@@ -188,11 +188,13 @@ export interface DeclarativeEngine {
    * deploy-config-gated: set the provider ⇒ available to every route/tool handler; unset ⇒ absent.
    * NOT tenant-partitioned (see `TtsCapability`).
    *
-   * OFF-REQUEST BOUNDARY (deliberate, and the same one `fsSourceFactory` and `sttCapability` have):
-   * this reaches the tools of an agent run driven through THIS app. The composition root's
-   * durable-worker-side `buildAgentRegistry` call does NOT thread it, so a tool invoked from a durable
-   * (off-request) run carries neither `init.fsSource`, `init.stt` nor `init.tts` and fail-closes
-   * loudly there. Work that needs speech belongs on the in-request path until that seam is widened.
+   * OFF-REQUEST TOO (and the same for `fsSourceFactory` and `sttCapability`): this reaches the tools
+   * of an agent run driven through THIS app, and the composition root's durable-worker-side
+   * `buildAgentRegistry` call threads all three as well, so a tool invoked from a durable
+   * (off-request) run carries the SAME `init.fsSource`, `init.stt` and `init.tts` a synchronous run
+   * gives it. None of the three touches the run's transaction — the fs source reads a
+   * deployment-static jailed root and both speech handles take no database — which is what lets them
+   * cross that seam unchanged. `init.emit` does NOT (see `eventBus` below).
    */
   ttsCapability?: TtsCapability;
   /**
@@ -208,10 +210,17 @@ export interface DeclarativeEngine {
    * flush lands inside that request's transaction. There is no provider and no credential to
    * configure — the backend is the database the boot already required.
    *
-   * OFF-REQUEST BOUNDARY (the same one `fsSourceFactory`/`sttCapability`/`ttsCapability` have): this
-   * reaches the tools of an agent run driven through THIS app. The composition root's
-   * durable-worker-side `buildAgentRegistry` call does not thread it, so a tool invoked from a durable
-   * (off-request) run carries no `init.emit` and fail-closes loudly there.
+   * OFF-REQUEST BOUNDARY — the one capability that does NOT cross it (unlike
+   * `fsSourceFactory`/`sttCapability`/`ttsCapability`, which do): this reaches the tools of an agent
+   * run driven through THIS app, and the composition root's durable-worker-side `buildAgentRegistry`
+   * call deliberately does not thread it, so a tool invoked from a durable (off-request) run carries
+   * no `init.emit` and fail-closes loudly there. The reason is the run's TRANSACTION: the worker runs
+   * a whole run inside one `tdb.transaction(...)` and builds its tools from that transactional handle,
+   * so the immediate form built there would take the tenant's `tenant_event_streams` counter-row lock
+   * — held by Postgres until COMMIT — for the rest of the run, serialising every other emit of that
+   * tenant behind the model call, and would lose the tool's events when the run later throws. Work
+   * that must emit belongs on the in-request path; widening this seam needs an emit handle that is not
+   * the run's transaction, not a wiring change.
    */
   eventBus?: TenantEventBus;
   /**

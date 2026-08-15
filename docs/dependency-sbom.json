@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "f39234e2079ccea5afd35e21cc2f6397c63ee9d83a24714d249cdde4d8628822",
+  "lockfile_sha256": "d48fa4b73eed84bf7f57ac6003ff97719ec48b491d83b13417522618bbaa03e8",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -1366,7 +1366,7 @@
     },
     {
       "name": "@hono/node-server",
-      "version": "1.19.14",
+      "version": "1.19.15",
       "license": "MIT",
       "license_file_present": true,
       "installed": true

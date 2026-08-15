@@ -39,7 +39,7 @@ import { StartRunRequest } from '../routes/runs.js';
 import { INJECTED_COLUMN_TS_NAMES } from './injected-columns-view.js';
 import { resolveResponseProjection } from './store-projection.js';
 import { CONTROL_KEYS } from './store-query.js';
-import { createBodySchema, updateBodySchema } from './store-validation.js';
+import { createBodySchema, NUMERIC_WIRE_RE, updateBodySchema } from './store-validation.js';
 
 /** A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency). */
 export interface OpenApiDocument {
@@ -55,11 +55,12 @@ type OpenApiPathItem = Record<string, OpenApiOperation>;
 interface OpenApiOperation {
   summary: string;
   /**
-   * Optional operation prose. Emitted ONLY on a store operation whose route carries a response
-   * projection, where it states the request/response NAMING SPLIT explicitly (query/path
+   * Optional operation prose. Emitted ONLY on a store operation whose route carries a NON-EMPTY
+   * response projection, where it states the request/response NAMING SPLIT explicitly (query/path
    * parameters by declared column name, response fields by projected wire name) — a generated
-   * client must read that rule here, not infer it from a 400. Absent otherwise (an un-projected
-   * document is byte-identical).
+   * client must read that rule here, not infer it from a 400. Absent otherwise: on an un-projected
+   * route (the document is byte-identical) and on a `project: {}` opt-out route, which serves the
+   * plain declared shape and therefore has no split to state.
    */
   description?: string;
   operationId: string;
@@ -145,7 +146,15 @@ function responseSchemaForColumnType(type: ColumnType): Record<string, unknown> 
       // corrupts a decimal past 2^53 — exactness is the point of the type, so the string is the only
       // honest wire form; the bounded bigint schema above is the model for documenting the runtime's
       // real envelope). Reads render Postgres's canonical form with exactly `scale` fractional digits.
-      return { type: 'string', pattern: '^-?\\d+(\\.\\d+)?$' };
+      //
+      // The pattern is `NUMERIC_WIRE_RE` ITSELF (store-validation.ts) — the same object the
+      // create/update body validator enforces and `store-query.ts` tests every numeric filter and
+      // cursor value against, so the three numeric patterns in this document cannot diverge from the
+      // envelope the server applies. Its 1..1000 digit runs also bound what a READ can carry: the
+      // grammar caps `precision` at 1000 and lint keeps `scale <= precision`, so a rendered
+      // numeric(precision, scale) never exceeds them. A hand-written `^-?\d+(\.\d+)?$` used to sit
+      // here and documented unbounded digit runs the wire never carries.
+      return { type: 'string', pattern: NUMERIC_WIRE_RE.source };
   }
 }
 
@@ -520,8 +529,11 @@ function filterParamSchema(type: ColumnType): Record<string, unknown> {
     case 'numeric':
       // A plain decimal string (no exponent), compared EXACTLY server-side — same wire form as the
       // body/row, one string envelope end to end: body in, body out, equality filter, `__in`
-      // element, keyset cursor.
-      return { type: 'string', pattern: '^-?\\d+(\\.\\d+)?$' };
+      // element, keyset cursor. The pattern is `NUMERIC_WIRE_RE` ITSELF — the very regex
+      // `store-query.ts` tests a numeric filter value against — so the documented filter envelope IS
+      // the runtime's, never a looser hand-copy of it (the previous `^-?\d+(\.\d+)?$` admitted digit
+      // runs past the 1..1000 bound, which the query builder answers with a 400).
+      return { type: 'string', pattern: NUMERIC_WIRE_RE.source };
     case 'jsonb':
       return { type: 'string' }; // unreachable — jsonb columns are excluded from filter params below
   }
@@ -631,9 +643,21 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
       schema: { type: 'integer', minimum: 1, maximum: LIST_MAX_LIMIT },
     },
   ];
+  // Every name the RUNTIME resolves at Precedence 1 (store-query.ts): ALL declared column names —
+  // jsonb ones included — plus the injected filterable `created_by`. This, and NOT the equality-param
+  // set below, is what the `__in`/`__contains`/comparison companions must be DE-DUPLICATED against.
+  // A key that names a declared column never reaches its suffix branch at runtime: the full key is
+  // looked up first. So for every such companion name exactly one of two things is true, and neither
+  // wants the companion emitted — a FILTERABLE column of that name answers it as plain equality (its
+  // own param is already emitted below), and a JSONB column of that name answers it with a 400
+  // (jsonb is not filterable). Keying the de-dup on the equality set, which omits jsonb columns,
+  // documented the second case: a store with an eligible column `foo` and a jsonb column literally
+  // named `foo__gt` carried a `foo__gt` parameter the server always refuses.
+  const precedenceOneNames = new Set<string>(store.columns.map((c) => c.name));
+  precedenceOneNames.add('created_by'); // the injected filterable column (store-query INJECTED_FILTERABLE)
   // The equality-filter surface: one param per declared non-jsonb business column (a control-key-named
   // column is skipped — defense-in-depth), PLUS the injected `created_by`. Collected FIRST, with their
-  // names, so the `<col>__in` set-filter companions below can be DE-DUPLICATED against them.
+  // names, so the `<col>__in` set-filter companions below know which columns to companion.
   const equalityNames = new Set<string>();
   // The TEXT columns (declared business + injected created_by) that each back a `?<col>__contains=`
   // substring-filter companion — collected alongside the equality params. NOTE the `?search=` control
@@ -709,32 +733,31 @@ function listQueryParameters(store: StoreSpec): OpenApiParameter[] {
     });
   }
   // The `<col>__in` SET-filter companions — one per equality column, EXCEPT when the companion name is
-  // ITSELF a declared equality param. That collision arises when a column is literally named `<x>__in`
-  // (its own equality param clashes with `<x>`'s IN-companion) or a business column is named
-  // `created_by__in` (clashing with the injected `created_by`'s companion). In every such case the
-  // exact-named EQUALITY param wins — mirroring the runtime Precedence-1 (store-query.ts), which routes
-  // `?<col>__in=` to a real `<col>__in` column as plain equality — so the companion is DROPPED and the
-  // emitted document never carries a duplicate (name+in) parameter (a valid OpenAPI 3.1 doc).
+  // ITSELF a name the runtime resolves at Precedence 1. That happens when a column is literally named
+  // `<x>__in` (colliding with `<x>`'s IN-companion) or when a business column is named `created_by__in`
+  // (colliding with the injected `created_by`'s companion). Either way `?<col>__in=` is answered by
+  // that column and never as a set filter, so the companion is DROPPED: the emitted document neither
+  // carries a duplicate (name+in) parameter — it stays a valid OpenAPI 3.1 doc — nor advertises a set
+  // filter on a jsonb column, which the server refuses with a 400.
   for (const name of equalityNames) {
-    if (equalityNames.has(`${name}__in`)) continue;
+    if (precedenceOneNames.has(`${name}__in`)) continue;
     params.push(inFilterParam(name));
   }
   // The `<col>__contains` SUBSTRING-filter companions — one per TEXT column, EXCEPT when the companion
-  // name is ITSELF a declared equality param (a column literally named `<x>__contains`). In that case
-  // the exact-named EQUALITY param wins — mirroring the runtime Precedence-1 (store-query.ts) — so the
-  // companion is DROPPED and the emitted document never carries a duplicate (name+in) parameter.
+  // name is ITSELF a Precedence-1 name (a column literally named `<x>__contains`). Same rule as the
+  // `__in` companions above, for the same two reasons: no duplicate parameter, and no substring filter
+  // documented on a key the server answers as equality or refuses outright.
   for (const name of textNames) {
-    if (equalityNames.has(`${name}__contains`)) continue;
+    if (precedenceOneNames.has(`${name}__contains`)) continue;
     params.push(containsFilterParam(name));
   }
   // The `<col>__gt`/`__gte`/`__lt`/`__lte` COMPARISON-filter companions — one set per eligible
-  // (non-nullable, non-jsonb, declared) column, EXCEPT when a companion name is ITSELF a declared
-  // equality param (a column literally named `<x>__gt`). The exact-named EQUALITY param wins —
-  // mirroring the runtime Precedence-1 (store-query.ts) — so that one companion is DROPPED and the
-  // emitted document never carries a duplicate (name+in) parameter.
+  // (non-nullable, non-jsonb, declared) column, EXCEPT when a companion name is ITSELF a Precedence-1
+  // name (a column literally named `<x>__gt`). Each of the four operators is checked on its own, so a
+  // column that shadows one of them costs its eligible sibling only that one bound.
   for (const [name, type] of comparableColumns) {
     for (const [op, prose] of COMPARISON_OPS) {
-      if (equalityNames.has(`${name}__${op}`)) continue;
+      if (precedenceOneNames.has(`${name}__${op}`)) continue;
       params.push(comparisonFilterParam(name, op, prose, type));
     }
   }
@@ -762,14 +785,28 @@ function storeOperation(
   };
   // The documented naming split of a projected route: responses carry the projected WIRE names;
   // everything request-side keeps the DECLARED column names (the projection is read-side only).
+  //
+  // Gated on a NON-EMPTY projection. `project: {}` is the documented per-route OPT-OUT (a route-level
+  // projection overrides a store-level one WHOLESALE, so `{}` opts that route back out) — and `{}` is
+  // not nullish, so it reaches here as a defined projection whose resolved shape is the plain declared
+  // one. An opted-out route serves no split, so it must not state one.
+  //
+  // The request-side casing clause is what the server actually accepts, not a restatement of the
+  // response rule: `normalizeBodyCasing` (store-validation.ts, applied in store-routes.ts on both the
+  // create and the update body BEFORE the strict Zod parse) renames a declared snake key to its
+  // camelCase twin and refuses a body carrying both variants of one column; the query side has no such
+  // normalizer — `buildListQuery` looks a filter key up under the DECLARED name only.
   const split =
-    project !== undefined
+    project !== undefined && Object.keys(project).length > 0
       ? {
           description:
             'This route declares a response projection: response fields carry the projected wire ' +
             'names (casing/rename/fields applied server-side), while path and query parameters — ' +
-            'equality/set/comparison filters, order, and the create/update body keys — keep the ' +
-            'declared column names. The projection is read-side only.',
+            'equality/set/comparison filters, order — and the create/update body keys keep the ' +
+            'declared column names. Query parameters take the declared snake_case name only; a ' +
+            'create/update body key may use either casing — the declared snake_case name or its ' +
+            'camelCase twin (sending both for one column is refused as ambiguous). The projection ' +
+            'is read-side only.',
         }
       : {};
   switch (op) {

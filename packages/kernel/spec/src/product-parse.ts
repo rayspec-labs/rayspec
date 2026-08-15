@@ -7,18 +7,27 @@
  *   1. YAML safe-load       — `yaml@2.9.0` `parse()` (safe by default). A syntax error → `yaml_parse_error`.
  *   2. VERSION CHECK FIRST   — a product document declares `version:'1.0'` with a `product:` section;
  *                              a missing/unsupported version → one clean `unsupported_version`.
- *   3. NO-CODE GUARDRAILS    — `scanProductGuardrails` over the RAW object: specific,
+ *   3. RESERVED DOCUMENT KEY — `scanReservedDocumentKeys` over the RAW object: a mapping key named
+ *                              `__proto__` is refused HERE or nowhere, for two different reasons —
+ *                              where the shape parse validates keys it skips this one BY NAME (a
+ *                              strict `z.object` raises no `unrecognized_keys` for it), and in a
+ *                              free-form region such as a `contracts` entry body it inspects no key
+ *                              at all. Short-circuits for the same reason the guardrails do: the
+ *                              document the later passes would read is not the document the author
+ *                              wrote.
+ *   4. NO-CODE GUARDRAILS    — `scanProductGuardrails` over the RAW object: specific,
  *                              explaining `no_code_in_yaml`/`provider_native_leak` errors. If ANY fire,
  *                              they are returned WITHOUT running the shape/lint passes — a doc smuggling
  *                              code/handlers/provider blobs is categorically rejected; shape-checking the
  *                              rest proves nothing (and the guardrail message is the actionable one).
- *   4. STRICT ZOD PARSE      — `ProductSpec.safeParse`. Every Zod issue → a `SpecError` (unknown key →
+ *   5. STRICT ZOD PARSE      — `ProductSpec.safeParse`. Every Zod issue → a `SpecError` (unknown key →
  *                              `unknown_field`, else `schema_violation`). Returns the FULL issue list.
- *   5. SEMANTIC LINT         — `lintProductSpec` (cross-refs, dups, capability status, contract vocab).
+ *   6. SEMANTIC LINT         — `lintProductSpec` (cross-refs, dups, capability status, contract vocab).
  *                              Only run when the shape parse SUCCEEDS.
  */
 import { parse as parseYaml } from 'yaml';
 import type { z } from 'zod';
+import { scanReservedDocumentKeys } from './document-keys.js';
 import { type Result, type SpecError, specError } from './errors.js';
 import { SPEC_VERSION } from './grammar.js';
 import { ProductSpec } from './product-grammar.js';
@@ -113,19 +122,25 @@ export function parseProductSpec(rawYamlText: string): Result<ProductSpec, SpecE
     };
   }
 
-  // ---- 3. NO-CODE GUARDRAILS (raw scan; short-circuit on any hit) -----------------------
+  // ---- 3. RESERVED DOCUMENT KEY (raw scan; short-circuit on any hit) --------------------
+  const reservedKeyErrors = scanReservedDocumentKeys(loaded);
+  if (reservedKeyErrors.length > 0) {
+    return { ok: false, errors: reservedKeyErrors };
+  }
+
+  // ---- 4. NO-CODE GUARDRAILS (raw scan; short-circuit on any hit) -----------------------
   const guardrailErrors = scanProductGuardrails(loaded);
   if (guardrailErrors.length > 0) {
     return { ok: false, errors: guardrailErrors };
   }
 
-  // ---- 4. STRICT ZOD PARSE (full issue list) --------------------------------------------
+  // ---- 5. STRICT ZOD PARSE (full issue list) --------------------------------------------
   const parsed = ProductSpec.safeParse(loaded);
   if (!parsed.success) {
     return { ok: false, errors: parsed.error.issues.flatMap(issueToSpecErrors) };
   }
 
-  // ---- 5. SEMANTIC LINT -----------------------------------------------------------------
+  // ---- 6. SEMANTIC LINT -----------------------------------------------------------------
   const lintErrors = lintProductSpec(parsed.data);
   if (lintErrors.length > 0) {
     return { ok: false, errors: lintErrors };

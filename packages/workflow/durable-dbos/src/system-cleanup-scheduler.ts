@@ -181,16 +181,30 @@ export class SystemCleanupScheduler {
  * jurisdiction, and it is the identical installed file the scheduler itself runs). Lazy + memoized so
  * an SDK-layout change on upgrade fails the first VALIDATION call loudly instead of breaking every
  * import of this package.
+ *
+ * A load failure is its OWN, self-describing error, never the underlying `MODULE_NOT_FOUND`: this is
+ * an INSTALLATION fault (a moved/renamed module in an upgraded SDK), and the one caller reports the
+ * PARSER's verdict on an operator's value. Keeping the two distinguishable is what stops a moved
+ * module from being reported as "your crontab is unparseable" — see `crontabParseError`.
  */
 let dbosValidateCrontab: ((pattern: string) => string) | undefined;
 function loadDbosValidateCrontab(): (pattern: string) => string {
   if (dbosValidateCrontab === undefined) {
-    const req = createRequire(import.meta.url);
-    const sdkEntry = req.resolve('@dbos-inc/dbos-sdk');
-    const crontabModule = req(path.join(path.dirname(sdkEntry), 'scheduler', 'crontab.js')) as {
-      validateCrontab: (pattern: string) => string;
-    };
-    dbosValidateCrontab = crontabModule.validateCrontab;
+    try {
+      const req = createRequire(import.meta.url);
+      const sdkEntry = req.resolve('@dbos-inc/dbos-sdk');
+      const crontabModule = req(path.join(path.dirname(sdkEntry), 'scheduler', 'crontab.js')) as {
+        validateCrontab: (pattern: string) => string;
+      };
+      dbosValidateCrontab = crontabModule.validateCrontab;
+    } catch (e) {
+      throw new Error(
+        "the scheduler's crontab parser could not be loaded from the installed " +
+          `'@dbos-inc/dbos-sdk' (expected 'scheduler/crontab.js' beside its entrypoint): ` +
+          `${e instanceof Error ? e.message : String(e)}. This is an SDK-layout fault, not a fault ` +
+          'in any crontab value.',
+      );
+    }
   }
   return dbosValidateCrontab;
 }
@@ -204,10 +218,21 @@ function loadDbosValidateCrontab(): (pattern: string) => string {
  * function can never diverge from what the launch would do. Lives HERE because this package is BY
  * DESIGN the only one that imports `@dbos-inc/dbos-sdk` — the composition root calls this seam
  * instead of growing an SDK import.
+ *
+ * THE LOAD IS OUTSIDE THE TRY, deliberately. Everything this function RETURNS is attributed to the
+ * caller's value: the composition root interpolates it into `RAYSPEC_CLEANUP_SCHEDULE='<value>' is
+ * not a crontab the scheduler can parse (<detail>)`. Loading the parser inside the try would put an
+ * SDK-layout failure — a moved `scheduler/crontab.js` after an upgrade — into that slot, refusing a
+ * VALID crontab with text blaming the operator. So a load failure propagates as the loader's own
+ * error instead (still fail-closed: the boot aborts either way, now naming the real fault), and only
+ * the PARSER's verdict is ever returned. Pinned by `crontab-parser-load.unit.test.ts`, which stubs
+ * the SDK resolve into a failure and asserts the shipped default crontab throws rather than
+ * returning a detail.
  */
 export function crontabParseError(crontab: string): string | undefined {
+  const validateCrontab = loadDbosValidateCrontab();
   try {
-    loadDbosValidateCrontab()(crontab);
+    validateCrontab(crontab);
     return undefined;
   } catch (e) {
     return e instanceof Error ? e.message : String(e);

@@ -59,7 +59,8 @@ Authorization: Bearer <token>          # needs the events:read permission
   dispatches no event and only updates the cursor your client will send back. `EventSource` handles it
   for you; a hand-written parser must not treat a block with no `data:` as an event.
 - **Omitting `topics` means every topic.** An explicitly empty `?topics=` is a **400**, not a stream
-  that quietly delivers nothing.
+  that quietly delivers nothing, and so is a filter naming more than **64** topics — omit it and
+  select client-side instead.
 - **The stream is closed after a bounded lifetime** (at most the access-token TTL) and your client
   reconnects with `Last-Event-ID`. That reconnect re-runs the whole auth chain, which is how a revoked
   principal stops receiving events.

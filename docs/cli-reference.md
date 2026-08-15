@@ -46,7 +46,7 @@ One flag stands outside the subcommand grammar. `rayspec --version` (or `-v`)
 reports the CLI's own version on **stdout** and exits `0`:
 
 ```json
-{ "ok": true, "version": "1.7.0" }
+{ "ok": true, "version": "1.8.0" }
 ```
 
 The value is read from the CLI package's own manifest at run time, so it names
@@ -127,14 +127,28 @@ it dispatches on the `product:` discriminant.
 - **Output:**
 
   ```json
-  { "ok": true, "errors": [] }
+  { "ok": true, "errors": [], "warnings": [] }
+  ```
+
+  `warnings` is part of every envelope, empty or not. It carries the non-fatal
+  advisories the linter raised — each a `code`, a `message` and a `path` — and
+  never affects `ok` or the exit code.
+
+  A fourth key, `suppressed`, is present **only** when a node's `lintSuppress`
+  acknowledged an advisory: the finding moves out of `warnings` into it, carrying
+  the finding's `code`, the acknowledgement's `because` verbatim, and the
+  finding's `path`. It does not affect `ok` either, and a document that
+  acknowledges nothing gets no `suppressed` key at all:
+
+  ```json
+  { "ok": true, "errors": [], "warnings": [], "suppressed": [{ "code": "cron_tenant_required", "because": "…", "path": "triggers[0].kind" }] }
   ```
 
   On failure, each entry carries a closed `code`, a `message`, and an optional
   `path`:
 
   ```json
-  { "ok": false, "errors": [{ "code": "unknown_field", "message": "…", "path": "stores[0].colums" }] }
+  { "ok": false, "errors": [{ "code": "unknown_field", "message": "…", "path": "stores[0].colums" }], "warnings": [] }
   ```
 
 - **Exit:** `0` if valid, `1` otherwise.
@@ -977,6 +991,31 @@ deployment sets its configuration through its orchestrator or secret manager.
   trim leaves untouched is silent. The stripped trailing newline of a key file created with
   a `>` redirect is the expected, harmless case; the signal matters when a secret that
   carried edge whitespace suddenly stops being accepted.
+- Ahead of that resolution it loads a local `.env` **if one exists** — a
+  local-development convenience; a real deployment has none. It searches `$PWD/.env`, the
+  directory `rayspec-serve` was started in, **first** and the RaySpec **install root's**
+  `.env` **second** — the install root being the directory four segments above the loader's
+  own module: your checkout root when you run from a checkout, and from a registry install
+  the consuming project's own root under npm's flat layout or a directory inside
+  `node_modules/.pnpm/` under pnpm's. It is a position rather than a named package —
+  whatever sits four segments up, including the unscoped `node_modules/rayspec` launcher
+  directory itself under npm's nested layout — deduplicated to one
+  read when they are the same file. Neither file
+  overrides a variable the environment already sets, and the second never overwrites a key
+  the first supplied, so the precedence per key is: environment > `$PWD/.env` >
+  install-root `.env`. `RAYSPEC_SKIP_DOTENV=1` skips both. `rayspec deploy` applies the
+  same two rules in the same order, so the two entrypoints **started in the same directory**
+  read the same `./.env`. The first path is `$PWD`-relative, so that directory is what they
+  have to share: a `rayspec-serve` started elsewhere — a unit file's `WorkingDirectory=`, a
+  container's `WORKDIR` — reads that directory's `./.env` instead. The **install-root**
+  candidate is resolved per package, from each loader's own module, so it is the same file
+  only where the two packages sit under one root: in a checkout, and under npm's flat
+  layout. Under pnpm each resolves inside its own
+  `node_modules/.pnpm/@rayspec+cli@<version>/` and `…/@rayspec+server@<version>/`
+  directory, so an install-root `.env` placed for one entrypoint is not read by the other.
+  Where both entrypoints
+  must agree regardless, set the variables in the environment: an already-set value beats
+  either file.
 - On boot it **applies the committed platform migration chain** to the target
   database (idempotent — it bootstraps a clean database and no-ops on an up-to-date
   one), then materializes a spec's declared stores on a clean database or mounts them
@@ -997,7 +1036,9 @@ deployment sets its configuration through its orchestrator or secret manager.
   backend from `OPENAI_API_KEY`) — no hand-written `AgentBackendsFactory` wrapper,
   and a missing credential fails the boot fast, naming the backend and the agent(s)
   that select it. (`rayspec deploy <spec>` is the same boot with `RAYSPEC_SPEC_PATH`
-  set for you; see
+  set for you, except that `deploy` seals the product-store registrar once its boot
+  returns and defaults the agent trace export **off**, neither of which
+  `rayspec-serve` does; see
   [getting-started](./getting-started.md#serving-your-declared-backend).)
 - A **frontend-only** spec — one that declares only a `frontend` (no `stores`,
   `api`, `agents`, `tooling`, `triggers`, `handlers`, or `extensions`, no

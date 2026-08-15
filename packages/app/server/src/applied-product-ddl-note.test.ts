@@ -34,6 +34,9 @@ describe('appliedProductDdlBootNote', () => {
     // Recovery is a reviewed forward migration — the escape the drift refusals already name.
     expect(note).toContain('rayspec plan <new-spec> --against <old-spec>');
     expect(note).toContain('rayspec deploy --apply-migration <delta.sql>');
+    // A delta that DROPs is refused by the apply gate unless it is allowlisted, so the recovery is
+    // unrunnable for a store removal without this flag — the same clause the drift refusal carries.
+    expect(note).toContain('--allowlist <file.json>');
     // The local remedy is named WITH its real blast radius (it is not a table-level cleanup).
     expect(note).toContain('rayspec dev db --reset --yes');
     expect(note).toContain('_dbos_sys');

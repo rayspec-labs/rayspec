@@ -432,6 +432,21 @@ export type ProductSchemaState = 'absent' | 'present-matching' | 'drifted';
  * DDL, an UNCHECKED-aspect difference (detectDrift's tight scope: it does not compare DEFAULT exprs,
  * secondary-index existence/order, or column ordinal) can never cause data loss — the worst case is the
  * app running against the live schema (e.g. a missing non-unique index = a slower query), never a drop.
+ *
+ * KNOWN BLIND SPOT — A SPEC THAT REMOVES A STORE LEAVES ITS TABLE STANDING, SILENTLY. Nothing here
+ * asks the live schema what it carries that the spec does NOT: `detectDrift` derives its introspection
+ * predicate from `stores` (`table_name = ANY(tableNames)`), so a table no declared store names is
+ * outside every query it runs and produces no finding — the superset-blindness `product-boot.ts`
+ * already names for the delta path. Removing SOME stores therefore classifies 'present-matching' on
+ * the strength of the remaining ones, and removing ALL of them takes the `stores.length === 0` return
+ * above, which answers before any finding is read (`detectDrift` also returns early on the empty table
+ * list, so there are none). Either way the boot routes to MOUNT with no product DDL and the orphaned
+ * tables stay in the database with their rows, unreported.
+ * THE BOUND: this is the fail-SAFE direction and it is the whole cost. No DDL runs, nothing is
+ * dropped, no data is lost, and the deployment serves correctly — the only thing missing is the
+ * signal. Reporting it is deliberately NOT a refusal: a shared schema legitimately carries platform
+ * tables and tables of other deployments, so a boot cannot treat an unclaimed table as an error.
+ * The empty-store arm is pinned by classify-product-schema.test.ts.
  */
 export function classifyProductSchema(
   stores: StoreSpec[],

@@ -133,7 +133,9 @@ export class OpenAiTtsAdapter implements TtsAdapter {
     }
 
     // A 2xx that carries JSON carries an envelope, not audio — never hand a caller a JSON blob
-    // labelled `audio/mpeg`.
+    // labelled `audio/mpeg`. The header is the cheap read (it saves buffering the body); the BYTES
+    // are the authority, checked below, because a response with no content-type at all reaches here
+    // with the header guard skipped.
     if (response.headers.get('content-type')?.toLowerCase().includes('application/json')) {
       throw new TtsAdapterError(
         'malformed_provider_output',
@@ -154,6 +156,13 @@ export class OpenAiTtsAdapter implements TtsAdapter {
       throw new TtsAdapterError(
         'malformed_provider_output',
         'openai tts returned an empty audio body.',
+      );
+    }
+    // The same refusal, decided on the BYTES rather than on a header the response need not carry.
+    if (startsWithJsonPunctuation(bytes)) {
+      throw new TtsAdapterError(
+        'malformed_provider_output',
+        'openai tts returned a JSON body where audio was expected.',
       );
     }
 
@@ -183,4 +192,24 @@ export class OpenAiTtsAdapter implements TtsAdapter {
 /** The error's class name only — never its message (which could echo the text or the key). */
 function errorName(err: unknown): string {
   return err instanceof Error && typeof err.name === 'string' ? err.name : 'Error';
+}
+
+/**
+ * Does the body OPEN like a JSON document — `{` or `[` after leading ASCII whitespace?
+ *
+ * A one-way test, deliberately: it decides that these bytes are NOT audio, never that they are. None
+ * of the three containers the port speaks can begin this way — `wav` opens with `RIFF` (0x52), `opus`
+ * with `OggS` (0x4F), and `mp3` with either `ID3` (0x49) or a frame sync whose first byte is 0xFF —
+ * so a leading `{`/`[` rules audio out. Nothing is parsed and nothing is decoded: the bytes are
+ * untrusted provider output, and this reads at most a handful of them.
+ */
+function startsWithJsonPunctuation(bytes: Uint8Array): boolean {
+  const LIMIT = Math.min(bytes.length, 16);
+  for (let i = 0; i < LIMIT; i++) {
+    const byte = bytes[i];
+    // Space, tab, LF, CR — the whitespace JSON allows before the opening token.
+    if (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d) continue;
+    return byte === 0x7b /* '{' */ || byte === 0x5b /* '[' */;
+  }
+  return false;
 }

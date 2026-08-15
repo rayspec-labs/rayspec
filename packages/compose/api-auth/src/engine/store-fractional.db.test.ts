@@ -67,6 +67,10 @@ api:
   - { method: POST, path: '/lines', action: { kind: store, store: ledger_lines, op: create } }
   - { method: GET, path: '/lines', action: { kind: store, store: ledger_lines, op: list } }
   - { method: GET, path: '/lines/{id}', action: { kind: store, store: ledger_lines, op: get } }
+  - method: GET
+    path: /plines
+    action: { kind: store, store: ledger_lines, op: list }
+    project: { fields: [id, note] }
 `;
 
 let testsRan = 0;
@@ -112,6 +116,9 @@ describeDb('declared store — the double and numeric column types', () => {
     jsonRequest(h.app, 'POST', '/lines', { body, headers: auth(token) });
   const listLines = (token: string, query = '') =>
     jsonRequest(h.app, 'GET', `/lines${query ? `?${query}` : ''}`, { headers: auth(token) });
+  /** The SAME store and the same rows, through a route whose projection drops `amount`. */
+  const listProjectedLines = (token: string, query = '') =>
+    jsonRequest(h.app, 'GET', `/plines${query ? `?${query}` : ''}`, { headers: auth(token) });
 
   beforeAll(async () => {
     if (!hasDb) return;
@@ -297,6 +304,87 @@ describeDb('declared store — the double and numeric column types', () => {
     // A malformed filter value is refused early.
     expect((await listLines(token, 'amount=1e5')).status).toBe(400);
   });
+
+  it('numeric READ guard: a NaN planted by direct SQL is a 400, and no page mints a cursor on it', async () => {
+    testsRan += 1;
+    const { token } = await principal('numeric-read@example.com', 'NumericReadOrg');
+    for (const v of ['1.000000', '2.000000']) {
+      expect((await createLine(token, { amount: v })).status).toBe(201);
+    }
+    const planted = (await (await listLines(token, 'amount=1.000000')).json()) as LineRow[];
+    const id = planted[0]?.id as string;
+    // numeric can hold NaN (and, from PostgreSQL 14, ±Infinity) at the SQL level. The write paths
+    // refuse it — only direct SQL can plant it — and it is not a decimal, so it is not a value the
+    // string wire form of this type can carry.
+    await h.db.execute(
+      drizzleSql`UPDATE ledger_lines SET amount = 'NaN'::numeric WHERE id = ${id}::uuid`,
+    );
+
+    const got = await jsonRequest(h.app, 'GET', `/lines/${id}`, { headers: auth(token) });
+    expect(got.status).toBe(400);
+    expect(got.status).not.toBe(500);
+    const body = await got.text();
+    expect(body).toContain('VALIDATION_ERROR');
+    expect(body).toContain('amount'); // names the column so the row is findable
+    expect(body).not.toContain('"NaN"'); // and never ships the value as the read envelope's decimal
+
+    // The LIST page containing the row refuses too — which is what keeps THIS feed followable: the
+    // cursor is minted from the last row of a page that was served, so a page that refuses mints
+    // nothing, and no client of this route is handed an `after=` value the next request would
+    // reject as a filter. The reach of that is exactly the routes that SERVE the column — the next
+    // test pins the other side.
+    const page = await listLines(token, 'order=amount.desc&limit=1'); // NaN sorts highest in SQL
+    expect(page.status).toBe(400);
+    expect(page.headers.get('X-Next-Cursor')).toBe(null);
+
+    // The rest of the feed is unaffected: the row is one row, not the whole store.
+    const rest = await listLines(token, 'amount=2.000000');
+    expect(rest.status).toBe(200);
+    expect(((await rest.json()) as LineRow[]).map((r) => r.amount)).toEqual(['2.000000']);
+  });
+
+  it('numeric READ guard REACH: a projection that drops the column drops the guard with it — the page serves and still mints the cursor the next request refuses', async () => {
+    testsRan += 1;
+    const { token } = await principal('numeric-proj@example.com', 'NumericProjOrg');
+    expect((await createLine(token, { amount: '2.000000' })).status).toBe(201);
+    expect((await createLine(token, { amount: '1.000000' })).status).toBe(201);
+    const planted = (await (await listLines(token, 'amount=1.000000')).json()) as LineRow[];
+    const id = planted[0]?.id as string;
+    await h.db.execute(
+      drizzleSql`UPDATE ledger_lines SET amount = 'NaN'::numeric WHERE id = ${id}::uuid`,
+    );
+
+    // ACCEPT CONTROL — the SAME row through a route that SERVES `amount`: the guard fires, the page
+    // is refused as a whole, and no cursor is minted. Without this arm a broken fixture would make
+    // the projected arm below look like a finding when it is really measuring nothing.
+    const unprojected = await listLines(token, 'order=amount.desc&limit=1');
+    expect(unprojected.status).toBe(400);
+    expect(unprojected.headers.get('X-Next-Cursor')).toBe(null);
+
+    // The REACH boundary. `/plines` projects `amount` away, and `serializeRow` skips a column absent
+    // from the projection BEFORE any read guard runs — so the guard never sees the value and the page
+    // is served. `order` is validated against the store's columns, never against the projection (the
+    // documented author-named query surface), so `order=amount.desc` is accepted here, and the cursor
+    // mints from the RAW row. The client is handed an `after=` value its own next request refuses.
+    const page = await listProjectedLines(token, 'order=amount.desc&limit=1');
+    expect(page.status).toBe(200);
+    const rows = (await page.json()) as Record<string, unknown>[];
+    expect(rows.map((r) => Object.keys(r).sort())).toEqual([['id', 'note']]); // `amount` never on the wire
+    const cursor = page.headers.get('X-Next-Cursor');
+    expect(cursor).not.toBe(null);
+    const decoded = JSON.parse(Buffer.from(cursor as string, 'base64url').toString('utf8'));
+    expect(decoded).toMatchObject({ c: 'amount', d: 'desc', v: 'NaN' });
+
+    // Following it is the stranded-client shape the guard removes on a route that serves the column.
+    const followUp = await listProjectedLines(
+      token,
+      `order=amount.desc&limit=1&after=${encodeURIComponent(cursor as string)}`,
+    );
+    expect(followUp.status).toBe(400);
+    expect(await followUp.text()).toContain(
+      "Filter 'amount' must be a plain decimal string (no exponent).",
+    );
+  });
 });
 
 /**
@@ -306,7 +394,7 @@ describeDb('declared store — the double and numeric column types', () => {
 describe('fractional column acceptance — ran-guard (must not silently skip in CI)', () => {
   it('the double/numeric arms ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(6);
+      expect(testsRan).toBe(8);
     } else {
       expect(requireDb).toBe(false);
     }

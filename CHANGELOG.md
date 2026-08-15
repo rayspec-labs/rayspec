@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.8.0] - 2026-08-15
 
 ### Added
 
@@ -51,11 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strips `details` from a 404 — there is no later stage that could remove an echoed path or filter
   value, so none is put in. The status choice leaks nothing either way: the read is tenant-bound, so
   a foreign row and an absent row both yield zero rows and take the same arm under every member.
-  **Nothing else changed.** This is a vocabulary addition, not a migration: no shipped example or
-  fixture document was touched, all 24 `absent_state` declarations in the shipped example and fixture
-  documents still read `empty_200` or `not_ready_409`, and both existing members behave exactly as
-  before — the interpreter and the OpenAPI emitter each gained one arm keyed on the new member and
-  left the others untouched.
+  **Nothing a view answers changed.** This is a vocabulary addition, not a migration: no shipped
+  example or fixture document was touched, all 24 `absent_state` declarations in the shipped example
+  and fixture documents still read `empty_200` or `not_ready_409`, and both existing members behave
+  exactly as before. The dispatch around them did change, so a 1.7.0→1.8.0 diff shows all three arms
+  as new text rather than one arm added: the interpreter and the OpenAPI emitter no longer test
+  `absent_state` with an `if`-chain ending in an `empty_200` fall-through — each looks the member up
+  in one map annotated `satisfies Record<ViewAbsentState, …>`. That annotation is what makes a fourth
+  member a build failure instead of a silent 200: both files are non-test modules under `src/`, which
+  the package tsconfig includes while excluding `**/*.test.ts`, and the package's `typecheck` script
+  is `tsc -p tsconfig.json --noEmit`.
 - **A boot warning when a served page carries an inline `<style>` / `<script>` / `style=` / `on*=`
   that the active Content-Security-Policy does not permit.** The default policy for a served frontend
   is `default-src 'self'` with no `'unsafe-inline'`, and a page that violates it fails in a way
@@ -123,10 +128,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another tenant, a sequence that is not plain decimal digits (a hexadecimal, exponent, fractional,
   signed, padded or empty one is refused rather than **coerced**, since coercing resumes the
   subscriber somewhere it never asked for while looking successful), and one **ahead** of the stream.
-  Omitting the cursor starts
+  A `Last-Event-ID` that is present but **empty** is none of them: an `EventSource`'s last-event-ID
+  string starts empty, so an empty header says exactly what an omitted one says, and it is read as
+  absent — a `?since=` sent beside it still applies. That is the empty string and nothing wider: a
+  header carrying any other value, including one made only of characters HTTP does not count as
+  whitespace, is checked against the four refusals like any other cursor. Omitting the cursor starts
   at the tail and is **not** a truncation, however old the stream's floor is. Omitting `topics` means
   **every** topic; an explicitly empty `?topics=` is a `400`, because an empty filter can only match
-  nothing and that is indistinguishable from a healthy stream on a quiet workspace.
+  nothing and that is indistinguishable from a healthy stream on a quiet workspace, and a filter
+  naming more than **64** topics is a `400` as well — a documented bound on the filter rather than
+  one a client discovers by being refused.
   Each read takes the events above the cursor together with the stream's retention floor **from one
   snapshot**, so a subscriber can never be told its cursor is fine about events that are already gone,
   and the floor is re-checked on **every** read rather than once at connect — a connection held open
@@ -147,7 +158,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reconnect gap while `rayspec.live` reported the backlog drained. A **resume checkpoint** (an
   `id:` line and nothing else, which the event-stream grammar defines as a cursor update that
   dispatches no event) is written whenever the cursor moves without a delivery, so the cap costs a
-  round trip and no events. There is no WebSocket surface, and none is
+  round trip and no events. The stream also states the reconnect delay itself, as an SSE **`retry:`**
+  field (one second) written before its first frame: the close is the server's own, so how long the
+  client waits before coming back is the server's decision rather than a per-client default — and
+  those defaults differ, which would otherwise make the same deployment resume at a different speed
+  in every browser. There is no WebSocket surface, and none is
   planned: SSE plus a durable cursor covers the case, and the durable rows — not the connection — are
   what make a resume correct. `examples/live-workspace-events` is the whole loop in one bootable
   document.
@@ -162,22 +177,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoped to a single agent run, so a product whose UI is driven by everything happening in a workspace
   had no transport to carry it and each one rebuilt the same polled events table in product code. A
   deployment that declares `deployment: { eventBus: { enabled: true } }` now gives every
-  `handler`-kind route init and every tool init an `emit(topic, payload)` capability; a
-  product-profile deployment has it structurally, with nothing to declare. Presence follows the
-  `blob`/`enqueue` posture exactly: without the declaration the field is **absent** (not
-  `undefined`-valued), so a handler that needs it fail-closes loudly rather than dropping events into
-  a silent no-op, and a `stream`-kind route init and a trigger init do not carry it (the same
-  boundary `fsSource`/`stt`/`tts` already draw). The capability is **tenant-bound by construction** —
-  it is built per request from the run's server-derived tenant and has no tenant parameter — and it is
-  positional, so a mis-call in the shape the sibling `init.enqueue` takes (`emit({ topic, payload })`)
-  is refused with a named error stating the expected `emit(topic, payload)` shape, never a 404 and
+  `handler`-kind route init, and the tool inits of an **in-request** agent run, an
+  `emit(topic, payload)` capability; a product-profile deployment has it structurally, with nothing to
+  declare. Presence follows the `blob`/`enqueue` posture exactly: without the declaration the field is
+  **absent** (not `undefined`-valued), so a handler that needs it fail-closes loudly rather than
+  dropping events into a silent no-op, and a `stream`-kind route init and a trigger init do not carry
+  it (the same boundary `fsSource`/`stt`/`tts` already draw). Neither do the tools of an **enqueued**
+  run (`async: true`, or a trigger whose action is `kind: agent`): the durable worker runs a whole run
+  inside one transaction, and an emit allocated there would hold the tenant's sequence lock until that
+  run committed, so the bus is not threaded into the worker's tool inits at all. The capability is
+  **tenant-bound by construction** — it is built per request from the run's server-derived tenant
+  and has no tenant parameter — and it is positional, so a mis-call in the shape the sibling
+  `init.enqueue` takes (`emit({ topic, payload })`) is refused with a named error stating the
+  expected `emit(topic, payload)` shape, never a 404 and
   never a corrupt row. What a consumer of the stream may rely on: every event carries a per-tenant
   sequence number; the order numbers are issued in is the order the writes commit in, so a reader
   resuming with `seq > cursor` cannot skip an event that committed late; the sequence is gap-free (a
   request that rolls back returns its number and the next emit reuses it); and on a route handler the
   events commit **with** the handler's own writes, so a reader never sees an event announcing a change
-  it cannot yet read. A tool handler has no outer transaction, so each of its emits is durable as it
-  returns. Two platform tables ship with it (`tenant_events`, `tenant_event_streams`, migration
+  it cannot yet read. A tool's emit is a standalone statement on a plain handle, so each is durable
+  as it returns. Two platform tables ship with it (`tenant_events`, `tenant_event_streams`, migration
   `0011`), both cascading on org delete and both now **reserved** store names. Events are kept for
   `retentionHours` (default 24) and swept by the daily housekeeping pass that already runs the OIDC
   prune — an **approximate** bound, and deliberately so: nothing is deleted inside a product request,
@@ -214,12 +233,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a file that is not there still gets a `404` rather than `200 text/html` from a `<name>.<ext>.html`
   sibling — while a dotted directory on the way (`/guide/1.2/notes`) still resolves its page, since
   only the last segment decides. **It is opt-in
-  (default `false`), so no existing deployment changes behaviour** — and **one** behaviour changes for
-  a site that opts in: where **both** `<path>.html` and `<path>/index.html` exist for the same path,
+  (default `false`), so no existing deployment changes behaviour** — and **two** behaviours change for
+  a site that opts in. Where **both** `<path>.html` and `<path>/index.html` exist for the same path,
   the `.html` file now wins where the directory index served before (`.html` is tried first, the order
-  the hosts above use). A trailing-slash request (`/docs/`) is unaffected and still resolves the
-  directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the static and
-  the backend profile, so the preview names the resolution boot will use.
+  the hosts above use). And on a mount that ships a root `404.html`, `/404` is an extensionless path
+  like any other, so it now serves that page with `200`. What that displaces depends on `spa`, since
+  the SPA fallback precedes the `404.html` branch: on an `spa: false` mount the miss branch answered
+  the same bytes with `404`, so the status flips, while on an `spa: true` mount the shell already
+  answered `/404` with `200`, so the document flips and the status does not. Either way it is the same
+  parity with those hosts, all of which serve `/404` as a page, and the reason the status is not
+  "fixed" back to `404`. A trailing-slash request (`/docs/`) is unaffected and still resolves the
+  directory index. The option is echoed in the `deploy --dry-run` verdict for **both** the
+  static and the backend profile, so the preview names the resolution boot will use, and the static
+  profile's boot banner marks a mount that sets it.
+  **One source-level note for anyone building against the tree in TypeScript:** `FrontendSpec` is
+  the *parsed* mount type, and a key with a schema default is required on it (this is why `spa` was
+  already required there), so a hand-written `FrontendSpec` literal now needs `cleanUrls` as well.
+  Nothing about a `rayspec.yaml` document changes — the key stays optional in YAML and defaults to
+  `false` — and no runtime behaviour changes; it is only literals written in TypeScript against the
+  parsed type that gain a key. The mount literals inside this repository's own tests are updated to
+  match.
 
 - **Speech synthesis reaches a backend-profile handler as the optional `init.tts` capability, behind a
   new `TTS_PROVIDER` contract — the egress half of the audio pipeline.** The platform shipped a real
@@ -245,15 +278,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supply it), an unsupported provider name is refused at boot naming the wired ones, and
   `TTS_PROVIDER=fake` is a working deterministic offline synthesizer for dev and CI (every call
   returns the same fixed-length tone, byte-identical; the boot warns loudly that nothing is being
-  spoken, warn-only). Unlike `transcribe`, `synthesize` rejects rather than returning a status union —
-  the happy path is the audio itself — with a structured, content-free `TtsAdapterError` that never
-  echoes the text, the response body, or the credential. Two limits are enforced before any provider
-  call, so a rejected request is never billed: the 4096-character text cap is **fail-closed** (an
-  over-long text is refused, never truncated into a recording that stops mid-sentence), and an unknown
-  voice is refused rather than silently falling back to a default, while `speed` is clamped into the
-  supported range. The offline provider enforces exactly those same limits — it is handed the live
-  adapter's own policy — so a request that passes in CI cannot first fail in production. Deployments
-  that set no provider boot and serve exactly as before.
+  spoken, warn-only). The fake validates `format` exactly as the live provider does but encodes
+  nothing, so it always answers WAV bytes under an honest `audio/wav` content type whatever container
+  was requested — read `contentType`, never derive it from the requested `format`. Unlike
+  `transcribe`, `synthesize` rejects rather than returning a status union — the happy path is the
+  audio itself — with a structured, content-free `TtsAdapterError` that never echoes the text, the
+  response body, or the credential (the SDK re-exports the type, so a handler can name what it
+  caught). Two limits are enforced before any provider call, so a rejected request is never billed:
+  the 4096-character text cap is **fail-closed** (an over-long text is refused, never truncated into
+  a recording that stops mid-sentence), and an unknown voice is refused rather than silently falling
+  back to a default — a blank string is an unknown voice, not an absent one, and is refused the same
+  way; the default is reached by omitting `voice`, and by an explicit `null`, which only an untyped
+  caller can send and which is read as absent — while `speed` is clamped into the supported range.
+  The capability forwards every option the caller **expressed** rather than every option that is
+  truthy, so a blank `format` reaches the same membership check a blank `voice` does instead of being
+  dropped and resolved to the adapter's default container. The offline provider enforces exactly
+  those same limits — it is handed the live adapter's own policy — so a request that passes in CI
+  cannot first fail in production. Deployments that set no provider boot and serve exactly as before.
 
 - **Transcription reaches a backend-profile handler as the optional `init.stt` capability, behind the
   existing `STT_PROVIDER` contract.** The platform shipped a real speech-to-text stack — the neutral
@@ -304,8 +345,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mislead the author-named query surface (`projection_query_shadow`) — never a runtime surprise.
   Keyset pagination is projection-immune (the cursor is minted from the stored row, so paging
   works with `id` renamed or dropped), and a projected route serializes exactly its projected
-  field set. Purely additive: a document without `project` parses, serves, and documents
-  byte-identically.
+  field set. Additive with one exception: a document without `project` parses, serves, and
+  documents exactly as before the key existed, except for a store that declares a column named
+  `__proto__` — the un-projected serializer now emits that column instead of swallowing it, which
+  is its own entry in this release.
 
 - **Two fractional column types for declared stores: `double` (PostgreSQL `float8`) and `numeric`
   with required `precision`/`scale` (exact decimals).** The column vocabulary had no honest home
@@ -355,12 +398,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tiers) are untouched. Unset, blank or an explicit 1 leaves the limiter byte-identical to before —
   five registrations per source per minute, `429` on the sixth. Any other value makes the boot log
   a loud one-line warning naming the variable and the value, so the dev/CI posture can never sit in
-  a production environment silently; a value that is not a positive integer aborts the boot with a
-  refusal naming the variable and the value, in the same shape as the other env refusals. The
+  a production environment silently; a value that is not a positive integer **or is above 1000**
+  aborts the boot with a refusal naming the variable and the value, in the same shape as the other
+  env refusals. The ceiling is deliberate and matches the shape
+  `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS` already had: the variable scales a *throttle*, so an unbounded
+  value is a way to switch that throttle off by arithmetic — at ×1e9 the `register` bucket admits
+  5e9 registrations a minute, which is no limit at all. ×1000 is ten times the documented example
+  and already means 5000 registrations a minute, so no harness meets the bound. The
   getting-started docs gain a "Testing against a live boot" section naming the buckets and their
   windows, so suite authors can also stagger registrations knowingly instead.
 - **A spec node can acknowledge a `doctor` advisory with `lintSuppress` — with a mandatory recorded
-  justification.** An agent, a store, or an api route may carry
+  justification.** An agent, a store, an api route, a trigger or a handler may carry
   `lintSuppress: [{ code, because }]`. `code` names one of the advisory (warning) codes only — the
   field's closed vocabulary contains no error codes, so suppressing an error is not expressible —
   and `because` is required and non-empty (whitespace-only rejected): a suppression without a
@@ -388,6 +436,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are unchanged. The route also enters the spec reference next to `triggers` — method, permission,
   the `202` bodies, the `fired:false` ambiguity, the error cases, and the `trigger-fire` rate
   bucket (30 fires per 60 seconds per tenant+trigger).
+  **The header write is not route-only, and that is a behaviour change beyond this route.** It sits
+  in the scheduler's one shared fire path, below the firing reserve and above the enqueue, keyed on
+  nothing about how the fire arrived — so a **scheduled** `cron` trigger's agent action writes it
+  too, on every scheduled tick that actually dispatches (a deduped no-op, a tenant-absent skip and a
+  beyond-look-back catch-up replay all return before it, as they always did). A cron-fired run id
+  therefore now resolves on `GET /v1/runs/{id}` as `enqueued` from the instant it is enqueued, where
+  it previously `404`ed until the run's own header committed and stayed `404` for a run that ended
+  by throwing. So a bounded or thrown cron run now leaves a non-terminal `enqueued` row in `runs`
+  rather than no row at all — read such a run's outcome by testing the header for TERMINALITY
+  (`isTerminalRunStatus`), the same way an API-enqueued run has always had to be read. The
+  documentation that stated the old behaviour outright is corrected with it: the
+  `RAYSPEC_AGENT_RUN_MAX_MS` note in `.env.example`, and the 1.7.0 entry that first described it.
+  The write stays advisory on both arms: it is
+  driven by the run-header identity resolver the deployment injects — the one boot path that
+  constructs the cron scheduler always supplies one, resolved off the same agent registry the
+  executor resolves runs from — a write failure is logged and never costs the fire its dispatch, and
+  a resolver that cannot name the `agentId` logs the skip and writes nothing. Both arms are pinned in
+  `packages/workflow/durable-dbos/src/cron-scheduler-run-header.db.test.ts`, the scheduled one
+  through `fireScheduled` — the same body the registered DBOS scheduled-workflow runs.
 - **Bounded comparison filters on both read surfaces, and a cursor on every `list` page.** Every
   read was equality-only, so "give me everything after X" — the natural read for an event log, an
   activity feed, or an incremental sync — could not be written at all. The declared `list` op now
@@ -422,7 +489,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   provider-side `parallel_tool_calls: false`, so the model stops batching at the source, and caps
   the SDK loop's local tool concurrency at 1, so a batch that still arrives executes strictly in
   emission-index order; with the flag off neither setting is sent and the provider's own default
-  (parallel) applies, exactly as before. On every backend the platform additionally serializes
+  (parallel) applies, exactly as before. Both `openai` settings are conditioned on the agent
+  actually declaring tools: an agent that sets the flag with an empty `tools` list has no call to
+  order, so neither setting is sent and its request is byte-identical to the one it sent before —
+  the same wire shape as the flag being off. On every backend the platform additionally serializes
   the run's tool dispatch through a per-run FIFO width-1 queue in front of the tool dispatcher,
   so a batched turn's calls run strictly in emission order — handlers, events, and journal steps
   included. A backend that could honor neither level is rejected at validation time with a
@@ -482,6 +552,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A mapping key written literally as `__proto__` is now refused at the parse boundary of both
+  document profiles (`reserved_document_key`), anywhere in the document.** It is the one key name the
+  shape validator will not report on *where it validates keys at all* — and in a free-form slot it
+  validates none, so the parse boundary is the only pass that can see it either way. The YAML loader
+  builds it as a genuine own property — it *defines*
+  the property rather than assigning it, so the prototype setter is bypassed — and the validator then
+  skips that key by name, in both readers a spec goes through — the strict-object unrecognized-key
+  walk and the record branch — without raising an issue.
+  **What that cost, measured on this grammar.** Where the grammar reads the level, the key is dropped
+  and the document that reached every rule downstream was not the document the author wrote:
+  `api[].project.rename: { __proto__: … }` parsed clean, linted clean and did *nothing* — the column
+  kept its own name on the wire and in the OpenAPI document while the author read the document as a
+  rename. A `__proto__` key at the document root, or in `metadata`, passed the strict unknown-key
+  rejection that refuses every other unknown key. Every record dock behaved the same way: product
+  `metadata`, a store step's `filter`/`values`, a view's `fields`/`params`, `contracts`. Inside a
+  FREE-FORM schema slot the behaviour is the opposite and matters just as much: a tool's `parameters`
+  and the body of a `contracts` entry are open `z.unknown()` regions the validator never descends
+  into, so there the key is not dropped — it survives the parse with its value intact and is carried
+  through to what the engine serves (a contract property named `__proto__` reaches
+  `components.schemas` in the emitted OpenAPI document). Unreported in both directions, which is why
+  the refusal belongs at the parse boundary and not in the grammar. The view-name denylist that
+  already named `__proto__` (`VIEW_RESERVED_NAMES`) shows the same split: for the positions it reads
+  from mapping keys — fields, params, filter/match columns — the key was already gone by the time the
+  lint ran, so that member could not fire for a document anyone actually wrote; for a counts *bucket*,
+  which is an array value and which the refusal deliberately leaves alone, it fires on a parsed
+  document today. One scan over the raw loaded document closes the reportable gap at once, and it is
+  the only place in the pipeline where the key is both still present and inspectable. The scan is
+  cycle-guarded, because a YAML alias resolves to the very node its anchor labels and an unguarded
+  walk of such a document would not return.
+  **This is a validation behaviour change, and it is deliberate**: a document that used to parse now
+  fails, with the error pointed at the offending key. No shipped example or fixture document declares
+  such a key (checked across every tracked `.yaml`/`.yml`). Two classes of author document are
+  affected, and they are not the same. One was already broken without being told: the key sat on a
+  level the grammar reads, was dropped, and the meaning written under it did nothing — that author now
+  finds out. The other was *working*: the key sat in a free-form schema slot, survived the parse and
+  was served in the emitted API contract. That document parsed before and is refused now; renaming the
+  property is the migration. Loading such a document never reparented an object either way — the YAML
+  loader *defines* the property rather than assigning it, so the `__proto__` setter is never reached.
+  **Only `__proto__` is refused.** `constructor` and `prototype` survive the shape parse as ordinary
+  keys, so they need no parse-boundary refusal and keep their existing treatment: a store column named
+  `constructor` is a legal declaration this platform serves, and a *view field* named `constructor` is
+  still rejected by the view lint on a parsed document. And the refusal is about a **key**: a
+  `__proto__` *value* is untouched, so a store column named `__proto__` stays legal and is served
+  under its own name.
+
 - **The `501` from `POST /v1/triggers/{name}/fire` now names the manual-trigger requirement instead
   of a durable worker.** It read `Manual trigger firing requires a configured durable worker and a
   declared manual trigger. No manual-trigger firer is wired on this deployment.`, and the worker half
@@ -529,14 +644,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   presents the block as `rayspec deploy` only or claims that leaving the variable unset keeps traces in
   the process: it now states the one thing that differs between the two entrypoints in how they treat
   the variable, which is what unset means (`off` on `deploy`, the SDK's exporting default on
-  `rayspec-serve`), and names the dev-boot wrappers — `examples/local-boot/serve.ts` and
-  `deployments/acme-notes/serve.mts` — as the boots that assemble the server themselves and never read
-  it. The getting-started guide's two "same boot" passages about `rayspec deploy <spec>` and
+  `rayspec-serve`), and names the boots that assemble the server themselves and read no trace-export
+  setting at all. (Both halves of that list moved again later in this release — see "the boot wrappers
+  that assemble the server themselves now honour `RAYSPEC_AGENT_TRACING` too" below.)
+  The getting-started guide's two "same boot" passages about `rayspec deploy <spec>` and
   `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` now name two differences that matter for what leaves the
   process and for what can still register a table — this trace-export default, and
   `sealProductStores()`, which `deploy` calls after its boot returns and `rayspec-serve` never calls —
-  without claiming to have counted every difference between the two entrypoints (`withBootTimeout` and
-  the `.env` search order differ as well).
+  without claiming to have counted every difference between the two entrypoints (`withBootTimeout`
+  differs as well).
   **The operator-facing messages are corrected while they are being touched.** The refusal an
   unusable value raises stated `unset ⇒ off`, which is false on the entrypoint this change makes it
   reachable from; it now states the default per entry point. And both `Trace export:` banner lines said
@@ -544,12 +660,108 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_`-prefixed span fields and `@openai/agents-core` strips every `_`-prefixed key in `Span.toJSON`
   before the exporter serializes anything, while function spans carry tool arguments and outputs
   unprefixed. Both lines now say run metadata plus, once an agent calls tools, its tool arguments and
-  outputs — and both name the remediation as `RAYSPEC_AGENT_TRACING` on `rayspec deploy` and
-  `rayspec-serve` specifically, because the same banner is printed by the two dev-boot wrappers, where
-  that variable is read by nothing.
+  outputs — and both name the remediation as `RAYSPEC_AGENT_TRACING`. (That hint was scoped to
+  `rayspec deploy` and `rayspec-serve` at the time, because the banner's other two call sites read
+  nothing; it is unqualified now that they do — see below.)
 
 ### Fixed
 
+- **The boot wrappers that assemble the server themselves now honour `RAYSPEC_AGENT_TRACING` too, and
+  load their local `.env` through the shipped loader.** `examples/local-boot/serve.ts` and
+  `deployments/acme-notes/serve.mts` call `assembleServer` directly, so neither reached the
+  `rayspec-serve` entrypoint's `main()`: an operator who set `RAYSPEC_AGENT_TRACING=off` on either one
+  still got the agent SDK's exporting default — run metadata and, once an agent calls tools, its tool
+  arguments and outputs leaving for OpenAI — and an unsupported value that fail-closes by name on both
+  documented entrypoints was ignored there. Both wrappers printed the resolved posture on their boot
+  banner throughout, so the export was visible; it was simply not a decision the operator could make.
+  Each now applies the same explicit-only reader the `rayspec-serve` entrypoint uses, before its first
+  boot input is read: `off` disables the export through the SDK's programmatic switch (both import the
+  composition root statically, so the trace provider has snapshotted the SDK's own switch long before
+  either boots and an environment write alone would arrive too late), `openai` is a no-op, unset and
+  blank still change nothing, and anything else aborts with the message the documented entrypoints
+  raise — printed as a message, not a stack, on both.
+  `examples/local-boot/serve.ts` also carried its own single-path `.env` reader: a private parser
+  resolving exactly one file, the install-root one, relative to its own module location. That is the
+  construction issue #384 was about, one level down — it ignored `RAYSPEC_SKIP_DOTENV=1`, never looked
+  at the invoking directory, and parsed values by rules of its own. It now calls the shipped
+  `loadLocalDotenvIfPresent`, so it resolves configuration exactly as `rayspec deploy` and
+  `rayspec-serve` do: `$PWD/.env` first, the install-root file second, per key, opt-out included.
+  `deployments/acme-notes/serve.mts` reads no `.env` at all and still does not — it is a deployment
+  entrypoint whose environment comes from the deployment.
+  **The banner's remediation hint drops its entry-point qualifier**, because all four boots that print
+  it now read the variable; a source-discovering test requires every `bootBanner` call site to apply a
+  posture, so a fifth boot that printed the banner without reading the variable fails rather than
+  making that sentence false. **And the two `.env` loaders gain the parity test they never had:** the
+  CLI's copy and the server's are behaviourally identical and joined only by a comment in each pointing
+  at the other, which is exactly how they came apart the first time. One suite now runs both shipped
+  modules over the same two-root layout on disk and requires identical resolved values — order,
+  per-key precedence, the opt-out, quote-stripping and the `\n` unescape — so a change to one that is
+  not made to the other stops being green. (Issues #383, #384.)
+- **`rayspec gen-handler` now says WHY it cannot coerce a `double` or `numeric` column from a tool
+  arg, instead of refusing the type as if it did not exist.** The holes contract carries its own
+  column-type set — the types the deterministic renderer has a coercion arm for — and that set is
+  deliberately narrower than the grammar's, because the renderer has no arm for either fractional
+  type. A `columns[]` entry naming one has been refused fail-closed all along, which is right; what
+  was wrong is what the refusal said. The message enumerated the seven types it accepts and stopped
+  there, so an author who had just declared a perfectly valid `numeric` money column read it as a
+  typo and went looking for one. The refusal now appends the reason and the way out: the type is a
+  valid store column type, the renderer has no coercion arm for it, so a handler that coerces that
+  column from an untrusted arg must be hand-written. It also names the path that is NOT closed — a
+  server-stamped `fixedValues` constant into that column still renders, because `fixedValues` pins
+  author constants by column name and carries no `jsonType` — so the refusal cannot be read as "this
+  column is unwritable from a generated handler". A type the grammar does not carry either — a
+  genuine typo like `float` — still gets the plain refusal, so the two failure modes stay
+  distinguishable.
+  Two smaller rot fixes ride along, both in the same file. The accepted list in the message is now
+  read off the set the validator checks against, rather than spelled out a second time by hand, so
+  it can never quote a vocabulary the renderer has outgrown. And the set of types the refusal calls
+  out by reason is DERIVED, by subtracting the renderer's set from the grammar's enum — nothing
+  re-lists `double` and `numeric`, so a type added to the grammar is explained on its own and one
+  that gains a renderer arm drops out on its own. The neighbouring comment claimed the local set
+  mirrored the grammar's and that floats map to `jsonb`; neither has been true since the fractional
+  types landed. It now states the subset relationship, and names what enforces it: the renderer's
+  coercion switch has no `default` and returns `string`, so adding a member to the local set without
+  writing its arm fails `tsc`.
+  No accepted hole-set renders differently — the seven renderable types, their coercion arms and the
+  emitted bytes are untouched.
+
+- **The generated OpenAPI document stops describing a `list` filter the server refuses, and its
+  `numeric` pattern is now the envelope the server enforces.** Three corrections to what
+  `GET /v1/openapi.json` publishes for declared `{store}` routes. Each is a document-accuracy fix —
+  no route behaviour changed, and the runtime was fail-closed throughout — but the document is a
+  product artifact a client generates code from, so a parameter it advertises has to be one the
+  server answers.
+  **Suffix companions were de-duplicated against the wrong set.** The emitter adds a `<col>__in`, a
+  `<col>__contains` and the four `<col>__gt`/`__gte`/`__lt`/`__lte` companions per eligible column,
+  and dropped a companion whose name collides with a declared **filterable** column. A `jsonb` column
+  is not filterable and was therefore missing from that set — while the query builder resolves the
+  FULL query key first, against **every** declared column. A store declaring an eligible column `foo`
+  next to a `jsonb` column literally named `foo__gt` published a `foo__gt` parameter that
+  `?foo__gt=` answers with `400 VALIDATION_ERROR: Column 'foo__gt' is not filterable.` The
+  de-duplication now keys on every declared column name plus the injected `created_by` — exactly the
+  set the query builder resolves first — and it covers all three suffix families and each of the four
+  comparison operators on its own. Nothing else moved: a non-`jsonb` column of the same name still
+  wins as plain equality, and a shadowed operator still costs its eligible sibling only that one
+  bound.
+  **The `numeric` pattern was a hand-written copy of the runtime's, and a looser one.** The row
+  schema and the numeric filter parameters carried `^-?\d+(\.\d+)?$` while the value gate is
+  `^-?\d{1,1000}(\.\d{1,1000})?$`, so the document admitted digit runs the server answers with a 400.
+  All three emitted patterns — row schema, filter parameters, and the create/update body schema that
+  already derived from it — are now the one exported regex, which the body validator and the filter
+  and cursor coercion also test against, so the published envelope and the enforced one cannot
+  diverge. Not covered by this: the per-column `numeric(precision, scale)` fit the create/update
+  validator additionally applies is a refinement with no JSON-Schema form, so the exported body
+  schema still admits a value the column's typmod refuses.
+  **A `project: {}` route stated a naming split it does not have, and the split sentence understated
+  the request surface.** `project: {}` is the documented per-route opt-out from a store-level
+  projection, and `{}` is not nullish — so an opted-out operation, whose schemas are byte-identical
+  to an un-projected one, still carried the sentence describing a request/response naming split. The
+  sentence is now emitted only for a non-empty projection. Where it is emitted it also states the
+  request-side casing rule, which it previously left out: a create/update body key may be written as
+  the declared snake_case name **or** its camelCase twin (both variants of one column in one body are
+  refused as ambiguous), while a query parameter takes the declared name only. Reading only the
+  generated document, a client author would have concluded that snake_case bodies are required —
+  stricter than what the server accepts.
 - **`examples/agent-pack-deployment` can be deployed now, and its pack manifest stops claiming the
   loader compiles TypeScript.** The example's whole product surface — a `notes` store, a `lookup_note`
   tool and the `note_summarizer` agent that references it — ships as a `defineExtension` pack authored
@@ -621,14 +833,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unhandled-`'error'` report, with its frames, and exit 1. The address in the refusal is built from the
   host and port the entrypoint already resolved, never from the error object, because a listen error
   carries `address`/`port` for some codes only. (Issue #365.)
-- **`Ctrl-C` now stops the example dev-boot servers.** `examples/contract-intake/dev-boot.mjs`,
-  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` kept
-  running after `SIGINT` and after `SIGTERM` — still answering `/health` 200 — so a developer who
-  pressed `Ctrl-C` was left with a live server still holding its database pool and its durable worker.
+- **`Ctrl-C` now stops the example dev-boot servers once they are up.**
+  `examples/contract-intake/dev-boot.mjs`, `examples/support-intake-chat/dev-boot.mjs` and
+  `examples/support-ticket-triage/dev-boot.mjs` kept running after `SIGINT` and after `SIGTERM` —
+  still answering `/health` 200 — so a developer who pressed `Ctrl-C` was left with a live server
+  still holding its database pool and its durable worker.
   Each wrapper now owns its shutdown: it captures the `serve()` return value and, on `SIGINT`/`SIGTERM`,
   closes the HTTP server, awaits `server.close()` (which drains the durable worker, then ends the
   database pool) and exits `0` — the same wiring `packages/app/server/src/serve.ts` gives the shipped
   `rayspec-serve` entrypoint, which is why that entrypoint is not affected.
+  **Two bounds the handler does not remove**, both of them consequences of that same wiring rather than
+  of these wrappers. The exit runs inside `httpServer.close()`'s callback, and Node invokes that callback
+  only once every open connection has ended: the port stops accepting the moment the signal lands, but a
+  request still in flight holds the process until it finishes. And the handler is registered only after
+  the boot completes, so a `Ctrl-C` during the boot is not the wrapper's to answer — before its
+  dependencies install the handlers described next, the signal kills the process outright and the
+  graceful path never runs; from there until `serve()` returns it does nothing at all and the server
+  finishes coming up. `packages/app/server/src/serve.ts` behaves the same way in both cases.
   **Nothing in a dependency changed.** The wrappers registered no signal handler of their own, and the
   `SIGINT`/`SIGTERM` handlers their dependencies install each act only when no *other* listener is
   registered — `@openai/agents-core`'s tracing provider exits only when `process.listeners(sig).length`
@@ -711,6 +932,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default only writes the queue row when the running version is the newest one registered, which
   per-document versions make the *un*common case — a second deployment's `workerConcurrency` would
   have looked accepted and silently not applied.
+  **What the fence does not cover: the queue row itself.** The fencing above is about *claiming* —
+  which worker may dequeue which job. Queue *configuration* is not fenced, and this release does not
+  change that. The queue names are process-independent constants (`workflow-runs`, `agent-runs`) and
+  DBOS's `queues` table is keyed on the name alone — it carries no application-version column, and
+  `always_update` upserts `ON CONFLICT (name) DO UPDATE`. So where two deployments share one
+  `DATABASE_URL`, and therefore one DBOS system database, they share one queue row per name: the most
+  recently booted deployment's `workerConcurrency` is the one in effect, for both. Setting different
+  values per deployment is not expressible against a shared system database; give each deployment its
+  own if their concurrency must differ. Verified against the pinned SDK (4.21.6) rather than inferred.
   **What an operator observes.** The `Application version` DBOS prints as it initializes — and the
   `applicationVersion` field the public `GET /recovery-scope` readiness probe reports — is now a
   `doc-…` value rather than a platform hash. The probe's fail-closed contract is unchanged: both
@@ -869,7 +1099,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid or absent credential still gets the uniform `401`.
 - **A refreshed access token carries `mship_role` again, resolved from live membership at refresh
   time.** `POST /v1/auth/refresh` re-minted the JWT without the role claim, so after the first
-  refresh (8 minutes in, at the default `ACCESS_TOKEN_TTL_SECONDS = 480`) every claim-trusted
+  refresh (8 minutes in, at the default `RAYSPEC_ACCESS_TOKEN_TTL_SECONDS = 480`) every claim-trusted
   permission (`store:read`, `agent:run`, `agent:read`, `org:read`, `apikey:read`) answered
   `403 missing_permission`, while every sensitive permission (`store:write`, `apikey:mint`,
   `apikey:revoke`, the org-management ops) kept working through its live-membership recheck — an
@@ -915,13 +1145,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`rayspec` run from a vendored checkout now honors the invoking project's `./.env`.** The CLI's
   `.env` auto-loader resolved the file relative to its OWN install location — always the RaySpec
-  checkout root, never the caller's project — so in the vendored/submodule layout the brownfield
+  install root, never the caller's project — so in the vendored/submodule layout the brownfield
   docs recommend, a product repo's `./.env` was silently ignored and the boot failed closed claiming
   a variable is missing even though the file set it. The loader now searches `$PWD/.env` first and
   the install-root `.env` second, with the same parser and the same per-key no-override rule, so the
   effective precedence is: real environment > `$PWD/.env` > install-root `.env` — an earlier source
   always wins per key, a later one only fills what is still unset. `RAYSPEC_SKIP_DOTENV=1` keeps
-  skipping the auto-load entirely, now covering both candidates; a run from the RaySpec checkout
+  skipping the auto-load entirely, now covering both candidates; a run from the RaySpec install
   root, where the two candidates are the same file, behaves exactly as before.
 
 - **A missing-required-variable boot refusal now names the `.env` paths that were searched.**
@@ -943,7 +1173,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Last-Event-ID` or `?since=`) resumes exactly as before — `:0`, the replay-from-floor cursor,
   included. (Issue #385.)
 
+- **`rayspec-serve` now honours the invoking project's `./.env` too — the other half of the `.env`
+  defect this release closed for the `rayspec` CLI.** The CLI gained a two-candidate search;
+  `rayspec-serve` kept resolving a single path relative to its OWN install location — always the
+  RaySpec install root — so one checkout could hand the two documented entrypoints different
+  configuration. With a `./.env` in the invoking project and another at the install root naming, say,
+  a different `DATABASE_URL`, `rayspec deploy <spec>` opened the first and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` the second, with nothing said either way. Both entrypoints
+  now search `$PWD/.env` first and the install-root `.env` second, deduplicated to a single read when
+  they are the same file, through the same parser and the same per-key no-override rule — so the
+  effective precedence is: real environment > `$PWD/.env` > install-root `.env`. Everything else
+  about the loader is unchanged: `RAYSPEC_SKIP_DOTENV=1` still skips it entirely, now covering both
+  candidates; an already-set variable still wins over both files; a literal `\n` is still unescaped,
+  which is what makes the single-line PEM form work; and a file that does not exist is still silent.
+  The boot's refusals are unchanged too — `rayspec-serve` names no searched paths, where
+  `rayspec deploy` lists them. The one thing a deployment could notice: a `rayspec-serve` started
+  from a directory that happens to contain a `.env` now reads that file, project file first. Started
+  from the install root, where the two candidates are one file, it behaves exactly as before.
+  (Issue #384.)
+
+- **A `numeric` column holding a `NaN` is refused on read, like a non-finite `double` — and a page
+  that serves it no longer mints a cursor no client can follow.** PostgreSQL's `numeric` accepts `NaN`,
+  which is not a decimal at all. Neither write path produces one — the request body validator and the
+  handler facade both check the same plain-decimal shape — so only a direct SQL write or a
+  hand-written migration can plant one, and until now both read paths handed it straight out: the
+  HTTP read returned `200` with `"amount":"NaN"` under a type documented as *the exact stored value in
+  PostgreSQL's canonical rendering with exactly `scale` fractional digits*, and the handler facade
+  returned the same string to an escape-hatch handler, a `store_read` node and the views interpreter.
+  The follow-on was worse than the value: a keyset page ordered on that column minted an
+  `X-Next-Cursor` carrying `NaN`, and the next request rejected its own cursor with
+  `Filter '<column>' must be a plain decimal string (no exponent).` — a `400` on a filter the client
+  never wrote, with no way to page past the row. Both serializers now refuse such a value with the
+  same `400 VALIDATION_ERROR` shape the `bigint` and `double` read guards use, naming the column and
+  the row id and never the value. A page is serialized before its pagination headers are minted, so
+  the refusal takes the whole page and mints no cursor: on any route that serves the column, the feed
+  cannot strand a client mid-scroll. The guard reaches exactly as far as the serializer and no
+  further — a route whose `project` drops the column never serializes it, so the guard never sees the
+  value; that page is served, and because `order` is validated against the store's columns and not
+  against the projection (the documented author-named query surface), a page ordered on the dropped
+  column still mints the `NaN` cursor the next request refuses. Both arms — the refusal and its
+  reach — are pinned in `store-fractional.db.test.ts`, each with the other as its accept control.
+  This is the one read guard keyed on the DECLARED column type rather than the
+  value shape, and it has to be: a `numeric` value is a string, exactly like the `text` value beside
+  it, where `NaN` is ordinary data no read may refuse. Nothing legitimate is affected — every
+  rendering PostgreSQL produces for a decimal passes the check, `±Infinity` cannot reach a column that
+  declares a precision and scale (the DB refuses it), and recovering a planted row stays a SQL-level
+  operation, the same price the other two read guards already state.
+
+- **A timestamp filter through the handler facade takes an ISO string, instead of failing as an
+  internal fault.** The facade's contract is plain serializable rows: it hands a handler an ISO
+  string for a timestamp column and accepts one on the write path. A filter did not: the value went
+  straight to the driver, whose timestamp mapper calls `.toISOString()` on it, so a string raised a
+  raw `TypeError` — a 500-shaped fault for what is a handler input mistake, where every other facade
+  input guard produces a `400`. It applied to all three filter forms (an equality value, an `IN`
+  element, and a `gt`/`gte`/`lt`/`lte` bound), so a handler could not express "rows since this
+  timestamp" with the value the same facade had just returned. All three now pass through the write
+  path's own coercion: a parseable string becomes the `Date` the driver wants, and an unparseable one
+  is the existing typed input refusal with its existing generic public message. A `Date` bound is
+  untouched, and no other column type is coerced on a filter — the write range bounds still belong to
+  the write path only.
+
+- **A store column named `__proto__` is serialized instead of silently dropped on the un-projected
+  read path.** Such a column is a legal declaration (the identifier rule admits it, the doctor passes
+  it, the write path stores it), and a route declaring a `project` already serialized it correctly. A
+  route without one did not: the serializer accumulated into a plain object, where
+  `out['__proto__'] = value` is not a property write at all. A string value was silently swallowed —
+  the column simply vanished from the response, with no error anywhere — and a value from a `jsonb`
+  column of that name REPLACED the response object's prototype, so the column vanished *and* every
+  key of the stored value became readable through the response object. Both paths now accumulate into
+  a prototype-free object. Nothing else moves: an ordinary column is an own property either way and
+  serializes to the same bytes in the same order, so the only response this changes is one whose
+  store declares a column named exactly `__proto__` — which could not reach the wire at all before.
+  It is the only name with that property: on a plain `{}` every other `Object.prototype` member
+  (`constructor`, `toString`, and the rest) already assigned as an own property and already
+  serialized, because `__proto__` alone is a setter rather than a plain key.
+
 ### Documentation
+
+- **The two prose lists of which columns `omitInjected` drops can no longer age quietly.** The
+  `ResponseProjection` doc comment in the grammar and the `project` section of the spec reference each
+  spell out, by name, the seven server-injected columns a projection removes and the spared `id`. Both
+  are correct today — checked against the generated injected-column list — but both were written by
+  hand, while the code that enforces the rule *derives* the set from that generated list. A ninth
+  injected column would change what the platform does and leave both documents quietly describing the
+  old set, with nothing to notice.
+  A test now reads both documents off disk and compares the names they list to the injected set minus
+  `id`, so adding an injected column turns it red until both documents name it. The chain closes end to
+  end: the set the test compares against is this package's copy of the injected columns, which is
+  itself pinned by an existing equality assertion against the generated list. The extractor requires
+  *exactly one* marker sentence per document and **throws** otherwise, so rewriting the sentence out
+  of reach — or duplicating it — fails loudly instead of silently finding nothing and passing. No
+  prose changed and no behaviour changed — what is new is that the next injected column reds a test
+  instead of aging two documents.
+
+- **The list of boots that ignore `RAYSPEC_AGENT_TRACING` was wrong in the direction that matters.**
+  `.env.example` named two wrappers as the ones that "assemble the server themselves and never read
+  this variable at all". Five boots assemble the server themselves. The three the list omitted are the
+  per-example demo wrappers — `examples/contract-intake/dev-boot.mjs`,
+  `examples/support-intake-chat/dev-boot.mjs` and `examples/support-ticket-triage/dev-boot.mjs` — and
+  they are the worse case: they read no trace-export setting **and** print no boot banner. Two of the
+  three call a model — `contract-intake` and `support-intake-chat` declare an extractor, default to
+  the live extraction path, and abort by name without `OPENAI_API_KEY` — so on those a demo run keeps
+  the agent SDK's exporting default with nothing said either way. `support-ticket-triage` declares no
+  extractor and demands no model credential, so it makes no model call and has nothing to export; it
+  belongs on the list because it reads the variable no more than the other two do, not because it
+  exports. An operator reading a two-item list concludes the boots it omits honour the
+  variable. The entry no longer enumerates the ones that do not read it against a list that can rot:
+  the two wrappers that print the banner now read the variable (above), and the demo wrappers are
+  named as a shape — `examples/<slug>/dev-boot.mjs` — with what they do state plainly, along with the
+  agent SDK's own switch as the way to stop that export in their environment.
+
+- **A third "same boot" sentence is qualified, and the `.env` search's install root stops being
+  called a checkout root.** The equivalence between `rayspec deploy <spec>` and
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` was corrected in the getting-started guide earlier this
+  release — `deploy` seals the product-store registrar after its boot returns and defaults the agent
+  trace export off, `rayspec-serve` does neither — while the CLI reference stated the same
+  equivalence unqualified. It links to the corrected passage, so a reader gets there; the clause is
+  now on the sentence itself, and on this changelog's own restatement of it.
+  Separately, the two-candidate `.env` search was documented as ending at the "checkout root". It ends
+  at the **install root**: the loader resolves it four segments above its own module, which is a
+  checkout root only when you run from one. Installed from the registry those four segments land
+  outside the package — the consuming project's own root under npm's flat layout, where it is usually
+  the same file as `$PWD/.env` and the two candidates dedupe to one read, and a directory inside
+  `node_modules/.pnpm/` under pnpm's. In neither layout is it the unscoped `node_modules/rayspec`
+  launcher package, which ships a bin and no loader. `install root` is what this changelog's own
+  normative sentences for issue #384 already used, so the reference, the
+  environment example, the server package README, the authoring skill and the two loaders' own
+  comments now all say it, and each names how that root is resolved rather than assuming a layout.
+  The missing-required-variable refusal keeps listing the resolved paths themselves, which is the one
+  place an operator reads the actual directory off a real run.
+  The authoring skill additionally still attributed the two-candidate search to the CLI alone; both
+  documented entrypoints have run it since issue #384. Two stale module paths in the CLI loader's
+  comments (`packages/cli/{src,dist}`, which has never existed at that spelling) are corrected in the
+  same pass.
+
+- **The column-type vocabulary is swept: `double` and `numeric` now appear everywhere the closed set
+  is enumerated.** The reference page was updated when the two fractional types landed; the two
+  surfaces a reader actually starts from were not. The concepts page still called the vocabulary
+  "`text`, `uuid`, `timestamp`, `integer`, `bigint`, `boolean`, and `jsonb`" — the first thing a
+  first-time reader is told about columns, and flatly wrong. The authoring skill repeated the
+  seven-type list in three more places and, under what it cannot express, told an author that floats
+  map to `jsonb`. Every one of those now names all nine types.
+  Widening a list is not enough on its own, because `numeric` is the one column type that does not
+  parse without more: `precision` and `scale` are REQUIRED on it and rejected on every other type,
+  and an author following the old list would have written `type: numeric` and met a lint error the
+  page never mentioned. So the skill's store reference gains the two keys and a short entry on the
+  pair — `double` is float64 on the wire and never money; `numeric` is the exact decimal, crosses
+  the wire as a string in both directions, and refuses a JSON number — and the concepts page names
+  the split in one sentence.
+  One place stays at seven ON PURPOSE and now says so: the `jsonType` set of a `gen-handler` holes
+  file, which is what the renderer can emit a coercion for, not what a store may declare.
+
+- **Three sentences that had outgrown the code they describe.** Each states a closed set that a
+  later change widened, and each is now the set the code actually implements.
+  The reference page called the `typescript_handler_module` advisory "the one a `.ts` `module`
+  raises". The trigger set is four-wide — `.ts`, `.tsx`, `.mts`, `.cts`, matched case-folded from
+  one shared vocabulary — so an author reading that sentence could reasonably conclude a `.tsx`
+  handler raises nothing and needs no build step.
+  The same page enumerates the surfaces the `bigint` JSON boundary is enforced on, and the list
+  predates the comparison filters: a `?<col>__gt=`-family bound is coerced by the same routine as
+  equality and refuses an out-of-range value identically. The sentence understated the enforcement
+  rather than over-claiming it, but an enumeration that is read as exhaustive should be one.
+  The concepts page promised an `X-Next-Cursor` "on every non-empty page". A relevance-ranked
+  full-text page is ordered by rank rather than by a stored column and therefore mints no keyset
+  cursor — the one non-empty page that carries none. That exception was already stated on the
+  reference page, in the OpenAPI document and in the authoring skill; the summary page is now
+  consistent with them, which matters because a client polling that header is the reader most likely
+  to have started there.
 
 - **`rayspec deploy --host <addr>` is documented.** The flag has always been accepted and has always
   been printed by `rayspec deploy --help`, but the CLI reference's deploy section described the
@@ -980,7 +1376,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rayspec-serve` entrypoint the section's own code block uses parses no flags, so
   `rayspec-serve --check-env` boots as if the flag were absent — and bridges to it through the
   equivalence the page already states, that `rayspec deploy <spec>` and
-  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the same boot. It is scoped to what the check reports
+  `RAYSPEC_SPEC_PATH=<spec> rayspec-serve` are the same boot up to the differences that page names
+  (product-store sealing and the agent trace-export default), neither of which changes what a
+  document's boot demands. It is scoped to what the check reports
   (the variables the document's boot will require, why, and whether each is set) and does not
   present a passing verdict as a boot that will succeed: the check validates no value and opens no
   database, so it answers `ok` for a document whose boot still refuses on a non-UUID tenant id or
@@ -992,9 +1390,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`, which names no
   `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served page is blocked.
   The policy is right and is unchanged; what was missing is that meeting it required a browser. No
-  server-side signal exists: the response is a `200` carrying the exact bytes, so `curl`, the deploy
-  output and the logs all look correct and only the rendered page differs — the first encounter reads
-  as "the deployment lost my CSS", with nothing connecting it to the policy. The `frontend` grammar
+  *request* shows it: the response is a `200` carrying the exact bytes, so `curl`, the deploy
+  output and the request logs all look correct and only the rendered page differs — the first encounter
+  reads as "the deployment lost my CSS", with nothing connecting it to the policy. (The server-side
+  signal for it is the boot warning listed under Added above.) The `frontend` grammar
   reference, the getting-started static-serving walkthrough, the concepts page and the CLI reference
   now state the default value in full, that CSS and JS belong in files the page references rather than
   in inline code (a same-origin file is what the default allows), and that `RAYSPEC_FRONTEND_CSP`
@@ -1057,7 +1456,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **No behaviour changed** — the correction is in the README, and the platform paths it now
   describes are the ones that already shipped.
 
+- **`OPENAI_BASE_URL` and `DEEPGRAM_BASE_URL` are documented in `.env.example`.** Both speech
+  adapters read a base URL from the environment at call time — the OpenAI synthesis adapter and the
+  Deepgram transcription adapter, each falling back to the provider's real host — and neither
+  variable appeared in the environment surface the reference points readers at, so the only way to
+  find the seam was to read the adapter source. The speech section now carries both, commented out
+  beside `TTS_PROVIDER`, as what they are: optional test/dev seams for pointing a suite or a dev
+  boot at a local stub, with the trailing slash stripped either way and unset meaning the real host.
+  The `OPENAI_BASE_URL` note also states its blast radius, which is wider than speech: the vendored
+  `openai` client defaults its base URL to that variable and the OpenAI agent backend constructs the
+  client without passing one, so a boot that points the variable at a local stub sends that backend's
+  model calls to the stub as well. Two backends are not redirected by it: Codex deliberately omits
+  the variable (with `OPENAI_API_KEY`, `CODEX_API_KEY` and `CODEX_BASE_URL`) from the subprocess
+  environment it builds, and Pi passes an explicit per-model base URL to every client it constructs,
+  so that client never falls back to the variable — meaning a stub set here does not contain Pi.
+  **No behaviour changed** — both variables were already read exactly this way.
+
 ### Security
+
+- **A static mount's containment guard now inspects the name the file server actually reads.** The
+  mount handler decoded the request path with `decodeURIComponent` and ran the fail-closed guard —
+  dotfiles, traversal, and the realpath symlink-escape check — on that string, while
+  `@hono/node-server`'s `serve-static` resolves the path it decodes with `decodeURI`. Those agree on
+  every path except one carrying a percent-encoded **reserved** character (`/ ? # : @ & = + $ ,`),
+  and there the guard cleared one name while a different one was served. A served directory holding
+  a file whose literal name carries such an escape — for instance a symlink named
+  `docs%2Fgetting-started.html` pointing outside the mount — answered `200` with bytes from outside
+  the served directory, while the identical symlink under a plainly-spelled name was correctly
+  refused. When the two decodings differ, the served name is now guarded as well — and, on a
+  `cleanUrls` mount, the `<name>.html` candidate the rewrite would resolve from it. The
+  malformed-escape fallback is **mirrored** rather than approximated, which is the part that makes
+  the guard complete: on an input `decodeURI` rejects, `serve-static` does not fall back to the raw
+  string but retries each escape run on its own, so a raw-string fallback here would have agreed with
+  the other decoder on exactly the inputs where a third, different name is read
+  (`/docs%252Fgetting-started.html%` reads `docs%2Fgetting-started.html%`).
+  **Appended names are covered too.** `serve-static` resolves a directory to `<dir>/index.html` and
+  the SPA fallback names `/index.html`; neither string had ever reached the guard, so a
+  `sub/index.html` symlink pointing out of the served directory answered `200` with its bytes for
+  `GET /sub` — needing no unusual filename at all. Both are guarded now, matching the custom-404
+  branch, which already checked the name it appends.
+  This is **not** a traversal: `decodeURI` never turns an escape into a `/`, and an encoded `..` was
+  already refused by both decodings. For every path without a percent-encoded reserved character the
+  two strings are identical, and the appended-name checks fire only where such a name is actually
+  resolved, so an ordinary build sees no change. The behaviour predates this release; it is fixed
+  here rather than carried, and pinned across three mount shapes with the plainly-spelled twin of
+  each escaping symlink as the accept control.
+
+- **Two checks that certified files they never read now reach them.** The unscoped `rayspec`
+  launcher — the package npm serves when a user installs the product — carries a bare name, and every
+  `--filter` in the two required CI lanes was either the `@rayspec/*` glob or an explicit
+  `@rayspec/<name>`. It was the only test-carrying workspace member no lane filter matched, so its
+  suite ran in **no required check**:
+  the only test of the shipped bin, four cases that spawn the launcher and the `@rayspec/cli` bin side
+  by side and compare exit code, stdout, stderr and the scaffold they write. Lane 1 now names it
+  explicitly, which is where it belongs — the suite spawns two built bins and touches no Postgres — so
+  the deterministic subset goes from 22 packages to 23. Separately, the anti-re-accretion gate
+  (`pnpm gate:no-archaeology`) enumerates tracked files under a fixed path allowlist, and three
+  example directories were never added to it: `examples/live-workspace-events`, `examples/notes-ui`
+  and `examples/agent-boot-backend`, 7 scanned files between them. Anything under a path the
+  allowlist does not name is not read, so the gate passed on them the way it passes on a clean tree.
+  **Neither gap was hiding a live failure:** the launcher suite is green on this tree and the three
+  example directories carry no forbidden token — what changes is that a regression in either place is
+  now loud instead of silent. The stale ci.yml comment pointing at a `pnpm gate:workspace` script
+  (never defined in this repository, nor the `gate:tracker-hygiene` it named) is deleted rather
+  than renamed, and the deterministic-subset count, wrong in both places it appeared, is corrected and
+  now carries the derivation and the command that recounts it. Repository infrastructure only: no
+  published package, API or runtime behavior changes.
 
 - **The transitive `nanoid` copy behind the test runner is raised from 3.3.17 to 3.3.18**
   (GHSA-2v37-7h3g-55p8: `customAlphabet` and `customRandom` loop indefinitely when configured with a
@@ -1073,13 +1537,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinct packages.
 - **The transitive `nanoid` copy behind `oidc-provider` is raised from 5.1.15 to 5.1.16**
   (GHSA-28wg-ghj8-5hjv / CVE-2026-67214: the `nanoid/non-secure` generators can loop indefinitely
-  when given a negative size). The vulnerable module is not reachable here — `oidc-provider` only
-  imports the secure `nanoid` entry point, with a fixed generator size — but the fix is a patch
+  when given a negative size). The vulnerable module is not reachable here — `oidc-provider` imports
+  the secure `nanoid` entry point and never `nanoid/non-secure`, in either of the two helpers that
+  use it, so the affected generators are out of reach regardless of the size passed. (Only one of
+  those two helpers passes a fixed size: `helpers/nanoid.js` builds a 43-character generator, while
+  `helpers/user_codes.js` derives its length from the user-code mask.) But the fix is a patch
   release inside `oidc-provider`'s declared range, so the copy is pinned forward via a scoped
   `pnpm.overrides` entry (`nanoid@5`) rather than carried as a scanner exception. The dependency
   SBOM (`docs/dependency-sbom.json`) is regenerated to match. The separate `nanoid` 3.x copy
   (dev-only, behind `postcss`) is not affected by this advisory; it is raised for a different one,
   above.
+- **The transitive `@hono/node-server` copy behind the MCP SDK is raised from 1.19.14 to 1.19.15,
+  and the repository's last scanner exception is retired with it** (GHSA-frvp-7c67-39w9: a path
+  traversal in `serve-static` on Windows, reached through an encoded backslash). The reachability
+  argument that carried the exception still measures true — that copy has exactly one dependent,
+  `@modelcontextprotocol/sdk`, which uses the server for its JSON-RPC transport to a child process
+  and never for static file serving, and the advisory depends on the Windows path resolver treating
+  `\` as a separator. It was retired anyway, because the exception rested on a second claim that did
+  not survive measurement: raising the copy was said to force a foreign major version onto that SDK,
+  when the advisory's fixed version is a patch release inside the range the SDK declares
+  (`^1.19.9`). So the copy is pinned forward via a scoped `pnpm.overrides` entry
+  (`@hono/node-server@1`), exactly as the two `nanoid` copies above are, rather than carried as a
+  scanner exception. `osv-scanner.toml` now declares no suppressions at all, so every advisory the
+  scanner matches fails the dependency-audit lane. The direct dependency is untouched at 2.0.10, the
+  dependency SBOM (`docs/dependency-sbom.json`) is regenerated to match, and the graph still
+  resolves to 485 distinct packages.
+
+### Upgrade notes
+
+Everything below is documented in place above; this is the checklist. Nothing here applies to a
+deployment that only authors specs and deploys them — the items are for embedders, for operators of
+an existing database, and for authors of documents that were silently doing nothing.
+
+- **Two exported types gained REQUIRED members, so an out-of-repository implementation stops
+  typechecking until it grows them.** `ServerConfig` (`@rayspec/server`) gains three:
+  `frontendCsp: string`, `permissionsPolicy: string` and `authRateMultiplier: number`. A deployment
+  that builds its config with `loadServerConfig` needs no change — it fills all three from the
+  environment; only code that constructs the object literally is affected. `FrontendSpec`
+  (`@rayspec/spec`) gains `cleanUrls: boolean` in its OUTPUT type, so a literal built outside this
+  repository needs the key; parsing a document is unaffected, because the field carries a default.
+- **A document with a mapping key written literally as `__proto__` no longer parses.** It used to,
+  and then quietly did nothing with whatever sat under that key — a `rename` renamed nothing, a view
+  field vanished from the response. It is now a named `reserved_document_key` error at the parse
+  boundary of both profiles. If a document relied on that key surviving into a free-form slot (a
+  tool's `parameters`, the body of a `contracts` entry), rename it before upgrading.
+- **`RAYSPEC_AUTH_RATE_MULTIPLIER` now has a ceiling** and refuses a value above it by name, the way
+  its sibling knobs already did. A deployment that set an implausibly large multiplier must lower it
+  or the boot stops.
+- **A static mount refuses a served file whose on-disk name carries a percent escape** when the two
+  decoders disagree about it, and refuses a directory index or SPA shell that resolves outside the
+  served directory. Both were served before; neither shape is produced by an ordinary build.
 
 ## [1.7.0] - 2026-08-05
 
@@ -1540,7 +2047,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enqueued through the API keeps the `enqueued` header that path writes before handing the job over,
   so reading its outcome has to test the header for TERMINALITY, which is what `isTerminalRunStatus`
   is for — while a cron trigger's agent action enqueues without writing a header, so a bounded run of
-  that kind leaves no `runs` row at all. Be precise about what the ceiling does: it stops run-core
+  that kind leaves no `runs` row at all. *(SUPERSEDED — that second clause describes this release
+  only. The trigger fire path now writes the same pre-enqueue `enqueued` header, so a bounded cron-
+  or manual-fired run leaves that non-terminal row behind and is read for TERMINALITY exactly like an
+  API-enqueued one; see the `POST /v1/triggers/{name}/fire` entry above.)*
+  Be precise about what the ceiling does: it stops run-core
   waiting, it does **not** cancel the model call — there is no cancellation path, so the provider
   request continues until it settles by itself. What it does give you is the caller and the worker
   slot back, and a run-core that refuses what the abandoned call reaches for afterwards: an event it
@@ -3932,6 +4443,16 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.8.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.8.0
+[1.7.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.7.0
+[1.6.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.2
+[1.6.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.1
+[1.6.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.0
+[1.5.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.5.1
+[1.5.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.5.0
+[1.4.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.4.1
+[1.4.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.4.0
+[1.3.3]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.3
 [1.3.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.2
 [1.3.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.1
 [1.3.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.3.0

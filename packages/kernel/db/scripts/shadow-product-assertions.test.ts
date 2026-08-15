@@ -103,6 +103,61 @@ stores:
     await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
   });
 
+  it('seeds a `numeric` column at ANY declared scale, including one above 100', async () => {
+    // The grammar admits `scale` up to 1000 (`grammar.ts`) and the only cross-field rule is
+    // `scale <= precision` (`lint.ts`), so `numeric(200, 150)` is a spec that parses and lints
+    // clean. Rendering the zero seed through `Number.prototype.toFixed` capped the seedable scale
+    // at 100 — above that `toFixed` is specified to throw a RangeError, which would surface inside
+    // the shadow dry-run as a stack trace from the seed builder rather than as a schema verdict.
+    // The ACCEPT CONTROL below is the same helper over a scale the old rendering handled, so a
+    // fixture that rejected everything could not make this arm look true.
+    const schema = 'rayspec_test_shadow_numeric_scale';
+    const stores = parseStores(`
+version: '1.0'
+metadata:
+  name: shadow-numeric-scale
+stores:
+  - name: ratios
+    columns:
+      - { name: wide_ratio, type: numeric, precision: 200, scale: 150 }
+`);
+    await freshSchemaFor(schema, stores);
+    const scoped = postgres(process.env.DATABASE_URL as string, {
+      max: 1,
+      connection: { search_path: `${schema}, public` },
+    });
+    try {
+      expect(await runProductAssertions(scoped, stores)).toBe(1);
+    } finally {
+      await scoped.end();
+    }
+    await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  });
+
+  it('ACCEPT CONTROL: the same seed path over a scale of 2 asserts its table', async () => {
+    const schema = 'rayspec_test_shadow_numeric_small';
+    const stores = parseStores(`
+version: '1.0'
+metadata:
+  name: shadow-numeric-small
+stores:
+  - name: prices
+    columns:
+      - { name: amount, type: numeric, precision: 12, scale: 2 }
+`);
+    await freshSchemaFor(schema, stores);
+    const scoped = postgres(process.env.DATABASE_URL as string, {
+      max: 1,
+      connection: { search_path: `${schema}, public` },
+    });
+    try {
+      expect(await runProductAssertions(scoped, stores)).toBe(1);
+    } finally {
+      await scoped.end();
+    }
+    await sql.unsafe(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+  });
+
   it('PASSES non-vacuously for the throwaway stores (asserts every product table)', async () => {
     const schema = 'rayspec_test_shadow_nonvacuous';
     await freshSchema(schema, true);

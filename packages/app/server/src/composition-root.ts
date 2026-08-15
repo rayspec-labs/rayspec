@@ -1335,6 +1335,16 @@ export function parseAccessTokenTtlSeconds(env: NodeJS.ProcessEnv): number {
 }
 
 /**
+ * The hard ceiling on the auth rate-limit multiplier. The variable scales a THROTTLE, so an
+ * unbounded value is a way to switch that throttle off by arithmetic: at ×1e9 the `register`
+ * bucket's 5/min becomes 5e9/min, which no caller can exhaust. ×1000 is an order of magnitude above
+ * the documented 100 and turns register/login/refresh into 5000/10000/30000 per minute — headroom
+ * no test harness reaches, and still a limit. Fail-closed above it, exactly as
+ * MAX_ACCESS_TOKEN_TTL_SECONDS bounds its own knob.
+ */
+export const MAX_AUTH_RATE_MULTIPLIER = 1000;
+
+/**
  * resolve the dev/CI auth rate-limit multiplier from env, fail-closed on an invalid value.
  *
  *  - RAYSPEC_AUTH_RATE_MULTIPLIER — unset/blank ⇒ 1 (the production limits, byte-identical). A
@@ -1343,18 +1353,20 @@ export function parseAccessTokenTtlSeconds(env: NodeJS.ProcessEnv): number {
  *    not trip the `register` bucket mid-run; windows and every other bucket are untouched. Any
  *    value other than 1 is announced with a loud one-line boot warning
  *    (`authRateMultiplierBanner`), so it can never sit in a production environment silently. A
- *    non-integer or ≤ 0 value ABORTS the boot.
+ *    non-integer, ≤ 0, OR > MAX_AUTH_RATE_MULTIPLIER (1000) value ABORTS the boot.
  */
 export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
   const raw = env.RAYSPEC_AUTH_RATE_MULTIPLIER?.trim();
   if (raw === undefined || raw === '') return 1;
   const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) {
+  if (!Number.isInteger(n) || n <= 0 || n > MAX_AUTH_RATE_MULTIPLIER) {
     throw new BootConfigError(
-      `Boot aborted — RAYSPEC_AUTH_RATE_MULTIPLIER='${raw}' is not a positive integer. It is the ` +
-        'dev/CI multiplier that scales the max of the login/register/refresh rate-limit buckets ' +
-        '(default 1 = the production limits). Fail-closed (a bad multiplier must never silently ' +
-        'fall back — falling back to the production limits would reproduce exactly the ' +
+      `Boot aborted — RAYSPEC_AUTH_RATE_MULTIPLIER='${raw}' is not a positive integer ≤ ` +
+        `${MAX_AUTH_RATE_MULTIPLIER}. It is the dev/CI multiplier that scales the max of the ` +
+        'login/register/refresh rate-limit buckets (default 1 = the production limits). The ' +
+        'ceiling exists because the variable scales a THROTTLE: an unbounded multiplier removes ' +
+        'it by arithmetic rather than by configuration. Fail-closed (a bad multiplier must never ' +
+        'silently fall back — falling back to the production limits would reproduce exactly the ' +
         'far-from-cause 429s the variable exists to remove, and guessing a scale would silently ' +
         'weaken an auth throttle).',
     );
@@ -1795,7 +1807,8 @@ export function appliedProductDdlBootNote(
     "Editing the spec's stores FIRST is what turns this into a second, confusing failure: the live " +
     'schema is then DRIFTED against the edited spec and that boot fail-closes on the drift — ' +
     'reconcile it with a reviewed FORWARD migration (`rayspec plan <new-spec> --against <old-spec>`, ' +
-    'then `rayspec deploy --apply-migration <delta.sql>`), never a hand-written down-migration; ' +
+    'then `rayspec deploy --apply-migration <delta.sql>`, adding `--allowlist <file.json>` to cover ' +
+    'any reviewed destructive statement the delta carries), never a hand-written down-migration; ' +
     'there are none. On a THROWAWAY local database `rayspec dev db --reset --yes` starts over ' +
     'instead — it is NOT a table-level cleanup: it DROPs the whole database AND its `_dbos_sys` ' +
     'sibling WITH (FORCE) and re-creates one empty database, so the platform tables and every org ' +
@@ -2552,6 +2565,10 @@ async function deployDeclaredSpec(
       schemaState === 'absent'
         ? [{ name: '0000_product_stores.sql', sql: generateProductSql(specStores), allowlist: [] }]
         : []; // present-matching → MOUNT: NO product DDL (existing data survives)
+    // A spec that REMOVED stores also lands here, including one that removed them all (`auth-only`
+    // below): the classifier is superset-blind and answers `present-matching`, so the orphaned tables
+    // stay in the database, with their rows, and nothing reports them. Fail-safe and deliberate —
+    // see the blind-spot note on `classifyProductSchema`.
     deployMode =
       specStores.length === 0 ? 'auth-only' : schemaState === 'absent' ? 'materialized' : 'mounted';
   }
@@ -2986,13 +3003,35 @@ async function deployDeclaredSpec(
               // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
               // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
               ...(blobFactory ? { blobFactory } : {}),
-              // Close the durable-path capability gap: the OFF-REQUEST worker's tool inits carry the
-              // SAME read/media seams the request path injects (fsSource/stt/tts, spread-absent when
-              // unconfigured) — an off-request tool that cannot read a file or transcribe an input
-              // was a request-path/durable-path divergence, not a posture.
+              // The three REMAINING handle-shaped capabilities the sync run surface threads
+              // (api-auth's `withDeclaredAgents`), on the SAME terms and for the SAME reason.
+              // `resolve-tools.ts` SPREADS each handle onto the tool init, so a capability this
+              // registry never received is an ABSENT key — and a declared tool that reads it throws
+              // off-request while the identical tool works in-request. None of the three touches the
+              // run's transaction: `fsSourceFactory()` reads the deployment's jailed source root and
+              // `sttCapability`/`ttsCapability` are provider handles that take no database at all.
+              // Every one is spread-when-wired, so a deployment that configured none builds a
+              // byte-identical registry to before.
               ...(fsSourceFactory ? { fsSourceFactory } : {}),
               ...(sttCapability ? { sttCapability } : {}),
               ...(ttsCapability ? { ttsCapability } : {}),
+              // `eventBus` is DELIBERATELY NOT threaded here, and it is the one capability that
+              // cannot cross this seam on these terms. The durable worker runs the WHOLE run inside
+              // one `tdb.transaction(...)` and builds the run's tools from that TRANSACTIONAL handle
+              // (@rayspec/durable-dbos `executor.ts`, the `runAgent` step), while the sync run surface
+              // builds them from a plain `forTenant(...)` handle (api-auth `routes/runs.ts`). The bus
+              // gives a tool the IMMEDIATE form, which allocates the sequence number at the call —
+              // so built from the worker's handle it would take the tenant's `tenant_event_streams`
+              // counter-row lock INSIDE the run's transaction, and Postgres holds that lock until
+              // COMMIT: for the rest of the run, across the model call, with every other emit of that
+              // tenant (ordinary in-request route flushes included) waiting behind it, unbounded —
+              // exactly the hazard the buffered/immediate split exists to prevent (api-auth
+              // `engine/event-bus.ts`). The same wrapping would also roll a tool's emitted events back
+              // with a run that later throws, while the identical in-request tool's survive. Giving an
+              // off-request tool a sound `init.emit` needs a handle that is NOT the run's transaction,
+              // which is a change to the tool-factory seam itself, not a wiring choice available here.
+              // `durable-worker-capability-parity.db.test.ts` arm (d) measures the counter row while a
+              // run is parked and fails if this seam is opened.
             });
           }
           // Inject the tenant-bound blob backend into the engine (the `stream` route arm

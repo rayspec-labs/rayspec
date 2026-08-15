@@ -37,6 +37,23 @@ document against the matching set of sections. Both profiles are strict: every
 object level rejects an unknown or misspelled key rather than ignoring it, so a
 typo fails validation instead of silently doing nothing.
 
+One key name is refused outright, anywhere in either profile: a mapping key
+written literally as `__proto__`. It is the one key the shape validator will not
+report on where it validates keys at all — and what it did with the key depended
+on where the key sat. Where the
+grammar reads the level, the validator skips that key by name without raising an
+issue, so the key was dropped and whatever was written under it did nothing: a
+`rename` written under it renamed nothing, a view field written under it vanished
+from the response. Inside a free-form schema slot — a tool's `parameters`, the
+body of a `contracts` entry — the validator does not inspect the level at all, so
+there the key was *not* dropped: it survived into the parsed document with its
+value intact and was carried into the API contract emitted from it. Either way no
+rule could say a word about it. Such a document now fails validation with
+`reserved_document_key`, pointed at the key; if you were relying on a `__proto__`
+property inside a free-form schema slot, rename that property. This is about a
+**key**. A `__proto__` *value* is untouched: a store column named `__proto__` stays
+a legal declaration and is served under its own name.
+
 The rest of this document is in two halves — the backend profile first (the
 concrete starting point), then the product profile.
 
@@ -145,7 +162,8 @@ stores:
     surface as a JSON **number** while its magnitude is at most
     **9 007 199 254 740 991** (`Number.MAX_SAFE_INTEGER`). Beyond that the
     request is refused with `400 VALIDATION_ERROR` rather than rounded — on a
-    `create`/`update` body, on a `?<col>=` or `?<col>__in=` filter, on a keyset
+    `create`/`update` body, on a `?<col>=`, a `?<col>__in=` or a
+    `?<col>__gt=`-family (`__gt`/`__gte`/`__lt`/`__lte`) filter, on a keyset
     cursor, **and on the way out**. The outbound refusal is deliberate and can
     fire on a request the caller did not get wrong: a value can reach the column
     by a route other than the REST write path (a hand-written migration, a
@@ -227,10 +245,25 @@ stores:
     above. A read returns the exact stored value in PostgreSQL's canonical
     rendering with exactly `scale` fractional digits (`7.5` written into a
     `numeric(24, 6)` column reads back `7.500000` — the same value,
-    canonically rendered). Filters and keyset cursors carry the same string
-    form and compare exactly server-side: a filter value beyond the declared
-    scale matches nothing rather than matching a rounded neighbour. Both
-    fractional types are orderable and usable as keyset pagination columns.
+    canonically rendered) — and refuses anything else: a `numeric` column can
+    also hold `NaN` at the SQL level, which is not a decimal at all, so a value
+    planted there by direct SQL makes the read a `400 VALIDATION_ERROR` naming
+    the column and the row id, exactly as a non-finite `double` does, rather
+    than a response carrying a "decimal" no decimal parser accepts. (No write
+    path produces one — both refuse the string — and PostgreSQL itself refuses
+    `±Infinity` for a column that declares a precision and scale.) The refusal
+    keeps the feed followable wherever the column is served: a page is
+    serialized before its pagination headers are minted, so the refusal takes
+    the whole page and no keyset cursor is minted on that row. A `project`
+    that drops the column is outside that reach — the serializer skips a
+    column the projection omits before the read guards run, and `order` is
+    validated against the store's columns, never against the projection, so a
+    page ordered on the dropped column is still served and still mints a
+    cursor the next request refuses as a filter value. Filters and keyset
+    cursors carry the same string form and compare exactly server-side: a
+    filter value beyond the declared scale matches nothing rather than
+    matching a rounded neighbour. Both fractional types are orderable and
+    usable as keyset pagination columns.
 
     **Changing a numeric column's `precision`/`scale`** is a real schema
     change: the diff emits a single `ALTER … SET DATA TYPE numeric(<p>, <s>)`,
@@ -691,7 +724,10 @@ The projection is **read-side only** and **fail-closed**:
   creates a deliberate request/response naming split: with the example above you
   sort with `?order=created_at.asc` and read the same value back as `createdAt`,
   and no query parameter is ever named `companionId`. The generated OpenAPI
-  document states this split on every projected operation.
+  document states this split on every projected operation — including the
+  request-side casing rule, since a body key takes either casing while a query
+  parameter takes the declared name only. A route that opts out with
+  `project: {}` serves the plain declared shape, so its operations state nothing.
 - **Misconfiguration is a `doctor` error, never a runtime surprise.** An unknown
   column in `rename`/`fields`, a rename of a column the projection itself
   removes from the response, two columns mapping to one wire name (including two
@@ -705,8 +741,13 @@ The projection is **read-side only** and **fail-closed**:
 - **Keyset pagination is projection-immune.** The `X-Next-Cursor` is minted from
   the stored row, so paging keeps working when the response renames `id` away or
   a `fields` allowlist drops it entirely.
-- **Purely additive.** No `project` key ⇒ byte-identical responses, documents,
-  and write behaviour.
+- **Additive, with one exception.** No `project` key ⇒ the same responses,
+  documents, and write behaviour as before the key existed. The exception is a
+  store that declares a column named `__proto__` — a legal, `doctor`-clean
+  column name: the un-projected serializer now emits it like any other column,
+  where the plain object it used to accumulate into swallowed a string value
+  outright and, for a `jsonb` value, took the stored object as the response's
+  prototype.
 
 ### The `created_by` actor stamp
 
@@ -1151,7 +1192,10 @@ agents:
   handlers, events, and journal steps included. Declare it for tools with
   ordered side effects (a write that must land before a finish, a spawn that
   must land before a sweep); the default keeps concurrent dispatch, which
-  suits read-only tools. A backend that could honor neither level is rejected
+  suits read-only tools. The provider-side half applies only when the agent
+  declares tools: with an empty `tools` list there is no call to order, so
+  `openai` sends neither setting and the request is the one a tool-free agent
+  always sent. A backend that could honor neither level is rejected
   at validation time (`capability_violation`) rather than silently ignoring
   the declaration; every current backend honors it.
 - `lintSuppress` — optional list of acknowledged advisories, scoped to **this
@@ -1237,6 +1281,12 @@ triggers:
     kind: cron
     schedule: '0 3 * * *'
     action: { kind: agent, agent: summarizer }
+  - name: rebuild-index
+    kind: manual
+    action: { kind: handler, handler: rebuild_index_handler }
+  - name: summarize-now
+    kind: manual
+    action: { kind: agent, agent: summarizer }
 ```
 
 - `name` — required, non-empty.
@@ -1281,7 +1331,7 @@ durable reserve→dispatch machinery a cron fire uses, so a double fire within o
 firing-instant bucket dedups to one dispatch. The answer is `202` with:
 
 ```json
-{ "name": "nightly-summary", "fired": true }
+{ "name": "rebuild-index", "fired": true }
 ```
 
 `fired: true` means **this call** won the exactly-once reserve and dispatched.
@@ -1290,7 +1340,7 @@ that dispatch enqueued:
 
 ```json
 {
-  "name": "nightly-summary",
+  "name": "summarize-now",
   "fired": true,
   "runId": "…",
   "events": "/v1/runs/{id}/events"
@@ -1342,6 +1392,10 @@ handlers:
     module: handlers/persist-note.ts
     export: persistNote
     kind: tool
+  - id: rebuild_index_handler
+    module: handlers/rebuild-index.ts
+    export: rebuildIndex
+    kind: trigger
 ```
 
 - `id` — required logical id referenced from `tooling`, `api`, or `triggers`.
@@ -1358,7 +1412,8 @@ handlers:
   handler**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
   `code` naming an advisory (never an error) and a **required, non-empty**
   `because` recording why the finding does not apply here. This is the node the
-  `typescript_handler_module` advisory — the one a `.ts` `module` raises — is
+  `typescript_handler_module` advisory — the one a TypeScript `module` raises
+  (`.ts`, `.tsx`, `.mts`, `.cts`) — is
   reported on. Acknowledging it records the reviewed decision (a build step
   compiles the module before deploy, say) and quiets `doctor`; the deploy loader
   still loads compiled JavaScript only, and `plan` still reports the raw advisory.
@@ -1373,7 +1428,10 @@ bounded comparison filters (`{ column: { gt: bound } }` and `gte`/`lt`/`lte`, on
 non-nullable, non-jsonb declared columns — read filters only), `orderBy`,
 `limit`/`offset` paging, and a filtered `count`** over the tenant-scoped store
 (still tenant-predicated beneath; no `like`/`OR`
-operators). A read that passes **no** `orderBy` comes back in `id` ascending order —
+operators). A filter on a `timestamp` column takes either a `Date` or the ISO
+string the facade itself hands back for that column — as an equality value, as a
+set-membership element, or as a comparison bound — and an unparseable date string
+is refused as a client error, the same way the write path refuses it. A read that passes **no** `orderBy` comes back in `id` ascending order —
 the same default the `list` op applies — so a handler never receives rows in an
 unspecified physical order. That default is the injected `id`, a random UUID, so it
 is a **stable** order and not a chronological one: order by `created_at` if you want
@@ -1418,7 +1476,7 @@ everywhere:
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
 | `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
-| `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and tools | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
+| `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and the tools of an **in-request** agent run (never those of an enqueued one — see below) | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
 
 Two boundaries the table implies are worth spelling out.
 
@@ -1481,7 +1539,8 @@ const speech = await init.tts.synthesize('Guten Morgen.', {
   speed: 1.25,     // clamped into the provider's range
   format: 'mp3',   // 'mp3' | 'opus' | 'wav'
 })
-// speech.bytes (Uint8Array), speech.contentType ('audio/mpeg'), speech.durationSeconds
+// speech.bytes (Uint8Array), speech.contentType ('audio/mpeg' from this provider —
+// read it, never derive it from the `format` you asked for), speech.durationSeconds
 return httpResponse(Buffer.from(speech.bytes).toString('base64'), {
   headers: { 'x-audio-content-type': speech.contentType },
 })
@@ -1506,7 +1565,15 @@ today:
   closed rather than failing every call at request time.
 - **`fake`** — a deterministic offline synthesizer for dev and CI: every call
   returns the same fixed-length tone, byte-identical, and nothing is spoken or
-  contacted. The boot **warns** loudly (warn-only — it never blocks a dev boot).
+  contacted. It **always answers WAV**: `format` is validated for membership
+  exactly as the live provider validates it, but nothing is encoded, so the bytes
+  are a PCM tone and `contentType` is an honest `audio/wav` whatever container was
+  requested. The refusals match the wired provider; the container does not — a
+  handler (or a test) that pins `contentType` to the requested `format` passes
+  against `openai` and fails against `fake` — for `mp3` and `opus`. A requested
+  `wav` is the one case the two agree on, so a suite that exercises only `wav`
+  never catches the pin. The boot **warns** loudly (warn-only — it never blocks a
+  dev boot).
 
 Unlike `transcribe`, `synthesize` **rejects** rather than returning a status union
 (the happy path is the audio itself). A failure is a `TtsAdapterError` carrying a
@@ -1523,8 +1590,12 @@ that passes in CI cannot first fail in production:
   characters) is **refused**, never truncated into a recording that stops
   mid-sentence and looks successful.
 - **voice membership is closed.** An unknown voice is refused rather than silently
-  falling back to a default the caller did not ask for. `speed`, by contrast, is
-  **clamped** into the supported range rather than refused.
+  falling back to a default the caller did not ask for — a blank string is an
+  unknown voice, not an absent one, and is refused the same way. The adapter's
+  default is reached by omitting `voice`, and by an explicit `null`: only an
+  untyped caller can send one, and it is read as absent rather than raised as a
+  type error. `speed`, by contrast, is **clamped** into the supported range rather
+  than refused.
 
 #### `init.emit` — append to the tenant's event stream
 
@@ -1542,9 +1613,15 @@ export const createNote = async (init) => {
 live UI reads back, instead of every product growing its own polled events table. It
 is present only when the deployment enabled the bus
 ([`deployment.eventBus`](#deployment)), and it reaches **`handler`-kind routes and
-tools** only: a `stream`-kind route init and a trigger init do not carry it (the same
-boundary the rest of this table draws), so work that must emit belongs in a
-`handler`-kind route or a tool the trigger drives.
+the tools of an in-request agent run** only: a `stream`-kind route init and a trigger
+init do not carry it (the same boundary the rest of this table draws), and neither
+does the init of a tool an **enqueued** run drives — `async: true`, or any trigger
+whose action is `kind: agent`, since a trigger fires its agent through the same
+durable worker. The worker runs a whole run inside one transaction, and allocating a
+sequence number there would hold the tenant's stream lock until that run committed,
+so the capability is left off rather than made to behave differently off-request. So
+work that must emit belongs in a `handler`-kind route, or in a tool of an agent run
+the request itself drives.
 
 The **tenant is engine-bound**: the capability has no tenant parameter, so a handler
 cannot emit into another tenant — there is nowhere to name one. That is the same
@@ -1562,11 +1639,20 @@ What a subscriber may rely on:
 - **The sequence is gap-free.** A rolled-back request returns its number and the next
   emit reuses it, which is what makes a hole in a stream a real signal that retention
   removed something, rather than noise.
-- **On a route handler the events are atomic with the handler's own writes.** They are
-  written as the last statement before the route transaction commits, so a reader
-  never sees an event announcing a change it cannot yet read — and a handler that
-  throws leaves neither its rows nor its events. A tool has no outer transaction by
-  design, so there each emit is its own statement, durable as it returns.
+- **On a route handler the events are atomic with the handler's own writes — inside
+  the transaction the engine opens around it.** That transaction is the boundary of
+  the promise: the buffered events are flushed as its last statement, so a reader
+  never sees an event announcing a change it cannot yet read, and a handler that
+  throws leaves neither its rows nor its events. Every `handler`-kind route this
+  document can declare runs inside it — and that is the only declarable kind whose
+  init carries `emit` at all. The one posture that does not — the engine opens no
+  transaction and the handler commits its own short ones instead — belongs to a
+  route a mounted capability contributes in code, and has no key in this grammar;
+  such a handler still gets ordered, durable events, but it committed its own
+  writes before the flush, so the two are not atomic. A tool's `emit` is the
+  immediate form instead: the run surface that carries it builds a tool's
+  capabilities from a plain, non-transactional handle, so there each emit is its own
+  statement, durable as it returns.
 
 Two refusals, both fail-closed with a named error (`500 INTERNAL`) rather than a
 silent no-op:
@@ -1628,6 +1714,11 @@ es.addEventListener('note.created', (e) => render(JSON.parse(e.data)))
 - The event's timestamp is **not on the wire**. It is transaction-start time and is
   not monotone with `seq`, so shipping it would only invite clients to sort by it. A
   handler that wants a timestamp puts one in its payload.
+- The stream opens with a **`retry:` field** — the reconnect delay, one second (the
+  field is in milliseconds). It is not a frame either and dispatches no event. It is
+  there because the close that ends most of these streams is the server's own lifetime
+  cap, so how long you wait before coming back is the server's call rather than a
+  per-client default, and those defaults differ. `EventSource` applies it for you.
 - Between frames you may see a block that is an `id:` line and nothing else — the
   **resume checkpoint**. It is not a frame and dispatches no event; it exists so that
   a subscriber which has not been handed a data frame yet is still holding a cursor
@@ -1657,12 +1748,25 @@ environments. Four refusals, each a `400` rather than a plausible-looking stream
 receives no truncation signal, however old the stream's floor is — it never had the
 history it is missing.
 
+**An empty `Last-Event-ID` is no cursor, not a bad one.** An `EventSource`'s
+last-event-ID string starts *empty*, so a header that is present with no value says
+exactly what an omitted header says: nothing to resume from. It is read as absent — a
+`?since=` sent alongside it still applies, and with neither you start at the tail. A
+header that does carry a value outranks `?since=`, and is checked against the four
+refusals above like any other cursor — "no value" is the empty string exactly, so a
+header holding only characters HTTP does not count as whitespace (a non-breaking space,
+say) is a value, and a `400`.
+
 ### `topics`
 
 **Omitting `topics` means every topic.** An explicitly empty `?topics=` is a `400`,
 not a subscription that quietly delivers nothing: an empty filter can only ever match
 nothing, which is indistinguishable from a working stream on a quiet workspace. A
 filter does not slow your resume down — the cursor advances past the events it skips.
+
+**At most 64 topics per subscription.** A longer filter is a `400`. The bound is on the
+filter, not on your topics: omit `topics` to receive every one of them and select
+client-side.
 
 ### Delivery, and what bounds it
 
@@ -1784,7 +1888,8 @@ deployment:
   sequence is gap-free (a rolled-back request returns its number and the next
   emit reuses it), which is what makes a hole in a stream a real signal that
   retention removed something, rather than noise. On a route handler the events
-  commit with the handler's own writes, so a reader never sees an event
+  commit inside the transaction the engine opens around the handler, together
+  with the writes the handler made in it, so a reader never sees an event
   announcing a change it cannot yet read.
 
 ## `frontend`
@@ -1836,14 +1941,21 @@ frontend:
   ordered rather than exclusive, so a mount may set both: a deep link that has a page gets
   that page, and only a path with no page at all reaches the SPA shell.
 
-  **One behaviour changes when you opt in.** With `cleanUrls: false` (the default) every
+  **Two behaviours change when you opt in.** With `cleanUrls: false` (the default) every
   path answers exactly as it does today. With it `true`, a site that ships **both**
   `<path>.html` and `<path>/index.html` for the same path serves `<path>.html`, where it
-  serves `<path>/index.html` today — `.html` is tried first. A request with a trailing
-  slash (`/docs/`) is unaffected and still resolves the directory index. The fail-closed
-  guard below applies to the `.html` candidate exactly as it does to any other served
-  path: a dotfile, a traversal, or a symlink escaping the directory is refused, never
-  followed.
+  serves `<path>/index.html` today — `.html` is tried first. And on a mount that ships a
+  root `404.html`, `/404` becomes an extensionless path like any other and serves that
+  page with `200`. What that changes depends on `spa`, because the fallback comes first in
+  the order above: on an `spa: false` mount the miss branch answered the same bytes with
+  `404`, so the status flips; on an `spa: true` mount the fallback already answered `/404`
+  with `200`, so the status is unchanged and the document flips from the shell to the
+  page. Either way it is parity with the hosts this option mirrors, which all serve `/404`
+  as a page. A request with a trailing slash (`/docs/`) is unaffected and still resolves
+  the directory index.
+  The fail-closed guard below applies to the `.html` candidate exactly as it does to any
+  other served path: a dotfile, a traversal, or a symlink escaping the directory is
+  refused, never followed.
 
 **Readiness.** Declaring a mount adds a `frontend` field to the `/health` response,
 valued `"ok"` or `"unavailable"`. It reports whether the mounts can be served — the
@@ -1869,14 +1981,27 @@ mount's own responses (the API and auth surface deliberately carries no CSP — 
 left to a fronting proxy). The CSP default is
 `default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'`, which
 names no `style-src` and no `script-src`, so an inline `<style>` or `<script>` in a served
-page falls back to `default-src` and is **blocked**. Nothing on the server side reports it:
-the response is a `200` carrying the exact bytes, so `curl`, the deploy output and the logs
-all look correct, and only the rendered page differs — the inline CSS is not applied and the
-inline script never runs. Reference built `.css`/`.js` files by `href`/`src` from the same
+page falls back to `default-src` and is **blocked**. A `style="…"` attribute and an `on*=`
+handler fall back to that same `default-src` and are blocked with them — the policy's reach
+is the four inline shapes, not only the two element ones. No *request* reports it: the
+response is a `200` carrying the exact bytes, so `curl`, the deploy output and the request
+logs all look correct, and only the rendered page differs — the inline CSS is not applied and
+the inline script never runs. The **boot** reports it, on both boot shapes: the once-per-boot pass
+over the declared mounts that computes the `frontend` readiness below also scans their HTML
+against the policy that boot will emit, and warns once, naming the files and the directive that
+decided. Three properties bound what that warning is worth. It is **warn-only** — its whole
+product is a line on the boot's warn sink, so it can never fail a boot or change what `/health`
+reports. It is **bounded** — at most 200 HTML files per boot across all mounts, the first 1 MiB
+of any one file, the first 5 offending files named, each stated in the message when it truncates.
+And it is a **heuristic text scan**, not an HTML parser and no hash computation: markup quoted
+inside an attribute or a string can be named, unusual markup can be missed, and a policy carrying
+a hash or nonce source is treated as permitting that shape. A silent boot is therefore good news,
+not a proof. Reference built `.css`/`.js` files by `href`/`src` from the same
 mount instead (same-origin, which `default-src 'self'` allows); if a page genuinely needs a
 weaker policy, `RAYSPEC_FRONTEND_CSP` replaces the whole baseline verbatim (and
 `RAYSPEC_PERMISSIONS_POLICY` the other header) — an operator choice, never the shipped
-default.
+default, and one the scan honours: it judges a page against the policy in force, so an
+override permitting the shape the page ships silences the warning too.
 
 **Range and HEAD** are a supported feature: a byte-`Range` GET returns `206` partial
 content (`Content-Range`, `Accept-Ranges: bytes`, and exactly the requested bytes),
@@ -1899,7 +2024,7 @@ assets *alongside* the full API. Separately, a document that declares **only** a
 event bus — boots as a **static profile**: with no database and no auth/OIDC/run
 surface constructed at all,
 for serving a built single-page app directly with no reverse proxy in front. That
-boot form, and the two response-header environment variables it reads
+boot form, and the two response-header environment variables both boot shapes read
 (`RAYSPEC_FRONTEND_CSP`, `RAYSPEC_PERMISSIONS_POLICY`, each with a secure default),
 are described in
 [getting-started → a frontend-only (static) deployment](./getting-started.md#a-frontend-only-static-deployment)
