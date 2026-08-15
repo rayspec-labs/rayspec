@@ -9,6 +9,8 @@
  * Commands (JSON on stdout — except `tasks --tree`, which renders TEXT unless --json;
  * exit 0 ok / 1 not-ok / 2 usage):
  *   workforce status --workforce <id>          control state, task counts, queue depth, headroom
+ *   workforce submit --workforce <id> --goal <text> [--description <text>] [--priority <p>]
+ *                                               submit a goal; the strategy shapes it into tasks
  *   workforce tasks [--status] [--owner]       flat task list
  *   workforce tasks --tree [--root <task-id>] [--json]   render one whole subtree as text
  *   workforce task <id>                        one task
@@ -106,12 +108,14 @@ export async function runWorkforce(args: readonly string[]): Promise<WorkforceRe
   const rest = args.slice(1);
   if (sub === undefined) {
     throw new WorkforceCliError(
-      'missing workforce subcommand (expected `status`, `tasks`, `task`, `approvals`, `cost`, `events`, `pause`, `resume`, or `halt`)',
+      'missing workforce subcommand (expected `status`, `submit`, `tasks`, `task`, `approvals`, `cost`, `events`, `pause`, `resume`, or `halt`)',
     );
   }
   switch (sub) {
     case 'status':
       return runStatus(rest);
+    case 'submit':
+      return runSubmit(rest);
     case 'tasks':
       return runTasks(rest);
     case 'task':
@@ -130,7 +134,7 @@ export async function runWorkforce(args: readonly string[]): Promise<WorkforceRe
       return runHalt(rest);
     default:
       throw new WorkforceCliError(
-        `unknown workforce subcommand ${JSON.stringify(sub)} (expected \`status\`, \`tasks\`, \`task\`, \`approvals\`, \`cost\`, \`events\`, \`pause\`, \`resume\`, or \`halt\`)`,
+        `unknown workforce subcommand ${JSON.stringify(sub)} (expected \`status\`, \`submit\`, \`tasks\`, \`task\`, \`approvals\`, \`cost\`, \`events\`, \`pause\`, \`resume\`, or \`halt\`)`,
       );
   }
 }
@@ -145,6 +149,40 @@ async function runStatus(args: readonly string[]): Promise<WorkforceResult> {
     `/v1/workforce/${encodeURIComponent(workforceId)}/status`,
   );
   return outcome('workforce status', res, { status: res.body });
+}
+
+/** Submit one goal to a declared workforce; the deployment's strategy shapes it into tasks. */
+async function runSubmit(args: readonly string[]): Promise<WorkforceResult> {
+  const { values } = parse(args, {
+    workforce: { type: 'string' },
+    goal: { type: 'string' },
+    description: { type: 'string' },
+    priority: { type: 'string' },
+  });
+  const workforceId = requireWorkforceId(values);
+  if (typeof values.goal !== 'string' || values.goal.length === 0) {
+    throw new WorkforceCliError(
+      'missing --goal <text> (the goal is what the workforce is asked to do)',
+    );
+  }
+  if (
+    typeof values.priority === 'string' &&
+    !['low', 'normal', 'high', 'urgent'].includes(values.priority)
+  ) {
+    throw new WorkforceCliError("--priority takes 'low', 'normal', 'high' or 'urgent'");
+  }
+  const t = await transportFrom(values);
+  const res = await workforceRequest(
+    t,
+    'POST',
+    `/v1/workforce/${encodeURIComponent(workforceId)}/goals`,
+    {
+      goal: values.goal,
+      ...(typeof values.description === 'string' ? { description: values.description } : {}),
+      ...(typeof values.priority === 'string' ? { priority: values.priority } : {}),
+    },
+  );
+  return outcome('workforce submit', res, res.body as Record<string, unknown>);
 }
 
 interface TaskNode {

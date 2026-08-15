@@ -140,3 +140,43 @@ describe('workforce cost --by', () => {
     expect(seen[0]).toContain('/v1/workforce/cost?by=employee');
   });
 });
+
+describe('workforce submit', () => {
+  it('requires --workforce and --goal as usage, and validates the priority pair', async () => {
+    stubFetch([]);
+    await expect(runWorkforce(['submit', '--goal', 'g', ...FLAGS])).rejects.toThrow(
+      /missing --workforce/,
+    );
+    await expect(runWorkforce(['submit', '--workforce', 'wf', ...FLAGS])).rejects.toThrow(
+      /missing --goal/,
+    );
+    await expect(
+      runWorkforce(['submit', '--workforce', 'wf', '--goal', 'g', '--priority', 'asap', ...FLAGS]),
+    ).rejects.toThrow(/--priority takes/);
+  });
+
+  it('POSTs the goal to the workforce and relays the created tasks', async () => {
+    const seen = stubFetch([
+      {
+        match: (url) => url.includes('/v1/workforce/wf/goals'),
+        body: { workforceId: 'wf', tasks: [{ taskId: 't1', owner: 'lead', title: 'g' }] },
+      },
+    ]);
+    const result = await runWorkforce([
+      'submit',
+      '--workforce',
+      'wf',
+      '--goal',
+      'g',
+      '--priority',
+      'high',
+      ...FLAGS,
+    ]);
+    expect(result).toMatchObject({
+      ok: true,
+      command: 'workforce submit',
+      workforceId: 'wf',
+    });
+    expect(seen[0]).toContain('/v1/workforce/wf/goals');
+  });
+});

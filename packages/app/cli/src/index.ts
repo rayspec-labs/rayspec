@@ -211,7 +211,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     commands: [
       {
         name: 'workforce',
-        block: `  rayspec workforce <status|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
+        block: `  rayspec workforce <status|submit|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
                                 The operator console for the durable task engine, speaking to a
                                 RUNNING deployment over its authenticated HTTP API. Shared flags on
                                 every subcommand: --url <base> (else RAYSPEC_URL, else a single
@@ -224,6 +224,10 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 Subcommands:
                                   status --workforce <id>       control state, counts, queue depth,
                                                                 current-window budget headroom
+                                  submit --workforce <id> --goal <text> [--description <text>]
+                                         [--priority low|normal|high|urgent]
+                                                                submit a goal; the deployment's
+                                                                strategy shapes it into tasks
                                   tasks [--status] [--owner] [--workforce <id>]
                                                                 flat task list
                                   tasks --tree [--root <task-id>] [--json] [--workforce <id>]
