@@ -53,20 +53,14 @@ agents:
     instructions: >-
       You attempt minimal reproductions of reported issues and state exactly what you ran and
       what happened. A reproduction claim you did not run is worse than no claim.
-  - id: docs_writer_agent
-    name: docs_writer_agent
-    backend: anthropic
-    model: claude-sonnet-5
-    instructions: >-
-      You keep the reference documentation precise: every stated guarantee names the mechanism
-      that enforces it.
   - id: release_notes_agent
     name: release_notes_agent
     backend: openai
     model: gpt-4o-mini
     instructions: >-
       You draft release notes for public consumption. Anything meant for publication needs a
-      human sign-off - request approval before you commit to public wording.
+      human sign-off - your manager requests it, so flag publication-ready wording clearly in
+      your result summary.
   - id: market_watcher_agent
     name: market_watcher_agent
     backend: anthropic
@@ -109,7 +103,7 @@ workforce:
       name: Documentation
       manager: mgr_docs
       mission: Keep the reference precise and draft the release notes.
-      members: [docs_writer, release_notes_writer]
+      members: [release_notes_writer]
     - id: watch
       name: Competitive Watch
       manager: mgr_watch
@@ -155,12 +149,6 @@ workforce:
       reportsTo: mgr_triage
       role: worker
       capabilities: [repro_required]
-    - id: docs_writer
-      agent: docs_writer_agent
-      title: Reference Writer
-      department: docs
-      reportsTo: mgr_docs
-      role: worker
     - id: release_notes_writer
       agent: release_notes_agent
       title: Release Notes Writer
@@ -182,8 +170,8 @@ workforce:
   teams:
     - id: release_notes_crew
       lead: mgr_docs
-      members: [docs_writer, release_notes_writer, issue_analyst]
-      maxSize: 4
+      members: [release_notes_writer, issue_analyst]
+      maxSize: 3
   reviewPolicies:
     - id: docs_quality
       appliesTo:

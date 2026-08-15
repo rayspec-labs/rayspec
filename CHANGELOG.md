@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.8.0] - 2026-08-15
+## [Unreleased]
 
 ### Added
 
@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one JSON object (`tasks --tree`'s text rendering is the group's one documented exception); and
   the `turn_ended` journal payload gains only the optional `classification` field, documented in
   the vocabulary's first published statement.
+
+## [1.8.0] - 2026-08-15
+
+### Added
+
 - **`lintSuppress` now docks on a `triggers[]` and a `handlers[]` node too.** The key arrived (see
   below) on agents, stores and api routes; on a trigger or a handler it was not ignored but a hard
   parse error (`unknown_field`) that broke the document — which put the two advisories an author is

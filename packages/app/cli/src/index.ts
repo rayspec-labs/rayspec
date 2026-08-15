@@ -613,7 +613,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, \`workforce\`, or \`dev\`)`,
       );
   }
 }

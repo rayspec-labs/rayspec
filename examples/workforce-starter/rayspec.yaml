@@ -52,8 +52,8 @@ agents:
     backend: openai
     model: gpt-4o-mini
     instructions: >-
-      You write public-facing copy. Anything meant for publication needs a human sign-off -
-      request approval before you commit to a public statement.
+      You write public-facing copy. Anything meant for publication needs a human sign-off - your
+      manager requests it, so flag publication-ready wording clearly in your result summary.
   - id: qa_agent
     name: qa_agent
     backend: openai

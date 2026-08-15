@@ -47,6 +47,11 @@ transcript is how the runtime knows an ending was attempted, and the check norma
 recorded tool name because adapters disagree on it (one records the bridged
 `mcp__rayspec__<tool>` form verbatim; the others record the neutral name).
 
+A delegation may declare its children's `priority` (the closed `low`–`urgent` set): dispatch
+ordering within the tenant honors it, deliberately — urgency is part of what a hand-off says —
+and it steers ORDER only, inside the same budgets and ceilings as everything else; a self-styled
+urgent child can never out-spend or out-count its scopes.
+
 Every linkage a model must not choose is injected by the trusted layer, never read from
 arguments: the review id a verdict targets comes from the parent's park binding, the escalation
 target from the declared reporting edge, the approval window and fate from the rule matching the

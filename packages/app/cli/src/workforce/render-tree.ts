@@ -5,7 +5,8 @@
  * it carries one, and its settled cost in an aligned column. This rendering IS the contract the
  * acceptance story pins byte-for-byte, so every formatting rule lives HERE and nowhere else:
  *
- *   - node order: children by task id ascending (creation order — task ids sort by mint order);
+ *   - node order: children by task id ascending — DETERMINISTIC, not creation order (task ids
+ *     are random/hash UUIDs, so id order carries no timeline);
  *   - labels: the root renders its OWNER (the seat the goal entered through), every other node
  *     its TITLE (what the delegation named the work);
  *   - annotations: `[status]`, or `[status: reason]` when a reason is set; then the confidence

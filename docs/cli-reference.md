@@ -709,8 +709,8 @@ fail-closed at every step:
 - **Authentication**: an API key from `--api-key` or `RAYSPEC_API_KEY`, sent
   exactly as the HTTP API expects it. Read commands (`status`, `tasks`, `task`,
   `approvals list`, `cost`, `events`) need **`store:read`**; every mutating
-  command (`submit`, `approvals approve`/`reject`, `pause`/`resume`/`halt`, a
-  cancel) needs **`store:write`**, matching the route permissions. A key without the
+  command (`submit`, `approvals approve`/`reject`, `pause`/`resume`/`halt`)
+  needs **`store:write`**, matching the route permissions. A key without the
   permission gets the route's 403 verbatim — the CLI adds **no local
   authorization logic of its own**, because two authorization implementations
   is one too many.
@@ -735,7 +735,9 @@ work that never happened.
 
 `submit` hands one goal to the declared workforce (`--priority` takes `low`,
 `normal`, `high` or `urgent`); the deployment's orchestration strategy shapes
-it into tasks and the reply lists them. `cost --by employee|department` groups
+it into tasks and the reply lists them. Every call is its own submission —
+there is no idempotency key on this surface yet, so a retry after a lost
+reply creates a second root; check `tasks` before retrying when that matters. `cost --by employee|department` groups
 the roll-up server-side, and the payload names its basis honestly:
 `department` reads the enforcing ledger's settlement buckets, while `employee`
 aggregates task rows by owner and therefore windows by task creation time.

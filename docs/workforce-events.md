@@ -26,7 +26,7 @@ The journal event vocabulary is:
 | `workforce.task.created` | task | `taskId`, `parentTaskId`, `rootTaskId`, `owner`, `requestedBy`, `goal`, `priority` |
 | `workforce.task.queued` | task | `taskId`, `parentTaskId`, `owner`, `requestedBy`, `priority`, `queueReason` (`initial`, or the absorbing signal kind — WHY the task woke) |
 | `workforce.task.turn_started` | task | `taskId`, `turnNumber`, `turnId` (the dispatched workflow id — the claim), `owner` |
-| `workforce.task.turn_ended` | task | `taskId`, `turnId`, `turnNumber`, `outcome` (the applied plan kind), `costUsd`, `classification?` (`direct` \| `delegate` \| `team` \| `review` \| `escalate` — present on orchestrator and manager turns that ended with a valid typed intent, absent on worker turns and refused endings; derived server-side from the typed intent, never from model prose) |
+| `workforce.task.turn_ended` | task | `taskId`, `turnId`, `turnNumber`, `outcome` (the applied plan kind), `costUsd`, `classification?` (`direct` \| `delegate` \| `team` \| `review` \| `escalate` — present on orchestrator and manager turns whose typed intent was accepted AND applied as that decision; absent on worker turns, refused endings, and outcomes that refused or overrode the decision itself — a rejected delegation, a consumed cancel. `complete_with_review` keeps it: the decision stood and policy added review. Derived server-side from the typed intent, never from model prose; the engine enforces the presence rule, so no caller can journal a decision that never existed) |
 | `workforce.task.transitioned` | task | `taskId`, `from`, `to`, `statusReason`, `actor` |
 | `workforce.task.completed` | task | `taskId`, `statusReason`, `resultSummary`, `confidence`, `totalCostUsd`, `turnsUsed` |
 | `workforce.task.failed` | task | `taskId`, `statusReason`, `resultSummary`, `confidence`, `totalCostUsd`, `turnsUsed` |
@@ -35,7 +35,7 @@ The journal event vocabulary is:
 | `workforce.approval.requested` | task | `approvalId`, `taskId`, `question`, `options`, `approver`, `onTimeout` (+ `escalatedFrom` when the request is the escalation of a timed-out approval) |
 | `workforce.approval.decided` | task | `approvalId`, `taskId`, `decision`, `decidedBy` (the VERIFIED principal — the route derives it from the credential), `reason` |
 | `workforce.approval.timed_out` | task | `approvalId`, `taskId`, `onTimeout`, `escalateTo` |
-| `workforce.review.requested` | task | `reviewId`, `taskId`, `reviewer`, `round` (+ `policy: true` and `reviewTaskId` when a matched policy intercepted a completion and dispatched the reviewer) |
+| `workforce.review.requested` | task | `reviewId`, `taskId`, `reviewer`, `round`; a request that DISPATCHES a reviewer turn additionally carries `policy` (`true` when a matched policy intercepted the completion, `false` when the turn asked) and `reviewTaskId`; a request routed to a human carries neither |
 | `workforce.review.decided` | task | `reviewId`, `taskId`, `reviewer`, `round`, `verdict`, `decidedBy`, `reasons`, `requiredChanges`, `outcome` (what the verdict did to the task) |
 | `workforce.review.abandoned` | task | `taskId`, `reviewId`, `reviewTaskId`, `reviewer`, `round`, `reviewTaskStatus`, `outcome` — the dispatched review task ended terminal WITHOUT a verdict; the reviewed task is released to a human rather than stranded, and no verdict is fabricated |
 | `workforce.delegation.accepted` | task (parent) | `parentTaskId`, `childTaskId`, `delegatedBy`, `delegatedTo` (what was ADDRESSED — `employee:`/`department:`/`team:`), `resolvedOwner` (who answers for it), `depth`, `goal` |
@@ -61,7 +61,9 @@ The journal event vocabulary is:
 
 - **`turn_ended.classification`** is the decision-seat signal: which way an orchestrator or
   manager turn moved its task, computed from the validated intent the toolset collected. A
-  refused ending (`outcome: invalid_intent`) carries none — model bytes never classify anything.
+  refused ending (`outcome: invalid_intent`), a rejected delegation, and a consumed cancel all
+  carry none — the engine suppresses the field wherever the named decision did not stand, so
+  model bytes never classify anything and the journal never claims a decision that never was.
 - **`review.decided` beside `turn_ended`**: when a matched policy intercepts a completion, the
   turn's journal shows both facts at once — `classification: direct` (what the seat chose) and
   `outcome: complete_with_review` (what the engine enforced).

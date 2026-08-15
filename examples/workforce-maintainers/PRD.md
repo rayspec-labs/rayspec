@@ -20,9 +20,9 @@ approvals that gate anything public.
   area; attempt minimal reproductions. Every reproduction claim is independently reviewed —
   `repro_engineer` holds `repro_required`, and the `triage_repro` rule fires on every one of its
   completions, unconditionally.
-- **Documentation** (`mgr_docs`, `docs_writer`, `release_notes_writer`): reference work and
-  release notes. Low-confidence writing routes to `senior_reviewer` (`confidenceBelow: 0.85`);
-  release notes additionally end in a human approval — the drafts carry `public_statement`, and
+- **Documentation** (`mgr_docs`, `release_notes_writer`): reference precision and release
+  notes. Low-confidence writing routes to `senior_reviewer` (`confidenceBelow: 0.85`); release
+  notes additionally end in a human approval — the drafts carry `public_statement`, and
   `mgr_docs` (who holds the label and the `request_approval` tool) asks for the sign-off before
   anything ships.
 - **Competitive Watch** (`mgr_watch`, `market_watcher`): monitoring on a tight department budget
@@ -33,9 +33,9 @@ approvals that gate anything public.
 
 - Budgets: $60/day workforce-wide, $3 and 25 turns per task, watch capped at $5/day, delegation
   depth 3, fan-out 6, 6 concurrent workers, 45m wall clock, 3 review rounds.
-- The `release_notes_crew` team (led by `mgr_docs`, with the analyst on loan from triage) is how
-  the orchestrator addresses release-notes work as one unit — teams are deliberately
-  cross-functional.
+- The `release_notes_crew` team (led by `mgr_docs`, pairing the release-notes writer with the
+  analyst on loan from triage) is how the orchestrator addresses release-notes work as one unit
+  — teams are deliberately cross-functional.
 - The approval escalates on timeout (1d) up the reporting line instead of failing silently.
 
 ## Explicitly out of scope (v1)

@@ -139,8 +139,15 @@ on the park itself, never on the status alone, on every door:
 | `blocked(escalated)` | the escalated-to owner's reply |
 | `blocked(budget_exhausted)` | a `budget_raised` operator signal |
 | `blocked(clarification_pending)` | the requester's `user_reply` |
+| `blocked(approval_pending)` | the decision on the escalated approval (an approval whose timeout escalated re-parks its task `blocked` while a superior's sign-off is asked) |
 | `waiting_for_review` | the review verdict (accept completes; reject re-queues for rework) |
 | `waiting_for_user(approval_pending)` | the human decision, or the timeout sweep's declared fate |
+| `waiting_for_user` (no reason) | a `user_reply` operator signal — the "a human decides" park (review rounds spent; a budget exceedance escalated to the root) |
+
+Operators additionally hold the `manual_unblock` door: it releases the `blocked` reasons whose
+exit is already a human judgment call, and REFUSES the structural and deadline parks — an
+override that dissolved a fan-out join or out-argued an absolute deadline would erase an exit no
+signal can re-arm (`signals.ts` owns the vocabulary; the same rule binds on every door).
 
 Structural parks (the join, the escalation) cannot be dissolved by an operator override or an
 escalation — their mechanism cannot be re-armed, so no door may move a task sitting in one "for
