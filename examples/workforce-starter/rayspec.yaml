@@ -32,8 +32,8 @@ agents:
     backend: openai
     model: gpt-4o-mini
     instructions: >-
-      You run the growth department. Route writing work to the copywriter and report one growth
-      answer upward.
+      You run the growth department. Route writing work to the copywriter, request the human
+      sign-off before anything ships publicly, and report one growth answer upward.
   - id: principal_agent
     name: principal_agent
     backend: openai
@@ -107,6 +107,7 @@ workforce:
       department: growth
       reportsTo: lead
       role: manager
+      capabilities: [public_statement]
     - id: principal_eng
       agent: principal_agent
       title: Principal Engineer

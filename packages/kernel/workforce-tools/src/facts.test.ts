@@ -94,27 +94,37 @@ describe('computeTurnFacts', () => {
     expect(copy.reviewRules).toEqual([]);
   });
 
-  it('presents the SAME approval rule the request_approval handler will bind', () => {
-    const task = fixtureTask({ owner: 'copy' });
+  it('presents the SAME approval rule the request_approval handler will bind — for seats that HOLD the tool', () => {
+    // The manager holds both the capability and the tool: the rule is a fact for its turns.
+    const task = fixtureTask({ owner: 'cmo' });
     const facts = computeTurnFacts({
       config,
-      employee: employee('copy'),
+      employee: employee('cmo'),
       task,
       snapshot: emptySnapshot(task),
     });
-    expect(facts.approvalRule).toEqual(matchApprovalRule(config, employee('copy')));
+    expect(facts.approvalRule).toEqual(matchApprovalRule(config, employee('cmo')));
     expect(facts.approvalRule).toEqual({
       id: 'public_statement',
       timeoutMs: 72 * 3_600_000,
       onTimeout: 'escalate',
     });
-    const uncovered = computeTurnFacts({
+    // The copywriter holds the capability but is a WORKER — no request_approval in its toolset,
+    // so no approval fact: a turn is never told about a tool the runtime will refuse it.
+    const worker = computeTurnFacts({
       config,
-      employee: employee('dev'),
-      task: fixtureTask(),
+      employee: employee('copy'),
+      task: fixtureTask({ owner: 'copy' }),
       snapshot: emptySnapshot(task),
     });
-    expect(uncovered.approvalRule).toBeNull();
+    expect(worker.approvalRule).toBeNull();
+    const uncovered = computeTurnFacts({
+      config,
+      employee: employee('mgr'),
+      task: fixtureTask({ owner: 'mgr' }),
+      snapshot: emptySnapshot(task),
+    });
+    expect(uncovered.approvalRule).toBeNull(); // a decision seat NO rule covers
   });
 
   it('computes depth remaining from the declared ceiling and the immutable ancestry', () => {

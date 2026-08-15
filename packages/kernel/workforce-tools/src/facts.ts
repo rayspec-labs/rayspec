@@ -12,6 +12,7 @@ import { type DeclaredReviewRule, reviewRuleAppliesTo } from '@rayspec/core';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import type { TaskRecord } from '@rayspec/tasks';
 import { type MatchedApprovalRule, matchApprovalRule } from './review-policy.js';
+import { TOOLSETS_BY_ROLE } from './roles.js';
 import type { WorkforceReadSnapshot } from './snapshot.js';
 
 /** One declared review rule that COVERS this employee, in declaration order (first match wins). */
@@ -34,7 +35,12 @@ export interface TurnFacts {
   readonly legalTargets: readonly string[];
   /** Declared review rules covering this employee, declaration order. */
   readonly reviewRules: readonly ApplicableReviewRuleFact[];
-  /** The declared approval rule covering this employee's capabilities, or null. */
+  /**
+   * The declared approval rule covering this employee's capabilities — null when none matches,
+   * and null for a seat whose toolset carries no `request_approval` at all (worker, reviewer):
+   * a fact the seat cannot act on is not a fact for its turn, and stating one would tell the
+   * model about a tool the runtime will refuse.
+   */
   readonly approvalRule: MatchedApprovalRule | null;
   readonly budget: {
     readonly workforceCeilingUsd: number | null;
@@ -125,7 +131,9 @@ export function computeTurnFacts(input: {
   return {
     legalTargets: legalTargetsFor(config, employee, snapshot),
     reviewRules: applicableReviewRules(config.reviewPolicies, employee),
-    approvalRule: matchApprovalRule(config, employee),
+    approvalRule: TOOLSETS_BY_ROLE[employee.role].includes('request_approval')
+      ? matchApprovalRule(config, employee)
+      : null,
     budget: {
       workforceCeilingUsd: budgets.workforce?.usd ?? null,
       workforceConsumedUsd: stateBudget?.consumedUsd ?? null,

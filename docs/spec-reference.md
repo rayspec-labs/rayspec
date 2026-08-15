@@ -2145,6 +2145,7 @@ workforce:
       department: growth
       reportsTo: lead
       role: manager
+      capabilities: [public_statement]
     - id: principal_eng
       agent: principal_agent
       title: Principal Engineer

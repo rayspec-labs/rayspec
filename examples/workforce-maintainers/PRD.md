@@ -22,8 +22,9 @@ approvals that gate anything public.
   completions, unconditionally.
 - **Documentation** (`mgr_docs`, `docs_writer`, `release_notes_writer`): reference work and
   release notes. Low-confidence writing routes to `senior_reviewer` (`confidenceBelow: 0.85`);
-  release notes additionally end in a human approval, because `release_notes_writer` holds
-  `public_statement`.
+  release notes additionally end in a human approval — the drafts carry `public_statement`, and
+  `mgr_docs` (who holds the label and the `request_approval` tool) asks for the sign-off before
+  anything ships.
 - **Competitive Watch** (`mgr_watch`, `market_watcher`): monitoring on a tight department budget
   ($5/day inside the workforce's $60/day) — the ledger blocks the department without touching
   the others.
@@ -52,6 +53,6 @@ approvals that gate anything public.
 | Three maintenance disciplines | `departments: triage, docs, watch` |
 | Every reproduction claim reviewed | `capabilities: [repro_required]` + `reviewPolicies[1]` (`triage_repro`) |
 | Writing quality gate | `reviewPolicies[0]` (`docs_quality`, `confidenceBelow: 0.85`) |
-| Human sign-off on public wording | `approvals[0]` + `capabilities: [public_statement]` |
+| Human sign-off on public wording | `approvals[0]` + `capabilities: [public_statement]` on the writer and the requesting manager |
 | Watch spends only its allowance | `departments[watch].budgets` (`usd: 5, window: daily`) |
 | Release notes as one addressable unit | `teams[0]` (`release_notes_crew`) |

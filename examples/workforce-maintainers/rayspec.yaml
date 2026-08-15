@@ -135,6 +135,7 @@ workforce:
       department: docs
       reportsTo: lead
       role: manager
+      capabilities: [public_statement]
     - id: mgr_watch
       agent: watch_mgr_agent
       title: Watch Manager

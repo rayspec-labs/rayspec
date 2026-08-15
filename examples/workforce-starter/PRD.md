@@ -29,8 +29,10 @@ it on the same database, and the story continues where it stood.
    confidence numbers.
 4. An engineering submission below confidence 0.8 trips `eng_quality`: the runtime routes it to
    `qa` no matter what the turn asked for. A rejection produces rework; the ceiling is 2 rounds.
-5. The copywriter holds `public_statement`, so publishing work ends in `request_approval` — the
-   task parks in `waiting_for_user` at zero cost until a human decides (2h window, then `fail`).
+5. Publishing work carries the `public_statement` label (the copywriter drafts under it; the
+   growth manager — the seat that answers for public output and holds `request_approval` — asks
+   for the sign-off). The growth stream parks in `waiting_for_user` at zero cost until a human
+   decides (2h window, then `fail`).
 6. When every stream lands, `lead` wakes with the results keyed by child task id and submits the
    synthesis; the root completes.
 
@@ -56,6 +58,6 @@ it on the same database, and the story continues where it stood.
 | One entry seat for every goal | `workforce.orchestrator: lead` |
 | Two parallel streams | `departments: eng, growth` + plural `delegate_task` |
 | Independent review of risky work | `reviewPolicies[0]` (`eng_quality`, `confidenceBelow: 0.8`, reviewer `qa`) |
-| Human sign-off on public wording | `approvals[0]` (`public_statement_signoff`) + `capabilities: [public_statement]` on the copywriter |
+| Human sign-off on public wording | `approvals[0]` (`public_statement_signoff`) + `capabilities: [public_statement]` on the copywriter and the growth manager (the requesting seat) |
 | A team the orchestrator can address whole | `teams[0]` (`release_crew`, led by `mgr_eng`) |
 | Spend and depth ceilings | `budgets` + `execution` |
