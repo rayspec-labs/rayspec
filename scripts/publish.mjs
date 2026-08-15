@@ -167,16 +167,31 @@ function loadRayspecPackages() {
 }
 
 /**
+ * Every package that DECLARES itself a publish target (`"rayspecPublishTarget": true` in its own
+ * manifest). The closure below can only see a package something IMPORTS at runtime, so a package
+ * whose whole purpose is to be compiled against by a consumer OUTSIDE this repository — a types-only
+ * contract surface — is invisible to it and would silently never be published. Such a package says
+ * so in its manifest instead, and ships by decision rather than by accident. It is a DECLARATION,
+ * never an inference: nothing here guesses that a package ought to be published.
+ */
+function declaredPublishTargets(pkgs) {
+  return [...pkgs]
+    .filter(([, entry]) => entry.json.rayspecPublishTarget === true)
+    .map(([name]) => name);
+}
+
+/**
  * The publish set = the runtime closure of the bin packages — the unscoped `rayspec` launcher plus
- * `@rayspec/cli` + `@rayspec/server` — over PRODUCTION `dependencies` only. The launcher's only
- * dependency is `@rayspec/cli`, so it pulls in the same closure. Excludes dev/test-only packages
- * (e.g. `@rayspec/parity`) and the `@spike/*` / example fixtures (they are not publish targets).
- * Derived — not hardcoded — so it stays correct as the graph evolves.
+ * `@rayspec/cli` + `@rayspec/server` — over PRODUCTION `dependencies` only, PLUS every package that
+ * declares itself a target (see above; its own runtime closure comes along, exactly like a bin
+ * package's). The launcher's only dependency is `@rayspec/cli`, so it pulls in the same closure.
+ * Excludes dev/test-only packages (e.g. `@rayspec/parity`) and the `@spike/*` / example fixtures
+ * (they are not publish targets). Derived — not hardcoded — so it stays correct as the graph evolves.
  */
 function computePublishSet(pkgs) {
   const roots = ['rayspec', '@rayspec/cli', '@rayspec/server'];
   const seen = new Set();
-  const stack = [...roots];
+  const stack = [...roots, ...declaredPublishTargets(pkgs)];
   while (stack.length) {
     const n = stack.pop();
     if (seen.has(n)) continue;

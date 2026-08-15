@@ -1,0 +1,32 @@
+{
+  "name": "@rayspec/pack-sdk",
+  "version": "1.8.0",
+  "private": true,
+  "//rayspecPublishTarget": "The publish set is DERIVED in scripts/publish.mjs as the runtime closure of the bin packages over production `dependencies`. This package ships TYPES ONLY, so nothing in this repository imports it at runtime and the closure walk cannot reach it — it would silently never be published. This flag DECLARES it a publish target instead, so it ships by decision rather than by accident (pinned by case (S) in scripts/publish.test.mjs).",
+  "rayspecPublishTarget": true,
+  "rayspecPublicApi": "api-report.md",
+  "files": [
+    "dist"
+  ],
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.9.3"
+  }
+}

@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "ebec6c82e0d240422f6b6a05a22ff12e1a3787330a84119a5a3335712dcf8406",
+  "lockfile_sha256": "baef7e8fe96a4300f180b9a97371c7c8b79f8a10844679f8c0897eb21e9327df",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -2233,6 +2233,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/pack-sdk",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
         "packages/kernel/tts-port",
@@ -4169,6 +4170,7 @@
         "packages/kernel/core",
         "packages/kernel/db",
         "packages/kernel/handler-sdk",
+        "packages/kernel/pack-sdk",
         "packages/kernel/platform",
         "packages/kernel/spec",
         "packages/kernel/stt-port",

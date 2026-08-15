@@ -10,6 +10,7 @@
     { "path": "./packages/workflow/durable-dbos" },
     { "path": "./packages/kernel/spec" },
     { "path": "./packages/kernel/handler-sdk" },
+    { "path": "./packages/kernel/pack-sdk" },
     { "path": "./packages/kernel/stt-port" },
     { "path": "./packages/kernel/tts-port" },
     { "path": "./packages/adapters/deepgram" },
