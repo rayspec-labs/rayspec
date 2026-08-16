@@ -74,9 +74,11 @@
  *   - a `route`-kind handler behind a `{kind:'stream'}` action — the stream shape above. `route` is
  *     one kind carrying TWO contracts (the spec resolves a stream action's handler against a declared
  *     `route`-kind handler), and only the JSON one is promised here.
- * Saying so is better than a promise this package would have to break — and better than an omission
- * that would let a pack author annotate a stream handler `PackRouteHandler` and discover the mismatch
- * at runtime, since the stream init structurally satisfies the JSON one.
+ * Saying so is better than a promise this package would have to break — and better than an omission.
+ * The compiler already REFUSES a stream handler annotated `PackRouteHandler` (see that type's
+ * docblock for the two errors), so the omission would not ship a runtime surprise; what it would ship
+ * is a pack author holding a `TS2339` about a missing `request` property with nothing in this package
+ * telling them the shape exists elsewhere and where.
  */
 
 /**
@@ -271,9 +273,14 @@ export type PackToolHandler<In = unknown, Out = unknown> = (
  *
  * NOT the shape for a `{kind:'stream'}` action. That action also resolves against a declared
  * `route`-kind handler, but the module behind it exchanges a raw Web `Request`/`Response` and needs
- * the blob backend — a contract this package withholds (see the module docblock). Annotating a stream
- * handler with this type COMPILES, because the stream init structurally satisfies
- * `PackRouteHandlerInit`, and then fails at runtime; annotate `StreamRouteHandler` from
- * `@rayspec/handler-sdk` instead.
+ * the blob backend — a contract this package withholds (see the module docblock).
+ *
+ * The compiler REFUSES that annotation rather than accepting it: reading `init.request` or
+ * `init.blob` is `TS2339` (the property is not on `PackRouteHandlerInit`), and spelling the parameter
+ * `StreamRouteHandlerInit` — or assigning a `StreamRouteHandler` value to this type — is `TS2322`,
+ * because a function parameter position is CONTRAVARIANT under `strict`. What the compiler does NOT
+ * do is name the shape to reach for instead; its message names a missing property. That is what this
+ * docblock is for: annotate `StreamRouteHandler`/`StreamRouteHandlerInit` from
+ * `@rayspec/handler-sdk`.
  */
 export type PackRouteHandler<Out = unknown> = (init: PackRouteHandlerInit) => Promise<Out> | Out;

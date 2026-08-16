@@ -8,8 +8,10 @@
  * measures three things:
  *
  *   (A) A MODULE WRITTEN AGAINST THE PACK SURFACE ALONE COMPILES. It imports `@rayspec/pack-sdk` and
- *       nothing else — the one package a pack shipping from its own repository can reach — and
- *       annotates both handler kinds the issue's port stopped on: a tool handler and a route handler.
+ *       nothing else — the whole of what a pack's handler module needs for the kinds this package
+ *       contracts — and annotates both of them: a tool handler and a route handler. (A pack's ENTRY
+ *       imports `@rayspec/platform`, and a stream handler imports `@rayspec/handler-sdk`; neither is
+ *       what this arm measures.)
  *   (B) THE PIN IS LOAD-BEARING. The same assertion the interop module makes goes RED when the
  *       platform's real init LOSES a member the contract promises. The undegraded template is the
  *       accept control for this arm: it compiles clean in the same instrument, so a red here is the
