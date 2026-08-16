@@ -5,9 +5,10 @@
  *                        authoring surface a pack uses; the impl `loadExtensions` validates).
  *  - load-extensions.ts  `loadExtensions(refs, ctx)` — directory-only path-jailed resolution,
  *                        version-pin FAIL-CLOSED, multi-root handler jail, the top-level section
- *                        claims a manifest makes, and the merge of pack
+ *                        claims a manifest makes, the pack-owned migration chain it declares, and
+ *                        the merge of pack
  *                        store/handler/tooling/api fragments + capability instances into the spec
- *                        the UNCHANGED `deploy()` consumes (no new migration path; byte-unchanged
+ *                        the UNCHANGED `deploy()` consumes (byte-unchanged
  *                        deploy/chokepoint/dispatch).
  *  - parse-with-packs.ts `parseSpecWithPacks(yaml, ctx)` — the pack-aware parse: the core grammar
  *                        plus the top-level sections the deployment's packs own, with a typed
@@ -19,6 +20,7 @@ export {
   EXTENSION_BRAND,
   type ExtensionCapabilities,
   type ExtensionManifest,
+  type ExtensionMigrationChain,
   type ExtensionSectionClaim,
   type ExtensionSpecFragments,
   isDefinedExtension,

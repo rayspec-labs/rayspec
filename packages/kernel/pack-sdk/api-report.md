@@ -12,7 +12,7 @@ must be regenerated here and committed in the same change:
 
 ## Entry point `.` — `dist/index.d.ts`
 
-22 export(s).
+23 export(s).
 
 ### `DefinedPack` — `dist/manifest.d.ts`
 
@@ -173,6 +173,7 @@ export interface PackManifest {
     readonly version: string;
     readonly fragments: PackFragments;
     readonly sections?: readonly PackSectionClaim[];
+    readonly migrations?: PackMigrationChain;
     readonly capabilities?: PackCapabilities;
 }
 ```
@@ -181,6 +182,15 @@ export interface PackManifest {
 
 ```ts
 export type PackManifestBrand = '@rayspec/extension@1';
+```
+
+### `PackMigrationChain` — `dist/manifest.d.ts`
+
+```ts
+export interface PackMigrationChain {
+    readonly dir: string;
+    readonly tablePrefix: string;
+}
 ```
 
 ### `PackSectionClaim` — `dist/manifest.d.ts`

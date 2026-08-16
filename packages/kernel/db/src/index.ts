@@ -104,6 +104,25 @@ export {
   scanMigrationSql,
 } from './migration-scan.js';
 export { migrationsDir } from './migrations.js';
+// The pack-migration chain scan — the ONE rule set `gate:pack-migrations` holds this repository's
+// committed chains to and `applyPackMigrations` holds a deployment's chains to. A pack is code from
+// somewhere else, so CI alone would only ever have covered the chains we happen to ship.
+export {
+  type PackMigrationChainScan,
+  type PackMigrationFileScan,
+  scanPackMigrationChain,
+  scanPackMigrationSql,
+} from './pack-migration-scan.js';
+// Pack-owned PLATFORM tables: a pack's own migration chain, applied through the same drizzle
+// migrator as the platform's and strictly after it, journaled in `__migrations_<packId>` so core and
+// pack chains can never renumber each other.
+export {
+  applyPackMigrations,
+  type PackMigrationApplied,
+  type PackMigrationChain,
+  PackMigrationError,
+  packJournalTable,
+} from './pack-migrations.js';
 // The ONE shared Postgres-error-shape detectors (the 23505 cause-chain walk + the constraint-name
 // reader). Request-path/capability code maps a UNIQUE violation to a typed conflict through these.
 export {
