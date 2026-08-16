@@ -775,20 +775,15 @@ change is applied by the explicit `--apply-migration` flag below.
   also the profile whose grammar carries `extensions[]`, so a document that
   references a pack claiming a top-level section is validated with that pack
   loaded and carries the same `claimedSections` list [`doctor`](#doctor) and
-  [`plan`](#plan) report. A document that **writes** such a section is also the one
-  place `ok:true` here is furthest from *it boots*, and `notProven` says so in the
-  same verdict: **the boot validates the document with the core grammar alone**,
-  before it resolves any pack, so a top-level key a pack claims is refused there —
-  the pack-aware parse is a diagnostic surface, and the boot has not been taught it
-  yet. (`--check-env` still loads no pack: running one is exactly the side effect
-  that command promises not to have — and for such a document it reports the boot's
-  refusal, which is the same fact from the boot's own module.)
-  That entry rides **exactly the documents that write a claimed key**, not every
-  document whose packs claim one: a document that references the pack without
-  writing the section it claims is written entirely in the grammar the boot has, so
-  it carries the `claimedSections` line and keeps the boundary list every other
-  backend verdict gets — being sent to `--check-env` for a refusal that is not
-  there would be the wrong-remedy report this surface exists to remove.
+  [`plan`](#plan) report. A document that **writes** such a section carries no extra
+  boundary: **the boot resolves the deployment's packs before it validates the
+  document**, so a claimed section boots exactly as this preview validated it, and
+  the verdict keeps the boundary list every other backend verdict gets.
+  (`--check-env` still loads no pack: running one is exactly the side effect that
+  command promises not to have. Having loaded none, it cannot tell a claimed key from
+  a mistyped one, so on a **pack-bearing** document it lifts out **every** top-level
+  key the core grammar does not own and names each in `notChecked` — see
+  [`--check-env`](#deploy) below for what that costs.)
 
   A **frontend-only** document has nothing to compose either, and what its check does
   not prove narrows instead: it reads only the document, so it says nothing about
@@ -855,7 +850,21 @@ change is applied by the explicit `--apply-migration` flag below.
   [`stream-backend` example](../examples/stream-backend/rayspec.yaml) is exactly that
   shape) reports the three unconditional secrets and nothing more. To keep that from
   reading as a clean bill of health, the verdict **names the packs the document
-  declares** — parsed off `extensions[]`, never loaded. A set `<VAR>_FILE` mount counts
+  declares** — parsed off `extensions[]`, never loaded.
+
+  Loading no pack has one further cost, and it is a **loss of coverage** rather than a
+  missing demand. A pack may claim a top-level key of the document, and only the loaded
+  pack can say which key. So on a document that **declares any pack**, this command lifts
+  out **every** top-level key the core grammar does not own — claimed or not — accepts it
+  unexamined, and names it in `notChecked`. **It therefore no longer refuses a mistyped
+  top-level section on such a document**: `auditting:` where the pack claims `auditing:`
+  is reported as a key whose owner it did not ask about, and the verdict's `errors` stays
+  empty. The boot still refuses it, and so do [`doctor`](#doctor), [`plan`](#plan) and
+  `--dry-run`, which all load the packs — run one of those for the verdict that has read
+  them. On a document that declares **no** pack nothing is lifted and an unknown
+  top-level key is refused here exactly as before.
+
+  A set `<VAR>_FILE` mount counts
   as set from the variable alone: the file is
   never opened, so a missing, unreadable or empty secret file still refuses the boot.
   And **no value is validated** — a malformed PKCS#8 PEM, a non-UUID

@@ -1,0 +1,23 @@
+# The same deployment, with the claimed section's key MISTYPED — `auditting` for `auditing`.
+#
+# No pack claims `auditting`, so this document is not deployable: the boot, `doctor`, `plan` and
+# `deploy --dry-run` all resolve this deployment's packs before they judge it, find no owner for the
+# key, and refuse it as `unknown_field` exactly as they would on a pack-free document.
+#
+# It exists to pin the ONE surface that answers differently. `rayspec deploy --check-env` loads no
+# pack by design, so it cannot tell this key from a legitimately claimed one and lifts it out
+# unexamined — it reports no error for a document every other command refuses, and names the key in
+# `notChecked` instead. That is a real loss of coverage on a pack-bearing document, and the pair of
+# cases in `packages/app/cli/src/pack-sections.test.ts` holds it in view rather than leaving it to be
+# discovered by an operator.
+version: '1.0'
+metadata:
+  name: fixture-pack-mistyped-key-deployment
+  description: The deployment whose claimed-section key is mistyped, so no pack claims it.
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: 1.0.0
+auditting:
+  retentionDays: 30
+  redactPayloads: true

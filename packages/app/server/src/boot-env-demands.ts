@@ -30,10 +30,14 @@
 
 import {
   detectSpecKind,
+  isCoreTopLevelKey,
+  loadSpecDocument,
   type ProductSpec,
   parseProductSpec,
   parseSpec,
+  parseSpecSections,
   type RaySpec,
+  type SectionClaim,
 } from '@rayspec/spec';
 
 // ── the variable catalogue ───────────────────────────────────────────────────────────────────────
@@ -738,7 +742,30 @@ export async function checkBootEnv(
     };
   }
 
-  const parsed = parseSpec(specText);
+  // A BACKEND document may carry a top-level key one of its PACKS claims the grammar of, and the boot
+  // accepts such a key (it resolves the packs before it validates the document). This command must
+  // not, because loading a pack is exactly the module/socket/credential access it promises not to
+  // perform. So it does the one honest thing available without loading anything: on a document that
+  // DECLARES packs, a top-level key the core grammar does not own is LIFTED OUT unvalidated and named
+  // in `notChecked`. Reporting it as `unknown_field` instead would be a refusal the boot does not
+  // raise — the wrong-remedy report (delete correct configuration) this whole seam exists to remove.
+  // A document that declares NO pack lifts nothing: no pack could own the key, so the refusal stands.
+  //
+  // WHAT THE LIFT COSTS, STATED RATHER THAN DISCOVERED. Which keys a pack claims is knowable only
+  // from a loaded pack, so this cannot lift the claimed ones and refuse the rest: on a pack-bearing
+  // document it lifts EVERY non-core top-level key, and a MISTYPED section (`auditting` for a claimed
+  // `auditing`) is therefore accepted here and reported as unchecked. It is not accepted anywhere
+  // else — the boot, `doctor`, `plan` and `deploy --dry-run` all load the packs and all still refuse
+  // it — so what is lost is one command's ability to catch a typo, not the refusal. That trade is the
+  // deliberate one: refusing every claimed section (which is what validating with the core grammar
+  // alone did) sends an operator to delete correct configuration, and a wrong refusal is worse than a
+  // narrower check. `pack-sections.test.ts` pins BOTH halves against one another on one document.
+  // `notChecked` is what keeps it visible, so a reader is never told the document is clean.
+  const loaded = loadSpecDocument(specText);
+  const unresolved = loaded.ok ? unresolvedTopLevelKeys(loaded.value) : [];
+  const parsed = loaded.ok
+    ? parseSpecSections(loaded.value, unresolved.map(unresolvedClaim))
+    : loaded;
   if (!parsed.ok) {
     return {
       ok: false,
@@ -754,7 +781,37 @@ export async function checkBootEnv(
       ),
     };
   }
-  return backendReport(base, parsed.value, env);
+  return backendReport(base, parsed.value.spec, env, unresolved);
+}
+
+/**
+ * The top-level keys of a PACK-BEARING document that the core grammar does not own — the keys whose
+ * owner only a loaded pack could name. Empty for a document that declares no pack (nothing could own
+ * a key there, so an unknown one is genuinely unknown) and empty for one whose keys are all core.
+ *
+ * DELIBERATELY NOT NARROWER, and it cannot be: no pack is loaded here, so "a key some declared pack
+ * claims" is not a set this function can compute. Every non-core key is lifted, which includes a
+ * mistyped one — see the caller for what that costs and why it is the right trade.
+ */
+function unresolvedTopLevelKeys(loaded: Record<string, unknown>): string[] {
+  const declared = loaded.extensions;
+  const declaresPacks = Array.isArray(declared) ? declared.length > 0 : declared !== undefined;
+  if (!declaresPacks) return [];
+  return Object.keys(loaded).filter((key) => !isCoreTopLevelKey(key));
+}
+
+/**
+ * A claim for a key this command cannot resolve the owner of. Its validator ACCEPTS the node
+ * unexamined, which is the truthful posture: the grammar for that section belongs to a pack, this
+ * command did not load the pack, and inventing a verdict either way would be worse than saying so —
+ * which the report does, in `notChecked`.
+ */
+function unresolvedClaim(key: string): SectionClaim {
+  return {
+    key,
+    packId: 'unresolved (no pack was loaded)',
+    validate: (node: unknown) => ({ ok: true, value: node }),
+  };
 }
 
 /** The demand set of a BACKEND-profile (`version:'1.0'`, no `product:`) document. */
@@ -762,6 +819,8 @@ function backendReport(
   base: { mode: 'check-env'; spec: string },
   spec: RaySpec,
   env: NodeJS.ProcessEnv,
+  /** Top-level keys lifted unvalidated because only a loaded pack could say who owns them. */
+  unresolvedSections: readonly string[] = [],
 ): BootEnvReport {
   const required = new RequirementSet(env);
   const errors: string[] = [];
@@ -875,6 +934,15 @@ function backendReport(
   // PARSED off the document, never loaded. Without this an operator reads a green verdict for a
   // document whose whole route surface (and therefore whole demand set) arrives from a pack.
   const notChecked = [...NOT_CHECKED];
+  if (unresolvedSections.length > 0) {
+    notChecked.unshift(
+      `this document writes ${unresolvedSections.length} top-level section(s) the core grammar does ` +
+        `not own — [${unresolvedSections.join(', ')}]. A pack this document declares may CLAIM the ` +
+        'grammar of one, and the boot resolves its packs before it validates the document, so a ' +
+        'claimed section boots. No pack was loaded here, so neither the ownership nor what is ' +
+        'written under it was checked: the section was accepted unexamined rather than refused',
+    );
+  }
   if (spec.extensions.length > 0) {
     notChecked.unshift(
       `this document declares ${spec.extensions.length} extension pack(s) — ` +

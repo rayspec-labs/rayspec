@@ -12,7 +12,7 @@ must be regenerated here and committed in the same change:
 
 ## Entry point `.` — `dist/index.d.ts`
 
-23 export(s).
+32 export(s).
 
 ### `DefinedPack` — `dist/manifest.d.ts`
 
@@ -51,6 +51,14 @@ export interface PackApiRouteFragment {
 
 ```ts
 export type PackCapabilities = object;
+```
+
+### `PackDatabase` — `dist/service.d.ts`
+
+```ts
+export interface PackDatabase {
+    query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+}
 ```
 
 ### `PackError` — `dist/errors.d.ts`
@@ -160,10 +168,32 @@ export interface PackJournalEntry {
 export type PackJournalStatus = 'ok' | 'error';
 ```
 
+### `PackJournalStep` — `dist/service.d.ts`
+
+```ts
+export interface PackJournalStep {
+    readonly runId: string;
+    readonly type: PackJournalStepType;
+    readonly idempotencyKey: string;
+    readonly input: unknown;
+    readonly output: unknown;
+    readonly status: PackJournalStatus;
+    readonly latencyMs?: number;
+}
+```
+
 ### `PackJournalStepType` — `dist/journal.d.ts`
 
 ```ts
 export type PackJournalStepType = 'llm' | 'tool' | 'store';
+```
+
+### `PackJournalWriter` — `dist/service.d.ts`
+
+```ts
+export interface PackJournalWriter {
+    record(step: PackJournalStep): Promise<void>;
+}
 ```
 
 ### `PackManifest` — `dist/manifest.d.ts`
@@ -174,6 +204,7 @@ export interface PackManifest {
     readonly fragments: PackFragments;
     readonly sections?: readonly PackSectionClaim[];
     readonly migrations?: PackMigrationChain;
+    readonly services?: readonly PackServiceDeclaration[];
     readonly capabilities?: PackCapabilities;
 }
 ```
@@ -199,6 +230,38 @@ export interface PackMigrationChain {
 export interface PackSectionClaim {
     readonly key: string;
     readonly schemaModule: string;
+}
+```
+
+### `PackServiceContext` — `dist/service.d.ts`
+
+```ts
+export interface PackServiceContext {
+    readonly packId: string;
+    readonly db: PackDatabase;
+    readonly spec: Readonly<Record<string, unknown>>;
+    readonly sections: Readonly<Record<string, unknown>>;
+    readonly journal?: PackJournalWriter;
+    readonly env: Readonly<Record<string, string | undefined>>;
+    readonly dispatch?: TurnDispatch;
+}
+```
+
+### `PackServiceDeclaration` — `dist/service.d.ts`
+
+```ts
+export interface PackServiceDeclaration {
+    readonly module: string;
+}
+```
+
+### `PackServiceModule` — `dist/service.d.ts`
+
+```ts
+export interface PackServiceModule {
+    readonly name: string;
+    boot(ctx: PackServiceContext): Promise<void> | void;
+    shutdown(): Promise<void> | void;
 }
 ```
 
@@ -238,6 +301,33 @@ export interface PackToolFragment {
 
 ```ts
 export declare const SAFE_IDENTIFIER_RE: RegExp;
+```
+
+### `TurnDispatch` — `dist/service.d.ts`
+
+```ts
+export interface TurnDispatch {
+    schedule(request: TurnDispatchRequest): Promise<TurnDispatchResult>;
+}
+```
+
+### `TurnDispatchRequest` — `dist/service.d.ts`
+
+```ts
+export interface TurnDispatchRequest {
+    readonly agentId: string;
+    readonly input: string;
+    readonly instructions?: string;
+    readonly maxTurns?: number;
+}
+```
+
+### `TurnDispatchResult` — `dist/service.d.ts`
+
+```ts
+export interface TurnDispatchResult {
+    readonly runId: string;
+}
 ```
 
 ### `isSafeIdentifier` — `dist/identifier.d.ts`

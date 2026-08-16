@@ -1,0 +1,34 @@
+# The same pack and the same claimed section, on a deployment that WIRES A DURABLE WORKER.
+#
+# `rayspec.yaml` beside this file deliberately wires none, so the pack's `turn-scheduler` service is
+# handed no `TurnDispatch` and records the fail-closed absence. This document is the other half: it
+# declares `deployment.durableWorker: true` and the agent that service schedules a turn for, so the
+# composition root builds the capability, binds it to the deployment tenant and hands it over — and the
+# turn the service schedules at boot is a REAL enqueue onto the REAL durable executor, with the same
+# enqueue-time run header the HTTP `async: true` path writes.
+#
+# The agent exists to be scheduled and nothing else: no route serves it and no trigger fires it, so the
+# only thing on this deployment that can start a run is the pack's service. That is what makes the run
+# header this document produces attributable to the capability rather than to any other path.
+# `packages/app/server/src/pack-service-boot.db.test.ts` boots it with a deterministic backend injected
+# the way every other durable-worker boot suite in that package injects one.
+version: '1.0'
+metadata:
+  name: fixture-pack-durable-deployment
+  description: The deployment that hands the pack's service a real TurnDispatch and lets it schedule.
+deployment:
+  durableWorker: true
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: 1.0.0
+auditing:
+  retentionDays: 30
+  redactPayloads: true
+agents:
+  - id: fixture_follow_up
+    name: fixture-follow-up-agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: Reconcile the ledger and report what changed.
+    maxTurns: 1

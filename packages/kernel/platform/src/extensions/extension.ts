@@ -4,8 +4,8 @@
  * An EXTENSION PACK is product code authored + versioned in its OWN repo (a product pack lives
  * outside this repo entirely; the platform stays 100% product-empty). A pack carries ALL of
  * its product: its `stores` / `handlers` / `tooling` / `api` SPEC FRAGMENTS, the top-level spec
- * SECTIONS it claims the grammar of, the MIGRATION CHAIN for the platform tables it owns, + the
- * capability INSTANCES
+ * SECTIONS it claims the grammar of, the MIGRATION CHAIN for the platform tables it owns, the
+ * long-lived SERVICES it brings, + the capability INSTANCES
  * it provides (a blob backend, vendor SDK clients — serializable-shaped, sandbox-forward). A
  * deployment's `rayspec.yaml` names a pack by REFERENCE (`extensions: [{ id, module, version }]`); at
  * boot `loadExtensions` resolves the pack's `defineExtension` MANIFEST, version-pin-checks it, jails
@@ -156,6 +156,28 @@ export interface ExtensionMigrationChain {
 }
 
 /**
+ * One LONG-LIVED SERVICE the pack brings — the fourth contribution kind, and the only one the platform
+ * BOOTS rather than calls. Every other kind is reactive (a route is served, a tool is invoked, a
+ * trigger fires); a service is the pack's own thread of control, for the work that has no caller:
+ * reconciling state at boot, draining a queue, scheduling follow-up work.
+ *
+ *  - `module` — the module INSIDE THE PACK whose default export is the service. It is resolved by the
+ *               same path jail, and preferring the same compiled `.js` sibling, as the pack entry and
+ *               every pack handler. Its default export must be `{ name, boot(ctx), shutdown() }`;
+ *               anything else is refused fail-closed at load, naming the pack.
+ *
+ * WHERE A SERVICE LIVES, AND WHY THAT IS LOAD-BEARING. A service module lives BESIDE `handlers/`, not
+ * under it, and that placement is the whole dispatch boundary: `handlers/` is what
+ * `gate:dispatch-boundary` scans, so a handler or tooling module that reaches the run surface fails the
+ * build while a service may reach it. The exemption is STRUCTURAL — it cannot be bought by naming a
+ * folder, because a directory named `services` nested inside `handlers/` is scanned like any other.
+ */
+export interface ExtensionServiceDeclaration {
+  /** The pack-relative module whose default export is the service (path-jailed under the pack root). */
+  readonly module: string;
+}
+
+/**
  * One extension-pack MANIFEST (the value a pack's entry module default-exports via `defineExtension`).
  *  - `version`      — the pack's OWN declared version. `loadExtensions` FAIL-CLOSED-checks it equals
  *                     the EXACT `ref.version` pin in the deployment spec (the silent-skip class:
@@ -164,6 +186,9 @@ export interface ExtensionMigrationChain {
  *  - `sections`     — the top-level spec sections the pack CLAIMS (optional; absent = claims none).
  *  - `migrations`   — the pack's OWN migration chain for the platform tables it owns (optional;
  *                     absent = the pack owns no platform state).
+ *  - `services`     — the long-lived services the pack brings (optional; absent = brings none). Beside
+ *                     `fragments` for the same reason a claim and a chain are: a service is not
+ *                     content merged into the document.
  *  - `capabilities` — the capability instances the pack provides (optional).
  */
 export interface ExtensionManifest {
@@ -175,6 +200,8 @@ export interface ExtensionManifest {
   readonly sections?: readonly ExtensionSectionClaim[];
   /** The pack's own migration chain for the platform tables it owns (optional). */
   readonly migrations?: ExtensionMigrationChain;
+  /** The long-lived services the pack brings, booted in this order (optional). */
+  readonly services?: readonly ExtensionServiceDeclaration[];
   /** The capability instances the pack provides (optional). */
   readonly capabilities?: ExtensionCapabilities;
 }

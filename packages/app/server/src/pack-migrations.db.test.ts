@@ -56,11 +56,11 @@ const repoRoot = resolve(here, '../../../..');
 /**
  * The in-tree fixture pack, its deployment document, and the chain it declares.
  *
- * `rayspec.no-section.yaml` is the document a BOOT accepts: the same pack and the same exact pin as
- * `rayspec.yaml`, without the claimed top-level section, which the boot's own core-grammar parse
- * does not yet admit. Every top-level key in it is one the core grammar owns, so this suite reads it
- * with the same `parseSpec` the boot reads a document with — the pin, the pack id and the module
- * path all come off the committed file, not out of this test.
+ * `rayspec.no-section.yaml` is the same pack and the same exact pin as `rayspec.yaml`, without the
+ * claimed top-level section. This suite reads it with the plain `parseSpec`, which is what makes it
+ * the right document here: every top-level key in it is one the CORE grammar owns, so resolving the
+ * pack is not a precondition of reading the chain off it. The pin, the pack id and the module path
+ * all come off the committed file, not out of this test.
  */
 const PACK_ROOT = join(repoRoot, 'packages/test/fixture-pack');
 const PACK_DOC = join(PACK_ROOT, 'rayspec.no-section.yaml');

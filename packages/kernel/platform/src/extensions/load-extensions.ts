@@ -22,6 +22,10 @@
  *      jailed against the PACK ROOT exactly as the entry and every handler module are. What the
  *      chain CONTAINS, and whether its namespace collides with the platform's or with another
  *      pack's, is decided by `applyPackMigrations` — the one door it reaches a database through.
+ *   4c. RESOLVES the LONG-LIVED SERVICES the manifest declares, if any: each `module` is jailed and
+ *      `.js`-preferred exactly as the entry is, imported, and structurally checked for the
+ *      `{ name, boot, shutdown }` the platform calls. They are BOOTED by the composition root — after
+ *      the migrations and the document's validation, before the listener — never here.
  *   5. MERGES the pack's store/handler/tooling/api fragments onto the deployment's sections + the
  *      capability instances into the merge result — so a pack store rides the existing migration gate,
  *      a pack route the existing api interpreter, a pack handler the existing loader. `deploy()` / the
@@ -69,6 +73,7 @@ import {
   type ModuleImporter,
 } from '../handlers/loader.js';
 import { type ExtensionCapabilities, isDefinedExtension } from './extension.js';
+import { isPackServiceModule, type LoadedPackService } from './pack-services.js';
 
 /** A single `extensions[]` reference (mirrors the spec's `ExtensionRef`; we re-declare to avoid a
  * value-import cycle — only the field shape is needed here). */
@@ -129,6 +134,13 @@ export interface LoadedExtensions {
    * chain has been applied; a pack that declares none contributes nothing here.
    */
   readonly migrations: PackMigrationChain[];
+  /**
+   * The LONG-LIVED SERVICES the loaded packs declare, already resolved to their exported
+   * `{ name, boot, shutdown }`, in the order the deployment's `extensions[]` lists the packs and each
+   * manifest lists its services. THAT ORDER IS THE BOOT ORDER, and its exact reverse is the shutdown
+   * order (`bootPackServices`). A pack that declares none contributes nothing here.
+   */
+  readonly services: LoadedPackService[];
   /** The capability instances packs provided (the LAST pack to set a field wins; a collision throws). */
   readonly capabilities: ExtensionCapabilities;
   /**
@@ -198,6 +210,7 @@ export async function loadExtensions(
   const packHandlerRoots: string[] = [];
   const sections: SectionClaim[] = [];
   const migrations: PackMigrationChain[] = [];
+  const services: LoadedPackService[] = [];
   // claimed top-level key → the pack that claimed it first (so a collision can name BOTH packs).
   const sectionOwners = new Map<string, string>();
 
@@ -359,6 +372,16 @@ export async function loadExtensions(
       migrations.push(resolvePackMigrationChain(manifest.migrations, ref.id, packRoot));
     }
 
+    // (4c) THE LONG-LIVED SERVICES the pack brings. Each module is resolved through the SAME jailed,
+    //      `.js`-preferred resolution the entry and every claimed section's schema module go through,
+    //      imported HERE (so a module that is missing or is not a service fails at the deployment's
+    //      edge rather than at the first tick of a timer that was never armed) and BOOTED LATER — the
+    //      boot order is after the migrations and the document's validation, before the listener, and
+    //      that ordering belongs to the composition root, not to this resolution.
+    for (const declared of manifest.services ?? []) {
+      services.push(await resolvePackService(declared, ref.id, packRoot, importer));
+    }
+
     // (5) MERGE the remaining fragments (stores/tooling/api/agents), each validated through its section
     //     schema. A pack agent is validated by the SAME `AgentSpecConfig` schema a
     //     deployment agent is — and post-merge it is INDISTINGUISHABLE from a deployment agent: it lands
@@ -405,10 +428,59 @@ export async function loadExtensions(
     agents,
     sections,
     migrations,
+    services,
     capabilities,
     importer: mergedImporter,
     packHandlerRoots,
   };
+}
+
+/**
+ * Resolve ONE `{ module }` service declaration into the service the boot starts, or FAIL CLOSED naming
+ * the pack AND the module path it was declared at.
+ *
+ * The module is loaded with the SAME discipline as the pack entry — jailed against the PACK root
+ * (`..`/absolute/symlink/outside-root rejected), compiled `.js` sibling preferred — and its default
+ * export is checked STRUCTURALLY for the three members the platform calls. A module that is missing
+ * one is not a service, and refusing it here is what keeps the failure at the deployment's edge: a
+ * `boot` that does not exist would otherwise surface as a boot-time TypeError with no pack in it.
+ */
+async function resolvePackService(
+  declared: { readonly module?: unknown },
+  packId: string,
+  packRoot: string,
+  importer: ModuleImporter,
+): Promise<LoadedPackService> {
+  const { module: moduleSpec } = declared;
+  if (typeof moduleSpec !== 'string' || moduleSpec.length === 0) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': declares a service with no \`module\` — a service is a module inside ` +
+        'the pack, and the manifest must say which one. Fail-closed.',
+      packId,
+    );
+  }
+  const absolute = resolvePackModule(packRoot, moduleSpec, `${packId}:${moduleSpec}`, packId);
+  let mod: Record<string, unknown>;
+  try {
+    mod = await importer(absolute);
+  } catch (e) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': failed to load the service module '${moduleSpec}' (${absolute}): ` +
+        `${e instanceof Error ? e.message : String(e)} (fail-closed).`,
+      packId,
+    );
+  }
+  const service = mod.default;
+  if (!isPackServiceModule(service)) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': the service module '${moduleSpec}' does not default-export a service ` +
+        `(got ${service === undefined ? 'no default export' : typeof service}) — it must ` +
+        'default-export `{ name, boot(ctx), shutdown() }`, with a string `name` and both members ' +
+        'functions. Fail-closed.',
+      packId,
+    );
+  }
+  return { packId, module: moduleSpec, ...service };
 }
 
 /**

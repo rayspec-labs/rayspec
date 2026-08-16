@@ -4,9 +4,17 @@
  * This pack exists to be LOADED, by the real loader, from a real deployment document, so that the
  * pack seams have something in the repository that exercises them end to end. It is therefore
  * deliberately boring: it contributes no store, no handler, no route, no agent and no capability. It
- * claims ONE top-level section, `auditing`, ships the module that validates it, and OWNS one
+ * claims ONE top-level section, `auditing`, ships the module that validates it, OWNS one
  * platform table through a migration chain of its own — an append-only ledger with hand-shaped
- * indexes and a foreign key, which is exactly what a generated `stores` table is not.
+ * indexes and a foreign key, which is exactly what a generated `stores` table is not — and brings TWO
+ * long-lived SERVICES, which is the one contribution kind the platform boots rather than calls.
+ *
+ * WHY TWO SERVICES AND NOT ONE. `TurnDispatch` goes to services and to nothing else, and a capability
+ * measured only where it is present is measured with no control: `services/turn-scheduler.ts` holds it
+ * and `services/audit-ledger.ts` never names it, so a suite that drives both can tell "the deployment
+ * handed it over" apart from "a service gets one by being a service". The CI dispatch-boundary gate is
+ * not involved — it scans the contribution roots it declares, all under `examples/`, and never reads
+ * this package.
  *
  * WHY IT IS A NORMAL WORKSPACE MEMBER. The two example packs under the `examples/` tree are named
  * `@spike/...` so CI's `--filter='!@spike/*'` excludes them. That is right for a demo and wrong for a
@@ -40,6 +48,13 @@ const fixturePack: DefinedPack = defineExtension({
   // carries — mandatory, and the reason the chain can run against the same database as the
   // platform's own without either being able to reach the other's tables.
   migrations: { dir: 'migrations', tablePrefix: 'fixture_pack_' },
+  // The LONG-LIVED SERVICES this pack brings — the one contribution kind the platform BOOTS rather
+  // than calls, declared in the order it boots them (and the reverse of the order it stops them). Two,
+  // deliberately, so the capability is measured against a control rather than only where it is
+  // present: `audit-ledger` never names `TurnDispatch`, `turn-scheduler` holds it. Pack-relative,
+  // resolved under the pack root by the same jail (and the same compiled-`.js` sibling preference)
+  // as the entry and every handler.
+  services: [{ module: 'services/audit-ledger.ts' }, { module: 'services/turn-scheduler.ts' }],
   sections: [
     {
       key: 'auditing',

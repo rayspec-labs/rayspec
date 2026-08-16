@@ -26,6 +26,7 @@
  * pack root, is a boot failure rather than a type error. Ids that reach generated SQL or generated
  * TypeScript — store and column names — additionally obey the identifier rule (`isSafeIdentifier`).
  */
+import type { PackServiceDeclaration } from './service.js';
 
 /**
  * The brand a pack entry's default export carries, stamped by the platform's manifest helper. A
@@ -215,6 +216,10 @@ export interface PackMigrationChain {
  *  - `migrations`   — the pack's OWN migration chain for the platform tables it owns (optional;
  *                     absent = the pack owns no platform state). Beside `fragments` for the same
  *                     reason a claim is: it is not content merged into the document.
+ *  - `services`     — the LONG-LIVED services the pack brings (optional; absent = brings none). The
+ *                     one contribution kind the deployment BOOTS rather than calls, declared in the
+ *                     order it is booted; see `PackServiceModule`. Beside `fragments` for the same
+ *                     reason a claim and a chain are.
  *  - `capabilities` — the capability instances the pack provides (optional).
  */
 export interface PackManifest {
@@ -226,6 +231,8 @@ export interface PackManifest {
   readonly sections?: readonly PackSectionClaim[];
   /** The pack's own migration chain for the platform tables it owns (optional). */
   readonly migrations?: PackMigrationChain;
+  /** The long-lived services the pack brings, booted in this order (optional). */
+  readonly services?: readonly PackServiceDeclaration[];
   /** The capability instances the pack provides (optional). */
   readonly capabilities?: PackCapabilities;
 }

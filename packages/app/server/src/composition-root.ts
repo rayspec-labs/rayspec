@@ -27,6 +27,7 @@
  * auth-only boot (no spec) is the default.
  */
 
+import { createHash } from 'node:crypto';
 import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
@@ -93,18 +94,26 @@ import {
 } from '@rayspec/durable-dbos';
 import {
   type BlobStoreFactory,
+  bootPackServices,
   type DurableExecutor,
   type DurableExecutorIdentity,
-  ExtensionLoadError,
   FsSourceConfigError,
   type FsSourceFactory,
   invokeTriggerHandler,
   type LoadedExtensions,
-  loadExtensions,
+  type LoadedPackService,
   type ModuleImporter,
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
+  makeJournalSink,
+  makeTurnDispatch,
+  type PackServiceContext,
+  PackServiceError,
+  type PackServicesHandle,
+  parseSpecWithPacks,
+  type RunHeaderIdentity,
   type RunJob,
+  type TurnDispatch,
 } from '@rayspec/platform';
 import {
   DEFAULT_EVENT_BUS_RETENTION_HOURS,
@@ -2025,6 +2034,9 @@ export async function assembleServer(
   let drift: BootedServer['drift'] = [];
   // A durable-worker shutdown hook to drain DBOS on close() (undefined when none wired).
   let durableExecutorShutdown: (() => Promise<void>) | undefined;
+  // Stop the packs' long-lived services on close(), in the reverse of boot order (undefined when no
+  // pack declared one).
+  let packServicesShutdown: (() => Promise<void>) | undefined;
   // A read of the LIVE durable executor identity for the /recovery-scope probe (undefined when no
   // durable worker is wired — the probe then fail-closes 503).
   let durableExecutorIdentity: (() => DurableExecutorIdentity) | undefined;
@@ -2099,6 +2111,7 @@ export async function assembleServer(
     deployMode = deployed.deployMode;
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
+    packServicesShutdown = deployed.packServicesShutdown;
     durableExecutorIdentity = deployed.durableExecutorIdentity;
     fireCronNow = deployed.fireCronNow;
     runCleanupNow = deployed.runCleanupNow;
@@ -2185,7 +2198,12 @@ export async function assembleServer(
     // that never change the SDK default, and cannot report OFF on a process that is still exporting.
     agentTracing: await observedAgentTracing(),
     close: async () => {
-      // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
+      // Stop the packs' SERVICES first, in the exact REVERSE of boot order: a service holds the
+      // database door and the dispatch capability, so stopping it after the worker had drained or the
+      // pool had closed would hand a timer a handle that is already gone. Swallowed for the same
+      // reason the worker drain is — a noisy shutdown must not leak a pooled connection.
+      if (packServicesShutdown) await packServicesShutdown().catch(() => {});
+      // Drain the durable worker NEXT (finish in-flight jobs, stop dequeuing) so a
       // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so
       // the DB pool still closes (a noisy shutdown must not leak a pooled connection).
       if (durableExecutorShutdown) await durableExecutorShutdown().catch(() => {});
@@ -2210,64 +2228,53 @@ interface MergedExtensions {
    * nothing at all).
    */
   readonly packMigrations: readonly PackMigrationChain[];
+  /**
+   * The LONG-LIVED SERVICES the loaded packs declare, in declaration order — which is boot order.
+   * Empty when no pack declares one. They are BOOTED far below, after the migrations and after
+   * `deploy()` has validated the merged document, and before this boot returns the app the
+   * entrypoint listens on.
+   */
+  readonly packServices: readonly LoadedPackService[];
 }
 
 /**
- * Resolve + merge the spec's referenced extension packs. When `extensions[]` is
- * EMPTY this is a strict NO-OP (the original spec + source pass through unchanged, no importer). When
- * packs are present, `loadExtensions` resolves each (DIRECTORY-ONLY path-jailed, version-pin
- * FAIL-CLOSED, pack-handler-jailed) and returns the merged fragments + a multi-root importer + any
- * provided capability instances. We concatenate the pack fragments onto the DEPLOYMENT's own sections,
- * RE-SERIALIZE the merged spec to YAML (so `deploy()` re-parses + re-validates it through the SAME
- * parseSpec/lintSpec gate — a pack fragment gets no special pass), and re-parse it ourselves to obtain
- * the typed merged `RaySpec` the downstream derivations use. A merge that produces an invalid
- * spec (a pack store colliding with a deployment id, a dangling pack tool→handler ref) FAILS CLOSED at
- * that re-parse (an actionable BootConfigError), exactly as a hand-written invalid spec would.
+ * Merge the ALREADY-RESOLVED extension packs into the spec every downstream step sees. When the
+ * document referenced none this is a strict NO-OP (the original spec + source pass through unchanged,
+ * no importer). Otherwise `loaded` is what the pack-aware parse above resolved — one resolution per
+ * boot, DIRECTORY-ONLY path-jailed, version-pin FAIL-CLOSED, pack-handler-jailed — and we concatenate
+ * its fragments onto the DEPLOYMENT's own sections, RE-SERIALIZE the merged spec to YAML (so
+ * `deploy()` re-parses + re-validates it through the SAME parseSpec/lintSpec gate — a pack fragment
+ * gets no special pass), and re-parse it ourselves to obtain the typed merged `RaySpec` the downstream
+ * derivations use. A merge that produces an invalid spec (a pack store colliding with a deployment id,
+ * a dangling pack tool→handler ref) FAILS CLOSED at that re-parse (an actionable BootConfigError),
+ * exactly as a hand-written invalid spec would.
  *
- * `packsRoot` = the deployment's escape-hatch root (a pack referenced by a relative dir resolves under
- * it); a real pack in its own repo is referenced relative to that root or via an explicit packs root.
- * The pack's manifest entry is `index` (the directory-MVP convention); `loadExtensions` resolves it
- * `.js`-preferred (a BUILT pack's compiled `index.js`, else the `index.ts` source). Production loads
- * compiled JavaScript only — a source-only `.ts` pack is rejected fail-closed unless a dev/test caller
- * injects the type-stripping importer (`moduleImporter`, never set in production).
+ * WHY THE RESOLUTION IS NO LONGER DONE HERE: a top-level section a pack CLAIMS can only be validated
+ * once the claiming pack is resolved, so the packs have to be loaded BEFORE the document is parsed —
+ * which is precisely what `parseSpecWithPacks` does. Loading them a second time here would import
+ * every pack module twice and give the boot two answers to the same question.
  */
-async function mergeExtensions(
+function mergeExtensions(
   baseSpec: RaySpec,
   baseSpecSource: string,
-  packsRoot: string,
   specPath: string,
+  /** The packs the pack-aware parse resolved; absent when the document referenced none. */
+  loaded: LoadedExtensions | undefined,
   /** DEV/TEST ONLY — the pack module importer; undefined in production (the guarded default is used). */
   moduleImporter?: ModuleImporter,
-): Promise<MergedExtensions> {
+): MergedExtensions {
   // Absent / empty extensions ⇒ a true no-op for production (the original spec + source, no importer;
   // deploy() then loads deployment-own handlers with the guarded default importer). A dev/test caller may
   // still inject `moduleImporter` (the type-stripping seam) to load un-built `.ts` DEPLOYMENT-own handlers
   // — thread it as the deploy importer so it reaches `loadHandlers`. Production sets nothing → guarded default.
-  if (baseSpec.extensions.length === 0) {
+  if (loaded === undefined) {
     return {
       spec: baseSpec,
       specSource: baseSpecSource,
       packMigrations: [],
+      packServices: [],
       ...(moduleImporter ? { extensionImporter: moduleImporter } : {}),
     };
-  }
-
-  let loaded: LoadedExtensions;
-  try {
-    loaded = await loadExtensions(baseSpec.extensions, {
-      packsRoot,
-      deploymentRoot: packsRoot,
-      // Production: undefined → the guarded compiled-JavaScript-only dynamic import (a `.ts` pack is
-      // rejected fail-closed). A dev/test caller may inject `typeStrippingImporter` to load un-built source.
-      importer: moduleImporter,
-    });
-  } catch (e) {
-    if (e instanceof ExtensionLoadError) {
-      throw new BootConfigError(
-        `Boot aborted — extension-pack load failed for the spec at ${specPath}: ${e.message}`,
-      );
-    }
-    throw e;
   }
 
   // Concatenate the pack fragments onto the deployment's own sections. The pack handler `module` paths
@@ -2305,10 +2312,152 @@ async function mergeExtensions(
     specSource: mergedSource,
     extensionImporter: loaded.importer,
     packMigrations: loaded.migrations,
+    packServices: loaded.services,
     ...(loaded.capabilities.blobFactory
       ? { packBlobFactory: loaded.capabilities.blobFactory }
       : {}),
   };
+}
+
+/** What the boot needs to build one pack service's context (and the capabilities it may not get). */
+interface ExtensionServiceWiring {
+  /** The one raw Db handle this boot built — the pack's own platform tables live in its database. */
+  readonly db: Db;
+  /** The MERGED, validated document every downstream step sees. */
+  readonly spec: RaySpec;
+  /** Every claimed top-level section, keyed by key, as its OWNER's validator returned it. */
+  readonly sections: Readonly<Record<string, unknown>>;
+  /** Which pack claims which key — the ownership map the section keys alone cannot carry. */
+  readonly claims: readonly { readonly key: string; readonly packId: string }[];
+  /** The deployment document's path — named in a refusal so an operator knows which boot failed. */
+  readonly specPath: string;
+  /** The DEPLOYMENT tenant off-request work runs under; absent ⇒ no journal writer, no dispatch. */
+  readonly tenantId?: string;
+  /** The durable executor, when one is wired; absent ⇒ no `TurnDispatch`. */
+  readonly executor?: DurableExecutor;
+  /** Resolve a declared agent's run-header identity off the SAME registry the worker resolves against. */
+  readonly resolveAgent: (agentId: string) => Omit<RunHeaderIdentity, 'runId'> | undefined;
+}
+
+/**
+ * Build each pack service's context and boot them all. Separated from `deployDeclaredSpec` so the
+ * WIRING — which capability is present under which condition — reads in one place instead of being
+ * spread through a 900-line deploy path.
+ *
+ * WHAT A SERVICE GETS, AND WHAT WITHHOLDS IT:
+ *  - `db`       — always. The parameterized query door onto the platform tables the pack's OWN chain
+ *                 created; there is no generated handle for a hand-shaped ledger.
+ *  - `spec`     — always: the MERGED document, exactly as every other downstream step sees it.
+ *  - `sections` — the claimed sections of THIS pack only. A pack is configured by its own grammar, not
+ *                 by its neighbour's, so the union is filtered by the claiming pack id.
+ *  - `journal`  — only when the deployment bound a tenant. The run journal is tenant-scoped through
+ *                 the chokepoint, and a row nobody can attribute is not a record.
+ *  - `dispatch` — only when BOTH a tenant and a durable worker are wired, because a scheduled turn
+ *                 needs a tenant to run under and an engine to run on. ABSENT is the fail-closed
+ *                 answer a service reads, exactly as `init.enqueue` is absent on a worker-less deploy.
+ */
+async function bootExtensionServices(
+  services: readonly LoadedPackService[],
+  wiring: ExtensionServiceWiring,
+): Promise<PackServicesHandle | undefined> {
+  if (services.length === 0) return undefined;
+
+  // The pack-owned-platform-table door: the SAME parameterized executor shape the deploy target's own
+  // `query` seam has, over the boot's one Db handle.
+  const db: PackServiceContext['db'] = {
+    query: async (sql: string, params: readonly unknown[] = []) =>
+      (await wiring.db.$client.unsafe(sql, params as never[])) as unknown as Record<
+        string,
+        unknown
+      >[],
+  };
+
+  // The tenant-bound halves. Both are built ONCE, from the tenant the deployment resolved — never from
+  // anything a pack supplies, which is what makes "a pack cannot name a tenant" structural rather than
+  // a rule somebody has to remember.
+  const tenantId = wiring.tenantId;
+  const tdb = tenantId ? forTenant(wiring.db, tenantId) : undefined;
+  const journal: PackServiceContext['journal'] = tdb
+    ? {
+        record: async (step) => {
+          // The run journal's own sink, so a service's step is priced, reconciled and shaped by the
+          // one writer every other step goes through — never a second INSERT with its own opinions.
+          // `replay: false`: a service records what it did, it does not read a replay cache.
+          await makeJournalSink(tdb, step.runId, PACK_SERVICE_JOURNAL_BACKEND, false).record({
+            type: step.type,
+            idempotencyKey: step.idempotencyKey,
+            inputHash: createHash('sha256')
+              .update(JSON.stringify(step.input ?? null))
+              .digest('hex'),
+            output: step.output,
+            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+            costUsd: 0,
+            latencyMs: step.latencyMs ?? 0,
+            status: step.status,
+            // A service's work is not a model call and authenticated as nothing: the neutral
+            // vocabulary for exactly that, recorded truthfully rather than overclaiming a path.
+            authMode: 'unauthenticated',
+          });
+        },
+      }
+    : undefined;
+  const dispatch: TurnDispatch | undefined =
+    tdb && tenantId && wiring.executor
+      ? makeTurnDispatch({
+          tenantId,
+          tdb,
+          executor: wiring.executor,
+          resolveAgent: wiring.resolveAgent,
+        })
+      : undefined;
+
+  try {
+    return await bootPackServices(services, (packId) => ({
+      packId,
+      db,
+      spec: wiring.spec as unknown as Readonly<Record<string, unknown>>,
+      sections: sectionsOwnedBy(wiring.sections, wiring.claims, packId),
+      env: process.env,
+      ...(journal ? { journal } : {}),
+      ...(dispatch ? { dispatch } : {}),
+    }));
+  } catch (e) {
+    if (e instanceof PackServiceError) {
+      throw new BootConfigError(
+        `Boot aborted — an extension pack's service failed to boot for the spec at ` +
+          `${wiring.specPath}: ${e.message}`,
+      );
+    }
+    throw e;
+  }
+}
+
+/** The `backend` column a service's journal step is attributed to — never a model provider's id. */
+const PACK_SERVICE_JOURNAL_BACKEND = 'pack-service';
+
+/**
+ * The claimed sections THIS pack owns, out of the union every pack's claims produced.
+ *
+ * The validated section map is keyed by section key alone, so it cannot say who owns what; the
+ * resolved CLAIMS can, because each one carries the id of the pack that made it. A key the document
+ * did not write is absent from the map for the same reason it was never lifted, so this filters what
+ * is there rather than inventing what is not.
+ *
+ * Deliberately a FILTER and not a pass-through of the whole map: a pack reading its neighbour's
+ * configuration would make one pack's grammar another pack's implicit dependency, and the claim
+ * mechanism exists precisely so that each key has ONE owner.
+ *
+ * EXPORTED for one reason: every deployment this repository boots has exactly ONE claiming pack, and
+ * with one pack a correct filter and a plain pass-through return the same map — so the property cannot
+ * be measured through a boot at all. `pack-service-sections.test.ts` pins it here, with two packs.
+ */
+export function sectionsOwnedBy(
+  sections: Readonly<Record<string, unknown>>,
+  claims: readonly { readonly key: string; readonly packId: string }[],
+  packId: string,
+): Readonly<Record<string, unknown>> {
+  const owned = new Set(claims.filter((c) => c.packId === packId).map((c) => c.key));
+  return Object.fromEntries(Object.entries(sections).filter(([key]) => owned.has(key)));
 }
 
 /**
@@ -2391,6 +2540,11 @@ async function deployDeclaredSpec(
   drift: BootedServer['drift'];
   /** Shut down the durable worker on close() (undefined when none was wired). */
   durableExecutorShutdown?: () => Promise<void>;
+  /**
+   * Stop the packs' long-lived services on close(), in the exact REVERSE of boot order (undefined
+   * when no pack declared one).
+   */
+  packServicesShutdown?: () => Promise<void>;
   /** Read the LIVE durable executor identity for /recovery-scope (undefined when none was wired). */
   durableExecutorIdentity?: () => DurableExecutorIdentity;
   /** Control seam: the on-demand cron-fire delegate (undefined when no cron is scheduled). */
@@ -2411,7 +2565,21 @@ async function deployDeclaredSpec(
 
   // Pre-parse to build the product tables + the first-materialization migration SQL the rollout
   // needs (deploy() re-parses internally for its own VALIDATE step — a !ok there aborts the deploy).
-  const parsed = parseSpec(specSource);
+  //
+  // THE PACK-AWARE PARSE, not the bare core grammar. A top-level section an extension pack CLAIMS is
+  // owned by that pack, so it can only be validated once the deployment's packs are resolved —
+  // `parseSpecWithPacks` resolves `extensions[]` through the same path jail and the same exact version
+  // pin the merge below relies on, hands each claimed node to its owner's validator, and returns the
+  // core-validated document (which never carries a claimed key) beside the sections. A document that
+  // references NO pack takes the load + the lift with an empty claim list, which is `parseSpec`. The
+  // packs it resolved are returned with it, so the merge does not resolve — or import — them twice.
+  const parsed = await parseSpecWithPacks(specSource, {
+    packsRoot: escapeHatchRoot,
+    deploymentRoot: escapeHatchRoot,
+    // Production: undefined → the guarded compiled-JavaScript-only dynamic import (a `.ts` pack is
+    // rejected fail-closed). A dev/test caller may inject `typeStrippingImporter` for un-built source.
+    ...(opts.moduleImporter ? { importer: opts.moduleImporter } : {}),
+  });
   if (!parsed.ok) {
     throw new BootConfigError(
       `Boot aborted — injected spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
@@ -2437,13 +2605,19 @@ async function deployDeclaredSpec(
     extensionImporter,
     packBlobFactory,
     packMigrations,
-  } = await mergeExtensions(
-    parsed.value,
+    packServices,
+  } = mergeExtensions(
+    parsed.value.spec,
     specSource,
-    escapeHatchRoot,
     specPath,
+    parsed.value.extensions,
     opts.moduleImporter,
   );
+  // The top-level sections the deployment's packs claim, as each pack's OWN validator returned them,
+  // plus the ownership map (which pack claims which key). A service reads its pack's own
+  // configuration out of these, and out of nothing else.
+  const claimedSections = parsed.value.sections;
+  const sectionClaims = parsed.value.extensions?.sections ?? [];
 
   // ── The PLATFORM TABLES the packs OWN, applied strictly after the platform chain ────────────
   // `applyMigrations` ran in assembleServer, so the platform tables exist and a pack table may carry
@@ -3222,6 +3396,34 @@ async function deployDeclaredSpec(
   // scheduler's pre-launch hook (attached above) registers its scheduled-workflows inside this start().
   if (pendingExecutorStart) await pendingExecutorStart();
 
+  // ── BOOT the extension packs' long-lived SERVICES ────────────────────────────────────────────
+  // The one contribution kind the platform BOOTS rather than calls, and the position in this function
+  // is the whole contract:
+  //   AFTER the platform migration chain (assembleServer), after every pack's OWN chain and after the
+  //   product DDL, and after `deploy()` validated the merged document — so a service that reconciles
+  //   state finds the tables it reads and the configuration it was given;
+  //   AFTER `pendingExecutorStart()` — so a service that schedules a turn through `TurnDispatch` finds
+  //   a LAUNCHED engine rather than one whose `enqueue` throws;
+  //   BEFORE this function returns — and `assembleServer` returns the app to an entrypoint that only
+  //   THEN creates a listener, so "before traffic" is a property of the call graph, not a promise.
+  // A boot that throws aborts the deployment naming the pack; the services that had already booted are
+  // shut down first (bootPackServices), so a refused boot leaves no timer running behind it.
+  const packServicesHandle = await bootExtensionServices(packServices, {
+    db,
+    spec: effectiveSpec,
+    sections: claimedSections,
+    claims: sectionClaims,
+    specPath,
+    tenantId: config.cronTenantId,
+    ...(durableExecutor ? { executor: durableExecutor } : {}),
+    resolveAgent: (agentId: string) => {
+      const entry = workerAgentRegistry?.get(agentId);
+      return entry
+        ? { backend: entry.backend.id, agentName: entry.spec.name, model: entry.spec.model }
+        : undefined;
+    },
+  });
+
   // ── wire the on-demand tenant DATA-ERASURE control seam ──────────────────────────────────────
   // Threads the deployed product tables + stores (for FK-safe ordering), the wired blob backend (built
   // per-target-tenant via blobFactory), the out-of-band AuditStore, and the resolved operator gate into
@@ -3286,6 +3488,7 @@ async function deployDeclaredSpec(
     // Report-only drift (empty here — a non-empty UPDATE-mode drift already threw above).
     drift: result.drift,
     ...(durableExecutorShutdown ? { durableExecutorShutdown } : {}),
+    ...(packServicesHandle ? { packServicesShutdown: () => packServicesHandle.shutdown() } : {}),
     ...(durableExecutorIdentity ? { durableExecutorIdentity } : {}),
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),

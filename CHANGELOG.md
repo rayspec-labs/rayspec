@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`services` — an extension pack can run a long-lived service, and schedule agent turns from it.**
+  A pack manifest may now declare `services: [{ module }]`. Each `module` is a module inside the pack
+  whose default export is `{ name, boot(ctx), shutdown() }`, resolved through the same path jail — and
+  the same compiled-`.js` preference — as the pack entry and every pack handler. It is the first
+  contribution kind the platform **boots** rather than calls: every other kind is reactive (a route is
+  served, a tool is invoked, a trigger fires), so work with no caller — reconciling state at boot,
+  draining a queue, scheduling follow-up work — had nowhere to live but a bespoke option on the
+  composition root, which is exactly the coupling extension packs exist to avoid. No such option was
+  added: a pack consumes the boot context, it does not get a parameter of its own.
+  **The order is the contract.** A service boots after the platform migration chain, after every
+  pack's own chain and after the deployed document has been validated — so its tables exist and its
+  configuration is real — and **before the deployment's listener accepts traffic**, because a service
+  that reconciles state at boot must finish before the first request can observe half-reconciled
+  state. Shutdown is the exact reverse of boot order, and it runs before the durable worker drains and
+  before the database pool closes, so a service is never handed a handle that is already gone. **A
+  service that cannot start fails the boot**, naming the pack, the service and the module it was
+  declared at; the services that had already booted are shut down first, so a refused boot leaves no
+  timer running behind it. A module that is not `{ name, boot, shutdown }`, or that resolves outside
+  the pack, is refused at load rather than at the first tick of a timer that was never armed.
+  **What the context carries.** A parameterized query door onto the platform tables the pack's own
+  migration chain created; the merged, validated document; the top-level sections **this** pack claims,
+  as its own validator returned them (never another pack's); a run-journal writer, so a service's work
+  is recorded where every other kind of work already is; the environment; and `TurnDispatch`.
+  **`TurnDispatch` is a service's alone.** It schedules a durable agent turn through the platform's
+  existing run surface — the same enqueue-time run header, the same neutral job, the same durable
+  executor the HTTP `async: true` path uses, so a turn a service schedules is read, streamed, cancelled
+  and journaled by the surfaces that already exist. It adds no second run path and no new job type.
+  **Tenancy is enforced by the platform, not by the caller**: there is no `tenantId` on the request, the
+  deployment binds the tenant when it builds the capability, and an agent the document does not declare
+  is refused rather than enqueued. A deployment that wired no durable worker — or bound no tenant —
+  hands over no capability at all, and the same is true of the journal writer: the key is **absent**,
+  so a service that needs one fails closed loudly rather than doing nothing quietly. A handler or
+  tooling contribution cannot receive it, and cannot even name it: `gate:dispatch-boundary` fails the
+  build on that identifier anywhere reachable from a pack's `handlers/` subtree.
+  **The boot now resolves a deployment's packs before it validates the document**, which is what lets a
+  service be handed its own validated section. A top-level key a pack claims is therefore accepted at
+  boot exactly as `doctor`, `plan` and `deploy --dry-run` already validated it; a key no pack claims is
+  still refused **by the boot** with the same `unknown_field`.
+  **`rayspec deploy --check-env` is the one command that cannot tell those two apart, and it now says
+  so instead of guessing.** It still loads no pack — that is the side effect the command promises not
+  to have — and without a loaded pack it cannot know which keys are claimed. So on a document that
+  **declares** any pack it lifts out **every** top-level key the core grammar does not own, claimed or
+  not, names each one in `notChecked`, and raises no `unknown_field` for any of them. **The
+  consequence, stated plainly: on a pack-bearing document `--check-env` no longer catches a mistyped
+  top-level section** — `auditting:` for a claimed `auditing:` is reported as a key whose owner it did
+  not ask about, while the boot (and `doctor`, `plan`, `deploy --dry-run`, all of which do load the
+  packs) still refuses it. Before this release `--check-env` refused it, because it validated with the
+  core grammar alone and therefore also refused every legitimately claimed section. Run `doctor` for
+  the verdict that has read the packs; `--check-env` answers about the environment. A document that
+  declares no pack is unchanged: nothing is lifted, and an unknown key is refused exactly as before.
+  A deployment that references no pack boots exactly as before.
+  The seam is exercised end to end by the in-tree `packages/test/fixture-pack`, which now brings two
+  services so the capability is measured against a control rather than only where it is present: one
+  reads its pack's claimed section, queries its pack-owned table and writes a journal entry on a timer
+  without ever naming `TurnDispatch`, and one holds it and schedules a real durable turn through a real
+  boot. (`gate:dispatch-boundary` proves the negative over the contribution roots it declares and over
+  its own self-test trees; it does not scan this package.)
+
 - **`migrations` — an extension pack can own platform tables, and bring the chain that creates
   them.** A pack manifest may now declare `migrations: { dir, tablePrefix }`. `dir` is a directory
   inside the pack holding `.sql` files and `meta/_journal.json`; `tablePrefix` is the namespace every
@@ -66,15 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parses its baseline with the same deployment's packs — the baseline is a prior revision of that
   deployment's document supplied as a diff input, so the packs that validate it are the installed
   ones wherever the file itself is kept — and a prior revision carrying a claimed section therefore no
-  longer blocks the update it is the baseline for. `deploy --dry-run` states the boundary this
-  preview does not cross, in the same verdict: the **boot** validates the document with the core
-  grammar alone before it resolves any pack, so a claimed top-level section is not accepted there yet,
-  and `notProven` says so for exactly the documents that **write** one. A document that references a
-  claiming pack without writing the section it claims is written entirely in the grammar the boot has:
-  it carries the `claimedSections` line and keeps the boundary list every other backend verdict gets,
-  because sending its operator to look for a boot refusal that is not there would be the same
-  wrong-remedy report this surface exists to remove. No further pack-contributed detail
-  is reported: what a pack configures stays the pack's business. A document that references no pack
+  longer blocks the update it is the baseline for. A claimed section carries **no** boot boundary with
+  it: the boot resolves the deployment's packs before it validates the document (see the `services`
+  entry above), so a document that **writes** a claimed key boots exactly as these commands validated
+  it, and its verdict carries the boundary list every other backend verdict gets. No further
+  pack-contributed detail is reported: what a pack configures stays the pack's business. A document
+  that references no pack
   loads no pack module and reaches no code in its own tree, which is pinned by a test rather than
   intended.
   The seam is exercised end to end by a new in-tree extension pack, `packages/test/fixture-pack`. It
