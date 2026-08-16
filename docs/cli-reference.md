@@ -35,9 +35,12 @@ The commands split into three groups:
 
   Read-only is about your **data**, and it does not by itself mean "reads nothing
   but the document" — so what each of them touches is stated per command, because
-  they differ. `doctor` (without `--with-packs`), `openapi` and `gen-handler` read
-  only the files you name: no database, no network, and no module out of the
-  deployment tree. `plan` also reads the tree — it resolves the deployment's
+  they differ. `doctor` (without `--with-packs`), `openapi` and `gen-handler` open
+  no database, no network, and no module out of the deployment tree; beyond the
+  documents you name, `doctor` also `stat`s each `frontend[]` mount's `dir` (see
+  [`doctor`](#doctor)), and every subcommand — these three included — runs the
+  CLI's startup [`.env` auto-load](#rayspec-serve--the-boot-server) first. `plan`
+  also reads the tree — it resolves the deployment's
   [extension packs](./concepts.md), which **imports** each one, so pack code runs
   in your process — and it opens a database only when you set
   `SHADOW_DATABASE_URL`, and then only a throwaway one it creates and drops.
@@ -127,10 +130,16 @@ rayspec doctor <spec.yaml> [--with-packs]
 ```
 
 Statically validates a spec against the grammar. **No database, no network, and
-no code out of the deployment tree** — it reads the file you name and nothing
-else. It runs the strict parser plus the semantic linter and reports the full,
-fail-closed list of violations (not just the first). Validates either profile —
-it dispatches on the `product:` discriminant.
+no module out of the deployment tree.** Beyond the document you name it makes one
+filesystem check: a backend document that declares `frontend[]` mounts has each
+mount's `dir` `stat`ed and access-checked, reported as `frontend_dir_missing` on
+a miss. Nothing in the tree is ever *imported* — the `--with-packs` flag below is
+the only thing that changes that. (The CLI's startup
+[`.env` auto-load](#rayspec-serve--the-boot-server) runs ahead of every
+subcommand, `doctor` included; `doctor` reads no variable from it, and
+`RAYSPEC_SKIP_DOTENV=1` skips it.) It runs the strict parser plus the semantic
+linter and reports the full, fail-closed list of violations (not just the first).
+Validates either profile — it dispatches on the `product:` discriminant.
 
 - **Postgres:** not needed.
 - **Flags:**
@@ -139,7 +148,9 @@ it dispatches on the `product:` discriminant.
     its owner. **This runs code from the deployment tree**: resolving a pack means
     importing its entry module, and the schema module of each section it claims.
     Without it no pack is read at all — see the `notResolved` key below for what
-    that leaves unchecked. `plan` and the `deploy` paths resolve packs either way.
+    that leaves unchecked. `plan`, `deploy --dry-run` and the deploy/boot paths
+    resolve packs either way; [`deploy --check-env`](#deploy) resolves none, by
+    design (see its section).
 - **Output:**
 
   ```json
@@ -182,21 +193,25 @@ it dispatches on the `product:` discriminant.
   every run of the first command a reader types is a warning people learn to skip.
 
   ```json
-  { "ok": true, "errors": [], "warnings": [], "notResolved": ["no extension pack was loaded, so neither the availability of the pack(s) this document declares (audit-pack) nor the grammar of any top-level section they claim was checked — [auditing] accepted unexamined rather than refused. Run `doctor --with-packs` to load them — it imports the entry module of each from this deployment tree."] }
+  { "ok": true, "errors": [], "warnings": [], "notResolved": ["no extension pack was loaded, so nothing about the pack(s) this document declares (audit-pack) was checked: neither that they are installed here, nor that the loader would accept them, nor the grammar of any top-level section they claim — [auditing] accepted unexamined rather than refused. Run `doctor --with-packs` to load them — it imports the entry module of each from this deployment tree."] }
   ```
 
-  Two things are genuinely unchecked there, and they are the reason to reach for
-  the flag. The packs themselves are never read, so a pack that is **not
-  installed** and a **version pin that does not match** are both invisible (with
-  `--with-packs` they are the two errors described below). And because only a
-  loaded pack can say which top-level keys are claimed, every top-level key the
-  core grammar does not own is accepted **unexamined** rather than refused — on a
-  pack-bearing document that includes a **mistyped** section (`auditting:` where
-  the pack claims `auditing:`). Accepting it is the deliberate trade: refusing it
-  would send you to delete configuration that is in fact correct. `plan`,
-  `deploy --dry-run` and `doctor --with-packs` all load the packs and all refuse
-  it — run one of those for the verdict that has read them. A document that
-  declares no pack has nothing to leave unresolved and gets no `notResolved` key.
+  What that leaves unchecked is the reason to reach for the flag. The packs
+  themselves are never read, so **nothing** the loader would have said about them
+  is said: a pack that is **not installed** is invisible, and so is one that is
+  here and the loader would **refuse** — a version pin that does not match its
+  manifest, two packs claiming one top-level key, a `module:` that escapes the
+  deployment tree. (With `--with-packs` both become one of the two errors
+  described below: `extension_pack_unavailable` and `extension_pack_refused`.)
+  And because only a loaded pack can say which top-level keys are claimed, every
+  top-level key the core grammar does not own is accepted **unexamined** rather
+  than refused — on a pack-bearing document that includes a **mistyped** section
+  (`auditting:` where the pack claims `auditing:`). Accepting it is the deliberate
+  trade: refusing it would send you to delete configuration that is in fact
+  correct. `plan`, `deploy --dry-run` and `doctor --with-packs` all load the packs
+  and all refuse it — run one of those for the verdict that has read them. A
+  document that declares no pack has nothing to leave unresolved and gets no
+  `notResolved` key.
 
   On failure, each entry carries a closed `code`, a `message`, and an optional
   `path`:
@@ -210,9 +225,10 @@ it dispatches on the `product:` discriminant.
   deployment** (install it, or drop it from `extensions[]` together with the
   sections it claims), while `extension_pack_refused` means the pack **is** here
   and was refused — a version pin that does not match its manifest, two packs
-  claiming one key — so deploying it again changes nothing. A violation **inside**
-  a claimed section is the pack's own, reported at `<section>.<field>` with the
-  same codes a core section's violation carries.
+  claiming one key, a `module:` that escapes the deployment tree — so deploying it
+  again changes nothing. A violation **inside** a claimed section is the pack's
+  own, reported at `<section>.<field>` with the same codes a core section's
+  violation carries.
 
 - **Exit:** `0` if valid, `1` otherwise.
 

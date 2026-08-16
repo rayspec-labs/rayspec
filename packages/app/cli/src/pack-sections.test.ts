@@ -394,19 +394,22 @@ describe('deploy --dry-run reports a claimed section with no boot boundary attac
   /**
    * THE COST OF LOADING NO PACK, PINNED — and pinned as a DIVERGENCE, not as a feature.
    *
-   * `--check-env` cannot know which top-level keys a pack claims, because it loads none. So on a
-   * document that DECLARES a pack it lifts out every key the core grammar does not own — which
-   * includes a MISTYPED one. `auditting:` (for the claimed `auditing:`) is owned by nothing, and this
-   * command accepts it unexamined.
+   * TWO surfaces load no pack, and both therefore answer this document differently from the ones that
+   * do. `--check-env` loads none because loading one is exactly the side effect it promises not to
+   * have; a bare `doctor` loads none because it is the first command run against a repository somebody
+   * has just cloned. Neither can know which top-level keys a pack claims, so on a document that
+   * DECLARES a pack both lift out every key the core grammar does not own — which includes a MISTYPED
+   * one. `auditting:` (for the claimed `auditing:`) is owned by nothing, and both accept it unexamined
+   * while naming it: `--check-env` in `notChecked`, `doctor` in `notResolved`.
    *
    * The control is the SAME document through `doctor --with-packs`, which loads the packs exactly as
-   * the boot does and refuses it. Two commands, one document, opposite verdicts: that is the
-   * divergence, it is deliberate (validating with the core grammar alone refused every legitimately
-   * claimed section, and sent an operator to delete correct configuration), and it is what the docs
-   * now state. Without the `doctor` half this would read as "the key is fine"; without the
-   * `--check-env` half a regression that started refusing claimed sections again would go unmeasured.
+   * the boot does and refuses it. Three verdicts, one document: that is the divergence, it is
+   * deliberate (validating with the core grammar alone refused every legitimately claimed section, and
+   * sent an operator to delete correct configuration), and it is what the docs now state. Without the
+   * `--with-packs` half this would read as "the key is fine"; without the other two a regression that
+   * started refusing claimed sections again would go unmeasured.
    */
-  it('a MISTYPED top-level key: --check-env lifts it out, and doctor --with-packs refuses it', async () => {
+  it('a MISTYPED top-level key: --check-env and a bare doctor lift it out, --with-packs refuses it', async () => {
     const checkEnv = await runDeploy(['--check-env', MISTYPED_KEY_DOC]);
     if (checkEnv.kind !== 'check-env') throw new Error('expected a check-env verdict');
     // No error at all for a key no pack claims: this command did not load the packs, so it cannot say
@@ -414,6 +417,13 @@ describe('deploy --dry-run reports a claimed section with no boot boundary attac
     expect(checkEnv.result.errors, JSON.stringify(checkEnv.result.errors)).toEqual([]);
     // It is NOT silent about it: the key it could not resolve an owner for is named.
     expect(checkEnv.result.notChecked.join('\n')).toContain('auditting');
+
+    // The SECOND surface that loads no pack: a bare `doctor`. Same lift, same document, and the same
+    // refusal to invent a verdict — named in `notResolved` rather than in `notChecked`.
+    const bare = await runDoctor([MISTYPED_KEY_DOC]);
+    expect(bare.ok, JSON.stringify(bare.errors)).toBe(true);
+    expect(JSON.stringify(bare.errors)).not.toContain('unknown_field');
+    expect((bare.notResolved ?? []).join('\n')).toContain('auditting');
 
     // The CONTROL: the same document, judged by a command that loads this deployment's packs — the
     // same resolution the boot performs. No pack claims the key, so it is refused, at the key.

@@ -211,6 +211,13 @@ function unresolvedClaim(key: string): SectionClaim {
  * that leaves its packs unresolved is not a document that is wrong, so this is not a warning. One line
  * whatever the document declares — a per-section list would grow with the document and read as a
  * finding count.
+ *
+ * It says "nothing about the pack(s) was checked", not "their availability was not checked": an
+ * unloaded pack is unchecked in EVERY respect the loader would have judged — that it is installed here,
+ * and that the loader would accept it at all (a version pin that does not match its manifest, two packs
+ * claiming one top-level key, a `module:` that escapes the deployment tree). Naming only availability
+ * would read as an enumeration and leave a reader believing a reference the loader would REFUSE was
+ * still held against the jail here. It was not.
  */
 function unresolvedLine(packIds: readonly string[], unresolved: readonly string[]): string {
   const named = packIds.length === 0 ? '' : ` (${packIds.join(', ')})`;
@@ -219,8 +226,9 @@ function unresolvedLine(packIds: readonly string[], unresolved: readonly string[
       ? ''
       : ` — [${unresolved.join(', ')}] accepted unexamined rather than refused`;
   return (
-    'no extension pack was loaded, so neither the availability of the pack(s) this document ' +
-    `declares${named} nor the grammar of any top-level section they claim was checked${lifted}. ` +
+    'no extension pack was loaded, so nothing about the pack(s) this document ' +
+    `declares${named} was checked: neither that they are installed here, nor that the loader would ` +
+    `accept them, nor the grammar of any top-level section they claim${lifted}. ` +
     'Run `doctor --with-packs` to load them — it imports the entry module of each from this ' +
     'deployment tree.'
   );
