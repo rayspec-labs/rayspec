@@ -2446,8 +2446,12 @@ const PACK_SERVICE_JOURNAL_BACKEND = 'pack-service';
  * Deliberately a FILTER and not a pass-through of the whole map: a pack reading its neighbour's
  * configuration would make one pack's grammar another pack's implicit dependency, and the claim
  * mechanism exists precisely so that each key has ONE owner.
+ *
+ * EXPORTED for one reason: every deployment this repository boots has exactly ONE claiming pack, and
+ * with one pack a correct filter and a plain pass-through return the same map — so the property cannot
+ * be measured through a boot at all. `pack-service-sections.test.ts` pins it here, with two packs.
  */
-function sectionsOwnedBy(
+export function sectionsOwnedBy(
   sections: Readonly<Record<string, unknown>>,
   claims: readonly { readonly key: string; readonly packId: string }[],
   packId: string,

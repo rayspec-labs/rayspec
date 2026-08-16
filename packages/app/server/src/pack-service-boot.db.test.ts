@@ -19,7 +19,10 @@
  *       could not have read it at all. The ordering is read back rather than asserted.
  *   (3) THE PACK'S OWN VALIDATED SECTION reaches its service: the document writes `auditing:` — a key
  *       the CORE grammar does not own — and the service is handed `retentionDays: 30` as its own
- *       validator returned it. Nothing else on this boot could have produced that value.
+ *       validator returned it. Nothing else on this boot could have produced that value. The MERGED
+ *       DOCUMENT and the ENVIRONMENT are read back the same way — the document by its own
+ *       `metadata.name`, the environment by a key only this suite sets — because an empty object in
+ *       either slot is indistinguishable from the real one until something asks.
  *   (4) THE JOURNAL WRITER writes real rows: with the deployment tenant bound, the sweep the service
  *       runs at boot lands in `journal_steps`, attributed to `pack-service`, and the TIMER it armed
  *       lands more without anything calling it — the whole reason this contribution kind exists.
@@ -28,6 +31,14 @@
  *   (6) FAIL-THE-FIX: a deployment whose pack ships a service that throws on boot ABORTS the boot with
  *       a `BootConfigError` naming the pack AND the service. The accept control is (1): the same boot
  *       with working services comes up.
+ *   (7) `TurnDispatch` IS BUILT AND HANDED OVER BY THIS COMPOSITION ROOT, and what it schedules is a
+ *       real run. The pack's committed sibling document wires a durable worker and declares the agent,
+ *       so the boot builds the capability, binds it to the deployment tenant and gives it to the
+ *       service — which schedules a turn and gets a runId whose `runs` header is really there, under
+ *       that tenant, with the identity the agent registry resolved, and whose job really runs. Arm
+ *       (1)–(5) is its accept control: same pack, same services, a document with no durable worker,
+ *       and the capability slot is ABSENT. Without this arm the whole build-and-bind step could be
+ *       deleted and every other suite here would stay green.
  *
  * WHAT MAKES (1) AND (5) OBSERVABLE AT ALL: the fixture pack's services record what they did in a
  * module of their own (`services/observed.ts`). A test that imports the SAME compiled module the
@@ -44,6 +55,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 import { EXTENSION_BRAND } from '@rayspec/platform';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
@@ -55,6 +67,48 @@ import {
   loadServerConfig,
 } from './composition-root.js';
 
+/**
+ * A deterministic, network-free backend wired as `openai` — the same shape every other durable-worker
+ * boot suite in this package injects. It exists so the run the pack's service schedules can actually
+ * EXECUTE on the worker: what this suite measures is the scheduling, not the model call.
+ */
+class FakeBackend implements Backend {
+  readonly id = 'openai' as const;
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+  async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    const finalText = `echo: ${spec.input}`;
+    await ctx.journal.record({
+      type: 'llm',
+      idempotencyKey: `llm:${spec.name}:0`,
+      inputHash: `hash:${spec.input}`,
+      output: { finalText },
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      costUsd: 0,
+      model: spec.model,
+      producedBy: 'fake-pack-service-backend',
+      latencyMs: 1,
+      status: 'ok',
+      authMode: 'api-key',
+    });
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status: 'completed',
+      finalText,
+      output: null,
+      error: null,
+      errorClass: null,
+      conversation: [],
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      costUsd: 0,
+      stepCount: 1,
+    };
+  }
+}
+
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../..');
@@ -62,12 +116,24 @@ const repoRoot = resolve(here, '../../../..');
 /** The in-tree fixture pack, and the committed document that WRITES the section its pack claims. */
 const PACK_ROOT = join(repoRoot, 'packages/test/fixture-pack');
 const PACK_DOC = join(PACK_ROOT, 'rayspec.yaml');
+/** The committed sibling document that WIRES A DURABLE WORKER and declares the agent to schedule. */
+const DURABLE_DOC = join(PACK_ROOT, 'rayspec.durable.yaml');
 const PACK_ID = 'fixture-pack';
 
 /** The compiled service-observation module — the SAME instance the deployment's services write to. */
 const OBSERVED_MODULE = join(PACK_ROOT, 'dist/services/observed.js');
 
+/**
+ * The environment key the pack's services read off `ctx.env`, set by this suite BEFORE it boots. It is
+ * how `ctx.env` becomes measurable at all: without a value only this suite sets, an `env` that arrived
+ * empty and an `env` that arrived whole look the same.
+ */
+const ENV_MARKER_KEY = 'RAYSPEC_FIXTURE_PACK_MARKER';
+const ENV_MARKER_VALUE = 'set-by-the-pack-service-boot-suite';
+
 const SUITE_DB = `rayspec_pack_service_${process.pid}`;
+/** The durable arm boots a REAL DBOS engine; the composition root derives this system sibling. */
+const DBOS_SYS_DB = `${SUITE_DB}_dbos_sys`;
 /** The deployment tenant the journal writer and the dispatch capability are bound to. */
 const TENANT = '00000000-0000-4000-8000-00000000042a';
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -101,6 +167,8 @@ interface Observed {
     {
       readonly sectionKeys: string[];
       readonly retentionDays?: number;
+      readonly specName?: string;
+      readonly envMarker?: string;
       readonly journal: boolean;
       readonly dispatch: boolean;
       readonly ledgerRows?: number;
@@ -130,6 +198,24 @@ async function scalar(url: string, sql: string): Promise<string> {
   try {
     const rows = (await client.unsafe(sql)) as unknown as Record<string, unknown>[];
     return String(Object.values(rows[0] ?? { v: '' })[0]);
+  } finally {
+    await client.end();
+  }
+}
+
+/** One ROW off the live database under test (undefined when the query selects none). */
+async function row(
+  url: string,
+  sql: string,
+  params: unknown[] = [],
+): Promise<Record<string, unknown> | undefined> {
+  const client = postgres(url, { max: 1 });
+  try {
+    const rows = (await client.unsafe(sql, params as never[])) as unknown as Record<
+      string,
+      unknown
+    >[];
+    return rows[0];
   } finally {
     await client.end();
   }
@@ -205,6 +291,8 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     'RAYSPEC_SPEC_PATH',
     'RAYSPEC_HANDLER_ROOT',
     'RAYSPEC_CRON_TENANT_ID',
+    'DBOS_SYSTEM_DATABASE_URL',
+    ENV_MARKER_KEY,
   ] as const;
 
   beforeAll(async () => {
@@ -212,6 +300,8 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     appDbUrl = withDbName(baseUrl, SUITE_DB);
     const admin = postgres(adminUrl(baseUrl), { max: 1 });
     try {
+      // The derived DBOS system sibling first — it is what holds a connection to nothing else.
+      await admin.unsafe(`DROP DATABASE IF EXISTS "${DBOS_SYS_DB}" WITH (FORCE)`);
       await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
       await admin.unsafe(`CREATE DATABASE "${SUITE_DB}"`);
     } finally {
@@ -233,6 +323,9 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     // boot of the same document with no tenant bound), then the org is registered, then the arms below
     // boot with it bound. That first boot is also the accept control for the no-journal posture.
     delete process.env.RAYSPEC_CRON_TENANT_ID;
+    delete process.env.DBOS_SYSTEM_DATABASE_URL;
+    // Set BEFORE any boot, so `ctx.env` carries a value only this suite could have put there.
+    process.env[ENV_MARKER_KEY] = ENV_MARKER_VALUE;
     process.env.RAYSPEC_SPEC_PATH = PACK_DOC;
     process.env.RAYSPEC_HANDLER_ROOT = PACK_ROOT;
     const first = await assembleServer(loadServerConfig());
@@ -254,6 +347,7 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     if (baseUrl) {
       const admin = postgres(adminUrl(baseUrl), { max: 1 });
       try {
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${DBOS_SYS_DB}" WITH (FORCE)`);
         await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
       } finally {
         await admin.end();
@@ -291,8 +385,17 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     //     ONLY the key this pack claims (the union of every pack's claims is not what a service gets).
     expect(ledger?.sectionKeys).toEqual(['auditing']);
     expect(ledger?.retentionDays).toBe(30);
+    // (3b) The MERGED DOCUMENT and the ENVIRONMENT are on the contract too, and both are read back off
+    //      what the service was handed: the document by its own `metadata.name`, the environment by a
+    //      key only this suite sets. An empty object in either slot reads identically to a whole one
+    //      unless something asks, so both services ask.
+    expect(ledger?.specName).toBe('fixture-pack-deployment');
+    expect(ledger?.envMarker).toBe(ENV_MARKER_VALUE);
+    expect(record.contexts.get('turn-scheduler')?.specName).toBe('fixture-pack-deployment');
+    expect(record.contexts.get('turn-scheduler')?.envMarker).toBe(ENV_MARKER_VALUE);
     // The tenant is bound on this boot, so there IS a journal writer; no durable worker is wired, so
     // there is NO dispatch capability — the fail-closed absence the second service reads and reports.
+    // This is the ACCEPT CONTROL for arm (7) below, which boots the sibling document that wires one.
     expect(ledger?.journal).toBe(true);
     expect(record.contexts.get('turn-scheduler')?.dispatch).toBe(false);
 
@@ -326,6 +429,88 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     const ticksAtShutdown = record.ticks.get('audit-ledger') ?? 0;
     await new Promise((r) => setTimeout(r, 200));
     expect(record.ticks.get('audit-ledger') ?? 0).toBe(ticksAtShutdown);
+  }, 180_000);
+
+  /**
+   * (7) THE CAPABILITY, THROUGH THE REAL COMPOSITION ROOT — the headline of this seam, on ground truth.
+   *
+   * Every other measurement of `TurnDispatch` drives it with a hand-built context and a fake executor,
+   * which pins the capability's own contract and says nothing about the few lines in the composition
+   * root that BUILD it: the tenant it closes over, the executor it is handed, and the registry its
+   * `resolveAgent` reads. Those lines can be gutted — `makeTurnDispatch(...)` never called, or called
+   * with the wrong tenant — and every fake-driven suite stays green.
+   *
+   * So this arm boots the pack's committed sibling document, which wires a REAL durable worker and
+   * declares the agent the service schedules, and reads back:
+   *   • the service was handed a capability at all (arm (1)–(5) is the accept control: the same pack,
+   *     the same services, a document with no durable worker, and the slot is ABSENT there);
+   *   • it scheduled a turn and got a runId — through the composition root's own capability;
+   *   • that runId has a real `runs` header, under the DEPLOYMENT tenant, carrying the identity the
+   *     registry resolved for the declared agent. Nothing else on this deployment can start a run: it
+   *     declares no route serving the agent and no trigger firing it, so the header can only have come
+   *     from the pack's service.
+   *   • and the run RUNS: the enqueue landed on the launched engine, so the job reaches a terminal
+   *     status rather than sitting in a queue nobody dequeues.
+   */
+  it('(7) with a durable worker wired, the service is handed a REAL TurnDispatch and schedules a real turn', async () => {
+    armsRan += 1;
+    process.env.RAYSPEC_SPEC_PATH = DURABLE_DOC;
+    process.env.RAYSPEC_HANDLER_ROOT = PACK_ROOT;
+
+    const record = await observed();
+    record.reset();
+    const scheduler = (await import(join(PACK_ROOT, 'dist/services/turn-scheduler.js'))) as {
+      scheduled: string[];
+    };
+    scheduler.scheduled.length = 0;
+
+    // The deterministic backend is injected the way every durable-worker boot suite here injects one;
+    // the WIRING under test is still the production one (no moduleImporter, no executor seam).
+    const durable = await assembleServer(loadServerConfig(), {
+      agentBackendsFactory: (): ReadonlyMap<BackendId, Backend> =>
+        new Map<BackendId, Backend>([['openai', new FakeBackend()]]),
+    });
+    try {
+      // The capability is PRESENT on this deployment, and absent on the other — one variable.
+      expect(record.contexts.get('turn-scheduler')?.dispatch).toBe(true);
+      expect(record.contexts.get('turn-scheduler')?.specName).toBe(
+        'fixture-pack-durable-deployment',
+      );
+
+      // The service scheduled exactly one turn, and kept the runId the platform handed back.
+      expect(scheduler.scheduled).toHaveLength(1);
+      const runId = scheduler.scheduled[0] as string;
+      expect(runId).toMatch(/^[0-9a-f-]{36}$/);
+
+      // The enqueue-time run HEADER is real, is the platform's own, and is stamped with the DEPLOYMENT
+      // tenant — the tenant the composition root bound, which the request object has no field for.
+      const header = await row(
+        appDbUrl,
+        'SELECT tenant_id, agent_name, model, backend, status FROM runs WHERE run_id = $1',
+        [runId],
+      );
+      expect(header, `no run header for ${runId}`).toBeDefined();
+      expect(header?.tenant_id).toBe(TENANT);
+      // The identity came from the SAME registry the worker resolves against, for the declared agent.
+      expect(header?.agent_name).toBe('fixture-follow-up-agent');
+      expect(header?.model).toBe('gpt-4o-mini');
+      expect(header?.backend).toBe('openai');
+
+      // And it is a real job on the launched engine, not a row: it reaches a terminal status.
+      const deadline = Date.now() + 30_000;
+      let status = String(header?.status ?? '');
+      while (status !== 'completed' && status !== 'error' && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 250));
+        status = String(
+          (await row(appDbUrl, 'SELECT status FROM runs WHERE run_id = $1', [runId]))?.status ?? '',
+        );
+      }
+      expect(status, `the scheduled run never reached a terminal status (last: ${status})`).toBe(
+        'completed',
+      );
+    } finally {
+      await durable.close();
+    }
   }, 180_000);
 
   it('(6) FAIL-THE-FIX: a service that cannot start ABORTS the boot, naming pack and service', async () => {

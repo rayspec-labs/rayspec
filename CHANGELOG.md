@@ -46,14 +46,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **The boot now resolves a deployment's packs before it validates the document**, which is what lets a
   service be handed its own validated section. A top-level key a pack claims is therefore accepted at
   boot exactly as `doctor`, `plan` and `deploy --dry-run` already validated it; a key no pack claims is
-  still refused with the same `unknown_field`. `rayspec deploy --check-env` still loads no pack — that
-  is the side effect the command promises not to have — so for a document that writes such a key it
-  neither validates the section nor refuses it: it names the key in `notChecked` as one whose owner it
-  did not ask about. A deployment that references no pack boots exactly as before.
+  still refused **by the boot** with the same `unknown_field`.
+  **`rayspec deploy --check-env` is the one command that cannot tell those two apart, and it now says
+  so instead of guessing.** It still loads no pack — that is the side effect the command promises not
+  to have — and without a loaded pack it cannot know which keys are claimed. So on a document that
+  **declares** any pack it lifts out **every** top-level key the core grammar does not own, claimed or
+  not, names each one in `notChecked`, and raises no `unknown_field` for any of them. **The
+  consequence, stated plainly: on a pack-bearing document `--check-env` no longer catches a mistyped
+  top-level section** — `auditting:` for a claimed `auditing:` is reported as a key whose owner it did
+  not ask about, while the boot (and `doctor`, `plan`, `deploy --dry-run`, all of which do load the
+  packs) still refuses it. Before this release `--check-env` refused it, because it validated with the
+  core grammar alone and therefore also refused every legitimately claimed section. Run `doctor` for
+  the verdict that has read the packs; `--check-env` answers about the environment. A document that
+  declares no pack is unchanged: nothing is lifted, and an unknown key is refused exactly as before.
+  A deployment that references no pack boots exactly as before.
   The seam is exercised end to end by the in-tree `packages/test/fixture-pack`, which now brings two
-  services so the dispatch boundary has a real module on each side: one that reads its pack's claimed
-  section, queries its pack-owned table and writes a journal entry on a timer without ever naming
-  `TurnDispatch`, and one that holds it.
+  services so the capability is measured against a control rather than only where it is present: one
+  reads its pack's claimed section, queries its pack-owned table and writes a journal entry on a timer
+  without ever naming `TurnDispatch`, and one holds it and schedules a real durable turn through a real
+  boot. (`gate:dispatch-boundary` proves the negative over the contribution roots it declares and over
+  its own self-test trees; it does not scan this package.)
 
 - **`migrations` — an extension pack can own platform tables, and bring the chain that creates
   them.** A pack manifest may now declare `migrations: { dir, tablePrefix }`. `dir` is a directory
@@ -114,7 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ones wherever the file itself is kept — and a prior revision carrying a claimed section therefore no
   longer blocks the update it is the baseline for. A claimed section carries **no** boot boundary with
   it: the boot resolves the deployment's packs before it validates the document (see the `services`
-  entry below), so a document that **writes** a claimed key boots exactly as these commands validated
+  entry above), so a document that **writes** a claimed key boots exactly as these commands validated
   it, and its verdict carries the boundary list every other backend verdict gets. No further
   pack-contributed detail is reported: what a pack configures stays the pack's business. A document
   that references no pack
