@@ -40,9 +40,30 @@ const fixturePack: DefinedPack = defineExtension({
   // The pack's OWN version. A deployment pins it EXACTLY; a skew is a hard load failure, never a
   // silent skip — which is why the documents beside this file pin `1.0.0` and one of them does not.
   version: '1.0.0',
-  // No spec fragment: what this pack contributes to the document is the section it claims, and what
-  // it contributes to the database is the chain below — neither is a `stores` business table.
-  fragments: {},
+  // ONE authenticated route, and the handler behind it. It is inside this pack's DEFAULT route
+  // namespace — `/ext/<packId>/`, and the deployment documents beside this file reference the pack as
+  // `fixture-pack` — so no `routePrefix` is declared here: the default is the case worth witnessing,
+  // and a route outside the namespace is a load failure naming this pack. Post-merge the route is an
+  // ordinary declared route: same app, same auth chain, same interpreter. The handler is `readonly`,
+  // so its route is gated on `store:read` rather than the default `store:write`.
+  fragments: {
+    handlers: [
+      {
+        id: 'fixture_pack_list_turns',
+        module: 'handlers/list-turns.ts',
+        export: 'listTurns',
+        kind: 'route',
+        readonly: true,
+      },
+    ],
+    api: [
+      {
+        method: 'GET',
+        path: '/ext/fixture-pack/turns/{turn_id}',
+        action: { kind: 'handler', handler: 'fixture_pack_list_turns' },
+      },
+    ],
+  },
   // The platform tables this pack OWNS. `dir` is pack-relative (the chain is emitted beside the
   // compiled entry by this package's build) and `tablePrefix` is the namespace every object in it
   // carries — mandatory, and the reason the chain can run against the same database as the

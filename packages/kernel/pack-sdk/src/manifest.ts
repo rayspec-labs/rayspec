@@ -91,11 +91,15 @@ export interface PackToolFragment {
 /**
  * A contributed HTTP route. It mounts on the deployment's existing auth chain and is served by the
  * same interpreter as a deployment-declared route — a pack gets no separate routing surface.
+ *
+ * `path` must lie under the pack's route NAMESPACE (`routePrefix` on the manifest, defaulting to
+ * `/ext/<packId>/`): a pack contributes onto the deployment's own route surface, so a path outside the
+ * namespace could shadow a route the deployment or another pack serves, and is refused at boot.
  */
 export interface PackApiRouteFragment {
   /** The method this route handles. */
   readonly method: PackHttpMethod;
-  /** The route path, unique post-merge against every other declared route. */
+  /** The route path — inside the pack's route namespace, unique post-merge against every other route. */
   readonly path: string;
   /** Every other declared key of the section body, validated by the deployment's own parse pass. */
   readonly [declaredKey: string]: unknown;
@@ -208,6 +212,9 @@ export interface PackMigrationChain {
  *
  *  - `version`      — the pack's OWN declared version. It must equal the EXACT pin the deployment's
  *                     reference carries: a SKEW is a hard boot error, never a silent skip.
+ *  - `routePrefix`  — the route NAMESPACE every contributed `api` route must lie under (optional;
+ *                     absent = `/ext/<packId>/`, derived from the id the deployment references the
+ *                     pack by). See the field below.
  *  - `fragments`    — the sections the pack contributes (merged into the deployment's document).
  *  - `sections`     — the top-level document sections the pack CLAIMS the grammar of (optional;
  *                     absent = claims none). It sits beside `fragments`, not inside it, because a
@@ -225,6 +232,18 @@ export interface PackMigrationChain {
 export interface PackManifest {
   /** The pack's declared exact version — checked fail-closed against the deployment's pin. */
   readonly version: string;
+  /**
+   * The route NAMESPACE every contributed `api` route must lie under — an absolute, parameter-free
+   * path prefix. Absent = `/ext/<packId>/`, derived from the id the deployment references the pack by.
+   *
+   * Declare it when the pack owns a path of its own (an ingest surface at `/uploads/`). Two rules are
+   * checked fail-closed at boot, naming the pack: a route outside the resolved namespace is refused,
+   * and so is a namespace that CONTAINS — or is contained by — the one another loaded pack claims,
+   * because a path in the overlap would have two owners and nothing to decide between them. There is
+   * one exception to the default: a pack id that cannot be spelled into a URL path segment has no
+   * derivable namespace, and such a pack must declare this field rather than get one invented for it.
+   */
+  readonly routePrefix?: string;
   /** The declarative sections the pack contributes. */
   readonly fragments: PackFragments;
   /** The top-level document sections the pack claims the grammar of (optional). */

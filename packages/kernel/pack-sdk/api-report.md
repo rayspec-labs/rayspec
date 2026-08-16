@@ -201,6 +201,7 @@ export interface PackJournalWriter {
 ```ts
 export interface PackManifest {
     readonly version: string;
+    readonly routePrefix?: string;
     readonly fragments: PackFragments;
     readonly sections?: readonly PackSectionClaim[];
     readonly migrations?: PackMigrationChain;

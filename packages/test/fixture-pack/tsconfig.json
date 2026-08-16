@@ -4,7 +4,11 @@
     "rootDir": "./src",
     "outDir": "./dist"
   },
-  "references": [{ "path": "../../kernel/platform" }, { "path": "../../kernel/pack-sdk" }],
+  "references": [
+    { "path": "../../kernel/platform" },
+    { "path": "../../kernel/pack-sdk" },
+    { "path": "../../kernel/handler-sdk" }
+  ],
   "include": ["src/**/*.ts"],
   "exclude": ["dist", "node_modules", "**/*.test.ts"]
 }

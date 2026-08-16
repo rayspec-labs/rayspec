@@ -44,7 +44,9 @@ function manifest(v: string): ExtensionManifest {
       api: [
         {
           method: 'POST',
-          path: '/pack',
+          // Inside this pack's DEFAULT route namespace (`ref.id` is `p1` in every case below) — a
+          // route outside it is a load failure, measured in its own describe further down.
+          path: '/ext/p1/pack',
           action: { kind: 'handler', handler: 'pack_h' },
         },
       ],
@@ -468,5 +470,121 @@ describe('loadExtensions — the migration chain a pack declares', () => {
     await expect(
       load(withMigrations({ dir: resolve(root, 'elsewhere'), tablePrefix: 'fx_' })),
     ).rejects.toThrow(ExtensionLoadError);
+  });
+});
+
+describe('loadExtensions — a pack is CONFINED to its own route namespace', () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-ext-prefix-'));
+  });
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** A manifest contributing exactly the given route paths (all `{handler}` routes). */
+  const withRoutes = (paths: readonly string[], routePrefix?: string): ExtensionManifest => ({
+    version: '1.0.0',
+    ...(routePrefix === undefined ? {} : { routePrefix }),
+    fragments: {
+      handlers: [{ id: 'pack_h', module: 'handlers/h.ts', export: 'run', kind: 'route' }],
+      api: paths.map((path) => ({
+        method: 'GET' as const,
+        path,
+        action: { kind: 'handler' as const, handler: 'pack_h' },
+      })),
+    },
+  });
+
+  /** Load one pack (`id`, `dir`) whose entry is the given manifest. */
+  const loadOne = async (id: string, dir: string, manifest: ExtensionManifest) => {
+    const entry = resolve(root, dir, 'index.ts');
+    const importer = fakeImporter(new Map([[entry, { default: defineExtension(manifest) }]]));
+    return loadExtensions([{ id, module: `./${dir}`, version: '1.0.0' }], {
+      packsRoot: root,
+      deploymentRoot: root,
+      importer,
+    });
+  };
+
+  it('DEFAULT NAMESPACE: a pack with no declared prefix is confined to /ext/<packId>/', async () => {
+    const out = await loadOne('acme', 'acme', withRoutes(['/ext/acme/turns']));
+    expect(out.api).toHaveLength(1);
+    expect(out.apiOwners).toEqual([{ packId: 'acme', prefix: '/ext/acme/', route: out.api[0] }]);
+  });
+
+  it('FAIL-CLOSED: a route OUTSIDE the namespace names the pack AND the offending path', async () => {
+    await expect(loadOne('acme', 'acme', withRoutes(['/notebooks/{id}']))).rejects.toThrow(
+      ExtensionLoadError,
+    );
+    await expect(loadOne('acme', 'acme', withRoutes(['/notebooks/{id}']))).rejects.toThrow(
+      /'acme'[\s\S]*\/notebooks\/\{id\}[\s\S]*\/ext\/acme\//,
+    );
+  });
+
+  it('FAIL-CLOSED: a path that merely SHARES A PREFIX with the namespace is outside it', async () => {
+    await expect(loadOne('acme', 'acme', withRoutes(['/ext/acme-other/x']))).rejects.toThrow(
+      /is not under/,
+    );
+  });
+
+  it('a manifest-declared prefix OVERRIDES the default and confines the pack to it', async () => {
+    const out = await loadOne('acme', 'acme', withRoutes(['/uploads/{id}'], '/uploads'));
+    expect(out.apiOwners[0]?.prefix).toBe('/uploads/');
+    await expect(
+      loadOne('acme', 'acme', withRoutes(['/ext/acme/turns'], '/uploads')),
+    ).rejects.toThrow(/is not under/);
+  });
+
+  it('FAIL-CLOSED: a declared prefix that is not usable as a namespace is refused', async () => {
+    await expect(loadOne('acme', 'acme', withRoutes(['/x'], '/'))).rejects.toThrow(
+      /whole route surface/,
+    );
+    await expect(loadOne('acme', 'acme', withRoutes(['/x'], 'uploads'))).rejects.toThrow(
+      /must start with/,
+    );
+  });
+
+  it('OVERLAP IS CONTAINMENT, NOT EQUALITY: a nested claim is refused naming BOTH packs', async () => {
+    const entryA = resolve(root, 'a', 'index.ts');
+    const entryB = resolve(root, 'b', 'index.ts');
+    const importer = fakeImporter(
+      new Map([
+        [entryA, { default: defineExtension(withRoutes(['/shared/one'], '/shared/')) }],
+        [entryB, { default: defineExtension(withRoutes(['/shared/deep/two'], '/shared/deep/')) }],
+      ]),
+    );
+    const refs = [
+      { id: 'a', module: './a', version: '1.0.0' },
+      { id: 'b', module: './b', version: '1.0.0' },
+    ];
+    const load = () => loadExtensions(refs, { packsRoot: root, deploymentRoot: root, importer });
+    await expect(load()).rejects.toThrow(ExtensionLoadError);
+    await expect(load()).rejects.toThrow(/'b'[\s\S]*'a'/);
+  });
+
+  it('two SIBLING namespaces coexist (the default keeps packs apart by construction)', async () => {
+    const entryA = resolve(root, 'a', 'index.ts');
+    const entryB = resolve(root, 'b', 'index.ts');
+    const importer = fakeImporter(
+      new Map([
+        [entryA, { default: defineExtension(withRoutes(['/ext/a/one'])) }],
+        [entryB, { default: defineExtension(withRoutes(['/ext/b/two'])) }],
+      ]),
+    );
+    const out = await loadExtensions(
+      [
+        { id: 'a', module: './a', version: '1.0.0' },
+        { id: 'b', module: './b', version: '1.0.0' },
+      ],
+      { packsRoot: root, deploymentRoot: root, importer },
+    );
+    expect(out.apiOwners.map((o) => o.packId)).toEqual(['a', 'b']);
+  });
+
+  it('FAIL-CLOSED: a pack id that cannot be a path segment must declare its own prefix', async () => {
+    await expect(loadOne('acme/v1', 'acme', withRoutes(['/ext/acme/x']))).rejects.toThrow(
+      /routePrefix/,
+    );
   });
 });
