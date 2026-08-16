@@ -535,10 +535,11 @@ function selfTest() {
     },
     // a name carrying a BRACE (`"a}b"`) — the clause must not be read as ending inside the string
     { rel: 'h/x.ts', src: 'import { "a}b" as c } from \'@rayspec/platform\';', expect: true },
-    // ── the same name after a DEFAULT BINDING and as the namespace re-export's exported name: both
-    //    are the quoted spelling of the PLAIN statement paired above them, which the ordinary rules
-    //    already flag. The pairs are what prove the refusal reaches the whole feature and not just
-    //    the spelling that opens with a brace.
+    // ── the same name after a DEFAULT BINDING and as the namespace re-export's exported name. Each
+    //    group opens with the PLAIN spelling of that shape, which the ordinary rules already flag,
+    //    and is followed by the quoted spellings of it (single- and double-quoted, and one whose
+    //    source escapes the scanned root). The plain reading is what makes the quoted zero a hole
+    //    rather than a benign miss — and a spelling missing here is cleared against every rule.
     { rel: 'h/x.ts', src: "import platform, { runAgent } from '@rayspec/platform';", expect: true },
     {
       rel: 'h/x.ts',
