@@ -154,19 +154,25 @@ jobs:
         run: pnpm gate:extension-capability
 
       # A pack that brings its own migration chain declares the table prefix its objects live under.
-      # Every CREATE TABLE / CREATE [UNIQUE] INDEX in the chain must carry it, and the chain must be
-      # additive-only with NO allowlist and no mechanism to author one — a closed pack does not get a
-      # lower bar than the core. A declared chain that reads zero files fails CLOSED. Reads SQL text
-      # only (no database), so it belongs here and not in lane 2 beside the platform-chain gates.
+      # Every CREATE TABLE / CREATE [UNIQUE] INDEX must NAME an object carrying it and every ALTER
+      # TABLE / CREATE INDEX ... ON must TARGET one, so a chain cannot reach into a platform table.
+      # The destructive half runs the PLATFORM's own scan with an EMPTY allowlist — a closed pack
+      # does not get a lower bar than the core, by wiring rather than by assertion — on top of an
+      # accepted-set check, so an unanticipated statement fails CLOSED. A declared chain that reads
+      # zero files fails CLOSED, and so does an EMPTY declared set. Needs the Build (it imports the
+      # scan from dist) but no database, so it belongs here and not in lane 2.
       - name: Pack-migration chain gate
         run: pnpm gate:pack-migrations
 
-      # A prefix gate nobody can make go red is worth nothing, and its fail-closed arm is the one that
-      # silently rots. This standalone regression drives the REAL gate against throwaway chains and
-      # proves each arm: a conforming chain passes and reports what it read, a planted unprefixed table
-      # AND a planted unprefixed index are both detected, a destructive statement is refused, and a
-      # chain directory that reads nothing — empty or absent — fails CLOSED.
-      # DB-free / secret-free → lane 1.
+      # A prefix gate nobody can make go red is worth nothing, and its fail-closed arms are the ones
+      # that silently rot. This standalone regression drives the REAL gate against throwaway chains
+      # and proves each arm: a conforming chain passes and reports what it read (its literal carries a
+      # `;`, a `--` and a second CREATE TABLE as CONTENT, so the splitter and the literal blanking are
+      # both load-bearing there), a planted unprefixed table/index and a reach into a platform table
+      # are detected, a destructive statement is refused — standalone AND riding beside an ADD in one
+      # ALTER TABLE — parity with the platform scan is measured over a corpus with an accept control,
+      # an unnamed index and a merged statement fail closed, and a chain that reads nothing — empty,
+      # absent, or an emptied declared set — fails CLOSED. Needs the Build; DB-free / secret-free.
       - name: Pack-migration chain gate regression
         run: pnpm test:pack-migrations
 
