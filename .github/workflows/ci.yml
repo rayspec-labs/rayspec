@@ -153,6 +153,23 @@ jobs:
       - name: Extension-capability gate
         run: pnpm gate:extension-capability
 
+      # A pack that brings its own migration chain declares the table prefix its objects live under.
+      # Every CREATE TABLE / CREATE [UNIQUE] INDEX in the chain must carry it, and the chain must be
+      # additive-only with NO allowlist and no mechanism to author one — a closed pack does not get a
+      # lower bar than the core. A declared chain that reads zero files fails CLOSED. Reads SQL text
+      # only (no database), so it belongs here and not in lane 2 beside the platform-chain gates.
+      - name: Pack-migration chain gate
+        run: pnpm gate:pack-migrations
+
+      # A prefix gate nobody can make go red is worth nothing, and its fail-closed arm is the one that
+      # silently rots. This standalone regression drives the REAL gate against throwaway chains and
+      # proves each arm: a conforming chain passes and reports what it read, a planted unprefixed table
+      # AND a planted unprefixed index are both detected, a destructive statement is refused, and a
+      # chain directory that reads nothing — empty or absent — fails CLOSED.
+      # DB-free / secret-free → lane 1.
+      - name: Pack-migration chain gate regression
+        run: pnpm test:pack-migrations
+
       # The spec.schema.json drift gate — re-derives the JSON Schema from the grammar and byte-compares
       # to the checked-in packages/kernel/spec/spec.schema.json, failing on drift. Needs the Build.
       - name: Spec-schema drift gate
