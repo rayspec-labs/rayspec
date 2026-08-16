@@ -45,6 +45,7 @@ import { type AgentSpec, type BackendId, validateSpec } from '@rayspec/core';
 // shapes and take the instance TYPE from the named class export — exactly as dispatch.ts does.
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
+import { normalizeRoutePath } from './brace-params.js';
 import {
   type SpecError,
   type SpecWarning,
@@ -53,6 +54,7 @@ import {
   specWarning,
 } from './errors.js';
 import {
+  type ApiRouteSpec,
   type ColumnType,
   MAX_IDENTIFIER_LENGTH,
   type RaySpec,
@@ -220,6 +222,41 @@ function findDuplicates<T>(
     } else {
       seen.add(key);
     }
+  });
+  return errors;
+}
+
+/**
+ * Report every declared `api[]` route that reaches the ROUTER as an earlier one — the same method and
+ * the same `normalizeRoutePath` form (parameter NAMES erased, because a router matches a parameter by
+ * position and a name is therefore not part of a route's identity).
+ *
+ * Kept out of `findDuplicates` on purpose: that helper reports a duplicate by its KEY, and here the key
+ * is the normalized form, which is neither of the two paths an author wrote. A refusal that prints
+ * `GET /x/{}` leaves the author to work out which two members produced it, so this names the earlier
+ * path beside the offending one. The reported member is the SECOND occurrence (the one that would be
+ * dead), at `api[i].path`, under the same `duplicate_name` code the raw-string rule used.
+ */
+function duplicateApiRoutes(routes: readonly ApiRouteSpec[]): SpecError[] {
+  const errors: SpecError[] = [];
+  const firstByKey = new Map<string, string>();
+  routes.forEach((route, index) => {
+    const key = `${route.method} ${normalizeRoutePath(route.path)}`;
+    const first = firstByKey.get(key);
+    if (first === undefined) {
+      firstByKey.set(key, route.path);
+      return;
+    }
+    errors.push(
+      specError(
+        'duplicate_name',
+        `duplicate api route '${route.method} ${route.path}' — it is the SAME route as ` +
+          `'${route.method} ${first}' once the router is done with it (a path parameter matches by ` +
+          'position, so what it is NAMED is not part of the route). Two handlers would register on ' +
+          'one route and the second would never be reached; give one of them a distinct path',
+        `api[${index}].path`,
+      ),
+    );
   });
   return errors;
 }
@@ -761,14 +798,12 @@ export function lintSpec(spec: RaySpec): SpecError[] {
       'trigger name',
       (i) => `triggers[${i}].name`,
     ),
-    // API route uniqueness: a duplicate `${method} ${path}` would register two handlers on one
-    // route — the second silently shadows the first. Reject at config.
-    ...findDuplicates(
-      spec.api,
-      (r) => `${r.method} ${r.path}`,
-      'api route',
-      (i) => `api[${i}].path`,
-    ),
+    // API route uniqueness, keyed on the ROUTER-NORMALIZED path (parameter names erased). Two routes
+    // the router cannot tell apart register two handlers on one route and the second is unreachable
+    // for the life of the process — and the router matches a parameter by POSITION, so `/x/{id}` and
+    // `/x/{thing_id}` ARE that pair while looking like two distinct strings. Reject at config, naming
+    // BOTH paths: the offender alone does not say which other route it collides with.
+    ...duplicateApiRoutes(spec.api),
   );
 
   // ---- 1 & 5. CROSS-REFS + KIND COHERENCE -----------------------------------------------

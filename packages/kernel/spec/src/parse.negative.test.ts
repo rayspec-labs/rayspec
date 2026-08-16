@@ -582,6 +582,43 @@ describe('negative — duplicate api route', () => {
     );
     expectRejection(yaml, 'duplicate_name');
   });
+
+  // The rule keys on the ROUTER-NORMALIZED path, not on the raw string. Two paths that differ only in
+  // what their parameters are NAMED are ONE route to the router: it matches on position, so the second
+  // registration is unreachable for the rest of the process's life and nothing reports it. Keyed on the
+  // raw string both of these lint clean, both register, and one of them is dead.
+  it('rejects two routes whose paths differ ONLY in a parameter NAME (one would be dead)', () => {
+    const yaml = BASE.replace(
+      "api:\n  - { method: GET, path: '/widgets', action: { kind: store, store: widgets, op: list } }",
+      "api:\n  - { method: GET, path: '/widgets/{id}', action: { kind: store, store: widgets, op: get } }\n" +
+        "  - { method: GET, path: '/widgets/{widget_id}', action: { kind: store, store: widgets, op: get } }",
+    );
+    expectRejection(yaml, 'duplicate_name');
+  });
+
+  it('names BOTH colliding paths in the message (a refusal that names one party is unactionable)', () => {
+    const yaml = BASE.replace(
+      "api:\n  - { method: GET, path: '/widgets', action: { kind: store, store: widgets, op: list } }",
+      "api:\n  - { method: GET, path: '/widgets/{id}', action: { kind: store, store: widgets, op: get } }\n" +
+        "  - { method: GET, path: '/widgets/{widget_id}', action: { kind: store, store: widgets, op: get } }",
+    );
+    const res = parseSpec(yaml);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const message = res.errors.map((e) => e.message).join('\n');
+    expect(message).toContain('/widgets/{id}');
+    expect(message).toContain('/widgets/{widget_id}');
+  });
+
+  // No false positive: a differently-SHAPED path is a different route to the router.
+  it('accepts two routes whose paths differ in a LITERAL segment', () => {
+    const yaml = BASE.replace(
+      "api:\n  - { method: GET, path: '/widgets', action: { kind: store, store: widgets, op: list } }",
+      "api:\n  - { method: GET, path: '/widgets/{id}', action: { kind: store, store: widgets, op: get } }\n" +
+        "  - { method: GET, path: '/widgets/mine/{id}', action: { kind: store, store: widgets, op: get } }",
+    );
+    expect(parseSpec(yaml).ok).toBe(true);
+  });
 });
 
 describe('negative — duplicate column name within a store', () => {
