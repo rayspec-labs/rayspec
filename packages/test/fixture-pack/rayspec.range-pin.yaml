@@ -1,0 +1,13 @@
+# The same deployment with a RANGE where the grammar requires an exact version pin. The reference
+# does not typecheck, so which top-level keys the deployment's packs own is unknowable — and the
+# report has to say only that. A verdict that ALSO called `auditing:` an unknown field would send an
+# operator to delete a section that is correct, over one character in the line above it.
+version: '1.0'
+metadata:
+  name: fixture-pack-deployment
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: ^1.0.0
+auditing:
+  retentionDays: 30

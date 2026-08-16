@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rayspec doctor`, `rayspec plan` and `rayspec deploy --dry-run` now say who owns a claimed
+  top-level section.** All three resolve the deployment's extension packs before they judge the
+  document — the same loader the boot runs, over the same deployment tree (`RAYSPEC_HANDLER_ROOT`
+  when the deployment sets one, otherwise the directory the spec file sits in) — so a top-level key a
+  pack claims is validated by that pack instead of being reported as `unknown_field`. Each command's
+  JSON envelope then carries a new `claimedSections` array: one neutral line per claim, naming the
+  section key and the pack that owns it (`section 'auditing' is claimed by extension pack
+  'audit-pack'`). It is the same line from all three commands, it never affects `ok`, and it is
+  omitted entirely for a document that references no pack, whose envelope is byte-identical to what
+  it was before the field existed. The three commands now also report the two typed pack failures an
+  operator has to tell apart — `extension_pack_unavailable` (the pack is not on this deployment) and
+  `extension_pack_refused` (it is here and was refused) — instead of an unknown field pointing at the
+  section, which sent an operator to delete configuration rather than install a pack. `plan --against`
+  parses its baseline with the same deployment's packs — the baseline is a prior revision of that
+  deployment's document supplied as a diff input, so the packs that validate it are the installed
+  ones wherever the file itself is kept — and a prior revision carrying a claimed section therefore no
+  longer blocks the update it is the baseline for. `deploy --dry-run` states the boundary this
+  preview does not cross, in the same verdict: the **boot** validates the document with the core
+  grammar alone before it resolves any pack, so a claimed top-level section is not accepted there yet,
+  and `notProven` says so for exactly the documents that **write** one. A document that references a
+  claiming pack without writing the section it claims is written entirely in the grammar the boot has:
+  it carries the `claimedSections` line and keeps the boundary list every other backend verdict gets,
+  because sending its operator to look for a boot refusal that is not there would be the same
+  wrong-remedy report this surface exists to remove. No further pack-contributed detail
+  is reported: what a pack configures stays the pack's business. A document that references no pack
+  loads no pack module and reaches no code in its own tree, which is pinned by a test rather than
+  intended.
+  The seam is exercised end to end by a new in-tree extension pack, `packages/test/fixture-pack`. It
+  claims one section (`auditing`) and ships the validator for it — written against no validation
+  library, because that is the contract the platform actually promises a pack — and is loaded through
+  the real loader, from real deployment documents beside it, on a real exact version pin. Unlike the
+  example packs under `examples/`, it is a normal workspace package that CI builds and typechecks: a
+  fixture excluded from CI cannot fail, and a seam whose only witness cannot fail is unproven.
+
 - **`sections` — an extension pack can claim a top-level key of the spec document, and validate it.**
   A pack manifest may now declare `sections: [{ key, schemaModule }]`. A deployment then writes that
   key at the top level of its own `rayspec.yaml`, and the pack's schema module — not the core grammar

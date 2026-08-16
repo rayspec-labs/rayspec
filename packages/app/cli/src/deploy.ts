@@ -40,6 +40,7 @@ import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // it — and every other subcommand — loads none of @rayspec/server.
 import type { BootEnvReport } from '@rayspec/server/boot-env';
 import type { FrontendSpec, SpecError } from '@rayspec/spec';
+import { parseFromDeploymentTree, withClaimedSections } from './pack-sections.js';
 import { dotenvCandidatePaths } from './read-env.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
@@ -116,6 +117,14 @@ export interface DeployDryRunResult {
   readonly errors: readonly string[];
   /** The honest boundary — what --dry-run does NOT prove. */
   readonly notProven: readonly string[];
+  /**
+   * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
+   * section key and the pack that owns it — the same line `plan` and `doctor` report, from the same
+   * loader run against the same deployment tree. Present only for a document that references a pack
+   * and validated, so every other verdict keeps the exact key set it had. NEVER affects `ok` — and
+   * where `ok:true` here is furthest from "it boots", `notProven` says so in the same verdict.
+   */
+  readonly claimedSections?: readonly string[];
 }
 
 /** What `--dry-run` deliberately does NOT prove (surfaced in the result + `--help`). */
@@ -162,6 +171,32 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
   // static boot only degrades its /health. Only the document was read here, so nothing was checked.
   'that the declared frontend directories hold servable built assets (only the document was read; an unservable mount is refused fail-closed at boot)',
 ] as const;
+
+/**
+ * The boundary a CLAIMED SECTION has, and the one entry above that is NOT a refusal met after the
+ * document validates: it is met INSTEAD of the validation this arm just ran. This preview validates
+ * the document with the deployment's packs loaded, so a top-level key a pack claims is judged by its
+ * owner. The boot does not: `deployDeclaredSpec` re-reads the document and validates it with the CORE
+ * grammar alone BEFORE it resolves a single pack, and that grammar rejects every key it does not own.
+ * `--check-env`, which reads the boot's own module, reports exactly that refusal for such a document.
+ *
+ * So it is stated, in the verdict, rather than left for a `deploy` to discover — a claimed section is
+ * the one shape for which `ok:true` here is furthest from "it boots".
+ *
+ * APPENDED FOR A DOCUMENT THAT WRITES ONE, NOT FOR ONE WHOSE PACKS CLAIM ONE. The two differ, and the
+ * entry is only true of the first: what a pack claims is a fact about the deployment, while the boot's
+ * core-grammar parse meets what the DOCUMENT wrote. A document that references a claiming pack and
+ * writes none of the keys it claims is written entirely in the grammar the boot has — it carries the
+ * claim line, and `--check-env` reports no refusal for it, so appending this entry there would send an
+ * operator to look for a refusal that is not there. That is the wrong-remedy report this seam exists to
+ * remove, and it would be reintroduced on the surface added to be honest about the boot. Every verdict
+ * that does not write a claimed key therefore keeps the boundary list it had.
+ */
+const BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION =
+  'that the boot accepts a top-level section an extension pack claims: this preview validated the ' +
+  "document with the deployment's packs loaded, but the boot validates it with the core grammar " +
+  'alone before it resolves any pack, and that grammar rejects a key it does not own (`--check-env`, ' +
+  "which reads the boot's own module, reports that refusal for this document)";
 
 /**
  * The `--check-env` verdict (JSON, stdout). It is the `@rayspec/server` boot-environment report — the
@@ -464,26 +499,48 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
     // the verdict is the validation `doctor` runs plus the names the document declares.
-    const backend = parseSpec(specText);
+    //
+    // It is the validation `doctor` runs including its packs: this is the profile whose grammar carries
+    // `extensions[]`, and the boot this previews resolves them from this same deployment tree. A
+    // document with no pack takes the unchanged `parseSpec` and is unaffected.
+    const fromTree = await parseFromDeploymentTree(specPath, specText);
+    const backend =
+      fromTree === undefined
+        ? parseSpec(specText)
+        : fromTree.spec !== undefined
+          ? ({ ok: true, value: fromTree.spec } as const)
+          : ({ ok: false, errors: fromTree.errors } as const);
     if (!backend.ok) return { ...base, errors: specDidNotValidate(backend.errors) };
     // A backend document MAY also declare frontend mounts (examples/notes-ui does). It is not the
     // static profile — it boots the full platform, which GATES on every mount — so the mounts are
     // reported here rather than silently dropped; omitted entirely when the document declares none.
     const mounts = backend.value.frontend ?? [];
-    return {
-      ...base,
-      ok: true,
-      backendProfile: {
-        profile: 'rayspec',
-        stores: backend.value.stores.map((store) => store.name),
-        routes: backend.value.api.map((route) => `${route.method} ${route.path}`),
-        agents: backend.value.agents.map((agent) => agent.id),
-        handlers: backend.value.handlers.map((handler) => handler.id),
-        ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
+    const claimedSections = fromTree?.claimedSections ?? [];
+    // The claim LINE rides every document whose packs claim a section; the boot BOUNDARY rides only a
+    // document that actually writes one, which is the only document the boot's core-grammar parse
+    // refuses. See the constant.
+    const writtenSections = fromTree?.writtenSections ?? [];
+    return withClaimedSections(
+      {
+        ...base,
+        ok: true,
+        backendProfile: {
+          profile: 'rayspec',
+          stores: backend.value.stores.map((store) => store.name),
+          routes: backend.value.api.map((route) => `${route.method} ${route.path}`),
+          agents: backend.value.agents.map((agent) => agent.id),
+          handlers: backend.value.handlers.map((handler) => handler.id),
+          ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
+        },
+        errors: [],
+        // A claimed section the document WROTE is also a boundary this preview does not cross.
+        notProven:
+          writtenSections.length > 0
+            ? [...BACKEND_DRY_RUN_NOT_PROVEN, BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION]
+            : BACKEND_DRY_RUN_NOT_PROVEN,
       },
-      errors: [],
-      notProven: BACKEND_DRY_RUN_NOT_PROVEN,
-    };
+      claimedSections,
+    );
   }
 
   const {

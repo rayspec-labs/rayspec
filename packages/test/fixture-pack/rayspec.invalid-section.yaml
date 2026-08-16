@@ -1,0 +1,14 @@
+# The same deployment, with two defects INSIDE the claimed section and none outside it: the required
+# `retentionDays` is not an integer of at least 1, and `retainForever` is a key the pack's grammar
+# does not declare. Neither is visible to the core grammar — the section belongs to the pack — so
+# every violation reported for this document is one the pack's own validator produced.
+version: '1.0'
+metadata:
+  name: fixture-pack-deployment
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: 1.0.0
+auditing:
+  retentionDays: 0
+  retainForever: true

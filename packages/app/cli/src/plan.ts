@@ -80,6 +80,7 @@ import {
   type SpecWarning,
   type StoreSpec,
 } from '@rayspec/spec';
+import { parseFromDeploymentTree, withClaimedSections } from './pack-sections.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 import {
   shadowApply as defaultShadowApply,
@@ -188,6 +189,17 @@ export interface PlanResult {
   readonly specWarnings?: SpecWarning[];
   /** A human-readable one-line-per-advisory summary of `specWarnings` (its text surface, as `gateSummary` is the gate's). */
   readonly specWarningSummary?: string;
+  /**
+   * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
+   * section key and the pack that owns it — `plan` is the command an operator debugs with, so the key
+   * that is neither the core grammar's nor an error is named here rather than left to be inferred.
+   * Present only for a document that references a pack, and only once THE PLANNED DOCUMENT's own parse
+   * validated — so a pack-free plan's envelope stays byte-identical. It can therefore ride an
+   * `ok:false` envelope whose refusal came from a later step (an `--against` baseline that did not
+   * validate, a blocked gate): the claim is a fact about the document that was planned, and it is
+   * exactly as true when the plan goes on to fail. NEVER affects `ok`.
+   */
+  readonly claimedSections?: readonly string[];
 }
 
 /** The read-only guard's refusal message (kept identical across first-materialize + update mode; secret-free). */
@@ -653,16 +665,45 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
 // Family handlers.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The backend-profile plan: `spec.stores` are the declared stores; update mode diffs old→new. */
+/** A spec file the CLI read: its text, and the resolved path whose directory is the deployment tree. */
+interface SpecFile {
+  readonly text: string;
+  readonly path: string;
+}
+
+/**
+ * The backend-profile plan: `spec.stores` are the declared stores; update mode diffs old→new.
+ *
+ * BOTH documents are parsed with the packs of ONE deployment — the one being planned, whose tree is
+ * the NEW document's. The baseline gets the pack-aware parse deliberately: it is a prior revision of
+ * the same deployment's document, so a claimed section it carries is as owned as the new one's, and
+ * parsing it with the core grammar alone would refuse the baseline as an unknown field and block an
+ * update the deployment can perform. It gets that parse from the DEPLOYMENT's tree just as
+ * deliberately: `--against` takes a diff INPUT, a file the operator produced wherever it suited them
+ * (`git show HEAD~1:rayspec.yaml > …`), and the packs able to validate it are the installed ones — not
+ * whatever happens to sit beside that file, which would be both the wrong pack set and pack code
+ * imported out of a directory nobody named as a deployment.
+ */
 async function planRaySpec(
-  newText: string,
-  oldText: string | undefined,
+  next: SpecFile,
+  priorText: string | undefined,
   allowlist: AllowlistEntry[],
   opts: RunPlanOpts,
 ): Promise<PlanResult> {
-  const parsed = parseSpec(newText);
+  const newText = next.text;
+  const fromTree = await parseFromDeploymentTree(next.path, newText);
+  const claimedSections = fromTree?.claimedSections ?? [];
+  const parsed =
+    fromTree === undefined
+      ? parseSpec(newText)
+      : fromTree.spec !== undefined
+        ? ({ ok: true, value: fromTree.spec } as const)
+        : ({ ok: false, errors: fromTree.errors } as const);
   if (!parsed.ok) {
-    return { ok: false, phase: 'validate', ...emptyProjection(), errors: parsed.errors };
+    return withClaimedSections(
+      { ok: false, phase: 'validate', ...emptyProjection(), errors: parsed.errors },
+      claimedSections,
+    );
   }
   const spec = parsed.value;
   const { routes, agents } = projectRoutesAgents(spec);
@@ -674,31 +715,46 @@ async function planRaySpec(
   const specWarnings = lintSpecWarnings(spec);
 
   let oldStores: StoreSpec[] | undefined;
-  if (oldText !== undefined) {
-    const parsedOld = parseSpec(oldText);
+  if (priorText !== undefined) {
+    // `next.path` — the baseline is a prior revision of THIS deployment's document, so its packs are
+    // this deployment's packs. The baseline file's own directory is a diff input's location, never a
+    // deployment tree.
+    const priorFromTree = await parseFromDeploymentTree(next.path, priorText);
+    const parsedOld =
+      priorFromTree === undefined
+        ? parseSpec(priorText)
+        : priorFromTree.spec !== undefined
+          ? ({ ok: true, value: priorFromTree.spec } as const)
+          : ({ ok: false, errors: priorFromTree.errors } as const);
     if (!parsedOld.ok) {
-      return withSpecWarnings(
-        { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors },
-        specWarnings,
+      return withClaimedSections(
+        withSpecWarnings(
+          { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors },
+          specWarnings,
+        ),
+        claimedSections,
       );
     }
     oldStores = parsedOld.value.stores;
   }
 
-  return withSpecWarnings(
-    await planStores({
-      newStores: spec.stores,
-      oldStores,
-      allowlist,
-      opts,
-      routes,
-      agents,
-      // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
-      // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
-      firstMaterializeSql: () =>
-        (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
-    }),
-    specWarnings,
+  return withClaimedSections(
+    withSpecWarnings(
+      await planStores({
+        newStores: spec.stores,
+        oldStores,
+        allowlist,
+        opts,
+        routes,
+        agents,
+        // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
+        // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
+        firstMaterializeSql: () =>
+          (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
+      }),
+      specWarnings,
+    ),
+    claimedSections,
   );
 }
 
@@ -849,10 +905,13 @@ export async function runPlan(
   positionals: readonly string[],
   opts: RunPlanOpts = {},
 ): Promise<PlanResult> {
-  // Read the NEW spec fail-closed (same hardening as doctor).
+  // Read the NEW spec fail-closed (same hardening as doctor). The RESOLVED path is kept, not just the
+  // text: its directory is the deployment tree the document's packs are resolved within.
   let text: string;
+  let specPath: string;
   try {
-    text = await readSpecFile(resolveSpecPath(positionals));
+    specPath = resolveSpecPath(positionals);
+    text = await readSpecFile(specPath);
   } catch (e) {
     if (e instanceof ReadSpecError) {
       return {
@@ -866,7 +925,9 @@ export async function runPlan(
   }
   const newKind = detectSpecKind(text);
 
-  // --against: read the PRIOR spec (jailed) and require the SAME family (a cross-family diff is undefined).
+  // --against: read the PRIOR spec (jailed) and require the SAME family (a cross-family diff is
+  // undefined). Its path is used to READ it and for nothing else: the baseline is a diff input, and
+  // the deployment whose packs judge both documents is the new document's.
   let oldText: string | undefined;
   if (opts.against !== undefined) {
     try {
@@ -970,5 +1031,5 @@ export async function runPlan(
 
   return newKind === 'product'
     ? planProduct(text, oldText, allowlist, opts)
-    : planRaySpec(text, oldText, allowlist, opts);
+    : planRaySpec({ text, path: specPath }, oldText, allowlist, opts);
 }

@@ -25,6 +25,7 @@
 import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import {
+  type AnySpecParse,
   applyLintSuppressions,
   lintSpecWarnings,
   parseAnySpec,
@@ -33,6 +34,7 @@ import {
   type SuppressedSpecWarning,
   specError,
 } from '@rayspec/spec';
+import { parseFromDeploymentTree, withClaimedSections } from './pack-sections.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
 /**
@@ -49,6 +51,13 @@ export interface DoctorResult {
   readonly errors: SpecError[];
   readonly warnings: SpecWarning[];
   readonly suppressed?: SuppressedSpecWarning[];
+  /**
+   * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
+   * section key and the pack that owns it. Present only for a document that references a pack and
+   * validated, so a pack-free document's envelope is byte-identical to what it was before the field
+   * existed. It never affects `ok`: it states who owns a key, not whether anything is wrong.
+   */
+  readonly claimedSections?: readonly string[];
 }
 
 /**
@@ -75,7 +84,17 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
     throw e;
   }
 
-  const parsed = parseAnySpec(text);
+  // The pack-aware parse when this deployment's document references a pack — the same loader, from
+  // the same tree, the boot uses. `undefined` ⇒ nothing to resolve, and the unchanged `parseAnySpec`
+  // answers exactly as it always did. A pack-aware parse validates the BACKEND profile (the only one
+  // whose grammar carries `extensions[]`), so its outcome is re-expressed in that profile's terms.
+  const fromTree = await parseFromDeploymentTree(specPath, text);
+  const parsed: AnySpecParse =
+    fromTree === undefined
+      ? parseAnySpec(text)
+      : fromTree.spec !== undefined
+        ? { ok: true, kind: 'rayspec', spec: fromTree.spec }
+        : { ok: false, kind: 'rayspec', errors: fromTree.errors };
   const errors: SpecError[] = parsed.ok ? [] : [...parsed.errors];
   // NON-FATAL advisories: only a valid backend-profile (rayspec) doc has stores/FKs to inspect (the
   // product profile has its own store handling). Warnings never affect `ok`. The nodes'
@@ -120,8 +139,12 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
   }
 
   // `suppressed` is emitted only when non-empty: a suppression-free document's envelope (and its
-  // serialized bytes) stays exactly what it was before the field existed.
-  return suppressed.length > 0
-    ? { ok: errors.length === 0, errors, warnings, suppressed }
-    : { ok: errors.length === 0, errors, warnings };
+  // serialized bytes) stays exactly what it was before the field existed. `claimedSections` is woven
+  // on under the same rule.
+  return withClaimedSections(
+    suppressed.length > 0
+      ? { ok: errors.length === 0, errors, warnings, suppressed }
+      : { ok: errors.length === 0, errors, warnings },
+    fromTree?.claimedSections ?? [],
+  );
 }

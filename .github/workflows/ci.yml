@@ -5,7 +5,7 @@ name: CI
 #
 #   lane1-deterministic  — no Postgres, no secrets. install → typecheck → lint → build →
 #                          gitleaks → the non-DB platform gates → check:deploy-entrypoint →
-#                          gate:parity → the deterministic test subset (the 23 non-DB packages).
+#                          gate:parity → the deterministic test subset (the 25 non-DB packages).
 #                          REQUIRED merge check. Fast, hermetic.
 #
 #   lane2-db             — ephemeral Postgres service. install → build → the DB gates
@@ -296,15 +296,15 @@ jobs:
       - name: Parity wire-golden / replay gate
         run: pnpm gate:parity
 
-      # ── Deterministic test subset — the 23 non-DB, non-parity packages ────────────────────────────
+      # ── Deterministic test subset — the 25 non-DB, non-parity packages ────────────────────────────
       # Split by turbo --filter (NOT self-skip): under CI=true the DB ran-guards HARD-FAIL when
       # DATABASE_URL is absent, so the 9 Postgres-backed packages are excluded here and run only in
       # lane 2. @rayspec/parity is excluded because it ran as the gate step above. No DATABASE_URL is
       # set → this lane touches no Postgres. @spike/* matches none of the filters below, so it never
       # enters this scope.
       #
-      # The count, derived from the filters: 32 @rayspec/* workspace members − the 9 Postgres-backed
-      # ones − @rayspec/parity + the `rayspec` launcher = 23. Recount after adding or moving a package
+      # The count, derived from the filters: 34 @rayspec/* workspace members − the 9 Postgres-backed
+      # ones − @rayspec/parity + the `rayspec` launcher = 25. Recount after adding or moving a package
       # with `pnpm exec turbo run test <the filters below> --dry-run=text` and read "Packages in Scope".
       #
       # `rayspec` is the UNSCOPED launcher npm serves when a user installs the product, so the

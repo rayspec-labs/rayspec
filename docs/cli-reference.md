@@ -144,12 +144,35 @@ it dispatches on the `product:` discriminant.
   { "ok": true, "errors": [], "warnings": [], "suppressed": [{ "code": "cron_tenant_required", "because": "…", "path": "triggers[0].kind" }] }
   ```
 
+  A fifth key, `claimedSections`, is present **only** when the document
+  references an [extension pack](./concepts.md) that claims a top-level section.
+  A claimed key is owned by the pack, not by the core grammar, so `doctor` runs
+  the same loader the boot runs, from the same deployment tree, and reports one
+  neutral line per claim naming the key and the pack that owns it. It never
+  affects `ok` — it states who owns a key, not that anything is wrong:
+
+  ```json
+  { "ok": true, "errors": [], "warnings": [], "claimedSections": ["section 'auditing' is claimed by extension pack 'audit-pack'"] }
+  ```
+
+  A document that references no pack loads no pack, reaches no pack module, and
+  gets no `claimedSections` key at all.
+
   On failure, each entry carries a closed `code`, a `message`, and an optional
   `path`:
 
   ```json
   { "ok": false, "errors": [{ "code": "unknown_field", "message": "…", "path": "stores[0].colums" }], "warnings": [] }
   ```
+
+  Two of those codes are about the packs themselves, and they prescribe opposite
+  actions: `extension_pack_unavailable` means the pack is **not on this
+  deployment** (install it, or drop it from `extensions[]` together with the
+  sections it claims), while `extension_pack_refused` means the pack **is** here
+  and was refused — a version pin that does not match its manifest, two packs
+  claiming one key — so deploying it again changes nothing. A violation **inside**
+  a claimed section is the pack's own, reported at `<section>.<field>` with the
+  same codes a core section's violation carries.
 
 - **Exit:** `0` if valid, `1` otherwise.
 
@@ -239,6 +262,18 @@ introspects a live target.
   when there are none. They are document findings, distinct from the operational
   stderr warning the read-only guard emits for a broken `DATABASE_URL_FILE`
   mount.
+
+  A document that references an extension pack claiming a top-level section also
+  carries `claimedSections` — the same one-line-per-claim list, from the same
+  loader run against the same deployment tree, that [`doctor`](#doctor)
+  documents. `plan` is the command an operator debugs with, which is why the key
+  that is neither the core grammar's nor an error is named rather than left to be
+  inferred. It never affects `ok`, and it is absent for a pack-free document.
+  In update mode the `--against` **baseline** is parsed with the packs of the
+  deployment being planned — the tree of the **new** document. The baseline is a
+  prior revision of that same deployment's document handed in as a diff input, so
+  it may be kept anywhere (`git show HEAD~1:rayspec.yaml > /tmp/prior.yaml`) and
+  the packs that can validate it are the installed ones either way.
 
 - **Exit:** `0` if the spec validated, the gate did not block, and any shadow
   applied cleanly; `1` otherwise.
@@ -736,7 +771,24 @@ change is applied by the explicit `--apply-migration` flag below.
   [spec-reference → `frontend`](./spec-reference.md#frontend); the mounts themselves
   are echoed in `frontendMounts`, so the verdict names what boot will check). A
   document the backend grammar rejects reports **its own** violations (a
-  `dangling_ref`, an unknown key) — the same errors `doctor` reports for it.
+  `dangling_ref`, an unknown key) — the same errors `doctor` reports for it. It is
+  also the profile whose grammar carries `extensions[]`, so a document that
+  references a pack claiming a top-level section is validated with that pack
+  loaded and carries the same `claimedSections` list [`doctor`](#doctor) and
+  [`plan`](#plan) report. A document that **writes** such a section is also the one
+  place `ok:true` here is furthest from *it boots*, and `notProven` says so in the
+  same verdict: **the boot validates the document with the core grammar alone**,
+  before it resolves any pack, so a top-level key a pack claims is refused there —
+  the pack-aware parse is a diagnostic surface, and the boot has not been taught it
+  yet. (`--check-env` still loads no pack: running one is exactly the side effect
+  that command promises not to have — and for such a document it reports the boot's
+  refusal, which is the same fact from the boot's own module.)
+  That entry rides **exactly the documents that write a claimed key**, not every
+  document whose packs claim one: a document that references the pack without
+  writing the section it claims is written entirely in the grammar the boot has, so
+  it carries the `claimedSections` line and keeps the boundary list every other
+  backend verdict gets — being sent to `--check-env` for a refusal that is not
+  there would be the wrong-remedy report this surface exists to remove.
 
   A **frontend-only** document has nothing to compose either, and what its check does
   not prove narrows instead: it reads only the document, so it says nothing about

@@ -23,6 +23,7 @@
     { "path": "./packages/adapters/anthropic" },
     { "path": "./packages/adapters/pi" },
     { "path": "./packages/test/parity" },
+    { "path": "./packages/test/fixture-pack" },
     { "path": "./packages/app/cli" },
     { "path": "./packages/app/rayspec" }
   ]

@@ -7,6 +7,7 @@
   "references": [
     { "path": "../../kernel/spec" },
     { "path": "../../kernel/db" },
+    { "path": "../../kernel/platform" },
     { "path": "../../compose/product-yaml" }
   ],
   "include": ["src/**/*.ts"],
