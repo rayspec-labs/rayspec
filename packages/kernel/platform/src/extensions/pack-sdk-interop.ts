@@ -1,13 +1,16 @@
 /**
- * INTEROP pins between the pack manifest a deployment loads and the manifest surface an out-of-tree
- * pack compiles against (`@rayspec/pack-sdk`).
+ * INTEROP pins between what a deployment loads and CALLS, and the surface an out-of-tree pack
+ * compiles against (`@rayspec/pack-sdk`).
  *
  * `@rayspec/pack-sdk` RE-EXPRESSES the manifest half of this module: it names the fields a
  * contribution is addressed by and leaves the rest of each section body open, so a pack can annotate
- * its entry export without depending on the whole platform. A re-expression is only worth anything
- * if the value this module actually produces satisfies it — and nothing here placed the two side by
- * side, so a re-expressed shape the helper's own result could not be assigned to compiled cleanly on
- * both sides and would have failed only in a pack author's repository.
+ * its entry export without depending on the whole platform. It re-expresses the HANDLER half too —
+ * the init the engine passes a contributed tool or route, and the function shape it calls — because a
+ * pack that declares a contribution has to write the module the declaration points at, and the
+ * package that carries the platform's own handler contract is private. A re-expression is only worth
+ * anything if the value this repository actually produces satisfies it — and nothing here placed the
+ * two side by side, so a re-expressed shape the helper's own result could not be assigned to compiled
+ * cleanly on both sides and would have failed only in a pack author's repository.
  *
  * WHY A NON-TEST SOURCE FILE. `typecheck` runs `tsc -p`, whose tsconfig EXCLUDES `*.test.ts`, and
  * `test` runs `vitest run` WITHOUT `--typecheck`, so a type-level assertion in a test file would
@@ -21,7 +24,8 @@
  * both sides spell out and the per-kind arms that make a failure name its own section. The SERVICE
  * kind is pinned in both directions, because it is the one kind where values cross the seam in both:
  * the deployment builds the boot context a pack's `boot` is annotated against, and the pack exports
- * the module this loader calls.
+ * the module this loader calls. The HANDLER kinds are pinned the same two ways, and for the same
+ * reason: the engine builds the init, the pack exports the function the engine calls.
  *
  * WHAT IS DELIBERATELY NOT PINNED: the REVERSE direction. A value typed as `PackManifest` is NOT
  * accepted by `defineExtension`, and that is the design: the pack fragment types pin the addressing
@@ -32,6 +36,13 @@
  * scope of this file.
  */
 import type {
+  HandlerDb,
+  RouteHandler,
+  RouteHandlerInit,
+  ToolHandler,
+  ToolHandlerInit,
+} from '@rayspec/handler-sdk';
+import type {
   DefinedPack,
   PackAgentFragment,
   PackApiRouteFragment,
@@ -40,8 +51,13 @@ import type {
   PackManifest,
   PackManifestBrand,
   PackMigrationChain,
+  PackRouteHandler as PackSdkRouteHandler,
+  PackRouteHandlerInit as PackSdkRouteHandlerInit,
   PackServiceContext as PackSdkServiceContext,
   PackServiceModule as PackSdkServiceModule,
+  PackStoreDb as PackSdkStoreDb,
+  PackToolHandler as PackSdkToolHandler,
+  PackToolHandlerInit as PackSdkToolHandlerInit,
   TurnDispatch as PackSdkTurnDispatch,
   PackSectionClaim,
   PackServiceDeclaration,
@@ -154,6 +170,37 @@ type _DispatchCapabilitiesAgree = Assert<
 >;
 
 /**
+ * The HANDLER kinds a pack can WRITE, in the three places they can diverge. A pack that declares a
+ * `tooling` or an `api` contribution has to author the module the declaration points at, and it
+ * authors it against the pack surface — so these are the arms that decide whether that module
+ * compiles in somebody else's repository.
+ *
+ *  - THE INIT the engine BUILDS must satisfy what a pack ANNOTATES against, or the pack's own
+ *    `(args, init: PackToolHandlerInit)` would refuse the argument the engine hands it. Both arms are
+ *    named separately so a divergence says which chokepoint's init stopped fitting.
+ *  - THE FUNCTION a pack EXPORTS must satisfy the shape the resolver and the route interpreter call,
+ *    so the pack surface's handler type must extend the platform's. This arm is the one that would go
+ *    red if the two inits drifted in the OTHER direction: a function's parameters are contravariant,
+ *    so a pack init that promised MORE than the engine builds fails right here.
+ *  - THE STORE DOOR is called out on its own because it is the one member of the init the pack
+ *    surface re-expresses that has behaviour rather than shape — a method the pack surface named but
+ *    this facade never implemented would be a runtime `undefined` a pack's build cleared.
+ */
+type _ToolInitFitsWhatAPackAnnotates = Assert<
+  ToolHandlerInit extends PackSdkToolHandlerInit ? true : false
+>;
+type _RouteInitFitsWhatAPackAnnotates = Assert<
+  RouteHandlerInit extends PackSdkRouteHandlerInit ? true : false
+>;
+type _APackToolHandlerIsDispatchableHere = Assert<
+  PackSdkToolHandler extends ToolHandler ? true : false
+>;
+type _APackRouteHandlerIsServableHere = Assert<
+  PackSdkRouteHandler extends RouteHandler ? true : false
+>;
+type _StoreDoorFitsWhatAPackAnnotates = Assert<HandlerDb extends PackSdkStoreDb ? true : false>;
+
+/**
  * Both sides spell the brand literal out. The pack surface ships no runtime, so it cannot import
  * the constant — it declares a copy, and a copy that drifts makes every loader check reject every
  * pack. Pinned in BOTH directions so neither a widening nor a narrowing passes.
@@ -182,8 +229,34 @@ const pins: [
   _ServiceContextFitsWhatAPackAnnotates,
   _APackServiceIsBootableHere,
   _DispatchCapabilitiesAgree,
+  _ToolInitFitsWhatAPackAnnotates,
+  _RouteInitFitsWhatAPackAnnotates,
+  _APackToolHandlerIsDispatchableHere,
+  _APackRouteHandlerIsServableHere,
+  _StoreDoorFitsWhatAPackAnnotates,
   _BrandLiteralsAgree,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true];
+] = [
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+];
 
 /**
  * The pins, widened. The exported TYPE is deliberately `readonly boolean[]` rather than the tuple
