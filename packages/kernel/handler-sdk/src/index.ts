@@ -1,10 +1,12 @@
 /**
- * @rayspec/handler-sdk — the ONLY package an escape-hatch handler may import.
+ * @rayspec/handler-sdk — the package a DEPLOYMENT's own escape-hatch handler is written against.
  *
  * This is the public, TYPE-ONLY contract for a trusted-author escape-hatch handler (the escape-hatch
  * layer): the `HandlerInit` the engine constructs + injects, and the neutral data shapes a handler
- * returns. An escape-hatch module imports ONLY this — never `@rayspec/{platform,db,core,api-auth}`
- * internals or any agent SDK type. The `gate:handler-imports` CI tripwire enforces that boundary.
+ * returns. An escape-hatch module imports a type-only handler contract and nothing else — this
+ * package, or `@rayspec/pack-sdk` for a handler an extension pack contributes — never
+ * `@rayspec/{platform,db,core,api-auth}` internals or any agent SDK type. The `gate:handler-imports`
+ * CI tripwire enforces that boundary over both.
  *
  * WHY TYPE-ONLY: a handler receives its capabilities by INJECTION (the engine builds the concrete
  * `HandlerInit` per run and passes it in). The handler never CONSTRUCTS a capability, so the SDK
@@ -29,8 +31,10 @@
 // Pure text utilities re-exported from @rayspec/core. These are stateless,
 // dependency-free functions (UAX-29 word tokenization + a token-run subset check) — NOT a capability,
 // platform internal, or runtime state — so re-exporting them keeps handler-sdk a thin, serializable-
-// seam SDK. A pack handler is confined to @rayspec/handler-sdk by the `gate:handler-imports` tripwire,
-// so this conduit is how it CONSUMES the harvested tokenizer instead of keeping its own copy.
+// seam SDK. A handler is confined by the `gate:handler-imports` tripwire to a type-only handler
+// contract (this package, or @rayspec/pack-sdk for a handler an extension pack contributes), so this
+// conduit is how a handler that names THIS package CONSUMES the harvested tokenizer instead of
+// keeping its own copy.
 // The shared bounded body reader — re-exported from @rayspec/core on the same conduit as the
 // tokenizer (a stateless, dependency-free byte primitive; not a capability or platform internal). A
 // capability binding (e.g. audio ingest) uses it to cap the bytes it buffers from the raw request

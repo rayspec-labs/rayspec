@@ -143,8 +143,10 @@ jobs:
       - name: Adapter-no-handlers gate
         run: pnpm gate:adapter-handlers
 
-      # An escape-hatch handler module may import ONLY @rayspec/handler-sdk — never a platform
-      # internal or an agent SDK, and may not '..'-tunnel into platform source.
+      # An escape-hatch handler module may import ONLY a type-only handler contract —
+      # @rayspec/handler-sdk (a deployment's own handler) or @rayspec/pack-sdk (a handler contributed
+      # by an extension pack) — never a platform internal or an agent SDK, and may not '..'-tunnel
+      # into platform source.
       - name: Handler-imports gate
         run: pnpm gate:handler-imports
 
