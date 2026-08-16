@@ -45,8 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build on that identifier anywhere reachable from a pack's `handlers/` subtree.
   **The boot now resolves a deployment's packs before it validates the document**, which is what lets a
   service be handed its own validated section. A top-level key a pack claims is therefore accepted at
-  boot exactly as `doctor`, `plan` and `deploy --dry-run` already validated it; a key no pack claims is
-  still refused **by the boot** with the same `unknown_field`.
+  boot exactly as `plan`, `deploy --dry-run` and `doctor --with-packs` already validated it; a key no
+  pack claims is still refused **by the boot** with the same `unknown_field`.
   **`rayspec deploy --check-env` is the one command that cannot tell those two apart, and it now says
   so instead of guessing.** It still loads no pack — that is the side effect the command promises not
   to have — and without a loaded pack it cannot know which keys are claimed. So on a document that
@@ -54,10 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not, names each one in `notChecked`, and raises no `unknown_field` for any of them. **The
   consequence, stated plainly: on a pack-bearing document `--check-env` no longer catches a mistyped
   top-level section** — `auditting:` for a claimed `auditing:` is reported as a key whose owner it did
-  not ask about, while the boot (and `doctor`, `plan`, `deploy --dry-run`, all of which do load the
-  packs) still refuses it. Before this release `--check-env` refused it, because it validated with the
-  core grammar alone and therefore also refused every legitimately claimed section. Run `doctor` for
-  the verdict that has read the packs; `--check-env` answers about the environment. A document that
+  not ask about, while the boot (and `plan`, `deploy --dry-run`, `doctor --with-packs`, all of which
+  do load the packs) still refuses it. Before this release `--check-env` refused it, because it
+  validated with the core grammar alone and therefore also refused every legitimately claimed section.
+  Run `doctor --with-packs` for the verdict that has read the packs; `--check-env` answers about the
+  environment. A document that
   declares no pack is unchanged: nothing is lifted, and an unknown key is refused exactly as before.
   A deployment that references no pack boots exactly as before.
   The seam is exercised end to end by the in-tree `packages/test/fixture-pack`, which now brings two
@@ -165,8 +166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the from-clean-DB gate applies it through the real wiring and reads back that the platform
   journal is untouched.
 
-- **`rayspec doctor`, `rayspec plan` and `rayspec deploy --dry-run` now say who owns a claimed
-  top-level section.** All three resolve the deployment's extension packs before they judge the
+- **`rayspec plan`, `rayspec deploy --dry-run` and `rayspec doctor --with-packs` now say who owns a
+  claimed top-level section.** All three resolve the deployment's extension packs before they judge the
   document — the same loader the boot runs, over the same deployment tree (`RAYSPEC_HANDLER_ROOT`
   when the deployment sets one, otherwise the directory the spec file sits in) — so a top-level key a
   pack claims is validated by that pack instead of being reported as `unknown_field`. Each command's
@@ -177,12 +178,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was before the field existed. The three commands now also report the two typed pack failures an
   operator has to tell apart — `extension_pack_unavailable` (the pack is not on this deployment) and
   `extension_pack_refused` (it is here and was refused) — instead of an unknown field pointing at the
-  section, which sent an operator to delete configuration rather than install a pack. `plan --against`
-  parses its baseline with the same deployment's packs — the baseline is a prior revision of that
-  deployment's document supplied as a diff input, so the packs that validate it are the installed
-  ones wherever the file itself is kept — and a prior revision carrying a claimed section therefore no
-  longer blocks the update it is the baseline for. A claimed section carries **no** boot boundary with
-  it: the boot resolves the deployment's packs before it validates the document (see the `services`
+  section, which sent an operator to delete configuration rather than install a pack. (`doctor` needs
+  the `--with-packs` flag for all of the above: it was narrowed later in this same cycle so that the
+  first command run against a freshly cloned repository imports no pack module — see
+  **`rayspec doctor` no longer runs code out of the deployment tree** under `### Changed`.)
+  `plan --against` parses its baseline with the same deployment's packs — the baseline is a prior
+  revision of that deployment's document supplied as a diff input, so the packs that validate it are
+  the installed ones wherever the file itself is kept — and a prior revision carrying a claimed
+  section therefore no longer blocks the update it is the baseline for. A claimed section carries
+  **no** boot boundary with it: the boot resolves the deployment's packs before it validates the
+  document (see the `services`
   entry above), so a document that **writes** a claimed key boots exactly as these commands validated
   it, and its verdict carries the boundary list every other backend verdict gets. No further
   pack-contributed detail is reported: what a pack configures stays the pack's business. A document
@@ -396,6 +401,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   annotates must satisfy what the engine calls — so a drift fails this repository's own build instead
   of a pack author's. The in-tree fixture pack now contributes both contracted kinds through real
   declarations and builds against `@rayspec/pack-sdk` alone.
+
+### Changed
+
+- **`rayspec doctor` no longer runs code out of the deployment tree, and `--with-packs` is how you ask
+  it to.** `doctor` is documented as a static check of a document — the first command anyone runs
+  against a repository they have just cloned — and it resolved the deployment's extension packs before
+  judging that document. Resolving a pack means `import()`ing its entry module and the schema module of
+  each section it claims, so third-party code out of `extensions[]` executed in-process as a side
+  effect of the check. Measured with a pack whose entry writes a file at import: `doctor` returned
+  `ok: true` and the file appeared.
+  **What a consumer observes.** `rayspec doctor <spec.yaml>` now imports no module out of the
+  deployment tree at all. Its filesystem reach is otherwise unchanged and unrelated: a backend
+  document declaring `frontend[]` mounts still has each mount's `dir` `stat`ed
+  (`frontend_dir_missing` on a miss), and the CLI's startup `.env` auto-load still runs ahead of every
+  subcommand. A document that declares a pack carries one new envelope key,
+  `notResolved`: **one** neutral line (not a warning, and never a per-section list) saying that no pack
+  was loaded, so nothing about the packs was checked — neither that they are installed here, nor that
+  the loader would accept them, nor the grammar of any top-level section they claim.
+  It does not affect `ok` or the exit code, and a document that declares no pack does not
+  carry the key — a pack-free envelope is byte-identical to before. Because only a loaded pack can say
+  which top-level keys are claimed, a key the core grammar does not own is now **accepted unexamined**
+  on a pack-bearing document rather than refused: that includes a mistyped section (`auditting:` for a
+  claimed `auditing:`), and it is the deliberate trade, since refusing it sends you to delete
+  configuration that is in fact correct. Two verdicts you used to get from a bare `doctor` now need the
+  flag: `extension_pack_unavailable` (the pack is not installed here) and `extension_pack_refused` (the
+  pack is here and the loader refuses it — a version pin that does not match its manifest, two packs
+  claiming one top-level key, a `module:` that escapes the deployment tree).
+  **`rayspec doctor --with-packs <spec.yaml>` restores the previous behaviour exactly** — the same
+  loader, the same deployment tree, the same `claimedSections` list naming the pack that owns each
+  claimed key — and its help text says plainly that it runs code from the deployment tree.
+  **`plan`, `deploy --dry-run` and the deploy paths are unchanged**: they resolve the deployment's
+  packs unconditionally, because naming the pack that claims a section is what an operator debugging a
+  deployment needs, and those commands are already understood to read the tree. `deploy --check-env`
+  loaded no pack before this change and still does not.
+  The CLI reference described the whole read-only floor as "no database, no network"; it now states,
+  per command, what that command actually reads.
 
 ### Fixed
 

@@ -5,6 +5,8 @@
  *
  * READ-ONLY DIAGNOSTIC FLOOR (never mutates a real/target DB; never prints secrets):
  *   rayspec doctor <spec.yaml>   STATIC validity (parseSpec; no Postgres).      exit 0 ok / 1 not.
+ *      [--with-packs]             Loads NO extension pack unless asked: --with-packs runs code from
+ *                                 the deployment tree (it imports each pack it resolves).
  *   rayspec plan   <spec.yaml>   the deploy() FRONT-HALF, READ-ONLY dry-run.    exit 0 ok / 1 not.
  *      [--against <old-spec>]     Handles both profiles (backend + product). With --against,
  *      [--allowlist <file.json>]  diffs prior->new into a DELTA (destructive delta BLOCKED unless the
@@ -93,7 +95,14 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     commands: [
       {
         name: 'doctor',
-        block: `  rayspec doctor <spec.yaml>   Static spec validation (parseSpec). Exit 0 if valid, 1 otherwise.`,
+        block: `  rayspec doctor <spec.yaml> [--with-packs]
+                                Static spec validation (parseSpec). Exit 0 if valid, 1 otherwise.
+                                Loads NO extension pack: a top-level section a pack claims is left
+                                unresolved (accepted unexamined, never refused) and the result says
+                                so in one line. --with-packs resolves this deployment's packs
+                                instead, which RUNS CODE FROM THE DEPLOYMENT TREE — it imports each
+                                pack's entry module and the schema module of each section it claims —
+                                and reports which pack claims which section.`,
       },
       {
         name: 'plan',
@@ -384,9 +393,12 @@ function resolveHelpRequest(args: readonly string[]): string | undefined {
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<number> {
   // DEV-DX: auto-load a local `.env` — `$PWD/.env` first, then the install-root `.env` (no-override
   // per key, opt-out via RAYSPEC_SKIP_DOTENV=1) — ONCE at startup so `plan`'s optional shadow-apply
-  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). Harmless to
-  // `doctor` (needs no env); does NOT change plan's read-only guarantee — it only makes DATABASE_URL
-  // readable so the read-only guard has a compare target.
+  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). A DEFAULT
+  // `doctor` needs no env; `doctor --with-packs` DOES read one from here — `RAYSPEC_HANDLER_ROOT`
+  // selects the deployment tree its packs are imported from (`deploymentRootFor` in pack-sections.ts),
+  // so a `.env` here can move the tree that pack code is executed out of. Does NOT change plan's
+  // read-only guarantee — it only makes DATABASE_URL readable so the read-only guard has a compare
+  // target.
   loadLocalDotenvIfPresent();
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns
@@ -446,7 +458,8 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       return result.ok ? 0 : 1;
     }
     case 'doctor': {
-      const result = await runDoctor(parsePositionals(rest));
+      const { positionals, withPacks } = parseDoctorArgs(rest);
+      const result = await runDoctor(positionals, { withPacks });
       await emit(result);
       return result.ok ? 0 : 1;
     }
@@ -534,8 +547,31 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
 }
 
 /**
- * Parse the positional path args for `doctor` (which takes exactly one positional, no flags). An
- * unknown `--flag` is a strict CLI error — preserving the original "doctor rejects unknown flags"
+ * Parse `doctor`'s args: exactly one positional spec path, plus the OPTIONAL boolean `--with-packs`.
+ * Unknown flags stay a strict CLI error. The flag is `doctor`'s alone — `openapi` reads the product
+ * profile, whose grammar carries no `extensions[]` — so it is parsed here rather than in the shared
+ * `parsePositionals`, which would otherwise start accepting it for a command that cannot honour it.
+ */
+function parseDoctorArgs(args: readonly string[]): {
+  positionals: string[];
+  withPacks: boolean;
+} {
+  try {
+    const { positionals, values } = parseArgs({
+      args: [...args],
+      allowPositionals: true,
+      strict: true,
+      options: { 'with-packs': { type: 'boolean' } },
+    });
+    return { positionals, withPacks: values['with-packs'] === true };
+  } catch (e) {
+    throw new CliError(`invalid arguments: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/**
+ * Parse the positional path args for `openapi` (which takes exactly one positional, no flags). An
+ * unknown `--flag` is a strict CLI error — preserving the original "the floor rejects unknown flags"
  * behaviour now that the top level no longer pre-parses the whole vector.
  */
 function parsePositionals(args: readonly string[]): string[] {

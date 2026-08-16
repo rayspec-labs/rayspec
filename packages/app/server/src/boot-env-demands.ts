@@ -754,9 +754,9 @@ export async function checkBootEnv(
   // WHAT THE LIFT COSTS, STATED RATHER THAN DISCOVERED. Which keys a pack claims is knowable only
   // from a loaded pack, so this cannot lift the claimed ones and refuse the rest: on a pack-bearing
   // document it lifts EVERY non-core top-level key, and a MISTYPED section (`auditting` for a claimed
-  // `auditing`) is therefore accepted here and reported as unchecked. It is not accepted anywhere
-  // else — the boot, `doctor`, `plan` and `deploy --dry-run` all load the packs and all still refuse
-  // it — so what is lost is one command's ability to catch a typo, not the refusal. That trade is the
+  // `auditing`) is therefore accepted here and reported as unchecked. Every command that DOES load
+  // the packs still refuses it — the boot, `plan`, `deploy --dry-run` and `doctor --with-packs` — so
+  // what is lost is one command's ability to catch a typo, not the refusal. That trade is the
   // deliberate one: refusing every claimed section (which is what validating with the core grammar
   // alone did) sends an operator to delete correct configuration, and a wrong refusal is worse than a
   // narrower check. `pack-sections.test.ts` pins BOTH halves against one another on one document.
