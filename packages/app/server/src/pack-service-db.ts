@@ -128,12 +128,22 @@ const PINNED_CONSEQUENCE =
  *
  * WHAT IS *NOT* REFUSED: a transaction opened on this door from an UNRELATED async context — a timer
  * the service armed, a second request in flight — is not nesting and runs as its own transaction on
- * its own connection, exactly as before.
+ * its own connection, exactly as before. That includes a context the callback itself CREATED and left
+ * running — the sweep a service arms in the same transaction that writes the row it sweeps — once the
+ * callback has settled, which is what the scope's `open` flag below buys.
  */
 export function makePackServiceDatabase(db: Db): PackServiceDatabase {
   const client = db.$client;
-  /** Open for exactly one callback's duration — how a re-entrant `transaction` is recognised. */
-  const insideTransaction = new AsyncLocalStorage<true>();
+  /**
+   * Open for exactly one callback's duration — how a re-entrant `transaction` is recognised.
+   *
+   * The flag is not ceremony. An `AsyncLocalStorage` store is INHERITED by every async context created
+   * inside the callback, and those contexts OUTLIVE it: a timer armed there, a promise left floating.
+   * Entering a store and never closing it would therefore refuse THEIR transactions forever, long after
+   * this one committed, with a message asserting a transaction that is over. Closing the scope when the
+   * callback settles ends the refusal with the callback rather than with the context tree it created.
+   */
+  const insideTransaction = new AsyncLocalStorage<{ open: boolean }>();
 
   return {
     query: async (sql: string, params: readonly unknown[] = []) => {
@@ -142,28 +152,35 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
     },
 
     transaction: async <T>(fn: (tx: PackServiceDatabase) => Promise<T>): Promise<T> => {
-      if (insideTransaction.getStore() === true) {
+      if (insideTransaction.getStore()?.open === true) {
         throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
       }
+      const scope = { open: true };
       // `client.begin` resolves an ARRAY its callback returns element by element (a `Promise.all`
       // convenience) — but ONLY for a callback that returns one SYNCHRONOUSLY, and the callback below
       // is `async`, so what it returns is always a Promise and that branch cannot fire. The cast is
       // the driver's return type (`UnwrapPromiseArray<T>`) staying deferred over a naked `T`.
       return (await client.begin(async (tx) =>
-        insideTransaction.run(true, async () =>
-          fn({
-            query: async (sql: string, params: readonly unknown[] = []) => {
-              refuseTransactionControl(sql, PINNED_CONSEQUENCE);
-              return (await tx.unsafe(sql, params as never[])) as unknown as Record<
-                string,
-                unknown
-              >[];
-            },
-            transaction: async () => {
-              throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
-            },
-          }),
-        ),
+        insideTransaction.run(scope, async () => {
+          try {
+            return await fn({
+              query: async (sql: string, params: readonly unknown[] = []) => {
+                refuseTransactionControl(sql, PINNED_CONSEQUENCE);
+                return (await tx.unsafe(sql, params as never[])) as unknown as Record<
+                  string,
+                  unknown
+                >[];
+              },
+              transaction: async () => {
+                throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
+              },
+            });
+          } finally {
+            // Ends the refusal with the callback — a context it created and left running is not
+            // nesting once the transaction is over, and must not be refused as if it were.
+            scope.open = false;
+          }
+        }),
       )) as T;
     },
   };

@@ -28,6 +28,12 @@
  *       driver that is not nesting at all but a SECOND connection with a transaction of its own, which
  *       commits under a rolled-back outer one; the counterproof measures exactly that. Two
  *       transactions from UNRELATED contexts are the accept control: they are not nesting and both run.
+ *   (4c) AND THE REFUSAL ENDS WITH THE CALLBACK. The carve-out's headline case is a context the
+ *       callback ITSELF created and left running — arming the periodic sweep in the same transaction
+ *       that writes the row it sweeps — which keeps working once the callback settles. Measured on the
+ *       timer and on a floating promise, with the counterproof beside it: an `AsyncLocalStorage` store
+ *       is INHERITED by such a context, so a scope that is entered and never closed would refuse its
+ *       transactions forever, long after the one that opened it committed.
  *   (5) NO WIDENING: the handle the callback receives is exactly a pack database — `query` and
  *       `transaction`, nothing else. A pack has no tenant to name in or out of a transaction (its
  *       context carries no `tenantId`), and opening one hands it no member that could carry one.
@@ -39,6 +45,7 @@
  * DB ISOLATION: one whole throwaway DATABASE named with process.pid, as the neighbouring boot suites.
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { makeDb } from '@rayspec/db';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -321,6 +328,73 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
     expect([a, b]).toEqual([1, 2]);
     // And so is one opened AFTER the callback returned, on the same door.
     expect(await door.transaction(async (tx) => (await tx.query('SELECT 3 AS n'))[0]?.n)).toBe(3);
+  }, 60_000);
+
+  it('(4c) a context the callback armed keeps working after it settles — the guard ends with the callback', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+
+    // THE ORDINARY SHAPE the carve-out is about: write the opening row and ARM THE PERIODIC SWEEP as
+    // one decision, so a crash between the two cannot leave the row unswept. The timer is a context
+    // CREATED INSIDE the callback and outliving it — not nesting, and not refusable as such.
+    const refusals: string[] = [];
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const returned = await door.transaction(async (tx) => {
+      await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (30, 'armed-the-sweep')");
+      timer = setInterval(() => {
+        void door
+          .transaction(async (sweep) => {
+            await sweep.query('UPDATE pack_tx_ledger SET holder = holder || $1 WHERE id = 30', [
+              '+',
+            ]);
+          })
+          .catch((e: Error) => refusals.push(e.name));
+      }, 20);
+      return 'armed';
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    } finally {
+      if (timer) clearInterval(timer);
+    }
+    expect(returned).toBe('armed');
+    // Every tick RAN: none refused, and the observer reads the sweeps the timer committed.
+    expect(refusals).toEqual([]);
+    const swept = (await observedHolders()).find((h) => h.startsWith('armed-the-sweep'));
+    expect(swept).toMatch(/^armed-the-sweep\+\+/);
+
+    // The same for a promise the callback left FLOATING, which resolves after it returned.
+    let settleFloated: (v: unknown) => void = () => undefined;
+    const floated = new Promise<unknown>((resolve) => {
+      settleFloated = resolve;
+    });
+    await door.transaction(async (tx) => {
+      await tx.query('SELECT 1 AS n');
+      void (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await door
+          .transaction(async (later) => (await later.query("SELECT 'ran' AS v"))[0]?.v)
+          .then(settleFloated, (e: Error) => settleFloated(`REFUSED: ${e.name}`));
+      })();
+      return 'left one floating';
+    });
+    expect(await floated).toBe('ran');
+
+    // COUNTERPROOF — the mechanism WITHOUT that scoping, which is what an `AsyncLocalStorage` entered
+    // and never closed does: the store is INHERITED by a context the callback created, so the value a
+    // guard would branch on is still set long after the transaction committed, and every transaction
+    // that context opens is refused forever with a message asserting a transaction that is over.
+    const inherited = new AsyncLocalStorage<true>();
+    let readAfterwards: unknown = 'the probe never fired';
+    await inherited.run(true, async () => {
+      setTimeout(() => {
+        readAfterwards = inherited.getStore();
+      }, 20);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(readAfterwards).toBe(true);
+
+    await door.query('DELETE FROM pack_tx_ledger WHERE id = 30');
   }, 60_000);
 
   it('(5) the callback is handed a pack database and nothing wider', async () => {

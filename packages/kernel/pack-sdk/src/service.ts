@@ -132,7 +132,9 @@ export interface PackDatabase {
    * genuinely INDEPENDENT transaction on a second pooled connection, which commits even when the outer
    * one rolls back, and blocks until the pool runs out on any row the outer one holds. A transaction
    * opened from an UNRELATED context — a timer the service armed, another request in flight — is not
-   * nesting and is unaffected.
+   * nesting and is unaffected. The refusal lasts exactly as long as `fn` does, so that holds for a
+   * context `fn` ITSELF started and left running — arming the periodic sweep in the same transaction
+   * that writes the row it will sweep — from the moment the callback settles onwards.
    *
    * ⚠ A TRANSACTION IS A RESOURCE DECISION, NOT A FREE CONVENIENCE. The pinned connection is reserved
    * out of the pool the deployment SERVES REQUESTS ON — the HTTP/API pool, four connections by default

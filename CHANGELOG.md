@@ -100,7 +100,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   door it would be a genuinely **independent** transaction on a second pooled connection, which commits
   even when the outer one rolls back and blocks until the pool runs out on any row the outer one holds.
   A transaction opened from an unrelated context — a timer the service armed, another request in
-  flight — is not nesting and is unaffected. **Transaction-control statements are refused on both
+  flight — is not nesting and is unaffected; the refusal lasts exactly as long as the callback does, so
+  that holds for a context the callback itself started and left running (arming the sweep in the same
+  transaction that writes the row it sweeps) from the moment the callback settles onwards. **Transaction-control statements are refused on both
   halves**: `query('BEGIN')` (and `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `START`/`PREPARE TRANSACTION`, …)
   rejects with the same typed error **before the statement reaches the server**, because on a pooled
   handle the driver's own refusal arrives only after the server has already begun the transaction — the
