@@ -18,7 +18,7 @@
  * cannot work at all and wrong for one whose optional recording is simply not wired.
  */
 import type { PackServiceContext, PackServiceModule } from '@rayspec/pack-sdk';
-import { contexts, record, tick } from './observed.js';
+import { contexts, ENV_MARKER_KEY, record, specName, tick } from './observed.js';
 
 /** The shape this pack's own `auditing` grammar accepts (see `../auditing.ts`). */
 interface AuditingSection {
@@ -51,9 +51,15 @@ const auditLedger: PackServiceModule = {
     const rows = await ctx.db.query('SELECT count(*)::int AS n FROM fixture_pack_audit_events');
     const ledgerRows = Number((rows[0] as { n?: unknown } | undefined)?.n ?? 0);
 
+    // The DOCUMENT and the ENVIRONMENT are on the contract too, so one fact off each is read back
+    // here — a context handed an empty document or an empty environment then fails a suite instead of
+    // passing unnoticed.
+    const marker = ctx.env[ENV_MARKER_KEY];
     contexts.set(auditLedger.name, {
       sectionKeys: Object.keys(ctx.sections),
       ...(auditing ? { retentionDays: auditing.retentionDays } : {}),
+      ...(specName(ctx.spec) !== undefined ? { specName: specName(ctx.spec) } : {}),
+      ...(marker !== undefined ? { envMarker: marker } : {}),
       journal: ctx.journal !== undefined,
       dispatch: ctx.dispatch !== undefined,
       ledgerRows,

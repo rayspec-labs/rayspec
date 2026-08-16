@@ -1,13 +1,17 @@
 /**
  * The pack's second SERVICE — the side of the dispatch boundary that DOES hold `TurnDispatch`.
  *
- * This module exists so the boundary has something real on both sides of it. Its sibling
- * `audit-ledger.ts` never names the capability; this one names it in an import clause, and that alone
- * is the load-bearing fact: `scripts/check-contribution-dispatch-boundary.mjs` fails the build on that
- * exact identifier when it appears in a module reachable from a pack's `handlers/` subtree, or from a
- * tooling contribution. It appears here, in `services/`, and the gate passes — the exemption is
- * STRUCTURAL (a services subtree is not a scanned root), not a listed exception, and it cannot be
- * bought by naming a folder `services` inside `handlers/`.
+ * This module exists so the capability contract has something real on both sides of it. Its sibling
+ * `audit-ledger.ts` never names the capability; this one names it in an import clause, and which
+ * module holds it is the load-bearing fact — pinned on this shipped source by
+ * `@rayspec/server`'s `pack-service-dispatch.test.ts`, arm (A).
+ *
+ * NOT BY THE CI GATE. `scripts/check-contribution-dispatch-boundary.mjs` scans the contribution roots
+ * it DECLARES, all of which are under `examples/`; it does not read this package at all, so it is a
+ * witness neither for nor against this module's placement. What the gate proves — that a module
+ * reachable from a pack's `handlers/` subtree may not name the capability, and that a folder named
+ * `services` nested inside `handlers/` buys no exemption — it proves over those roots and over its own
+ * synthetic self-test trees.
  *
  * WHAT IT DOES WITH IT. It schedules one durable agent turn, and it does so with NO tenant argument,
  * because there is none to give: the deployment bound the tenant when it built the capability. Two
@@ -18,7 +22,7 @@
  * silent no-op to paper over, and scheduling an undeclared agent is refused by the platform anyway.
  */
 import type { PackServiceContext, PackServiceModule, TurnDispatch } from '@rayspec/pack-sdk';
-import { contexts, record } from './observed.js';
+import { contexts, ENV_MARKER_KEY, record, specName } from './observed.js';
 
 /** The agent id this service schedules a turn for when the deployment gives it a way to. */
 const FOLLOW_UP_AGENT = 'fixture_follow_up';
@@ -35,8 +39,11 @@ const turnScheduler: PackServiceModule = {
   async boot(ctx: PackServiceContext): Promise<void> {
     record('turn-scheduler:boot');
     dispatch = ctx.dispatch;
+    const marker = ctx.env[ENV_MARKER_KEY];
     contexts.set(turnScheduler.name, {
       sectionKeys: Object.keys(ctx.sections),
+      ...(specName(ctx.spec) !== undefined ? { specName: specName(ctx.spec) } : {}),
+      ...(marker !== undefined ? { envMarker: marker } : {}),
       journal: ctx.journal !== undefined,
       dispatch: ctx.dispatch !== undefined,
     });

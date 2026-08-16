@@ -21,12 +21,32 @@ export interface ObservedContext {
   readonly sectionKeys: string[];
   /** The `retentionDays` this pack's own `auditing` section declared, when the document wrote one. */
   readonly retentionDays?: number;
+  /**
+   * `spec.metadata.name` off the context's document — one fact read back off `ctx.spec`, so that a
+   * context handed an EMPTY document instead of the deployment's merged one is a test failure rather
+   * than an unmeasured difference. Absent if the context carried no document at all.
+   */
+  readonly specName?: string;
+  /**
+   * The environment the context carried, read at ONE agreed key the suite sets before it boots. Same
+   * purpose as `specName`: `ctx.env` is part of the contract, so something has to read it.
+   */
+  readonly envMarker?: string;
   /** Whether the deployment had a run-journal writer to give (it binds a tenant, or it does not). */
   readonly journal: boolean;
   /** Whether the deployment had the dispatch capability to give (a durable worker, or none). */
   readonly dispatch: boolean;
   /** The row count this service read back through the database door at boot. */
   readonly ledgerRows?: number;
+}
+
+/** The one environment key this pack's services read, so a suite can prove `ctx.env` arrived. */
+export const ENV_MARKER_KEY = 'RAYSPEC_FIXTURE_PACK_MARKER';
+
+/** `spec.metadata.name` off a document a pack must treat as open data, not as a typed spec. */
+export function specName(spec: Readonly<Record<string, unknown>>): string | undefined {
+  const metadata = spec.metadata as { name?: unknown } | undefined;
+  return typeof metadata?.name === 'string' ? metadata.name : undefined;
 }
 
 /** The context each service was booted with, keyed by service name. */

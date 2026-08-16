@@ -9,10 +9,12 @@
  * indexes and a foreign key, which is exactly what a generated `stores` table is not — and brings TWO
  * long-lived SERVICES, which is the one contribution kind the platform boots rather than calls.
  *
- * WHY TWO SERVICES AND NOT ONE. `TurnDispatch` goes to services and to nothing else, and a boundary
- * with only one side is unmeasured: `services/audit-ledger.ts` never names the capability and
- * `services/turn-scheduler.ts` holds it, so the CI dispatch-boundary gate has a real module of each
- * kind to be right about.
+ * WHY TWO SERVICES AND NOT ONE. `TurnDispatch` goes to services and to nothing else, and a capability
+ * measured only where it is present is measured with no control: `services/turn-scheduler.ts` holds it
+ * and `services/audit-ledger.ts` never names it, so a suite that drives both can tell "the deployment
+ * handed it over" apart from "a service gets one by being a service". The CI dispatch-boundary gate is
+ * not involved — it scans the contribution roots it declares, all under `examples/`, and never reads
+ * this package.
  *
  * WHY IT IS A NORMAL WORKSPACE MEMBER. The two example packs under the `examples/` tree are named
  * `@spike/...` so CI's `--filter='!@spike/*'` excludes them. That is right for a demo and wrong for a

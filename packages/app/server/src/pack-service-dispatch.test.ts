@@ -3,14 +3,20 @@
  *
  * `scripts/check-contribution-dispatch-boundary.mjs` proves the NEGATIVE: a module reachable from a
  * pack's `handlers/` subtree, or from a tooling contribution, that so much as names `TurnDispatch`
- * fails the build. A negative proved alone is worth very little — a boundary that forbids everything
- * passes it. So this suite measures the other half, on the pack the repository actually ships:
+ * fails the build. It proves it over the six contribution roots it DECLARES — all of them under
+ * `examples/` — and its own self-test arms pin the structural exemption (a sibling `services/` subtree
+ * is not a scanned root; a folder named `services` NESTED inside `handlers/` buys nothing) on
+ * synthetic trees of its own. This package is not one of those roots and is not scanned: the gate is
+ * not a witness for anything in the fixture pack, in either direction.
+ *
+ * A negative proved alone is worth very little — a boundary that forbids everything passes it. So this
+ * suite measures the other half, on the pack the repository actually ships:
  *
  *   (A) THE HOLDER IS A SERVICE, AND IT IS THE ONE THAT NAMES THE CAPABILITY. The fixture pack's
  *       `services/turn-scheduler.ts` imports `TurnDispatch`; its sibling `services/audit-ledger.ts`
- *       does not. Both live BESIDE `handlers/`, which is why the gate leaves them alone — the
- *       exemption is structural, not a listed exception. Asserted on the SHIPPED SOURCE, so moving
- *       either module under `handlers/` reds the gate and moving the import reds this.
+ *       does not. Asserted on the SHIPPED SOURCE, and this suite is the only thing asserting it: if
+ *       the capability ever moves to the module that is supposed not to hold it, THIS arm is what
+ *       reds — not the gate, which never reads this package.
  *   (B) A SERVICE THAT HOLDS IT SCHEDULES A TURN. Booted with a context carrying the capability and a
  *       document that declares the agent, the service schedules one and gets a runId back.
  *   (C) AND WITHOUT IT, IT SCHEDULES NOTHING. Booted with no capability — the shape of a deployment
