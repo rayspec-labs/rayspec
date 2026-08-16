@@ -822,7 +822,9 @@ change is applied by the explicit `--apply-migration` flag below.
   | **frontend-only** (static) | `staticProfile` — the profile named, the `frontendMounts` that boot would serve, and the statement that no database is touched, no migration applies, and there is nothing to compose | the same detection the static boot branches on |
 
   A **backend** document declares its routes and handlers rather than lowering to
-  them, so there is nothing to compose: the check is the validation `doctor` runs,
+  them, so there is nothing to compose: the check is the validation `doctor --with-packs` runs
+  (a dry-run previews THIS deployment, so it resolves the document`s packs unconditionally, while a
+  default `doctor` resolves none),
   and the payload is **declared names only** — no SQL, nothing derived. It covers the
   sections [`plan`](#plan) also projects (`stores`, `routes`, `agents`) plus the
   declared handler ids, but it is not `plan`'s payload: `plan` publishes no handlers,

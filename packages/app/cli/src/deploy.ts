@@ -473,7 +473,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     }
     // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
-    // the verdict is the validation `doctor` runs plus the names the document declares.
+    // the verdict is the validation `doctor --with-packs` runs plus the names the document declares.
     //
     // It is the validation `doctor --with-packs` runs: this is the profile whose grammar carries
     // `extensions[]`, and the boot this previews resolves them from this same deployment tree. A
