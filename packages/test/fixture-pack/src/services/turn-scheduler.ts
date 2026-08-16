@@ -1,5 +1,5 @@
 /**
- * The pack's second SERVICE — the side of the dispatch boundary that DOES hold `TurnDispatch`.
+ * The pack's second SERVICE — the one that DOES hold `TurnDispatch`.
  *
  * This module exists so the capability contract has something real on both sides of it. Its sibling
  * `audit-ledger.ts` never names the capability; this one names it in an import clause, and which

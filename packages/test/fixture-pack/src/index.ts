@@ -50,9 +50,10 @@ const fixturePack: DefinedPack = defineExtension({
   migrations: { dir: 'migrations', tablePrefix: 'fixture_pack_' },
   // The LONG-LIVED SERVICES this pack brings — the one contribution kind the platform BOOTS rather
   // than calls, declared in the order it boots them (and the reverse of the order it stops them). Two,
-  // deliberately, so the dispatch boundary has something real on BOTH sides: `audit-ledger` never
-  // names `TurnDispatch`, `turn-scheduler` holds it. Pack-relative, resolved under the pack root by
-  // the same jail (and the same compiled-`.js` sibling preference) as the entry and every handler.
+  // deliberately, so the capability is measured against a control rather than only where it is
+  // present: `audit-ledger` never names `TurnDispatch`, `turn-scheduler` holds it. Pack-relative,
+  // resolved under the pack root by the same jail (and the same compiled-`.js` sibling preference)
+  // as the entry and every handler.
   services: [{ module: 'services/audit-ledger.ts' }, { module: 'services/turn-scheduler.ts' }],
   sections: [
     {

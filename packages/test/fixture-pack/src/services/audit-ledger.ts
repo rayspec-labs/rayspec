@@ -1,5 +1,5 @@
 /**
- * The pack's first SERVICE — the side of the dispatch boundary that does NOT hold `TurnDispatch`.
+ * The pack's first SERVICE — the CONTROL, the one that does NOT hold `TurnDispatch`.
  *
  * It is the ordinary shape: work with no caller. At boot it reads its own pack's configuration out of
  * the top-level section the pack CLAIMS (`auditing`), reads its own pack-owned platform table through
