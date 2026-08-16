@@ -13,6 +13,10 @@
  *     platform table it would have swallowed;
  *   - two packs whose prefixes NEST are refused, naming BOTH packs (neither can be the winner by
  *     accident), and equal prefixes are the same refusal;
+ *   - both of those hold in POSTGRES'S case space rather than in the declared text's: the server
+ *     folds an unquoted identifier to lower case, so `Orgs` names the platform's `orgs` and two
+ *     packs declaring `fx_`/`FX_` own ONE namespace. The second describe block below is that half,
+ *     and every arm in it carries the lowercase arm beside it as its control;
  *   - a chain the SCAN rejects does not apply: the destructive statement, and the statement that
  *     leaves the declared namespace, are both refused here, at boot, not only in CI;
  *   - a chain with no `meta/_journal.json`, or with a committed `.sql` the journal does not list, is
@@ -198,5 +202,87 @@ describe('applyPackMigrations — the namespace rules, refused before any statem
   it('the journal table is the pack id, namespaced — never the platform chain’s', () => {
     expect(packJournalTable('fixture-pack')).toBe('__migrations_fixture-pack');
     expect(packJournalTable('fixture-pack')).not.toBe('__drizzle_migrations');
+  });
+});
+
+/**
+ * THE SAME RULES, IN THE CASE SPACE THE SERVER USES.
+ *
+ * PostgreSQL folds an UNQUOTED identifier to lower case before it names anything, and keeps a QUOTED
+ * one exactly: `ALTER TABLE Orgs` targets the platform's `orgs`, and two packs declaring `fx_` and
+ * `FX_` own ONE namespace, not two. Every rule above compares text, so read verbatim they would all
+ * have cleared a case-varied prefix — the pack's declared namespace would have been measured against
+ * a name the database never writes down.
+ *
+ * Each arm here is paired with the arm one case-shift away, so none of them can be green because the
+ * comparison became a blanket refusal: an unquoted name that FOLDS INTO the declared namespace still
+ * reaches the handle, and so does a prefix that is already in the folded form.
+ */
+describe('applyPackMigrations — namespace rules in PostgreSQL’s own case space', () => {
+  it('a prefix whose FOLDED form contains a platform table is refused, naming both', async () => {
+    // The statement the refusal prevents: unquoted `Orgs` IS the platform's `orgs` to the server.
+    const dir = chain({ '0000_x': 'ALTER TABLE Orgs ADD COLUMN "note" text;' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [{ packId: 'p1', dir, tablePrefix: 'Orgs' }]),
+    ).rejects.toThrow(/'p1'[\s\S]*'Orgs'[\s\S]*contains the platform table orgs/);
+  });
+
+  it('CONTROL: the same chain declared in the folded case is the same refusal', async () => {
+    const dir = chain({ '0000_x': 'ALTER TABLE orgs ADD COLUMN "note" text;' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [{ packId: 'p1', dir, tablePrefix: 'orgs' }]),
+    ).rejects.toThrow(/'p1'[\s\S]*'orgs'[\s\S]*contains the platform table orgs/);
+  });
+
+  it('two packs whose prefixes differ ONLY in case are one namespace, refused naming both', async () => {
+    const a = chain({ '0000_a': 'CREATE TABLE fx2_one ("id" uuid PRIMARY KEY NOT NULL);' });
+    const b = chain({ '0000_b': 'CREATE TABLE FX2_two ("id" uuid PRIMARY KEY NOT NULL);' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [
+        { packId: 'lower', dir: a, tablePrefix: 'fx2_' },
+        { packId: 'upper', dir: b, tablePrefix: 'FX2_' },
+      ]),
+    ).rejects.toThrow(/'upper'[\s\S]*'FX2_'[\s\S]*'fx2_'[\s\S]*'lower'/);
+  });
+
+  it('CONTROL: two packs whose prefixes are genuinely disjoint are not refused for it', async () => {
+    const a = chain({ '0000_a': 'CREATE TABLE fx2_one ("id" uuid PRIMARY KEY NOT NULL);' });
+    const b = chain({ '0000_b': 'CREATE TABLE gx2_two ("id" uuid PRIMARY KEY NOT NULL);' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [
+        { packId: 'first', dir: a, tablePrefix: 'fx2_' },
+        { packId: 'second', dir: b, tablePrefix: 'gx2_' },
+      ]),
+    ).rejects.toThrow(/the database handle was touched/);
+  });
+
+  it('an UNQUOTED object name is folded, so a case-varied one is INSIDE the namespace', async () => {
+    // `CREATE TABLE FX_events` creates `fx_events` — the pack's own table, not an escape.
+    const dir = chain({ '0000_x': 'CREATE TABLE FX_events ("id" uuid PRIMARY KEY NOT NULL);' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [{ packId: 'p1', dir, tablePrefix: 'fx_' }]),
+    ).rejects.toThrow(/the database handle was touched/);
+  });
+
+  it('a QUOTED object name keeps its case, and one outside the namespace is refused', async () => {
+    // `"FX_events"` is a DIFFERENT table from `fx_events`, and it carries no declared prefix.
+    const dir = chain({ '0000_x': 'CREATE TABLE "FX_events" ("id" uuid PRIMARY KEY NOT NULL);' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [{ packId: 'p1', dir, tablePrefix: 'fx_' }]),
+    ).rejects.toThrow(/does not carry the declared table prefix 'fx_'/);
+  });
+
+  it('a prefix that is not in the folded form is refused even when it collides with nothing', async () => {
+    const dir = chain({ '0000_x': 'CREATE TABLE Acme_events ("id" uuid PRIMARY KEY NOT NULL);' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [{ packId: 'p1', dir, tablePrefix: 'Acme_' }]),
+    ).rejects.toThrow(/'Acme_' is not a plain lowercase SQL identifier fragment/);
+  });
+
+  it('CONTROL: the same pack with the folded prefix passes every rule', async () => {
+    const dir = chain({ '0000_x': 'CREATE TABLE Acme_events ("id" uuid PRIMARY KEY NOT NULL);' });
+    await expect(
+      applyPackMigrations(forbiddenDb, [{ packId: 'p1', dir, tablePrefix: 'acme_' }]),
+    ).rejects.toThrow(/the database handle was touched/);
   });
 });

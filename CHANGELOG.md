@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose namespace contains a platform table names the pack and the table; two packs whose prefixes
   overlap names both packs; a chain directory that climbs out of the pack, that reads no `.sql` file,
   or whose `meta/_journal.json` does not list a migration committed beside it is refused as well —
+  and every one of those comparisons is made **in PostgreSQL's own case space**, because the server's
+  is: an unquoted identifier is folded to lower case before it names anything, so `Orgs` is the
+  platform's `orgs` and two packs declaring `fx_` and `FX_` own one namespace rather than two. A
+  declared `tablePrefix` is therefore written in lower case (anything else is refused fail-closed, as
+  a namespace the database never writes down), and an unquoted object name in a chain is folded
+  before it is measured against it, while a quoted one keeps its case exactly as Postgres does.
   a migration that ships and never runs is not a smaller failure than one that fails. A pack chain is
   held to the same rule set `gate:pack-migrations` applies in CI (`scanPackMigrationChain`, one
   module with two callers): every created table and index must carry the declared prefix, no
@@ -37,10 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before.
   The seam is exercised end to end by the in-tree `packages/test/fixture-pack`, which now owns a
   table through a chain of its own: it is loaded by the real loader from its real deployment document
-  on its real exact version pin, and its chain is applied to a real database after the platform's.
-  The two database migration gates extend over it — the shadow dry-run applies it on top of the
-  platform chain and proves its foreign key cascades from `orgs`, and the from-clean-DB gate applies
-  it through the real wiring and reads back that the platform journal is untouched.
+  on its real exact version pin, and its chain is applied to a real database after the platform's —
+  including through a whole real boot, which is what pins the ordering against the platform chain and
+  the abort a refused chain produces. The two database migration gates extend over it — the shadow
+  dry-run applies it on top of the platform chain and proves its foreign key cascades from `orgs`,
+  and the from-clean-DB gate applies it through the real wiring and reads back that the platform
+  journal is untouched.
 
 - **`rayspec doctor`, `rayspec plan` and `rayspec deploy --dry-run` now say who owns a claimed
   top-level section.** All three resolve the deployment's extension packs before they judge the

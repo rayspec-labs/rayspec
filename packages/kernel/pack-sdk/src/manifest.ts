@@ -189,6 +189,11 @@ export interface PackSectionClaim {
  * table, and it may not overlap the prefix another pack declares — a collision is a boot failure
  * naming both parties. There is no default, because a namespace nobody declared is a namespace
  * nothing can hold the chain to.
+ *
+ * Write the prefix in LOWER CASE. PostgreSQL folds an unquoted identifier to lower case before it
+ * names anything, so that is the only form in which a declared namespace and the objects a chain
+ * creates can be compared at all; a prefix in any other case is refused fail-closed rather than
+ * quietly measured against names the server never writes down.
  */
 export interface PackMigrationChain {
   /** The chain directory (`.sql` files plus `meta/_journal.json`), pack-relative and jailed. */

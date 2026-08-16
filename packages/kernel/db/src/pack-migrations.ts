@@ -31,6 +31,12 @@
  *     refused naming both the pack and the table — the pack's namespace must be the pack's alone;
  *   - two packs whose prefixes NEST (or are equal) are refused naming BOTH packs — a table under
  *     the inner prefix would sit in both namespaces, and nothing here could decide whose it is;
+ *   - both of those comparisons run on the prefix FOLDED TO LOWER CASE, because that is the name
+ *     PostgreSQL gives an unquoted identifier: `Orgs` and `orgs` are ONE namespace to the server, so
+ *     comparing the declared text verbatim would have cleared a prefix that contains `orgs` and a
+ *     second pack that owns the first one's tables. (`scanPackMigrationChain` separately refuses a
+ *     prefix that is not already in that folded form, so the two halves of every comparison — the
+ *     declared namespace and the names in the chain — are always in one case space;)
  *   - a chain the SCAN rejects does not apply. It is the same `scanPackMigrationChain`
  *     `gate:pack-migrations` runs, with the same empty allowlist: a pack is code from somewhere
  *     else, and this repository's CI has no opinion about a chain it never saw;
@@ -94,9 +100,22 @@ export function packJournalTable(packId: string): string {
   return `${JOURNAL_PREFIX}${packId}`;
 }
 
+/**
+ * A declared prefix in the case the SERVER will store its objects under. PostgreSQL folds an
+ * UNQUOTED identifier to lower case, so `Orgs` and `orgs` are ONE name to it while every rule below
+ * compares text: unfolded, `tablePrefix: 'Orgs'` would contain no platform table and would overlap
+ * no sibling's `orgs`, and the chain's unquoted objects would land in exactly the namespace those
+ * two rules just cleared. The chain scan additionally refuses a prefix that is not already in this
+ * form — this fold is what lets the refusal below NAME the collision instead of reporting a shape.
+ */
+function foldedPrefix(tablePrefix: string): string {
+  return tablePrefix.toLowerCase();
+}
+
 /** The platform table names a pack prefix may not swallow, read off the shared reserved set. */
 function platformTablesUnder(tablePrefix: string): string[] {
-  return [...RESERVED_STORE_NAMES].filter((name) => name.startsWith(tablePrefix)).sort();
+  const folded = foldedPrefix(tablePrefix);
+  return [...RESERVED_STORE_NAMES].filter((name) => name.startsWith(folded)).sort();
 }
 
 /**
@@ -155,7 +174,8 @@ function assertJournalDescribesChain(chain: PackMigrationChain): void {
 
 /** Every namespace rule, decided across the WHOLE set before a single statement runs. */
 function assertNamespaces(chains: readonly PackMigrationChain[]): void {
-  const byPrefix = new Map<string, string>();
+  /** FOLDED prefix → the pack that declared it, plus the text it declared (for the diagnostic). */
+  const byPrefix = new Map<string, { readonly declared: string; readonly ownerId: string }>();
   const seenIds = new Set<string>();
   for (const chain of chains) {
     if (seenIds.has(chain.packId)) {
@@ -178,29 +198,38 @@ function assertNamespaces(chains: readonly PackMigrationChain[]): void {
       );
     }
 
+    // Both rules below run on the FOLDED prefix, which is the namespace the server will actually
+    // hand the chain. When the declared text differs from it, say so — otherwise a refusal naming
+    // 'Orgs' and `orgs` in one sentence reads like a typo rather than like the rule it is.
+    const folded = foldedPrefix(chain.tablePrefix);
+    const foldNote =
+      folded === chain.tablePrefix
+        ? ''
+        : ` (PostgreSQL folds an UNQUOTED identifier to lower case, so that prefix is the namespace '${folded}')`;
+
     const swallowed = platformTablesUnder(chain.tablePrefix);
     if (swallowed.length > 0) {
       throw new PackMigrationError(
-        `extension pack '${chain.packId}': its declared table prefix '${chain.tablePrefix}' ` +
-          `contains the platform table${swallowed.length > 1 ? 's' : ''} ${swallowed.join(', ')} — ` +
-          "a pack's namespace must be the pack's alone, and the platform already owns that name " +
-          '(fail-closed collision).',
+        `extension pack '${chain.packId}': its declared table prefix '${chain.tablePrefix}'` +
+          `${foldNote} contains the platform table${swallowed.length > 1 ? 's' : ''} ` +
+          `${swallowed.join(', ')} — a pack's namespace must be the pack's alone, and the platform ` +
+          'already owns that name (fail-closed collision).',
         chain.packId,
       );
     }
 
-    for (const [prefix, ownerId] of byPrefix) {
-      if (chain.tablePrefix.startsWith(prefix) || prefix.startsWith(chain.tablePrefix)) {
+    for (const [prefix, owner] of byPrefix) {
+      if (folded.startsWith(prefix) || prefix.startsWith(folded)) {
         throw new PackMigrationError(
-          `extension pack '${chain.packId}': its declared table prefix '${chain.tablePrefix}' ` +
-            `overlaps the prefix '${prefix}' extension pack '${ownerId}' declares — a table under ` +
-            'the longer prefix would sit in both namespaces, and nothing decides whose it is ' +
-            '(fail-closed collision).',
+          `extension pack '${chain.packId}': its declared table prefix '${chain.tablePrefix}'` +
+            `${foldNote} overlaps the prefix '${owner.declared}' extension pack '${owner.ownerId}' ` +
+            'declares — a table under the longer prefix would sit in both namespaces, and nothing ' +
+            'decides whose it is (fail-closed collision).',
           chain.packId,
         );
       }
     }
-    byPrefix.set(chain.tablePrefix, chain.packId);
+    byPrefix.set(folded, { declared: chain.tablePrefix, ownerId: chain.packId });
   }
 }
 

@@ -13,6 +13,15 @@
  * must TARGET a table that carries it. A chain that creates a bare `orgs`, or that alters one, is
  * not a pack owning its own tables — it is a pack reaching into the platform's.
  *
+ * IN POSTGRES'S CASE SPACE, BECAUSE THE SERVER IS. An UNQUOTED identifier is FOLDED to lower case
+ * before it names anything — `ALTER TABLE Orgs` targets `orgs`, the platform's own table — while a
+ * QUOTED one is not (`"Orgs"` is a different table from `orgs`). A comparison that read both
+ * verbatim would therefore have measured a name the database never sees: `tablePrefix: 'Orgs'` with
+ * `ALTER TABLE Orgs ADD …` would read as a pack staying inside its own namespace while the statement
+ * reached the platform's table, and two packs declaring `Acme_` and `acme_` would read as two
+ * namespaces while owning one. So a declared prefix must BE in the folded form (lower case) and an
+ * unquoted object name is folded before it is measured against it.
+ *
  * ADDITIVE-ONLY, AND NO ALLOWLIST — THE ASYMMETRY IS DELIBERATE. The destructive half is not a
  * second, weaker vocabulary written here: it is the platform's OWN `scanMigrationSql`, run over the
  * pack chain with an EMPTY allowlist. On the platform chain `gate:migrations` runs that same scan
@@ -46,8 +55,24 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { scanMigrationSql } from './migration-scan.js';
 
-/** A declared prefix must be a plain SQL identifier fragment — anything else is a config error. */
-const PREFIX_RE = /^[a-z_][a-z0-9_]*$/i;
+/**
+ * A declared prefix must be a plain SQL identifier fragment IN THE CASE POSTGRES STORES IT — lower.
+ * The `i` flag this pattern used to carry admitted `Orgs`, and every namespace comparison in this
+ * module and in `assertNamespaces` is text: an uppercase prefix is one nothing the server actually
+ * writes down could be measured against. Lower case is the single space a declared prefix and a
+ * folded object name can meet in, so anything else is a config error rather than a namespace.
+ */
+const PREFIX_RE = /^[a-z_][a-z0-9_]*$/;
+
+/** The refusal a prefix outside that form gets, anchored at whatever the caller is scanning. */
+function prefixShapeViolation(at: string, tablePrefix: string): string {
+  return (
+    `${at}: the declared table prefix '${tablePrefix}' is not a plain lowercase SQL identifier ` +
+    'fragment — PostgreSQL folds an UNQUOTED identifier to lower case, so a prefix given in any ' +
+    'other case names a namespace the server never writes down and nothing could hold the chain to ' +
+    '(fail-closed).'
+  );
+}
 
 /**
  * The statement forms a pack chain may contain. Everything else is refused: "additive-only" is
@@ -385,11 +410,16 @@ function blankLiteralBodies(s: string): string {
   return out;
 }
 
-/** Unquote an object name and drop any schema qualification — `"public"."fx_t"` reads as `fx_t`. */
+/**
+ * Unquote an object name, drop any schema qualification (`"public"."fx_t"` reads as `fx_t`), and put
+ * it in the case the SERVER will store it under: an UNQUOTED identifier is folded to lower case
+ * (`ALTER TABLE Orgs` targets `orgs`), a QUOTED one keeps its case exactly (`"Orgs"` is its own
+ * table). Only the unquoted branch folds, because only the unquoted branch is folded by Postgres.
+ */
 function objectName(raw: string): string {
   const parts = raw.split('.');
   const last = (parts[parts.length - 1] as string).trim();
-  return last.startsWith('"') ? last.slice(1, -1).replace(/""/g, '"') : last;
+  return last.startsWith('"') ? last.slice(1, -1).replace(/""/g, '"') : last.toLowerCase();
 }
 
 /** Clip a statement for a diagnostic. */
@@ -414,6 +444,12 @@ export interface PackMigrationChainScan extends PackMigrationFileScan {
 /**
  * Check one migration file's SQL against a required table prefix. PURE (no I/O) so a caller can
  * exercise the EXACT logic a CI run and a boot both use. `rel` is used only in messages.
+ *
+ * The prefix's own SHAPE is checked here rather than only in `scanPackMigrationChain`, so this door
+ * is fail-closed for every caller: a prefix that is not in Postgres's folded case is one no name in
+ * the file could be compared against, and returning "no violations" for it would be a clean pass
+ * over a namespace rule that never ran. (The chain scan returns before it reaches a file, so a chain
+ * never collects this twice.)
  */
 export function scanPackMigrationSql(
   rel: string,
@@ -421,6 +457,10 @@ export function scanPackMigrationSql(
   tablePrefix: string,
 ): PackMigrationFileScan {
   const violations: string[] = [];
+
+  if (!PREFIX_RE.test(tablePrefix)) {
+    return { violations: [prefixShapeViolation(rel, tablePrefix)], statements: 0 };
+  }
 
   // The destructive half: the PLATFORM's scan, with NO allowlist. Every finding is a refusal — there
   // is no entry to author that would clear one. It runs per BREAKPOINT CHUNK for the same reason the
@@ -530,9 +570,7 @@ export function scanPackMigrationChain(
 ): PackMigrationChainScan {
   const violations: string[] = [];
   if (!PREFIX_RE.test(tablePrefix)) {
-    violations.push(
-      `${dir}: the declared table prefix '${tablePrefix}' is not a plain SQL identifier fragment.`,
-    );
+    violations.push(prefixShapeViolation(dir, tablePrefix));
     return { violations, files: 0, statements: 0 };
   }
 

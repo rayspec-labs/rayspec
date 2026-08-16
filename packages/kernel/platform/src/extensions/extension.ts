@@ -143,7 +143,10 @@ export interface ExtensionSectionClaim {
  *  - `tablePrefix` — MANDATORY, and the namespace the whole chain lives in: every table and index it
  *                    creates must carry it, and it may neither contain a platform table nor overlap
  *                    another pack's prefix. A chain with no namespace is a chain that can reach into
- *                    anything, so the field is required whenever `migrations` is present at all.
+ *                    anything, so the field is required whenever `migrations` is present at all. It
+ *                    is written in LOWER CASE — PostgreSQL folds an unquoted identifier to lower
+ *                    case, so that is the one form a declared namespace and a created object can be
+ *                    compared in (any other case is refused fail-closed).
  */
 export interface ExtensionMigrationChain {
   /** The chain directory, pack-relative and path-jailed under the pack root. */
