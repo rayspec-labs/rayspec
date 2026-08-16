@@ -1,5 +1,5 @@
 /**
- * THE ACCEPT CONTROL for the two-phase parse: a document on a deployment with NO packs must come out
+ * THE ACCEPT CONTROL for the section-aware parse: a document on a deployment with NO packs must come out
  * of the section-aware path exactly as it comes out of `parseSpec` — the VALUE when it parses, and
  * the full error list (code, message, path, ORDER) when it does not.
  *
@@ -13,14 +13,19 @@
  *     several unknown keys at once (one issue, keys in document order).
  *
  * Both halves run through `parseSpec` and through `parseSpecWithSections(text, [])` and are compared
- * after a JSON round-trip, so a difference in key order inside the value fails too.
+ * TWICE: structurally, which reports a difference readably, and as the two JSON TEXTS, which is what
+ * makes key ORDER load-bearing. The structural comparison alone would not, and that is measured, not
+ * assumed: reversing the key order of the returned value reds 11 cases with both assertions in place
+ * and ZERO with `toEqual` alone (`toEqual` is deep equality and ignores key order). The order a
+ * document's sections come back in is visible to every consumer that serializes the parsed value.
  *
- * MEASURED TO BITE, not assumed: lifting every non-core key instead of only the claimed ones reds 12
- * cases here (7 of them checked-in documents), and dropping the lint stage from the section path reds
- * the dangling-cross-reference case.
+ * MEASURED TO BITE, not assumed: dropping the lint stage from the section path reds the
+ * dangling-cross-reference case, and lifting every non-core key instead of only the claimed ones reds
+ * 5 cases here — 13, seven of them checked-in documents, if that over-broad lift is ALSO keyed on the
+ * backend grammar alone rather than on both document profiles.
  *
- * The two paths share phase A (`loadSpecDocument`) by construction — this control covers the half
- * that can drift: the strict-shape parse, the error mapping and the lint.
+ * The two paths share the pre-shape load (`loadSpecDocument`) by construction — this control covers
+ * the half that can drift: the strict-shape parse, the error mapping and the lint.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -91,6 +96,15 @@ const brokenDocs: ReadonlyArray<readonly [string, string]> = [
   ],
 ];
 
+/**
+ * Assert two parsed results are the same document — structurally (which gives a readable diff on
+ * failure) AND as JSON text (which is the half that makes key ORDER count; `toEqual` does not).
+ */
+function expectSameJson(actual: unknown, expected: unknown): void {
+  expect(JSON.parse(JSON.stringify(actual))).toEqual(JSON.parse(JSON.stringify(expected)));
+  expect(JSON.stringify(actual)).toBe(JSON.stringify(expected));
+}
+
 /** Compare the two paths for one document — the whole result, after a JSON round-trip. */
 function expectIdentical(raw: string): void {
   const before = parseSpec(raw);
@@ -98,15 +112,11 @@ function expectIdentical(raw: string): void {
   expect(after.ok).toBe(before.ok);
   if (!before.ok) {
     if (after.ok) return;
-    expect(JSON.parse(JSON.stringify(after.errors))).toEqual(
-      JSON.parse(JSON.stringify(before.errors)),
-    );
+    expectSameJson(after.errors, before.errors);
     return;
   }
   if (!after.ok) return;
-  expect(JSON.parse(JSON.stringify(after.value.spec))).toEqual(
-    JSON.parse(JSON.stringify(before.value)),
-  );
+  expectSameJson(after.value.spec, before.value);
   // No packs ⇒ no claims ⇒ nothing was lifted out of the document.
   expect(after.value.sections).toEqual({});
 }
