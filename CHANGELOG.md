@@ -237,6 +237,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `undefined` while a module-level `z.object` evaluates — a load-order accident no behaviour test can
   pin.
 
+- **An extension pack is now confined to a route namespace of its own, and a pack manifest may declare
+  which one.** Every route a pack contributes must lie under one prefix that pack owns: `/ext/<packId>/`
+  by default — derived from the id the deployment references it by — or the prefix its manifest sets in
+  the new optional `routePrefix` field. A contributed route outside the resolved namespace is a
+  fail-closed load failure naming the pack and the offending path, where before a pack fragment could
+  claim any path at all, including one the deployment already served, and the deployment found out by
+  watching a route stop working. Two packs whose namespaces **overlap** are refused the same way, and
+  overlap is decided by **containment** rather than by string equality: `/shared/` and `/shared/deep/`
+  are different strings that own common paths, and the refusal names both packs. A pack id that cannot
+  be spelled into a URL path segment gets no derived default and must declare `routePrefix` instead of
+  having a namespace invented for it.
+  **Why `/ext/` and not `/v1/ext/`:** `/v1/` is the auth and OIDC surface, which the declared-route
+  registrar refuses outright, and a deployment-declared route already lives outside it — a pack
+  contributes routes exactly as a deployment does, so its paths are the same kind of path, namespaced by
+  who brought them. **What a pack route is otherwise is unchanged:** the same app, the same
+  `requireAuth → resolveTenant → requirePermission` chain, the same interpreter. There is still no raw
+  mount.
+  **Upgrading a pack:** a pack whose routes already sit under a path of its own declares that path as
+  `routePrefix` and nothing about its URLs changes; otherwise move the routes under `/ext/<packId>/`.
+  The bundled stream-backend example declares `routePrefix: '/uploads/'`, so its documented URLs are
+  byte-unchanged.
+
 ### Fixed
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
@@ -268,6 +290,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   none of the four is threaded here. The handler-SDK docstrings and the "Optional handler
   capabilities" table in the spec reference described the trigger init as carrying only
   `{ tenantId, db, triggerName }`; both now say what the builders do.
+
+- **Two declared routes that differ only in what a path parameter is NAMED are now refused instead of
+  leaving one of them dead.** The route-uniqueness rule keyed on the raw ``${method} ${path}`` string, so
+  `GET /notebooks/{id}` and `GET /notebooks/{notebook_id}` both passed validation and both registered —
+  and a router matches a path parameter by **position**, never by name, so the two are one route: the
+  first registration answered every request and the second was unreachable for the life of the process,
+  with nothing anywhere saying so. The rule now compares the **router-normalized** path (parameter names
+  erased) and names **both** paths in the refusal, since the offender alone does not say which route it
+  collides with. The same comparison runs across a deployment's routes, an extension pack's contributed
+  routes and another pack's, and there the refusal names the parties rather than an array index — which
+  is what the new per-route pack attribution in the merge is for. A path that differs in a literal
+  segment is still a different route: `/widgets/{id}` and `/widgets/mine/{id}` both validate as before.
+
+- **A declared route can no longer claim a platform path outside `/v1/`.** The reserved set a declared
+  `api[]` path was checked against was `/v1/` and `/oidc/` only — but the platform registers its public
+  readiness probes (`GET /health`, `GET /recovery-scope`) and the declared static frontend mounts
+  **after** the declared routes, and matching handlers run in registration order. A declared route
+  claiming `/health` therefore won the match and validated clean, and the probe a deploy tool waits on
+  answered that route for the rest of the process's life. Those paths are now reserved too, and so is
+  anything nested under a declared frontend mount, which would otherwise shadow the mount's deep links.
+  A route on one of them aborts the boot with a message naming the prefix. **A frontend mount at the
+  root `/` is exempt**, exactly as the existing mount rule already exempts it: it is a legitimate static
+  catch-all that coexists with the API by registration order and fall-through. The reserved paths are
+  supplied by the composition root that registers them rather than hardcoded in the routing engine, so a
+  deployment's own mounts are covered without the engine knowing about them.
 
 ## [1.8.0] - 2026-08-15
 

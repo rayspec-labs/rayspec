@@ -26,6 +26,12 @@ export default defineExtension({
   // The pack's OWN declared version — `loadExtensions` FAIL-CLOSED-checks it equals the deployment's
   // exact `ref.version` pin (a SKEW aborts the deploy, never a silent skip).
   version: '1.0.0',
+  // The route NAMESPACE this pack owns. Declared, rather than left to the `/ext/<packId>/` default,
+  // because this pack IS the deployment's upload surface: `/uploads/…` is the path its consumers
+  // address, and a namespace a pack declares is a namespace someone wrote down. Every route below must
+  // lie under it (a path outside is a load failure naming this pack), and no other loaded pack may
+  // claim a namespace that contains it or that it contains.
+  routePrefix: '/uploads/',
   fragments: {
     // ── stores ──────────────────────────────────────────────────────────────────────────────────
     // The blob POINTER-row store (records WHERE a blob lives — an opaque BlobStore key + metadata, NOT

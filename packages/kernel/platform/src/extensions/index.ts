@@ -16,6 +16,9 @@
  *  - pack-services.ts    the `services` contribution kind — the shape a service module exports, the
  *                        context it boots with, and `bootPackServices` (declaration-order boot,
  *                        reverse-order shutdown, a failing boot that names its pack).
+ *  - route-namespace.ts  the route NAMESPACE a pack is confined to (`/ext/<packId>/` by default),
+ *                        the containment rules two claims are compared by, and the router-normalized
+ *                        shadowing check that keeps a merged route surface free of dead routes.
  */
 export {
   type DefinedExtension,
@@ -50,3 +53,13 @@ export {
   type PackServicesHandle,
 } from './pack-services.js';
 export { parseSpecWithPacks, type SpecWithPacks } from './parse-with-packs.js';
+export {
+  canonicalRoutePrefix,
+  defaultPackRoutePrefix,
+  isUnderRoutePrefix,
+  PACK_ROUTE_PREFIX_ROOT,
+  type PackContributedRoute,
+  routePrefixesOverlap,
+  routePrefixRefusal,
+  shadowedRouteRefusal,
+} from './route-namespace.js';

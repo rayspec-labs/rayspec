@@ -149,6 +149,7 @@ import {
 import {
   attachAppliedProductDdlNote,
   type BootedServer,
+  platformPublicRoutePrefixes,
   resolveLiveTenantOrgId,
   type ServerConfig,
 } from './composition-root.js';
@@ -2892,6 +2893,11 @@ export async function deployProductYamlSpec(
           // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
           const engineWithByteMovers: DeclarativeEngine = {
             ...engine,
+            // The platform paths the composition root registers on this same app AFTER the declared
+            // routes — its two readiness probes. A declared route claiming one would win the match and
+            // leave the probe dead; api-auth does not own those paths, so the boot that registers them
+            // names them. This profile declares no static frontend mounts, so there are none to add.
+            reservedPathPrefixes: platformPublicRoutePrefixes(),
             // Thread the product-profile conflict-key carve-out (computed above from
             // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
             // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-

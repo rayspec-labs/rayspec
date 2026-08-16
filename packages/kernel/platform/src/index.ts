@@ -138,6 +138,8 @@ export {
   type LoadedExtensions,
   type LoadedPackService,
   loadExtensions,
+  PACK_ROUTE_PREFIX_ROOT,
+  type PackContributedRoute,
   type PackServiceContext,
   type PackServiceDatabase,
   PackServiceError,
@@ -147,6 +149,7 @@ export {
   type PackServicesHandle,
   parseSpecWithPacks,
   type SpecWithPacks,
+  shadowedRouteRefusal,
 } from './extensions/index.js';
 // The fs-backed READ-ONLY, path-jailed `FsSource` impl + composition-root factory (the path jail is the
 // ENTIRE containment; a symlink/traversal/absolute escape is refused fail-closed — never foreign bytes).

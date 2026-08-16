@@ -60,6 +60,30 @@ export function braceParamNames(path: string): string[] {
 }
 
 /**
+ * The token every `{param}` collapses to in a router-normalized path (see `normalizeRoutePath`). It is
+ * deliberately `{}`, which the grammar above does NOT read as a param (a name needs at least one
+ * character) — so the normalized form is never mistaken for a declared path by the helpers here.
+ */
+const NORMALIZED_PARAM = '{}';
+
+/**
+ * The ROUTER-NORMALIZED form of a declared route path: every `{param}` collapsed to a single token,
+ * every other character verbatim (`/notes/{id}/tags/{tag}` → `/notes/{}/tags/{}`).
+ *
+ * This is the form in which two declared paths can be compared for whether they are the SAME ROUTE.
+ * A router matches a parameter by POSITION, not by name — `/notes/{id}` and `/notes/{note_id}` are one
+ * route to it, so registering both leaves the second unreachable for the life of the process. Erasing
+ * the names is what makes that pair equal, and the raw string is what makes it look like two routes.
+ *
+ * A path containing a LITERAL `{}` normalizes onto the same token, and that is correct rather than a
+ * false positive: a parameter segment matches the literal text `{}` too, so the two really would
+ * compete for the same requests.
+ */
+export function normalizeRoutePath(path: string): string {
+  return rewriteBraceParams(path, () => NORMALIZED_PARAM);
+}
+
+/**
  * Rewrite each `{param}` in a declared route path via `replace(name)`, copying every other character
  * verbatim (e.g. `toHonoPath` uses `(name) => ':' + name`; the operationId slug uses
  * `(name) => '_by_' + name + '_'`). Byte-exact equivalent of `path.replace(/\{([^}/]+)\}/g, cb)`.

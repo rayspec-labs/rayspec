@@ -182,6 +182,8 @@ export interface ExtensionServiceDeclaration {
  *  - `version`      — the pack's OWN declared version. `loadExtensions` FAIL-CLOSED-checks it equals
  *                     the EXACT `ref.version` pin in the deployment spec (the silent-skip class:
  *                     a SKEW is a hard error, NEVER a silent skip).
+ *  - `routePrefix`  — the route NAMESPACE every `api` fragment must lie under (optional; absent ⇒ the
+ *                     default `/ext/<packId>/`). See `route-namespace.ts`.
  *  - `fragments`    — the spec sections the pack contributes (merged into the deployment spec).
  *  - `sections`     — the top-level spec sections the pack CLAIMS (optional; absent = claims none).
  *  - `migrations`   — the pack's OWN migration chain for the platform tables it owns (optional;
@@ -194,6 +196,14 @@ export interface ExtensionServiceDeclaration {
 export interface ExtensionManifest {
   /** The pack's declared exact version (must equal the deployment's `ref.version` pin — fail-closed). */
   readonly version: string;
+  /**
+   * The route NAMESPACE this pack's `api` fragments are confined to — an absolute, parameter-free path
+   * prefix. Absent ⇒ the default `/ext/<packId>/`, derived from the id the deployment references the
+   * pack by. Declare it when the pack owns a path of its own (an ingest surface at `/uploads/`); a
+   * route outside the resolved namespace, and a namespace that CONTAINS or is contained by another
+   * loaded pack's, are both fail-closed load failures naming the pack.
+   */
+  readonly routePrefix?: string;
   /** The declarative spec fragments the pack contributes. */
   readonly fragments: ExtensionSpecFragments;
   /** The top-level spec sections the pack claims the grammar of (optional). */

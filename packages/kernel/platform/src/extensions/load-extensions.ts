@@ -30,6 +30,12 @@
  *      capability instances into the merge result — so a pack store rides the existing migration gate,
  *      a pack route the existing api interpreter, a pack handler the existing loader. `deploy()` / the
  *      migration gate / `dispatchTool` / the chokepoint stay BYTE-UNCHANGED.
+ *   5b. CONFINES the pack's routes to ONE route NAMESPACE it owns (`/ext/<packId>/`, or the prefix its
+ *      manifest declares), refuses a namespace that overlaps one another pack already claimed — by
+ *      CONTAINMENT, since `/shared/` and `/shared/deep/` are different strings owning common paths —
+ *      and records each merged route WITH the pack that brought it (`apiOwners`). The attribution is
+ *      what a later refusal over the flat merged `api[]` has to have: past this point a pack route is
+ *      indistinguishable from a deployment route, and a message could only name an array index.
  *
  * WHY THE VIRTUAL-PATH REWRITE (the multi-root trick that keeps `deploy()` byte-unchanged): `deploy()`
  * loads handlers from ONE `rollout.escapeHatchRoot` via `loadHandlers`, which path-jails each
@@ -74,6 +80,15 @@ import {
 } from '../handlers/loader.js';
 import { type ExtensionCapabilities, isDefinedExtension } from './extension.js';
 import { isPackServiceModule, type LoadedPackService } from './pack-services.js';
+import {
+  canonicalRoutePrefix,
+  defaultPackRoutePrefix,
+  isUnderRoutePrefix,
+  PACK_ROUTE_PREFIX_ROOT,
+  type PackContributedRoute,
+  routePrefixesOverlap,
+  routePrefixRefusal,
+} from './route-namespace.js';
 
 /** A single `extensions[]` reference (mirrors the spec's `ExtensionRef`; we re-declare to avoid a
  * value-import cycle — only the field shape is needed here). */
@@ -118,6 +133,15 @@ export interface LoadedExtensions {
   readonly tooling: ToolSpecConfig[];
   /** The merged api route fragments. */
   readonly api: ApiRouteSpec[];
+  /**
+   * The SAME routes as `api`, in the same order, each carrying the pack that contributed it and the
+   * namespace that pack is confined to. This is the per-route ATTRIBUTION the flat merge cannot hold:
+   * once a pack route is concatenated onto the deployment's own `api[]` it is indistinguishable from a
+   * deployment route, so a later refusal over the merged surface could only name an INDEX into an
+   * array the author never wrote. The composition root reads it to name the offending pack (see
+   * `shadowedRouteRefusal`); everything else keeps using `api`.
+   */
+  readonly apiOwners: readonly PackContributedRoute[];
   /** The merged agent fragments (pack-contributed OOTB agents, registered post-merge). */
   readonly agents: AgentSpecConfig[];
   /**
@@ -205,6 +229,7 @@ export async function loadExtensions(
   const handlers: HandlerSpec[] = [];
   const tooling: ToolSpecConfig[] = [];
   const api: ApiRouteSpec[] = [];
+  const apiOwners: PackContributedRoute[] = [];
   const agents: AgentSpecConfig[] = [];
   const capabilities: { blobFactory?: ExtensionCapabilities['blobFactory'] } = {};
   const packHandlerRoots: string[] = [];
@@ -213,6 +238,9 @@ export async function loadExtensions(
   const services: LoadedPackService[] = [];
   // claimed top-level key → the pack that claimed it first (so a collision can name BOTH packs).
   const sectionOwners = new Map<string, string>();
+  // claimed route namespace → the pack that claimed it first. Compared by CONTAINMENT, not by
+  // equality, so this is a list rather than a keyed map (see `routePrefixesOverlap`).
+  const prefixOwners: { readonly packId: string; readonly prefix: string }[] = [];
 
   // virtual rewritten absolute path → real pre-jailed pack-file absolute path (the importer's map).
   const virtualToReal = new Map<string, string>();
@@ -393,8 +421,45 @@ export async function loadExtensions(
       stores.push(parseFragment(StoreSpecSchema, s, ref.id, 'store'));
     for (const t of fragments.tooling ?? [])
       tooling.push(parseFragment(ToolSpecConfigSchema, t, ref.id, 'tool'));
-    for (const r of fragments.api ?? [])
-      api.push(parseFragment(ApiRouteSpecSchema, r, ref.id, 'api route'));
+    // (5b) THE ROUTE NAMESPACE. Resolved for a pack that has a route surface to confine — one that
+    //      contributes an `api` fragment, or one that DECLARES a prefix (a declaration reserves the
+    //      path whether or not this version of the pack serves anything there yet). A pack that
+    //      contributes no routes and claims nothing has nothing to confine, and refusing it a
+    //      namespace it never uses would only turn its id into a constraint for no reason.
+    const packRoutes = fragments.api ?? [];
+    if (packRoutes.length > 0 || manifest.routePrefix !== undefined) {
+      const routePrefix = resolveRoutePrefix(manifest.routePrefix, ref.id);
+      // Compared against every claim already made by CONTAINMENT — `/shared/` and `/shared/deep/` are
+      // different strings that own common paths, so equality would clear the pair that matters most.
+      for (const owner of prefixOwners) {
+        if (!routePrefixesOverlap(routePrefix, owner.prefix)) continue;
+        throw new ExtensionLoadError(
+          `extension '${ref.id}': claims the route namespace '${routePrefix}', which overlaps the ` +
+            `namespace '${owner.prefix}' extension '${owner.packId}' already claims. Two packs ` +
+            'cannot both own a path — one namespace CONTAINS the other, so a route in the overlap ' +
+            'has two owners and nothing decides which one serves it (fail-closed collision).',
+          ref.id,
+        );
+      }
+      prefixOwners.push({ packId: ref.id, prefix: routePrefix });
+      for (const r of packRoutes) {
+        const route = parseFragment(ApiRouteSpecSchema, r, ref.id, 'api route');
+        if (!isUnderRoutePrefix(route.path, routePrefix)) {
+          throw new ExtensionLoadError(
+            `extension '${ref.id}': route ${route.method} ${route.path} is not under the pack's ` +
+              `route namespace '${routePrefix}'. A pack contributes routes onto the deployment's OWN ` +
+              'route surface, so a path outside its namespace could shadow a route the deployment ' +
+              '(or another pack) serves. Move the route under the namespace, or declare a ' +
+              '`routePrefix` in the manifest that covers it (fail-closed).',
+            ref.id,
+          );
+        }
+        api.push(route);
+        // Recorded WITH its pack: the merge that follows concatenates these onto the deployment's own
+        // `api[]`, and past that point nothing can tell whose route is whose.
+        apiOwners.push({ packId: ref.id, prefix: routePrefix, route });
+      }
+    }
     for (const ag of fragments.agents ?? [])
       agents.push(parseFragment(AgentSpecConfigSchema, ag, ref.id, 'agent'));
 
@@ -425,6 +490,7 @@ export async function loadExtensions(
     handlers,
     tooling,
     api,
+    apiOwners,
     agents,
     sections,
     migrations,
@@ -481,6 +547,44 @@ async function resolvePackService(
     );
   }
   return { packId, module: moduleSpec, ...service };
+}
+
+/**
+ * Resolve the ROUTE NAMESPACE this pack's `api` fragments are confined to, or FAIL CLOSED naming the
+ * pack. A manifest that declares `routePrefix` gets that path, canonicalised; a manifest that declares
+ * none gets `/ext/<packId>/`.
+ *
+ * The default is DERIVED from the pack id, which is a free string in the document grammar, so an id
+ * that cannot be spelled into a URL path has no default — and rather than sanitise it into a namespace
+ * nobody wrote down (the mistake `tablePrefix` exists not to make), such a pack is required to declare
+ * one. Unlike `tablePrefix` a route prefix DOES have a default, because there is a safe one to derive:
+ * a table prefix has to fit an identifier the database will fold and compare, while a path segment
+ * built from an already-unique pack id is a namespace no other pack can reach.
+ */
+function resolveRoutePrefix(declared: string | undefined, packId: string): string {
+  if (declared === undefined) {
+    const fallback = defaultPackRoutePrefix(packId);
+    if (fallback === undefined) {
+      throw new ExtensionLoadError(
+        `extension '${packId}': the default route namespace is '${PACK_ROUTE_PREFIX_ROOT}<packId>/', ` +
+          `and the id '${packId}' cannot be spelled into a URL path segment. Declare an explicit ` +
+          '`routePrefix` in the pack manifest so the namespace this pack owns is written down rather ' +
+          'than derived from an id that does not survive the derivation (fail-closed).',
+        packId,
+      );
+    }
+    return fallback;
+  }
+  const refusal = routePrefixRefusal(declared);
+  if (refusal !== undefined) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': ${refusal}. The namespace is what confines every route this pack ` +
+        'contributes to paths it owns, so it must be a fixed absolute path that is not the whole ' +
+        'surface (fail-closed).',
+      packId,
+    );
+  }
+  return canonicalRoutePrefix(declared);
 }
 
 /**

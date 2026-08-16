@@ -60,6 +60,12 @@ const DEPLOYMENT_SPECS = [
   // handler root (examples/agent-pack-deployment/packs/agent-pack/handlers) is gate-scanned (the
   // scan-surface must equal the loader's accept-surface; a committed pack handler is never unscanned).
   'examples/agent-pack-deployment/rayspec.yaml',
+  // The in-tree fixture pack's own deployment document. It is here for the same reason as the line
+  // above and for no other: the fixture pack now contributes a ROUTE, so it ships a handler under its
+  // `handlers/` subtree, and a committed pack handler that no gate scans is exactly the hole this
+  // discovery exists to close. Its `module` points at the BUILT pack (`./dist`), so the scanned root
+  // is the compiled subtree the loader would actually import.
+  'packages/test/fixture-pack/rayspec.yaml',
 ];
 
 /**

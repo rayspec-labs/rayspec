@@ -136,6 +136,53 @@ describe('registerDeclaredRoutes — reserved-namespace boot guard (no /v1/* or 
   });
 });
 
+describe('registerDeclaredRoutes — the INJECTED reserved prefixes (paths api-auth does not own)', () => {
+  const registry: AgentRegistry = new Map([['ghost', { spec: {} as never, backend: {} as never }]]);
+
+  const registerWithReserved = (path: string, reservedPathPrefixes: readonly string[]): void => {
+    const app = new OpenAPIHono<AppEnv>();
+    const route: ApiRouteSpec = { method: 'GET', path, action: { kind: 'agent', agent: 'ghost' } };
+    registerDeclaredRoutes(app, makeDeps(registry), {
+      spec: makeSpec({ api: [route] }),
+      productTables: emptyTables,
+      reservedPathPrefixes,
+    });
+  };
+
+  // The platform registers its public probes AFTER the declared routes, so a declared `/health` wins
+  // the match and the probe is dead for the life of the process. api-auth does not own those paths —
+  // the composition root that registers them injects them here.
+  it('aborts the boot for a declared route on an injected public probe path (/health)', () => {
+    expect(() => registerWithReserved('/health', ['/health/', '/recovery-scope/'])).toThrow(
+      /RESERVED platform prefix/,
+    );
+  });
+
+  it('aborts for a route NESTED under an injected prefix (/recovery-scope/deep)', () => {
+    expect(() =>
+      registerWithReserved('/recovery-scope/deep', ['/health/', '/recovery-scope/']),
+    ).toThrow(/RESERVED platform prefix/);
+  });
+
+  it('aborts for a route under an injected FRONTEND mount prefix (the mount would be shadowed)', () => {
+    expect(() => registerWithReserved('/app/config', ['/app/'])).toThrow(
+      /RESERVED platform prefix/,
+    );
+  });
+
+  it('names the injected prefix in the refusal, not just the two api-auth owns', () => {
+    expect(() => registerWithReserved('/health', ['/health/'])).toThrow(/\/health\//);
+  });
+
+  it('no false positive: an injected prefix does not reserve a merely similar path', () => {
+    expect(() => registerWithReserved('/healthy', ['/health/'])).not.toThrow();
+  });
+
+  it('no injected prefixes ⇒ byte-identical behaviour (only /v1/ and /oidc/ are reserved)', () => {
+    expect(() => registerWithReserved('/health', [])).not.toThrow();
+  });
+});
+
 describe('registerDeclaredRoutes — {handler} route boot-time fail-closed (no-DB unit, HANDLER-ROUTE-BOOTFAIL)', () => {
   const handlerRoute: ApiRouteSpec = {
     method: 'POST',
