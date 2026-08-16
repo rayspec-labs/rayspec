@@ -119,8 +119,9 @@ export interface DeployDryRunResult {
   readonly notProven: readonly string[];
   /**
    * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
-   * section key and the pack that owns it — the same line `plan` and `doctor` report, from the same
-   * loader run against the same deployment tree. Present only for a document that references a pack
+   * section key and the pack that owns it — the same line `plan` and `doctor --with-packs` report,
+   * from the same loader run against the same deployment tree. Present only for a document that
+   * references a pack
    * and validated, so every other verdict keeps the exact key set it had. NEVER affects `ok` — and
    * where `ok:true` here is furthest from "it boots", `notProven` says so in the same verdict.
    */
@@ -474,9 +475,11 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
     // the verdict is the validation `doctor` runs plus the names the document declares.
     //
-    // It is the validation `doctor` runs including its packs: this is the profile whose grammar carries
+    // It is the validation `doctor --with-packs` runs: this is the profile whose grammar carries
     // `extensions[]`, and the boot this previews resolves them from this same deployment tree. A
-    // document with no pack takes the unchanged `parseSpec` and is unaffected.
+    // dry-run is a preview of THIS deployment, so it resolves them unconditionally — `doctor`, which
+    // is a check of the document, does not unless it is asked. A document with no pack takes the
+    // unchanged `parseSpec` and is unaffected.
     const fromTree = await parseFromDeploymentTree(specPath, specText);
     const backend =
       fromTree === undefined

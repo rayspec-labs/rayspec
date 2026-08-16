@@ -32,6 +32,16 @@ The commands split into three groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
+
+  Read-only is about your **data**, and it does not by itself mean "reads nothing
+  but the document" — so what each of them touches is stated per command, because
+  they differ. `doctor` (without `--with-packs`), `openapi` and `gen-handler` read
+  only the files you name: no database, no network, and no module out of the
+  deployment tree. `plan` also reads the tree — it resolves the deployment's
+  [extension packs](./concepts.md), which **imports** each one, so pack code runs
+  in your process — and it opens a database only when you set
+  `SHADOW_DATABASE_URL`, and then only a throwaway one it creates and drops.
+  `doctor --with-packs` is the opt-in into that same pack resolution.
 - A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
   database `DATABASE_URL` names (and applies the committed migration chain to
   it), so it is deliberately *not* under `dev`, which is local-only. It prints no
@@ -113,17 +123,23 @@ deliberate, defence-in-depth jail, not a bug.
 ## `doctor`
 
 ```
-rayspec doctor <spec.yaml>
+rayspec doctor <spec.yaml> [--with-packs]
 ```
 
-Statically validates a spec against the grammar. **No database, no network.** It
-runs the strict parser plus the semantic linter and reports the full,
+Statically validates a spec against the grammar. **No database, no network, and
+no code out of the deployment tree** — it reads the file you name and nothing
+else. It runs the strict parser plus the semantic linter and reports the full,
 fail-closed list of violations (not just the first). Validates either profile —
 it dispatches on the `product:` discriminant.
 
 - **Postgres:** not needed.
-- **Flags:** none (exactly one positional spec path; an unknown flag is a usage
-  error).
+- **Flags:**
+  - `--with-packs` — optional. Resolves the [extension packs](./concepts.md) the
+    document declares, so a top-level section one of them claims is validated by
+    its owner. **This runs code from the deployment tree**: resolving a pack means
+    importing its entry module, and the schema module of each section it claims.
+    Without it no pack is read at all — see the `notResolved` key below for what
+    that leaves unchecked. `plan` and the `deploy` paths resolve packs either way.
 - **Output:**
 
   ```json
@@ -144,12 +160,13 @@ it dispatches on the `product:` discriminant.
   { "ok": true, "errors": [], "warnings": [], "suppressed": [{ "code": "cron_tenant_required", "because": "…", "path": "triggers[0].kind" }] }
   ```
 
-  A fifth key, `claimedSections`, is present **only** when the document
-  references an [extension pack](./concepts.md) that claims a top-level section.
-  A claimed key is owned by the pack, not by the core grammar, so `doctor` runs
-  the same loader the boot runs, from the same deployment tree, and reports one
-  neutral line per claim naming the key and the pack that owns it. It never
-  affects `ok` — it states who owns a key, not that anything is wrong:
+  A fifth key, `claimedSections`, is present **only** under `--with-packs`, and
+  then only when the document references an [extension pack](./concepts.md) that
+  claims a top-level section. A claimed key is owned by the pack, not by the core
+  grammar, so that run uses the same loader the boot runs, from the same
+  deployment tree, and reports one neutral line per claim naming the key and the
+  pack that owns it. It never affects `ok` — it states who owns a key, not that
+  anything is wrong:
 
   ```json
   { "ok": true, "errors": [], "warnings": [], "claimedSections": ["section 'auditing' is claimed by extension pack 'audit-pack'"] }
@@ -157,6 +174,29 @@ it dispatches on the `product:` discriminant.
 
   A document that references no pack loads no pack, reaches no pack module, and
   gets no `claimedSections` key at all.
+
+  Without `--with-packs`, a document that declares a pack gets `notResolved`
+  instead — **one** neutral line, never a per-section list, saying what leaving
+  the packs unread left unchecked. It does not affect `ok` either: a document
+  whose packs were not resolved is not a document that is wrong, and a warning on
+  every run of the first command a reader types is a warning people learn to skip.
+
+  ```json
+  { "ok": true, "errors": [], "warnings": [], "notResolved": ["no extension pack was loaded, so neither the availability of the pack(s) this document declares (audit-pack) nor the grammar of any top-level section they claim was checked — [auditing] accepted unexamined rather than refused. Run `doctor --with-packs` to load them — it imports the entry module of each from this deployment tree."] }
+  ```
+
+  Two things are genuinely unchecked there, and they are the reason to reach for
+  the flag. The packs themselves are never read, so a pack that is **not
+  installed** and a **version pin that does not match** are both invisible (with
+  `--with-packs` they are the two errors described below). And because only a
+  loaded pack can say which top-level keys are claimed, every top-level key the
+  core grammar does not own is accepted **unexamined** rather than refused — on a
+  pack-bearing document that includes a **mistyped** section (`auditting:` where
+  the pack claims `auditing:`). Accepting it is the deliberate trade: refusing it
+  would send you to delete configuration that is in fact correct. `plan`,
+  `deploy --dry-run` and `doctor --with-packs` all load the packs and all refuse
+  it — run one of those for the verdict that has read them. A document that
+  declares no pack has nothing to leave unresolved and gets no `notResolved` key.
 
   On failure, each entry carries a closed `code`, a `message`, and an optional
   `path`:
@@ -265,10 +305,14 @@ introspects a live target.
 
   A document that references an extension pack claiming a top-level section also
   carries `claimedSections` — the same one-line-per-claim list, from the same
-  loader run against the same deployment tree, that [`doctor`](#doctor)
-  documents. `plan` is the command an operator debugs with, which is why the key
-  that is neither the core grammar's nor an error is named rather than left to be
-  inferred. It never affects `ok`, and it is absent for a pack-free document.
+  loader run against the same deployment tree, that
+  [`doctor --with-packs`](#doctor) documents. `plan` is the command an operator
+  debugs with, which is why the key that is neither the core grammar's nor an
+  error is named rather than left to be inferred — and why `plan` resolves the
+  deployment's packs unconditionally, with no flag to ask for it. That resolution
+  **imports** each pack, so pack code runs in your process: `plan` previews a
+  deploy of this tree, and reading the tree is what it is for. It never affects
+  `ok`, and it is absent for a pack-free document.
   In update mode the `--against` **baseline** is parsed with the packs of the
   deployment being planned — the tree of the **new** document. The baseline is a
   prior revision of that same deployment's document handed in as a diff input, so
@@ -774,8 +818,8 @@ change is applied by the explicit `--apply-migration` flag below.
   `dangling_ref`, an unknown key) — the same errors `doctor` reports for it. It is
   also the profile whose grammar carries `extensions[]`, so a document that
   references a pack claiming a top-level section is validated with that pack
-  loaded and carries the same `claimedSections` list [`doctor`](#doctor) and
-  [`plan`](#plan) report. A document that **writes** such a section carries no extra
+  loaded and carries the same `claimedSections` list
+  [`doctor --with-packs`](#doctor) and [`plan`](#plan) report. A document that **writes** such a section carries no extra
   boundary: **the boot resolves the deployment's packs before it validates the
   document**, so a claimed section boots exactly as this preview validated it, and
   the verdict keeps the boundary list every other backend verdict gets.
@@ -859,10 +903,11 @@ change is applied by the explicit `--apply-migration` flag below.
   unexamined, and names it in `notChecked`. **It therefore no longer refuses a mistyped
   top-level section on such a document**: `auditting:` where the pack claims `auditing:`
   is reported as a key whose owner it did not ask about, and the verdict's `errors` stays
-  empty. The boot still refuses it, and so do [`doctor`](#doctor), [`plan`](#plan) and
-  `--dry-run`, which all load the packs — run one of those for the verdict that has read
-  them. On a document that declares **no** pack nothing is lifted and an unknown
-  top-level key is refused here exactly as before.
+  empty. The boot still refuses it, and so do [`plan`](#plan), `--dry-run` and
+  [`doctor --with-packs`](#doctor), which all load the packs — run one of those for the
+  verdict that has read them. (Plain `doctor` loads none either, and lifts the same keys
+  for the same reason.) On a document that declares **no** pack nothing is lifted and an
+  unknown top-level key is refused here exactly as before.
 
   A set `<VAR>_FILE` mount counts
   as set from the variable alone: the file is

@@ -8,9 +8,15 @@
  * documents beside it are what this suite runs the three commands against, so every step here is the
  * real one: the real loader, the real path jail, the real exact version pin, the pack's own validator.
  *
+ * `doctor` resolves no pack unless it is asked to (`--with-packs`) — importing a pack is code out of
+ * the deployment tree, and that is not what a check of the document is for — so every `doctor` case
+ * here passes the flag. What the DEFAULT run does instead, and that it runs no pack code at all, is
+ * measured against a pack whose entry writes a file at import in `doctor-pack-execution.test.ts`.
+ *
  * WHAT IT PINS, one case per seam behaviour:
- *   • a valid claimed section parses — and each of `doctor`, `plan` and `deploy --dry-run` reports the
- *     SAME single neutral line for it, naming the section key and the pack that claims it;
+ *   • a valid claimed section parses — and each of `doctor --with-packs`, `plan` and
+ *     `deploy --dry-run` reports the SAME single neutral line for it, naming the section key and the
+ *     pack that claims it;
  *   • a malformed claimed section is refused by the PACK's validator, at `auditing.<field>`, with the
  *     pack's own wording — nothing in the core grammar can see into that section, so a violation
  *     reported for it can only have come from the pack;
@@ -90,7 +96,7 @@ function show(errors: readonly SpecError[]): string {
 
 describe('a claimed section is visible to an operator — one neutral line, from all three commands', () => {
   it('doctor: the document validates and reports the line', async () => {
-    const result = await runDoctor([VALID_DOC]);
+    const result = await runDoctor([VALID_DOC], { withPacks: true });
     expect(result.errors, show(result.errors)).toEqual([]);
     expect(result.ok).toBe(true);
     expect(result.claimedSections).toEqual([CLAIMED_LINE]);
@@ -112,7 +118,7 @@ describe('a claimed section is visible to an operator — one neutral line, from
   });
 
   it('the three commands report the SAME line — one loader, one sentence', async () => {
-    const doctor = await runDoctor([VALID_DOC]);
+    const doctor = await runDoctor([VALID_DOC], { withPacks: true });
     const plan = await runPlan([VALID_DOC], { shadowDatabaseUrl: undefined });
     const dryRun = await runDeploy(['--dry-run', VALID_DOC]);
     if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
@@ -123,7 +129,7 @@ describe('a claimed section is visible to an operator — one neutral line, from
 
 describe('the claimed section reaches the pack that owns it', () => {
   it('a malformed section is refused by the PACK validator, at `auditing.<field>`', async () => {
-    const result = await runDoctor([INVALID_SECTION_DOC]);
+    const result = await runDoctor([INVALID_SECTION_DOC], { withPacks: true });
     expect(result.ok).toBe(false);
     // Both violations are the pack's own: the core grammar cannot see into a section it does not own.
     expect(result.errors, show(result.errors)).toEqual([
@@ -142,12 +148,12 @@ describe('the claimed section reaches the pack that owns it', () => {
   });
 
   it('the section is NOT reported as an unknown top-level field — the pack owns the key', async () => {
-    const result = await runDoctor([VALID_DOC]);
+    const result = await runDoctor([VALID_DOC], { withPacks: true });
     expect(result.errors.map((e) => e.code)).not.toContain('unknown_field');
   });
 
   it('plan and deploy --dry-run refuse the malformed section too, with the same violations', async () => {
-    const doctor = await runDoctor([INVALID_SECTION_DOC]);
+    const doctor = await runDoctor([INVALID_SECTION_DOC], { withPacks: true });
     const plan = await runPlan([INVALID_SECTION_DOC], { shadowDatabaseUrl: undefined });
     expect(plan.ok).toBe(false);
     expect(plan.phase).toBe('validate');
@@ -162,7 +168,7 @@ describe('the claimed section reaches the pack that owns it', () => {
 
 describe("the exact version pin is the loader's, and it is load-bearing", () => {
   it('a pin the manifest does not declare is `extension_pack_refused` — the pack IS here', async () => {
-    const result = await runDoctor([VERSION_SKEW_DOC]);
+    const result = await runDoctor([VERSION_SKEW_DOC], { withPacks: true });
     expect(result.ok).toBe(false);
     expect(result.errors.map((e) => e.code)).toEqual(['extension_pack_refused']);
     const [error] = result.errors;
@@ -174,7 +180,7 @@ describe("the exact version pin is the loader's, and it is load-bearing", () => 
   });
 
   it('a pin that is a RANGE reports the pin error and NOTHING about the section it declares', async () => {
-    const result = await runDoctor([RANGE_PIN_DOC]);
+    const result = await runDoctor([RANGE_PIN_DOC], { withPacks: true });
     expect(result.ok).toBe(false);
     // Which keys the packs own is unknowable while the reference does not typecheck, so the verdict
     // says only that. An `unknown_field` on `auditing` here is the report this whole seam exists to
@@ -202,7 +208,7 @@ describe('the SAME document on a deployment WITHOUT the pack', () => {
 
   it('fails with the typed missing-pack error, naming the pack — never an unknown field', async () => {
     process.chdir(root);
-    const result = await runDoctor(['rayspec.yaml']);
+    const result = await runDoctor(['rayspec.yaml'], { withPacks: true });
     expect(result.ok).toBe(false);
     expect(result.errors.map((e) => e.code)).toEqual(['extension_pack_unavailable']);
     const [error] = result.errors;
@@ -314,7 +320,7 @@ describe("plan --against: the baseline is judged by the DEPLOYMENT's packs", () 
     expect(result.phase).toBe('validate');
     // The pack's own two violations, identical to what `doctor` reports for that document — so the
     // baseline was validated by the pack that owns the section, from a directory that holds no pack.
-    const doctor = await runDoctor([INVALID_SECTION_DOC]);
+    const doctor = await runDoctor([INVALID_SECTION_DOC], { withPacks: true });
     expect(result.errors, show(result.errors)).toEqual(doctor.errors);
     // The planned document's claim is a fact about the planned document: a baseline that fails later
     // does not unmake it, and the envelope carries it on the refusal too.
@@ -343,9 +349,9 @@ describe("plan --against: the baseline is judged by the DEPLOYMENT's packs", () 
  *     asked about;
  *   • and the PRICE of that, measured rather than assumed: having loaded no pack it cannot tell a
  *     claimed key from a MISTYPED one, so on a pack-bearing document it lifts out both. The last two
- *     cases pin that divergence from each side — `doctor`, which does load the packs, refuses the
- *     mistyped document that `--check-env` accepts, and the same key on a PACK-FREE document is still
- *     refused by `--check-env` itself, so the lift is demonstrably what silences it.
+ *     cases pin that divergence from each side — `doctor --with-packs`, which does load the packs,
+ *     refuses the mistyped document that `--check-env` accepts, and the same key on a PACK-FREE
+ *     document is still refused by `--check-env` itself, so the lift is demonstrably what silences it.
  */
 describe('deploy --dry-run reports a claimed section with no boot boundary attached', () => {
   /**
@@ -393,14 +399,14 @@ describe('deploy --dry-run reports a claimed section with no boot boundary attac
    * includes a MISTYPED one. `auditting:` (for the claimed `auditing:`) is owned by nothing, and this
    * command accepts it unexamined.
    *
-   * The control is the SAME document through `doctor`, which loads the packs exactly as the boot does
-   * and refuses it. Two commands, one document, opposite verdicts: that is the divergence, it is
-   * deliberate (validating with the core grammar alone refused every legitimately claimed section, and
-   * sent an operator to delete correct configuration), and it is what the docs now state. Without the
-   * `doctor` half this would read as "the key is fine"; without the `--check-env` half a regression
-   * that started refusing claimed sections again would go unmeasured.
+   * The control is the SAME document through `doctor --with-packs`, which loads the packs exactly as
+   * the boot does and refuses it. Two commands, one document, opposite verdicts: that is the
+   * divergence, it is deliberate (validating with the core grammar alone refused every legitimately
+   * claimed section, and sent an operator to delete correct configuration), and it is what the docs
+   * now state. Without the `doctor` half this would read as "the key is fine"; without the
+   * `--check-env` half a regression that started refusing claimed sections again would go unmeasured.
    */
-  it('a MISTYPED top-level key: --check-env lifts it out, and doctor — which loads the packs — refuses it', async () => {
+  it('a MISTYPED top-level key: --check-env lifts it out, and doctor --with-packs refuses it', async () => {
     const checkEnv = await runDeploy(['--check-env', MISTYPED_KEY_DOC]);
     if (checkEnv.kind !== 'check-env') throw new Error('expected a check-env verdict');
     // No error at all for a key no pack claims: this command did not load the packs, so it cannot say
@@ -411,7 +417,7 @@ describe('deploy --dry-run reports a claimed section with no boot boundary attac
 
     // The CONTROL: the same document, judged by a command that loads this deployment's packs — the
     // same resolution the boot performs. No pack claims the key, so it is refused, at the key.
-    const doctor = await runDoctor([MISTYPED_KEY_DOC]);
+    const doctor = await runDoctor([MISTYPED_KEY_DOC], { withPacks: true });
     expect(doctor.ok).toBe(false);
     expect(doctor.errors.map((e) => e.code)).toContain('unknown_field');
     expect(doctor.errors.map((e) => e.path)).toContain('auditting');
