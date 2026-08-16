@@ -173,32 +173,6 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
 ] as const;
 
 /**
- * The boundary a CLAIMED SECTION has, and the one entry above that is NOT a refusal met after the
- * document validates: it is met INSTEAD of the validation this arm just ran. This preview validates
- * the document with the deployment's packs loaded, so a top-level key a pack claims is judged by its
- * owner. The boot does not: `deployDeclaredSpec` re-reads the document and validates it with the CORE
- * grammar alone BEFORE it resolves a single pack, and that grammar rejects every key it does not own.
- * `--check-env`, which reads the boot's own module, reports exactly that refusal for such a document.
- *
- * So it is stated, in the verdict, rather than left for a `deploy` to discover — a claimed section is
- * the one shape for which `ok:true` here is furthest from "it boots".
- *
- * APPENDED FOR A DOCUMENT THAT WRITES ONE, NOT FOR ONE WHOSE PACKS CLAIM ONE. The two differ, and the
- * entry is only true of the first: what a pack claims is a fact about the deployment, while the boot's
- * core-grammar parse meets what the DOCUMENT wrote. A document that references a claiming pack and
- * writes none of the keys it claims is written entirely in the grammar the boot has — it carries the
- * claim line, and `--check-env` reports no refusal for it, so appending this entry there would send an
- * operator to look for a refusal that is not there. That is the wrong-remedy report this seam exists to
- * remove, and it would be reintroduced on the surface added to be honest about the boot. Every verdict
- * that does not write a claimed key therefore keeps the boundary list it had.
- */
-const BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION =
-  'that the boot accepts a top-level section an extension pack claims: this preview validated the ' +
-  "document with the deployment's packs loaded, but the boot validates it with the core grammar " +
-  'alone before it resolves any pack, and that grammar rejects a key it does not own (`--check-env`, ' +
-  "which reads the boot's own module, reports that refusal for this document)";
-
-/**
  * The `--check-env` verdict (JSON, stdout). It is the `@rayspec/server` boot-environment report — the
  * demands the BOOT itself raises, read out of the one module that states them — plus the ONE fact only
  * the CLI knows: which `.env` files its auto-loader searched before this environment was read.
@@ -515,11 +489,10 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // static profile — it boots the full platform, which GATES on every mount — so the mounts are
     // reported here rather than silently dropped; omitted entirely when the document declares none.
     const mounts = backend.value.frontend ?? [];
+    // The claim LINE rides every document whose packs claim a section. It carries no boundary with it:
+    // the boot resolves the deployment's packs before it validates the document, so a claimed section
+    // boots exactly as this preview validated it — there is no divergence left to disclose.
     const claimedSections = fromTree?.claimedSections ?? [];
-    // The claim LINE rides every document whose packs claim a section; the boot BOUNDARY rides only a
-    // document that actually writes one, which is the only document the boot's core-grammar parse
-    // refuses. See the constant.
-    const writtenSections = fromTree?.writtenSections ?? [];
     return withClaimedSections(
       {
         ...base,
@@ -533,11 +506,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
           ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
         },
         errors: [],
-        // A claimed section the document WROTE is also a boundary this preview does not cross.
-        notProven:
-          writtenSections.length > 0
-            ? [...BACKEND_DRY_RUN_NOT_PROVEN, BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION]
-            : BACKEND_DRY_RUN_NOT_PROVEN,
+        notProven: BACKEND_DRY_RUN_NOT_PROVEN,
       },
       claimedSections,
     );

@@ -154,10 +154,8 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 backend doc reports its declarations, a frontend-only doc its mounts.
                                 A backend doc that references an extension pack is validated with that
                                 pack loaded, so a top-level section the pack claims is judged by its
-                                owner and named in claimedSections — while the boot itself validates
-                                with the core grammar alone. A doc that WRITES such a section is
-                                therefore refused at boot, which the verdict's notProven states for
-                                exactly those docs.
+                                owner and named in claimedSections — the same resolution the boot
+                                makes before it validates the document.
                                 NO DB, NO network. Emits a JSON verdict. Does NOT prove: the
                                 migration, boot-env sufficiency, any provider credential, live-schema
                                 drift, or that the app serves — the verdict's notProven lists what
