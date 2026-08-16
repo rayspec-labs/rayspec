@@ -263,6 +263,19 @@ export interface DeclarativeEngine {
    * deterministically). Absent ⇒ the default.
    */
   playbackMaxStreamsPerUser?: number;
+  /**
+   * ADDITIONAL reserved path prefixes a declared route may not shadow — the platform paths the
+   * COMPOSITION ROOT registers on this same app and that this package therefore does not own: its
+   * public readiness probes (`/health/`, `/recovery-scope/`) and the deployment's declared static
+   * frontend mount prefixes. Injected rather than hardcoded for the same reason `blobFactory` is: the
+   * root owns those paths, api-auth only has to refuse a declared route that would take one.
+   *
+   * It matters because of REGISTRATION ORDER: the root registers the probes and the mounts AFTER the
+   * declared routes, and Hono runs matching handlers in that order — so a declared `/health` wins the
+   * match and the probe answers nothing for the life of the process. Absent ⇒ only `/v1/` and `/oidc/`
+   * are reserved (an auth-only app, or a unit suite that registers neither).
+   */
+  reservedPathPrefixes?: readonly string[];
 }
 
 /** The Hono app environment (Bindings = raw Node req/res for the OIDC mount; Variables below). */
