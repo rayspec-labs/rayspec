@@ -41,6 +41,14 @@ import { z } from 'zod';
  *                               Only `__proto__`: `constructor`/`prototype` survive validation as
  *                               ordinary keys and stay legal. Applies to a KEY only — a store
  *                               column named `__proto__` is a value and is still served.
+ *  - `extension_pack_unavailable` — the document references an extension pack that this deployment
+ *                               cannot resolve. A pack owns the grammar of every top-level section it
+ *                               claims, so a document carrying such a section cannot be validated
+ *                               where the pack is absent: the parse fails NAMING the pack rather than
+ *                               reporting its section as an unknown field, which would send the
+ *                               operator after the wrong thing. Emitted by the pack-aware parse
+ *                               (`parseSpecWithPacks`, `@rayspec/platform`), which is the only entry
+ *                               point that resolves packs; the pack-free `parseSpec` never emits it.
  *  - `dangling_ref`          — a cross-reference points at an id/name that is not declared.
  *  - `duplicate_name`         — two entries in one section share an id/name.
  *  - `capability_violation`   — an agent demands a capability its chosen backend lacks
@@ -161,6 +169,7 @@ export const SpecErrorCode = z.enum([
   'schema_violation',
   'unknown_field',
   'reserved_document_key',
+  'extension_pack_unavailable',
   'dangling_ref',
   'duplicate_name',
   'capability_violation',
