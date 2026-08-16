@@ -19,6 +19,12 @@
  * (no AST), COMMENT- and STRING-LITERAL-stripped before analysis, with a SELF-TEST that proves the
  * detector fires on every forbidden vector AND passes the one sanctioned import.
  *
+ * HONEST CEILING: being a tripwire, it vets what a module WRITES DOWN — a source it can read. A
+ * specifier it cannot read is REFUSED rather than cleared, so the ceiling is not a hole: an opaque
+ * dynamic `import()`/`require()` argument is flagged on sight, and so is a member named with a STRING
+ * rather than an identifier (`{ "runAgent" as go }`, legal since ES2022) — the clause reader cannot
+ * extract such a statement at all, so leaving it unflagged would clear it against every rule at once.
+ *
  * ESCAPE-HATCH ROOTS: a RaySpec deployment's escape-hatch library lives outside the platform
  * (zero-product-code). On the platform main line the ONLY escape-hatch modules that exist are
  * the THROWAWAY's (examples/acme-notes-backend/handlers). A real deployment would add its own root here
@@ -188,7 +194,9 @@ function stripComments(src) {
  *   - `import '<src>'`                     (side-effect import)
  *   - `import('<src>')` / `require('<src>')` (dynamic, static-string arg)
  * A dynamic import/require with a NON-static-string arg is handled separately (see
- * `detectDynamicImportViolations` — it is FLAGGED as opaque, not source-extracted).
+ * `detectDynamicImportViolations` — it is FLAGGED as opaque, not source-extracted), and so is a clause
+ * that names a member with a STRING literal (see `detectQuotedNameViolations` — the clause body below
+ * excludes quotes, so such a statement is never extracted here).
  * Returns the list of source specifiers (the strings inside the quotes/backticks).
  */
 function extractImportSources(codeNoComments) {
@@ -213,6 +221,34 @@ function extractImportSources(codeNoComments) {
     }
   }
   return sources;
+}
+
+/**
+ * ES2022 lets a brace group name a member with a STRING rather than an identifier
+ * (`import { "runAgent" as go } from '@rayspec/platform'`). `extractImportSources` builds its clause
+ * from a character class that EXCLUDES quotes, so such a statement is not merely read wrong — it is
+ * never extracted, its source is never vetted, and every rule this gate owns silently reads zero for
+ * it.
+ *
+ * The reader stays a greppable tripwire rather than learning to parse the name: it REFUSES the
+ * statement it cannot read, the same posture the opaque-dynamic-specifier rule already takes. Applied
+ * to the COMMENT-STRIPPED source, so an apostrophe inside a comment between the braces cannot
+ * manufacture a violation.
+ */
+const QUOTED_MEMBER_NAME =
+  /\b(?:import|export)\s*(?:type\s*)?\{[^}]*['"][^}]*\}\s*from\s*(?:'[^']+'|"[^"]+"|`[^`$]+`)/g;
+
+function detectQuotedNameViolations(rel, codeNoComments) {
+  const found = [];
+  for (const [statement] of codeNoComments.matchAll(QUOTED_MEMBER_NAME)) {
+    found.push(
+      `${rel}: names an imported member with a string literal (${statement.trim().slice(0, 80)}…) — ` +
+        'this gate reads an import clause to reach the source it names, and a quoted member name is ' +
+        'one it cannot read, so the statement is refused rather than cleared (fail-closed). Write ' +
+        'the member as a plain identifier.',
+    );
+  }
+  return found;
 }
 
 /**
@@ -336,6 +372,8 @@ export function detectViolations(rel, src) {
     // deployment vendors in its own library) is NOT flagged here — the path jail (loader.ts) bounds
     // WHICH file loads; this gate bounds the trust-boundary-crossing imports specifically.
   }
+  // A member named with a STRING literal — refuse the statement (its source is never extracted).
+  found.push(...detectQuotedNameViolations(rel, code));
   // LOADER-1: an opaque dynamic import()/require()/createRequire — flag (cannot be vetted).
   found.push(...detectDynamicImportViolations(rel, code));
   return found;
@@ -449,6 +487,35 @@ function selfTest() {
       src: "import { forTenant } from '../../packages/kernel/db/src/tenant-db.js';",
       expect: true,
     },
+    // ── a QUOTED member name (ES2022) is not extracted at all, so the statement walks past EVERY
+    //    rule above at once. It is refused as unreadable, not read. Each vector is the quoted
+    //    spelling of a plain one already above, and the accept controls below prove the refusal is
+    //    not a blanket one.
+    { rel: 'h/x.ts', src: 'import { "runAgent" as go } from \'@rayspec/platform\';', expect: true },
+    { rel: 'h/x.ts', src: 'import { "makeDb" as m } from \'@rayspec/db/testing\';', expect: true },
+    { rel: 'h/x.ts', src: 'import { "default" as p } from \'@rayspec/platform\';', expect: true },
+    { rel: 'h/x.ts', src: "import { 'forTenant' as f } from '@rayspec/db';", expect: true },
+    { rel: 'h/x.ts', src: 'export { "default" as p } from \'@rayspec/platform\';', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import type { "AgentSpec" as A } from \'@rayspec/core\';',
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: 'import { "forTenant" as f } from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    // …and the accept controls for it: a quote in the SOURCE, in an object literal, in a comment
+    // between the braces, and a legitimate enumerable re-export under the name `default`.
+    { rel: 'h/x.ts', src: 'import { helper } from "./shared.js";', expect: false },
+    { rel: 'h/x.ts', src: 'export const o = { a: "x" };', expect: false },
+    {
+      rel: 'h/x.ts',
+      src: "import { /* don't */ helper } from '@rayspec/handler-sdk';",
+      expect: false,
+    },
+    { rel: 'h/x.ts', src: "export { helper as default } from './shared.js';", expect: false },
     // a DEAD STRING mentioning a forbidden module (not an import) — must NOT fire (#16-style)
     {
       rel: 'h/x.ts',
