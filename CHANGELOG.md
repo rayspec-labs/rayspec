@@ -354,28 +354,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write the modules its declarations point at.** The package described *where* a handler lives and
   *what it is called* — `PackHandlerFragment{id, module, export, kind}`, `PackToolFragment`,
   `PackApiRouteFragment` — and nothing that said what a handler **is**. A pack that declared a
-  `tooling` or an `api` contribution therefore had no typed contract for the module behind it: the
-  platform's own handler contract ships in a package that is private, unpublished and internal, so a
-  pack in its own repository could neither install it nor should have. Eleven exports close that
+  `tooling` or an `api` contribution therefore had no typed contract for the module behind it. The
+  platform's own handler contract, `@rayspec/handler-sdk`, releases in the same closure and a pack
+  can install it — but it carries runtime and three production dependencies, so requiring it beside
+  the pack surface would put four packages and an implementation into a pack's build for a shape one
+  types-only, zero-dependency package can promise. Eleven exports close that
   (32 → 43, all additive): **`PackToolHandler<In, Out>`** — `(args, init) => neutral data` — and
   **`PackRouteHandler<Out>`** — `(init) => JSON body` — with the inits they receive
   (`PackHandlerInit`, `PackToolHandlerInit`, `PackRouteHandlerInit`, `PackHandlerPrincipal`) and the
   tenant-bound, name-keyed store door those inits carry (`PackStoreDb`, `PackStoreRow`,
-  `PackStoreFilter`, `PackSelectOptions`, `PackUpsertOptions`). A pack handler module now imports
-  `@rayspec/pack-sdk` and nothing else, for both halves of a contribution.
+  `PackStoreFilter`, `PackSelectOptions`, `PackUpsertOptions`). A pack handler module of either
+  contracted kind now imports `@rayspec/pack-sdk` and nothing else, for both halves of a
+  contribution, and `gate:handler-imports` sanctions that import over the manifest-derived pack
+  handler roots alongside `@rayspec/handler-sdk`.
   **What a pack handler does not get is stated, not omitted.** The injected capability handles (a blob
   backend, the read-only file source, the speech providers, the event-bus append), the durable
   enqueue, the play-token mint and the branded status/header response envelope are each named in the
   contract's docblock with the reason they are withheld — a capability contract is versioned with the
-  platform, scheduling an agent turn is the `services` contribution's privilege alone, and the
-  response brand is a runtime value a types-only package does not ship. Withheld from the contract, not
-  from the deployment: the platform builds one init per invocation and a pack simply has no promised
-  name for the rest of it. `trigger` stays declarable and uncontracted, and says so.
+  platform, the promised way for a pack to schedule an agent turn is `TurnDispatch` on the `services`
+  contribution's boot context, and the
+  response brand is a runtime value a types-only package does not ship. Withheld from the **contract**,
+  not from the deployment — a deployment's own init for a route may still carry an enqueue, and what
+  it hands its routes is its affair; this is a statement about what a pack may **rely on**, enforced
+  by the type rather than by the runtime. Two declarable shapes stay uncontracted and say so: a
+  `trigger`, and a `route`-kind handler behind a `{kind:'stream'}` action — a second contract on the
+  same kind, which exchanges a raw `Request`/`Response` and requires the blob backend, so contracting
+  it would contradict the capability-handle rule above. Such a handler annotates
+  `StreamRouteHandler` from `@rayspec/handler-sdk`, as `examples/stream-backend`'s pack does.
   **The correspondence is pinned at compile time**, on the platform side where the init value is
   built: the init the engine passes must satisfy what a pack annotates against, and a function a pack
   annotates must satisfy what the engine calls — so a drift fails this repository's own build instead
-  of a pack author's. The in-tree fixture pack now contributes both kinds through real declarations
-  and builds against `@rayspec/pack-sdk` alone.
+  of a pack author's. The in-tree fixture pack now contributes both contracted kinds through real
+  declarations and builds against `@rayspec/pack-sdk` alone.
 
 ### Fixed
 

@@ -6,8 +6,10 @@
  * contribution is addressed by and leaves the rest of each section body open, so a pack can annotate
  * its entry export without depending on the whole platform. It re-expresses the HANDLER half too —
  * the init the engine passes a contributed tool or route, and the function shape it calls — because a
- * pack that declares a contribution has to write the module the declaration points at, and the
- * package that carries the platform's own handler contract is private. A re-expression is only worth
+ * pack that declares a contribution has to write the module the declaration points at, and pointing
+ * it at `@rayspec/handler-sdk` instead would put that package's runtime and its three production
+ * dependencies into a pack's install, ending the one-import, zero-dependency property this surface
+ * exists for. A re-expression is only worth
  * anything if the value this repository actually produces satisfies it — and nothing here placed the
  * two side by side, so a re-expressed shape the helper's own result could not be assigned to compiled
  * cleanly on both sides and would have failed only in a pack author's repository.

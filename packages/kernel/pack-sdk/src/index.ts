@@ -27,7 +27,10 @@
  * HANDLER modules RUN with injected capabilities, and the contract they are written against is
  * declared HERE too (`handler.ts`): the manifest half says where a handler lives and what it is
  * called, and the handler half says what it IS — the value the platform calls it with, and the
- * function it exports. So a pack still imports ONE thing to build both halves.
+ * function it exports. So a pack still imports ONE thing to build both halves — for the shapes this
+ * package contracts, which is the `tool` kind and the `route` kind behind a `{kind:'handler'}` api
+ * action. What it does NOT contract is named in `handler.ts` with the reason, so a pack author reads
+ * a statement rather than discovering an absence.
  *
  * A pack's SERVICE modules are the third surface, and they are typed HERE rather than against the
  * handler contract: a service is not called by the platform, it is BOOTED by it, so what it receives

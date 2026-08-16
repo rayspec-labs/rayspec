@@ -15,10 +15,14 @@ A pack's **entry** module builds its manifest with the platform's manifest helpe
 typechecks the full document grammar at the pack's own edge — and names `DefinedPack` from
 this package for what it exports. A pack's **handler** modules run with injected
 capabilities, and the contract they are written against is here too: `PackToolHandler` for
-the module a `tooling` contribution points at, `PackRouteHandler` for an `api` one, and the
+the module a `tooling` contribution points at, `PackRouteHandler` for an `api` one served
+behind a `{kind:'handler'}` action, and the
 init each receives — the invocation's server-derived tenant and `PackStoreDb`, the
 name-keyed door onto the declared stores, plus what the request carried on a route. What a
-pack handler does **not** receive is stated in the same place, with the reason. A pack's
+pack handler does **not** receive — and which declarable shapes are **not** contracted here
+(a `trigger`, and a `route`-kind handler behind a `{kind:'stream'}` action, which exchanges
+a raw `Request`/`Response` and needs the blob backend) — is stated in the same place, with
+the reason. A pack's
 **service** modules — the one contribution kind the deployment boots rather than calls —
 are typed against `PackServiceModule`: what they receive is a boot context rather than a
 per-invocation init, and it carries `TurnDispatch`, the capability a handler may not even

@@ -12,9 +12,11 @@
  * `@rayspec/pack-sdk` alone is the module the platform's tool chokepoint calls — not what the handler
  * computes; a handler that touched the database would make that measurement depend on one.
  *
- * ONE IMPORT. It names `@rayspec/pack-sdk` and nothing else, exactly as a pack shipping from its own
- * repository must: the package carrying the platform's own handler contract is private, so it is not
- * a package such a pack can install.
+ * ONE IMPORT. It names `@rayspec/pack-sdk` and nothing else — the point being that ONE types-only,
+ * zero-dependency package covers both halves of a contribution. A pack shipping from its own
+ * repository could install `@rayspec/handler-sdk` (it releases in the same closure), but doing so
+ * would add that package's runtime and its three production dependencies to a pack's install for a
+ * shape this one already promises.
  */
 import type { PackToolHandler } from '@rayspec/pack-sdk';
 

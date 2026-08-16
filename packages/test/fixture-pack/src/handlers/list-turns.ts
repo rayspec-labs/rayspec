@@ -10,10 +10,10 @@
  * It is deliberately trivial: it reads its bound path parameter and answers with it. What is being
  * witnessed is WHERE the route is allowed to live and WHO the merge says brought it, not what the
  * handler computes — and a handler that touched the database would make the namespace test depend on
- * one. It names `@rayspec/pack-sdk` and nothing else — the one package a pack shipping from its own
- * repository can install, now that the same package carries the contract a handler is written
- * against — which keeps this subtree inside the boundary `gate:handler-imports` enforces over it once
- * the deployment document beside this pack registers it.
+ * one. It names `@rayspec/pack-sdk` and nothing else, now that the same package carries the contract a
+ * handler is written against — which keeps this subtree inside the boundary `gate:handler-imports`
+ * enforces over it once the deployment document beside this pack registers it: that gate sanctions
+ * the two type-only handler contracts and refuses everything else.
  */
 import type { PackRouteHandler } from '@rayspec/pack-sdk';
 

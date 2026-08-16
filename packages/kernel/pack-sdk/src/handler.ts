@@ -11,14 +11,19 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHY THE CONTRACT IS DECLARED HERE RATHER THAN RE-EXPORTED.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * The platform's own handler contract lives in a package that is private, carries runtime and depends
- * on core internals. Re-exporting it would make the whole of it this package's promise — every
- * internal type it names, every dependency it pulls — and would end the property that makes this
- * surface worth having: a pack imports ONE thing, and that thing ships nothing but types. So the
- * contract is DECLARED here, against what this package already carries, and the correspondence with
- * the value the platform actually passes is pinned AT COMPILE TIME on the platform side — where the
- * value lives. Without that pin the two could drift, and the only place the drift would surface is a
- * pack author's own repository, which is the failure this surface exists to prevent.
+ * The platform's own handler contract (`@rayspec/handler-sdk`) ships in the same release closure as
+ * this package, so INSTALLING it is not the obstacle — RE-EXPORTING it is. That package carries
+ * RUNTIME (a bounded body reader, a tokenizer conduit) and three production dependencies
+ * (`@rayspec/core`, `@rayspec/stt-port`, `@rayspec/tts-port`), and its contract names capability
+ * objects owned by the platform. Re-exporting it — or requiring it beside this one — would make the
+ * whole of that this package's promise: every internal type it names, every dependency it pulls, and
+ * four packages in a pack's install instead of one. That ends the two properties this surface exists
+ * for: a pack imports ONE thing for both halves of a contribution, and that thing is a
+ * zero-dependency leaf. So the contract is DECLARED here, against what this package already carries,
+ * and the correspondence with the value the platform actually passes is pinned AT COMPILE TIME on the
+ * platform side — where the value lives. Without that pin the two could drift, and the only place the
+ * drift would surface is a pack author's own repository, which is the failure this surface exists to
+ * prevent.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHAT A PACK HANDLER RECEIVES — AND WHAT IT DOES NOT.
@@ -47,15 +52,31 @@
  *    platform's branded envelope, and the brand is a RUNTIME value this types-only package does not
  *    ship. A pack route handler returns a plain body, which the deployment serializes as JSON with
  *    HTTP 200; spelling the brand out by hand would couple a pack to a marker it does not own.
+ *  - THE STREAM ROUTE SHAPE. A `route`-kind handler placed behind a `{kind:'stream'}` api action is a
+ *    DIFFERENT contract from `PackRouteHandler` — it is handed the raw Web `Request` plus a REQUIRED
+ *    blob backend and returns a raw `Response`, not a JSON body — and this package does not promise
+ *    it. Not by oversight: its init REQUIRES the very capability handle the first bullet withholds,
+ *    so contracting it here would contradict that rule in the same file. A pack that contributes a
+ *    stream route annotates `StreamRouteHandler`/`StreamRouteHandlerInit` from `@rayspec/handler-sdk`
+ *    instead — `examples/stream-backend/packs/stream-pack` is the in-tree witness, and
+ *    `gate:handler-imports` sanctions that import over a pack handler root for exactly this case.
  *
  * Everything withheld is withheld from THE CONTRACT, not from the running deployment: the platform
  * builds one init per invocation and a pack simply has no promised name for the rest of it.
  *
- * TWO OF THE THREE DECLARABLE KINDS ARE CONTRACTED HERE. `PackHandlerKind` also admits `trigger`, and
- * no contract for it is promised: a pack's trigger is fired by the durable worker, and until both
- * halves of that seam are settled a type here would have to change. Declaring a trigger handler is
- * supported; annotating one against this package is not, and saying so is better than a promise this
- * package would have to break.
+ * WHICH DECLARABLE SHAPES ARE CONTRACTED HERE — and which are not. `PackHandlerKind` admits `tool`,
+ * `route` and `trigger`; this package contracts the `tool` kind and the `route` kind AS SERVED BEHIND
+ * A `{kind:'handler'}` api action. Two shapes are declarable and uncontracted, and each says so
+ * rather than going missing:
+ *   - `trigger` — a pack's trigger is fired by the durable worker, and until both halves of that seam
+ *     are settled a type here would have to change. Declaring one is supported; annotating one
+ *     against this package is not.
+ *   - a `route`-kind handler behind a `{kind:'stream'}` action — the stream shape above. `route` is
+ *     one kind carrying TWO contracts (the spec resolves a stream action's handler against a declared
+ *     `route`-kind handler), and only the JSON one is promised here.
+ * Saying so is better than a promise this package would have to break — and better than an omission
+ * that would let a pack author annotate a stream handler `PackRouteHandler` and discover the mismatch
+ * at runtime, since the stream init structurally satisfies the JSON one.
  */
 
 /**
@@ -243,8 +264,16 @@ export type PackToolHandler<In = unknown, Out = unknown> = (
 ) => Promise<Out> | Out;
 
 /**
- * A ROUTE handler: `(init) => neutral JSON body`, the shape an `api` contribution's handler module
- * exports. It runs behind the deployment's auth chain, inside the tenant-scoped transaction the
- * deployment opened, and what it returns is the response body, serialized as JSON with HTTP 200.
+ * A ROUTE handler: `(init) => neutral JSON body`, the shape the module behind an `api` contribution's
+ * `{kind:'handler'}` action exports. It runs behind the deployment's auth chain, inside the
+ * tenant-scoped transaction the deployment opened, and what it returns is the response body,
+ * serialized as JSON with HTTP 200.
+ *
+ * NOT the shape for a `{kind:'stream'}` action. That action also resolves against a declared
+ * `route`-kind handler, but the module behind it exchanges a raw Web `Request`/`Response` and needs
+ * the blob backend — a contract this package withholds (see the module docblock). Annotating a stream
+ * handler with this type COMPILES, because the stream init structurally satisfies
+ * `PackRouteHandlerInit`, and then fails at runtime; annotate `StreamRouteHandler` from
+ * `@rayspec/handler-sdk` instead.
  */
 export type PackRouteHandler<Out = unknown> = (init: PackRouteHandlerInit) => Promise<Out> | Out;
