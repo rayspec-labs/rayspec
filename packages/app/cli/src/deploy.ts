@@ -40,6 +40,7 @@ import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // it — and every other subcommand — loads none of @rayspec/server.
 import type { BootEnvReport } from '@rayspec/server/boot-env';
 import type { FrontendSpec, SpecError } from '@rayspec/spec';
+import { parseFromDeploymentTree, withClaimedSections } from './pack-sections.js';
 import { dotenvCandidatePaths } from './read-env.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
@@ -116,6 +117,13 @@ export interface DeployDryRunResult {
   readonly errors: readonly string[];
   /** The honest boundary — what --dry-run does NOT prove. */
   readonly notProven: readonly string[];
+  /**
+   * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
+   * section key and the pack that owns it — the same line `plan` and `doctor` report, from the same
+   * loader run against the same deployment tree. Present only for a document that references a pack
+   * and validated, so every other verdict keeps the exact key set it had. NEVER affects `ok`.
+   */
+  readonly claimedSections?: readonly string[];
 }
 
 /** What `--dry-run` deliberately does NOT prove (surfaced in the result + `--help`). */
@@ -464,26 +472,39 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
     // the verdict is the validation `doctor` runs plus the names the document declares.
-    const backend = parseSpec(specText);
+    //
+    // It is the validation `doctor` runs including its packs: this is the profile whose grammar carries
+    // `extensions[]`, and the boot this previews resolves them from this same deployment tree. A
+    // document with no pack takes the unchanged `parseSpec` and is unaffected.
+    const fromTree = await parseFromDeploymentTree(specPath, specText);
+    const backend =
+      fromTree === undefined
+        ? parseSpec(specText)
+        : fromTree.spec !== undefined
+          ? ({ ok: true, value: fromTree.spec } as const)
+          : ({ ok: false, errors: fromTree.errors } as const);
     if (!backend.ok) return { ...base, errors: specDidNotValidate(backend.errors) };
     // A backend document MAY also declare frontend mounts (examples/notes-ui does). It is not the
     // static profile — it boots the full platform, which GATES on every mount — so the mounts are
     // reported here rather than silently dropped; omitted entirely when the document declares none.
     const mounts = backend.value.frontend ?? [];
-    return {
-      ...base,
-      ok: true,
-      backendProfile: {
-        profile: 'rayspec',
-        stores: backend.value.stores.map((store) => store.name),
-        routes: backend.value.api.map((route) => `${route.method} ${route.path}`),
-        agents: backend.value.agents.map((agent) => agent.id),
-        handlers: backend.value.handlers.map((handler) => handler.id),
-        ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
+    return withClaimedSections(
+      {
+        ...base,
+        ok: true,
+        backendProfile: {
+          profile: 'rayspec',
+          stores: backend.value.stores.map((store) => store.name),
+          routes: backend.value.api.map((route) => `${route.method} ${route.path}`),
+          agents: backend.value.agents.map((agent) => agent.id),
+          handlers: backend.value.handlers.map((handler) => handler.id),
+          ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
+        },
+        errors: [],
+        notProven: BACKEND_DRY_RUN_NOT_PROVEN,
       },
-      errors: [],
-      notProven: BACKEND_DRY_RUN_NOT_PROVEN,
-    };
+      fromTree?.claimedSections ?? [],
+    );
   }
 
   const {

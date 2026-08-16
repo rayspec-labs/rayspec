@@ -80,6 +80,7 @@ import {
   type SpecWarning,
   type StoreSpec,
 } from '@rayspec/spec';
+import { parseFromDeploymentTree, withClaimedSections } from './pack-sections.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 import {
   shadowApply as defaultShadowApply,
@@ -188,6 +189,14 @@ export interface PlanResult {
   readonly specWarnings?: SpecWarning[];
   /** A human-readable one-line-per-advisory summary of `specWarnings` (its text surface, as `gateSummary` is the gate's). */
   readonly specWarningSummary?: string;
+  /**
+   * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
+   * section key and the pack that owns it — `plan` is the command an operator debugs with, so the key
+   * that is neither the core grammar's nor an error is named here rather than left to be inferred.
+   * Present only for a document that references a pack and validated, so a pack-free plan's envelope
+   * stays byte-identical. NEVER affects `ok`.
+   */
+  readonly claimedSections?: readonly string[];
 }
 
 /** The read-only guard's refusal message (kept identical across first-materialize + update mode; secret-free). */
@@ -653,16 +662,41 @@ async function planStores(inp: StorePlanInputs): Promise<PlanResult> {
 // Family handlers.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** The backend-profile plan: `spec.stores` are the declared stores; update mode diffs old→new. */
+/** A spec file the CLI read: its text, and the resolved path whose directory is the deployment tree. */
+interface SpecFile {
+  readonly text: string;
+  readonly path: string;
+}
+
+/**
+ * The backend-profile plan: `spec.stores` are the declared stores; update mode diffs old→new.
+ *
+ * BOTH documents are parsed from their own deployment tree, so a top-level section a pack claims is
+ * validated by that pack on each side. The baseline gets the same treatment as the new document
+ * deliberately: it is a prior revision of the same deployment's document, so a claimed section it
+ * carries is as owned as the new one's — parsing it with the core grammar alone would refuse the
+ * baseline as an unknown field and block an update the deployment can perform.
+ */
 async function planRaySpec(
-  newText: string,
-  oldText: string | undefined,
+  next: SpecFile,
+  prior: SpecFile | undefined,
   allowlist: AllowlistEntry[],
   opts: RunPlanOpts,
 ): Promise<PlanResult> {
-  const parsed = parseSpec(newText);
+  const newText = next.text;
+  const fromTree = await parseFromDeploymentTree(next.path, newText);
+  const claimedSections = fromTree?.claimedSections ?? [];
+  const parsed =
+    fromTree === undefined
+      ? parseSpec(newText)
+      : fromTree.spec !== undefined
+        ? ({ ok: true, value: fromTree.spec } as const)
+        : ({ ok: false, errors: fromTree.errors } as const);
   if (!parsed.ok) {
-    return { ok: false, phase: 'validate', ...emptyProjection(), errors: parsed.errors };
+    return withClaimedSections(
+      { ok: false, phase: 'validate', ...emptyProjection(), errors: parsed.errors },
+      claimedSections,
+    );
   }
   const spec = parsed.value;
   const { routes, agents } = projectRoutesAgents(spec);
@@ -674,31 +708,43 @@ async function planRaySpec(
   const specWarnings = lintSpecWarnings(spec);
 
   let oldStores: StoreSpec[] | undefined;
-  if (oldText !== undefined) {
-    const parsedOld = parseSpec(oldText);
+  if (prior !== undefined) {
+    const priorFromTree = await parseFromDeploymentTree(prior.path, prior.text);
+    const parsedOld =
+      priorFromTree === undefined
+        ? parseSpec(prior.text)
+        : priorFromTree.spec !== undefined
+          ? ({ ok: true, value: priorFromTree.spec } as const)
+          : ({ ok: false, errors: priorFromTree.errors } as const);
     if (!parsedOld.ok) {
-      return withSpecWarnings(
-        { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors },
-        specWarnings,
+      return withClaimedSections(
+        withSpecWarnings(
+          { ok: false, phase: 'validate', ...emptyProjection(), errors: parsedOld.errors },
+          specWarnings,
+        ),
+        claimedSections,
       );
     }
     oldStores = parsedOld.value.stores;
   }
 
-  return withSpecWarnings(
-    await planStores({
-      newStores: spec.stores,
-      oldStores,
-      allowlist,
-      opts,
-      routes,
-      agents,
-      // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
-      // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
-      firstMaterializeSql: () =>
-        (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
-    }),
-    specWarnings,
+  return withClaimedSections(
+    withSpecWarnings(
+      await planStores({
+        newStores: spec.stores,
+        oldStores,
+        allowlist,
+        opts,
+        routes,
+        agents,
+        // The generator is injectable so a test can drive the gate-BLOCKED branch through runPlan's
+        // OWN code with a destructive first-materialization. Production default: generateProductSql(stores).
+        firstMaterializeSql: () =>
+          (opts.generateSql ?? ((s: RaySpec) => generateProductSql(s.stores)))(spec),
+      }),
+      specWarnings,
+    ),
+    claimedSections,
   );
 }
 
@@ -849,10 +895,13 @@ export async function runPlan(
   positionals: readonly string[],
   opts: RunPlanOpts = {},
 ): Promise<PlanResult> {
-  // Read the NEW spec fail-closed (same hardening as doctor).
+  // Read the NEW spec fail-closed (same hardening as doctor). The RESOLVED path is kept, not just the
+  // text: its directory is the deployment tree the document's packs are resolved within.
   let text: string;
+  let specPath: string;
   try {
-    text = await readSpecFile(resolveSpecPath(positionals));
+    specPath = resolveSpecPath(positionals);
+    text = await readSpecFile(specPath);
   } catch (e) {
     if (e instanceof ReadSpecError) {
       return {
@@ -868,9 +917,11 @@ export async function runPlan(
 
   // --against: read the PRIOR spec (jailed) and require the SAME family (a cross-family diff is undefined).
   let oldText: string | undefined;
+  let oldPath: string | undefined;
   if (opts.against !== undefined) {
     try {
-      oldText = await readSpecFile(resolveSpecPath([opts.against]));
+      oldPath = resolveSpecPath([opts.against]);
+      oldText = await readSpecFile(oldPath);
     } catch (e) {
       if (e instanceof ReadSpecError) {
         return {
@@ -970,5 +1021,12 @@ export async function runPlan(
 
   return newKind === 'product'
     ? planProduct(text, oldText, allowlist, opts)
-    : planRaySpec(text, oldText, allowlist, opts);
+    : planRaySpec(
+        { text, path: specPath },
+        oldText !== undefined && oldPath !== undefined
+          ? { text: oldText, path: oldPath }
+          : undefined,
+        allowlist,
+        opts,
+      );
 }

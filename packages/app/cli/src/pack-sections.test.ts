@@ -1,0 +1,244 @@
+/**
+ * THE CLAIMED-SECTION SEAM, END TO END, against a REAL pack.
+ *
+ * `packages/test/fixture-pack` is an in-tree extension pack: a normal `@rayspec/*` workspace member
+ * (so the CI filters build and typecheck it — a fixture excluded from CI proves nothing), compiled to
+ * JavaScript by its own `tsc -b` (so the loader, which imports compiled JavaScript only, can load it),
+ * claiming one top-level section (`auditing`) and shipping the validator for it. The deployment
+ * documents beside it are what this suite runs the three commands against, so every step here is the
+ * real one: the real loader, the real path jail, the real exact version pin, the pack's own validator.
+ *
+ * WHAT IT PINS, one case per seam behaviour:
+ *   • a valid claimed section parses — and each of `doctor`, `plan` and `deploy --dry-run` reports the
+ *     SAME single neutral line for it, naming the section key and the pack that claims it;
+ *   • a malformed claimed section is refused by the PACK's validator, at `auditing.<field>`, with the
+ *     pack's own wording — nothing in the core grammar can see into that section, so a violation
+ *     reported for it can only have come from the pack;
+ *   • the SAME document on a deployment that does not have the pack fails with the typed
+ *     `extension_pack_unavailable` naming the pack — never as an unknown field on the section, which
+ *     would send an operator to delete the configuration instead of installing the pack;
+ *   • the exact version pin is load-bearing: a document whose pin does not match the manifest is
+ *     `extension_pack_refused` — the pack is present, so deploying it again changes nothing.
+ *
+ * NO DATABASE, NO NETWORK, NO SECRET: `doctor` and a backend `--dry-run` touch none, and the fixture
+ * document declares no store, so `plan`'s optional shadow-apply has nothing to apply and never runs.
+ */
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { SpecError } from '@rayspec/spec';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { runDeploy } from './deploy.js';
+import { runDoctor } from './doctor.js';
+import { runPlan } from './plan.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(here, '../../../..');
+
+/** The fixture pack's directory, and the deployment documents that reference it. */
+const PACK_DIR = 'packages/test/fixture-pack';
+const VALID_DOC = `${PACK_DIR}/rayspec.yaml`;
+const INVALID_SECTION_DOC = `${PACK_DIR}/rayspec.invalid-section.yaml`;
+const VERSION_SKEW_DOC = `${PACK_DIR}/rayspec.version-skew.yaml`;
+const RANGE_PIN_DOC = `${PACK_DIR}/rayspec.range-pin.yaml`;
+
+/**
+ * The ONE line each command reports for the section this pack claims. It names the key and the pack,
+ * and states nothing else: whether the document writes the section, and whether what it wrote is
+ * valid, are the commands' own verdicts and are reported as those.
+ */
+const CLAIMED_LINE = "section 'auditing' is claimed by extension pack 'fixture-pack'";
+
+// The pack has to have been BUILT — the loader imports compiled JavaScript only. `test` runs after
+// `^build` in the task graph and the pack is a declared devDependency of this package, so any
+// turbo-driven run has it; a bare vitest invocation might not. FAIL, loudly and with the fix, rather
+// than skip: a skipped seam proof is a green that means nothing.
+const PACK_ENTRY = join(repoRoot, PACK_DIR, 'dist/index.js');
+if (!existsSync(PACK_ENTRY)) {
+  throw new Error(
+    `the fixture pack is not built (${PACK_ENTRY} is absent) — run \`pnpm build\` before this suite; ` +
+      'the loader imports compiled JavaScript only, so an unbuilt pack is an absent pack.',
+  );
+}
+
+// The spec-path jail resolves against the CWD, so every command runs from the repo root (the fixture
+// documents are inside it). The missing-pack case chdirs into its own throwaway tree instead.
+let prevCwd: string;
+beforeEach(() => {
+  prevCwd = process.cwd();
+  process.chdir(repoRoot);
+});
+afterEach(() => {
+  process.chdir(prevCwd);
+});
+
+/** Render a violation list compactly, so a failure names what was actually reported. */
+function show(errors: readonly SpecError[]): string {
+  return JSON.stringify(errors, null, 2);
+}
+
+describe('a claimed section is visible to an operator — one neutral line, from all three commands', () => {
+  it('doctor: the document validates and reports the line', async () => {
+    const result = await runDoctor([VALID_DOC]);
+    expect(result.errors, show(result.errors)).toEqual([]);
+    expect(result.ok).toBe(true);
+    expect(result.claimedSections).toEqual([CLAIMED_LINE]);
+  });
+
+  it('plan: the same line, from the command operators debug with', async () => {
+    const result = await runPlan([VALID_DOC], { shadowDatabaseUrl: undefined });
+    expect(result.errors, show(result.errors)).toEqual([]);
+    expect(result.ok).toBe(true);
+    expect(result.claimedSections).toEqual([CLAIMED_LINE]);
+  });
+
+  it('deploy --dry-run: the same line again', async () => {
+    const outcome = await runDeploy(['--dry-run', VALID_DOC]);
+    if (outcome.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(outcome.result.errors, JSON.stringify(outcome.result.errors)).toEqual([]);
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.claimedSections).toEqual([CLAIMED_LINE]);
+  });
+
+  it('the three commands report the SAME line — one loader, one sentence', async () => {
+    const doctor = await runDoctor([VALID_DOC]);
+    const plan = await runPlan([VALID_DOC], { shadowDatabaseUrl: undefined });
+    const dryRun = await runDeploy(['--dry-run', VALID_DOC]);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(plan.claimedSections).toEqual(doctor.claimedSections);
+    expect(dryRun.result.claimedSections).toEqual(doctor.claimedSections);
+  });
+});
+
+describe('the claimed section reaches the pack that owns it', () => {
+  it('a malformed section is refused by the PACK validator, at `auditing.<field>`', async () => {
+    const result = await runDoctor([INVALID_SECTION_DOC]);
+    expect(result.ok).toBe(false);
+    // Both violations are the pack's own: the core grammar cannot see into a section it does not own.
+    expect(result.errors, show(result.errors)).toEqual([
+      {
+        code: 'unknown_field',
+        message: "unknown field 'retainForever' (unknown keys are rejected)",
+        path: 'auditing.retainForever',
+      },
+      {
+        code: 'schema_violation',
+        message:
+          'retentionDays must be an integer of at least 1 (the audit retention window in days)',
+        path: 'auditing.retentionDays',
+      },
+    ]);
+  });
+
+  it('the section is NOT reported as an unknown top-level field — the pack owns the key', async () => {
+    const result = await runDoctor([VALID_DOC]);
+    expect(result.errors.map((e) => e.code)).not.toContain('unknown_field');
+  });
+
+  it('plan and deploy --dry-run refuse the malformed section too, with the same violations', async () => {
+    const doctor = await runDoctor([INVALID_SECTION_DOC]);
+    const plan = await runPlan([INVALID_SECTION_DOC], { shadowDatabaseUrl: undefined });
+    expect(plan.ok).toBe(false);
+    expect(plan.phase).toBe('validate');
+    expect(plan.errors).toEqual(doctor.errors);
+
+    const dryRun = await runDeploy(['--dry-run', INVALID_SECTION_DOC]);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.ok).toBe(false);
+    expect(dryRun.result.errors.join('\n')).toContain('auditing.retentionDays');
+  });
+});
+
+describe("the exact version pin is the loader's, and it is load-bearing", () => {
+  it('a pin the manifest does not declare is `extension_pack_refused` — the pack IS here', async () => {
+    const result = await runDoctor([VERSION_SKEW_DOC]);
+    expect(result.ok).toBe(false);
+    expect(result.errors.map((e) => e.code)).toEqual(['extension_pack_refused']);
+    const [error] = result.errors;
+    expect(error?.path).toBe('extensions[0]');
+    expect(error?.message).toContain("pins version '9.9.9'");
+    expect(error?.message).toContain("manifest declares version '1.0.0'");
+    // No claim was resolved, so there is no line to report — and none is invented.
+    expect(result.claimedSections).toBeUndefined();
+  });
+
+  it('a pin that is a RANGE reports the pin error and NOTHING about the section it declares', async () => {
+    const result = await runDoctor([RANGE_PIN_DOC]);
+    expect(result.ok).toBe(false);
+    // Which keys the packs own is unknowable while the reference does not typecheck, so the verdict
+    // says only that. An `unknown_field` on `auditing` here is the report this whole seam exists to
+    // avoid: it names the wrong line and prescribes the wrong fix.
+    expect(result.errors.map((e) => e.path)).toEqual(['extensions[0].version']);
+    expect(show(result.errors)).not.toContain('auditing');
+    expect(result.errors.map((e) => e.code)).not.toContain('unknown_field');
+  });
+});
+
+describe('the SAME document on a deployment WITHOUT the pack', () => {
+  let root = '';
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-fixture-pack-absent-'));
+    // Byte-for-byte the document that parses beside the pack — only the deployment tree differs.
+    writeFileSync(
+      join(root, 'rayspec.yaml'),
+      readFileSync(join(repoRoot, VALID_DOC), 'utf8'),
+      'utf8',
+    );
+  });
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('fails with the typed missing-pack error, naming the pack — never an unknown field', async () => {
+    process.chdir(root);
+    const result = await runDoctor(['rayspec.yaml']);
+    expect(result.ok).toBe(false);
+    expect(result.errors.map((e) => e.code)).toEqual(['extension_pack_unavailable']);
+    const [error] = result.errors;
+    expect(error?.path).toBe('extensions[0]');
+    expect(error?.message).toContain("extension pack 'fixture-pack' is not available");
+    // The remedy the operator is sent to must be "install the pack", not "delete the section".
+    expect(show(result.errors)).not.toContain('unknown field');
+  });
+
+  it('plan and deploy --dry-run report the same typed failure', async () => {
+    process.chdir(root);
+    const plan = await runPlan(['rayspec.yaml'], { shadowDatabaseUrl: undefined });
+    expect(plan.ok).toBe(false);
+    expect(plan.errors.map((e) => e.code)).toEqual(['extension_pack_unavailable']);
+
+    const dryRun = await runDeploy(['--dry-run', 'rayspec.yaml']);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.ok).toBe(false);
+    expect(dryRun.result.errors.join('\n')).toContain('extension_pack_unavailable');
+  });
+});
+
+describe('a pack-free document is untouched', () => {
+  const DOC = "version: '1.0'\nmetadata:\n  name: no-packs-here\n";
+  let root = '';
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-fixture-pack-free-'));
+    writeFileSync(join(root, 'rayspec.yaml'), DOC, 'utf8');
+  });
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('carries NO claimed-section field at all, in any of the three envelopes', async () => {
+    process.chdir(root);
+    const doctor = await runDoctor(['rayspec.yaml']);
+    expect(doctor.ok).toBe(true);
+    expect('claimedSections' in doctor).toBe(false);
+
+    const plan = await runPlan(['rayspec.yaml'], { shadowDatabaseUrl: undefined });
+    expect(plan.ok).toBe(true);
+    expect('claimedSections' in plan).toBe(false);
+
+    const dryRun = await runDeploy(['--dry-run', 'rayspec.yaml']);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.ok).toBe(true);
+    expect('claimedSections' in dryRun.result).toBe(false);
+  });
+});
