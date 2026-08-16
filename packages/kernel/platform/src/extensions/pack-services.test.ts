@@ -74,11 +74,20 @@ function loggingService(name: string, log: string[], onBoot?: () => void): PackS
   };
 }
 
+/**
+ * The database door a service is handed. `transaction` runs the callback on the SAME stub handle:
+ * these arms measure the orchestrator, and a stub that refused one would make the door the variable.
+ */
+const stubDb: PackServiceContext['db'] = {
+  query: async () => [],
+  transaction: async (fn) => await fn(stubDb),
+};
+
 /** The minimal context the orchestrator hands a service; the per-member wiring is the boot's. */
 function stubContext(packId: string, over: Partial<PackServiceContext> = {}): PackServiceContext {
   return {
     packId,
-    db: { query: async () => [] },
+    db: stubDb,
     spec: { metadata: { name: 'fixture' } } as PackServiceContext['spec'],
     sections: {},
     env: {},

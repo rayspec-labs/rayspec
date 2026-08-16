@@ -67,6 +67,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot. (`gate:dispatch-boundary` proves the negative over the contribution roots it declares and over
   its own self-test trees; it does not scan this package.)
 
+- **A pack service can open a transaction, on a pinned connection.** The database door a service is
+  handed (`PackServiceContext['db']`, the `PackDatabase` in `@rayspec/pack-sdk`) gained one member:
+  `transaction<T>(fn: (tx: PackDatabase) => Promise<T>): Promise<T>`. Until now the door was a single
+  parameterized `query`, so a pack could write single statements and nothing else — a pack whose
+  correctness rests on writing two rows atomically, or on holding a row lock across a
+  read-decide-write, could not be built on it. Not for want of a method name: the handle underneath is
+  **pooled**, where two calls are not promised the same connection, so a bare `BEGIN` issued through
+  `query()` cannot open a transaction the next call is in, and a `SELECT … FOR UPDATE` issued through
+  it holds nothing once the call returns — a second connection takes the same row with
+  `FOR UPDATE NOWAIT` immediately.
+  **What a consumer observes.** Inside `fn` the connection is **pinned** — one and the same for every
+  statement — so a `FOR UPDATE` taken there is still held on the next statement (a second connection's
+  `NOWAIT` is refused with `55P03` until the callback returns), and two writes land together or not at
+  all. `tx` is a `PackDatabase` again, with the same parameterized `query`, so a statement reads the
+  same inside a transaction as outside one and there is nothing extra to import. A callback that
+  **throws rolls back**, and the error propagates unchanged — the same value the callback threw, so a
+  pack's own error class and message reach its own catch intact; what the callback returns is what the
+  call resolves with, **with one exception, and it is stated on the contract**: a statement that
+  **fails inside `fn` aborts the whole call even when the pack catches it**, because the driver latches
+  the first statement error raised on the pinned connection and re-raises it once the callback
+  resolves — a caught unique violation followed by a normal return still rejects with that error, and
+  rolling back to a pack's own `SAVEPOINT` does not clear the latch. So the door refuses `SAVEPOINT`
+  outright rather than letting a pack believe it recovered, and the guidance beside the method is to do
+  the read that decides (`SELECT … FOR UPDATE`, an existence check) instead of writing speculatively.
+  **Nesting is refused** rather than left to the driver, in **both** directions a pack can reach for a
+  second transaction: `tx.transaction(…)`, and calling `transaction` again on the same `ctx.db` **from
+  inside the callback** — the ordinary factoring once a helper takes a `PackDatabase`. Both reject with
+  an error whose `name` is `PackTransactionError` and roll back the transaction they were attempted in.
+  Through `tx` a second call could only be a savepoint, whose rollback would leave the outer
+  transaction alive and committing under a pack that believed it had opened a transaction; through the
+  door it would be a genuinely **independent** transaction on a second pooled connection, which commits
+  even when the outer one rolls back and blocks until the pool runs out on any row the outer one holds.
+  A transaction opened from an unrelated context — a timer the service armed, another request in
+  flight — is not nesting and is unaffected; the refusal lasts exactly as long as the callback does, so
+  that holds for a context the callback itself started and left running (arming the sweep in the same
+  transaction that writes the row it sweeps) from the moment the callback settles onwards. **Transaction-control statements are refused on both
+  halves**: `query('BEGIN')` (and `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `START`/`PREPARE TRANSACTION`, …)
+  rejects with the same typed error **before the statement reaches the server**, because on a pooled
+  handle the driver's own refusal arrives only after the server has already begun the transaction — the
+  connection then goes back to the pool still inside one, and every later write that lands on it is
+  invisible to every other connection while its locks are held indefinitely.
+  **The transactional handle is no wider than the pooled one**: it carries exactly the same members —
+  no tenant handle, no journal writer, no escape hatch — so opening a transaction reaches no further
+  than a single statement already reaches, and a service still has no `tenantId` on its context either
+  way. What neither half is, is a **tenant filter**: a pack's SQL is run as written, so a pack that
+  attributes rows to a tenant is told which one by the deployment (its configuration, its environment)
+  rather than by this door.
+  **The pin is a resource decision, not a free convenience**: the connection is reserved out of the
+  pool the deployment **serves requests on** — the HTTP/API pool, four connections by default, not the
+  durable worker's separate one — and is not returned until `fn` returns. Two concurrent pack
+  transactions therefore hold half of it, and a callback that awaits a model call or an HTTP round trip
+  holds its share for that long; enough of those starve the deployment's own `/health` and `/events`.
+  That consequence is stated in the docblock beside the method, where a pack author reading only the
+  signature meets it. The frozen contract surface moves with it: `@rayspec/pack-sdk`'s checked-in
+  `api-report.md` carries the new member. A pack that only consumes the injected door is unaffected; a
+  pack that builds its own stand-in `PackDatabase` in its tests has to add the member to it.
+
 - **`migrations` — an extension pack can own platform tables, and bring the chain that creates
   them.** A pack manifest may now declare `migrations: { dir, tablePrefix }`. `dir` is a directory
   inside the pack holding `.sql` files and `meta/_journal.json`; `tablePrefix` is the namespace every

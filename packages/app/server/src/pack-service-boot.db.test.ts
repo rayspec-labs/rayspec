@@ -16,7 +16,14 @@
  *   (2) AFTER THE MIGRATIONS, PINNED BY THE DATABASE: the first service reads `fixture_pack_audit_events`
  *       through the context's database door at boot. That table is created by the pack's OWN migration
  *       chain, which the same boot applied moments earlier — so a service that booted before the chain
- *       could not have read it at all. The ordering is read back rather than asserted.
+ *       could not have read it at all. The ordering is read back rather than asserted. The same door is
+ *       what the ledger WRITES through, and it writes TRANSACTIONALLY: the pair of rows that are only
+ *       ever right together lands in one callback, and a second callback that throws mid-write leaves
+ *       nothing behind. What the table holds afterwards — read on a connection of this suite's own —
+ *       is the committed pair and no trace of the abandoned one, and the error the service caught is
+ *       the one it threw. `pack-service-db.db.test.ts` measures the door's own guarantees (the pin, the
+ *       lock, the rollback, the refused nesting); this arm is the WIRING — that the door a service is
+ *       actually handed by the composition root is that door.
  *   (3) THE PACK'S OWN VALIDATED SECTION reaches its service: the document writes `auditing:` — a key
  *       the CORE grammar does not own — and the service is handed `retentionDays: 30` as its own
  *       validator returned it. Nothing else on this boot could have produced that value. The MERGED
@@ -25,7 +32,16 @@
  *       either slot is indistinguishable from the real one until something asks.
  *   (4) THE JOURNAL WRITER writes real rows: with the deployment tenant bound, the sweep the service
  *       runs at boot lands in `journal_steps`, attributed to `pack-service`, and the TIMER it armed
- *       lands more without anything calling it — the whole reason this contribution kind exists.
+ *       lands more without anything calling it — the whole reason this contribution kind exists. And
+ *       the tenant those JOURNALED rows carry is the DEPLOYMENT's, not something the pack chose: read
+ *       through the platform's own tenant chokepoint under a DIFFERENT tenant, the service's journaled
+ *       work is nothing at all; the accept control is the same read under the deployment tenant, which
+ *       finds them. That is a claim about the JOURNAL WRITER, which is tenant-bound by construction —
+ *       it is deliberately NOT extended to the database door, which is no tenant filter and runs the
+ *       SQL the pack wrote. What is measured about the door's own rows is (4c): the pack was TOLD its
+ *       tenant by the deployment and every ledger row it wrote transactionally carries that one and no
+ *       other. The chokepoint cannot be the instrument there — a pack-owned table is not in the
+ *       platform's drizzle schema — so the rows are read directly, under both tenants.
  *   (5) SHUTDOWN IS THE REVERSE, and it really stops the work: `close()` shuts the two services down
  *       in the reverse of boot order, and the timer stops ticking afterwards.
  *   (6) FAIL-THE-FIX: a deployment whose pack ships a service that throws on boot ABORTS the boot with
@@ -56,7 +72,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
+import { forTenant, makeDb, schema } from '@rayspec/db';
 import { EXTENSION_BRAND } from '@rayspec/platform';
+import { eq } from 'drizzle-orm';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -136,6 +154,10 @@ const SUITE_DB = `rayspec_pack_service_${process.pid}`;
 const DBOS_SYS_DB = `${SUITE_DB}_dbos_sys`;
 /** The deployment tenant the journal writer and the dispatch capability are bound to. */
 const TENANT = '00000000-0000-4000-8000-00000000042a';
+/** A tenant this deployment never bound — what the cross-tenant read in arm (4b) asks under. */
+const OTHER_TENANT = '00000000-0000-4000-8000-00000000042b';
+/** The `backend` column a pack service's journal step is attributed to (the composition root's own). */
+const PACK_SERVICE_BACKEND = 'pack-service';
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let armsRan = 0;
 
@@ -172,6 +194,8 @@ interface Observed {
       readonly journal: boolean;
       readonly dispatch: boolean;
       readonly ledgerRows?: number;
+      readonly ledgerPairRows?: number;
+      readonly abandonedError?: string;
     }
   >;
   readonly ticks: Map<string, number>;
@@ -381,6 +405,20 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     //     created by the pack's own migration chain, which THIS boot applied — a service booted before
     //     the migrations could not have read it at all.
     expect(ledger?.ledgerRows).toBe(0);
+    // (2b) And it WROTE through the same door, transactionally. The pair landed together; the second
+    //      transaction, abandoned mid-write by a throw, landed nothing — and the error the service
+    //      caught is the one it threw, unchanged. Both facts are read back off the DATABASE on this
+    //      suite's own connection, so a service that merely believed it had written proves nothing.
+    expect(ledger?.ledgerPairRows).toBe(2);
+    expect(ledger?.abandonedError).toBe('the ledger sweep was abandoned mid-write');
+    const ledgerAction = async (action: string): Promise<string> =>
+      await scalar(
+        appDbUrl,
+        `SELECT count(*)::int FROM fixture_pack_audit_events WHERE action = '${action}'`,
+      );
+    expect(await ledgerAction('ledger-opened')).toBe('1');
+    expect(await ledgerAction('ledger-closed')).toBe('1');
+    expect(await ledgerAction('ledger-abandoned')).toBe('0');
     // (3) The pack's own claimed section reached its service, validated by the pack's own grammar, and
     //     ONLY the key this pack claims (the union of every pack's claims is not what a service gets).
     expect(ledger?.sectionKeys).toEqual(['auditing']);
@@ -416,6 +454,42 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
       ),
     );
     expect(sweptOnTimer).toBeGreaterThan(sweptAtBoot);
+
+    // (4b) THE JOURNALED WORK IS THE DEPLOYMENT'S TENANT'S. The same rows, read through the platform's
+    //      OWN tenant chokepoint: under a different tenant there are none, and under the deployment
+    //      tenant they are all there. The pack never named either — its context carries no `tenantId`
+    //      at all — because the JOURNAL WRITER is tenant-bound by construction: the composition root
+    //      binds the tenant when it builds it. This measures that writer, not the database door.
+    const probe = makeDb(appDbUrl);
+    try {
+      const byPackService = eq(schema.journalSteps.backend, PACK_SERVICE_BACKEND);
+      const otherTenant = await forTenant(probe, OTHER_TENANT)
+        .select(schema.journalSteps)
+        .where(byPackService);
+      expect(otherTenant).toHaveLength(0);
+      const deploymentTenant = await forTenant(probe, TENANT)
+        .select(schema.journalSteps)
+        .where(byPackService);
+      // At LEAST what the raw count above found — the timer is still ticking between the two reads,
+      // so the accept control is "every one of them is there", not a frozen number.
+      expect(deploymentTenant.length).toBeGreaterThanOrEqual(sweptOnTimer);
+    } finally {
+      await probe.$client.end();
+    }
+
+    // (4c) THE ROWS THE TRANSACTION WROTE carry the tenant the DEPLOYMENT bound — the one the service
+    //      was told on `ctx.env`, never one it chose and never one it found by enumerating the
+    //      platform's tenant table. Read DIRECTLY, because the platform's tenant chokepoint cannot
+    //      reach a pack-owned table at all (it is not in the platform's drizzle schema) — so this is
+    //      what is actually measurable about the door's own rows, with a tenant the deployment never
+    //      bound as the control.
+    const ledgerUnder = async (tenant: string): Promise<string> =>
+      await scalar(
+        appDbUrl,
+        `SELECT count(*)::int FROM fixture_pack_audit_events WHERE tenant_id = '${tenant}'::uuid`,
+      );
+    expect(await ledgerUnder(TENANT)).toBe('2');
+    expect(await ledgerUnder(OTHER_TENANT)).toBe('0');
 
     // (5) close() stops them in the exact REVERSE of boot order — and the timer really stops.
     await server.close();

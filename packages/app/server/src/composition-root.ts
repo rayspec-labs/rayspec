@@ -146,6 +146,7 @@ import {
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
+import { makePackServiceDatabase } from './pack-service-db.js';
 import {
   deployProductYamlSpec,
   makeSchemaProbe,
@@ -2416,14 +2417,11 @@ async function bootExtensionServices(
   if (services.length === 0) return undefined;
 
   // The pack-owned-platform-table door: the SAME parameterized executor shape the deploy target's own
-  // `query` seam has, over the boot's one Db handle.
-  const db: PackServiceContext['db'] = {
-    query: async (sql: string, params: readonly unknown[] = []) =>
-      (await wiring.db.$client.unsafe(sql, params as never[])) as unknown as Record<
-        string,
-        unknown
-      >[],
-  };
+  // `query` seam has, over the boot's one Db handle — plus the transactional half, which runs on a
+  // connection RESERVED for the callback's duration out of THAT handle's pool, which is the HTTP/API
+  // one (`makeDb(config.databaseUrl)`, DEFAULT_POOL_MAX = 4) and not the durable worker's separate
+  // pool. The contract states that cost beside the method; see pack-service-db.ts.
+  const db: PackServiceContext['db'] = makePackServiceDatabase(wiring.db);
 
   // The tenant-bound halves. Both are built ONCE, from the tenant the deployment resolved — never from
   // anything a pack supplies, which is what makes "a pack cannot name a tenant" structural rather than

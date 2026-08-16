@@ -85,8 +85,74 @@ export interface TurnDispatch {
  * seam, and the identifier rule (`isSafeIdentifier`) is what a derived name must clear first.
  */
 export interface PackDatabase {
-  /** Run one parameterized statement and read its rows back. */
+  /**
+   * Run one parameterized statement and read its rows back.
+   *
+   * A TRANSACTION-CONTROL STATEMENT IS REFUSED HERE — `BEGIN`, `START TRANSACTION`, `COMMIT`,
+   * `ROLLBACK`, `SAVEPOINT` and the rest reject with an `Error` whose `name` is
+   * `PackTransactionError`, before the statement reaches the server. This handle is POOLED, so such a
+   * statement cannot do what it looks like it does: the connection it lands on goes back to the pool
+   * still inside a transaction nothing ever commits, and every later write that happens to be issued
+   * on it is invisible to every other connection while its locks are held indefinitely. Use
+   * `transaction(fn)` below.
+   */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+  /**
+   * Run `fn` inside ONE transaction, on a connection PINNED for the callback's whole duration. `tx` is
+   * a `PackDatabase` again — the same parameterized `query` — so a statement reads the same inside a
+   * transaction as outside one: nothing new to learn, nothing extra to import.
+   *
+   * WHY THE METHOD HAS TO EXIST. `query` runs on a POOLED handle, where two calls are not promised the
+   * same connection: a bare `BEGIN` through it cannot open a transaction the next call is in, and a
+   * `SELECT … FOR UPDATE` through it holds NOTHING once the call returns — correct for a pool, and
+   * fatal for a read-decide-write whose correctness rests on the row not moving. Inside `fn` the
+   * connection is one and the same, so a lock taken there is held until the callback returns, and two
+   * writes land together or not at all.
+   *
+   * A CALLBACK THAT THROWS ROLLS BACK, and the error propagates UNCHANGED — the same value the
+   * callback threw, so a pack's own error class and message reach its own catch intact. What the
+   * callback RETURNS is what this resolves with, WITH ONE EXCEPTION, and it is the one worth reading
+   * twice: ⚠ A STATEMENT THAT FAILS INSIDE `fn` ABORTS THE WHOLE CALL, EVEN IF YOU CAUGHT IT. The
+   * driver latches the first statement error raised on the pinned connection and re-raises it once the
+   * callback resolves, so a `tx.query(…)` wrapped in a `try`/`catch` the pack treats as handled,
+   * followed by a normal return, still REJECTS with that statement's error and rolls back. Rolling
+   * back to your own `SAVEPOINT` does not undo the latch either — which is why `tx.query` refuses
+   * `SAVEPOINT` outright rather than letting a pack believe it recovered. Read-decide-write: do the
+   * READ that tells you whether the write is safe (`SELECT … FOR UPDATE`, an existence check), rather
+   * than writing speculatively and catching the constraint violation.
+   *
+   * NESTING IS REFUSED, not left to the driver, and the refusal covers BOTH ways to reach for a second
+   * transaction. `tx.transaction(…)` rejects with a typed refusal (an `Error` whose `name` is
+   * `PackTransactionError`); so does calling `transaction` again on the SAME `ctx.db` from inside the
+   * callback — the ordinary factoring once a helper takes a `PackDatabase` — and both, like any other
+   * failure inside a callback, roll the transaction they were attempted in back. Neither could be what
+   * it looks like: through `tx` it could only be a SAVEPOINT, a different guarantee wearing the same
+   * name (rolling one back leaves the OUTER transaction alive and committing, so a pack that believed
+   * it had opened a transaction would watch its "rollback" commit); through `ctx.db` it would be a
+   * genuinely INDEPENDENT transaction on a second pooled connection, which commits even when the outer
+   * one rolls back, and blocks until the pool runs out on any row the outer one holds. A transaction
+   * opened from an UNRELATED context — a timer the service armed, another request in flight — is not
+   * nesting and is unaffected. The refusal lasts exactly as long as `fn` does, so that holds for a
+   * context `fn` ITSELF started and left running — arming the periodic sweep in the same transaction
+   * that writes the row it will sweep — from the moment the callback settles onwards.
+   *
+   * ⚠ A TRANSACTION IS A RESOURCE DECISION, NOT A FREE CONVENIENCE. The pinned connection is reserved
+   * out of the pool the deployment SERVES REQUESTS ON — the HTTP/API pool, four connections by default
+   * — and not out of the durable worker's, which is a pool of its own. Two concurrent pack transactions
+   * therefore hold half of it, and it is not returned until `fn` returns: a callback that awaits a
+   * model call, an HTTP round trip or a timer holds its share for exactly that long, and enough of
+   * those starve the deployment's own `/health` and `/events`. Keep what is inside `fn` to database
+   * work and do the slow part before or after it.
+   *
+   * NO WIDER THAN `query`. `tx` carries exactly the members `query` is reached through and nothing
+   * else — no tenant handle, no journal writer, no escape hatch — so opening a transaction reaches no
+   * further than a single statement already reaches. What it is NOT is a tenant filter: neither half
+   * rewrites the SQL a pack wrote, so what a statement touches is what the pack asked for, and a pack
+   * that attributes rows to a tenant gets that value from the deployment (its configuration, its
+   * environment) rather than from this door — there is no `tenantId` on a service's context, in a
+   * transaction or out of one, exactly as there is none on a `TurnDispatchRequest`.
+   */
+  transaction<T>(fn: (tx: PackDatabase) => Promise<T>): Promise<T>;
 }
 
 /** One step a service records in the run journal. `input` is HASHED by the platform, never stored. */

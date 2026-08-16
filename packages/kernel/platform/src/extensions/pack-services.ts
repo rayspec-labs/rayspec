@@ -42,8 +42,38 @@ import type { TurnDispatch } from '../turn-dispatch.js';
  * already owns; it does not change who is trusted.
  */
 export interface PackServiceDatabase {
-  /** Run one parameterized statement and read its rows back. */
+  /**
+   * Run one parameterized statement and read its rows back. A TRANSACTION-CONTROL statement (`BEGIN`,
+   * `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is REFUSED here before it reaches the server: this handle is
+   * pooled, so the connection such a statement lands on would go back to the pool still inside a
+   * transaction nothing ever commits.
+   */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+  /**
+   * Run `fn` inside ONE transaction, on a connection PINNED for the callback's duration — so a lock
+   * taken inside it is still held when the next statement runs, and two writes land together or not at
+   * all. `tx` is a `PackServiceDatabase` again: the same parameterized `query`, and nothing else.
+   *
+   * WHY IT CANNOT BE THE POOLED EXECUTOR ABOVE: on a pooled handle two calls are not promised the same
+   * connection, so a bare `BEGIN` cannot open a transaction the next call is in and a
+   * `SELECT … FOR UPDATE` is released the moment the call returns. The deployment builds this half over
+   * a RESERVED connection (see the composition root's `makePackServiceDatabase`), which is also why it
+   * is a RESOURCE DECISION: the pin is reserved out of the pool the deployment SERVES REQUESTS on — the
+   * HTTP/API pool, four connections by default, not the durable worker's separate one — and is not
+   * returned until `fn` returns.
+   *
+   * A callback that throws ROLLS BACK and its error propagates unchanged. A statement that FAILS inside
+   * `fn` aborts the whole call even when the pack catches it: the driver latches the first statement
+   * error on the pinned connection and re-raises it once the callback resolves. NESTING IS REFUSED with
+   * a typed error rather than left to the driver, through `tx` AND through the same door re-entered
+   * from inside the callback — the first could only be a savepoint, whose rollback would leave the
+   * outer transaction alive; the second would be an independent transaction on a second pooled
+   * connection, committing under a rolled-back outer one. NO WIDER THAN `query`: the transactional
+   * handle carries exactly the members the pooled one carries, so opening a transaction reaches no
+   * further than a single statement already reaches. Neither half is a tenant filter — a pack's SQL is
+   * run as written, and the tenant a pack attributes rows to comes from the deployment.
+   */
+  transaction<T>(fn: (tx: PackServiceDatabase) => Promise<T>): Promise<T>;
 }
 
 /**
