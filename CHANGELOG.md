@@ -371,7 +371,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would raise `42P07` on the object it re-creates or `42P01` on the target it re-drops. A delta that
   genuinely did land still **mounts**, unchanged: a non-idempotent delta is never re-applied. The
   allowlist gate is untouched, and a still-present `DROP` target on a delta with no landed evidence
-  still routes to apply exactly as before.
+  still routes to apply exactly as before. A reviewed **`RENAME`** is measured by the name it renames
+  **away**, which the boot can probe: still there, and the delta has not run, so it is applied rather
+  than mounted and lost. And a statement whose state the schema genuinely cannot settle now contributes
+  **no** evidence in either direction, rather than the reading that looks best — a `DROP … IF EXISTS`
+  whose target is missing may never have had one (re-dropping it raises nothing), and a `RENAME` whose
+  old name is already gone says as little; a target that is still **there** remains un-landed, for the
+  `IF EXISTS` form as much as the plain one, so the drop is never silently skipped.
 - **An identifier is read the way the catalog stores it, or it is not read at all.** The probe turns a
   statement into a question about a named object, so a name read only partly is worse than no name.
   A double-quoted name is now read to its closing quote (a space, a hyphen or a dot inside it belongs
@@ -386,10 +392,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direction.** It read "its additive objects are present and any destructive targets were PROBED gone"
   on every mount, including one where nothing had been looked for. It is now built from what the boot
   established: the objects found present, the targets found gone, and the statements the drift-clean
-  classification itself proves ran (a type change, a `SET NOT NULL`, a rename — unapplied, each would
-  have classified as drift). Only a delta that leaves **no** evidence of any kind now gets the "nothing
-  in this boot can tell you" wording; for the classify-proven kinds the log says so and still tells the
-  operator the environment is stale.
+  classification itself measured — a type change or a `SET NOT NULL` **over a column the drift check
+  actually introspects** (the document's own stores and their declared columns), which unapplied would
+  have classified as drift. Over any other column the drift check never looked, so nothing is claimed
+  for it. Only a delta that leaves **no** evidence of any kind gets the "nothing in this boot can tell
+  you" wording — and it keeps it, rather than being told the environment is stale.
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it

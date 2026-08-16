@@ -149,6 +149,7 @@ import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { makePackServiceDatabase } from './pack-service-db.js';
 import {
   deployProductYamlSpec,
+  driftInspectedColumns,
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
@@ -2749,6 +2750,9 @@ async function deployDeclaredSpec(
       specPath,
       (m) => console.warn(m),
       makeSchemaProbe(queryFn, 'public'),
+      // The columns the classify just above ACTUALLY introspected — the only ones a drift-clean reading
+      // may stand as evidence for (see planUpdateBoot). Built from the SAME stores detectDrift was given.
+      driftInspectedColumns(specStores),
     );
     migrations = plan.migrations;
     // A zero-store backend spec ('present-matching' by construction) keeps its 'auth-only' deployMode;

@@ -400,15 +400,18 @@ export function leftoverUpdateEnvMountLog(probed: ProbedObjects): string {
     probed.gone.length > 0
       ? `      · gone, as its reviewed DROPs leave them: ${probed.gone.join(', ')}\n`
       : '';
-  // The classify-derived half. It is EVIDENCE, not an assumption: an unapplied statement of these kinds
-  // leaves a type / nullability / presence difference the drift check reports, so a drift-clean
-  // classification is itself the measurement — and saying so beats sending the operator to a manual
-  // catalog check the boot did not need.
+  // The classify-derived half. It is EVIDENCE, not an assumption — but ONLY because the router puts a
+  // statement here exclusively when the drift check INTROSPECTS the column it alters (the spec's own
+  // stores and their declared columns): unapplied, that column's live type / nullability would have
+  // differed and the classify would have said DRIFT. A statement over any other column never reaches
+  // this list, so nothing here rests on a question the classify did not ask.
   const proven =
     probed.proven.length > 0
-      ? `      · proven applied by the drift-clean classify (unapplied, ${
+      ? `      · proven applied by the drift-clean classify — ${
+          probed.proven.length === 1 ? 'it alters a column' : 'each alters a column'
+        } the classify INSPECTS, and unapplied ${
           probed.proven.length === 1 ? 'it' : 'each'
-        } would have shown as DRIFT): ${probed.proven.join(', ')}\n`
+        } would have shown as DRIFT: ${probed.proven.join(', ')}\n`
       : '';
   const lead = anyProbed
     ? '    This boot PROBED the objects the delta itself names, and every one of them is in the state ' +
@@ -465,10 +468,12 @@ export interface ProbedObjects {
   /** Reviewed DROP targets the live schema no longer has, named the same way. */
   readonly gone: readonly string[];
   /**
-   * Statements no probe is needed for, because the drift-clean CLASSIFY itself proves they ran: the
-   * {@link APPLIED_AT_PRESENT_MATCHING} kinds leave a detectable type / nullability / presence
-   * difference while unapplied, so reaching `present-matching` IS the measurement. Named by kind and
-   * statement, so the log quotes the evidence rather than asserting the conclusion.
+   * Statements no probe CAN settle, because they change a column's SHAPE rather than any object's
+   * existence — and that the drift-clean CLASSIFY therefore measured instead: the
+   * {@link CLASSIFY_MEASURED_COLUMN_KINDS} over a column `detectDrift` actually introspects leave a
+   * type / nullability difference while unapplied, so reaching `present-matching` IS the measurement.
+   * A statement over any OTHER column never lands here — the classify never looked at it. Named by kind
+   * and statement, so the log quotes the evidence rather than asserting the conclusion.
    */
   readonly proven: readonly string[];
 }
@@ -503,20 +508,35 @@ const PROBEABLE_SUPERSET_BLIND: ReadonlySet<DestructiveKind> = new Set<Destructi
 ]);
 
 /**
- * Destructive scan-kinds that CANNOT reach `present-matching` UNAPPLIED, because `detectDrift` DOES
- * inspect the affected NEW-spec object: a type change / SET NOT NULL / NOT-NULL ADD / rename all leave a
- * detectable column-type / nullability / missing-column / missing-table difference when unapplied → the
- * boot classifies `drifted`, never `present-matching`. So at `present-matching` these are PROVEN already
- * applied — consistent with a fully-applied leftover env: they never force a re-apply and MUST NOT
- * refuse (refusing them would re-introduce the ENV-1 crash-loop after a legitimate non-subset update).
+ * The destructive scan-kinds that never refuse ON THEIR OWN at `present-matching` — a legitimate
+ * leftover env after a non-subset update must MOUNT, never crash-loop. They split by HOW this boot can
+ * measure them, and each is measured exactly ONE way (a statement that lands in two piles at once
+ * asserts both that it ran and that it did not):
+ *
+ *   - {@link PROBED_BY_ITS_OWN_ADD} — the statement ADDs an object, so the additive half already probes
+ *     that object. The probe IS the measurement; nothing here may add a second, classify-derived claim
+ *     about the same statement.
+ *   - {@link RENAMES_AT_PRESENT_MATCHING} — a rename names the object it renames AWAY, and that name is
+ *     probeable ({@link removedObject} reads it): STILL THERE ⇒ the rename has NOT run.
+ *   - {@link CLASSIFY_MEASURED_COLUMN_KINDS} — a type change / SET NOT NULL alters a column's SHAPE and
+ *     names no object whose EXISTENCE settles it. For these, and ONLY for a column `detectDrift`
+ *     actually introspects, the drift-clean classification is itself the measurement: unapplied, the
+ *     column's live type / nullability would have differed from the spec's and classified `drifted`.
+ *     `detectDrift` scopes every query to the spec's stores and compares only their DECLARED columns, so
+ *     a statement over any other column is NOT covered by that premise and contributes no evidence at
+ *     all (see the `driftInspectedColumns` argument of {@link routePresentMatchingUpdate}).
  */
-const APPLIED_AT_PRESENT_MATCHING: ReadonlySet<DestructiveKind> = new Set<DestructiveKind>([
+const PROBED_BY_ITS_OWN_ADD: ReadonlySet<DestructiveKind> = new Set<DestructiveKind>([
+  'add-column-not-null-no-default',
+]);
+const RENAMES_AT_PRESENT_MATCHING: ReadonlySet<DestructiveKind> = new Set<DestructiveKind>([
+  'rename-table',
+  'rename-column',
+]);
+const CLASSIFY_MEASURED_COLUMN_KINDS: ReadonlySet<DestructiveKind> = new Set<DestructiveKind>([
   'using-cast',
   'type-change-no-using',
   'set-not-null',
-  'add-column-not-null-no-default',
-  'rename-table',
-  'rename-column',
 ]);
 
 /**
@@ -592,18 +612,46 @@ function truncateStmt(text: string): string {
   return s.length > 80 ? `${s.slice(0, 80)}…` : s;
 }
 
-const DROP_TABLE_HEAD = /^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?/i;
-const DROP_INDEX_HEAD = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?/i;
+// The `IF EXISTS` group is CAPTURING in each of these: such a statement is IDEMPOTENT, and the router
+// must know that to read its target's ABSENCE for what it is (see {@link ReadDestructive.idempotent}).
+const DROP_TABLE_HEAD = /^DROP\s+TABLE\s+(IF\s+EXISTS\s+)?/i;
+const DROP_INDEX_HEAD = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(IF\s+EXISTS\s+)?/i;
 const ALTER_TABLE_HEAD = /^ALTER\s+TABLE\s+(?:ONLY\s+)?/i;
 // `ALTER TABLE "t" DROP COLUMN "c"` and the bare `ALTER TABLE "t" DROP "c"` (both flagged drop-column).
-const DROP_COLUMN_KW = /^\s+DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?/i;
-const DROP_CONSTRAINT_KW = /^\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?/i;
+const DROP_COLUMN_KW = /^\s+DROP\s+(?:COLUMN\s+)?(IF\s+EXISTS\s+)?/i;
+const DROP_CONSTRAINT_KW = /^\s+DROP\s+CONSTRAINT\s+(IF\s+EXISTS\s+)?/i;
+
+/** One destructive statement, parsed: the target it names, and whether it is IDEMPOTENT. */
+interface ReadDestructive {
+  readonly target: DestructiveTargetProbe;
+  /**
+   * The statement carries `IF EXISTS`, so it is IDEMPOTENT: it runs clean whether or not the target is
+   * there, and a MISSING target therefore proves NOTHING about whether THIS delta ran — the object may
+   * never have existed. (A target that is STILL THERE says as much as it does for a plain DROP: the
+   * statement has not run.) This is the destructive mirror of the `IF NOT EXISTS` exclusion the additive
+   * half already makes; reading absence as "it landed" would be a claim the schema never supported.
+   */
+  readonly idempotent: boolean;
+}
 
 /**
- * Extract the schema target from a superset-blind destructive statement's text (whitespace already
- * collapsed by the scan; a trailing `;` tolerated). Returns `undefined` for anything it cannot parse with
- * confidence — the router treats that as fail-closed REFUSE (never a silent mount). Recognizes the exact
- * forms `diffProductStores` emits (double-quoted identifiers) plus IF EXISTS / bare-DROP variants.
+ * Consume a DROP keyword prefix, reporting what follows it AND whether its `IF EXISTS` group was there.
+ * (`afterKeyword` stays the plain form the additive heads use — they have no such group.)
+ */
+function afterDropKeyword(
+  keyword: RegExp,
+  s: string,
+): { rest: string; ifExists: boolean } | undefined {
+  const m = keyword.exec(s);
+  return m === null ? undefined : { rest: s.slice(m[0].length), ifExists: m[1] !== undefined };
+}
+
+/**
+ * Parse a superset-blind destructive statement's text (whitespace already collapsed by the scan; a
+ * trailing `;` tolerated) into the target it names PLUS whether it is idempotent. Returns `undefined`
+ * for anything it cannot parse with confidence — the router treats that as fail-closed REFUSE (never a
+ * silent mount). Recognizes the exact forms `diffProductStores` emits (double-quoted identifiers) plus
+ * IF EXISTS / bare-DROP variants.
  *
  * Every name goes through {@link readIdentifier}, so it is read WHOLE or not at all: a multi-target
  * `DROP TABLE "a", "b"`, a schema-qualified `DROP TABLE public.t` and a name this cannot end cleanly all
@@ -611,39 +659,59 @@ const DROP_CONSTRAINT_KW = /^\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?/i;
  * `parts`, which is the table that statement drops — asking for `Parts` would answer "already gone" for
  * a table that is still there).
  */
-export function extractDestructiveTarget(
+function readDestructive(
   kind: DestructiveKind,
   statementText: string,
-): DestructiveTargetProbe | undefined {
+): ReadDestructive | undefined {
   const s = statementText.replace(/\s*;\s*$/, '').trim();
   if (kind === 'drop-table' || kind === 'drop-index') {
-    const head = afterKeyword(kind === 'drop-table' ? DROP_TABLE_HEAD : DROP_INDEX_HEAD, s);
+    const head = afterDropKeyword(kind === 'drop-table' ? DROP_TABLE_HEAD : DROP_INDEX_HEAD, s);
     if (head === undefined) return undefined;
-    const target = readLocalName(head);
+    const target = readLocalName(head.rest);
     // Anchored at the statement's END, exactly as before: a trailing `, "b"` / `CASCADE` means this
     // statement does more than the one target it just read, so it is not determinable here.
     if (target === undefined || target.rest.trim() !== '') return undefined;
-    return kind === 'drop-table'
-      ? { kind: 'drop-table', table: target.name }
-      : { kind: 'drop-index', index: target.name };
+    return {
+      target:
+        kind === 'drop-table'
+          ? { kind: 'drop-table', table: target.name }
+          : { kind: 'drop-index', index: target.name },
+      idempotent: head.ifExists,
+    };
   }
   if (kind === 'drop-column' || kind === 'drop-constraint') {
     const head = afterKeyword(ALTER_TABLE_HEAD, s);
     if (head === undefined) return undefined;
     const table = readLocalName(head);
     if (table === undefined) return undefined;
-    const rest = afterKeyword(
+    const member = afterDropKeyword(
       kind === 'drop-column' ? DROP_COLUMN_KW : DROP_CONSTRAINT_KW,
       table.rest,
     );
-    if (rest === undefined) return undefined;
-    const member = readLocalName(rest);
     if (member === undefined) return undefined;
-    return kind === 'drop-column'
-      ? { kind: 'drop-column', table: table.name, column: member.name }
-      : { kind: 'drop-constraint', table: table.name, constraint: member.name };
+    const read = readLocalName(member.rest);
+    if (read === undefined) return undefined;
+    return {
+      target:
+        kind === 'drop-column'
+          ? { kind: 'drop-column', table: table.name, column: read.name }
+          : { kind: 'drop-constraint', table: table.name, constraint: read.name },
+      idempotent: member.ifExists,
+    };
   }
   return undefined;
+}
+
+/**
+ * The schema target a superset-blind destructive statement names — {@link readDestructive} without the
+ * idempotence flag, for the callers that only need the object (the additive half's subtraction, and the
+ * pinned parse tests).
+ */
+export function extractDestructiveTarget(
+  kind: DestructiveKind,
+  statementText: string,
+): DestructiveTargetProbe | undefined {
+  return readDestructive(kind, statementText)?.target;
 }
 
 /** The live-schema object one superset-blind destructive target names. */
@@ -753,6 +821,46 @@ function removedObject(text: string): SchemaObjectProbe | undefined {
   return read === undefined ? undefined : { kind: 'column', table: table.name, column: read.name };
 }
 
+const ALTER_COLUMN_KW = /^\s+ALTER\s+(?:COLUMN\s+)?/i;
+
+/**
+ * The `table.column` a {@link CLASSIFY_MEASURED_COLUMN_KINDS} statement alters (`ALTER TABLE "t" ALTER
+ * COLUMN "c" TYPE …` / `… SET NOT NULL`, and the bare `ALTER "c"` form), or `undefined` when this cannot
+ * name one WHOLE. The key is the one {@link driftInspectedColumns} builds, so the router can ask whether
+ * `detectDrift` introspects THIS column before letting the drift-clean classify stand as its evidence.
+ */
+function alteredColumnKey(text: string): string | undefined {
+  const s = text.replace(/\s*;\s*$/, '').trim();
+  const alterTable = afterKeyword(ALTER_TABLE_HEAD, s);
+  if (alterTable === undefined) return undefined;
+  const table = readLocalName(alterTable);
+  if (table === undefined) return undefined;
+  const rest = afterKeyword(ALTER_COLUMN_KW, table.rest);
+  if (rest === undefined) return undefined;
+  const column = readLocalName(rest);
+  return column === undefined ? undefined : `${table.name}.${column.name}`;
+}
+
+/**
+ * The `table.column` keys `detectDrift` actually INTROSPECTS: every store the spec declares × the
+ * columns THAT store declares. It scopes each query to `table_name = ANY(<the spec's stores>)` and then
+ * compares only `store.columns`, so nothing outside this set is inspected — and a drift-clean classify
+ * says nothing whatsoever about it. (Injected columns are deliberately left out: missing one only
+ * withholds evidence, which is the safe direction.)
+ */
+export function driftInspectedColumns(
+  stores: readonly {
+    readonly name: string;
+    readonly columns: readonly { readonly name: string }[];
+  }[],
+): ReadonlySet<string> {
+  const keys = new Set<string>();
+  for (const store of stores) {
+    for (const column of store.columns) keys.add(`${store.name}.${column.name}`);
+  }
+  return keys;
+}
+
 /** One object's identity, for subtracting what the SAME delta takes away again. */
 function objectKey(object: SchemaObjectProbe): string {
   if (object.kind === 'table') return `table:${object.table}`;
@@ -825,12 +933,19 @@ export type PresentMatchingRoute =
  * delta ran) and each object an additive statement CREATEs (present iff it ran). DB-free (the probe is
  * injected), so it is exhaustively unit-testable with a fake probe.
  *
- * Every statement contributes to ONE of two piles, and the decision is made on the piles — never on half
- * of the evidence with the other half computed and discarded:
+ * Every statement is measured ONE way, and contributes to at most ONE of two piles — never to both (a
+ * statement in both piles asserts at once that it ran and that it did not), and never computed and then
+ * discarded:
  *   - LANDED   — an object a CREATE names and the schema HAS; a reviewed DROP target that is GONE; a
- *                statement the drift-clean classify itself proves ran ({@link APPLIED_AT_PRESENT_MATCHING}).
+ *                column-shape statement the drift-clean classify itself measured
+ *                ({@link CLASSIFY_MEASURED_COLUMN_KINDS} over a `driftInspectedColumns` column).
  *   - UNLANDED — an object a CREATE names and the schema does NOT have; a reviewed DROP target that is
- *                STILL there.
+ *                STILL there; the name a RENAME renames AWAY and the schema STILL has.
+ * A statement whose state the schema genuinely cannot settle contributes to NEITHER, rather than to the
+ * pile that reads best: an `IF EXISTS` DROP whose target is missing (it may never have existed), a
+ * RENAME whose old name is already gone (it may never have existed either), and a column-shape statement
+ * over a column `detectDrift` does not introspect. Silence is what the schema said; claiming otherwise
+ * is how a delta gets called applied when it never ran (#440).
  * then:
  *   - nothing UNLANDED → MOUNT, carrying WHAT was established so the log can claim only that (a delta
  *     that names nothing probeable at all lands here too, with an empty pile and a log that says so).
@@ -844,33 +959,68 @@ export type PresentMatchingRoute =
  *     within the additive one: "partly applied is refused" is the shipped guarantee.
  *   - a statement we cannot parse a target from, or an undeterminable kind (TRUNCATE / DELETE /
  *     DROP SCHEMA / …) → REFUSE fail-closed (cannot tell applied from unapplied by schema).
- * An {@link APPLIED_AT_PRESENT_MATCHING} kind never refuses ON ITS OWN — with no unlanded evidence the
- * boot MOUNTS exactly as before, so a legitimate leftover after a non-subset update is unaffected.
+ * None of {@link PROBED_BY_ITS_OWN_ADD} / {@link RENAMES_AT_PRESENT_MATCHING} /
+ * {@link CLASSIFY_MEASURED_COLUMN_KINDS} ever refuses ON ITS OWN — with no unlanded evidence the boot
+ * MOUNTS exactly as before, so a legitimate leftover after a non-subset update is unaffected.
+ *
+ * `driftInspectedColumns` carries the `table.column` keys the CLASSIFY actually introspected (see
+ * {@link driftInspectedColumns}); it is the ONLY thing that lets a column-shape statement stand as
+ * evidence. It defaults to EMPTY — a caller that does not say what the classify inspected gets no
+ * classify-derived evidence at all, which is the safe direction.
  */
 export async function routePresentMatchingUpdate(
   migrations: readonly PlannedMigration[],
   probeObject: (probe: SchemaObjectProbe) => Promise<boolean>,
+  driftInspected: ReadonlySet<string> = new Set(),
 ): Promise<PresentMatchingRoute> {
   const gone: string[] = []; // a reviewed DROP target, probed GONE          → landed
   const present: string[] = []; // an object a CREATE names, probed THERE    → landed
-  const proven: string[] = []; // the classify itself proves it ran          → landed
+  const proven: string[] = []; // the classify itself measured it            → landed
   const absent: string[] = []; // an object a CREATE names, probed MISSING   → unlanded
   const stillThere: string[] = []; // a reviewed DROP target, probed PRESENT → unlanded
+  const notRenamed: string[] = []; // a RENAME's OLD name, probed PRESENT    → unlanded
   for (const migration of migrations) {
     const scan = scanMigrationSql(migration.sql, migration.allowlist ?? []);
     for (const finding of scan.findings) {
       if (PROBEABLE_SUPERSET_BLIND.has(finding.kind)) {
-        const target = extractDestructiveTarget(finding.kind, finding.text);
-        if (!target) {
+        const read = readDestructive(finding.kind, finding.text);
+        if (!read) {
           return {
             kind: 'refuse',
             reason: `an unparseable ${finding.kind} statement ('${truncateStmt(finding.text)}')`,
           };
         }
-        const object = destructiveTargetObject(target);
-        ((await probeObject(object)) ? stillThere : gone).push(describeSchemaObject(object));
-      } else if (APPLIED_AT_PRESENT_MATCHING.has(finding.kind)) {
-        proven.push(`${finding.kind} ('${truncateStmt(finding.text)}')`);
+        const object = destructiveTargetObject(read.target);
+        if (await probeObject(object)) {
+          // Still there — the DROP has not run. True of the IF EXISTS form as much as the plain one.
+          stillThere.push(describeSchemaObject(object));
+        } else if (!read.idempotent) {
+          gone.push(describeSchemaObject(object));
+        }
+        // …and an IF EXISTS target that is GONE is NOT evidence: the statement runs clean either way, so
+        // the object may simply never have existed. Reading it as "the delta landed" refused a delta
+        // that never ran (and that re-drop would have raised nothing).
+      } else if (PROBED_BY_ITS_OWN_ADD.has(finding.kind)) {
+        // An `ADD COLUMN … NOT NULL` — the additive half below probes the very column it adds, and that
+        // probe IS the measurement. Asserting a second, classify-derived proof here would put ONE
+        // statement in BOTH piles: refused as half-landed for having run and not run at once.
+      } else if (RENAMES_AT_PRESENT_MATCHING.has(finding.kind)) {
+        // A rename names the object it renames AWAY, and this boot can probe THAT name. Still there ⇒
+        // the rename has not run — the one reading the schema supports. (Gone proves nothing: an object
+        // that never existed is gone too, so it contributes nothing rather than a claim.)
+        const renamedAway = removedObject(finding.text);
+        if (renamedAway !== undefined && (await probeObject(renamedAway))) {
+          notRenamed.push(describeSchemaObject(renamedAway));
+        }
+      } else if (CLASSIFY_MEASURED_COLUMN_KINDS.has(finding.kind)) {
+        // A column-shape change names no object whose existence settles it — but if the classify
+        // INTROSPECTS that column, reaching `present-matching` already measured it: unapplied, its live
+        // type / nullability would have differed and classified `drifted`. Over any other column the
+        // classify never looked, so the statement contributes nothing at all.
+        const column = alteredColumnKey(finding.text);
+        if (column !== undefined && driftInspected.has(column)) {
+          proven.push(`${finding.kind} ('${truncateStmt(finding.text)}')`);
+        }
       } else {
         return {
           kind: 'refuse',
@@ -887,12 +1037,17 @@ export async function routePresentMatchingUpdate(
   const unlanded = [
     ...absent.map((o) => `${o} — a CREATE in the delta names it, and it is NOT there`),
     ...stillThere.map((o) => `${o} — a reviewed DROP in the delta names it, and it is STILL there`),
+    ...notRenamed.map(
+      (o) => `${o} — a reviewed RENAME in the delta renames it away, and it is STILL there`,
+    ),
   ];
   if (unlanded.length === 0) return { kind: 'mount', probed: { present, gone, proven } };
   const landed = [
     ...present.map((o) => `${o} — a CREATE in the delta names it, and it is THERE`),
     ...gone.map((o) => `${o} — a reviewed DROP in the delta names it, and it is GONE`),
-    ...proven.map((s) => `${s} — the drift-clean classify proves this statement ran`),
+    ...proven.map(
+      (s) => `${s} — the drift-clean classify INSPECTS that column, so this statement ran`,
+    ),
   ];
   if (landed.length > 0) return { kind: 'refuse-half-landed', landed, unlanded };
   return { kind: 'apply', absent };
@@ -965,6 +1120,9 @@ export function makeSchemaProbe(
  *                              revision mounted this too and SILENTLY LOST the reviewed drop forever.)
  *                            · an object the delta CREATEs is ABSENT  → APPLY, naming it. (an earlier
  *                              revision mounted this too and lost the change — issue #440.)
+ *                            · the name a reviewed RENAME renames AWAY is STILL there → APPLY (the
+ *                              rename never ran; the same #440 loss, for a statement that names no
+ *                              created object).
  *                            · landed AND un-landed evidence together → REFUSE fail-closed, naming both
  *                              sides: a half-landed delta can be neither re-applied nor called applied.
  *                              Across BOTH halves — a drop target still there beside an object already
@@ -980,9 +1138,10 @@ export async function planUpdateBoot(
   specPath: string,
   warn: (message: string) => void,
   probeObject: (probe: SchemaObjectProbe) => Promise<boolean>,
+  driftInspected: ReadonlySet<string> = new Set(),
 ): Promise<{ migrations: PlannedMigration[]; deployMode: 'mounted' | 'updated' }> {
   if (schemaState === 'present-matching') {
-    const route = await routePresentMatchingUpdate(updateMigrations, probeObject);
+    const route = await routePresentMatchingUpdate(updateMigrations, probeObject, driftInspected);
     if (route.kind === 'apply') {
       // An UNAPPLIED delta: the live schema present-matches the NEW spec ONLY because detectDrift is
       // superset-blind (a reviewed DROP target STILL EXISTS) or because the spec cannot express what the
@@ -1000,9 +1159,9 @@ export async function planUpdateBoot(
           'names and found some of them in the state an APPLIED delta leaves them in and some not:\n' +
           `    • ALREADY landed: ${route.landed.join('\n                      ')}\n` +
           `    • NOT landed:     ${route.unlanded.join('\n                      ')}\n` +
-          'Re-applying it would raise a duplicate-object error on what already landed (42P07 on an ' +
-          'object it re-creates, 42P01 on a target it re-drops, and a rename cannot run twice), and ' +
-          'mounting would lose what did not — fail-closed rather than guess: reconcile by hand, or ' +
+          'Re-applying it would run over what ALREADY landed (an object it re-creates raises 42P07, a ' +
+          'target it re-drops 42P01), and mounting would lose what did not — fail-closed rather than ' +
+          'guess: reconcile by hand, or ' +
           'author a forward delta for the MISSING half only and point RAYSPEC_UPDATE_MIGRATION at ' +
           'that one. Fail-closed.',
       );
@@ -2890,6 +3049,10 @@ export async function deployProductYamlSpec(
       specPath,
       (m) => console.warn(m),
       makeSchemaProbe(queryFn, 'public'),
+      // WHICH columns the classify above actually introspected — the only ones whose drift-clean
+      // reading may stand as evidence that a column-shape statement (a type change / SET NOT NULL)
+      // already ran. Built from the SAME `composedStores` detectDrift was just given.
+      driftInspectedColumns(composedStores),
     );
     migrations = plan.migrations;
     deployMode = plan.deployMode;
