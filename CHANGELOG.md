@@ -421,8 +421,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `video/mp4`, `video/webm`), served as the allowlist's own canonical string with any `; codecs=…`
   parameter dropped, and anything else, `text/html` included, is `application/octet-stream`. Every
   byte response (`200` and `206` alike) now also carries `Content-Disposition: attachment`. A consumer
-  who ingested one of the allow-listed audio or video types sees the same `Content-Type` as before
-  plus that one new header; anyone who relied on the route echoing an arbitrary uploaded type gets
+  who ingested an allow-listed type sees that type's bare `type/subtype` — identical when they
+  declared it bare, with any `; codecs=…` parameter dropped and any casing normalized — plus that one
+  new header; anyone who relied on the route echoing an arbitrary uploaded type gets
   `application/octet-stream` instead. **This is an example, not the platform**: no platform path
   reflects an uploaded `Content-Type` — the audio capability's playback route serves the type its
   own server-side media-prep step registered, never the uploader's — but the example is documentation
