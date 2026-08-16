@@ -277,6 +277,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already gave. What is new is that a change which hands a contributed route a refusal of its own now
   fails CI instead of shipping.
 
+- **The platform has a journal replay helper of its own**
+  (`packages/compose/api-auth/src/http/journal-replay.ts`). Turning persisted journal entries into a
+  resumable, cursor-paged SSE feed is generic machinery — the same exclusive `seq > cursor` bound, the
+  same ascending order, the same `Last-Event-ID`-takes-precedence-over-`?lastEventId=` cursor
+  resolution, the same "a cursor that is not a number means from the beginning" rule, and the same
+  tenant-scoped read — and it lived inside the run-events route, so every other surface that needs it
+  would have had to grow a second copy with its own subtly different bounds. It is now one module with
+  its own tests. A caller supplies the stream id and the read-path validator that turns a stored
+  payload into a `data` string or refuses it; a refused entry is **dropped** — never served verbatim,
+  never replaced by a fabricated one, and never allowed to truncate the entries after it.
+  `GET /v1/runs/{id}/events` now calls the helper and is byte-unchanged: same frames, same ids, same
+  order, same drops, same neutral-event re-validation on read.
+
 ### Fixed
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
