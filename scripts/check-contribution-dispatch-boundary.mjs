@@ -40,7 +40,10 @@
  *     out of reach of a greppable tripwire — as is any name the scanned module never writes down. An
  *     import of a run-surface-bearing package whose bindings the gate cannot ENUMERATE is therefore
  *     flagged on sight: a `*` namespace, a DEFAULT binding, a side-effect import and a dynamic
- *     `import()`/`require()` all hand the module an object whose members the gate cannot see.
+ *     `import()`/`require()` all hand the module an object whose members the gate cannot see. A
+ *     member named with a STRING rather than an identifier (`{ "runAgent" as go }`, legal since
+ *     ES2022) is refused on the same ground and for a sharper reason: the clause reader cannot even
+ *     extract such a statement, so leaving it unflagged would clear it against every rule at once.
  *   - It bounds IMPORTS, not behaviour. The capability contract is what actually withholds
  *     `TurnDispatch` from a handler; this gate is the forcing function that keeps the code shaped so
  *     that withholding it stays meaningful.
@@ -430,7 +433,37 @@ export function detectViolations(rel, src) {
       );
     }
   }
+  found.push(...detectQuotedNameViolations(rel, code));
   found.push(...detectDynamicImportViolations(rel, code));
+  return found;
+}
+
+/**
+ * ES2022 lets a brace group name a member with a STRING rather than an identifier
+ * (`import { "runAgent" as go } from '@rayspec/platform'`). `extractImports` builds its clause from a
+ * character class that excludes quotes, so a quoted name does not merely confuse the reader — the
+ * whole statement is never extracted, and EVERY rule above silently reads zero. That is one spelling
+ * walking past the run-surface name rule, the module-prefix rule, the unenumerable-take rule and the
+ * root-escape rule at once.
+ *
+ * The reader is a greppable tripwire, not a parser, so it does not learn to read the name: it refuses
+ * the statement it cannot vet. Same posture as the unenumerable-take rule — a name the gate cannot
+ * read is a name it cannot clear. Applied to the COMMENT-STRIPPED source, so an apostrophe inside a
+ * comment between the braces cannot manufacture a violation.
+ */
+const QUOTED_MODULE_EXPORT_NAME =
+  /\b(?:import|export)\s*(?:type\s*)?\{[^}]*['"][^}]*\}\s*from\s*(?:'[^']+'|"[^"]+"|`[^`$]+`)/g;
+
+function detectQuotedNameViolations(rel, code) {
+  const found = [];
+  for (const [statement] of code.matchAll(QUOTED_MODULE_EXPORT_NAME)) {
+    found.push(
+      `${rel}: names an imported member with a string literal (${statement.trim().slice(0, 80)}…) — ` +
+        'this gate matches the names in an import clause, and a quoted member name is one it cannot ' +
+        'read, so the statement is refused rather than cleared (fail-closed). Write the member as a ' +
+        'plain identifier.',
+    );
+  }
   return found;
 }
 
@@ -512,6 +545,38 @@ function selfTestDetector() {
     { rel: 'h/x.ts', src: "import { runAgent as go } from '@rayspec/platform';", expect: true },
     // the ceiling, stated as a case: a TYPE-only import of a run-surface binding — must FIRE
     { rel: 'h/x.ts', src: "import type { runAgent } from '@rayspec/platform';", expect: true },
+    // ── a QUOTED member name (ES2022) is not extracted at all, so it used to walk past EVERY rule
+    //    above at once. It is refused as unreadable, not read. Each vector paired with the plain
+    //    spelling it hides, and the accept controls below prove the refusal is not a blanket one.
+    { rel: 'h/x.ts', src: 'import { "runAgent" as go } from \'@rayspec/platform\';', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import { "DbosDurableExecutor" as D } from \'@rayspec/durable-dbos\';',
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: 'import { "default" as p } from \'@rayspec/platform\';', expect: true },
+    { rel: 'h/x.ts', src: "import { 'runAgent' as go } from '@rayspec/platform';", expect: true },
+    { rel: 'h/x.ts', src: 'export { "default" as p } from \'@rayspec/platform\';', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import type { "runAgent" as R } from \'@rayspec/platform\';',
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: 'import { "go" as g } from \'/abs/run-core.js\';', expect: true },
+    // …and the accept controls for it: a quote in the SOURCE, in an object literal, in a comment
+    // between the braces, and a legitimate enumerable re-export under the name `default`.
+    { rel: 'h/x.ts', src: 'import { helper } from "./shared.js";', expect: false },
+    { rel: 'h/x.ts', src: 'export const o = { a: "x" };', expect: false },
+    {
+      rel: 'h/x.ts',
+      src: "import { /* don't */ helper } from '@rayspec/handler-sdk';",
+      expect: false,
+    },
+    {
+      rel: 'h/x.ts',
+      src: "export { helper as default } from '@rayspec/platform';",
+      expect: false,
+    },
     {
       rel: 'h/x.ts',
       src: "import type { DurableExecutor } from '@rayspec/platform';",
