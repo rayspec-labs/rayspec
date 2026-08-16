@@ -22,18 +22,18 @@
 # WHAT "ZERO DRIFT" IS PROVEN BY (two independent oracles, both auto-derived from schema.ts):
 #   (1) a fail-closed `drizzle-kit push` diff (Step 2) — the auto-derived cross-check, with ONE
 #       exact documented benign line subtracted (the scopes array-default quirk, see Step 2);
+#   (2) a COMPLETE structural cross-check (Step 3, migrate-clean-assert.ts) — the DETERMINISTIC
+#       primary oracle: for all 12 core platform tables it asserts every column (name/type/
+#       nullability/DEFAULT/array-element-type), every PRIMARY KEY (ordered cols), every FK
+#       (target + ON DELETE, both directions), and every index (name/uniqueness/ORDERED columns/
+#       partial-WHERE/expression body, both directions). It carries NO push quirk.
+#
 # WHAT STEP 4 ADDS: an extension pack's OWN migration chain, applied on the bootstrapped database by
 # the real `applyPackMigrations` wiring, then read back — the pack's objects landed inside its
 # declared namespace, its chain is journaled in its own `__migrations_<packId>` table, the PLATFORM
 # journal is byte-for-byte the same count it was, and a second apply is a no-op. It runs after the
 # two drift oracles because those compare the live database against schema.ts, which describes the
 # platform's tables and knows nothing about a pack's.
-#
-#   (2) a COMPLETE structural cross-check (Step 3, migrate-clean-assert.ts) — the DETERMINISTIC
-#       primary oracle: for all 12 core platform tables it asserts every column (name/type/
-#       nullability/DEFAULT/array-element-type), every PRIMARY KEY (ordered cols), every FK
-#       (target + ON DELETE, both directions), and every index (name/uniqueness/ORDERED columns/
-#       partial-WHERE/expression body, both directions). It carries NO push quirk.
 #
 # Clean-room: derives the server from DATABASE_URL (fall back to the documented local default),
 # creates its OWN throwaway DB (`<db>_migrate_clean`) on that server, and drops it on ANY exit.
