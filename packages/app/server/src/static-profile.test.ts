@@ -5,7 +5,9 @@
  * `isStaticProfile` is the FAIL-CLOSED absence predicate that decides whether a frontend-only spec may
  * boot WITHOUT a database / JWT signing key / api-key pepper and mount NO auth surface. The table below
  * is fail-the-fix, not pass-the-shape:
- *   - a frontend-only backend doc → true (and stays true for an explicit `durableWorker:false`);
+ *   - a frontend-only backend doc → true (and stays true for an explicit `durableWorker:false`, and
+ *     for the reserved opaque `managed:` key — the allowlist tripwire's other direction, where an
+ *     omission fails LOUD on the very profile the key exists to serve, not safe);
  *   - EACH route/DB/agent/handler/worker-bearing section non-empty → false (INCLUDING a non-empty
  *     `extensions[]`, the pack-merge smuggle path a bare-emptiness check would miss);
  *   - a product-profile doc → false; an unknown top-level key / unsupported version → false;
@@ -76,6 +78,18 @@ frontend:
     dir: docs/dist
 `;
     expect(isStaticProfile(doc)).toBe(true);
+  });
+
+  it('the reserved `managed:` key does not disqualify — a frontend-only doc carrying it stays static', () => {
+    // The OTHER direction of the keys-allowlist tripwire, and the one that fails LOUD rather than
+    // safe: `managed` is opaque and bears no route/DB/agent/handler, so its mere presence must not
+    // re-route a frontend-only deployment onto the normal boot — that boot would demand a database
+    // and two secrets such a deployment must not have. Fail-the-fix: drop 'managed' from
+    // STATIC_PROFILE_KNOWN_KEYS and both cases below flip to false.
+    const withContents = `${FRONTEND_ONLY}managed:\n  owner: platform\n  nested:\n    flag: true\n`;
+    const empty = `${FRONTEND_ONLY}managed: {}\n`;
+    expect(isStaticProfile(withContents)).toBe(true);
+    expect(isStaticProfile(empty)).toBe(true);
   });
 });
 
