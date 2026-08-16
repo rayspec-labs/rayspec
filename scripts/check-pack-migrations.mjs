@@ -35,11 +35,15 @@
  * The gate reads SQL TEXT, so it strips comments and blanks string-literal bodies before it
  * matches anything (the shape `check-handler-imports.mjs` uses for source): a `-- CREATE TABLE
  * orgs` note and a `DEFAULT 'DROP TABLE orgs'` column default are not statements, and a `;` or
- * `--` inside a literal or a quoted identifier is not structure. Statement boundaries are the ones
- * the MIGRATOR uses — a literal-aware `;` AND drizzle's `--> statement-breakpoint` marker, which
- * it splits on whether or not a `;` is there (drizzle-orm/migrator.js). A statement whose text
- * still holds a second top-level verb after that, or an unterminated literal that swallows the
- * rest of the file, is refused rather than scanned at its opening keywords alone.
+ * `--` inside a literal or a quoted identifier is not structure. Statement boundaries are a
+ * SUPERSET of the MIGRATOR's, and by construction rather than by imitation: the RAW file text is
+ * split on drizzle's `--> statement-breakpoint` marker FIRST, exactly as `readMigrationFiles`
+ * does, and only then is each chunk walked for a literal-aware `;`. The ORDER is the whole point —
+ * drizzle never parses comments, so a marker sitting behind a `--` earlier on the same line is
+ * still a boundary to it, and a gate that stripped comments first would swallow the marker and
+ * with it every statement the migrator would go on to run. A statement whose text still holds a
+ * second top-level verb after that, or an unterminated literal that swallows the rest of the file,
+ * is refused rather than scanned at its opening keywords alone.
  *
  * NEEDS THE BUILD: it imports the platform scan from `@rayspec/db`'s built output, so it runs
  * after `pnpm build` (as `gate:spec-schema` and `gate:api-report` already do). It needs no
@@ -152,21 +156,53 @@ const DOLLAR_TAG_RE = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
 const BREAKPOINT = '--> statement-breakpoint';
 
 /**
- * Split SQL into statements the way the MIGRATOR does, LITERAL-AWARE. Walks the text tracking lexer
- * state so a `--`, a slash-star block comment or a `;` inside a single-quoted string ('', the
- * escaped quote), a dollar-quoted body ($tag$...$tag$) or a double-quoted identifier ("", the
- * escaped quote) is not mistaken for structure. A statement ends at a top-level `;` OR at a
- * `--> statement-breakpoint` marker, which is recognised BEFORE the `--` comment strip could
- * swallow it. Comments are dropped; literal and identifier bodies are kept verbatim so the
- * object-name match below still sees the name it must check. Each statement is returned with its
- * 1-based starting line and its internal whitespace collapsed to single spaces, so a newline-split
- * `DROP\nTABLE` reads as one statement.
+ * Cut a migration file the way the MIGRATOR cuts it: `readMigrationFiles` does
+ * `query.split('--> statement-breakpoint')` on the RAW text and the dialect then executes EVERY
+ * chunk (`for (const stmt of migration.sql) await tx.execute(sql.raw(stmt))`), consulting no
+ * comment rule anywhere — drizzle has no lexer, so nothing can hide the marker from it.
+ *
+ * That is why this runs BEFORE any comment handling. A marker with a `--` earlier on the same line
+ * (`-- x --> statement-breakpoint DROP TABLE "orgs";`) reads as an ordinary line comment to a
+ * scanner that strips comments first, which drops the marker AND the statement behind it while the
+ * migrator happily runs that statement. Splitting the raw text first makes this gate's boundaries a
+ * superset of the migrator's by construction: whatever it would execute as a statement of its own
+ * is scanned here as a statement of its own.
+ *
+ * A marker that lands inside a string or dollar-quoted literal cuts that literal in half, and the
+ * fail-closed unterminated-literal path refuses the chain. That is the correct verdict, not a
+ * false positive: the migrator would cut it in exactly the same place and execute both halves.
+ *
+ * Each chunk carries the number of newlines before it, so every diagnostic keeps the line number
+ * the file on disk actually has (the marker itself spans no newline).
+ */
+function breakpointChunks(sql) {
+  const chunks = [];
+  let lineOffset = 0;
+  for (const text of sql.split(BREAKPOINT)) {
+    chunks.push({ text, lineOffset });
+    lineOffset += (text.match(/\n/g) ?? []).length;
+  }
+  return chunks;
+}
+
+/**
+ * Split ONE breakpoint chunk into statements, LITERAL-AWARE. Walks the text tracking lexer state so
+ * a `--`, a slash-star block comment or a `;` inside a single-quoted string ('', the escaped
+ * quote), a dollar-quoted body ($tag$...$tag$) or a double-quoted identifier ("", the escaped
+ * quote) is not mistaken for structure. Comments are dropped; literal and identifier bodies are
+ * kept verbatim so the object-name match below still sees the name it must check. Each statement is
+ * returned with its 1-based starting line WITHIN THE CHUNK and its internal whitespace collapsed to
+ * single spaces, so a newline-split `DROP\nTABLE` reads as one statement.
+ *
+ * The `--> statement-breakpoint` marker needs no case here: `breakpointChunks` already removed
+ * every one of them from the raw text, which is the only order in which a comment strip cannot
+ * swallow a boundary the migrator honours.
  *
  * Returns `{ statements, unterminated }`. `unterminated` is the first literal that ran to the end
- * of the file without a closing delimiter — everything after it was swallowed into one statement
+ * of the chunk without a closing delimiter — everything after it was swallowed into one statement
  * and cannot have been scanned, which the caller turns into a refusal instead of a silent pass.
  */
-function splitStatements(sql) {
+function splitChunkStatements(sql) {
   const statements = [];
   let unterminated = null;
   let buf = '';
@@ -218,11 +254,6 @@ function splitStatements(sql) {
     const next = i + 1 < n ? sql[i + 1] : '';
 
     if (ch === '-' && next === '-') {
-      if (sql.startsWith(BREAKPOINT, i)) {
-        end(); // the marker is a statement boundary to the migrator, so it is one here
-        i += BREAKPOINT.length;
-        continue;
-      }
       while (i < n && sql[i] !== '\n') i += 1;
       continue; // leave the newline for the line counter below
     }
@@ -273,6 +304,30 @@ function splitStatements(sql) {
     i += 1;
   }
   end();
+  return { statements, unterminated };
+}
+
+/**
+ * Split a whole migration FILE into the statements the migrator would run: cut the raw text on the
+ * breakpoint marker first (`breakpointChunks`), then walk each chunk for a literal-aware `;`. Line
+ * numbers from each chunk are lifted back onto the file, so a diagnostic still points at the line
+ * on disk. The first unterminated literal ANYWHERE in the file is the one reported.
+ */
+function splitStatements(sql) {
+  const statements = [];
+  let unterminated = null;
+  for (const chunk of breakpointChunks(sql)) {
+    const result = splitChunkStatements(chunk.text);
+    for (const stmt of result.statements) {
+      statements.push({ line: stmt.line + chunk.lineOffset, text: stmt.text });
+    }
+    if (!unterminated && result.unterminated) {
+      unterminated = {
+        ...result.unterminated,
+        line: result.unterminated.line + chunk.lineOffset,
+      };
+    }
+  }
   return { statements, unterminated };
 }
 
@@ -368,14 +423,22 @@ export function scanPackMigrationSql(rel, sql, tablePrefix) {
   const violations = [];
 
   // The destructive half: the PLATFORM's scan, with NO allowlist. Every finding is a refusal —
-  // there is no entry to author that would clear one. Run over the whole file so its line numbers
-  // and its unanchored detectors see each statement exactly as `gate:migrations` would.
-  for (const finding of scanMigrationSql(sql, []).findings) {
-    violations.push(
-      `${rel}:${finding.line}: destructive statement in a pack migration chain [${finding.kind}] — ` +
-        `${clip(finding.text)}. The platform chain clears such a statement only through a reviewed ` +
-        'allowlist entry; a pack chain has NO allowlist and no mechanism to author one.',
-    );
+  // there is no entry to author that would clear one. It runs per BREAKPOINT CHUNK for the same
+  // reason the splitter does: the core scan strips `--` line comments (it scans plain SQL, where a
+  // comment really is one), so on a chain file it would read `-- x --> statement-breakpoint DROP
+  // TABLE "orgs";` as a comment and never see the DROP the migrator would run. Cutting on the
+  // marker first hands it exactly the text the migrator would execute. The scan carries no state
+  // across statements, so on a file without markers this is the identical call `gate:migrations`
+  // makes; the chunk's line offset puts the finding back on its line in the file.
+  for (const chunk of breakpointChunks(sql)) {
+    for (const finding of scanMigrationSql(chunk.text, []).findings) {
+      violations.push(
+        `${rel}:${finding.line + chunk.lineOffset}: destructive statement in a pack migration ` +
+          `chain [${finding.kind}] — ${clip(finding.text)}. The platform chain clears such a ` +
+          'statement only through a reviewed allowlist entry; a pack chain has NO allowlist and ' +
+          'no mechanism to author one.',
+      );
+    }
   }
 
   const { statements, unterminated } = splitStatements(sql);

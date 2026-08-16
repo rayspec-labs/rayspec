@@ -30,6 +30,12 @@
  *       semicolons, PASSES and is counted as SEVERAL statements — nothing but the marker boundary
  *       produces that count. A `DROP TABLE` planted behind a marker FAILS, and a statement holding
  *       a second top-level verb after all splitting FAILS rather than being judged at its head.
+ *       A marker with text AHEAD of it on the same line — `-- x --> statement-breakpoint DROP
+ *       TABLE "orgs";` — FAILS too, in all four payload classes: drizzle splits the RAW file and
+ *       parses no comments, so that line is two statements to it and the second one RUNS. With an
+ *       accept control (the same line with no marker is a plain comment and still passes) so the
+ *       arm cannot be green because the gate started reading comments as SQL. A marker INSIDE a
+ *       literal cuts it, which fails closed as an unterminated literal.
  *   (Q) a digit-tagged dollar-quoted literal (`$tag1$…$tag1$`) does not swallow the rest of the
  *       file: the statement behind one is scanned on its own, and is planted as a NAMESPACE
  *       violation so only the splitter can catch it. An UNTERMINATED literal FAILS.
@@ -345,6 +351,74 @@ try {
     console.log(
       `ok (S/merged) — a merged statement is refused, not read at its head (exit ${r2.code})`,
     );
+
+    // And the marker with text AHEAD of it on the same line. `readMigrationFiles` splits the RAW
+    // file text on the marker and the dialect executes every chunk; drizzle parses no comments at
+    // all, so `-- x --> statement-breakpoint DROP TABLE "orgs";` is TWO statements to it and the
+    // second one runs. A gate that stripped comments before looking for the marker read the whole
+    // line as a comment and passed the file — the marker and the statement behind it both
+    // swallowed. Every payload class is driven, because pinning only the destructive half would
+    // leave the namespace escape uncovered.
+    for (const [payload, expected] of [
+      ['DROP TABLE "orgs";', /destructive statement in a pack migration chain \[drop-table\]/],
+      ['TRUNCATE TABLE "orgs";', /destructive statement in a pack migration chain \[truncate\]/],
+      [
+        'CREATE TABLE "sessions" ("id" uuid PRIMARY KEY NOT NULL);',
+        /CREATE TABLE "sessions" does not carry/,
+      ],
+      ['ALTER TABLE "orgs" ADD COLUMN "leak" text;', /ALTER TABLE "orgs" does not carry/],
+    ]) {
+      const hidden = chain({
+        '0000_commented.sql': [
+          'CREATE TABLE "fx_a" ("id" uuid PRIMARY KEY NOT NULL);',
+          `-- x --> statement-breakpoint ${payload}`,
+          '',
+        ].join('\n'),
+      });
+      const r4 = runGate(hidden, PREFIX);
+      assert.notEqual(
+        r4.code,
+        0,
+        `(S/commented) a marker behind a \`--\` is still a boundary to the migrator: ${payload}`,
+      );
+      assert.match(
+        r4.err,
+        expected,
+        `(S/commented) the statement the migrator would RUN must be seen: ${payload}\n${r4.err}`,
+      );
+    }
+    console.log('ok (S/commented) — a marker behind a `--` is still a boundary (4 payloads)');
+
+    // The accept control for that arm: the same line with NO marker in it is an ordinary comment
+    // and must still pass. Without this, the arm above would stay green if the gate stopped
+    // stripping comments altogether and started reading every one of them as SQL.
+    const commentOnly = chain({
+      '0000_comment.sql': [
+        'CREATE TABLE "fx_a" ("id" uuid PRIMARY KEY NOT NULL);',
+        '-- x statement-breakpoint DROP TABLE "orgs";',
+        '',
+      ].join('\n'),
+    });
+    const r5 = runGate(commentOnly, PREFIX);
+    assert.equal(
+      r5.code,
+      0,
+      `(S/commented-control) a comment naming a DROP but holding NO marker must still PASS; ` +
+        `got: ${r5.err}`,
+    );
+    console.log('ok (S/commented-control) — a comment with no marker is still a comment');
+
+    // A marker INSIDE a literal: the migrator cuts the literal in half and runs both halves, so
+    // treating the literal as intact would scan text the migrator never runs and miss text it
+    // does. Cutting in the same place leaves an unterminated literal, which fails closed.
+    const inLiteral = chain({
+      '0000_in_literal.sql':
+        'CREATE TABLE "fx_a" ("n" text DEFAULT \'x --> statement-breakpoint y\');\n',
+    });
+    const r6 = runGate(inLiteral, PREFIX);
+    assert.notEqual(r6.code, 0, '(S/in-literal) a marker inside a literal must fail CLOSED');
+    assert.match(r6.err, /UNTERMINATED/, '(S/in-literal) the fail-closed reason must be named');
+    console.log(`ok (S/in-literal) — a marker inside a literal fails closed (exit ${r6.code})`);
   }
 
   // ── (Q) a digit-tagged dollar quote, and an unterminated literal ─────────────────────────────
