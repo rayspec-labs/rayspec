@@ -9,6 +9,10 @@
  *   2. LOADS the pack's `defineExtension` MANIFEST (the branded default export of the pack's entry).
  *   3. VERSION-PIN FAIL-CLOSES: the manifest's `version` MUST equal the `ref.version` exact pin from
  *      the spec — a SKEW is a hard error (the silent-skip class: NEVER a silent skip).
+ *   3b. RESOLVES the top-level SECTIONS the manifest claims: the key must be a safe identifier that
+ *      the core grammar does not own and that no other pack has claimed, and the claim's schema
+ *      module is loaded through the SAME jailed, `.js`-preferred resolution as the entry. The
+ *      resolved claims are what `parseSpecWithPacks` hands the document's own top-level nodes to.
  *   4. JAILS each pack handler `module` against the PACK ROOT (a pack handler can never climb out of
  *      its own pack), and REWRITES it to a jail-safe VIRTUAL path UNDER THE DEPLOYMENT ROOT so the
  *      UNCHANGED `deploy()` → `loadHandlers(deployRoot, mergedSpec.handlers, importer)` jails it
@@ -38,10 +42,16 @@ import {
   AgentSpecConfig as AgentSpecConfigSchema,
   type ApiRouteSpec,
   ApiRouteSpec as ApiRouteSpecSchema,
+  CORE_TOP_LEVEL_KEYS,
   type HandlerSpec,
   HandlerSpec as HandlerSpecSchema,
+  isCoreTopLevelKey,
+  isSectionSchemaLike,
+  SafeIdentifier,
+  type SectionClaim,
   type StoreSpec,
   StoreSpec as StoreSpecSchema,
+  sectionValidatorFrom,
   type ToolSpecConfig,
   ToolSpecConfig as ToolSpecConfigSchema,
   typeScriptSourceExtensionOf,
@@ -99,6 +109,13 @@ export interface LoadedExtensions {
   readonly api: ApiRouteSpec[];
   /** The merged agent fragments (pack-contributed OOTB agents, registered post-merge). */
   readonly agents: AgentSpecConfig[];
+  /**
+   * The TOP-LEVEL SECTION CLAIMS the loaded packs make — one per `{ key, schemaModule }` a manifest
+   * declares, each carrying the claiming pack's id and the validator built from its schema module.
+   * The deployment's parse hands the matching top-level node to `validate` (see `parseSpecWithPacks`);
+   * a key no claim covers stays an unknown field, refused by the unchanged strict top level.
+   */
+  readonly sections: SectionClaim[];
   /** The capability instances packs provided (the LAST pack to set a field wins; a collision throws). */
   readonly capabilities: ExtensionCapabilities;
   /**
@@ -115,11 +132,18 @@ export interface LoadedExtensions {
   readonly packHandlerRoots: string[];
 }
 
-/** A fail-closed extension-load error (every message names the offending pack id for the deploy log). */
+/**
+ * A fail-closed extension-load error (every message names the offending pack id for the deploy log).
+ * `packId` carries the same id as a FIELD, so a caller that has to re-report the failure in its own
+ * vocabulary — the pack-aware parse turns it into a typed `SpecError` — can name the pack without
+ * reading it back out of the message.
+ */
 export class ExtensionLoadError extends Error {
-  constructor(message: string) {
+  readonly packId: string | undefined;
+  constructor(message: string, packId?: string) {
     super(message);
     this.name = 'ExtensionLoadError';
+    this.packId = packId;
   }
 }
 
@@ -146,6 +170,9 @@ export async function loadExtensions(
   const agents: AgentSpecConfig[] = [];
   const capabilities: { blobFactory?: ExtensionCapabilities['blobFactory'] } = {};
   const packHandlerRoots: string[] = [];
+  const sections: SectionClaim[] = [];
+  // claimed top-level key → the pack that claimed it first (so a collision can name BOTH packs).
+  const sectionOwners = new Map<string, string>();
 
   // virtual rewritten absolute path → real pre-jailed pack-file absolute path (the importer's map).
   const virtualToReal = new Map<string, string>();
@@ -156,6 +183,7 @@ export async function loadExtensions(
       throw new ExtensionLoadError(
         `extension '${ref.id}' is referenced more than once in extensions[] — pack ids must be ` +
           'unique (fail-closed).',
+        ref.id,
       );
     }
     seenIds.add(ref.id);
@@ -169,6 +197,7 @@ export async function loadExtensions(
         `extension '${ref.id}': module '${ref.module}' looks like an npm package specifier — the ` +
           'npm-module branch is NOT built (directory-only). Reference the pack as a directory ' +
           'path relative to the packs root (fail-closed).',
+        ref.id,
       );
     }
     const packRoot = jailModulePathFor(ctx.packsRoot, ref.module, ref.id);
@@ -186,6 +215,7 @@ export async function loadExtensions(
         `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
           `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
           'a defineExtension(...) manifest (fail-closed).',
+        ref.id,
       );
     }
     const manifest = mod.default;
@@ -195,6 +225,7 @@ export async function loadExtensions(
           '(...) manifest (got ' +
           `${manifest === undefined ? 'no default export' : typeof manifest}) — the entry must be ` +
           '`export default defineExtension({ version, fragments, … })`. Fail-closed.',
+        ref.id,
       );
     }
 
@@ -205,6 +236,7 @@ export async function loadExtensions(
         `extension '${ref.id}': version SKEW — the spec pins version '${ref.version}' but the pack ` +
           `manifest declares version '${manifest.version}'. A version skew is a HARD fail-closed ` +
           'error (never a silent skip): pin the exact version the pack declares, or update the pack.',
+        ref.id,
       );
     }
 
@@ -214,6 +246,16 @@ export async function loadExtensions(
     // The merged spec is STILL re-validated by deploy()'s parseSpec (cross-section lint: dangling
     // refs, dup ids across deployment+pack) — this is the per-fragment shape gate that complements it.
     const fragments = manifest.fragments;
+
+    // (3b) THE TOP-LEVEL SECTIONS THIS PACK CLAIMS. Each claim is checked against three fail-closed
+    //      rules before its schema module is loaded through the SAME jailed, `.js`-preferred
+    //      resolution the entry and every handler use: the key is a safe identifier, the key is not
+    //      one the CORE grammar owns (the denylist is read off the grammar itself, so a section added
+    //      to the document grammar closes to packs the moment it is declared), and no other pack has
+    //      claimed it (a collision names BOTH packs — neither can be the winner by accident).
+    for (const claim of manifest.sections ?? []) {
+      sections.push(await resolveSectionClaim(claim, ref.id, packRoot, sectionOwners, importer));
+    }
 
     // (4) JAIL each pack handler against the PACK root, then rewrite its module to a jail-safe virtual
     //     path under the deployment root (so the unchanged single-root deploy() load accepts it).
@@ -233,13 +275,19 @@ export async function loadExtensions(
           `extension '${ref.id}': handler '${h.id}' module '${h.module}' is not under the pack's ` +
             '`handlers/` directory. A pack handler module MUST live under `handlers/` (the subtree ' +
             'BOTH escape-hatch gates scan); a handler outside it would load unscanned (fail-closed).',
+          ref.id,
         );
       }
       // Jail the pack handler module against the PACK root (a pack handler can never climb out),
       // `.js`-preferred: a BUILT pack's compiled `handlers/<n>.js` sibling is loaded when it exists
       // (so the production importer loads compiled JS with NO manifest rewrite — the manifest keeps its
       // authored `.ts` module path); a source-only pack resolves to the `.ts` the production importer rejects.
-      const realHandlerAbsolute = resolvePackModule(packRoot, h.module, `${ref.id}:${h.id}`);
+      const realHandlerAbsolute = resolvePackModule(
+        packRoot,
+        h.module,
+        `${ref.id}:${h.id}`,
+        ref.id,
+      );
       // FIX C (virtual-path collision): derive the virtual segment from a GUARANTEED-unique authority —
       // the ref's loop INDEX (`<refIndex>__<sanitize(id)>`) — so two DISTINCT `ref.id`s that
       // sanitize-collide (`acme:v1` vs `acme_v1`, both valid `z.string().min(1)`) can NEVER collapse
@@ -255,6 +303,7 @@ export async function loadExtensions(
         ctx.deploymentRoot,
         virtualModule,
         `${ref.id}:${h.id}`,
+        ref.id,
       );
       // FIX C (defense-in-depth): a virtual path must map to EXACTLY one real file. If a collision ever
       // re-emerges (a future change to the segment derivation), FAIL CLOSED naming both packs rather
@@ -264,6 +313,7 @@ export async function loadExtensions(
           `extension '${ref.id}': handler '${h.id}' rewrites to the virtual path '${virtualModule}' ` +
             `which is already mapped (from another pack handler). A virtual handler path must map to ` +
             'exactly one real file — refusing to overwrite (fail-closed collision).',
+          ref.id,
         );
       }
       virtualToReal.set(virtualAbsolute, realHandlerAbsolute);
@@ -295,6 +345,7 @@ export async function loadExtensions(
         throw new ExtensionLoadError(
           `extension '${ref.id}': provides a blobFactory capability but another pack already provided ` +
             'one — at most one pack may own the blob backend (fail-closed collision).',
+          ref.id,
         );
       }
       capabilities.blobFactory = caps.blobFactory;
@@ -314,10 +365,82 @@ export async function loadExtensions(
     tooling,
     api,
     agents,
+    sections,
     capabilities,
     importer: mergedImporter,
     packHandlerRoots,
   };
+}
+
+/**
+ * Resolve ONE `{ key, schemaModule }` claim into a `SectionClaim` the deployment's parse can use, or
+ * FAIL CLOSED naming the pack. Every refusal here is a deploy-time refusal: nothing about a claim is
+ * decided later, so a pack cannot end up owning a key it was not allowed to claim.
+ *
+ * `sectionOwners` is the running key → pack-id map; a second claim on a key names BOTH packs, because
+ * "one of these two packs already had it" is the only actionable form of that message.
+ */
+async function resolveSectionClaim(
+  claim: { readonly key: string; readonly schemaModule: string },
+  packId: string,
+  packRoot: string,
+  sectionOwners: Map<string, string>,
+  importer: ModuleImporter,
+): Promise<SectionClaim> {
+  const { key, schemaModule } = claim;
+  if (!SafeIdentifier.safeParse(key).success) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': claims the top-level section '${key}', which is not a safe identifier ` +
+        '(lowercase letters/digits/underscore, starting with a letter or underscore, at most 63 ' +
+        'characters). A claimed key is a document key an author writes — fail-closed.',
+      packId,
+    );
+  }
+  if (isCoreTopLevelKey(key)) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': claims the top-level section '${key}', which the core spec grammar ` +
+        `already owns (${CORE_TOP_LEVEL_KEYS.join(', ')}). A pack may not claim a core key — the ` +
+        'document would have two owners for one section (fail-closed collision).',
+      packId,
+    );
+  }
+  const owner = sectionOwners.get(key);
+  if (owner !== undefined) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': claims the top-level section '${key}', which extension '${owner}' ` +
+        'already claims. Two packs cannot both own one top-level key — nothing would decide whose ' +
+        'grammar validates it (fail-closed collision).',
+      packId,
+    );
+  }
+
+  // The schema module is resolved with the SAME discipline as the pack entry: jailed against the
+  // PACK root (`..`/absolute/symlink/outside-root rejected), compiled `.js` sibling preferred.
+  const schemaAbsolute = resolvePackModule(packRoot, schemaModule, `${packId}:${key}`, packId);
+  let mod: Record<string, unknown>;
+  try {
+    mod = await importer(schemaAbsolute);
+  } catch (e) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': failed to load the schema module '${schemaModule}' ` +
+        `(${schemaAbsolute}) for the claimed section '${key}': ` +
+        `${e instanceof Error ? e.message : String(e)} (fail-closed).`,
+      packId,
+    );
+  }
+  const schema = mod.default;
+  if (!isSectionSchemaLike(schema)) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': the schema module '${schemaModule}' for the claimed section '${key}' ` +
+        `does not default-export something that can validate a node (got ${
+          schema === undefined ? 'no default export' : typeof schema
+        }) — it must default-export a value with a \`safeParse\` method. Fail-closed.`,
+      packId,
+    );
+  }
+
+  sectionOwners.set(key, packId);
+  return { key, packId, validate: sectionValidatorFrom(schema, key) };
 }
 
 /**
@@ -338,6 +461,7 @@ function parseFragment<T>(
     throw new ExtensionLoadError(
       `extension '${packId}': a ${what} fragment is malformed: ` +
         `${e instanceof Error ? e.message : String(e)} (fail-closed at load).`,
+      packId,
     );
   }
 }
@@ -385,16 +509,16 @@ function isUnderHandlersDir(moduleSpec: string): boolean {
  * seam importer loads it). This lets a BUILT pack deploy with NO manifest rewrite (the manifest keeps its
  * authored `.ts` module paths) while the production compiled-JavaScript boundary still holds.
  */
-function resolvePackModule(packRoot: string, moduleSpec: string, id: string): string {
+function resolvePackModule(packRoot: string, moduleSpec: string, id: string, packId = id): string {
   const ext = typeScriptSourceExtensionOf(moduleSpec);
   if (ext !== undefined) {
     const compiledSpec = `${moduleSpec.slice(0, -ext.length)}.js`;
     // Re-jail the compiled sibling spec with the FULL discipline (traversal/containment/symlink), then
     // prefer it only when it actually exists on disk (a built pack); otherwise fall through to the source.
-    const compiledAbsolute = jailModulePathFor(packRoot, compiledSpec, id);
+    const compiledAbsolute = jailModulePathFor(packRoot, compiledSpec, id, packId);
     if (existsSync(compiledAbsolute)) return compiledAbsolute;
   }
-  return jailModulePathFor(packRoot, moduleSpec, id);
+  return jailModulePathFor(packRoot, moduleSpec, id, packId);
 }
 
 /**
@@ -403,13 +527,14 @@ function resolvePackModule(packRoot: string, moduleSpec: string, id: string): st
  * path is jailed with the EXACT discipline a handler module is (the security-load-bearing jail lives
  * in ONE place). Wraps the `HandlerLoadError` it throws in an `ExtensionLoadError` for the deploy log.
  */
-function jailModulePathFor(root: string, moduleSpec: string, id: string): string {
+function jailModulePathFor(root: string, moduleSpec: string, id: string, packId = id): string {
   try {
     return jailModulePath(root, moduleSpec, id);
   } catch (e) {
     if (e instanceof HandlerLoadError) {
       throw new ExtensionLoadError(
         `extension '${id}': ${e.message.replace(/^handler '[^']*': /, '')}`,
+        packId,
       );
     }
     throw e;
