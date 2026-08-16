@@ -4,15 +4,18 @@
  * The pack loader lives in `@rayspec/platform`, and resolving a pack means IMPORTING one — arbitrary
  * code from the deployment tree. A document that references no pack must therefore pay for none of
  * it: not the module, not the import. That is not a performance note, it is the property that keeps a
- * pack-free `doctor` byte-identical to what it always was.
+ * pack-free `doctor` byte-identical to what it always was. A document that DOES reference a pack pays
+ * for it only when `doctor` is asked to resolve them (`--with-packs`), which is the same property one
+ * step further out: the default run reaches the loader for no document at all.
  *
  * The `@rayspec/platform` mock factory below is the probe: it runs the FIRST time that module is
  * imported, so a counter inside it turns "did this document shape reach the loader?" into an
- * assertion. Both directions are pinned — a document with no `extensions[]` never loads it, and a
- * document WITH one does — because a probe that only ever reads zero proves nothing.
+ * assertion. Both directions are pinned — neither shape loads it without the flag, and the
+ * pack-bearing one does with it — because a probe that only ever reads zero proves nothing.
  *
  * The stubbed `parseSpecWithPacks` returns a fixed verdict; what the real one does with a real pack
- * is measured against the real fixture pack in `pack-sections.test.ts`.
+ * is measured against the real fixture pack in `pack-sections.test.ts`, and that a real pack's ENTRY
+ * does not execute without the flag in `doctor-pack-execution.test.ts`.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -91,8 +94,15 @@ describe('the pack loader stays off the path of a document that references no pa
     expect(h.platformLoads).toBe(before);
   });
 
-  it('a document that DOES reference a pack reaches the loader', async () => {
+  it('nor does a PACK-BEARING document, without the flag that asks for them', async () => {
+    const before = h.platformLoads;
     const result = await runDoctor(['with-pack.yaml']);
+    expect(result.ok).toBe(true);
+    expect(h.platformLoads).toBe(before);
+  });
+
+  it('--with-packs on a document that DOES reference a pack reaches the loader', async () => {
+    const result = await runDoctor(['with-pack.yaml'], { withPacks: true });
     expect(result.ok).toBe(true);
     expect(h.platformLoads).toBeGreaterThan(0);
   });

@@ -17,7 +17,9 @@
  *     them (harmless to the DB URLs the CLI actually consumes, and kept for parity with the server).
  *   • OPT-OUT — `RAYSPEC_SKIP_DOTENV=1` disables it entirely (to prove a pure-ambient-env run).
  *
- * `doctor` needs no env, so this is a no-op for it; `plan`'s read-only guarantee is UNCHANGED — the
+ * A DEFAULT `doctor` needs no env, so this is a no-op for it; `doctor --with-packs` DOES read one
+ * from here — `RAYSPEC_HANDLER_ROOT`, which selects the deployment tree its packs are imported and
+ * EXECUTED from (see `deploymentRootFor` in pack-sections.ts). `plan`'s read-only guarantee is UNCHANGED — the
  * loader only makes `DATABASE_URL` readable so the read-only guard can COMPARE (a net security improvement:
  * the guard now fires where before it was skipped for lack of a compare target). `plan` still NEVER
  * connects to `DATABASE_URL`.

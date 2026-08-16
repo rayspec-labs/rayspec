@@ -166,7 +166,8 @@ function validatorRefusal(key: string, owner: string, what: string): Result<unkn
  * Adapt a pack's schema module into a `SectionValidator`. A rejection is reported UNDER the section
  * key (`acme_notes.retentionDays`) with the SAME codes the core grammar reports: an unknown key
  * inside the section is `unknown_field`, everything else is `schema_violation`. So a section a pack
- * owns reads, in `plan` and `doctor` output, exactly like a section the core grammar owns.
+ * owns reads, in `plan` and `doctor --with-packs` output, exactly like a section the core grammar
+ * owns.
  *
  * THE ENVELOPE. `schema` is the default export of a module loaded out of a pack directory: foreign
  * code, admitted on the structural evidence that it has a `safeParse` method and nothing more. Three
