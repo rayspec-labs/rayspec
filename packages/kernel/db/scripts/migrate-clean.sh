@@ -22,6 +22,13 @@
 # WHAT "ZERO DRIFT" IS PROVEN BY (two independent oracles, both auto-derived from schema.ts):
 #   (1) a fail-closed `drizzle-kit push` diff (Step 2) — the auto-derived cross-check, with ONE
 #       exact documented benign line subtracted (the scopes array-default quirk, see Step 2);
+# WHAT STEP 4 ADDS: an extension pack's OWN migration chain, applied on the bootstrapped database by
+# the real `applyPackMigrations` wiring, then read back — the pack's objects landed inside its
+# declared namespace, its chain is journaled in its own `__migrations_<packId>` table, the PLATFORM
+# journal is byte-for-byte the same count it was, and a second apply is a no-op. It runs after the
+# two drift oracles because those compare the live database against schema.ts, which describes the
+# platform's tables and knows nothing about a pack's.
+#
 #   (2) a COMPLETE structural cross-check (Step 3, migrate-clean-assert.ts) — the DETERMINISTIC
 #       primary oracle: for all 12 core platform tables it asserts every column (name/type/
 #       nullability/DEFAULT/array-element-type), every PRIMARY KEY (ordered cols), every FK
@@ -155,6 +162,51 @@ fi
 echo "== complete structural cross-check (information_schema/pg_catalog vs schema.ts) =="
 ( cd "$DB_PKG_DIR" && MIGRATE_CLEAN_URL="$CLEAN_URL" pnpm exec tsx scripts/migrate-clean-assert.ts )
 
+# --- Step 4: A PACK'S OWN CHAIN, APPLIED THROUGH THE REAL WIRING ----------------------------------
+# An extension pack that owns platform tables brings a migration chain of its own. It runs through
+# the SAME drizzle migrator as the chain above, strictly AFTER it, journaled in its OWN
+# `__migrations_<packId>` table — and the in-tree fixture pack's chain is applied here, on the
+# database the platform chain just bootstrapped, by `applyPackMigrations` itself rather than by a
+# gate-local re-implementation. Two properties are read back afterwards:
+#   (a) the pack's chain landed, inside its declared namespace;
+#   (b) `drizzle.__drizzle_migrations` — the PLATFORM chain's journal — carries exactly the rows it
+#       carried before, so the two chains cannot renumber each other. That is the whole reason the
+#       pack gets a journal of its own, and it is measured, not assumed.
+# It runs AFTER the two drift oracles above deliberately: those compare the live database against
+# schema.ts, which describes the PLATFORM's tables and knows nothing about a pack's.
+PACK_CHAIN_DIR="$(cd "$(dirname "$0")/../../../test/fixture-pack/migrations" && pwd)"
+PACK_ID="fixture-pack"
+PACK_PREFIX="fixture_pack_"
+PACK_JOURNAL="__migrations_${PACK_ID}"
+
+echo "== applying the in-tree fixture pack's OWN chain through applyPackMigrations =="
+PLATFORM_JOURNAL_BEFORE="$(psql -d "$CLEAN_DB" -tA -c "SELECT count(*) FROM drizzle.__drizzle_migrations;")"
+( cd "$DB_PKG_DIR" && PACK_CHAIN_URL="$CLEAN_URL" pnpm exec tsx scripts/apply-pack-chain.ts \
+    "$PACK_ID" "$PACK_CHAIN_DIR" "$PACK_PREFIX" )
+
+pack_assert_eq() {
+  local expected="$1" query="$2" label="$3" got
+  got="$(psql -d "$CLEAN_DB" -tA -c "$query")"
+  if [[ "$got" != "$expected" ]]; then
+    echo "MIGRATE-CLEAN: FAIL — $label: expected [$expected], got [$got]" >&2
+    exit 1
+  fi
+  echo "  ok: $label = $got"
+}
+
+pack_assert_eq "1" "SELECT count(*) FROM pg_tables WHERE tablename = 'fixture_pack_audit_events';" "the pack's table exists"
+pack_assert_eq "0" "SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename LIKE 'fixture\\_pack\\_%' AND tablename <> 'fixture_pack_audit_events';" "no pack table outside the chain's one declared table"
+pack_assert_eq "1" "SELECT count(*) FROM drizzle.\"$PACK_JOURNAL\";" "the pack chain is journaled in its OWN table"
+pack_assert_eq "$PLATFORM_JOURNAL_BEFORE" "SELECT count(*) FROM drizzle.__drizzle_migrations;" "the PLATFORM journal is untouched by the pack chain"
+
+# IDEMPOTENT, exactly as the platform chain is: a reboot re-applies nothing. Without this the pack
+# chain would fail its second boot on `relation already exists`, or silently double-journal.
+echo "== re-applying the same pack chain (a reboot must be a no-op) =="
+( cd "$DB_PKG_DIR" && PACK_CHAIN_URL="$CLEAN_URL" pnpm exec tsx scripts/apply-pack-chain.ts \
+    "$PACK_ID" "$PACK_CHAIN_DIR" "$PACK_PREFIX" )
+pack_assert_eq "1" "SELECT count(*) FROM drizzle.\"$PACK_JOURNAL\";" "the pack journal did not grow on re-apply"
+pack_assert_eq "$PLATFORM_JOURNAL_BEFORE" "SELECT count(*) FROM drizzle.__drizzle_migrations;" "the PLATFORM journal is still untouched"
+
 echo "== drop the throwaway clean DB =="
 psql -d postgres -c "DROP DATABASE IF EXISTS $CLEAN_DB WITH (FORCE);" >/dev/null
-echo "MIGRATE-CLEAN: PASS — the committed chain bootstraps a clean DB and equals schema.ts (zero drift)."
+echo "MIGRATE-CLEAN: PASS — the committed chain bootstraps a clean DB and equals schema.ts (zero drift), and a pack's own chain applies after it into its own namespace and its own journal."
