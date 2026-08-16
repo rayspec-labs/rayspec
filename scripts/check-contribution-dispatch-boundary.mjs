@@ -17,10 +17,13 @@
  * exemption cannot be bought by naming a folder.
  *
  * "REACHABLE" WITHOUT A MODULE GRAPH. The gate reads every module file under a contribution root, and
- * closes the two ways a module could reach the run surface from somewhere it does not read: a relative
- * import that CLIMBS OUT of the scanned root (`..`) is a violation, and an opaque dynamic
- * `import()`/`require()` — an argument that is not one static string — is a violation. What is left is
- * either scanned here or a bare specifier this gate vets by name.
+ * closes the ways a module could reach the run surface from somewhere it does not read. A specifier
+ * that LEAVES the scanned root is a violation however it is spelled — a relative path that climbs out
+ * with `..`, an ABSOLUTE path, a URL specifier (`file:`, `data:`, `http:` …; `node:` is the one scheme
+ * a contributed module legitimately writes), or a `#…` SUBPATH specifier whose target lives in a
+ * package.json `imports` map this gate does not read. An opaque dynamic `import()`/`require()` — an
+ * argument that is not one static string — is a violation too. What is left is either scanned here or
+ * a bare specifier this gate vets by name.
  *
  * MIRRORS scripts/check-handler-imports.mjs: a greppable TRIPWIRE (no AST), COMMENT-stripped by a
  * string-aware pass before analysis, with a PURE `detectViolations(rel, src)` and a SELF-TEST that
@@ -34,9 +37,10 @@
  *     buying the distinction costs a parser this gate does not want.
  *   - It matches import SOURCES and the names in an import CLAUSE. A run-surface function re-exported
  *     under a different name by some third package, or reached through an aliased local binding, is
- *     out of reach of a greppable tripwire — as is any name the scanned module never writes down. A
- *     NAMESPACE import of a run-surface-bearing package is therefore flagged on sight, because the
- *     gate cannot see which binding is taken through the namespace object.
+ *     out of reach of a greppable tripwire — as is any name the scanned module never writes down. An
+ *     import of a run-surface-bearing package whose bindings the gate cannot ENUMERATE is therefore
+ *     flagged on sight: a `*` namespace, a DEFAULT binding, a side-effect import and a dynamic
+ *     `import()`/`require()` all hand the module an object whose members the gate cannot see.
  *   - It bounds IMPORTS, not behaviour. The capability contract is what actually withholds
  *     `TurnDispatch` from a handler; this gate is the forcing function that keeps the code shaped so
  *     that withholding it stays meaningful.
@@ -44,6 +48,11 @@
  * ZERO FILES IS A FAILURE, NEVER A SKIP. Every declared contribution root must exist AND yield at
  * least one module file. A renamed or moved root would otherwise retire the scan with no signal —
  * zero files read, zero violations found, a normal PASS line.
+ *
+ * AN UNDECLARED ROOT IS A FAILURE TOO. The zero-file rule is fail-closed against a root that goes
+ * AWAY; on its own it says nothing about a root that ARRIVES. So after the scan the gate walks
+ * `examples/` for every directory named `handlers` and fails when one is missing from the declared
+ * list — a new deployment or pack cannot ship handlers that this boundary silently exempts.
  */
 import {
   lstatSync,
@@ -56,17 +65,18 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * The contribution roots to scan — every in-repo `handlers/` subtree a deployment or a pack ships.
- * DECLARED DATA rather than discovered, because this gate is self-contained by design (it carries no
- * YAML reader); the zero-file rule below is what keeps that list honest — a root that is renamed,
- * moved or emptied fails the gate instead of quietly shrinking the scan. A new deployment or pack
- * that ships handlers adds its root here.
+ * DECLARED DATA rather than parsed out of the deployment YAMLs, because this gate is self-contained by
+ * design (it carries no YAML reader). Two rules keep the list honest, one per direction: the ZERO-FILE
+ * rule below fails on a root that is renamed, moved or emptied, and the UNDECLARED-ROOT rule fails on
+ * a `handlers/` directory that exists on disk and is missing from this list. A new deployment or pack
+ * that ships handlers adds its root here — and the gate says so, in red, until it does.
  */
 const CONTRIBUTION_ROOTS = [
   'examples/acme-notes-backend/handlers',
@@ -78,6 +88,14 @@ const CONTRIBUTION_ROOTS = [
 ];
 
 /**
+ * Where the undeclared-root rule LOOKS for contribution roots. This repo's deployments and packs all
+ * live under `examples/`; a `handlers` directory inside `packages/` is platform code implementing the
+ * handler machinery, not a contribution to it, and is out of scope by construction. A directory named
+ * `handlers` anywhere under these must appear in `CONTRIBUTION_ROOTS`.
+ */
+const CONTRIBUTION_SEARCH_DIRS = ['examples'];
+
+/**
  * Packages that EXIST to run or schedule agent turns. ANY import of one from this side of the
  * boundary is a violation — there is no benign reason a contributed handler names them. Prefix-matched
  * against the import source, so a deep subpath is caught with the bare specifier.
@@ -85,9 +103,9 @@ const CONTRIBUTION_ROOTS = [
 const RUN_SURFACE_MODULE_PREFIXES = ['@rayspec/durable-dbos', '@rayspec/workflow-durable'];
 
 /**
- * Packages that CARRY the run surface among other exports. Importing a named binding from one is
- * judged by the name (below); a NAMESPACE import of one is flagged on sight, because a namespace
- * object hides which binding is taken through it.
+ * Packages that CARRY the run surface among other exports. Importing a NAMED binding from one is
+ * judged by the name (below); an import whose bindings cannot be enumerated is flagged on sight,
+ * because the object it hands over hides which member is taken through it.
  */
 const RUN_SURFACE_BEARING_PREFIXES = [
   '@rayspec/platform',
@@ -243,6 +261,19 @@ function isNamespaceClause(clause) {
   return clause.includes('*');
 }
 
+/**
+ * True when an import takes bindings the gate CANNOT ENUMERATE, so judging it by name is impossible:
+ * a `*` namespace, a DEFAULT binding (an identifier outside the `{ … }` group — under CJS interop that
+ * is the whole exports object), or NO clause at all, which is how `extractImports` records a
+ * side-effect import, a dynamic `import()` and a `require()`. Applied to a run-surface-BEARING package
+ * this is a refusal, for the same reason the namespace case always was: the module gets an object and
+ * the gate cannot see which member it reaches through it.
+ */
+function isUnenumerableClause(clause) {
+  if (clause.trim() === '' || isNamespaceClause(clause)) return true;
+  return clauseIdentifiers(clause.replace(/\{[^}]*\}/g, ' ')).length > 0;
+}
+
 /** True if the source is (or is a subpath of) a package that exists to run or schedule agent turns. */
 function isRunSurfaceModule(source) {
   return RUN_SURFACE_MODULE_PREFIXES.some((p) => source === p || source.startsWith(`${p}/`));
@@ -254,12 +285,26 @@ function isRunSurfaceBearing(source) {
 }
 
 /**
- * A relative import that climbs OUT of the scanned root with `..` is a violation: it reaches a module
- * this gate never read, which is exactly the hole the "reachable" claim has to close. A sibling
- * relative import stays inside the root and is therefore already scanned.
+ * Name the way a specifier LEAVES the scanned root, or return `null` when it does not. Reaching a
+ * module this gate never read is exactly the hole the "reachable" claim has to close, and the `..`
+ * climb is only its most obvious spelling: the identical reach written as an absolute path, a `file:`
+ * URL or a `#`-subpath alias must fail the same way, or the rule is decoration. A sibling relative
+ * import stays inside the root and is therefore already scanned; a bare package specifier is vetted by
+ * name above; `node:` is the one URL scheme a contributed module legitimately writes.
  */
-function isEscapingRelative(source) {
-  return source.startsWith('.') && source.split(/[/\\]/).includes('..');
+function escapeKind(source) {
+  if (source.startsWith('.')) {
+    return source.split(/[/\\]/).includes('..') ? "a '..'-escaping relative path" : null;
+  }
+  if (source.startsWith('#')) {
+    return "a '#'-subpath specifier (its target lives in a package.json imports map, unread here)";
+  }
+  if (source.startsWith('/') || source.startsWith('\\') || isAbsolute(source)) {
+    return 'an absolute path';
+  }
+  const scheme = /^([a-zA-Z][a-zA-Z\d+\-.]*):/.exec(source);
+  if (scheme !== null && scheme[1] !== 'node') return `a '${scheme[1]}:' URL specifier`;
+  return null;
 }
 
 /**
@@ -341,11 +386,12 @@ export function detectViolations(rel, src) {
         `${rel}: imports '${source}' — that package exists to run or schedule agent turns. A ` +
           'contributed handler or tooling module may not reach the run surface; only a service may.',
       );
-    } else if (isNamespaceClause(clause) && isRunSurfaceBearing(source)) {
+    } else if (isRunSurfaceBearing(source) && isUnenumerableClause(clause)) {
       found.push(
-        `${rel}: takes the whole '${source}' namespace — the gate cannot see which binding is used ` +
-          'through a namespace object, so a namespace import of a run-surface-bearing package is ' +
-          'refused (fail-closed).',
+        `${rel}: takes '${source}' through bindings the gate cannot enumerate (a namespace, a ` +
+          'default binding, a side-effect import or a dynamic import()/require()) — it cannot see ' +
+          'which member is used through that object, so an unenumerable take of a run-surface-' +
+          'bearing package is refused (fail-closed).',
       );
     } else {
       for (const id of clauseIdentifiers(clause)) {
@@ -357,10 +403,12 @@ export function detectViolations(rel, src) {
         }
       }
     }
-    if (isEscapingRelative(source)) {
+    const leaves = escapeKind(source);
+    if (leaves !== null) {
       found.push(
-        `${rel}: imports a '..'-escaping relative path '${source}' — it leaves the scanned ` +
-          'contribution subtree, so what it reaches is unverified (fail-closed).',
+        `${rel}: imports ${leaves} '${source}' — it leaves the scanned contribution subtree and is ` +
+          'not a bare specifier this gate can vet by name, so what it reaches is unverified ' +
+          '(fail-closed).',
       );
     }
   }
@@ -393,6 +441,36 @@ export function scanContributionRoots(root, roots) {
     counts.set(rel, n);
   }
   return { violations, counts };
+}
+
+/**
+ * Discover every `handlers` directory under `searchDirs`, as repo-relative paths. This is the input to
+ * the undeclared-root rule: a root found here that `CONTRIBUTION_ROOTS` does not declare is a gate
+ * FAILURE, which is what stops a newly added deployment or pack from shipping handlers this boundary
+ * never sees. `fs` only — no YAML reader, so the gate stays one self-contained file. Descent stops at
+ * a discovered root (a nested `handlers` is already covered by the outer one) and skips build/vendor
+ * output, which is a copy of a root, not a new one.
+ */
+export function discoverContributionRoots(root, searchDirs = CONTRIBUTION_SEARCH_DIRS) {
+  const found = [];
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return; // an absent search dir contributes nothing to discover.
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue; // a symlinked dir is not followed (see `walk`).
+      const { name } = entry;
+      if (name === 'node_modules' || name === 'dist' || name.startsWith('.')) continue;
+      const full = join(dir, name);
+      if (name === 'handlers') found.push(relative(root, full).split('\\').join('/'));
+      else visit(full);
+    }
+  };
+  for (const rel of searchDirs) visit(join(root, rel));
+  return found.sort();
 }
 
 // --- self-test: the detector's vectors, then the scan's behaviour over real fixture trees ---------
@@ -453,8 +531,26 @@ function selfTestDetector() {
     // a namespace import of a run-surface-bearing package hides the binding — must FIRE
     { rel: 'h/x.ts', src: "import * as platform from '@rayspec/platform';", expect: true },
     { rel: 'h/x.ts', src: "export * from '@rayspec/server';", expect: true },
+    // EVERY OTHER SPELLING of the same unenumerable take of a bearing package — must FIRE too, or the
+    // namespace rule is a formality the most idiomatic lazy-load walks around.
+    { rel: 'h/x.ts', src: "const { runAgent } = await import('@rayspec/platform');", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: "const p = await import('@rayspec/platform'); p.runAgent(i);",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "const c = await import('@rayspec/platform/run-core');", expect: true },
+    { rel: 'h/x.ts', src: "const { runAgent } = require('@rayspec/platform');", expect: true },
+    { rel: 'h/x.ts', src: "import platform from '@rayspec/platform';", expect: true },
+    { rel: 'h/x.ts', src: "import platform, { helper } from '@rayspec/platform';", expect: true },
+    { rel: 'h/x.ts', src: "import '@rayspec/platform';", expect: true },
+    { rel: 'h/x.ts', src: "import server from '@rayspec/server';", expect: true },
+    // a NAMED import of a benign binding from a bearing package stays enumerable — must NOT fire
+    { rel: 'h/x.ts', src: "import { helper } from '@rayspec/platform';", expect: false },
+    { rel: 'h/x.ts', src: "import type { RouteSpec } from '@rayspec/server';", expect: false },
     // a namespace import of the type-only contribution SDK is not run-surface-bearing — must NOT fire
     { rel: 'h/x.ts', src: "import * as sdk from '@rayspec/handler-sdk';", expect: false },
+    { rel: 'h/x.ts', src: "import sdk from '@rayspec/handler-sdk';", expect: false },
     // a BACKTICK specifier must not slip past a quote-only matcher — must FIRE
     { rel: 'h/x.ts', src: 'const e = await import(`@rayspec/durable-dbos`);', expect: true },
     { rel: 'h/x.ts', src: 'import { runAgent } from `@rayspec/platform`;', expect: true },
@@ -490,9 +586,33 @@ function selfTestDetector() {
       src: "import { runAgent } from '../../packages/kernel/platform/src/run-core.js';",
       expect: true,
     },
+    // the SAME reach spelled without a '..' — absolute, URL, or subpath alias — must FIRE the same way
+    {
+      rel: 'h/x.ts',
+      src: "import { go } from '/repo/packages/kernel/platform/src/run-core.js';",
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: "import * as p from '/repo/packages/kernel/platform/src/run-core.js';",
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: "import { go } from 'file:///repo/packages/kernel/platform/src/run-core.js';",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "import { go } from '#platform/run-core.js';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: "import { go } from 'https://cdn.example.com/run-core.js';",
+      expect: true,
+    },
     // a sibling relative import stays inside the scanned subtree — must NOT fire
     { rel: 'h/x.ts', src: "import { shared } from './shared.js';", expect: false },
     { rel: 'h/x.ts', src: "import { deep } from './lib/deep.js';", expect: false },
+    // `node:` is the one URL scheme a contributed module legitimately writes — must NOT fire
+    { rel: 'h/x.ts', src: "import { createHash } from 'node:crypto';", expect: false },
     // a forbidden import hidden after a string that CONTAINS comment delimiters — must FIRE
     {
       rel: 'h/x.ts',
@@ -605,6 +725,31 @@ function selfTestScan() {
       }
     }
 
+    // (D) an UNDECLARED contribution root is DISCOVERED — the other direction of the honesty rule.
+    //     `pack2/handlers` exists on disk and no declared list mentions it; discovery must surface it
+    //     so the caller below can fail on the difference. Nested and vendored dirs are handled too: a
+    //     `handlers` inside a discovered root is already covered by it, and one under `node_modules`
+    //     or `dist` is build/vendor output, not a new contribution.
+    {
+      const ws = fixtureTree({
+        'ex/pack1/handlers/tool.ts': CLEAN_HANDLER,
+        'ex/pack2/handlers/tool.ts': CLEAN_HANDLER,
+        'ex/pack1/handlers/nested/handlers/tool.ts': CLEAN_HANDLER,
+        'ex/pack3/node_modules/vendored/handlers/tool.ts': CLEAN_HANDLER,
+        'ex/pack3/dist/handlers/tool.ts': CLEAN_HANDLER,
+        'ex/pack3/services/reconcile.ts': RUN_SURFACE_USER,
+      });
+      trees.push(ws);
+      const discovered = discoverContributionRoots(ws, ['ex']);
+      if (discovered.join(',') !== 'ex/pack1/handlers,ex/pack2/handlers') {
+        fail(`(D) discovery must find exactly the two real roots; got: ${discovered.join(',')}`);
+      }
+      const undeclared = discovered.filter((r) => !['ex/pack1/handlers'].includes(r));
+      if (undeclared.join(',') !== 'ex/pack2/handlers') {
+        fail(`(D) an undeclared root must be surfaced; got: ${undeclared.join(',')}`);
+      }
+    }
+
     // (L) a symlink under a contribution root is flagged and not followed.
     {
       const ws = fixtureTree({
@@ -636,6 +781,24 @@ if (emptyRoots.length > 0) {
     '\nA declared contribution root that reads nothing is a FAILURE, never a skip: a renamed or ' +
       'moved root would otherwise retire this boundary with a normal PASS line. Fix the path, or ' +
       'drop the root from CONTRIBUTION_ROOTS if the contribution is really gone.',
+  );
+  process.exit(1);
+}
+
+const undeclaredRoots = discoverContributionRoots(repoRoot).filter(
+  (rel) => !CONTRIBUTION_ROOTS.includes(rel),
+);
+
+if (undeclaredRoots.length > 0) {
+  console.error(
+    'contribution-dispatch-boundary gate FAILED: contribution root(s) on disk that this gate does ' +
+      'not scan:',
+  );
+  for (const rel of undeclaredRoots) console.error(`  - ${rel}`);
+  console.error(
+    '\nA handlers/ subtree that no declared root covers is a FAILURE, never a skip: it would ship ' +
+      'contributed modules this boundary never reads, which is the exact hole the gate exists to ' +
+      'close. Add the root to CONTRIBUTION_ROOTS.',
   );
   process.exit(1);
 }

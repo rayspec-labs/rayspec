@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
- * Regression test for the coverage guard on the two chokepoint-family gates.
+ * Regression test for the coverage guard on the gates that walk a fixed list of source roots.
  *
  * `check-tenant-chokepoint.mjs` and `check-adapter-no-handlers.mjs` walk a fixed list of source
  * roots. `walk()` returns silently when a directory does not exist ("root doesn't exist yet"), so a
  * rename or a move of any declared root made the gate read ZERO files, find zero violations, and exit
  * 0 with its normal PASS line — the guard retired itself without a signal. That is the same FAIL-OPEN
  * that `check-no-pack-imports.mjs` closed with a scanned-count guard (see its
- * `check-no-pack-imports.spacepath.test.mjs`); these two gates carry the same guard now.
+ * `check-no-pack-imports.spacepath.test.mjs`); these gates carry the same guard now, and
+ * `check-contribution-dispatch-boundary.mjs` — added here with the same three cases — carries it too.
  *
  * The test drives the REAL scripts. Each script derives its repo root from its own location
  * (`join(dirname(fileURLToPath(import.meta.url)), '..')`), so copying it into `<throwaway>/scripts/`
@@ -20,11 +21,18 @@
  *   (V) a planted violation FAILS — the detector still fires (the accept control for case G).
  *   (G) a root that resolves to nothing FAILS CLOSED, naming the unscanned root.
  *
+ * Two more run for a gate that opts into them, because they are guards only that gate carries:
+ *
+ *   (U) a root that ARRIVES on disk undeclared FAILS CLOSED — the other direction of (G), which on
+ *       its own only catches a root going away.
+ *   (T) a gate whose own SELF-TEST is broken exits 2, NOT 1 and not 0 — the distinct code is the
+ *       whole point of running a self-test ahead of the scan, and nothing else asserts it.
+ *
  * Standalone (no test framework is wired for the gate scripts): `node <thisfile>`; exit 0 = pass.
  */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,18 +51,22 @@ function runGate(scriptPath) {
 
 /**
  * Build a throwaway repo whose root is the workspace itself: the gate script lands in
- * `<ws>/scripts/`, and `files` (relative paths → contents) are written under `<ws>`.
+ * `<ws>/scripts/`, and `files` (relative paths → contents) are written under `<ws>`. `edit`, when
+ * given, rewrites the COPIED script's source — used by case (T) to break a gate's own self-test
+ * without touching this checkout.
  */
-function throwawayRepo(scriptName, files) {
+function throwawayRepo(scriptName, files, edit) {
   const ws = mkdtempSync(join(tmpdir(), 'rayspec-gate-coverage-'));
   mkdirSync(join(ws, 'scripts'), { recursive: true });
-  cpSync(join(SCRIPTS_DIR, scriptName), join(ws, 'scripts', scriptName));
+  const script = join(ws, 'scripts', scriptName);
+  cpSync(join(SCRIPTS_DIR, scriptName), script);
+  if (edit) writeFileSync(script, edit(readFileSync(script, 'utf8')));
   for (const [rel, contents] of Object.entries(files)) {
     const full = join(ws, rel);
     mkdirSync(dirname(full), { recursive: true });
     writeFileSync(full, contents);
   }
-  return { ws, script: join(ws, 'scripts', scriptName) };
+  return { ws, script };
 }
 
 const BENIGN = "import { readFileSync } from 'node:fs';\nexport const y = readFileSync;\n";
@@ -74,6 +86,14 @@ const ADAPTER_ROOTS = [
   'packages/adapters/pi/src',
   'packages/adapters/codex/src',
 ];
+const DISPATCH_BOUNDARY_ROOTS = [
+  'examples/acme-notes-backend/handlers',
+  'examples/expense-claim-coder/handlers',
+  'examples/lead-qualifier/handlers',
+  'examples/live-workspace-events/handlers',
+  'examples/agent-pack-deployment/packs/agent-pack/handlers',
+  'examples/stream-backend/packs/stream-pack/handlers',
+];
 
 /** A populated tree: one benign source file under every declared root. */
 function populated(roots) {
@@ -82,7 +102,7 @@ function populated(roots) {
 
 const created = [];
 try {
-  for (const [gate, script, roots, violation, violationPattern] of [
+  for (const [gate, script, roots, violation, violationPattern, extra = {}] of [
     [
       'tenant-chokepoint',
       'check-tenant-chokepoint.mjs',
@@ -102,6 +122,23 @@ try {
         src: 'export const toolHandlers = {\n  lookup: async () => ({ ok: true }),\n};\n',
       },
       /toolHandlers|handler/i,
+    ],
+    [
+      'contribution-dispatch-boundary',
+      'check-contribution-dispatch-boundary.mjs',
+      DISPATCH_BOUNDARY_ROOTS,
+      {
+        path: 'examples/lead-qualifier/handlers/leak.ts',
+        src: "import { runAgent } from '@rayspec/platform';\nexport const go = runAgent;\n",
+      },
+      /runAgent|run surface/,
+      {
+        // A contribution root that ARRIVES undeclared must fail closed, the mirror of case (G).
+        undeclaredRoot: 'examples/new-deployment/packs/p2/handlers',
+        // Deleting the run entry from the gate's own name list must trip its self-test, not its scan:
+        // the tree here is CLEAN, so a gate that skipped the self-test would exit 0 on this input.
+        breakSelfTest: (src) => src.replace("  'runAgent',\n", ''),
+      },
     ],
   ]) {
     // ── (C) a populated tree passes, and says how much it read ─────────────────────────────────────
@@ -154,6 +191,41 @@ try {
         `(G/${gate}) the unscanned root must be named; got: ${r.err}`,
       );
       console.log(`ok (G/${gate}) — an unscanned root fails closed (exit ${r.code})`);
+    }
+
+    // ── (U) a root that ARRIVES on disk undeclared fails CLOSED ────────────────────────────────────
+    // Every declared root is populated, so the zero-file rule is satisfied: only the undeclared-root
+    // rule can turn this red, which is what makes the case worth running.
+    if (extra.undeclaredRoot) {
+      const files = populated(roots);
+      files[`${extra.undeclaredRoot}/ok.ts`] = BENIGN;
+      const { ws, script: s } = throwawayRepo(script, files);
+      created.push(ws);
+      const r = runGate(s);
+      assert.notEqual(
+        r.code,
+        0,
+        `(U/${gate}) a contribution root the gate does not scan must fail CLOSED`,
+      );
+      assert.ok(
+        r.err.includes(extra.undeclaredRoot),
+        `(U/${gate}) the undeclared root must be named; got: ${r.err}`,
+      );
+      console.log(`ok (U/${gate}) — an undeclared root fails closed (exit ${r.code})`);
+    }
+
+    // ── (T) a broken self-test exits 2, distinctly from a real violation's 1 ───────────────────────
+    if (extra.breakSelfTest) {
+      const { ws, script: s } = throwawayRepo(script, populated(roots), extra.breakSelfTest);
+      created.push(ws);
+      const r = runGate(s);
+      assert.equal(
+        r.code,
+        2,
+        `(T/${gate}) a broken detector must exit 2, not 1 and not 0; got ${r.code}: ${r.err}`,
+      );
+      assert.match(r.err, /SELF-TEST FAILED/, `(T/${gate}) the self-test failure must be named`);
+      console.log(`ok (T/${gate}) — a broken self-test exits 2 before the scan`);
     }
   }
 
