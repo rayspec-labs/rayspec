@@ -1,8 +1,9 @@
 # @rayspec/pack-sdk
 
 The **one** surface an out-of-tree extension pack compiles against: the manifest types for
-every contribution kind, the closed error vocabulary a pack author branches on, the
-identifier rule, and the journal entries a pack's work is recorded as.
+every contribution kind, the contract the handler modules those declarations point at are
+written against, the closed error vocabulary a pack author branches on, the identifier
+rule, and the journal entries a pack's work is recorded as.
 
 **Types only.** A pack receives every runtime object by injection at boot, so it never
 needs to import one. The single executable export is `isSafeIdentifier`, because the rule
@@ -13,11 +14,16 @@ silent break for every pack.
 A pack's **entry** module builds its manifest with the platform's manifest helper — which
 typechecks the full document grammar at the pack's own edge — and names `DefinedPack` from
 this package for what it exports. A pack's **handler** modules run with injected
-capabilities and import only `@rayspec/handler-sdk`. A pack's **service** modules — the one
-contribution kind the deployment boots rather than calls — are typed here, against
-`PackServiceModule`: what they receive is a boot context rather than a per-invocation init,
-and it carries `TurnDispatch`, the capability a handler may not even name. The three
-surfaces are deliberately distinct.
+capabilities, and the contract they are written against is here too: `PackToolHandler` for
+the module a `tooling` contribution points at, `PackRouteHandler` for an `api` one, and the
+init each receives — the invocation's server-derived tenant and `PackStoreDb`, the
+name-keyed door onto the declared stores, plus what the request carried on a route. What a
+pack handler does **not** receive is stated in the same place, with the reason. A pack's
+**service** modules — the one contribution kind the deployment boots rather than calls —
+are typed against `PackServiceModule`: what they receive is a boot context rather than a
+per-invocation init, and it carries `TurnDispatch`, the capability a handler may not even
+name, and `PackDatabase`, the parameterized-SQL door onto the platform tables the pack
+itself owns. The three surfaces are deliberately distinct.
 
 The fragment types here pin the fields a contribution is *addressed* by and leave the rest
 of each section body open, so they are deliberately **wider** than that grammar: they
