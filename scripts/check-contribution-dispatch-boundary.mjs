@@ -262,15 +262,33 @@ function isNamespaceClause(clause) {
 }
 
 /**
+ * True when a clause takes the module's DEFAULT export from INSIDE a `{ … }` group — `{ default as
+ * platform }`, or the `export { default } from …` re-export. This is the same whole-exports object the
+ * bare `import platform from …` spelling hands over, only written where a brace-stripping test would
+ * mistake it for an enumerable named binding, so both spellings have to be refused alike. Judged per
+ * SPECIFIER, on the imported-name side: the mirror position `{ runAgent as default }` takes an
+ * ENUMERABLE named export and merely renames it on the way out, and stays judged by that name.
+ */
+function takesDefaultBinding(clause) {
+  for (const group of clause.match(/\{[^}]*\}/g) ?? []) {
+    for (const specifier of group.slice(1, -1).split(',')) {
+      if (/^\s*(?:type\s+)?default\b/.test(specifier)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * True when an import takes bindings the gate CANNOT ENUMERATE, so judging it by name is impossible:
- * a `*` namespace, a DEFAULT binding (an identifier outside the `{ … }` group — under CJS interop that
- * is the whole exports object), or NO clause at all, which is how `extractImports` records a
- * side-effect import, a dynamic `import()` and a `require()`. Applied to a run-surface-BEARING package
- * this is a refusal, for the same reason the namespace case always was: the module gets an object and
- * the gate cannot see which member it reaches through it.
+ * a `*` namespace, a DEFAULT binding (under CJS interop the whole exports object — written either
+ * OUTSIDE the `{ … }` group or aliased INSIDE it, which is the same take), or NO clause at all, which
+ * is how `extractImports` records a side-effect import, a dynamic `import()` and a `require()`.
+ * Applied to a run-surface-BEARING package this is a refusal, for the same reason the namespace case
+ * always was: the module gets an object and the gate cannot see which member it reaches through it.
  */
 function isUnenumerableClause(clause) {
   if (clause.trim() === '' || isNamespaceClause(clause)) return true;
+  if (takesDefaultBinding(clause)) return true;
   return clauseIdentifiers(clause.replace(/\{[^}]*\}/g, ' ')).length > 0;
 }
 
@@ -545,9 +563,37 @@ function selfTestDetector() {
     { rel: 'h/x.ts', src: "import platform, { helper } from '@rayspec/platform';", expect: true },
     { rel: 'h/x.ts', src: "import '@rayspec/platform';", expect: true },
     { rel: 'h/x.ts', src: "import server from '@rayspec/server';", expect: true },
+    // the SAME default binding written INSIDE the braces — must FIRE alike, or the refusal is a
+    // formality one alias walks around: it hands over the identical whole-exports object.
+    {
+      rel: 'h/x.ts',
+      src: "import { default as platform } from '@rayspec/platform';",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "import { default as p } from '@rayspec/server';", expect: true },
+    { rel: 'h/x.ts', src: "export { default } from '@rayspec/platform';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: "export { default as platform } from '@rayspec/platform';",
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: "import { default as d, helper } from '@rayspec/platform';",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "import type { default as P } from '@rayspec/platform';", expect: true },
     // a NAMED import of a benign binding from a bearing package stays enumerable — must NOT fire
     { rel: 'h/x.ts', src: "import { helper } from '@rayspec/platform';", expect: false },
     { rel: 'h/x.ts', src: "import type { RouteSpec } from '@rayspec/server';", expect: false },
+    // the MIRROR position: `default` on the EXPORTED side renames an enumerable named binding, so it
+    // stays judged by that name — benign one must NOT fire, run-surface one must.
+    { rel: 'h/x.ts', src: "export { helper as default } from '@rayspec/platform';", expect: false },
+    {
+      rel: 'h/x.ts',
+      src: "export { runAgent as default } from '@rayspec/platform';",
+      expect: true,
+    },
     // a namespace import of the type-only contribution SDK is not run-surface-bearing — must NOT fire
     { rel: 'h/x.ts', src: "import * as sdk from '@rayspec/handler-sdk';", expect: false },
     { rel: 'h/x.ts', src: "import sdk from '@rayspec/handler-sdk';", expect: false },
