@@ -12,7 +12,7 @@ must be regenerated here and committed in the same change:
 
 ## Entry point `.` — `dist/index.d.ts`
 
-21 export(s).
+22 export(s).
 
 ### `DefinedPack` — `dist/manifest.d.ts`
 
@@ -72,6 +72,8 @@ export type PackErrorCode =
  | 'schema_violation'
  | 'unknown_field'
  | 'reserved_document_key'
+ | 'extension_pack_unavailable'
+ | 'extension_pack_refused'
  | 'dangling_ref'
  | 'duplicate_name'
  | 'capability_violation'
@@ -170,6 +172,7 @@ export type PackJournalStepType = 'llm' | 'tool' | 'store';
 export interface PackManifest {
     readonly version: string;
     readonly fragments: PackFragments;
+    readonly sections?: readonly PackSectionClaim[];
     readonly capabilities?: PackCapabilities;
 }
 ```
@@ -178,6 +181,15 @@ export interface PackManifest {
 
 ```ts
 export type PackManifestBrand = '@rayspec/extension@1';
+```
+
+### `PackSectionClaim` — `dist/manifest.d.ts`
+
+```ts
+export interface PackSectionClaim {
+    readonly key: string;
+    readonly schemaModule: string;
+}
 ```
 
 ### `PackStoreFragment` — `dist/manifest.d.ts`

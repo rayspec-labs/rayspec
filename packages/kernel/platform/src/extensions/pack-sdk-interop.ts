@@ -36,6 +36,7 @@ import type {
   PackHandlerFragment,
   PackManifest,
   PackManifestBrand,
+  PackSectionClaim,
   PackStoreFragment,
   PackToolFragment,
 } from '@rayspec/pack-sdk';
@@ -51,6 +52,7 @@ import type {
   EXTENSION_BRAND,
   ExtensionCapabilities,
   ExtensionManifest,
+  ExtensionSectionClaim,
 } from './extension.js';
 
 /** Compile-time assertion: fails to compile unless `T` is exactly `true`. */
@@ -86,6 +88,13 @@ type _ApiRoutesFit = Assert<ApiRouteSpec extends PackApiRouteFragment ? true : f
 type _AgentsFit = Assert<AgentSpecConfig extends PackAgentFragment ? true : false>;
 
 /**
+ * The SECTION CLAIM kind. `_ManifestIsAPackManifest` already covers it transitively now that the pack
+ * surface declares the slot, but it is named on its own for the same reason each fragment arm is: a
+ * failure should say which contribution kind diverged, not just that a manifest stopped fitting.
+ */
+type _SectionClaimsFit = Assert<ExtensionSectionClaim extends PackSectionClaim ? true : false>;
+
+/**
  * Both sides spell the brand literal out. The pack surface ships no runtime, so it cannot import
  * the constant — it declares a copy, and a copy that drifts makes every loader check reject every
  * pack. Pinned in BOTH directions so neither a widening nor a narrowing passes.
@@ -108,8 +117,9 @@ const pins: [
   _ToolingFits,
   _ApiRoutesFit,
   _AgentsFit,
+  _SectionClaimsFit,
   _BrandLiteralsAgree,
-] = [true, true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true, true];
 
 /**
  * The pins, widened. The exported TYPE is deliberately `readonly boolean[]` rather than the tuple

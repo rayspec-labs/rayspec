@@ -148,11 +148,40 @@ export interface PackFragments {
 export type PackCapabilities = object;
 
 /**
+ * One TOP-LEVEL SECTION a pack CLAIMS — the second contribution kind, and the one that runs the other
+ * way round. A fragment is content the pack ADDS to the deployment's document; a claim takes a
+ * top-level key the deployment writes in its OWN document and makes the pack's schema module, not the
+ * core grammar, the thing that decides whether what is written there is valid. It is how a pack is
+ * CONFIGURED by a first-class section instead of through the opaque `config` blob on its
+ * `extensions[]` entry, which no lint and no schema export can see into.
+ *
+ * Both fields are checked fail-closed at boot, naming the pack: the key must be a safe identifier
+ * (`isSafeIdentifier`), it may not be a key a document grammar already owns, and no two packs may
+ * claim one key. `schemaModule` is resolved under the PACK root with the same jail as a handler
+ * module, and its default export only has to be able to `safeParse` a node — a pack ships in its own
+ * repository and validates with its own library, so the contract is structural rather than an
+ * instance of any particular validation package.
+ *
+ * A violation inside a claimed section is reported at `<key>.<field>` under the same closed
+ * `PackErrorCode` vocabulary as a violation in any other section.
+ */
+export interface PackSectionClaim {
+  /** The top-level document key this pack owns the grammar of. A safe identifier, unique post-merge. */
+  readonly key: string;
+  /** The pack-relative module whose default export validates the section node (jailed under the pack). */
+  readonly schemaModule: string;
+}
+
+/**
  * One pack manifest — the value a pack's entry module default-exports.
  *
  *  - `version`      — the pack's OWN declared version. It must equal the EXACT pin the deployment's
  *                     reference carries: a SKEW is a hard boot error, never a silent skip.
  *  - `fragments`    — the sections the pack contributes (merged into the deployment's document).
+ *  - `sections`     — the top-level document sections the pack CLAIMS the grammar of (optional;
+ *                     absent = claims none). It sits beside `fragments`, not inside it, because a
+ *                     claim is not content merged into the document — it is ownership of a key the
+ *                     DEPLOYMENT writes.
  *  - `capabilities` — the capability instances the pack provides (optional).
  */
 export interface PackManifest {
@@ -160,6 +189,8 @@ export interface PackManifest {
   readonly version: string;
   /** The declarative sections the pack contributes. */
   readonly fragments: PackFragments;
+  /** The top-level document sections the pack claims the grammar of (optional). */
+  readonly sections?: readonly PackSectionClaim[];
   /** The capability instances the pack provides (optional). */
   readonly capabilities?: PackCapabilities;
 }
