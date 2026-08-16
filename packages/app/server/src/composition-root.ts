@@ -113,6 +113,7 @@ import {
   parseSpecWithPacks,
   type RunHeaderIdentity,
   type RunJob,
+  shadowedRouteRefusal,
   type TurnDispatch,
 } from '@rayspec/platform';
 import {
@@ -176,8 +177,38 @@ export const DEFAULT_PORT = 8080;
  */
 export const DEFAULT_HOST = '127.0.0.1';
 
+/** The path of the generic readiness probe (registered PUBLIC, after the declared routes). */
+export const HEALTH_PATH = '/health';
+
 /** The path of the live-executor-identity readiness probe (registered PUBLIC, exactly like /health). */
 export const RECOVERY_SCOPE_PATH = '/recovery-scope';
+
+/**
+ * The path prefixes THIS composition root registers on the assembled app, in the form the declared-
+ * route registrar reserves them (bare prefix, the prefix itself, anything nested under it).
+ *
+ * WHY THE ROOT SUPPLIES THESE. api-auth reserves `/v1/` and `/oidc/` — the surface it registers
+ * itself — and must not hardcode paths it does not own. The readiness probes and the declared static
+ * mounts are registered HERE, and registered AFTER the declared routes: Hono runs matching handlers in
+ * registration order, so a declared route claiming `/health` WINS and the probe a deploy tool waits on
+ * answers nothing for the rest of the process's life. Nothing caught that — `api[]` was checked
+ * against `/v1/` and `/oidc/` only, and the lint rule that does know about `/health` guards the
+ * FRONTEND mounts, not the routes.
+ *
+ * A frontend mount at the ROOT `/` is EXCLUDED, deliberately and for the same reason the lint rule
+ * exempts it: `/` is a legitimate static catch-all that coexists with the whole API by registration
+ * order and fall-through, so reserving it would reserve every path there is.
+ */
+export function platformPublicRoutePrefixes(
+  frontendMounts: readonly FrontendSpec[] = [],
+): readonly string[] {
+  const prefixes = [`${HEALTH_PATH}/`, `${RECOVERY_SCOPE_PATH}/`];
+  for (const mount of frontendMounts) {
+    if (mount.route === '/') continue;
+    prefixes.push(mount.route.endsWith('/') ? mount.route : `${mount.route}/`);
+  }
+  return prefixes;
+}
 
 /** The computed outcome of the live-executor-identity probe. */
 export interface RecoveryScopeOutcome {
@@ -294,7 +325,7 @@ export function registerHealthRoute<E extends Env>(
   probeDatabase: (() => Promise<void>) | undefined,
   frontend: FrontendReadiness | undefined,
 ): void {
-  app.get('/health', async (c) => {
+  app.get(HEALTH_PATH, async (c) => {
     let db: 'ok' | 'unreachable' | undefined;
     if (probeDatabase !== undefined) {
       try {
@@ -2249,6 +2280,12 @@ interface MergedExtensions {
  * a dangling pack tool→handler ref) FAILS CLOSED at that re-parse (an actionable BootConfigError),
  * exactly as a hand-written invalid spec would.
  *
+ * ONE REFUSAL IS TAKEN BEFORE THE CONCATENATION rather than after it: a pack route and a deployment
+ * route that reach the ROUTER as one route. The re-parse's lint rule refuses that pair too, but by
+ * then both are members of one flat `api[]` and it can only name an index into an array nobody wrote;
+ * here the loader's per-route attribution is still in hand, so the message can name the pack. See
+ * `shadowedRouteRefusal`.
+ *
  * WHY THE RESOLUTION IS NO LONGER DONE HERE: a top-level section a pack CLAIMS can only be validated
  * once the claiming pack is resolved, so the packs have to be loaded BEFORE the document is parsed —
  * which is precisely what `parseSpecWithPacks` does. Loading them a second time here would import
@@ -2275,6 +2312,22 @@ function mergeExtensions(
       packServices: [],
       ...(moduleImporter ? { extensionImporter: moduleImporter } : {}),
     };
+  }
+
+  // ── The SHADOWING refusal, taken BEFORE the concatenation that makes it unanswerable ──────────
+  // A pack route and a deployment route that reach the ROUTER as one route are not the same STRING:
+  // a path parameter matches by position, so `/notes/{id}` and `/notes/{note_id}` are one route, both
+  // register, and the second is unreachable for the life of the process. The merged document's own
+  // lint rule now refuses that pair too — but by then the two are members of one flat `api[]`, so it
+  // can only report an INDEX. Here the loader's per-route attribution is still in hand, so the refusal
+  // can say which pack to talk to. (The pack's confinement to its own namespace already happened at
+  // load; this covers the pair confinement cannot: a DEPLOYMENT route reaching into a pack's paths.)
+  const shadowed = shadowedRouteRefusal(baseSpec.api, loaded.apiOwners);
+  if (shadowed !== undefined) {
+    throw new BootConfigError(
+      `Boot aborted — the spec at ${specPath} merged with its extension packs declares two routes ` +
+        `that are one route to the router:\n${shadowed}`,
+    );
   }
 
   // Concatenate the pack fragments onto the deployment's own sections. The pack handler `module` paths
@@ -3171,6 +3224,11 @@ async function deployDeclaredSpec(
           // ABSENT (not undefined) for a no-stream spec, keeping the engine shape exact.
           const engineWithBlob: DeclarativeEngine = {
             ...engine,
+            // The platform paths THIS root registers on the same app — the two readiness probes and
+            // the declared static mounts. They go on AFTER the declared routes, so without this a
+            // declared `/health` would win the match and the probe would answer nothing; api-auth
+            // does not own those paths, so the root that registers them is what names them.
+            reservedPathPrefixes: platformPublicRoutePrefixes(effectiveSpec.frontend ?? []),
             ...(blobFactory ? { blobFactory } : {}),
             // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
             // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
