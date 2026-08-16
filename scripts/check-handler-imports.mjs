@@ -19,11 +19,17 @@
  * (no AST), COMMENT- and STRING-LITERAL-stripped before analysis, with a SELF-TEST that proves the
  * detector fires on every forbidden vector AND passes the one sanctioned import.
  *
- * HONEST CEILING: being a tripwire, it vets what a module WRITES DOWN — a source it can read. A
- * specifier it cannot read is REFUSED rather than cleared, so the ceiling is not a hole: an opaque
- * dynamic `import()`/`require()` argument is flagged on sight, and so is a member named with a STRING
- * rather than an identifier (`{ "runAgent" as go }`, legal since ES2022) — the clause reader cannot
- * extract such a statement at all, so leaving it unflagged would clear it against every rule at once.
+ * HONEST CEILING: being a tripwire, it vets what a module WRITES DOWN — a source it can read — and
+ * the reader is a matcher, not a parser. Two shapes it cannot read are REFUSED rather than cleared:
+ * an opaque dynamic `import()`/`require()` argument is flagged on sight, and so is a member named
+ * with a STRING rather than an identifier (`{ "runAgent" as go }`, legal since ES2022) — the clause
+ * reader cannot extract such a statement at all, so leaving it unflagged would clear it against every
+ * rule at once. That refusal covers every spelling of the quoted name (the brace clause alone, after
+ * `type`, after a default binding — `import platform, { "runAgent" as go } from …` — and the
+ * namespace re-export `export * as "p" from …`), each pinned by a self-test case alongside the plain
+ * spelling it would otherwise hide. What the refusals do NOT buy is a parser: a spelling no matcher
+ * here anticipates is still read as clean, which is why the OS-level isolate, not this gate, is the
+ * boundary that actually holds.
  *
  * ESCAPE-HATCH ROOTS: a RaySpec deployment's escape-hatch library lives outside the platform
  * (zero-product-code). On the platform main line the ONLY escape-hatch modules that exist are
@@ -234,9 +240,30 @@ function extractImportSources(codeNoComments) {
  * statement it cannot read, the same posture the opaque-dynamic-specifier rule already takes. Applied
  * to the COMMENT-STRIPPED source, so an apostrophe inside a comment between the braces cannot
  * manufacture a violation.
+ *
+ * EVERY spelling the grammar gives such a name is matched, because one that is NOT matched is cleared
+ * against every rule at once — the exact defect this rule exists to close:
+ *   - the brace clause on its own, or after `type` (`import type { "AgentSpec" as A } from …`);
+ *   - the brace clause after a DEFAULT BINDING — `ImportClause : ImportedDefaultBinding , NamedImports`
+ *     puts a binding and a comma before the brace (`import platform, { "runAgent" as go } from …`),
+ *     one comma away from the plain spelling;
+ *   - the namespace re-export whose EXPORTED name is a string — `ExportFromClause : * as
+ *     ModuleExportName`, and a `ModuleExportName` may be a StringLiteral (`export * as "p" from …`).
+ * The clause body reads a quoted run AS a run (backslash escapes honored), so a name that itself
+ * carries a brace (`{ "a}b" as c }`) does not end the clause early and slip past.
  */
-const QUOTED_MEMBER_NAME =
-  /\b(?:import|export)\s*(?:type\s*)?\{[^}]*['"][^}]*\}\s*from\s*(?:'[^']+'|"[^"]+"|`[^`$]+`)/g;
+// A member/export NAME written as a string: a quoted run, escapes honored.
+const NAME_STRING = String.raw`(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")`;
+// The module SPECIFIER: the same three quote styles `extractImportSources` accepts, sans its captures.
+const SOURCE_STRING = String.raw`(?:'[^']+'|"[^"]+"|\`[^\`$]+\`)`;
+// A brace clause that CARRIES a quote (the lookahead: a quoted name always opens before the clause's
+// first `}`), read as runs so a `}` inside a name is not mistaken for the end of the clause.
+const QUOTED_CLAUSE = String.raw`\{(?=[^{}]*['"])(?:[^{}'"]|${NAME_STRING})*\}`;
+const QUOTED_MEMBER_NAME = new RegExp(
+  String.raw`\b(?:import|export)(?:\s*type)?(?:\s+[A-Za-z_$][\w$]*\s*,)?\s*${QUOTED_CLAUSE}\s*from\s*${SOURCE_STRING}` +
+    String.raw`|\bexport(?:\s*type)?\s*\*\s*as\s*${NAME_STRING}\s*from\s*${SOURCE_STRING}`,
+  'g',
+);
 
 function detectQuotedNameViolations(rel, codeNoComments) {
   const found = [];
@@ -506,16 +533,45 @@ function selfTest() {
       src: 'import { "forTenant" as f } from \'../../packages/kernel/db/src/tenant-db.js\';',
       expect: true,
     },
-    // …and the accept controls for it: a quote in the SOURCE, in an object literal, in a comment
-    // between the braces, and a legitimate enumerable re-export under the name `default`.
+    // a name carrying a BRACE (`"a}b"`) — the clause must not be read as ending inside the string
+    { rel: 'h/x.ts', src: 'import { "a}b" as c } from \'@rayspec/platform\';', expect: true },
+    // ── the same name after a DEFAULT BINDING and as the namespace re-export's exported name: both
+    //    are the quoted spelling of the PLAIN statement paired above them, which the ordinary rules
+    //    already flag. The pairs are what prove the refusal reaches the whole feature and not just
+    //    the spelling that opens with a brace.
+    { rel: 'h/x.ts', src: "import platform, { runAgent } from '@rayspec/platform';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import platform, { "runAgent" as go } from \'@rayspec/platform\';',
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "import d, { 'makeDb' as m } from '@rayspec/db/testing';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import x, { "forTenant" as f } from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "export * as p from '@rayspec/platform';", expect: true },
+    { rel: 'h/x.ts', src: 'export * as "p" from \'@rayspec/platform\';', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'export * as "t" from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    // …and the accept controls for it: a quote in the SOURCE, in an object literal, in a default
+    // export, in a comment between the braces, a legitimate enumerable re-export under the name
+    // `default`, and the two widened spellings written WITHOUT a quoted name against a benign source.
     { rel: 'h/x.ts', src: 'import { helper } from "./shared.js";', expect: false },
     { rel: 'h/x.ts', src: 'export const o = { a: "x" };', expect: false },
+    { rel: 'h/x.ts', src: 'export default { a: "x" };', expect: false },
     {
       rel: 'h/x.ts',
       src: "import { /* don't */ helper } from '@rayspec/handler-sdk';",
       expect: false,
     },
     { rel: 'h/x.ts', src: "export { helper as default } from './shared.js';", expect: false },
+    { rel: 'h/x.ts', src: "import helper, { shared } from './shared.js';", expect: false },
+    { rel: 'h/x.ts', src: "export * as shared from './shared.js';", expect: false },
     // a DEAD STRING mentioning a forbidden module (not an import) — must NOT fire (#16-style)
     {
       rel: 'h/x.ts',
