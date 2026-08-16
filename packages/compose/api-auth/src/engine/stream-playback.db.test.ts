@@ -191,6 +191,65 @@ describe.skipIf(!hasDb)('stream PLAYBACK + media-JWT second auth path', () => {
   });
 
   // ──────────────────────────────────────────────────────────────────────────────────────────────
+  // The uploaded Content-Type is DATA, never a served document type (#442).
+  // ──────────────────────────────────────────────────────────────────────────────────────────────
+
+  it('an uploaded text/html type is NOT reflected back as a live document type (200 + 206)', async () => {
+    const a = await principal('htmltype@example.com', 'HtmlType');
+    // The ingest handler records the uploader's declared Content-Type on the pointer row. Upload a
+    // markup body declaring `text/html` — the exact shape a stored-XSS payload takes.
+    const markup = new TextEncoder().encode('<script>document.title="executed"</script>');
+    const posted = await postChunk(h.app, 'upl-html', 0, a.token, markup, 'text/html');
+    expect(posted.status).toBe(200);
+    const token = await media.mint({
+      tenantId: a.orgId,
+      resource: 'upl-html/0',
+      sub: a.userId,
+      ttlSeconds: 300,
+    });
+
+    // Full GET: the bytes come back, but nothing about the response lets a browser run them as a
+    // document in the deployment's origin — the served type is the inert fallback, the response is a
+    // download, and the type may not be sniffed back into markup.
+    const res = await h.app.request(playbackUrl('upl-html', 0, token));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/octet-stream');
+    expect(res.headers.get('content-disposition')).toBe('attachment');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    // The BYTES are untouched — the defence is the response framing, never a rewrite of the payload.
+    expect(new TextDecoder().decode(await res.arrayBuffer())).toBe(
+      '<script>document.title="executed"</script>',
+    );
+
+    // The 206 arm carries the same framing (a Range request must not be the way around it).
+    const partial = await h.app.request(playbackUrl('upl-html', 0, token), {
+      headers: { range: 'bytes=0-4' },
+    });
+    expect(partial.status).toBe(206);
+    expect(partial.headers.get('content-type')).toBe('application/octet-stream');
+    expect(partial.headers.get('content-disposition')).toBe('attachment');
+    expect(partial.headers.get('x-content-type-options')).toBe('nosniff');
+    await partial.arrayBuffer();
+  });
+
+  it('an allow-listed media type is still served as itself, with the same framing', async () => {
+    const a = await principal('mediatype@example.com', 'MediaType');
+    await ingest(a, 'upl-ogg', 0, new Uint8Array([1, 2, 3, 4])); // ingested as audio/ogg
+    const token = await media.mint({
+      tenantId: a.orgId,
+      resource: 'upl-ogg/0',
+      sub: a.userId,
+      ttlSeconds: 300,
+    });
+    const res = await h.app.request(playbackUrl('upl-ogg', 0, token));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('audio/ogg');
+    expect(res.headers.get('content-disposition')).toBe('attachment');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    await res.arrayBuffer();
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────────────────────────
   // The media-JWT RED-first battery — every one of these must DENY.
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 

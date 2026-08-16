@@ -30,6 +30,19 @@
  *      stream is the one RECORDED IN THE DB row (the authority), not one the caller supplied.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE UPLOADED CONTENT-TYPE IS DATA — never a served document type (#442).
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * The ingest handler records the uploader's declared `Content-Type` on the pointer row. Serving that
+ * back verbatim would make this route a stored-XSS primitive: upload a body declaring `text/html`,
+ * request it back, and a `<script>` inside it runs as a live document on the deployment's OWN origin.
+ * So playback NEVER reflects it. The recorded type is only a LOOKUP KEY into a small allowlist of
+ * inert media containers (`servedContentType` below serves the allowlist's own canonical string —
+ * never the recorded one); everything else collapses to `application/octet-stream`. Every byte
+ * response additionally carries `Content-Disposition: attachment`, so it can only ever be a download,
+ * never a document. `X-Content-Type-Options: nosniff` is already on every response (the platform's
+ * own security-header chain), so the fallback type cannot be sniffed back into markup either.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
  * RANGE / CONDITIONAL-GET (the media-streaming read contract).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  *  - A full GET (no Range) → 200 + Content-Length + a strong ETag + Accept-Ranges: bytes.
@@ -49,6 +62,36 @@ const POINTER_STORE = 'blob_chunks';
 /** The opaque BlobStore key for one chunk's bytes (mirrors the ingest handler's storageKey). */
 function storageKey(uploadId: string, chunkIndex: number): string {
   return `${uploadId}/${chunkIndex}`;
+}
+
+/**
+ * The media types this example is willing to serve back AS THEMSELVES — inert container formats a
+ * browser can decode but never execute. Entries are bare `type/subtype`, lower-case, no parameters.
+ */
+const SERVABLE_CONTENT_TYPES: ReadonlySet<string> = new Set([
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/ogg',
+  'audio/wav',
+  'audio/webm',
+  'video/mp4',
+  'video/webm',
+]);
+
+/** The inert type served for every recorded type NOT on the allowlist above. */
+const FALLBACK_CONTENT_TYPE = 'application/octet-stream';
+
+/**
+ * The Content-Type to SERVE for one chunk, derived from — never equal to — the uploader's recorded
+ * type. The recorded value is untrusted DATA, so it is used only to look up an allowlist entry, and
+ * the ALLOWLIST's string is what goes on the wire (any `; codecs=…` parameter the uploader attached
+ * is dropped rather than echoed). An unrecognized type — `text/html` included — is
+ * `application/octet-stream`.
+ */
+function servedContentType(recorded: unknown): string {
+  if (typeof recorded !== 'string') return FALLBACK_CONTENT_TYPE;
+  const essence = (recorded.split(';')[0] ?? '').trim().toLowerCase();
+  return SERVABLE_CONTENT_TYPES.has(essence) ? essence : FALLBACK_CONTENT_TYPE;
 }
 
 /** A small JSON error Response (returned verbatim by the platform — no JSON envelope). */
@@ -140,10 +183,8 @@ export const chunkPlayback: StreamRouteHandler = async (
     return jsonError(404, 'not_found', 'no such resource.');
   }
   const dbStorageKey = typeof row.storage_key === 'string' ? row.storage_key : key;
-  const contentType =
-    typeof row.content_type === 'string' && row.content_type.length > 0
-      ? row.content_type
-      : 'application/octet-stream';
+  // NOT the recorded type — an allowlisted inert type or the octet-stream fallback (see the header).
+  const contentType = servedContentType(row.content_type);
 
   // The blob metadata (len + a stable etagSource). Tenant-bound init.blob — the key resolves under the
   // token tenant's blob root by construction.
@@ -194,6 +235,7 @@ export const chunkPlayback: StreamRouteHandler = async (
       status: 206,
       headers: {
         'content-type': contentType,
+        'content-disposition': 'attachment',
         'content-length': String(length),
         'content-range': `bytes ${range.start}-${range.end}/${len}`,
         'accept-ranges': 'bytes',
@@ -209,6 +251,7 @@ export const chunkPlayback: StreamRouteHandler = async (
     status: 200,
     headers: {
       'content-type': contentType,
+      'content-disposition': 'attachment',
       'content-length': String(len),
       'accept-ranges': 'bytes',
       etag,
