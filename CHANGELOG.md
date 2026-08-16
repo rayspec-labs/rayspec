@@ -407,6 +407,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supplied by the composition root that registers them rather than hardcoded in the routing engine, so a
   deployment's own mounts are covered without the engine knowing about them.
 
+### Security
+
+- **The bundled `stream-backend` example no longer serves an uploaded blob under the `Content-Type`
+  its uploader declared.** The example's playback handler read the `content_type` recorded on the
+  pointer row at ingest and put it on the response verbatim, so a chunk uploaded as `text/html` came
+  back `200 text/html`, same-origin, with no `Content-Disposition` — and a `<script>` in that body ran
+  as a live document in the origin of the deployment that stored it. `X-Content-Type-Options: nosniff`
+  (which the platform's response chain does set on this route) never helped: it stops a type from
+  being sniffed, not a declared `text/html` from rendering. Playback now derives the served type from
+  the recorded one instead of echoing it — the recorded value is a lookup key into a small allowlist
+  of inert media containers (`audio/mpeg`, `audio/mp4`, `audio/ogg`, `audio/wav`, `audio/webm`,
+  `video/mp4`, `video/webm`), served as the allowlist's own canonical string with any `; codecs=…`
+  parameter dropped, and anything else, `text/html` included, is `application/octet-stream`. Every
+  byte response (`200` and `206` alike) now also carries `Content-Disposition: attachment`. A consumer
+  who ingested one of the allow-listed audio or video types sees the same `Content-Type` as before
+  plus that one new header; anyone who relied on the route echoing an arbitrary uploaded type gets
+  `application/octet-stream` instead. **This is an example, not the platform**: no platform path
+  reflects an uploaded `Content-Type` — the audio capability's playback route serves the type its
+  own server-side media-prep step registered, never the uploader's — but the example is documentation
+  and its handler is meant to be copied, so the rule is now stated in its README next to the code.
+
 ## [1.8.0] - 2026-08-15
 
 ### Added

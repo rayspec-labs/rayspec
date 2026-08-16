@@ -184,6 +184,14 @@ requested route resource and (2) **re-validates ownership in the DB** (a tenant-
 tenant-B's blob finds no row under A's scope → 404). A per-user streaming **semaphore** bounds
 concurrent streams → 429 + `Retry-After`.
 
+**The uploaded `Content-Type` is never reflected back.** Playback serves the recorded type only when
+it is on the handler's small allowlist of inert media containers and `application/octet-stream`
+otherwise, always with `Content-Disposition: attachment` — so a chunk uploaded as `text/html` comes
+back as an opaque download and can never run as a live document in the deployment's own origin
+(`X-Content-Type-Options: nosniff`, which the platform's response chain already sets on every
+response, keeps the fallback from being sniffed back into markup). Copy that rule along with the
+handler: any route that hands stored bytes back to a browser on the origin that stored them needs it.
+
 `packs/stream-pack/handlers/play-token-mint.ts` is the **mint** route — a normal `{handler}` route on
 the standard (RS256 Bearer) auth chain that, after confirming the caller's tenant owns the chunk (via
 `init.db`), mints a short-lived `?token=` via the engine-injected `init.mintPlayToken`.
