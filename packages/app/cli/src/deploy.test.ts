@@ -17,6 +17,8 @@ import { DeployCliError, runDeploy } from './deploy.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../..');
 const ACME_REL = 'examples/acme-notes/acme-notes.product.yaml';
+/** The shipped CONVERSATION-declaring document — the one rollout seam compose calls rather than checks. */
+const CHAT_REL = 'examples/support-intake-chat/support-intake-chat.product.yaml';
 const DOCTORED = join(repoRoot, '_deploy_test_doctored.product.yaml');
 const GARBAGE = join(repoRoot, '_deploy_test_garbage.product.yaml');
 const STATIC_REL = '_deploy_test_static.rayspec.yaml';
@@ -81,6 +83,20 @@ describe('rayspec deploy --dry-run', () => {
     expect(r.composed?.workflows).toEqual(['process_session']);
     // The honest boundary is always surfaced.
     expect(r.notProven.length).toBeGreaterThan(0);
+  });
+
+  it('composes a CONVERSATION-declaring document — the responder stub is called, not thrown', async () => {
+    // Compose CALLS the responder factory (it cross-references the declared store-context against
+    // the composed stores), so the dry-run's stub has to be an inert instance behind that factory.
+    // A throwing factory refused every conversation-declaring document with an internal message.
+    const outcome = await runDeploy(['--dry-run', CHAT_REL]);
+    if (outcome.kind !== 'dry-run') throw new Error('unreachable');
+    const r = outcome.result;
+    expect(r.errors).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.composed?.product).toBe('support_intake_chat');
+    // What the stub costs is stated in the verdict, not left to inference.
+    expect(r.notProven.join('\n')).toMatch(/store-context read/);
   });
 
   it('fail-closes on an UNWIRED capability with the compose error (ok:false)', async () => {
