@@ -2,12 +2,15 @@
  * A PACK-CONTRIBUTED ROUTE REFUSES EXACTLY AS A DEPLOYMENT-DECLARED ONE DOES — asserted byte for byte.
  *
  * A pack contributes `api` fragments that ride the deployment's own interpreter, so auth, tenancy and
- * the refusal envelope are INHERITED rather than re-implemented. That is the design; nothing in the
- * tree measured it. `pack-route-namespace.test.ts` measures WHERE a pack route may live, and the
- * suites that drive a pack end to end assert their own surface's answers — the nearest 401s belong to
- * the media-token path, which is a disjoint credential chain the shared middleware never sees. So a
- * change that gave a contributed route its own refusal — a different code, an extra header, a
- * `details` key on a 401 — would land green.
+ * the refusal envelope are INHERITED rather than re-implemented. That is the design; what the tree
+ * measured of it stopped short of a contributed route. `pack-route-namespace.test.ts` measures WHERE a
+ * pack route may live. The refusals of the `{handler}` arm a contributed route rides ARE asserted —
+ * but only for a DEPLOYMENT-declared route, and only as status codes: `declared-handler-model.db.test.ts`
+ * pins the unauthenticated 401 and the under-scoped 403, `declared-route-rate-limit.db.test.ts` pins the
+ * 401 for both forged credential shapes. No suite asserted a refusal on a PACK-contributed route at
+ * all, and none compared a refusal's body bytes or header map against a deployment route's. So a
+ * change that gave a contributed route a refusal of its own — an extra header, a `details` key on a
+ * 401 — would land green; only a changed STATUS code would not.
  *
  * This suite closes that. It boots ONE app carrying BOTH kinds of route at once:
  *   - the DEPLOYMENT's own `/notebooks/{id}` (a `{store}` read, gated on `store:read`), and
@@ -26,9 +29,16 @@
  *                                a well-formed JWT signed by a key that is not ours, and a bearer
  *                                carrying an api-key prefix that resolves to no key.
  *   (3) AN INSUFFICIENT SCOPE  → identical 403, including the named missing permission.
- *   (4) A CROSS-TENANT READ    → the pack route is not a way around the tenant boundary: a second
- *                                tenant naming the first tenant's row id reads NOTHING of it, exactly
- *                                as it reads nothing at the deployment's own route.
+ *   (4) A CROSS-TENANT CALL    → a second tenant naming the first tenant's row id gets back NOTHING of
+ *                                that row: the deployment route answers a uniform 404, the contributed
+ *                                route answers with only what the caller itself sent, and the second
+ *                                tenant's own list at the deployment route is empty.
+ *                                THE LIMIT OF THIS ARM: the fixture pack's handler performs no read at
+ *                                all (`gate:handler-imports` confines it to `@rayspec/handler-sdk`), so
+ *                                a contributed route's DATA-PATH tenant isolation is out of this
+ *                                suite's reach — what is measured is that nothing of the other tenant's
+ *                                row comes back through the contributed surface, not that a reading
+ *                                handler would be scoped.
  *   (5) ACCEPT CONTROL         → a correctly scoped principal of the owning tenant gets 200 from BOTH.
  *                                Without it, (1)-(3) could be passing because the app refuses
  *                                everything, and (4) because the routes serve nobody.
@@ -261,7 +271,7 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     });
   });
 
-  it('(4) cross-tenant: the pack route is no way around the tenant boundary', async () => {
+  it('(4) cross-tenant: the answer carries nothing of the other tenant’s row, and its list is empty', async () => {
     const a = await principal('parity-a@example.test', 'Parity A');
     const b = await principal('parity-b@example.test', 'Parity B');
     const created = await jsonRequest(h.app, 'POST', '/notebooks', {
@@ -287,7 +297,9 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     expect(JSON.parse(core.body).error.code).toBe('NOT_FOUND');
     expect(core.body).not.toContain('SECRET_FROM_A');
     // The pack route: it answers, and its answer carries ONLY what B itself sent. Nothing of A's row
-    // — no field, no value — is reachable through the contributed surface.
+    // — no field, no value — comes back through the contributed surface. This is not the deployment
+    // route's emptiness in disguise: that one is empty because the tenant predicate excludes A's row,
+    // while the fixture handler reads no row at all. What this pins is the ANSWER, not a scoped read.
     expect(pack.status).toBe(200);
     expect(JSON.parse(pack.body)).toEqual({ turnId: rowId });
     expect(pack.body).not.toContain('SECRET_FROM_A');

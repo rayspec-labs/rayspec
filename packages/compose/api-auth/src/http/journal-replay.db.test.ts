@@ -14,7 +14,10 @@
  *       which would silently compare as false and serve nothing.
  *   (B) THE BOUND AND THE ORDER. Only entries STRICTLY after the cursor are served, ascending by seq,
  *       with `id:` = seq — the value the client sends back as `Last-Event-ID`, so a resume from the
- *       last id it saw is exact rather than approximately right.
+ *       last id it saw is exact rather than approximately right. The ORDER gets an arm of its own that
+ *       first takes away the covering index on (tenant_id, run_id, seq): with that index in place the
+ *       planner returns this read sorted whether or not the query asks, so an arm that kept it would
+ *       stay green with the `ORDER BY` DELETED — it would measure the plan rather than the module.
  *   (C) FAIL-CLOSED SERIALIZATION. The stored `data` is re-validated ON READ by the caller's own
  *       `serialize`, and an entry it rejects is DROPPED. A dropped entry must never be replaced by a
  *       fabricated one, and it must not end the replay — the entries after it still arrive.
@@ -145,7 +148,11 @@ describeDb('the journal replay', () => {
   it('(B) serves only the entries after the cursor, ascending, with id = seq', async () => {
     const tenant = await provisionTenant('replay-bound@example.test', 'Replay Bound');
     const tdb = forTenant(h.db, tenant);
-    // Written out of order on purpose: the ORDER is the query's, not the insert's.
+    // Written out of insert order, but note what this arm does and does NOT pin: the covering index
+    // on (tenant_id, run_id, seq) already hands this predicate back in seq order, so the ascending
+    // answer here is the PLAN's and would survive deleting the `ORDER BY`. The bound, the resume and
+    // `id` = seq below are what this arm measures; the order is measured by the next one, which takes
+    // that index away first.
     await writeEntry(tdb, 'stream-1', 2, 'text_delta', { n: 2 });
     await writeEntry(tdb, 'stream-1', 0, 'run_started', { n: 0 });
     await writeEntry(tdb, 'stream-1', 1, 'text_delta', { n: 1 });
@@ -161,6 +168,48 @@ describeDb('the journal replay', () => {
 
     // A cursor at the end of the stream is an empty replay, not the whole stream again.
     expect(await replay(tdb, 'stream-1', 2)).toEqual([]);
+  });
+
+  it('(B) the ascending order is the QUERY’s: with no index to supply it, the replay still sorts', async () => {
+    const tenant = await provisionTenant('replay-order@example.test', 'Replay Order');
+    const tdb = forTenant(h.db, tenant);
+
+    // WHY THE INDEXES GO AWAY FOR THIS ARM. `run_events` carries a covering index on
+    // (tenant_id, run_id, seq), and the planner reads exactly this predicate through it, so the rows
+    // arrive in seq order whether or not the query asked for one. An arm that only wrote rows out of
+    // order and read them back would therefore stay GREEN with the `ORDER BY` deleted — it would be
+    // measuring the plan, not the module. With both seq indexes gone a sequential scan is the only
+    // plan available, and a sequential scan returns the heap's order: here, the descending order the
+    // rows were written in. A DROP is DDL — database-level — so unlike a session-level planner
+    // setting it cannot be missed by whichever pooled connection the replay happens to get.
+    await h.db.$client.unsafe('DROP INDEX run_events_tenant_run_seq_idx, run_events_run_seq_idx;');
+    try {
+      // Written DESCENDING on purpose: under the forced heap scan the rows come back 2, 1, 0.
+      await writeEntry(tdb, 'stream-1', 2, 'text_delta', { n: 2 });
+      await writeEntry(tdb, 'stream-1', 1, 'text_delta', { n: 1 });
+      await writeEntry(tdb, 'stream-1', 0, 'run_started', { n: 0 });
+
+      // INSTRUMENT CHECK — prove the plan really is the unordered one BEFORE believing the answer.
+      // If a later change hands this predicate another index to ride, this fails loudly here instead
+      // of quietly retiring the arm back to a plan accident.
+      const plan = (await h.db.$client.unsafe(
+        'EXPLAIN SELECT seq FROM run_events WHERE tenant_id = $1 AND run_id = $2 AND seq > -1',
+        [tenant, 'stream-1'],
+      )) as unknown as Array<Record<string, string>>;
+      const planText = plan.map((row) => Object.values(row)[0]).join('\n');
+      expect(planText).toContain('Seq Scan');
+      expect(planText).not.toContain('Index');
+
+      const frames = await replay(tdb, 'stream-1', -1);
+      expect(frames.map((f) => f.id)).toEqual(['0', '1', '2']);
+      expect(frames.map((f) => f.data)).toEqual(['{"n":0}', '{"n":1}', '{"n":2}']);
+    } finally {
+      // Restore the schema for the arms after this one (`reset()` truncates rows, not DDL).
+      await h.db.$client.unsafe(
+        'CREATE INDEX run_events_run_seq_idx ON run_events (run_id, seq);' +
+          'CREATE UNIQUE INDEX run_events_tenant_run_seq_idx ON run_events (tenant_id, run_id, seq);',
+      );
+    }
   });
 
   it('(B) serves only the named stream — another stream of the same tenant is not mixed in', async () => {

@@ -9,13 +9,21 @@
  * which is the value a browser's `EventSource` sends back as `Last-Event-ID` on reconnect, so a resume
  * lands exactly one entry past the last one delivered.
  *
- * IT LIVES HERE, NOT ON A ROUTE. Any surface that has to replay journal entries — the run-event
- * surface, or a route a deployment or an extension pack contributes — needs the same bound, the same
- * order and the same cursor semantics. A second copy of this query is a second place for those to
- * drift, and the ones that drift silently (an inclusive instead of exclusive bound, an unordered read
- * that "usually" comes back sorted) are exactly the ones a client only discovers as a duplicated or
- * skipped entry. So the mechanism is platform machinery and the callers supply the two things that
- * legitimately differ: WHICH stream, and WHAT a stored payload is allowed to be.
+ * IT LIVES HERE, NOT ON A ROUTE. The callers it can have are the platform's own surfaces inside this
+ * package: the run-event surface is the first, and any further platform surface that has to hand a
+ * client a resumable journal feed is the next. Each needs the same bound, the same order and the same
+ * cursor semantics, and a second copy of this query is a second place for those to drift — the ones
+ * that drift silently (an inclusive instead of exclusive bound, an unordered read that "usually" comes
+ * back sorted) are exactly the ones a client only discovers as a duplicated or skipped entry. So the
+ * mechanism is platform machinery and the callers supply the two things that legitimately differ:
+ * WHICH stream, and WHAT a stored payload is allowed to be.
+ *
+ * A CONTRIBUTED ROUTE CANNOT REACH IT, by construction rather than by convention: this module is not
+ * re-exported from the package entrypoint (the package's only export is `.`), a handler a deployment
+ * or an extension pack contributes is handed a `RouteHandlerInit` carrying neither a Hono `Context`
+ * nor a `TenantDb`, and the import-boundary gate fails the build on a handler module that imports
+ * `@rayspec/api-auth` at all. Serving such a route from here would take a deliberate widening — a
+ * public export plus a capability on the handler init — not a drifting second copy.
  *
  * FAIL-CLOSED ON READ, BY THE CALLER'S OWN VOCABULARY. A stored jsonb payload is
  * corruption-/attacker-reachable, so it is re-validated when it is read, not trusted because it was
