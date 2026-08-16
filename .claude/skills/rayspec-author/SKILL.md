@@ -596,9 +596,11 @@ node packages/app/cli/dist/index.js deploy \
 `--apply-migration` sets the boot into UPDATE mode: the gated `deploy()` engine SCANS the delta (a
 destructive statement WITHOUT a covering reviewed `--allowlist` entry is BLOCKED with a `DeployError`,
 fail-closed) and, if clean, applies it IN PLACE so existing rows survive. It is **reboot-safe**: the boot
-classifies the live schema FIRST, so a delta that ALREADY landed on a prior boot MOUNTS (the classify
-sees present-matching) instead of re-applying and crash-looping on a duplicate column — a leftover
-`--apply-migration` in a `Restart=always` unit applies once, then mounts. (`--apply-migration`/
+PROBES the objects the delta itself names FIRST, so a delta that ALREADY landed on a prior boot MOUNTS
+(its objects are there) instead of re-applying and crash-looping on a duplicate column — a leftover
+`--apply-migration` in a `Restart=always` unit applies once, then mounts. A delta whose objects are NOT
+there is applied and the boot names them, even on a drift-clean schema (the drift check only ever
+inspects what the spec declares, so an object the grammar cannot express is invisible to it). (`--apply-migration`/
 `--allowlist` cannot be combined with `--dry-run`, which touches no DB; a bare `--allowlist` without
 `--apply-migration` is a usage error.)
 

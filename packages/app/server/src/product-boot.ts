@@ -14,14 +14,16 @@
  * (reboot-safe by construction, because `RAYSPEC_UPDATE_MIGRATION` is a PERSISTENT
  * deployment env re-read on EVERY boot) routes on the result: `drifted` (the normal update) hands the
  * reviewed forward DELTA to `deploy()`'s gate; `absent` (a first boot) refuses actionably; and
- * `present-matching` PROBES the delta's destructive targets live (detectDrift is superset-blind,
- * so a leftover-env schema and an UNAPPLIED pure-SUBSET removal both classify present-matching): a genuine
- * LEFTOVER (all drop targets gone / additive-only) SHORT-CIRCUITs to MOUNT with a loud operator log
- * (re-applying a non-idempotent delta would 42P07/42P01 crash-loop the boot), an UNAPPLIED subset removal
- * (a reviewed drop target STILL EXISTS) APPLIES the delta, and an undeterminable destructive statement
- * REFUSES fail-closed. A post-migrate drift GATE then fail-closes an under-reconciling delta (a delayed
- * brick). Unset ⇒ behavior-identical to the prior mount/materialize boot (the drifted-refuse error TEXT
- * now also points at the update seam).
+ * `present-matching` PROBES the objects the DELTA ITSELF names, live — the drop targets it names (which
+ * must be gone if it ran) and the objects it CREATEs (which must be present if it ran). That classify is
+ * derived from the SPEC, and is reached both by a delta that landed and by one that never ran, so the
+ * delta's own objects are the only evidence there is: a genuine LEFTOVER (everything in the state an
+ * applied delta leaves it in) SHORT-CIRCUITs to MOUNT with a loud operator log that names WHAT it probed
+ * (re-applying a non-idempotent delta would 42P07/42P01 crash-loop the boot), an UNAPPLIED delta (a
+ * reviewed drop target STILL EXISTS, or an object it creates is ABSENT) APPLIES, and a half-landed or
+ * undeterminable delta REFUSES fail-closed. A post-migrate drift GATE then fail-closes an
+ * under-reconciling delta (a delayed brick). Unset ⇒ behavior-identical to the prior mount/materialize
+ * boot (the drifted-refuse error TEXT now also points at the update seam).
  *
  * This lives in the composition root (server) — the DBOS wiring belongs here (server/src is where the
  * concrete engines are wired), NOT in the frozen-surface deploy.ts (the family dispatch already exists).
@@ -75,6 +77,7 @@ import {
   type ProductSchemaState,
   type QueryFn,
   scanMigrationSql,
+  splitMigrationStatements,
 } from '@rayspec/db';
 import {
   DbosDurableExecutor,
@@ -361,22 +364,92 @@ export function readProductUpdateMigrations(env: ProductUpdateEnv): PlannedMigra
   return [{ name: basename(resolved), sql, allowlist }];
 }
 
-/**
- * The loud operator log emitted when a LEFTOVER `RAYSPEC_UPDATE_MIGRATION` is mounted (
- * this now EXCLUSIVELY covers a genuine leftover — the delta's additive objects exist AND any destructive
- * targets were PROBED gone; an UNAPPLIED subset drop is applied, not mounted, and an undeterminable
- * destructive statement refuses).
- */
-export const LEFTOVER_UPDATE_ENV_MOUNT_LOG =
+/** The header every drift-clean-mount log carries; what follows it is what the probe MEASURED. */
+const LEFTOVER_UPDATE_ENV_HEADER =
   '\n⚠️  RAYSPEC PRODUCT BOOT — RAYSPEC_UPDATE_MIGRATION is set but the live schema ALREADY ' +
-  'satisfies the new spec (drift-clean) ⚠️\n' +
-  '    The reviewed delta was already applied on a PRIOR boot — its additive objects are present and ' +
-  'any destructive targets were PROBED gone; this boot MOUNTED without re-applying it (a non-idempotent ' +
-  'delta re-applied would crash the boot).\n' +
-  '    REMOVE RAYSPEC_UPDATE_MIGRATION (and RAYSPEC_UPDATE_ALLOWLIST) from the deployment env — it ' +
-  'is now stale. Set it again only for the NEXT schema change.\n';
+  'satisfies the new spec (drift-clean) ⚠️\n';
 
-// ── the present-matching destructive discriminator ─────────────────────────────
+/**
+ * The loud operator log emitted when a LEFTOVER `RAYSPEC_UPDATE_MIGRATION` is mounted — built FROM the
+ * probe results, so every claim in it was measured on the live schema. A sentence about a probe result
+ * has to come from that probe: the fixed text this replaced asserted that "its additive objects are
+ * present and any destructive targets were PROBED gone" even when the delta named no object anything
+ * had looked for (issue #440). The zero-evidence case now says so instead, and does not call the env
+ * stale on a measurement nobody took.
+ */
+export function leftoverUpdateEnvMountLog(probed: ProbedObjects): string {
+  if (probed.present.length === 0 && probed.gone.length === 0) {
+    return (
+      `${LEFTOVER_UPDATE_ENV_HEADER}` +
+      '    The reviewed delta names NO object this boot can probe (no CREATE TABLE / CREATE INDEX / ' +
+      'ALTER TABLE … ADD, no probeable DROP target), so NOTHING here measured whether it ran: this ' +
+      'boot MOUNTED without re-applying it (a non-idempotent delta re-applied would crash the boot) ' +
+      'on the drift-clean classification ALONE.\n' +
+      '    If the delta HAS landed, clear RAYSPEC_UPDATE_MIGRATION (and RAYSPEC_UPDATE_ALLOWLIST) ' +
+      'from the deployment env — it is stale. If you cannot say, CHECK THE SCHEMA BY HAND first: ' +
+      'nothing in this boot can tell you.\n'
+    );
+  }
+  const present =
+    probed.present.length > 0
+      ? `      · present, as its CREATEs leave them: ${probed.present.join(', ')}\n`
+      : '';
+  const gone =
+    probed.gone.length > 0
+      ? `      · gone, as its reviewed DROPs leave them: ${probed.gone.join(', ')}\n`
+      : '';
+  return (
+    `${LEFTOVER_UPDATE_ENV_HEADER}` +
+    '    This boot PROBED the objects the delta itself names, and every one of them is in the state an ' +
+    'APPLIED delta leaves it in:\n' +
+    `${present}${gone}` +
+    '    — so the delta was already applied on a PRIOR boot, and this boot MOUNTED without re-applying ' +
+    'it (a non-idempotent delta re-applied would crash the boot).\n' +
+    '    REMOVE RAYSPEC_UPDATE_MIGRATION (and RAYSPEC_UPDATE_ALLOWLIST) from the deployment env — it ' +
+    'is now stale. Set it again only for the NEXT schema change.\n'
+  );
+}
+
+/**
+ * The loud operator log emitted when a drift-clean boot APPLIES the delta anyway, because an object the
+ * delta CREATEs is not in the live schema. It NAMES the objects it looked for and did not find — the
+ * whole reason this boot is not mounting — and it does not call the env stale.
+ */
+export function unappliedUpdateApplyLog(absent: readonly string[]): string {
+  return (
+    '\n⚠️  RAYSPEC PRODUCT BOOT — RAYSPEC_UPDATE_MIGRATION is set and the live schema is drift-clean ' +
+    'against the new spec, but the reviewed delta has NOT been applied ⚠️\n' +
+    `    PROBED, and NOT in the live schema: ${absent.join(', ')}. The spec-derived schema does not ` +
+    `name ${absent.length === 1 ? 'that object' : 'those objects'}, so the drift check never inspects ` +
+    `${absent.length === 1 ? 'it' : 'them'} — the objects the delta itself names are the only evidence ` +
+    'there is, and they say the delta never ran.\n' +
+    '    This boot is APPLYING the delta, through the SAME reviewed gate a drifted boot uses. The env ' +
+    'is NOT stale: leave RAYSPEC_UPDATE_MIGRATION in place for this boot and clear it once the delta ' +
+    'has landed.\n'
+  );
+}
+
+// ── the present-matching discriminator: the objects the delta names, probed live ────────────────
+
+/**
+ * A live-schema OBJECT an existence probe asks about. ONE vocabulary for both directions the router
+ * reads: the TARGET a reviewed DROP names (which must be GONE if the delta ran) and the OBJECT an
+ * additive statement CREATEs (which must be PRESENT if it ran). The live schema answers both the same
+ * way — which statement asked is the router's business, not the probe's.
+ */
+export type SchemaObjectProbe =
+  | { kind: 'table'; table: string }
+  | { kind: 'column'; table: string; column: string }
+  | { kind: 'index'; index: string }
+  | { kind: 'constraint'; table: string; constraint: string };
+
+/** What the live probe actually MEASURED — the only thing the drift-clean mount log may claim. */
+export interface ProbedObjects {
+  /** Objects the delta CREATEs that the live schema HAS, named as the log prints them. */
+  readonly present: readonly string[];
+  /** Reviewed DROP targets the live schema no longer has, named the same way. */
+  readonly gone: readonly string[];
+}
 
 /**
  * A live-schema existence probe for the target of ONE superset-blind destructive statement. The boot
@@ -472,30 +545,126 @@ export function extractDestructiveTarget(
   return undefined;
 }
 
-/** How a `present-matching` update delta resolves once its destructive targets are probed live. */
+/** The live-schema object one superset-blind destructive target names. */
+function destructiveTargetObject(target: DestructiveTargetProbe): SchemaObjectProbe {
+  if (target.kind === 'drop-table') return { kind: 'table', table: target.table };
+  if (target.kind === 'drop-column')
+    return { kind: 'column', table: target.table, column: target.column };
+  if (target.kind === 'drop-index') return { kind: 'index', index: target.index };
+  return { kind: 'constraint', table: target.table, constraint: target.constraint };
+}
+
+/**
+ * The ADDITIVE statement forms this boot can name a created object for. Each is ANCHORED at the
+ * statement's first keyword and captures only its FIRST action, which is what makes them literal-safe:
+ * by the time a string literal can appear in a statement (a DEFAULT, a NOTICE body), the capture is
+ * already made, so SQL written INSIDE a literal can never be read as an object. Together they cover
+ * exactly what `generateProductSql` / `diffProductStores` emit for an additive change, plus the
+ * hand-authored index the `stores` grammar cannot express.
+ *
+ * `IF NOT EXISTS` is EXCLUDED from every one of them (the `(?!IF\b)` guards, and the CREATE INDEX
+ * lookahead the unnamed-index case already needed): such a statement is IDEMPOTENT, so its object's
+ * presence proves nothing about whether THIS delta ran — the object may predate it — and re-running it
+ * cannot crash. Reading it as evidence would be another claim the schema never supported.
+ */
+const CREATE_TABLE_RE = new RegExp(`^CREATE\\s+TABLE\\s+(?!IF\\b)${IDENT}`, 'i');
+const CREATE_INDEX_RE = new RegExp(
+  `^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(?:CONCURRENTLY\\s+)?(?!(?:ON|CONCURRENTLY|IF)\\b)${IDENT}`,
+  'i',
+);
+const ADD_COLUMN_RE = new RegExp(
+  `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${IDENT}\\s+ADD\\s+COLUMN\\s+(?!IF\\b)${IDENT}`,
+  'i',
+);
+const ADD_CONSTRAINT_RE = new RegExp(
+  `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${IDENT}\\s+ADD\\s+CONSTRAINT\\s+${IDENT}`,
+  'i',
+);
+
+/**
+ * Extract the live-schema objects a delta's ADDITIVE statements CREATE. On a `present-matching`
+ * classification these are the ONLY evidence there is about whether the delta itself ran: `detectDrift`
+ * introspects the NEW spec's stores/columns/FKs, so an object the spec cannot express — a hand-shaped
+ * index is the canonical one — is invisible to it and the classification reads the same either way.
+ *
+ * Statements come from the SAME literal-aware split the destructive scan reads (`splitMigrationStatements`),
+ * so a `;` inside a dollar-quoted body is not a boundary and a `--> statement-breakpoint` behind a
+ * comment marker still is one. A statement this cannot name an object for contributes NOTHING rather
+ * than a guess: a data statement, a CREATE TYPE, an unnamed index, an `IF NOT EXISTS` form. The caller
+ * reports exactly what comes back here and claims nothing about the rest.
+ */
+export function extractAdditiveObjects(sql: string): SchemaObjectProbe[] {
+  const objects: SchemaObjectProbe[] = [];
+  for (const { text } of splitMigrationStatements(sql)) {
+    const table = CREATE_TABLE_RE.exec(text);
+    if (table) {
+      objects.push({ kind: 'table', table: table[1] as string });
+      continue;
+    }
+    const index = CREATE_INDEX_RE.exec(text);
+    if (index) {
+      objects.push({ kind: 'index', index: index[1] as string });
+      continue;
+    }
+    const column = ADD_COLUMN_RE.exec(text);
+    if (column) {
+      objects.push({ kind: 'column', table: column[1] as string, column: column[2] as string });
+      continue;
+    }
+    const constraint = ADD_CONSTRAINT_RE.exec(text);
+    if (constraint) {
+      objects.push({
+        kind: 'constraint',
+        table: constraint[1] as string,
+        constraint: constraint[2] as string,
+      });
+    }
+  }
+  return objects;
+}
+
+/** How an object is NAMED to an operator — the same words the probe asked its question in. */
+function describeSchemaObject(object: SchemaObjectProbe): string {
+  if (object.kind === 'table') return `table "${object.table}"`;
+  if (object.kind === 'column') return `column "${object.table}"."${object.column}"`;
+  if (object.kind === 'index') return `index "${object.index}"`;
+  return `constraint "${object.constraint}" on "${object.table}"`;
+}
+
+/** How a `present-matching` update delta resolves once the objects it names are probed live. */
 export type PresentMatchingRoute =
-  | { kind: 'mount' } // a genuine LEFTOVER env — all drop targets already gone / additive-only
-  | { kind: 'apply' } // an UNAPPLIED subset removal — a reviewed drop target STILL EXISTS
-  | { kind: 'refuse'; reason: string }; // an UNDETERMINABLE destructive statement — fail-closed
+  | { kind: 'mount'; probed: ProbedObjects } // a genuine LEFTOVER env — and what proved it
+  | { kind: 'apply'; absent: readonly string[] } // UNAPPLIED — a drop target exists, or a CREATE's object does not
+  | { kind: 'refuse'; reason: string } // an UNDETERMINABLE destructive statement — fail-closed
+  | { kind: 'refuse-half-landed'; present: readonly string[]; absent: readonly string[] }; // partly there
 
 /**
  * Decide, for a `present-matching` classification in UPDATE mode, whether the reviewed delta is a genuine
- * LEFTOVER env (MOUNT) or an UNAPPLIED pure-subset removal that must still run (APPLY) — by PROBING each
- * superset-blind destructive target's live existence. DB-free (the probe is injected), so it is
- * exhaustively unit-testable with a fake probe:
- *   - no destructive findings, OR every probed target is GONE, and no undeterminable statement → MOUNT
- *     (a leftover env; the loud operator log fires at the call site).
- *   - ANY probed target STILL EXISTS → APPLY (the reviewed drop never ran — route to deploy()'s gate).
+ * LEFTOVER env (MOUNT) or one that has NOT been applied and must still run (APPLY) — by PROBING the
+ * objects the DELTA names, in both directions: each superset-blind destructive TARGET (gone iff the
+ * delta ran) and each object an additive statement CREATEs (present iff it ran). DB-free (the probe is
+ * injected), so it is exhaustively unit-testable with a fake probe:
+ *   - ANY probed drop target STILL EXISTS → APPLY (the reviewed drop never ran — route to deploy()'s
+ *     gate). Unchanged, and decided FIRST: the destructive half's routing is exactly what it was.
+ *   - every object the delta CREATEs is ABSENT → APPLY, naming them: the delta never ran, and on a
+ *     drift-clean schema nothing else can say so (issue #440 — this MOUNTED, and the change was lost).
+ *   - some of those objects present and some absent → REFUSE fail-closed: a HALF-LANDED delta can be
+ *     neither re-applied (the ones already there raise a duplicate-object error) nor called applied.
  *   - a statement we cannot parse a target from, or an undeterminable kind (TRUNCATE / DELETE /
  *     DROP SCHEMA / …) → REFUSE fail-closed (cannot tell applied from unapplied by schema).
+ *   - everything probed is in the state an applied delta leaves it in (including a delta that names
+ *     nothing probeable at all) → MOUNT, carrying WHAT was probed so the log can claim only that.
  * A destructive kind in {@link APPLIED_AT_PRESENT_MATCHING} is skipped: present-matching already PROVES
  * it applied (detectDrift inspects type/nullability/presence), so it is consistent with a leftover.
  */
 export async function routePresentMatchingUpdate(
   migrations: readonly PlannedMigration[],
-  probeTarget: (probe: DestructiveTargetProbe) => Promise<boolean>,
+  probeObject: (probe: SchemaObjectProbe) => Promise<boolean>,
 ): Promise<PresentMatchingRoute> {
   let anyTargetExists = false;
+  const gone: string[] = [];
+  const present: string[] = [];
+  const absent: string[] = [];
   for (const migration of migrations) {
     const scan = scanMigrationSql(migration.sql, migration.allowlist ?? []);
     for (const finding of scan.findings) {
@@ -507,7 +676,9 @@ export async function routePresentMatchingUpdate(
             reason: `an unparseable ${finding.kind} statement ('${truncateStmt(finding.text)}')`,
           };
         }
-        if (await probeTarget(target)) anyTargetExists = true;
+        const object = destructiveTargetObject(target);
+        if (await probeObject(object)) anyTargetExists = true;
+        else gone.push(describeSchemaObject(object));
       } else if (APPLIED_AT_PRESENT_MATCHING.has(finding.kind)) {
       } else {
         return {
@@ -518,8 +689,17 @@ export async function routePresentMatchingUpdate(
         };
       }
     }
+    for (const object of extractAdditiveObjects(migration.sql)) {
+      ((await probeObject(object)) ? present : absent).push(describeSchemaObject(object));
+    }
   }
-  return anyTargetExists ? { kind: 'apply' } : { kind: 'mount' };
+  if (anyTargetExists) return { kind: 'apply', absent: [] };
+  if (absent.length > 0) {
+    return present.length === 0
+      ? { kind: 'apply', absent }
+      : { kind: 'refuse-half-landed', present, absent };
+  }
+  return { kind: 'mount', probed: { present, gone } };
 }
 
 /**
@@ -530,16 +710,16 @@ export async function routePresentMatchingUpdate(
 export function makeSchemaProbe(
   query: QueryFn,
   schema: string,
-): (probe: DestructiveTargetProbe) => Promise<boolean> {
+): (probe: SchemaObjectProbe) => Promise<boolean> {
   return async (probe) => {
-    if (probe.kind === 'drop-table') {
+    if (probe.kind === 'table') {
       const rows = await query(
         `SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
         [schema, probe.table],
       );
       return rows.length > 0;
     }
-    if (probe.kind === 'drop-column') {
+    if (probe.kind === 'column') {
       const rows = await query(
         `SELECT 1 FROM information_schema.columns
           WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
@@ -547,7 +727,7 @@ export function makeSchemaProbe(
       );
       return rows.length > 0;
     }
-    if (probe.kind === 'drop-index') {
+    if (probe.kind === 'index') {
       const rows = await query(
         `SELECT 1 FROM pg_class i JOIN pg_namespace ns ON ns.oid = i.relnamespace
           WHERE i.relkind IN ('i', 'I') AND ns.nspname = $1 AND i.relname = $2`,
@@ -555,7 +735,7 @@ export function makeSchemaProbe(
       );
       return rows.length > 0;
     }
-    // drop-constraint
+    // constraint
     const rows = await query(
       `SELECT 1 FROM pg_constraint con
          JOIN pg_class rel ON rel.oid = con.conrelid
@@ -578,14 +758,19 @@ export function makeSchemaProbe(
  *                          reviewed delta (→ deploy()'s gate + the post-migrate drift gate). deployMode
  *                          'updated'.
  *   - `present-matching` — the live schema satisfies the NEW spec's load-bearing facts, but detectDrift
- *                          is SUPERSET-BLIND, so this covers TWO indistinguishable-by-classification cases.
- *                          the boot discriminates them by PROBING the delta's destructive targets live
- *                          (`routePresentMatchingUpdate` + `probeTarget`):
- *                            · all drop targets GONE / additive-only  → MOUNT (a leftover env; ZERO
- *                              migrations, loud log). deployMode 'mounted'.
+ *                          is SUPERSET-BLIND, so this classification is reached BOTH by a delta that
+ *                          landed and by one that never ran. The boot discriminates them by PROBING the
+ *                          objects the DELTA names (`routePresentMatchingUpdate` + `probeObject`) —
+ *                          nothing else in this boot has looked at them:
+ *                            · everything probed as an applied delta leaves it → MOUNT (a leftover env;
+ *                              ZERO migrations, a log that names what was probed). deployMode 'mounted'.
  *                            · a reviewed drop target STILL EXISTS    → APPLY (the delta never ran — a
  *                              pure-SUBSET update on its first boot). deployMode 'updated'. (an earlier
  *                              revision mounted this too and SILENTLY LOST the reviewed drop forever.)
+ *                            · an object the delta CREATEs is ABSENT  → APPLY, naming it. (an earlier
+ *                              revision mounted this too and lost the change — issue #440.)
+ *                            · some of those objects present, some absent → REFUSE fail-closed: a
+ *                              half-landed delta can be neither re-applied nor called applied.
  *                            · an undeterminable destructive statement → REFUSE fail-closed (honest both-
  *                              cases message).
  *   - `absent`           — NOTHING is materialized yet (a first boot). Update mode evolves an EXISTING
@@ -596,15 +781,32 @@ export async function planUpdateBoot(
   updateMigrations: PlannedMigration[],
   specPath: string,
   warn: (message: string) => void,
-  probeTarget: (probe: DestructiveTargetProbe) => Promise<boolean>,
+  probeObject: (probe: SchemaObjectProbe) => Promise<boolean>,
 ): Promise<{ migrations: PlannedMigration[]; deployMode: 'mounted' | 'updated' }> {
   if (schemaState === 'present-matching') {
-    const route = await routePresentMatchingUpdate(updateMigrations, probeTarget);
+    const route = await routePresentMatchingUpdate(updateMigrations, probeObject);
     if (route.kind === 'apply') {
-      // An UNAPPLIED pure-subset removal: the live schema present-matches the smaller NEW spec ONLY
-      // because detectDrift is superset-blind, but a reviewed DROP target STILL EXISTS — so the delta
-      // never ran. Route it to deploy()'s gate (+ the post-update drift gate) exactly like 'drifted'.
+      // An UNAPPLIED delta: the live schema present-matches the NEW spec ONLY because detectDrift is
+      // superset-blind (a reviewed DROP target STILL EXISTS) or because the spec cannot express what the
+      // delta creates (an object it CREATEs is NOT there) — either way the delta never ran. Route it to
+      // deploy()'s gate (+ the post-update drift gate) exactly like 'drifted'. The absent objects are
+      // named to the operator; the destructive arm keeps the silence it always had (deploy() logs the
+      // apply, and the reviewed DROP is its own announcement).
+      if (route.absent.length > 0) warn(unappliedUpdateApplyLog(route.absent));
       return { migrations: updateMigrations, deployMode: 'updated' };
+    }
+    if (route.kind === 'refuse-half-landed') {
+      throw new ProductBootError(
+        `RAYSPEC_UPDATE_MIGRATION is set and the live schema present-matches the NEW spec at ` +
+          `${specPath}, but the reviewed delta is only HALF LANDED — this boot PROBED the objects it ` +
+          'names and found some of them and not the others:\n' +
+          `    • IN the live schema:     ${route.present.join(', ')}\n` +
+          `    • NOT in the live schema: ${route.absent.join(', ')}\n` +
+          'Re-applying it would raise a duplicate-object error on the ones already there, and mounting ' +
+          'would lose the ones that are not — fail-closed rather than guess: reconcile by hand, or ' +
+          'author a forward delta for the MISSING objects only and point RAYSPEC_UPDATE_MIGRATION at ' +
+          'that one. Fail-closed.',
+      );
     }
     if (route.kind === 'refuse') {
       throw new ProductBootError(
@@ -618,9 +820,10 @@ export async function planUpdateBoot(
           'explicit reviewed re-deploy against a drifted schema. Fail-closed.',
       );
     }
-    // 'mount' — a genuine leftover env (all drop targets already gone / additive-only). MOUNT (zero
-    // migrations) so a non-idempotent delta is not re-applied (which would crash-loop the boot).
-    warn(LEFTOVER_UPDATE_ENV_MOUNT_LOG);
+    // 'mount' — a genuine leftover env (every object the delta names is in the state an applied delta
+    // leaves it in). MOUNT (zero migrations) so a non-idempotent delta is not re-applied (which would
+    // crash-loop the boot). The log carries what was PROBED, so it claims that and nothing more.
+    warn(leftoverUpdateEnvMountLog(route.probed));
     return { migrations: [], deployMode: 'mounted' };
   }
   if (schemaState === 'absent') {
@@ -2468,9 +2671,10 @@ export async function deployProductYamlSpec(
   let deployMode: BootedServer['deployMode'];
   if (updateMigrations !== undefined) {
     // ENV-DRIVEN UPDATE mode. planUpdateBoot routes on the classify (reboot-safe): drifted →
-    // apply; absent → refuse actionably; present-matching → PROBE the delta's destructive targets live
-    // — a leftover env MOUNTS + loud log, but an UNAPPLIED pure-subset removal (a drop target
-    // still exists) APPLIES, and an undeterminable destructive statement REFUSES fail-closed.
+    // apply; absent → refuse actionably; present-matching → PROBE the objects the delta itself names,
+    // live — a leftover env MOUNTS + a log that says what it probed, but an UNAPPLIED delta (a drop
+    // target still exists, or an object it CREATEs is absent) APPLIES, and a half-landed or
+    // undeterminable delta REFUSES fail-closed.
     // (audio is now conditional, so a doc composing ZERO stores — no capability/declared/collection
     // stores — classifies 'present-matching' [classifyProductSchema: stores.length===0, UNIT-PINNED at
     // the db layer in classify-product-schema.test.ts], so the update path here never crashes on a

@@ -1,6 +1,6 @@
 /**
  * `rayspec deploy --apply-migration` — GROUND-TRUTH acceptance on real Postgres, END-TO-END through the
- * REAL CLI (a spawned `node dist/index.js deploy … --apply-migration …` subprocess). Two arms, each on
+ * REAL CLI (a spawned `node dist/index.js deploy … --apply-migration …` subprocess). Four arms, each on
  * its OWN throwaway database:
  *
  *   1. ADDITIVE   — materialize a minimal agent-free backend, SEED rows, then reboot with
@@ -10,6 +10,11 @@
  *                   `--apply-migration <drop.sql>` and NO reviewed --allowlist; assert the boot is
  *                   BLOCKED (the subprocess exits non-zero at the EXISTING deploy() gate — "roll-out
  *                   refused"), and the schema + data are INTACT (fail-closed applied nothing).
+ *   3. LEFTOVER   — the additive delta applied ONCE, then the IDENTICAL command again: the second boot
+ *                   MOUNTS (no 42701 crash-loop) and the column + rows are untouched.
+ *   4. HAND-SHAPED — a delta whose only object is an index the `stores` grammar cannot express, so the
+ *                   classify is drift-clean either way: it APPLIES while the index is absent and MOUNTS
+ *                   once it is there (both read off `pg_indexes`).
  *
  * This proves the CLI FLAG reaches the EXISTING gated migration engine (no new engine): arg parse →
  * read-spec jail → RAYSPEC_UPDATE_MIGRATION env → serve-opts updateMigrations → deploy()'s gated
@@ -37,11 +42,13 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let additiveRan = 0;
 let destructiveRan = 0;
 let rebootRan = 0;
+let handShapedRan = 0;
 
 const TENANT = '00000000-0000-4000-8000-0000000000ad';
 const ADD_DB = `rayspec_cli_applymig_add_${process.pid}`;
 const DROP_DB = `rayspec_cli_applymig_drop_${process.pid}`;
 const REBOOT_DB = `rayspec_cli_applymig_reboot_${process.pid}`;
+const HAND_DB = `rayspec_cli_applymig_hand_${process.pid}`;
 const PORT_BASE = 19000 + (process.pid % 900);
 
 // A minimal AGENT-FREE backend: one store + one declarative read route (no agents, no durable worker,
@@ -71,6 +78,14 @@ api:
 `;
 const ADDITIVE_DELTA = 'ALTER TABLE parts ADD COLUMN note text;\n';
 const DESTRUCTIVE_DELTA = 'ALTER TABLE parts DROP COLUMN label;\n';
+// A delta whose ONLY object is a HAND-SHAPED INDEX — an object the `stores` grammar cannot express and
+// therefore one `detectDrift` never inspects, so the live schema stays drift-clean against the SAME
+// spec whether or not the delta ran. The DO block is the literal decoy: a `;` inside a dollar-quoted
+// body is not a statement boundary and the `DROP TABLE` in its NOTICE text is not a DROP.
+const HAND_INDEX_DELTA =
+  "DO $tag1$ BEGIN PERFORM 1; RAISE NOTICE 'DROP TABLE scratchpad'; END $tag1$;\n" +
+  '--> statement-breakpoint\n' +
+  'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n';
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -186,11 +201,13 @@ describe.skipIf(!baseUrl)(
       writeFileSync(join(workDir, 'v2.rayspec.yaml'), SPEC_V2);
       writeFileSync(join(workDir, '0001_add_note.sql'), ADDITIVE_DELTA);
       writeFileSync(join(workDir, '0001_drop_label.sql'), DESTRUCTIVE_DELTA);
+      writeFileSync(join(workDir, '0002_hand_index.sql'), HAND_INDEX_DELTA);
       const { privateKey } = await generateKeyPair('RS256', { extractable: true });
       pem = await exportPKCS8(privateKey);
       await createDb(ADD_DB);
       await createDb(DROP_DB);
       await createDb(REBOOT_DB);
+      await createDb(HAND_DB);
     }, 120_000);
 
     afterAll(async () => {
@@ -203,7 +220,7 @@ describe.skipIf(!baseUrl)(
       if (baseUrl) {
         const admin = postgres(adminUrl(baseUrl), { max: 1 });
         try {
-          for (const name of [ADD_DB, DROP_DB, REBOOT_DB]) {
+          for (const name of [ADD_DB, DROP_DB, REBOOT_DB, HAND_DB]) {
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}_dbos_sys" WITH (FORCE)`);
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
           }
@@ -377,6 +394,89 @@ describe.skipIf(!baseUrl)(
       },
       300_000,
     );
+
+    // ── The delta's OWN object decides, not the spec-derived classify (#440) ─────────────────────────
+    // A hand-shaped index is not expressible in the `stores` grammar, so `detectDrift` never inspects it
+    // and the live schema reads drift-clean against the SAME spec whether or not the delta ran. BOTH
+    // directions, on ground truth from `pg_indexes`:
+    //   (a) the index is ABSENT  ⇒ the delta is UNAPPLIED ⇒ it APPLIES (RED: the boot mounted, said the
+    //       delta "was already applied on a PRIOR boot", told the operator to remove the flag — and
+    //       `select count(*) from pg_indexes where indexname='parts_label_idx'` returned 0);
+    //   (b) the index is PRESENT ⇒ the delta really did land ⇒ the SAME command MOUNTS (re-applying the
+    //       non-idempotent CREATE INDEX raises 42P07 and the boot would never serve).
+    maybe(
+      'a delta whose only object is a HAND-SHAPED INDEX APPLIES on a drift-clean schema, and MOUNTS once that object is really there',
+      async () => {
+        handShapedRan += 1;
+        const appDb = withDbName(baseUrl as string, HAND_DB);
+
+        /** GROUND TRUTH — the exact catalog read the field report used. */
+        const indexCount = async (): Promise<number> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'parts_label_idx'`,
+            )) as unknown as { n: number }[];
+            return rows[0]?.n ?? -1;
+          } finally {
+            await c.end();
+          }
+        };
+
+        // Boot 1 — materialize the backend and seed rows (so a drop+recreate would be visible too).
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 7);
+        await waitForBoot(PORT_BASE + 7, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Org', 'org')`, [
+            TENANT,
+          ]);
+          await seed.unsafe(
+            `INSERT INTO parts (tenant_id, label) VALUES ($1,'a'),($1,'b'),($1,'c')`,
+            [TENANT],
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+        expect(await indexCount()).toBe(0);
+
+        // Boot 2 — the SAME spec (the index is not expressible in it) + the reviewed delta.
+        const boot2 = spawnDeploy(
+          ['v1.rayspec.yaml', '--apply-migration', '0002_hand_index.sql'],
+          appDb,
+          PORT_BASE + 8,
+        );
+        await waitForBoot(PORT_BASE + 8, 120_000, boot2);
+        expect(await indexCount()).toBe(1); // the delta LANDED
+        // and the operator was NOT told to drop a flag whose delta had not run.
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the LEFTOVER env on the now-indexed schema: the delta really did land, so the same
+        // command must MOUNT. (A re-apply raises 42P07 and this boot would never become ready.)
+        const boot3 = spawnDeploy(
+          ['v1.rayspec.yaml', '--apply-migration', '0002_hand_index.sql'],
+          appDb,
+          PORT_BASE + 9,
+        );
+        await waitForBoot(PORT_BASE + 9, 120_000, boot3);
+        expect(await indexCount()).toBe(1); // created ONCE, not twice, not dropped
+        expect(stderrOf(boot3)).toMatch(/parts_label_idx/); // the mount log NAMES what it probed
+        expect(stderrOf(boot3)).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // now it really is stale
+        const check = postgres(appDb, { max: 1 });
+        try {
+          const rows = (await check.unsafe(`SELECT count(*)::int AS n FROM parts`)) as unknown as {
+            n: number;
+          }[];
+          expect(rows[0]?.n).toBe(3); // the seeded rows never moved
+        } finally {
+          await check.end();
+        }
+        await shutdown(boot3);
+      },
+      300_000,
+    );
   },
 );
 
@@ -391,6 +491,7 @@ describe('rayspec deploy --apply-migration — ran-guard (must not silently skip
       expect(additiveRan).toBe(1);
       expect(destructiveRan).toBe(1);
       expect(rebootRan).toBe(1);
+      expect(handShapedRan).toBe(1);
     } else {
       expect(dbRequired).toBe(false);
     }

@@ -20,9 +20,7 @@ import {
   assembleExtractionInstructions,
   buildLiveAgent,
   buildSttAdapter,
-  type DestructiveTargetProbe,
   extractDestructiveTarget,
-  LEFTOVER_UPDATE_ENV_MOUNT_LOG,
   makeExtractionBackend,
   mediaPrepEnabled,
   nativeValidatedDowngradeWarning,
@@ -35,6 +33,7 @@ import {
   resolveInputContext,
   resolveStructuredOutputMode,
   routePresentMatchingUpdate,
+  type SchemaObjectProbe,
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
 
@@ -1084,20 +1083,21 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
     expect(logs).toEqual([]); // no leftover-env warning on the normal update
   });
 
-  it('present-matching + ADDITIVE-only leftover → MOUNTS with the loud log', async () => {
+  it('present-matching + ADDITIVE-only leftover whose table IS there → MOUNTS with the loud log', async () => {
     // A stale RAYSPEC_UPDATE_MIGRATION carrying only additive DDL on a plain restart must NOT re-apply
-    // the non-idempotent delta (42P07 crash-loop). No destructive finding ⇒ no probe ⇒ MOUNT.
+    // the non-idempotent delta (42P07 crash-loop). The table it creates is live ⇒ it really did run ⇒ MOUNT.
     const logs: string[] = [];
     const plan = await planUpdateBoot(
       'present-matching',
       ADDITIVE,
       SPEC,
       (m) => logs.push(m),
-      neverExists,
+      alwaysExists,
     );
     expect(plan.deployMode).toBe('mounted');
     expect(plan.migrations).toEqual([]); // ZERO migrations — the delta is NOT re-applied
-    expect(logs).toEqual([LEFTOVER_UPDATE_ENV_MOUNT_LOG]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/table "pinned_moments"/); // the log names the object that proved it
     expect(logs[0]).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // tells the operator to clear the stale env
   });
 
@@ -1128,7 +1128,90 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
     );
     expect(plan.deployMode).toBe('mounted');
     expect(plan.migrations).toEqual([]);
-    expect(logs).toEqual([LEFTOVER_UPDATE_ENV_MOUNT_LOG]);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatch(/table "highlights"/); // named as PROBED gone, which is what happened
+    expect(logs[0]).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  // A delta whose ONLY object is a hand-shaped index — the object a `stores` generator cannot express,
+  // and therefore one `detectDrift` never inspects: the classify says present-matching whether or not
+  // the delta ran (#440).
+  const HAND_INDEX: PlannedMigration[] = [
+    {
+      name: '0004_hand_index.sql',
+      sql:
+        "DO $tag1$ BEGIN PERFORM 1; RAISE NOTICE 'DROP TABLE scratchpad'; END $tag1$;\n" +
+        '--> statement-breakpoint\n' +
+        'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n',
+      allowlist: [],
+    },
+  ];
+
+  it('present-matching + an object the delta CREATEs that is ABSENT → APPLIES, and the log NAMES it', async () => {
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      HAND_INDEX,
+      SPEC,
+      (m) => logs.push(m),
+      neverExists,
+    );
+    expect(plan.deployMode).toBe('updated'); // the delta runs — it is NOT a leftover
+    expect(plan.migrations).toBe(HAND_INDEX); // through deploy()'s gate, exactly like a drifted boot
+    expect(logs.join('\n')).toMatch(/parts_label_idx/); // says WHICH object it looked for and did not find
+    expect(logs.join('\n')).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // the env is NOT stale
+  });
+
+  it('present-matching + that SAME delta with its object PRESENT → MOUNTS, and the log names what it PROBED', async () => {
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      HAND_INDEX,
+      SPEC,
+      (m) => logs.push(m),
+      alwaysExists,
+    );
+    expect(plan.deployMode).toBe('mounted'); // a genuinely applied delta is still recognised
+    expect(plan.migrations).toEqual([]); // and NOT re-applied
+    expect(logs[0]).toMatch(/index "parts_label_idx"/); // the claim names the object the probe answered for
+    expect(logs[0]).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  it('present-matching + a delta naming NO probeable object → MOUNTS without claiming a probe it never ran', async () => {
+    const dataOnly: PlannedMigration[] = [
+      { name: '0005_seed.sql', sql: 'INSERT INTO "note_artifacts" ("note") VALUES (\'x\');\n' },
+    ];
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      dataOnly,
+      SPEC,
+      (m) => logs.push(m),
+      neverExists,
+    );
+    expect(plan.deployMode).toBe('mounted');
+    expect(logs[0]).not.toMatch(/additive objects are present/); // nothing measured that
+    expect(logs[0]).toMatch(/NO object this boot can probe/);
+  });
+
+  it('present-matching + a HALF-LANDED delta → REFUSES, naming what it found and what it did not', async () => {
+    const halfLanded: PlannedMigration[] = [
+      {
+        name: '0006_add_pinned.sql',
+        sql:
+          'CREATE TABLE "pinned_moments" (\n"id" uuid\n);\n' +
+          '--> statement-breakpoint\n' +
+          'CREATE INDEX "pinned_moments_label_idx" ON "pinned_moments" USING btree ("label");\n',
+        allowlist: [],
+      },
+    ];
+    const onlyTable = async (p: { index?: string }): Promise<boolean> => p.index === undefined;
+    await expect(
+      planUpdateBoot('present-matching', halfLanded, SPEC, () => {}, onlyTable),
+    ).rejects.toThrow(ProductBootError);
+    await expect(
+      planUpdateBoot('present-matching', halfLanded, SPEC, () => {}, onlyTable),
+    ).rejects.toThrow(/table "pinned_moments"[\s\S]*index "pinned_moments_label_idx"/);
   });
 
   it('present-matching + an UNDETERMINABLE destructive statement (TRUNCATE) → REFUSES fail-closed', async () => {
@@ -1161,13 +1244,13 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
   const mig = (sql: string, allowlist: PlannedMigration['allowlist'] = []): PlannedMigration[] => [
     { name: 'd.sql', sql, allowlist },
   ];
-  const probe = (present: ReadonlySet<string>) => async (p: DestructiveTargetProbe) => {
+  const probe = (present: ReadonlySet<string>) => async (p: SchemaObjectProbe) => {
     const key =
-      p.kind === 'drop-table'
+      p.kind === 'table'
         ? p.table
-        : p.kind === 'drop-column'
+        : p.kind === 'column'
           ? `${p.table}.${p.column}`
-          : p.kind === 'drop-index'
+          : p.kind === 'index'
             ? p.index
             : `${p.table}#${p.constraint}`;
     return present.has(key);
@@ -1178,7 +1261,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       mig('DROP TABLE "highlights";'),
       probe(new Set(['highlights'])),
     );
-    expect(route).toEqual({ kind: 'apply' });
+    expect(route).toEqual({ kind: 'apply', absent: [] });
   });
 
   it('a superset-blind drop whose target is GONE → { kind: mount } (a genuine leftover)', async () => {
@@ -1186,17 +1269,17 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       mig('DROP TABLE "highlights";'),
       probe(new Set()),
     );
-    expect(route).toEqual({ kind: 'mount' });
+    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: ['table "highlights"'] } });
   });
 
-  it('no destructive findings (additive-only) → { kind: mount }, probe never consulted', async () => {
-    let probed = false;
-    const route = await routePresentMatchingUpdate(mig('CREATE TABLE "x" ();'), async () => {
-      probed = true;
+  it('no destructive findings (additive-only) → the probe decides on the object the delta CREATEs', async () => {
+    const probed: unknown[] = [];
+    const route = await routePresentMatchingUpdate(mig('CREATE TABLE "x" ();'), async (p) => {
+      probed.push(p);
       return true;
     });
-    expect(route).toEqual({ kind: 'mount' });
-    expect(probed).toBe(false);
+    expect(route).toEqual({ kind: 'mount', probed: { present: ['table "x"'], gone: [] } });
+    expect(probed).toEqual([{ kind: 'table', table: 'x' }]);
   });
 
   it('a MIXED delta — one target gone, one still present → { kind: apply } (any-exists wins)', async () => {
@@ -1204,7 +1287,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       mig('DROP TABLE "highlights";\n--> statement-breakpoint\nDROP TABLE "pinned_moments";'),
       probe(new Set(['pinned_moments'])), // highlights gone, pinned_moments still there
     );
-    expect(route).toEqual({ kind: 'apply' });
+    expect(route).toEqual({ kind: 'apply', absent: [] });
   });
 
   it('an APPLIED-AT-PRESENT-MATCHING kind (SET NOT NULL) → { kind: mount }, NOT refuse (no ENV-1 crash-loop)', async () => {
@@ -1220,7 +1303,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       ]),
       probe(new Set()),
     );
-    expect(route).toEqual({ kind: 'mount' });
+    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: [] } });
   });
 
   it('an UNDETERMINABLE destructive kind (TRUNCATE) → { kind: refuse }', async () => {
@@ -1242,6 +1325,143 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       probe(new Set(['a'])),
     );
     expect(route.kind).toBe('refuse');
+  });
+});
+
+/**
+ * The objects the DELTA names are the only evidence a drift-clean classify leaves (#440).
+ *
+ * `detectDrift` introspects the NEW spec's stores/columns/FKs, so an object the spec cannot express —
+ * a hand-shaped index is the canonical one — is invisible to it: the classify reads `present-matching`
+ * whether the delta ran or not. Deciding "already applied" on that classify alone MOUNTS an UNAPPLIED
+ * delta, tells the operator the env is stale, and the change is lost; and the mount log asserted a
+ * measurement nobody took ("its additive objects are present"). So the router probes the objects the
+ * delta CREATEs as well as the targets it DROPs.
+ */
+describe('routePresentMatchingUpdate — the objects the delta CREATEs are probed too', () => {
+  const mig = (sql: string, allowlist: PlannedMigration['allowlist'] = []): PlannedMigration[] => [
+    { name: 'd.sql', sql, allowlist },
+  ];
+  /**
+   * A live-schema fake keyed by the object NAME and blind to the probe's KIND — which is what a live
+   * schema is: it answers "is this index here?" the same way whether a DROP targets it or a CREATE
+   * names it. Typed structurally so it reads against the probe shape either way.
+   */
+  const objectProbe =
+    (present: ReadonlySet<string>) =>
+    async (p: {
+      table?: string;
+      column?: string;
+      index?: string;
+      constraint?: string;
+    }): Promise<boolean> =>
+      present.has(p.index ?? p.constraint ?? p.column ?? p.table ?? '');
+
+  // The reported delta: a DO block whose NOTICE text contains SQL (the literal decoy — a `;` inside a
+  // dollar-quoted body is not a statement boundary and `DROP TABLE` inside it is not a DROP), plus one
+  // hand-shaped index, exactly the object a `stores` generator cannot express.
+  const HAND_INDEX =
+    "DO $tag1$ BEGIN PERFORM 1; RAISE NOTICE 'DROP TABLE scratchpad'; END $tag1$;\n" +
+    '--> statement-breakpoint\n' +
+    'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n';
+
+  it('the index the delta CREATEs is ABSENT → { kind: apply } NAMING the object it did not find', async () => {
+    const route = await routePresentMatchingUpdate(mig(HAND_INDEX), objectProbe(new Set()));
+    expect(route.kind).toBe('apply');
+    expect((route as { absent: readonly string[] }).absent).toEqual(['index "parts_label_idx"']);
+  });
+
+  it('the index the delta CREATEs is PRESENT → { kind: mount }, and the probe was ASKED about it', async () => {
+    // The other arm of the same contract: a delta that GENUINELY landed must still mount (re-applying a
+    // non-idempotent delta crash-loops the boot). The mount is only allowed to rest on a probe that ran.
+    const asked: unknown[] = [];
+    const route = await routePresentMatchingUpdate(mig(HAND_INDEX), async (p) => {
+      asked.push(p);
+      return true;
+    });
+    expect(route.kind).toBe('mount');
+    expect(asked).toEqual([{ kind: 'index', index: 'parts_label_idx' }]);
+  });
+
+  it('every additive form the generator emits is probed (table, column, index, constraint)', async () => {
+    const asked: unknown[] = [];
+    await routePresentMatchingUpdate(
+      mig(
+        'CREATE TABLE "pinned_moments" (\n"id" uuid\n);\n' +
+          '--> statement-breakpoint\n' +
+          'ALTER TABLE "note_artifacts" ADD COLUMN "note" text;\n' +
+          '--> statement-breakpoint\n' +
+          'ALTER TABLE "pinned_moments" ADD CONSTRAINT "pinned_moments_tenant_id_orgs_id_fk" ' +
+          'FOREIGN KEY ("tenant_id") REFERENCES "orgs"("id");\n' +
+          '--> statement-breakpoint\n' +
+          'CREATE INDEX "pinned_moments_tenant_idx" ON "pinned_moments" USING btree ("tenant_id");\n',
+      ),
+      async (p) => {
+        asked.push(p);
+        return true;
+      },
+    );
+    expect(asked).toEqual([
+      { kind: 'table', table: 'pinned_moments' },
+      { kind: 'column', table: 'note_artifacts', column: 'note' },
+      {
+        kind: 'constraint',
+        table: 'pinned_moments',
+        constraint: 'pinned_moments_tenant_id_orgs_id_fk',
+      },
+      { kind: 'index', index: 'pinned_moments_tenant_idx' },
+    ]);
+  });
+
+  it('SQL inside a literal names NO object (the decoy is not read as a statement)', async () => {
+    const asked: unknown[] = [];
+    const route = await routePresentMatchingUpdate(
+      mig(
+        'DO $tag1$ BEGIN RAISE NOTICE \'CREATE INDEX "ghost_idx" ON "parts"\'; END $tag1$;\n' +
+          '--> statement-breakpoint\n' +
+          'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n',
+      ),
+      async (p) => {
+        asked.push(p);
+        return true;
+      },
+    );
+    expect(route.kind).toBe('mount');
+    expect(asked).toEqual([{ kind: 'index', index: 'parts_label_idx' }]); // never "ghost_idx"
+  });
+
+  it('SOME objects present and some absent → { kind: refuse-half-landed }, carrying both sides (fail-closed)', async () => {
+    // A half-landed delta cannot be re-applied (the object that IS there would raise 42P07) and cannot be
+    // called applied either. Refuse, and say what was found and what was not — never guess.
+    const route = await routePresentMatchingUpdate(
+      mig(
+        'CREATE TABLE "pinned_moments" (\n"id" uuid\n);\n' +
+          '--> statement-breakpoint\n' +
+          'CREATE INDEX "pinned_moments_label_idx" ON "pinned_moments" USING btree ("label");\n',
+      ),
+      objectProbe(new Set(['pinned_moments'])),
+    );
+    expect(route).toEqual({
+      kind: 'refuse-half-landed',
+      present: ['table "pinned_moments"'],
+      absent: ['index "pinned_moments_label_idx"'],
+    });
+  });
+
+  it('an `IF NOT EXISTS` object is NOT evidence either way — it is re-appliable, so it is not probed', async () => {
+    // `ADD COLUMN IF NOT EXISTS` (the injected-backfill form) is idempotent: its presence does not show
+    // THIS delta ran, and re-running it cannot crash. Counting it as "applied" would be another claim
+    // the schema never supported.
+    const asked: unknown[] = [];
+    const route = await routePresentMatchingUpdate(
+      mig('ALTER TABLE "note_artifacts" ADD COLUMN IF NOT EXISTS "deleted_at" timestamptz;\n'),
+      async (p) => {
+        asked.push(p);
+        return true;
+      },
+    );
+    expect(route.kind).toBe('mount');
+    expect(asked).toEqual([]);
   });
 });
 

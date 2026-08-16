@@ -2728,10 +2728,11 @@ async function deployDeclaredSpec(
     //   - 'present-matching' → the delta ALREADY landed on a PRIOR boot: MOUNT (zero migrations, loud
     //                          log) so a LEFTOVER --apply-migration in a process-managed unit
     //                          (systemd/docker `Restart=always`) MOUNTS instead of re-applying + crash-
-    //                          looping on a duplicate_column (42701). planUpdateBoot's live target-probe
-    //                          discriminates a genuine leftover (MOUNT) from an UNAPPLIED pure-subset
-    //                          removal (APPLY — the reviewed drop target still exists) and REFUSES an
-    //                          undeterminable destructive delta fail-closed — parity with product-boot.
+    //                          looping on a duplicate_column (42701). planUpdateBoot's live probe of the
+    //                          objects the DELTA names discriminates a genuine leftover (MOUNT) from an
+    //                          UNAPPLIED delta (APPLY — a reviewed drop target still exists, or an object
+    //                          the delta CREATEs is absent) and REFUSES a half-landed or undeterminable
+    //                          delta fail-closed — parity with product-boot.
     //   - 'absent'           → REFUSE fail-closed (update mode evolves an EXISTING schema; a first boot
     //                          must materialize via the plain path — dropping --apply-migration).
     // `deploy()` stays BYTE-UNCHANGED throughout: when planUpdateBoot routes APPLY it GATES each migration

@@ -883,10 +883,15 @@ change is applied by the explicit `--apply-migration` flag below.
   schema (author the delta with [`plan --against`](#plan)). It reaches the same gated
   migration engine `plan` previews: a **destructive** statement without a covering
   reviewed **`--allowlist <file.json>`** entry is **blocked**. It is **reboot-safe** —
-  the boot classifies the live schema first and mounts a present-matching schema
-  instead of re-applying a non-idempotent delta, so a `Restart=always` unit applies the
-  delta once and mounts thereafter (still, drop the flag once it lands to keep intent
-  explicit). It is rejected with `--dry-run` (a dry-run touches no database) and against a
+  before deciding, the boot probes the objects the delta itself names: one whose objects
+  are already in the state an applied delta leaves them in is **mounted** rather than
+  re-applied (a non-idempotent delta re-applied would crash the boot), so a
+  `Restart=always` unit applies the delta once and mounts thereafter (still, drop the flag
+  once it lands to keep intent explicit). A delta whose objects are **not** there is
+  **applied**, and the boot names the object it looked for — including when the live schema
+  is drift-clean against the spec, which it always is for an object the spec cannot express
+  (a hand-shaped index). A delta found only **partly** applied is **refused**, naming both
+  sides, rather than half re-applied. It is rejected with `--dry-run` (a dry-run touches no database) and against a
   frontend-only spec (the static profile below touches no database either), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
   Both file paths are jailed exactly like the spec path.

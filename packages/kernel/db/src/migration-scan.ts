@@ -346,6 +346,42 @@ function stripStringLiteralBodies(s: string): string {
 }
 
 /**
+ * Drizzle's statement separator. `readMigrationFiles` splits each migration file on this exact string
+ * whether or not the statement before it ended in `;`, so a chain that omits the semicolons is still
+ * several statements to the migrator — and must be several statements to a reader of the same file.
+ */
+const BREAKPOINT = '--> statement-breakpoint';
+
+/** One statement of a migration: its 1-based starting line, and its whitespace-collapsed text. */
+export interface MigrationStatement {
+  readonly line: number;
+  readonly text: string;
+}
+
+/**
+ * Split migration SQL into the statements a MIGRATOR would run — the same literal-aware reading
+ * `scanMigrationSql` does, exposed for a caller that must decide something about the statements
+ * themselves rather than about their destructiveness.
+ *
+ * The RAW text is cut on the breakpoint marker FIRST and each chunk is only then walked for a
+ * literal-aware `;`. That ORDER is the point: drizzle has no lexer, so a marker sitting behind a `--`
+ * earlier on the same line is still a boundary to it, and a reader that stripped comments first would
+ * swallow the marker together with the statement behind it. Line numbers are lifted back onto the
+ * file, so a diagnostic still points at the line on disk.
+ */
+export function splitMigrationStatements(sql: string): MigrationStatement[] {
+  const statements: MigrationStatement[] = [];
+  let lineOffset = 0;
+  for (const chunk of sql.split(BREAKPOINT)) {
+    for (const stmt of splitStatements(chunk)) {
+      statements.push({ line: stmt.line + lineOffset, text: stmt.text });
+    }
+    lineOffset += (chunk.match(/\n/g) ?? []).length;
+  }
+  return statements;
+}
+
+/**
  * Scan migration SQL for destructive statements. Uses the literal-aware `splitStatements`
  * tokenizer (comments + `;` terminators inside string/dollar-quote literals are NOT mistaken
  * for structure), maps each statement back to its starting line, runs every detector on a

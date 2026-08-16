@@ -352,6 +352,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`deploy --apply-migration` (and `RAYSPEC_UPDATE_MIGRATION`) now probes the objects the delta
+  itself names, so a reviewed delta is applied instead of being reported as already applied.** The
+  boot decided that question on the drift check alone, and the drift check only ever inspects what
+  the document declares. An object the grammar cannot express — a hand-shaped index is the canonical
+  one — is therefore invisible to it, so the live schema read "drift-clean" whether or not the delta
+  had run: such a delta was **mounted without applying**, the boot said it "was already applied on a
+  PRIOR boot", and it told the operator to remove the flag — after which the change was lost unless
+  someone checked the catalog by hand. The boot now probes the delta's own objects before deciding.
+  Every object an additive statement creates (`CREATE TABLE`, `CREATE [UNIQUE] INDEX`,
+  `ALTER TABLE … ADD COLUMN`, `ALTER TABLE … ADD CONSTRAINT`) must be **present** for a mount, exactly
+  as every reviewed `DROP` target must already be **gone**. A delta whose objects are absent is
+  **applied**, through the same reviewed gate a drifted boot uses, and the boot names the object it
+  looked for and did not find. A delta found only **partly** applied is **refused**, fail-closed,
+  naming what was there and what was not — it can be neither re-applied nor called applied. A delta
+  that genuinely did land still **mounts**, unchanged: a non-idempotent delta is never re-applied.
+  **The destructive half is unchanged** in every respect: a still-present `DROP` target still routes
+  to apply, an undeterminable destructive statement still refuses, and the allowlist gate is
+  untouched.
+- **The drift-clean mount log no longer states a probe result it did not produce.** It read "its
+  additive objects are present and any destructive targets were PROBED gone" on every mount, including
+  one where nothing had been looked for. It is now built from the probe: it names the objects found
+  present and the targets found gone, and when the delta names no object this boot can probe it says
+  that instead — and stops calling the environment stale, telling the operator to check the schema by
+  hand before removing the flag.
+
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
   may not contain a `$`, so digits after the first character are legal (`$tag1$`). The scan matched
