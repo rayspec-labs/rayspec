@@ -20,7 +20,9 @@ import {
   assembleExtractionInstructions,
   buildLiveAgent,
   buildSttAdapter,
+  extractAdditiveObjects,
   extractDestructiveTarget,
+  leftoverUpdateEnvMountLog,
   makeExtractionBackend,
   mediaPrepEnabled,
   nativeValidatedDowngradeWarning,
@@ -1192,6 +1194,56 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
     expect(plan.deployMode).toBe('mounted');
     expect(logs[0]).not.toMatch(/additive objects are present/); // nothing measured that
     expect(logs[0]).toMatch(/NO object this boot can probe/);
+    expect(logs[0]).toMatch(/nothing in this boot can tell you/); // true here: an INSERT leaves no trace
+  });
+
+  it('present-matching + a delta the CLASSIFY itself proves ran → MOUNTS saying so, not "nothing can tell you"', async () => {
+    // A SET NOT NULL / type change / rename names no probeable object, but it is NOT unmeasured: unapplied
+    // it would have classified DRIFTED. Sending the operator to a manual catalog check here, and dropping
+    // the "the env is stale" instruction, would replace one false sentence with its opposite.
+    const provenDelta: PlannedMigration[] = [
+      {
+        name: '0007_not_null.sql',
+        sql: 'ALTER TABLE "parts" ALTER COLUMN "label" SET NOT NULL;\n',
+        allowlist: [
+          {
+            kind: 'set-not-null',
+            match: 'ALTER TABLE "parts" ALTER COLUMN "label" SET NOT NULL',
+            reason: 'reviewed',
+          },
+        ],
+      },
+    ];
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      provenDelta,
+      SPEC,
+      (m) => logs.push(m),
+      neverExists,
+    );
+    expect(plan.deployMode).toBe('mounted');
+    expect(plan.migrations).toEqual([]);
+    expect(logs[0]).toMatch(/PROVES its statements already ran/);
+    expect(logs[0]).toMatch(/proven applied by the drift-clean classify/);
+    expect(logs[0]).toMatch(/set-not-null/); // the evidence is quoted, not asserted
+    expect(logs[0]).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // the env IS stale, and it says so
+    expect(logs[0]).not.toMatch(/nothing in this boot can tell you/);
+    expect(logs[0]).not.toMatch(/CHECK THE SCHEMA BY HAND/);
+  });
+
+  it('the zero-evidence wording fires ONLY when there is no evidence of any kind', () => {
+    // Both wordings pinned side by side: the honest "nothing measured this" and the honest "this was
+    // measured" must never be printed for the other case.
+    expect(leftoverUpdateEnvMountLog({ present: [], gone: [], proven: [] })).toMatch(
+      /nothing in this boot can tell you/,
+    );
+    expect(
+      leftoverUpdateEnvMountLog({ present: [], gone: [], proven: ["rename-table ('…')"] }),
+    ).not.toMatch(/nothing in this boot can tell you/);
+    expect(leftoverUpdateEnvMountLog({ present: ['index "x"'], gone: [], proven: [] })).not.toMatch(
+      /nothing in this boot can tell you/,
+    );
   });
 
   it('present-matching + a HALF-LANDED delta → REFUSES, naming what it found and what it did not', async () => {
@@ -1269,7 +1321,10 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       mig('DROP TABLE "highlights";'),
       probe(new Set()),
     );
-    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: ['table "highlights"'] } });
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: ['table "highlights"'], proven: [] },
+    });
   });
 
   it('no destructive findings (additive-only) → the probe decides on the object the delta CREATEs', async () => {
@@ -1278,16 +1333,28 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       probed.push(p);
       return true;
     });
-    expect(route).toEqual({ kind: 'mount', probed: { present: ['table "x"'], gone: [] } });
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: ['table "x"'], gone: [], proven: [] },
+    });
     expect(probed).toEqual([{ kind: 'table', table: 'x' }]);
   });
 
-  it('a MIXED delta — one target gone, one still present → { kind: apply } (any-exists wins)', async () => {
+  it('a MIXED delta — one target gone, one still present → REFUSES (that IS a half-landed delta)', async () => {
+    // Both halves are evidence, and they disagree: the delta's first DROP ran and its second did not.
+    // Re-applying would raise 42P01 on the table that is already gone, which is exactly what the shipped
+    // "a delta found only PARTLY applied is REFUSED" sentence promises not to do.
     const route = await routePresentMatchingUpdate(
       mig('DROP TABLE "highlights";\n--> statement-breakpoint\nDROP TABLE "pinned_moments";'),
       probe(new Set(['pinned_moments'])), // highlights gone, pinned_moments still there
     );
-    expect(route).toEqual({ kind: 'apply', absent: [] });
+    expect(route).toEqual({
+      kind: 'refuse-half-landed',
+      landed: ['table "highlights" — a reviewed DROP in the delta names it, and it is GONE'],
+      unlanded: [
+        'table "pinned_moments" — a reviewed DROP in the delta names it, and it is STILL there',
+      ],
+    });
   });
 
   it('an APPLIED-AT-PRESENT-MATCHING kind (SET NOT NULL) → { kind: mount }, NOT refuse (no ENV-1 crash-loop)', async () => {
@@ -1303,7 +1370,16 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       ]),
       probe(new Set()),
     );
-    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: [] } });
+    // …and it is carried as CLASSIFY-DERIVED evidence, not as "nothing was measured": reaching
+    // present-matching at all IS the measurement for this kind.
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: {
+        present: [],
+        gone: [],
+        proven: [`set-not-null ('ALTER TABLE "note_artifacts" ALTER COLUMN "note" SET NOT NULL')`],
+      },
+    });
   });
 
   it('an UNDETERMINABLE destructive kind (TRUNCATE) → { kind: refuse }', async () => {
@@ -1443,8 +1519,10 @@ describe('routePresentMatchingUpdate — the objects the delta CREATEs are probe
     );
     expect(route).toEqual({
       kind: 'refuse-half-landed',
-      present: ['table "pinned_moments"'],
-      absent: ['index "pinned_moments_label_idx"'],
+      landed: ['table "pinned_moments" — a CREATE in the delta names it, and it is THERE'],
+      unlanded: [
+        'index "pinned_moments_label_idx" — a CREATE in the delta names it, and it is NOT there',
+      ],
     });
   });
 
@@ -1462,6 +1540,217 @@ describe('routePresentMatchingUpdate — the objects the delta CREATEs are probe
     );
     expect(route.kind).toBe('mount');
     expect(asked).toEqual([]);
+  });
+});
+
+/**
+ * A name is read the way the CATALOG holds it, or it is not read at all.
+ *
+ * The extractors here turn a statement into a probe QUESTION, so a name read only PARTLY is worse than
+ * no name: the boot then asks the live schema about an object the delta never mentions and believes the
+ * answer. A hand-authored delta is exactly the population this path exists for (the generator's own
+ * output is quoted and unqualified), so the shapes a human writes — `public.x`, `"a b"`, `UPPER_IDX` —
+ * are the ones that must not mis-parse.
+ */
+describe('the additive extractor reads an identifier WHOLE, folded, or not at all', () => {
+  const accept = 'CREATE TABLE "parts_extra" ("id" uuid);'; // the ACCEPT control: generator-shaped
+
+  it('ACCEPT CONTROL: a generator-shaped name is read exactly', () => {
+    expect(extractAdditiveObjects(accept)).toEqual([{ kind: 'table', table: 'parts_extra' }]);
+  });
+
+  it('a SCHEMA-QUALIFIED name yields NO object — never the schema read as the object', () => {
+    // Was: [{ kind: 'table', table: 'public' }] — the probe then asked whether a table called "public"
+    // exists, found none, and re-applied a delta that had already landed (42P07, crash-loop).
+    expect(extractAdditiveObjects('CREATE TABLE public.audit_log ("id" uuid);')).toEqual([]);
+    expect(extractAdditiveObjects('CREATE TABLE "public"."audit_log" ("id" uuid);')).toEqual([]);
+    expect(extractAdditiveObjects('CREATE INDEX public.parts_label_idx ON parts (label);')).toEqual(
+      [],
+    );
+    expect(extractAdditiveObjects('ALTER TABLE public.parts ADD COLUMN "note" text;')).toEqual([]);
+  });
+
+  it('an UNQUOTED name is FOLDED to lower case, the way the catalog stores it', () => {
+    expect(extractAdditiveObjects('CREATE INDEX Parts_Label_Idx ON parts (label);')).toEqual([
+      { kind: 'index', index: 'parts_label_idx' },
+    ]);
+    expect(extractAdditiveObjects('CREATE INDEX PARTS_LABEL_IDX ON parts (label);')).toEqual([
+      { kind: 'index', index: 'parts_label_idx' },
+    ]);
+    expect(extractAdditiveObjects('CREATE TABLE Parts_Extra (id uuid);')).toEqual([
+      { kind: 'table', table: 'parts_extra' },
+    ]);
+  });
+
+  it('a QUOTED name keeps its case and its unusual characters — read to the closing quote', () => {
+    // Was: truncated at the first character outside [A-Za-z0-9_$] — `"parts extra"` became `parts`,
+    // an object the delta does not create, and a live `parts` MOUNTED a delta that never ran.
+    expect(extractAdditiveObjects('CREATE TABLE "parts extra" ("id" uuid);')).toEqual([
+      { kind: 'table', table: 'parts extra' },
+    ]);
+    expect(extractAdditiveObjects('CREATE TABLE "parts-archive" (id uuid);')).toEqual([
+      { kind: 'table', table: 'parts-archive' },
+    ]);
+    expect(extractAdditiveObjects('CREATE INDEX "Parts Label Idx" ON "parts" ("label");')).toEqual([
+      { kind: 'index', index: 'Parts Label Idx' },
+    ]);
+  });
+
+  it('a name that cannot be read whole yields NO object (an unterminated quote, a non-ASCII letter)', () => {
+    expect(extractAdditiveObjects('CREATE TABLE "parts_extra (id uuid);')).toEqual([]);
+    expect(extractAdditiveObjects('CREATE TABLE café (id uuid);')).toEqual([]);
+  });
+
+  it('an object the SAME delta RENAMEs or DROPs away is not required to be present', () => {
+    // A landed `CREATE TABLE "t_new"` + `RENAME TO "t"` leaves NO t_new. Demanding one routed a fully
+    // applied delta to APPLY, which re-ran a rename that cannot succeed twice.
+    expect(
+      extractAdditiveObjects(
+        'CREATE TABLE "t_new" ("id" uuid);\n--> statement-breakpoint\nALTER TABLE "t_new" RENAME TO "t";',
+      ),
+    ).toEqual([]);
+    expect(
+      extractAdditiveObjects(
+        'ALTER TABLE "parts" ADD COLUMN "note" text;\n--> statement-breakpoint\n' +
+          'ALTER TABLE "parts" RENAME COLUMN "note" TO "label";',
+      ),
+    ).toEqual([]);
+    expect(
+      extractAdditiveObjects(
+        'CREATE INDEX "tmp_idx" ON "parts" ("label");\n--> statement-breakpoint\nDROP INDEX "tmp_idx";',
+      ),
+    ).toEqual([]);
+    expect(
+      extractAdditiveObjects(
+        'ALTER TABLE "parts" ADD CONSTRAINT "parts_ck" CHECK ("label" <> \'\');\n' +
+          '--> statement-breakpoint\nALTER TABLE "parts" DROP CONSTRAINT "parts_ck";',
+      ),
+    ).toEqual([]);
+    // …and a member of a table the delta renames away goes with it (it is unreachable under that name).
+    expect(
+      extractAdditiveObjects(
+        'CREATE TABLE "t_new" ("id" uuid);\n--> statement-breakpoint\n' +
+          'ALTER TABLE "t_new" ADD CONSTRAINT "t_new_pk" PRIMARY KEY ("id");\n' +
+          '--> statement-breakpoint\nALTER TABLE "t_new" RENAME TO "t";',
+      ),
+    ).toEqual([]);
+    // An INDEX survives a table rename under its own name, so it stays as evidence.
+    expect(
+      extractAdditiveObjects(
+        'CREATE TABLE "t_new" ("id" uuid);\n--> statement-breakpoint\n' +
+          'CREATE INDEX "t_id_idx" ON "t_new" ("id");\n' +
+          '--> statement-breakpoint\nALTER TABLE "t_new" RENAME TO "t";',
+      ),
+    ).toEqual([{ kind: 'index', index: 't_id_idx' }]);
+  });
+
+  it('a create-then-rename delta that HAS landed MOUNTS instead of re-applying the rename', async () => {
+    const route = await routePresentMatchingUpdate(
+      [
+        {
+          name: 'd.sql',
+          sql: 'CREATE TABLE "t_new" ("id" uuid);\n--> statement-breakpoint\nALTER TABLE "t_new" RENAME TO "t";',
+          allowlist: [
+            {
+              kind: 'rename-table',
+              match: 'ALTER TABLE "t_new" RENAME TO "t"',
+              reason: 'reviewed',
+            },
+          ],
+        },
+      ],
+      async () => false, // the live schema holds "t", not "t_new" — what an APPLIED delta leaves
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: {
+        present: [],
+        gone: [],
+        proven: [`rename-table ('ALTER TABLE "t_new" RENAME TO "t"')`],
+      },
+    });
+  });
+
+  it('the DESTRUCTIVE extractor folds an unquoted target too (else a live table reads as GONE)', () => {
+    expect(extractDestructiveTarget('drop-table', 'DROP TABLE Highlights')).toEqual({
+      kind: 'drop-table',
+      table: 'highlights',
+    });
+    // …and a qualified or unreadable target still REFUSES upstream rather than probing a guess.
+    expect(extractDestructiveTarget('drop-table', 'DROP TABLE public.highlights')).toBeUndefined();
+    expect(
+      extractDestructiveTarget('drop-column', 'ALTER TABLE public.t DROP COLUMN "c"'),
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * "A delta found only PARTLY applied is REFUSED" — the sentence shipped in .env.example and the CLI
+ * reference — across the WHOLE matrix, not just the additive quadrant. Both halves of a delta are
+ * evidence; when they disagree the delta is half landed, and re-applying it raises 42P07 on an object it
+ * re-creates or 42P01 on a target it re-drops.
+ */
+describe('routePresentMatchingUpdate — the four quadrants of a delta with BOTH halves', () => {
+  const MIXED: PlannedMigration[] = [
+    {
+      name: '0007_mixed.sql',
+      sql:
+        'DROP TABLE "highlights";\n--> statement-breakpoint\n' +
+        'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n',
+      allowlist: [{ kind: 'drop-table', match: 'DROP TABLE "highlights"', reason: 'reviewed' }],
+    },
+  ];
+  const live = (names: ReadonlySet<string>) => async (p: SchemaObjectProbe) =>
+    names.has(p.kind === 'index' ? p.index : p.kind === 'table' ? p.table : '');
+
+  it('drop target STILL there + index ABSENT (it never ran) → APPLY, naming the index too', async () => {
+    const route = await routePresentMatchingUpdate(MIXED, live(new Set(['highlights'])));
+    expect(route).toEqual({ kind: 'apply', absent: ['index "parts_label_idx"'] });
+  });
+
+  it('drop target GONE + index PRESENT (it fully ran) → MOUNT', async () => {
+    const route = await routePresentMatchingUpdate(MIXED, live(new Set(['parts_label_idx'])));
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: ['index "parts_label_idx"'], gone: ['table "highlights"'], proven: [] },
+    });
+  });
+
+  it('drop target GONE + index ABSENT (half landed) → REFUSE, not a re-applied DROP (42P01)', async () => {
+    const route = await routePresentMatchingUpdate(MIXED, live(new Set()));
+    expect(route).toEqual({
+      kind: 'refuse-half-landed',
+      landed: ['table "highlights" — a reviewed DROP in the delta names it, and it is GONE'],
+      unlanded: ['index "parts_label_idx" — a CREATE in the delta names it, and it is NOT there'],
+    });
+  });
+
+  it('drop target STILL there + index PRESENT (half landed) → REFUSE, not a re-created index (42P07)', async () => {
+    const route = await routePresentMatchingUpdate(
+      MIXED,
+      live(new Set(['highlights', 'parts_label_idx'])),
+    );
+    expect(route).toEqual({
+      kind: 'refuse-half-landed',
+      landed: ['index "parts_label_idx" — a CREATE in the delta names it, and it is THERE'],
+      unlanded: [
+        'table "highlights" — a reviewed DROP in the delta names it, and it is STILL there',
+      ],
+    });
+  });
+
+  it('the REFUSAL the boot raises names both sides', async () => {
+    await expect(
+      planUpdateBoot(
+        'present-matching',
+        MIXED,
+        '/tmp/acme.product.yaml',
+        () => {},
+        live(new Set()),
+      ),
+    ).rejects.toThrow(
+      /HALF LANDED[\s\S]*ALREADY landed[\s\S]*highlights[\s\S]*NOT landed[\s\S]*parts_label_idx/,
+    );
   });
 });
 

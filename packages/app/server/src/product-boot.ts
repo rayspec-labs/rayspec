@@ -378,11 +378,13 @@ const LEFTOVER_UPDATE_ENV_HEADER =
  * stale on a measurement nobody took.
  */
 export function leftoverUpdateEnvMountLog(probed: ProbedObjects): string {
-  if (probed.present.length === 0 && probed.gone.length === 0) {
+  const anyProbed = probed.present.length > 0 || probed.gone.length > 0;
+  if (!anyProbed && probed.proven.length === 0) {
     return (
       `${LEFTOVER_UPDATE_ENV_HEADER}` +
       '    The reviewed delta names NO object this boot can probe (no CREATE TABLE / CREATE INDEX / ' +
-      'ALTER TABLE … ADD, no probeable DROP target), so NOTHING here measured whether it ran: this ' +
+      'ALTER TABLE … ADD, no probeable DROP target), and none of its statements is one the drift ' +
+      'check itself would have caught unapplied — so NOTHING here measured whether it ran: this ' +
       'boot MOUNTED without re-applying it (a non-idempotent delta re-applied would crash the boot) ' +
       'on the drift-clean classification ALONE.\n' +
       '    If the delta HAS landed, clear RAYSPEC_UPDATE_MIGRATION (and RAYSPEC_UPDATE_ALLOWLIST) ' +
@@ -398,11 +400,24 @@ export function leftoverUpdateEnvMountLog(probed: ProbedObjects): string {
     probed.gone.length > 0
       ? `      · gone, as its reviewed DROPs leave them: ${probed.gone.join(', ')}\n`
       : '';
+  // The classify-derived half. It is EVIDENCE, not an assumption: an unapplied statement of these kinds
+  // leaves a type / nullability / presence difference the drift check reports, so a drift-clean
+  // classification is itself the measurement — and saying so beats sending the operator to a manual
+  // catalog check the boot did not need.
+  const proven =
+    probed.proven.length > 0
+      ? `      · proven applied by the drift-clean classify (unapplied, ${
+          probed.proven.length === 1 ? 'it' : 'each'
+        } would have shown as DRIFT): ${probed.proven.join(', ')}\n`
+      : '';
+  const lead = anyProbed
+    ? '    This boot PROBED the objects the delta itself names, and every one of them is in the state ' +
+      'an APPLIED delta leaves it in:\n'
+    : '    The reviewed delta names no object this boot can probe, but the drift-clean classification ' +
+      'itself PROVES its statements already ran:\n';
   return (
     `${LEFTOVER_UPDATE_ENV_HEADER}` +
-    '    This boot PROBED the objects the delta itself names, and every one of them is in the state an ' +
-    'APPLIED delta leaves it in:\n' +
-    `${present}${gone}` +
+    `${lead}${present}${gone}${proven}` +
     '    — so the delta was already applied on a PRIOR boot, and this boot MOUNTED without re-applying ' +
     'it (a non-idempotent delta re-applied would crash the boot).\n' +
     '    REMOVE RAYSPEC_UPDATE_MIGRATION (and RAYSPEC_UPDATE_ALLOWLIST) from the deployment env — it ' +
@@ -443,12 +458,19 @@ export type SchemaObjectProbe =
   | { kind: 'index'; index: string }
   | { kind: 'constraint'; table: string; constraint: string };
 
-/** What the live probe actually MEASURED — the only thing the drift-clean mount log may claim. */
+/** What this boot actually ESTABLISHED — the only thing the drift-clean mount log may claim. */
 export interface ProbedObjects {
   /** Objects the delta CREATEs that the live schema HAS, named as the log prints them. */
   readonly present: readonly string[];
   /** Reviewed DROP targets the live schema no longer has, named the same way. */
   readonly gone: readonly string[];
+  /**
+   * Statements no probe is needed for, because the drift-clean CLASSIFY itself proves they ran: the
+   * {@link APPLIED_AT_PRESENT_MATCHING} kinds leave a detectable type / nullability / presence
+   * difference while unapplied, so reaching `present-matching` IS the measurement. Named by kind and
+   * statement, so the log quotes the evidence rather than asserting the conclusion.
+   */
+  readonly proven: readonly string[];
 }
 
 /**
@@ -497,50 +519,129 @@ const APPLIED_AT_PRESENT_MATCHING: ReadonlySet<DestructiveKind> = new Set<Destru
   'rename-column',
 ]);
 
-/** A safe SQL identifier as the generator / `diffProductStores` emit it (optionally double-quoted). */
-const IDENT = '"?([A-Za-z_][A-Za-z0-9_$]*)"?';
+/**
+ * Where an identifier may legitimately END. Anything else immediately after a name means the name was
+ * NOT read whole (a non-ASCII letter, a stray quote), and a half-read name is the one thing this module
+ * must never produce: the probe would ask the catalog a confident question about an object the delta
+ * does not name.
+ */
+const IDENT_BOUNDARY = /^[\s(),;.]/;
+
+/** One identifier, read WHOLE — plus what follows it and whether it was SCHEMA-QUALIFIED. */
+interface ReadIdentifier {
+  readonly name: string;
+  readonly rest: string;
+  readonly qualified: boolean;
+}
+
+/**
+ * Read ONE SQL identifier off the FRONT of `input` — WHOLE or not at all.
+ *
+ * The rule this enforces is that a name is either read exactly as Postgres would store it, or not read:
+ *   - a DOUBLE-QUOTED name is taken from the opening quote to its closing quote (a doubled `""` is one
+ *     literal quote inside the name), so a space / hyphen / dot inside it is part of the NAME;
+ *   - an UNQUOTED name is FOLDED to lower case, because that is what the catalog holds — probing
+ *     `Parts_Label_Idx` verbatim asks about an object no `CREATE INDEX Parts_Label_Idx` ever created;
+ *   - either form must end at {@link IDENT_BOUNDARY}; otherwise the name ran past what this can read and
+ *     the read FAILS rather than truncating.
+ * A `schema.name` qualifier is read through to the LAST part and reported via `qualified`, so callers
+ * can refuse to guess which schema a qualified statement targets (the probes here are scoped to ONE).
+ */
+function readIdentifier(input: string): ReadIdentifier | undefined {
+  const s = input.replace(/^\s+/, '');
+  let name: string;
+  let rest: string;
+  if (s.startsWith('"')) {
+    const quoted = /^"((?:[^"]|"")*)"/.exec(s);
+    if (!quoted) return undefined; // an unterminated quoted identifier is unreadable, not a prefix
+    name = (quoted[1] as string).replace(/""/g, '"');
+    rest = s.slice(quoted[0].length);
+  } else {
+    const bare = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(s);
+    if (!bare) return undefined;
+    name = bare[0].toLowerCase(); // Postgres FOLDS an unquoted identifier; the catalog holds the fold
+    rest = s.slice(bare[0].length);
+  }
+  if (name === '' || (rest !== '' && !IDENT_BOUNDARY.test(rest))) return undefined;
+  if (rest.startsWith('.')) {
+    const qualified = readIdentifier(rest.slice(1));
+    return qualified === undefined ? undefined : { ...qualified, qualified: true };
+  }
+  return { name, rest, qualified: false };
+}
+
+/**
+ * The same read, but an object this boot can actually probe: a SCHEMA-QUALIFIED name is NOT one, since
+ * the probes are scoped to a single Postgres schema and nothing here knows whether the qualifier names
+ * it. Callers treat `undefined` the way they treat any unreadable statement — never as a guess.
+ */
+function readLocalName(input: string): { name: string; rest: string } | undefined {
+  const read = readIdentifier(input);
+  if (read === undefined || read.qualified) return undefined;
+  return { name: read.name, rest: read.rest };
+}
+
+/** Consume a fixed keyword prefix, returning what follows it (or `undefined` when it is not there). */
+function afterKeyword(keyword: RegExp, s: string): string | undefined {
+  const m = keyword.exec(s);
+  return m === null ? undefined : s.slice(m[0].length);
+}
 
 function truncateStmt(text: string): string {
   const s = text.replace(/\s*;\s*$/, '').trim();
   return s.length > 80 ? `${s.slice(0, 80)}…` : s;
 }
 
+const DROP_TABLE_HEAD = /^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?/i;
+const DROP_INDEX_HEAD = /^DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?/i;
+const ALTER_TABLE_HEAD = /^ALTER\s+TABLE\s+(?:ONLY\s+)?/i;
+// `ALTER TABLE "t" DROP COLUMN "c"` and the bare `ALTER TABLE "t" DROP "c"` (both flagged drop-column).
+const DROP_COLUMN_KW = /^\s+DROP\s+(?:COLUMN\s+)?(?:IF\s+EXISTS\s+)?/i;
+const DROP_CONSTRAINT_KW = /^\s+DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?/i;
+
 /**
  * Extract the schema target from a superset-blind destructive statement's text (whitespace already
  * collapsed by the scan; a trailing `;` tolerated). Returns `undefined` for anything it cannot parse with
  * confidence — the router treats that as fail-closed REFUSE (never a silent mount). Recognizes the exact
  * forms `diffProductStores` emits (double-quoted identifiers) plus IF EXISTS / bare-DROP variants.
+ *
+ * Every name goes through {@link readIdentifier}, so it is read WHOLE or not at all: a multi-target
+ * `DROP TABLE "a", "b"`, a schema-qualified `DROP TABLE public.t` and a name this cannot end cleanly all
+ * refuse, and an UNQUOTED name is folded the way the catalog folds it (`DROP TABLE Parts` probes
+ * `parts`, which is the table that statement drops — asking for `Parts` would answer "already gone" for
+ * a table that is still there).
  */
 export function extractDestructiveTarget(
   kind: DestructiveKind,
   statementText: string,
 ): DestructiveTargetProbe | undefined {
   const s = statementText.replace(/\s*;\s*$/, '').trim();
-  if (kind === 'drop-table') {
-    const m = new RegExp(`^DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?${IDENT}\\s*$`, 'i').exec(s);
-    return m ? { kind, table: m[1] as string } : undefined;
+  if (kind === 'drop-table' || kind === 'drop-index') {
+    const head = afterKeyword(kind === 'drop-table' ? DROP_TABLE_HEAD : DROP_INDEX_HEAD, s);
+    if (head === undefined) return undefined;
+    const target = readLocalName(head);
+    // Anchored at the statement's END, exactly as before: a trailing `, "b"` / `CASCADE` means this
+    // statement does more than the one target it just read, so it is not determinable here.
+    if (target === undefined || target.rest.trim() !== '') return undefined;
+    return kind === 'drop-table'
+      ? { kind: 'drop-table', table: target.name }
+      : { kind: 'drop-index', index: target.name };
   }
-  if (kind === 'drop-column') {
-    // `ALTER TABLE "t" DROP COLUMN "c"` and the bare `ALTER TABLE "t" DROP "c"` (both flagged drop-column).
-    const m = new RegExp(
-      `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${IDENT}\\s+DROP\\s+(?:COLUMN\\s+)?(?:IF\\s+EXISTS\\s+)?${IDENT}`,
-      'i',
-    ).exec(s);
-    return m ? { kind, table: m[1] as string, column: m[2] as string } : undefined;
-  }
-  if (kind === 'drop-index') {
-    const m = new RegExp(
-      `^DROP\\s+INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+EXISTS\\s+)?${IDENT}\\s*$`,
-      'i',
-    ).exec(s);
-    return m ? { kind, index: m[1] as string } : undefined;
-  }
-  if (kind === 'drop-constraint') {
-    const m = new RegExp(
-      `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${IDENT}\\s+DROP\\s+CONSTRAINT\\s+(?:IF\\s+EXISTS\\s+)?${IDENT}`,
-      'i',
-    ).exec(s);
-    return m ? { kind, table: m[1] as string, constraint: m[2] as string } : undefined;
+  if (kind === 'drop-column' || kind === 'drop-constraint') {
+    const head = afterKeyword(ALTER_TABLE_HEAD, s);
+    if (head === undefined) return undefined;
+    const table = readLocalName(head);
+    if (table === undefined) return undefined;
+    const rest = afterKeyword(
+      kind === 'drop-column' ? DROP_COLUMN_KW : DROP_CONSTRAINT_KW,
+      table.rest,
+    );
+    if (rest === undefined) return undefined;
+    const member = readLocalName(rest);
+    if (member === undefined) return undefined;
+    return kind === 'drop-column'
+      ? { kind: 'drop-column', table: table.name, column: member.name }
+      : { kind: 'drop-constraint', table: table.name, constraint: member.name };
   }
   return undefined;
 }
@@ -567,22 +668,101 @@ function destructiveTargetObject(target: DestructiveTargetProbe): SchemaObjectPr
  * presence proves nothing about whether THIS delta ran — the object may predate it — and re-running it
  * cannot crash. Reading it as evidence would be another claim the schema never supported.
  */
-const CREATE_TABLE_RE = new RegExp(`^CREATE\\s+TABLE\\s+(?!IF\\b)${IDENT}`, 'i');
-const CREATE_INDEX_RE = new RegExp(
-  `^CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+(?:CONCURRENTLY\\s+)?(?!(?:ON|CONCURRENTLY|IF)\\b)${IDENT}`,
-  'i',
-);
-const ADD_COLUMN_RE = new RegExp(
-  `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${IDENT}\\s+ADD\\s+COLUMN\\s+(?!IF\\b)${IDENT}`,
-  'i',
-);
-const ADD_CONSTRAINT_RE = new RegExp(
-  `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?${IDENT}\\s+ADD\\s+CONSTRAINT\\s+${IDENT}`,
-  'i',
-);
+const CREATE_TABLE_HEAD = /^CREATE\s+TABLE\s+(?!IF\b)/i;
+const CREATE_INDEX_HEAD =
+  /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?!(?:ON|CONCURRENTLY|IF)\b)/i;
+const ADD_COLUMN_KW = /^\s+ADD\s+COLUMN\s+(?!IF\b)/i;
+const ADD_CONSTRAINT_KW = /^\s+ADD\s+CONSTRAINT\s+/i;
 
 /**
- * Extract the live-schema objects a delta's ADDITIVE statements CREATE. On a `present-matching`
+ * The statement forms that take an object AWAY again — the other half of what a delta does to the
+ * objects it names. A delta that CREATEs `t_new` and then RENAMEs it to `t` leaves NO `t_new` behind, so
+ * requiring `t_new` to be present would read a fully-applied delta as unapplied and re-run it.
+ * (`ALTER TABLE … RENAME TO` does not rename the table's INDEXes, so an index keeps standing as
+ * evidence; its COLUMNs and CONSTRAINTs are no longer reachable under the old table name and do not.)
+ */
+const ALTER_INDEX_HEAD = /^ALTER\s+INDEX\s+(?:IF\s+EXISTS\s+)?/i;
+const RENAME_TO_KW = /^\s+RENAME\s+TO\s+/i;
+const RENAME_CONSTRAINT_KW = /^\s+RENAME\s+CONSTRAINT\s+/i;
+const RENAME_COLUMN_KW = /^\s+RENAME\s+(?:COLUMN\s+)?/i;
+
+/** The one object a statement CREATEs, or `undefined` when this cannot name one WHOLE. */
+function additiveObject(text: string): SchemaObjectProbe | undefined {
+  const createTable = afterKeyword(CREATE_TABLE_HEAD, text);
+  if (createTable !== undefined) {
+    const read = readLocalName(createTable);
+    return read === undefined ? undefined : { kind: 'table', table: read.name };
+  }
+  const createIndex = afterKeyword(CREATE_INDEX_HEAD, text);
+  if (createIndex !== undefined) {
+    const read = readLocalName(createIndex);
+    return read === undefined ? undefined : { kind: 'index', index: read.name };
+  }
+  const alterTable = afterKeyword(ALTER_TABLE_HEAD, text);
+  if (alterTable === undefined) return undefined;
+  const table = readLocalName(alterTable);
+  if (table === undefined) return undefined;
+  const addColumn = afterKeyword(ADD_COLUMN_KW, table.rest);
+  if (addColumn !== undefined) {
+    const read = readLocalName(addColumn);
+    return read === undefined
+      ? undefined
+      : { kind: 'column', table: table.name, column: read.name };
+  }
+  const addConstraint = afterKeyword(ADD_CONSTRAINT_KW, table.rest);
+  if (addConstraint === undefined) return undefined;
+  const read = readLocalName(addConstraint);
+  return read === undefined
+    ? undefined
+    : { kind: 'constraint', table: table.name, constraint: read.name };
+}
+
+/** The one object a statement RENAMEs or DROPs away, or `undefined` when it takes none away. */
+function removedObject(text: string): SchemaObjectProbe | undefined {
+  // drop-constraint BEFORE drop-column: the bare-DROP column form (`ALTER TABLE "t" DROP "c"`) also
+  // matches `DROP CONSTRAINT "c"` and would read the keyword itself as the column name.
+  for (const kind of ['drop-table', 'drop-index', 'drop-constraint', 'drop-column'] as const) {
+    const target = extractDestructiveTarget(kind, text);
+    if (target !== undefined) return destructiveTargetObject(target);
+  }
+  const alterIndex = afterKeyword(ALTER_INDEX_HEAD, text);
+  if (alterIndex !== undefined) {
+    const index = readLocalName(alterIndex);
+    if (index === undefined) return undefined;
+    return afterKeyword(RENAME_TO_KW, index.rest) === undefined
+      ? undefined
+      : { kind: 'index', index: index.name };
+  }
+  const alterTable = afterKeyword(ALTER_TABLE_HEAD, text);
+  if (alterTable === undefined) return undefined;
+  const table = readLocalName(alterTable);
+  if (table === undefined) return undefined;
+  if (afterKeyword(RENAME_TO_KW, table.rest) !== undefined) {
+    return { kind: 'table', table: table.name };
+  }
+  const renameConstraint = afterKeyword(RENAME_CONSTRAINT_KW, table.rest);
+  if (renameConstraint !== undefined) {
+    const read = readLocalName(renameConstraint);
+    return read === undefined
+      ? undefined
+      : { kind: 'constraint', table: table.name, constraint: read.name };
+  }
+  const renameColumn = afterKeyword(RENAME_COLUMN_KW, table.rest);
+  if (renameColumn === undefined) return undefined;
+  const read = readLocalName(renameColumn);
+  return read === undefined ? undefined : { kind: 'column', table: table.name, column: read.name };
+}
+
+/** One object's identity, for subtracting what the SAME delta takes away again. */
+function objectKey(object: SchemaObjectProbe): string {
+  if (object.kind === 'table') return `table:${object.table}`;
+  if (object.kind === 'column') return `column:${object.table}.${object.column}`;
+  if (object.kind === 'index') return `index:${object.index}`;
+  return `constraint:${object.table}.${object.constraint}`;
+}
+
+/**
+ * Extract the live-schema objects a delta's ADDITIVE statements leave BEHIND. On a `present-matching`
  * classification these are the ONLY evidence there is about whether the delta itself ran: `detectDrift`
  * introspects the NEW spec's stores/columns/FKs, so an object the spec cannot express — a hand-shaped
  * index is the canonical one — is invisible to it and the classification reads the same either way.
@@ -590,37 +770,36 @@ const ADD_CONSTRAINT_RE = new RegExp(
  * Statements come from the SAME literal-aware split the destructive scan reads (`splitMigrationStatements`),
  * so a `;` inside a dollar-quoted body is not a boundary and a `--> statement-breakpoint` behind a
  * comment marker still is one. A statement this cannot name an object for contributes NOTHING rather
- * than a guess: a data statement, a CREATE TYPE, an unnamed index, an `IF NOT EXISTS` form. The caller
- * reports exactly what comes back here and claims nothing about the rest.
+ * than a guess: a data statement, a CREATE TYPE, an unnamed index, an `IF NOT EXISTS` form, a
+ * SCHEMA-QUALIFIED name (the probes are scoped to one schema and nothing here knows which one the
+ * qualifier means), or any name that cannot be read whole. That is the whole contract — a name read only
+ * PARTLY would become a confident probe question about an object the delta never names, which is the
+ * defect this module exists to close, so it is the one outcome that is not allowed.
+ *
+ * An object the SAME delta later RENAMEs or DROPs away is subtracted: a fully-applied
+ * `CREATE TABLE "t_new"` + `ALTER TABLE "t_new" RENAME TO "t"` leaves no `t_new`, and demanding one
+ * would route a landed delta to APPLY and re-run a rename that cannot succeed twice.
  */
 export function extractAdditiveObjects(sql: string): SchemaObjectProbe[] {
-  const objects: SchemaObjectProbe[] = [];
+  const created: SchemaObjectProbe[] = [];
+  const removed = new Set<string>();
+  const removedTables = new Set<string>();
   for (const { text } of splitMigrationStatements(sql)) {
-    const table = CREATE_TABLE_RE.exec(text);
-    if (table) {
-      objects.push({ kind: 'table', table: table[1] as string });
+    const object = additiveObject(text);
+    if (object !== undefined) {
+      created.push(object);
       continue;
     }
-    const index = CREATE_INDEX_RE.exec(text);
-    if (index) {
-      objects.push({ kind: 'index', index: index[1] as string });
-      continue;
-    }
-    const column = ADD_COLUMN_RE.exec(text);
-    if (column) {
-      objects.push({ kind: 'column', table: column[1] as string, column: column[2] as string });
-      continue;
-    }
-    const constraint = ADD_CONSTRAINT_RE.exec(text);
-    if (constraint) {
-      objects.push({
-        kind: 'constraint',
-        table: constraint[1] as string,
-        constraint: constraint[2] as string,
-      });
-    }
+    const gone = removedObject(text);
+    if (gone === undefined) continue;
+    removed.add(objectKey(gone));
+    if (gone.kind === 'table') removedTables.add(gone.table);
   }
-  return objects;
+  return created.filter(
+    (object) =>
+      !removed.has(objectKey(object)) &&
+      !(object.kind !== 'index' && removedTables.has(object.table)),
+  );
 }
 
 /** How an object is NAMED to an operator — the same words the probe asked its question in. */
@@ -636,35 +815,47 @@ export type PresentMatchingRoute =
   | { kind: 'mount'; probed: ProbedObjects } // a genuine LEFTOVER env — and what proved it
   | { kind: 'apply'; absent: readonly string[] } // UNAPPLIED — a drop target exists, or a CREATE's object does not
   | { kind: 'refuse'; reason: string } // an UNDETERMINABLE destructive statement — fail-closed
-  | { kind: 'refuse-half-landed'; present: readonly string[]; absent: readonly string[] }; // partly there
+  // partly there — each side already worded as the evidence it is
+  | { kind: 'refuse-half-landed'; landed: readonly string[]; unlanded: readonly string[] };
 
 /**
  * Decide, for a `present-matching` classification in UPDATE mode, whether the reviewed delta is a genuine
  * LEFTOVER env (MOUNT) or one that has NOT been applied and must still run (APPLY) — by PROBING the
  * objects the DELTA names, in both directions: each superset-blind destructive TARGET (gone iff the
  * delta ran) and each object an additive statement CREATEs (present iff it ran). DB-free (the probe is
- * injected), so it is exhaustively unit-testable with a fake probe:
- *   - ANY probed drop target STILL EXISTS → APPLY (the reviewed drop never ran — route to deploy()'s
- *     gate). Unchanged, and decided FIRST: the destructive half's routing is exactly what it was.
- *   - every object the delta CREATEs is ABSENT → APPLY, naming them: the delta never ran, and on a
- *     drift-clean schema nothing else can say so (issue #440 — this MOUNTED, and the change was lost).
- *   - some of those objects present and some absent → REFUSE fail-closed: a HALF-LANDED delta can be
- *     neither re-applied (the ones already there raise a duplicate-object error) nor called applied.
+ * injected), so it is exhaustively unit-testable with a fake probe.
+ *
+ * Every statement contributes to ONE of two piles, and the decision is made on the piles — never on half
+ * of the evidence with the other half computed and discarded:
+ *   - LANDED   — an object a CREATE names and the schema HAS; a reviewed DROP target that is GONE; a
+ *                statement the drift-clean classify itself proves ran ({@link APPLIED_AT_PRESENT_MATCHING}).
+ *   - UNLANDED — an object a CREATE names and the schema does NOT have; a reviewed DROP target that is
+ *                STILL there.
+ * then:
+ *   - nothing UNLANDED → MOUNT, carrying WHAT was established so the log can claim only that (a delta
+ *     that names nothing probeable at all lands here too, with an empty pile and a log that says so).
+ *   - UNLANDED only → APPLY, through the same reviewed gate a drifted boot uses. `absent` names the
+ *     objects a CREATE named and the schema does not have (issue #440 — this MOUNTED, and the change was
+ *     lost); a still-present DROP target routes here just as it always did, and still logs nothing of its
+ *     own — deploy() announces the apply and the reviewed DROP is its own announcement.
+ *   - BOTH piles non-empty → REFUSE fail-closed, naming both sides. A half-landed delta can be neither
+ *     re-applied (an object already created raises 42P07, a DROP whose target is already gone raises
+ *     42P01, a rename cannot run twice) nor called applied. This holds across the two halves, not just
+ *     within the additive one: "partly applied is refused" is the shipped guarantee.
  *   - a statement we cannot parse a target from, or an undeterminable kind (TRUNCATE / DELETE /
  *     DROP SCHEMA / …) → REFUSE fail-closed (cannot tell applied from unapplied by schema).
- *   - everything probed is in the state an applied delta leaves it in (including a delta that names
- *     nothing probeable at all) → MOUNT, carrying WHAT was probed so the log can claim only that.
- * A destructive kind in {@link APPLIED_AT_PRESENT_MATCHING} is skipped: present-matching already PROVES
- * it applied (detectDrift inspects type/nullability/presence), so it is consistent with a leftover.
+ * An {@link APPLIED_AT_PRESENT_MATCHING} kind never refuses ON ITS OWN — with no unlanded evidence the
+ * boot MOUNTS exactly as before, so a legitimate leftover after a non-subset update is unaffected.
  */
 export async function routePresentMatchingUpdate(
   migrations: readonly PlannedMigration[],
   probeObject: (probe: SchemaObjectProbe) => Promise<boolean>,
 ): Promise<PresentMatchingRoute> {
-  let anyTargetExists = false;
-  const gone: string[] = [];
-  const present: string[] = [];
-  const absent: string[] = [];
+  const gone: string[] = []; // a reviewed DROP target, probed GONE          → landed
+  const present: string[] = []; // an object a CREATE names, probed THERE    → landed
+  const proven: string[] = []; // the classify itself proves it ran          → landed
+  const absent: string[] = []; // an object a CREATE names, probed MISSING   → unlanded
+  const stillThere: string[] = []; // a reviewed DROP target, probed PRESENT → unlanded
   for (const migration of migrations) {
     const scan = scanMigrationSql(migration.sql, migration.allowlist ?? []);
     for (const finding of scan.findings) {
@@ -677,9 +868,9 @@ export async function routePresentMatchingUpdate(
           };
         }
         const object = destructiveTargetObject(target);
-        if (await probeObject(object)) anyTargetExists = true;
-        else gone.push(describeSchemaObject(object));
+        ((await probeObject(object)) ? stillThere : gone).push(describeSchemaObject(object));
       } else if (APPLIED_AT_PRESENT_MATCHING.has(finding.kind)) {
+        proven.push(`${finding.kind} ('${truncateStmt(finding.text)}')`);
       } else {
         return {
           kind: 'refuse',
@@ -693,13 +884,18 @@ export async function routePresentMatchingUpdate(
       ((await probeObject(object)) ? present : absent).push(describeSchemaObject(object));
     }
   }
-  if (anyTargetExists) return { kind: 'apply', absent: [] };
-  if (absent.length > 0) {
-    return present.length === 0
-      ? { kind: 'apply', absent }
-      : { kind: 'refuse-half-landed', present, absent };
-  }
-  return { kind: 'mount', probed: { present, gone } };
+  const unlanded = [
+    ...absent.map((o) => `${o} — a CREATE in the delta names it, and it is NOT there`),
+    ...stillThere.map((o) => `${o} — a reviewed DROP in the delta names it, and it is STILL there`),
+  ];
+  if (unlanded.length === 0) return { kind: 'mount', probed: { present, gone, proven } };
+  const landed = [
+    ...present.map((o) => `${o} — a CREATE in the delta names it, and it is THERE`),
+    ...gone.map((o) => `${o} — a reviewed DROP in the delta names it, and it is GONE`),
+    ...proven.map((s) => `${s} — the drift-clean classify proves this statement ran`),
+  ];
+  if (landed.length > 0) return { kind: 'refuse-half-landed', landed, unlanded };
+  return { kind: 'apply', absent };
 }
 
 /**
@@ -762,15 +958,17 @@ export function makeSchemaProbe(
  *                          landed and by one that never ran. The boot discriminates them by PROBING the
  *                          objects the DELTA names (`routePresentMatchingUpdate` + `probeObject`) —
  *                          nothing else in this boot has looked at them:
- *                            · everything probed as an applied delta leaves it → MOUNT (a leftover env;
- *                              ZERO migrations, a log that names what was probed). deployMode 'mounted'.
+ *                            · everything measured as an applied delta leaves it → MOUNT (a leftover env;
+ *                              ZERO migrations, a log that names what was measured). deployMode 'mounted'.
  *                            · a reviewed drop target STILL EXISTS    → APPLY (the delta never ran — a
  *                              pure-SUBSET update on its first boot). deployMode 'updated'. (an earlier
  *                              revision mounted this too and SILENTLY LOST the reviewed drop forever.)
  *                            · an object the delta CREATEs is ABSENT  → APPLY, naming it. (an earlier
  *                              revision mounted this too and lost the change — issue #440.)
- *                            · some of those objects present, some absent → REFUSE fail-closed: a
- *                              half-landed delta can be neither re-applied nor called applied.
+ *                            · landed AND un-landed evidence together → REFUSE fail-closed, naming both
+ *                              sides: a half-landed delta can be neither re-applied nor called applied.
+ *                              Across BOTH halves — a drop target still there beside an object already
+ *                              created is as half-landed as two additive objects disagreeing.
  *                            · an undeterminable destructive statement → REFUSE fail-closed (honest both-
  *                              cases message).
  *   - `absent`           — NOTHING is materialized yet (a first boot). Update mode evolves an EXISTING
@@ -798,13 +996,14 @@ export async function planUpdateBoot(
     if (route.kind === 'refuse-half-landed') {
       throw new ProductBootError(
         `RAYSPEC_UPDATE_MIGRATION is set and the live schema present-matches the NEW spec at ` +
-          `${specPath}, but the reviewed delta is only HALF LANDED — this boot PROBED the objects it ` +
-          'names and found some of them and not the others:\n' +
-          `    • IN the live schema:     ${route.present.join(', ')}\n` +
-          `    • NOT in the live schema: ${route.absent.join(', ')}\n` +
-          'Re-applying it would raise a duplicate-object error on the ones already there, and mounting ' +
-          'would lose the ones that are not — fail-closed rather than guess: reconcile by hand, or ' +
-          'author a forward delta for the MISSING objects only and point RAYSPEC_UPDATE_MIGRATION at ' +
+          `${specPath}, but the reviewed delta is only HALF LANDED — this boot measured the objects it ` +
+          'names and found some of them in the state an APPLIED delta leaves them in and some not:\n' +
+          `    • ALREADY landed: ${route.landed.join('\n                      ')}\n` +
+          `    • NOT landed:     ${route.unlanded.join('\n                      ')}\n` +
+          'Re-applying it would raise a duplicate-object error on what already landed (42P07 on an ' +
+          'object it re-creates, 42P01 on a target it re-drops, and a rename cannot run twice), and ' +
+          'mounting would lose what did not — fail-closed rather than guess: reconcile by hand, or ' +
+          'author a forward delta for the MISSING half only and point RAYSPEC_UPDATE_MIGRATION at ' +
           'that one. Fail-closed.',
       );
     }
@@ -2655,9 +2854,12 @@ export async function deployProductYamlSpec(
 
   // The ENV-DRIVEN update-apply seam. `RAYSPEC_UPDATE_MIGRATION` is a PERSISTENT
   // deployment env re-read on EVERY boot, so we CLASSIFY the live schema vs the NEW spec FIRST (the same
-  // read-only detectDrift the plain path uses) and then ROUTE — which is what makes a LEFTOVER update env
-  // reboot-safe: a `present-matching` schema (the delta already applied on a prior boot) MOUNTS instead of
-  // re-applying a non-idempotent delta (which would 42P07/duplicate-column crash-loop the boot). `deploy()`
+  // read-only detectDrift the plain path uses) and then ROUTE — but the classify does NOT decide on its
+  // own: a `present-matching` schema is reached BOTH by a delta that landed and by one that never ran, so
+  // planUpdateBoot PROBES THE OBJECTS THE DELTA ITSELF NAMES. That is what makes a LEFTOVER update env
+  // reboot-safe: a delta whose objects are all in the state an applied delta leaves them in MOUNTS instead
+  // of re-applying a non-idempotent delta (which would 42P07/duplicate-column crash-loop the boot), one
+  // whose objects are NOT there is applied, and a HALF-LANDED one is refused naming both sides. `deploy()`
   // stays BYTE-UNCHANGED throughout: it GATES each migration (scanMigrationSql over the reviewed allowlist —
   // a destructive statement WITHOUT a covering entry BLOCKS with a DeployError at [lint/gate], never a
   // silent apply) then applies it, evolving the live schema in place while existing rows survive.

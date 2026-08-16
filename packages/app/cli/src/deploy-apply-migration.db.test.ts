@@ -82,10 +82,15 @@ const DESTRUCTIVE_DELTA = 'ALTER TABLE parts DROP COLUMN label;\n';
 // therefore one `detectDrift` never inspects, so the live schema stays drift-clean against the SAME
 // spec whether or not the delta ran. The DO block is the literal decoy: a `;` inside a dollar-quoted
 // body is not a statement boundary and the `DROP TABLE` in its NOTICE text is not a DROP.
+// Two hand-shaped indexes, in the two shapes a HUMAN writes them: the generator-style quoted name, and
+// an UNQUOTED mixed-case one — which Postgres FOLDS, so the catalog holds `parts_label_hand_idx`. A boot
+// that probed the name as written would find nothing, re-run the CREATE INDEX and die on 42P07.
 const HAND_INDEX_DELTA =
   "DO $tag1$ BEGIN PERFORM 1; RAISE NOTICE 'DROP TABLE scratchpad'; END $tag1$;\n" +
   '--> statement-breakpoint\n' +
-  'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n';
+  'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n' +
+  '--> statement-breakpoint\n' +
+  'CREATE INDEX Parts_Label_Hand_Idx ON "parts" USING btree ("label");\n';
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -404,18 +409,22 @@ describe.skipIf(!baseUrl)(
     //       `select count(*) from pg_indexes where indexname='parts_label_idx'` returned 0);
     //   (b) the index is PRESENT ⇒ the delta really did land ⇒ the SAME command MOUNTS (re-applying the
     //       non-idempotent CREATE INDEX raises 42P07 and the boot would never serve).
+    // One of the two indexes is written UNQUOTED and mixed-case, the way a human writes one, so (b) also
+    // pins that the boot probes the name the CATALOG holds (folded) rather than the name as typed —
+    // probing the typed name reads ABSENT on an index that is right there, and boot 3 dies on 42P07.
     maybe(
-      'a delta whose only object is a HAND-SHAPED INDEX APPLIES on a drift-clean schema, and MOUNTS once that object is really there',
+      'a delta whose only objects are HAND-SHAPED INDEXES APPLIES on a drift-clean schema, and MOUNTS once those objects are really there',
       async () => {
         handShapedRan += 1;
         const appDb = withDbName(baseUrl as string, HAND_DB);
 
         /** GROUND TRUTH — the exact catalog read the field report used. */
-        const indexCount = async (): Promise<number> => {
+        const indexCount = async (name = 'parts_label_idx'): Promise<number> => {
           const c = postgres(appDb, { max: 1 });
           try {
             const rows = (await c.unsafe(
-              `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'parts_label_idx'`,
+              `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = $1`,
+              [name],
             )) as unknown as { n: number }[];
             return rows[0]?.n ?? -1;
           } finally {
@@ -449,6 +458,10 @@ describe.skipIf(!baseUrl)(
         );
         await waitForBoot(PORT_BASE + 8, 120_000, boot2);
         expect(await indexCount()).toBe(1); // the delta LANDED
+        // GROUND TRUTH for the fold: the unquoted `Parts_Label_Hand_Idx` is in the catalog LOWER-CASED,
+        // so the name the boot must probe is the folded one — asking for the name as written finds nothing.
+        expect(await indexCount('parts_label_hand_idx')).toBe(1);
+        expect(await indexCount('Parts_Label_Hand_Idx')).toBe(0);
         // and the operator was NOT told to drop a flag whose delta had not run.
         expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
         await shutdown(boot2);
@@ -462,7 +475,9 @@ describe.skipIf(!baseUrl)(
         );
         await waitForBoot(PORT_BASE + 9, 120_000, boot3);
         expect(await indexCount()).toBe(1); // created ONCE, not twice, not dropped
+        expect(await indexCount('parts_label_hand_idx')).toBe(1); // …and so was the unquoted one
         expect(stderrOf(boot3)).toMatch(/parts_label_idx/); // the mount log NAMES what it probed
+        expect(stderrOf(boot3)).toMatch(/parts_label_hand_idx/); // by the name the CATALOG holds
         expect(stderrOf(boot3)).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // now it really is stale
         const check = postgres(appDb, { max: 1 });
         try {

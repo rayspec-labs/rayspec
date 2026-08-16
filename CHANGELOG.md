@@ -365,17 +365,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as every reviewed `DROP` target must already be **gone**. A delta whose objects are absent is
   **applied**, through the same reviewed gate a drifted boot uses, and the boot names the object it
   looked for and did not find. A delta found only **partly** applied is **refused**, fail-closed,
-  naming what was there and what was not — it can be neither re-applied nor called applied. A delta
-  that genuinely did land still **mounts**, unchanged: a non-idempotent delta is never re-applied.
-  **The destructive half is unchanged** in every respect: a still-present `DROP` target still routes
-  to apply, an undeterminable destructive statement still refuses, and the allowlist gate is
-  untouched.
-- **The drift-clean mount log no longer states a probe result it did not produce.** It read "its
-  additive objects are present and any destructive targets were PROBED gone" on every mount, including
-  one where nothing had been looked for. It is now built from the probe: it names the objects found
-  present and the targets found gone, and when the delta names no object this boot can probe it says
-  that instead — and stops calling the environment stale, telling the operator to check the schema by
-  hand before removing the flag.
+  naming what landed and what did not — it can be neither re-applied nor called applied. That holds
+  across **both** halves of a delta: a reviewed `DROP` target still sitting there beside an object the
+  same delta already created is as half-landed as two additive objects disagreeing, and re-applying it
+  would raise `42P07` on the object it re-creates or `42P01` on the target it re-drops. A delta that
+  genuinely did land still **mounts**, unchanged: a non-idempotent delta is never re-applied. The
+  allowlist gate is untouched, and a still-present `DROP` target on a delta with no landed evidence
+  still routes to apply exactly as before.
+- **An identifier is read the way the catalog stores it, or it is not read at all.** The probe turns a
+  statement into a question about a named object, so a name read only partly is worse than no name.
+  A double-quoted name is now read to its closing quote (a space, a hyphen or a dot inside it belongs
+  to the name), an **unquoted** name is folded to lower case the way PostgreSQL folds it — probing
+  `Parts_Label_Idx` verbatim asked about an index no `CREATE INDEX Parts_Label_Idx` ever created, and
+  the boot re-applied a delta that had landed — and a **schema-qualified** name, or any name that
+  cannot be read whole, now yields **no object at all** rather than a guess: previously
+  `CREATE TABLE public.audit_log` was read as a table called `public`. An object the **same delta**
+  later renames or drops away is no longer required to be present either (`CREATE TABLE "t_new"` +
+  `ALTER TABLE "t_new" RENAME TO "t"` leaves no `t_new`).
+- **The drift-clean mount log no longer states a probe result it did not produce, in either
+  direction.** It read "its additive objects are present and any destructive targets were PROBED gone"
+  on every mount, including one where nothing had been looked for. It is now built from what the boot
+  established: the objects found present, the targets found gone, and the statements the drift-clean
+  classification itself proves ran (a type change, a `SET NOT NULL`, a rename — unapplied, each would
+  have classified as drift). Only a delta that leaves **no** evidence of any kind now gets the "nothing
+  in this boot can tell you" wording; for the classify-proven kinds the log says so and still tells the
+  operator the environment is stale.
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
