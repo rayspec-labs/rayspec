@@ -7,21 +7,34 @@
  * of what it promises is a database fact rather than a shape — so every arm here is measured against a
  * live server, with a SECOND connection standing outside as the observer:
  *
- *   (1) WHY THE METHOD EXISTS — the pooled half, unchanged. A bare `BEGIN` through `query()` is
- *       refused by the driver (`UNSAFE_TRANSACTION`), and a `SELECT … FOR UPDATE` through `query()`
- *       holds NOTHING once the call returns: a second connection takes the same row with
- *       `FOR UPDATE NOWAIT` immediately. Correct behaviour for a pool, and fatal for a lock order.
- *       ACCEPT CONTROL: the very same `NOWAIT` IS refused (55P03) while a `transaction()` callback
- *       holds the row — so the probe reads a real difference rather than never firing.
+ *   (1) WHY THE METHOD EXISTS — the pooled half. A `SELECT … FOR UPDATE` through `query()` holds
+ *       NOTHING once the call returns: a second connection takes the same row with `FOR UPDATE NOWAIT`
+ *       immediately. Correct behaviour for a pool, and fatal for a lock order. ACCEPT CONTROL: the very
+ *       same `NOWAIT` IS refused (55P03) while a `transaction()` callback holds the row — so the probe
+ *       reads a real difference rather than never firing.
+ *   (1b) AND THE POOLED HALF REFUSES TO PRETEND. `query('BEGIN')` is refused BY THE DOOR, before the
+ *       statement reaches the server, and the connection it would have been issued on is unharmed:
+ *       the next write through the same door is visible to the observer. Left to the driver the
+ *       refusal arrives only after the server has already begun the transaction, and the pooled
+ *       connection goes back inside one — measured here as the counterproof, on a throwaway pool.
  *   (2) THE CONNECTION IS PINNED for the callback's duration, and released with it.
  *   (3) ATOMIC, AND ROLLED BACK ON A THROW: two statements in one callback land together; a callback
  *       that throws leaves NEITHER of them visible to the second connection, and the error the caller
  *       catches is the one the callback threw — same instance, same class, same message.
  *   (4) NESTING IS REFUSED with a typed error rather than silently demoted to a savepoint, and the
  *       refusal rolls the transaction it was attempted in back.
+ *   (4b) AND SO IS RE-ENTRY THROUGH THE DOOR THE SERVICE HOLDS — `ctx.db.transaction(…)` called from
+ *       inside a callback, which is what a helper that closed over the door would do. Left to the
+ *       driver that is not nesting at all but a SECOND connection with a transaction of its own, which
+ *       commits under a rolled-back outer one; the counterproof measures exactly that. Two
+ *       transactions from UNRELATED contexts are the accept control: they are not nesting and both run.
  *   (5) NO WIDENING: the handle the callback receives is exactly a pack database — `query` and
  *       `transaction`, nothing else. A pack has no tenant to name in or out of a transaction (its
  *       context carries no `tenantId`), and opening one hands it no member that could carry one.
+ *   (6) THE HONEST LIMIT, pinned so it cannot drift out of the docblock: a statement that FAILS inside
+ *       the callback aborts the whole call even when the pack CATCHES it and returns normally — the
+ *       driver latches the first error on the pinned connection and re-raises it. A pack's own
+ *       savepoint is no way around it, which is why `tx.query('SAVEPOINT …')` is refused outright.
  *
  * DB ISOLATION: one whole throwaway DATABASE named with process.pid, as the neighbouring boot suites.
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
@@ -70,6 +83,15 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
     }
   }
 
+  /** Backends this database is holding INSIDE a transaction with nothing running — the poison state. */
+  async function idleInTransactionBackends(): Promise<number> {
+    const rows = (await second.unsafe(
+      'SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() ' +
+        "AND state = 'idle in transaction'",
+    )) as unknown as { n: number }[];
+    return rows[0]?.n ?? 0;
+  }
+
   /** What the observer sees in the ledger — read on its OWN connection, never the door's. */
   async function observedHolders(): Promise<string[]> {
     const rows = (await second.unsafe(
@@ -115,19 +137,8 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
     }
   }, 60_000);
 
-  it('(1) the pooled half cannot open one, and holds no lock — and the accept control fires', async () => {
+  it('(1) the pooled half holds no lock — and the accept control fires', async () => {
     armsRan += 1;
-    // A handle of THIS arm's own: the driver refuses the `BEGIN` only after the server has already
-    // started the transaction, so the pooled connection it was issued on stays inside one. That is a
-    // second reason a pack must not try — and a reason this arm must not hand its pool to the others.
-    const poisoned = makeDb(appDbUrl);
-    try {
-      const door = makePackServiceDatabase(poisoned);
-      await expect(door.query('BEGIN')).rejects.toThrow(/UNSAFE_TRANSACTION/);
-    } finally {
-      await poisoned.$client.end();
-    }
-
     const door = makePackServiceDatabase(db);
     await door.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (1, 'initial')");
 
@@ -141,6 +152,53 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
       await tx.query('SELECT id FROM pack_tx_ledger WHERE id = 1 FOR UPDATE');
       expect(await observerTakesRow()).toBe('55P03');
     });
+  }, 60_000);
+
+  it('(1b) the door refuses transaction control on the pooled half, and the pool survives it', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+
+    // Every form a pack reaches for, refused BY THE DOOR — the typed refusal, not a database error.
+    for (const statement of [
+      'BEGIN',
+      '  begin;',
+      'START TRANSACTION',
+      'COMMIT',
+      'ROLLBACK',
+      'SAVEPOINT sp',
+      '-- open one\nBEGIN',
+      '/* open one */ BEGIN',
+      "PREPARE TRANSACTION 'x'",
+    ]) {
+      await expect(door.query(statement)).rejects.toBeInstanceOf(PackTransactionError);
+      await expect(door.query(statement)).rejects.toThrow(/transaction\(fn\)/);
+    }
+    // An ordinary statement whose first word merely starts the same way is NOT refused — the accept
+    // control for the tripwire, so "everything is refused" cannot pass as "the right thing is".
+    expect(await door.query("SELECT 'commitment' AS v")).toEqual([{ v: 'commitment' }]);
+
+    // AND THE POOL IS UNHARMED: the refusal happened before the wire, so the next write through the
+    // same door is committed and visible to a connection standing outside.
+    await door.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (10, 'after-the-refusal')");
+    expect(await observedHolders()).toContain('after-the-refusal');
+    await door.query('DELETE FROM pack_tx_ledger WHERE id = 10');
+
+    // COUNTERPROOF, on a throwaway pool of its own at the deployment's own size: left to the driver,
+    // the refusal arrives only AFTER the server has already begun the transaction, so the connection
+    // goes back to the pool INSIDE one — and everything written on it afterwards is invisible to
+    // everyone else, indefinitely. That is what the door refuses before the wire to avoid.
+    const unguarded = makeDb(appDbUrl);
+    try {
+      await expect(unguarded.$client.unsafe('BEGIN')).rejects.toThrow(/UNSAFE_TRANSACTION/);
+      expect(await idleInTransactionBackends()).toBeGreaterThan(0);
+      await unguarded.$client.unsafe(
+        "INSERT INTO pack_tx_ledger (id, holder) VALUES (11, 'swallowed')",
+      );
+      expect(await observedHolders()).not.toContain('swallowed');
+    } finally {
+      await unguarded.$client.end();
+    }
+    expect(await idleInTransactionBackends()).toBe(0);
   }, 60_000);
 
   it('(2) the connection is pinned for the callback, and released with it', async () => {
@@ -204,6 +262,67 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
     expect(await observedHolders()).toEqual(['initial', 'paired-a', 'paired-b']);
   }, 60_000);
 
+  it('(4b) re-entering through the door the service holds is refused too, and the outer rolls back', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+
+    // The ordinary factoring: a helper that closed over the service's OWN `ctx.db` and opened a
+    // transaction on it, called from inside another callback. Refused with the same typed error.
+    let caught: unknown;
+    try {
+      await door.transaction(async (tx) => {
+        await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (7, 'before-the-reentry')");
+        await door.transaction(async (inner) => {
+          await inner.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (8, 'reentrant')");
+        });
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(PackTransactionError);
+    expect((caught as Error).message).toMatch(/already inside a transaction/);
+    // Neither write survives: the refusal rolled the transaction it was attempted in back, and the
+    // inner one never opened at all.
+    expect(await observedHolders()).toEqual(['initial', 'paired-a', 'paired-b']);
+
+    // COUNTERPROOF, on a throwaway pool of its own: WITHOUT the refusal the inner call is not a
+    // nested transaction but an INDEPENDENT one on a second connection — it commits even though the
+    // outer callback then throws and rolls back. That is the partial write the refusal exists for.
+    const unguarded = makeDb(appDbUrl, 4);
+    try {
+      const raw = unguarded.$client;
+      await raw
+        .begin(async (tx) => {
+          await tx.unsafe(
+            "INSERT INTO pack_tx_ledger (id, holder) VALUES (7, 'outer-rolled-back')",
+          );
+          await raw.begin(async (independent) => {
+            await independent.unsafe(
+              "INSERT INTO pack_tx_ledger (id, holder) VALUES (8, 'committed-anyway')",
+            );
+          });
+          throw new Error('the outer transaction rolls back after all');
+        })
+        .catch(() => undefined);
+      const holders = await observedHolders();
+      expect(holders).not.toContain('outer-rolled-back');
+      expect(holders).toContain('committed-anyway');
+      await raw.unsafe('DELETE FROM pack_tx_ledger WHERE id = 8');
+    } finally {
+      await unguarded.$client.end();
+    }
+
+    // ACCEPT CONTROL: two transactions on the same door from UNRELATED contexts are not nesting, and
+    // both run — the guard is scoped to the callback, not a lock on the door.
+    const [a, b] = await Promise.all([
+      door.transaction(async (tx) => (await tx.query('SELECT 1 AS n'))[0]?.n),
+      door.transaction(async (tx) => (await tx.query('SELECT 2 AS n'))[0]?.n),
+    ]);
+    expect([a, b]).toEqual([1, 2]);
+    // And so is one opened AFTER the callback returned, on the same door.
+    expect(await door.transaction(async (tx) => (await tx.query('SELECT 3 AS n'))[0]?.n)).toBe(3);
+  }, 60_000);
+
   it('(5) the callback is handed a pack database and nothing wider', async () => {
     armsRan += 1;
     const door = makePackServiceDatabase(db);
@@ -217,5 +336,59 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
     expect(members).toEqual(['query', 'transaction']);
     // Same reach, not a wider one: the pinned handle reads exactly what the pooled one reads.
     expect(sameRows).toEqual(await observedHolders());
+  }, 60_000);
+
+  it('(6) a statement that fails inside the callback aborts the call even when the pack catches it', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+    const before = await observedHolders();
+
+    // The ordinary "catch the unique violation, treat it as already-recorded, carry on" shape. It
+    // does NOT carry on: the driver latched the statement's error on the pinned connection and
+    // re-raises it once the callback resolves, so the call rejects with the error the pack swallowed
+    // and the value the callback returned never reaches the caller.
+    let caught: unknown;
+    let returned: unknown = 'the callback did not return';
+    try {
+      returned = await door.transaction(async (tx) => {
+        await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (20, 'before-the-failure')");
+        try {
+          // id 1 is taken — a duplicate key the pack believes it has handled.
+          await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (1, 'duplicate')");
+        } catch {
+          // handled, as far as the pack is concerned
+        }
+        return 'the value the pack meant to return';
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(returned).toBe('the callback did not return');
+    expect((caught as { code?: string }).code).toBe('23505');
+    // …and the whole callback rolled back, including the write that had succeeded before it.
+    expect(await observedHolders()).toEqual(before);
+
+    // A PACK'S OWN SAVEPOINT IS NOT A WAY AROUND IT, so the door refuses one rather than letting a
+    // pack believe it recovered: `ROLLBACK TO SAVEPOINT` would not clear that latch.
+    let savepointRefusal: unknown;
+    try {
+      await door.transaction(async (tx) => {
+        await tx.query('SAVEPOINT recover_here');
+      });
+    } catch (e) {
+      savepointRefusal = e;
+    }
+    expect(savepointRefusal).toBeInstanceOf(PackTransactionError);
+
+    // ACCEPT CONTROL: the same shape with the failing statement REPLACED by a read that decides —
+    // which is what the docblock tells a pack to write — commits and returns its value.
+    const decided = await door.transaction(async (tx) => {
+      const taken = await tx.query('SELECT id FROM pack_tx_ledger WHERE id = $1 FOR UPDATE', [1]);
+      if (taken.length > 0) return 'already recorded';
+      await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (1, 'recorded')");
+      return 'recorded';
+    });
+    expect(decided).toBe('already recorded');
+    expect(await observedHolders()).toEqual(before);
   }, 60_000);
 });

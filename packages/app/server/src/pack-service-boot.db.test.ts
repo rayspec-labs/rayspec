@@ -33,11 +33,15 @@
  *   (4) THE JOURNAL WRITER writes real rows: with the deployment tenant bound, the sweep the service
  *       runs at boot lands in `journal_steps`, attributed to `pack-service`, and the TIMER it armed
  *       lands more without anything calling it — the whole reason this contribution kind exists. And
- *       the tenant those rows carry is the DEPLOYMENT's, not something the pack chose: read through
- *       the platform's own tenant chokepoint under a DIFFERENT tenant, the work this service did —
- *       transactions included — is nothing at all. A pack has no `tenantId` on its context to name one
- *       with, in or out of a transaction, so opening one cannot be the seam it widens its reach
- *       through. The accept control is the same read under the deployment tenant, which finds them.
+ *       the tenant those JOURNALED rows carry is the DEPLOYMENT's, not something the pack chose: read
+ *       through the platform's own tenant chokepoint under a DIFFERENT tenant, the service's journaled
+ *       work is nothing at all; the accept control is the same read under the deployment tenant, which
+ *       finds them. That is a claim about the JOURNAL WRITER, which is tenant-bound by construction —
+ *       it is deliberately NOT extended to the database door, which is no tenant filter and runs the
+ *       SQL the pack wrote. What is measured about the door's own rows is (4c): the pack was TOLD its
+ *       tenant by the deployment and every ledger row it wrote transactionally carries that one and no
+ *       other. The chokepoint cannot be the instrument there — a pack-owned table is not in the
+ *       platform's drizzle schema — so the rows are read directly, under both tenants.
  *   (5) SHUTDOWN IS THE REVERSE, and it really stops the work: `close()` shuts the two services down
  *       in the reverse of boot order, and the timer stops ticking afterwards.
  *   (6) FAIL-THE-FIX: a deployment whose pack ships a service that throws on boot ABORTS the boot with
@@ -451,11 +455,11 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     );
     expect(sweptOnTimer).toBeGreaterThan(sweptAtBoot);
 
-    // (4b) TENANCY IS THE PLATFORM'S, AND A TRANSACTION DOES NOT MOVE IT. The same rows, read through
-    //      the platform's OWN tenant chokepoint: under a different tenant there are none, and under
-    //      the deployment tenant they are all there. The pack never named either — its context carries
-    //      no `tenantId` at all, in a transaction or out of one — so the attribution is the
-    //      deployment's doing and nothing a service opened could have widened it.
+    // (4b) THE JOURNALED WORK IS THE DEPLOYMENT'S TENANT'S. The same rows, read through the platform's
+    //      OWN tenant chokepoint: under a different tenant there are none, and under the deployment
+    //      tenant they are all there. The pack never named either — its context carries no `tenantId`
+    //      at all — because the JOURNAL WRITER is tenant-bound by construction: the composition root
+    //      binds the tenant when it builds it. This measures that writer, not the database door.
     const probe = makeDb(appDbUrl);
     try {
       const byPackService = eq(schema.journalSteps.backend, PACK_SERVICE_BACKEND);
@@ -472,6 +476,20 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     } finally {
       await probe.$client.end();
     }
+
+    // (4c) THE ROWS THE TRANSACTION WROTE carry the tenant the DEPLOYMENT bound — the one the service
+    //      was told on `ctx.env`, never one it chose and never one it found by enumerating the
+    //      platform's tenant table. Read DIRECTLY, because the platform's tenant chokepoint cannot
+    //      reach a pack-owned table at all (it is not in the platform's drizzle schema) — so this is
+    //      what is actually measurable about the door's own rows, with a tenant the deployment never
+    //      bound as the control.
+    const ledgerUnder = async (tenant: string): Promise<string> =>
+      await scalar(
+        appDbUrl,
+        `SELECT count(*)::int FROM fixture_pack_audit_events WHERE tenant_id = '${tenant}'::uuid`,
+      );
+    expect(await ledgerUnder(TENANT)).toBe('2');
+    expect(await ledgerUnder(OTHER_TENANT)).toBe('0');
 
     // (5) close() stops them in the exact REVERSE of boot order — and the timer really stops.
     await server.close();

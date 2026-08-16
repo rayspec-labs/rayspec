@@ -31,6 +31,13 @@ interface AuditingSection {
 /** How often the ledger sweep records a journal entry. Short, because the fixture is measured. */
 const SWEEP_INTERVAL_MS = 50;
 
+/**
+ * The environment key naming the tenant the DEPLOYMENT bound. A pack that attributes rows has to be
+ * told which tenant by the deployment — its context carries no `tenantId`, and the database door is
+ * not a tenant filter — and this is the deployment's own name for it, read off `ctx.env`.
+ */
+const DEPLOYMENT_TENANT_ENV_KEY = 'RAYSPEC_CRON_TENANT_ID';
+
 /** The two ledger rows that are only ever right TOGETHER — the atomic pair the boot writes. */
 const LEDGER_OPENED = 'ledger-opened';
 const LEDGER_CLOSED = 'ledger-closed';
@@ -66,10 +73,12 @@ const auditLedger: PackServiceModule = {
     // this pack already holds for the tenant are taken `FOR UPDATE` first — the read-decide-write a
     // pooled statement cannot hold, because the lock would be gone before the decision was written.
     //
-    // THE TENANT IS THE PLATFORM'S, NOT THIS PACK'S. A service has no `tenantId` on its context, in a
-    // transaction or out of one, so the only tenant it can write under is the one the deployment
-    // registered — and a deployment that registered none writes nothing, which is a legitimate
-    // posture rather than a fault.
+    // THE TENANT COMES FROM THE DEPLOYMENT, not from this pack and not from the door. There is no
+    // `tenantId` on a service's context, in a transaction or out of one, and the database door is no
+    // tenant filter either — it runs the SQL a pack writes. So a pack that attributes rows has to be
+    // TOLD which tenant, and this one reads the tenant the deployment bound off the environment it
+    // was handed. A deployment that bound none writes nothing, which is a legitimate posture rather
+    // than a fault.
     const tenantId = await deploymentTenant(ctx);
     let ledgerPairRows = 0;
     let abandonedError: string | undefined;
@@ -133,20 +142,35 @@ const auditLedger: PackServiceModule = {
 };
 
 /**
- * The one tenant a service can write under — the tenant the DEPLOYMENT registered, read back off the
- * platform's own table. Absent on a deployment that has registered none, which is what makes the boot
+ * The tenant this pack attributes its ledger rows to — the one the DEPLOYMENT bound, named on the
+ * environment the service was handed (`ctx.env`, which is on the contract for exactly this kind of
+ * deployment-supplied value). Absent on a deployment that bound none, which is what makes the boot
  * above write nothing rather than fail.
+ *
+ * IT IS CHECKED, NOT PICKED. The pack does not enumerate the platform's tenant table and take
+ * whichever row comes first — that would attribute a ledger to an arbitrary tenant on any deployment
+ * with more than one. It asks whether the tenant it was NAMED is registered, because this pack's
+ * ledger carries a foreign key onto that table: on a deployment whose bound tenant is not registered
+ * yet, "write nothing" is the right answer and failing the whole boot is not.
  */
 async function deploymentTenant(ctx: PackServiceContext): Promise<string | undefined> {
-  const rows = await ctx.db.query('SELECT id FROM orgs ORDER BY id LIMIT 1');
-  const id = (rows[0] as { id?: unknown } | undefined)?.id;
-  return typeof id === 'string' ? id : undefined;
+  const bound = ctx.env[DEPLOYMENT_TENANT_ENV_KEY]?.trim();
+  if (!bound) return undefined;
+  // Compared AS TEXT on purpose: a value that is not a UUID at all is then "not registered" rather
+  // than a cast error that would fail the boot of a deployment this pack has no business judging.
+  const rows = await ctx.db.query('SELECT id FROM orgs WHERE id::text = $1', [bound]);
+  return rows.length === 1 ? bound : undefined;
 }
 
 /**
  * Append ONE ledger row. It takes a `PackDatabase`, so the SAME call serves the pooled door and the
  * transactional one — which is the whole point of the transactional handle being a `PackDatabase`
  * again: a pack writes one statement and decides elsewhere whether it runs inside a transaction.
+ *
+ * It is HANDED the door rather than closing over `ctx.db`, which is the shape that keeps working: a
+ * helper that closed over the service's own door and opened a transaction on it would be REFUSED with
+ * a `PackTransactionError` when called from inside another callback, because that second transaction
+ * would be an independent one on a second connection rather than a nested one.
  */
 async function appendEvent(
   db: PackDatabase,

@@ -104,9 +104,11 @@ type _ServiceContextCarriesTheContract = Assert<
 /**
  * The DATABASE door keeps BOTH of its members. The single-statement executor is what a service reads
  * and writes through; `transaction` is what makes an atomic pair and a held row lock expressible at
- * all, and it hands the callback the same door rather than a wider one — so the pin names the shape of
- * the callback's parameter too. Dropping either member, or handing the callback something else, is a
- * contract change and fails to compile here.
+ * all. Dropping either member is a contract change and fails to compile here.
+ *
+ * This pin catches REMOVAL and nothing else, deliberately paired with the one below: `transaction` is
+ * declared method-style, so its parameters are compared BIVARIANTLY and an assignability test alone
+ * accepts a `transaction` that hands the callback something WIDER than the door.
  */
 type _DatabaseDoorIsTransactional = Assert<
   PackDatabase extends {
@@ -114,6 +116,31 @@ type _DatabaseDoorIsTransactional = Assert<
     transaction: <T>(fn: (tx: PackDatabase) => Promise<T>) => Promise<T>;
   }
     ? true
+    : false
+>;
+
+/** The handle `transaction` hands its callback, extracted from the signature rather than restated. */
+type TransactionCallbackHandle = Parameters<PackDatabase['transaction']>[0] extends (
+  tx: infer Handle,
+) => unknown
+  ? Handle
+  : never;
+
+/**
+ * …and that handle is EXACTLY the door — the same members, no more and no fewer. Assignability is
+ * asserted in BOTH directions (each side wrapped in a one-tuple, so a union would be compared whole
+ * rather than distributed): `Handle extends PackDatabase` catches a NARROWED callback parameter, and
+ * `PackDatabase extends Handle` catches a WIDENED one. That second direction is the one the contract
+ * leans on — "a transaction is not a seam a pack can widen its reach through" — and it is the one a
+ * plain `extends` test cannot see, because a method's parameters are bivariant even under
+ * `strictFunctionTypes`. Verified by construction: this assertion resolves to `false` (and so fails to
+ * compile) against a `transaction` whose callback takes `PackDatabase & { … }`.
+ */
+type _TransactionHandsBackTheSameDoor = Assert<
+  [TransactionCallbackHandle] extends [PackDatabase]
+    ? [PackDatabase] extends [TransactionCallbackHandle]
+      ? true
+      : false
     : false
 >;
 
@@ -177,6 +204,7 @@ export const PACK_CONTRACT_TYPEPINS: [
   _ServiceModuleIsBootable,
   _ServiceContextCarriesTheContract,
   _DatabaseDoorIsTransactional,
+  _TransactionHandsBackTheSameDoor,
   _VersionIsRequired,
   _HandlerIsAddressable,
   _SectionsKeepTheirIdentity,
@@ -184,4 +212,4 @@ export const PACK_CONTRACT_TYPEPINS: [
   _PackFacingErrorCodes,
   _JournalEntryVocabulary,
   _IdentifierRuleIsCheckable,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true];
