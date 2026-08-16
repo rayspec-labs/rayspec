@@ -355,6 +355,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /v1/runs/{id}/events` now calls the helper and is byte-unchanged: same frames, same ids, same
   order, same drops, same neutral-event re-validation on read.
 
+- **`@rayspec/pack-sdk` now carries the contract a pack handler is written against, so a pack can
+  write the modules its declarations point at.** The package described *where* a handler lives and
+  *what it is called* — `PackHandlerFragment{id, module, export, kind}`, `PackToolFragment`,
+  `PackApiRouteFragment` — and nothing that said what a handler **is**. A pack that declared a
+  `tooling` or an `api` contribution therefore had no typed contract for the module behind it. The
+  platform's own handler contract, `@rayspec/handler-sdk`, releases in the same closure and a pack
+  can install it — but it carries runtime and three production dependencies, so requiring it beside
+  the pack surface would put four packages and an implementation into a pack's build for a shape one
+  types-only, zero-dependency package can promise. Eleven exports close that
+  (32 → 43, all additive): **`PackToolHandler<In, Out>`** — `(args, init) => neutral data` — and
+  **`PackRouteHandler<Out>`** — `(init) => JSON body` — with the inits they receive
+  (`PackHandlerInit`, `PackToolHandlerInit`, `PackRouteHandlerInit`, `PackHandlerPrincipal`) and the
+  tenant-bound, name-keyed store door those inits carry (`PackStoreDb`, `PackStoreRow`,
+  `PackStoreFilter`, `PackSelectOptions`, `PackUpsertOptions`). A pack handler module of either
+  contracted kind now imports `@rayspec/pack-sdk` and nothing else, for both halves of a
+  contribution, and `gate:handler-imports` sanctions that import over the manifest-derived pack
+  handler roots alongside `@rayspec/handler-sdk`. **That sanction is now load-bearing**: the gate
+  refuses every *other* `@rayspec/`-scoped specifier under a handler root, rather than enumerating
+  the platform internals someone thought of — so `@rayspec/server`, `@rayspec/durable-dbos`, a
+  capability runtime or a package added next release is refused on the day it lands, and a subpath of
+  a sanctioned contract is refused too. Its self-test proves the set decides something by mutation:
+  each sanctioned name is dropped in turn and the import that the full set accepts must be refused by
+  the shrunken one, so a name cannot sit in that set inertly. The PASS line now **reports** what the
+  scan read — modules scanned, per-contract tally, which vectors came back clean — instead of
+  generalizing a property over files that do not all have it. An ordinary third-party or node-builtin
+  import stays deliberately unflagged, and the header says so: the path jail bounds which file loads,
+  this gate bounds the trust-boundary crossings.
+  **What a pack handler does not get is stated, not omitted.** The injected capability handles (a blob
+  backend, the read-only file source, the speech providers, the event-bus append), the durable
+  enqueue, the play-token mint and the branded status/header response envelope are each named in the
+  contract's docblock with the reason they are withheld — a capability contract is versioned with the
+  platform, the promised way for a pack to schedule an agent turn is `TurnDispatch` on the `services`
+  contribution's boot context, and the
+  response brand is a runtime value a types-only package does not ship. Withheld from the **contract**,
+  not from the deployment — a deployment's own init for a route may still carry an enqueue, and what
+  it hands its routes is its affair; this is a statement about what a pack may **rely on**, enforced
+  by the type rather than by the runtime. Two declarable shapes stay uncontracted and say so: a
+  `trigger`, and a `route`-kind handler behind a `{kind:'stream'}` action — a second contract on the
+  same kind, which exchanges a raw `Request`/`Response` and requires the blob backend, so contracting
+  it would contradict the capability-handle rule above. Such a handler annotates
+  `StreamRouteHandler` from `@rayspec/handler-sdk`, as `examples/stream-backend`'s pack does.
+  **The correspondence is pinned at compile time**, on the platform side where the init value is
+  built: the init the engine passes must satisfy what a pack annotates against, and a function a pack
+  annotates must satisfy what the engine calls — so a drift fails this repository's own build instead
+  of a pack author's. The in-tree fixture pack now contributes both contracted kinds through real
+  declarations and builds against `@rayspec/pack-sdk` alone.
+
 ### Changed
 
 - **`rayspec doctor` no longer runs code out of the deployment tree, and `--with-packs` is how you ask

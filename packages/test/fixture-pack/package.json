@@ -14,7 +14,6 @@
     "@rayspec/platform": "workspace:*"
   },
   "devDependencies": {
-    "@rayspec/handler-sdk": "workspace:*",
     "@rayspec/pack-sdk": "workspace:*",
     "typescript": "5.9.3"
   }

@@ -1,17 +1,22 @@
 /**
- * @rayspec/handler-sdk — the ONLY package an escape-hatch handler may import.
+ * @rayspec/handler-sdk — the package a DEPLOYMENT's own escape-hatch handler is written against.
  *
  * This is the public, TYPE-ONLY contract for a trusted-author escape-hatch handler (the escape-hatch
  * layer): the `HandlerInit` the engine constructs + injects, and the neutral data shapes a handler
- * returns. An escape-hatch module imports ONLY this — never `@rayspec/{platform,db,core,api-auth}`
- * internals or any agent SDK type. The `gate:handler-imports` CI tripwire enforces that boundary.
+ * returns. Under the `@rayspec/` scope an escape-hatch module names one of the two handler contracts
+ * and nothing else — this package, or `@rayspec/pack-sdk` for a handler an extension pack contributes
+ * — never `@rayspec/{platform,db,core,api-auth}` internals or any agent SDK type. The
+ * `gate:handler-imports` CI tripwire holds that boundary over both: it refuses every OTHER
+ * `@rayspec/`-scoped import under a handler root, agent SDKs, and `..`-escapes into platform source.
  *
- * WHY TYPE-ONLY: a handler receives its capabilities by INJECTION (the engine builds the concrete
- * `HandlerInit` per run and passes it in). The handler never CONSTRUCTS a capability, so the SDK
- * ships no runtime — only the shapes the handler declares against. This keeps the package a pure
- * contract and makes the external-exposure isolate seam trivial: the init is a SERIALIZABLE-shaped
- * value (name-keyed store access + plain rows), so the in-process call can become a cross-isolate
- * call WITHOUT changing a single handler or spec.
+ * WHY THE CONTRACT IS TYPES: a handler receives its capabilities by INJECTION (the engine builds the
+ * concrete `HandlerInit` per run and passes it in). The handler never CONSTRUCTS a capability, so no
+ * capability here is a runtime value — only the shapes the handler declares against. The package is
+ * not empty at runtime (it also carries the response-envelope helpers and the `@rayspec/core` conduit
+ * documented below, none of them a capability), but nothing a handler is INJECTED with is something
+ * it could build from this package. That makes the external-exposure isolate seam trivial: the init
+ * is a SERIALIZABLE-shaped value (name-keyed store access + plain rows), so the in-process call can
+ * become a cross-isolate call WITHOUT changing a single handler or spec.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * TRUSTED-AUTHOR, NOT SANDBOXED (binding posture).
@@ -29,8 +34,10 @@
 // Pure text utilities re-exported from @rayspec/core. These are stateless,
 // dependency-free functions (UAX-29 word tokenization + a token-run subset check) — NOT a capability,
 // platform internal, or runtime state — so re-exporting them keeps handler-sdk a thin, serializable-
-// seam SDK. A pack handler is confined to @rayspec/handler-sdk by the `gate:handler-imports` tripwire,
-// so this conduit is how it CONSUMES the harvested tokenizer instead of keeping its own copy.
+// seam SDK. A handler is confined by the `gate:handler-imports` tripwire to a sanctioned handler
+// contract (this package, or @rayspec/pack-sdk for a handler an extension pack contributes) for
+// anything `@rayspec/`-scoped, so this conduit is how a handler that names THIS package CONSUMES the
+// harvested tokenizer instead of keeping its own copy — @rayspec/core is refused to it directly.
 // The shared bounded body reader — re-exported from @rayspec/core on the same conduit as the
 // tokenizer (a stateless, dependency-free byte primitive; not a capability or platform internal). A
 // capability binding (e.g. audio ingest) uses it to cap the bytes it buffers from the raw request
@@ -80,7 +87,7 @@ import type { FsSource } from './fs-source.js';
 // The neutral TRANSCRIPT shapes an `init.stt` call returns — defined in `@rayspec/stt-port`, the
 // provider-NEUTRAL speech-to-text port (no provider is named or imported there). Re-exported on the
 // same conduit as the text/byte primitives above so a handler names the result type from the ONE SDK
-// package; TYPE-ONLY, so the SDK still ships no runtime.
+// package; TYPE-ONLY, so these re-exports add nothing to what the SDK ships at runtime.
 export type {
   SttAdapterError,
   SttSegment,
@@ -94,13 +101,14 @@ export type {
 // The neutral SYNTHESIS shapes an `init.tts` call takes and returns — defined in `@rayspec/tts-port`,
 // the provider-NEUTRAL text-to-speech port (no provider is named or imported there). Re-exported on
 // the same conduit as the transcript types above so a handler names the request/result types from the
-// ONE SDK package; TYPE-ONLY, so the SDK still ships no runtime.
+// ONE SDK package; TYPE-ONLY, so these re-exports add nothing to what the SDK ships at runtime.
 //
 // `TtsAdapterError` travels with them, exactly as `SttAdapterError` does above: `synthesize` rejects
 // with one, so a handler that wants to type its catch must be able to NAME it — and a handler may
 // import no other package. It is a CLASS in the port but crosses as a TYPE: the shape and `code` are
-// nameable, `instanceof` is not, because a value export would give this runtime-free SDK a runtime
-// edge to the port. `speech-error-typepin.ts` fails `tsc -b` if either name is dropped here.
+// nameable, `instanceof` is not, because a value export would give this SDK a runtime edge to the
+// port — the one dependency direction the conduit above is careful not to open.
+// `speech-error-typepin.ts` fails `tsc -b` if either name is dropped here.
 export type {
   TtsAdapterError,
   TtsAudioFormat,

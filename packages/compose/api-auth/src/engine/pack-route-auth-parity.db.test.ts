@@ -34,7 +34,8 @@
  *                                route answers with only what the caller itself sent, and the second
  *                                tenant's own list at the deployment route is empty.
  *                                THE LIMIT OF THIS ARM: the fixture pack's handler performs no read at
- *                                all (`gate:handler-imports` confines it to `@rayspec/handler-sdk`), so
+ *                                all — it is written against `@rayspec/pack-sdk` alone and only echoes
+ *                                its bound path parameter — so
  *                                a contributed route's DATA-PATH tenant isolation is out of this
  *                                suite's reach — what is measured is that nothing of the other tenant's
  *                                row comes back through the contributed surface, not that a reading

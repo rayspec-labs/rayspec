@@ -16,6 +16,8 @@
  *   4. ERROR VOCABULARY — the codes a pack author branches on are members of the closed set.
  *   5. JOURNAL — the entry a pack's contribution produces keeps its kind + status vocabulary.
  *   6. THE IDENTIFIER RULE — checkable at authoring time, bounded by the Postgres identifier limit.
+ *   7. THE HANDLER CONTRACT — the two kinds a pack can WRITE (not just declare) keep the init they
+ *      take and the members that init promises on every invocation.
  */
 import type {
   isSafeIdentifier,
@@ -29,12 +31,17 @@ import type {
   PackJournalEntry,
   PackManifest,
   PackManifestBrand,
+  PackRouteHandler,
+  PackRouteHandlerInit,
   PackSectionClaim,
   PackServiceContext,
   PackServiceDeclaration,
   PackServiceModule,
+  PackStoreDb,
   PackStoreFragment,
   PackToolFragment,
+  PackToolHandler,
+  PackToolHandlerInit,
   TurnDispatch,
 } from './index.js';
 
@@ -187,6 +194,63 @@ type _JournalEntryVocabulary = Assert<
   PackJournalEntry extends { type: 'llm' | 'tool' | 'store'; status: 'ok' | 'error' } ? true : false
 >;
 
+/**
+ * A pack handler is CALLABLE with the init this package tells its author to annotate against: the
+ * tool arm takes `(args, init)` and the route arm takes `(init)`. These extract the parameter from
+ * the exported function type rather than restating it, so a handler type that started taking
+ * something else — or stopped taking an init at all — fails here rather than in a pack's repository.
+ */
+type _AToolHandlerTakesTheToolInit = Assert<
+  Parameters<PackToolHandler>[1] extends PackToolHandlerInit ? true : false
+>;
+type _ARouteHandlerTakesTheRouteInit = Assert<
+  Parameters<PackRouteHandler>[0] extends PackRouteHandlerInit ? true : false
+>;
+
+/**
+ * BOTH inits promise the two members a handler cannot work without — the invocation's server-derived
+ * tenant and the door onto the declared stores — and the ROUTE arm additionally promises what the
+ * request carried. `params` is REQUIRED and the rest are not, which is the contract: a route always
+ * has its bound path parameters, while a body, the allowlisted headers and a resolved principal are
+ * each absent on a real invocation, so a handler that needs one fail-closes loudly on `undefined`.
+ */
+type _BothInitsCarryTenantAndStores = Assert<
+  'tenantId' | 'db' extends keyof PackToolHandlerInit
+    ? 'tenantId' | 'db' | 'params' extends keyof PackRouteHandlerInit
+      ? true
+      : false
+    : false
+>;
+type _RouteParamsAreRequired = Assert<
+  undefined extends PackRouteHandlerInit['params'] ? false : true
+>;
+
+/**
+ * The STORE DOOR keeps every method a handler reaches a declared store through, and `transaction`
+ * hands its callback the SAME door. The second half is asserted in BOTH directions (each side wrapped
+ * in a one-tuple so a union is compared whole): a method's parameters are compared BIVARIANTLY even
+ * under `strictFunctionTypes`, so a one-way test would accept a callback handed something WIDER —
+ * which is exactly what "a transaction is not a seam a pack can reach further through" forbids. The
+ * same pairing `PackDatabase` uses above, for the same reason.
+ */
+type _StoreDoorKeepsItsMethods = Assert<
+  'select' | 'insert' | 'upsert' | 'update' | 'delete' | 'transaction' extends keyof PackStoreDb
+    ? true
+    : false
+>;
+type StoreTransactionHandle = Parameters<PackStoreDb['transaction']>[0] extends (
+  tx: infer Handle,
+) => unknown
+  ? Handle
+  : never;
+type _StoreTransactionHandsBackTheSameDoor = Assert<
+  [StoreTransactionHandle] extends [PackStoreDb]
+    ? [PackStoreDb] extends [StoreTransactionHandle]
+      ? true
+      : false
+    : false
+>;
+
 /** The identifier rule is checkable, and bounded by the Postgres identifier limit. */
 type _IdentifierRuleIsCheckable = Assert<
   ReturnType<typeof isSafeIdentifier> extends boolean
@@ -211,5 +275,32 @@ export const PACK_CONTRACT_TYPEPINS: [
   _BrandIsPinned,
   _PackFacingErrorCodes,
   _JournalEntryVocabulary,
+  _AToolHandlerTakesTheToolInit,
+  _ARouteHandlerTakesTheRouteInit,
+  _BothInitsCarryTenantAndStores,
+  _RouteParamsAreRequired,
+  _StoreDoorKeepsItsMethods,
+  _StoreTransactionHandsBackTheSameDoor,
   _IdentifierRuleIsCheckable,
-] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true];
+] = [
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+];
