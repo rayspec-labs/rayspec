@@ -153,6 +153,14 @@ jobs:
       - name: Extension-capability gate
         run: pnpm gate:extension-capability
 
+      # A contributed handler is called BY the platform and may never turn around and drive an agent:
+      # no module reachable from a pack's handlers/ subtree — or from a tooling contribution, whose
+      # handler resolves into that subtree — may import the run surface (runAgent, the DurableExecutor
+      # enqueue seam and the engine behind it, the run-header writes, TurnDispatch). Only a services
+      # module may, and that exemption is structural (services/ is not a scanned root). A declared root
+      # that reads nothing FAILS rather than skipping, so a rename cannot retire the boundary.
+      - name: Contribution-dispatch-boundary gate
+        run: pnpm gate:dispatch-boundary
       # A pack that brings its own migration chain declares the table prefix its objects live under.
       # Every CREATE TABLE / CREATE [UNIQUE] INDEX must NAME an object carrying it and every ALTER
       # TABLE / CREATE INDEX ... ON must TARGET one, so a chain cannot reach into a platform table.
