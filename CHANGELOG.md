@@ -259,6 +259,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The bundled stream-backend example declares `routePrefix: '/uploads/'`, so its documented URLs are
   byte-unchanged.
 
+- **A pack-contributed route's refusals are now pinned to a deployment-declared route's, byte for
+  byte.** A pack contributes `api` fragments that ride the deployment's own interpreter, so auth,
+  tenancy and the error envelope are inherited rather than re-implemented — but nothing in the tree
+  measured that, and the nearest refusal assertions belong to the media-token path, a disjoint
+  credential chain the shared middleware never sees. A new suite boots ONE app carrying both kinds of
+  route at once — the deployment's own `{store}` read and the in-tree fixture pack's contributed
+  `readonly {handler}` read, both therefore gated on `store:read`, the pack resolved and merged by the
+  real loader — and asserts that the two answer **an absent credential, a well-formed JWT signed by a
+  foreign key, a bearer carrying an unknown api-key prefix, and a valid api-key without `store:read`**
+  with the identical status, the identical body bytes and the identical response header map. The
+  request id is pinned per arm so the two envelopes compare as **bytes**, not as shapes, down to the
+  named missing permission the 403 carries. A cross-tenant arm pins the other half: a second tenant
+  naming the first tenant's row id reads nothing of it at either route, and an accept control proves
+  both routes still serve a correctly scoped principal.
+  **Nothing a consumer calls behaves differently** — every one of those answers is what the platform
+  already gave. What is new is that a change which hands a contributed route a refusal of its own now
+  fails CI instead of shipping.
+
 ### Fixed
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
