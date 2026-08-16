@@ -25,15 +25,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to before, value and errors alike, which is measured over every checked-in example document rather
   than asserted. `parseSpec` itself is unchanged and resolves no packs.
   What a claim may be is fail-closed at load, with the pack named in every refusal: the key must be a
-  safe identifier, it may not be a key the core grammar owns (that denylist is read off the grammar
-  object itself, so a section added to the document grammar is closed to packs the moment it is
-  declared), no two packs may claim one key (the refusal names both), and the schema module resolves
-  through the same jail, preferring the same compiled sibling, as the pack entry and every pack
-  handler — a module outside the pack directory does not load.
-  Taking such a document to a deployment where the pack is absent fails at parse with a new typed
+  safe identifier, it may not be a key either document grammar owns (that denylist is read off the
+  grammar objects themselves — both the backend profile's shape and the product profile's, `product:`
+  included, since that key is what tells the two profiles apart — so a section added to a document
+  grammar is closed to packs the moment it is declared), no two packs may claim one key (the refusal
+  names both), and the schema module resolves through the same jail, preferring the same compiled
+  sibling, as the pack entry and every pack handler — a module outside the pack directory does not
+  load. The validator itself is treated as what it is, code from another repository: it runs inside
+  the same fail-closed envelope as everything else a pack supplies, so one that throws, one that
+  answers with something that is not a verdict, and one that refuses a section without reporting a
+  violation all REFUSE the section, naming the pack. None of them can escape as an exception, and
+  none can leave a document accepted with a section its owner rejected.
+  Taking such a document to a deployment that does not have the pack fails at parse with a new typed
   error, `extension_pack_unavailable`, naming the missing pack. A pack owns the grammar of the section
   it claims, so the honest report is "this pack is not here", not an unknown field pointing at the
   section — which would send an operator to delete the configuration rather than to install the pack.
+  A pack that IS deployed and was refused — a version skew, two packs claiming one key — is the
+  opposite situation with the opposite remedy, and reports under its own code,
+  `extension_pack_refused`, which says the pack is present and that redeploying it changes nothing.
+  Both codes join `PackErrorCode` in `@rayspec/pack-sdk`, alongside the `sections` slot on
+  `PackManifest`, so a pack that ships in its own repository can declare a claim and handle both
+  outcomes against the contract rather than against internals.
 
 - **`@rayspec/pack-sdk` — the one surface an extension pack that ships in its own repository
   compiles against.** A pack has to import *something* to build: the manifest types, the error
