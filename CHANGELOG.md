@@ -22,10 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator has to tell apart — `extension_pack_unavailable` (the pack is not on this deployment) and
   `extension_pack_refused` (it is here and was refused) — instead of an unknown field pointing at the
   section, which sent an operator to delete configuration rather than install a pack. `plan --against`
-  parses its baseline the same way, so a prior revision that carries a claimed section no longer
-  blocks the update it is the baseline for. No further pack-contributed detail is reported: what a
-  pack configures stays the pack's business. A document that references no pack loads no pack module
-  and reaches no code in its own tree, which is pinned by a test rather than intended.
+  parses its baseline with the same deployment's packs — the baseline is a prior revision of that
+  deployment's document supplied as a diff input, so the packs that validate it are the installed
+  ones wherever the file itself is kept — and a prior revision carrying a claimed section therefore no
+  longer blocks the update it is the baseline for. `deploy --dry-run` states the boundary this
+  preview does not cross, in the same verdict: the **boot** validates the document with the core
+  grammar alone before it resolves any pack, so a claimed top-level section is not accepted there yet,
+  and `notProven` says so for exactly the documents that carry one. No further pack-contributed detail
+  is reported: what a pack configures stays the pack's business. A document that references no pack
+  loads no pack module and reaches no code in its own tree, which is pinned by a test rather than
+  intended.
   The seam is exercised end to end by a new in-tree extension pack, `packages/test/fixture-pack`. It
   claims one section (`auditing`) and ships the validator for it — written against no validation
   library, because that is the contract the platform actually promises a pack — and is loaded through

@@ -51,18 +51,27 @@ export interface DeploymentTreeParse {
 
 /**
  * The deployment tree a spec's packs are resolved within — `RAYSPEC_HANDLER_ROOT` when the deployment
- * declares one, otherwise the directory the spec file itself sits in. Mirrors `loadServerConfig`'s
- * `escapeHatchRoot`, which is what the boot hands the loader, so a command previews the boot's tree
- * rather than a second guess at it.
+ * declares one, otherwise the directory the DEPLOYMENT's spec file sits in. Mirrors
+ * `loadServerConfig`'s `escapeHatchRoot`, which is what the boot hands the loader, so a command
+ * previews the boot's tree rather than a second guess at it.
  */
-function deploymentRootFor(specPath: string, env: NodeJS.ProcessEnv): string {
+function deploymentRootFor(deploymentSpecPath: string, env: NodeJS.ProcessEnv): string {
   const declared = env.RAYSPEC_HANDLER_ROOT?.trim();
-  return declared ? resolvePath(declared) : dirname(specPath);
+  return declared ? resolvePath(declared) : dirname(deploymentSpecPath);
 }
 
 /**
- * Parse `specText` with the packs the deployment at `specPath` carries, so a top-level section one of
- * them claims is validated by its owner and reported as owned.
+ * Parse `specText` with the packs the deployment at `deploymentSpecPath` carries, so a top-level
+ * section one of them claims is validated by its owner and reported as owned.
+ *
+ * THE TREE IS THE DEPLOYMENT'S, NOT THE TEXT'S OWN FILE'S. `deploymentSpecPath` is the path of the
+ * document THIS DEPLOYMENT boots — for a document being checked, its own path. `plan --against` hands
+ * in the NEW document's path for its baseline as well: a baseline is a prior revision of the same
+ * deployment's document supplied as a diff INPUT, so it may sit wherever the operator produced it (a
+ * checkout of the previous revision, a scratch copy beside the terminal), while the packs that can
+ * validate it are the ones installed on the deployment being planned. Resolving from the baseline
+ * file's own directory would answer with the wrong pack set — and would import pack code out of a
+ * directory named only as a diff input.
  *
  * Returns `undefined` when the pack-aware parse has nothing to add, and the caller must then keep its
  * OWN unchanged parse: a document of the product profile (whose grammar has no `extensions[]`, so it
@@ -77,7 +86,7 @@ function deploymentRootFor(specPath: string, env: NodeJS.ProcessEnv): string {
  * would report exactly that.
  */
 export async function parseFromDeploymentTree(
-  specPath: string,
+  deploymentSpecPath: string,
   specText: string,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DeploymentTreeParse | undefined> {
@@ -92,7 +101,7 @@ export async function parseFromDeploymentTree(
 
   // Only now — a document that references a pack is the only one that pays for the loader's module.
   const { parseSpecWithPacks } = await import('@rayspec/platform');
-  const root = deploymentRootFor(specPath, env);
+  const root = deploymentRootFor(deploymentSpecPath, env);
   const parsed = await parseSpecWithPacks(specText, { packsRoot: root, deploymentRoot: root });
   if (!parsed.ok) return { errors: parsed.errors, claimedSections: [] };
   return {

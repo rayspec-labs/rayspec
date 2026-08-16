@@ -269,6 +269,11 @@ introspects a live target.
   documents. `plan` is the command an operator debugs with, which is why the key
   that is neither the core grammar's nor an error is named rather than left to be
   inferred. It never affects `ok`, and it is absent for a pack-free document.
+  In update mode the `--against` **baseline** is parsed with the packs of the
+  deployment being planned — the tree of the **new** document. The baseline is a
+  prior revision of that same deployment's document handed in as a diff input, so
+  it may be kept anywhere (`git show HEAD~1:rayspec.yaml > /tmp/prior.yaml`) and
+  the packs that can validate it are the installed ones either way.
 
 - **Exit:** `0` if the spec validated, the gate did not block, and any shadow
   applied cleanly; `1` otherwise.
@@ -770,8 +775,14 @@ change is applied by the explicit `--apply-migration` flag below.
   also the profile whose grammar carries `extensions[]`, so a document that
   references a pack claiming a top-level section is validated with that pack
   loaded and carries the same `claimedSections` list [`doctor`](#doctor) and
-  [`plan`](#plan) report. (`--check-env` still loads no pack: running one is
-  exactly the side effect that command promises not to have.)
+  [`plan`](#plan) report. That is also the one place `ok:true` here is furthest
+  from *it boots*, and `notProven` says so in the same verdict: **the boot
+  validates the document with the core grammar alone**, before it resolves any
+  pack, so a top-level key a pack claims is refused there — the pack-aware parse
+  is a diagnostic surface, and the boot has not been taught it yet.
+  (`--check-env` still loads no pack: running one is exactly the side effect that
+  command promises not to have — and for such a document it reports the boot's
+  refusal, which is the same fact from the boot's own module.)
 
   A **frontend-only** document has nothing to compose either, and what its check does
   not prove narrows instead: it reads only the document, so it says nothing about

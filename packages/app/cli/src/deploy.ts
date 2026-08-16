@@ -121,7 +121,8 @@ export interface DeployDryRunResult {
    * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
    * section key and the pack that owns it — the same line `plan` and `doctor` report, from the same
    * loader run against the same deployment tree. Present only for a document that references a pack
-   * and validated, so every other verdict keeps the exact key set it had. NEVER affects `ok`.
+   * and validated, so every other verdict keeps the exact key set it had. NEVER affects `ok` — and
+   * where `ok:true` here is furthest from "it boots", `notProven` says so in the same verdict.
    */
   readonly claimedSections?: readonly string[];
 }
@@ -170,6 +171,24 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
   // static boot only degrades its /health. Only the document was read here, so nothing was checked.
   'that the declared frontend directories hold servable built assets (only the document was read; an unservable mount is refused fail-closed at boot)',
 ] as const;
+
+/**
+ * The boundary a CLAIMED SECTION has, and the one entry above that is NOT a refusal met after the
+ * document validates: it is met INSTEAD of the validation this arm just ran. This preview validates
+ * the document with the deployment's packs loaded, so a top-level key a pack claims is judged by its
+ * owner. The boot does not: `deployDeclaredSpec` re-reads the document and validates it with the CORE
+ * grammar alone BEFORE it resolves a single pack, and that grammar rejects every key it does not own.
+ * `--check-env`, which reads the boot's own module, reports exactly that refusal for such a document.
+ *
+ * So it is stated, in the verdict, rather than left for a `deploy` to discover — a claimed section is
+ * the one shape for which `ok:true` here is furthest from "it boots". Appended ONLY for a document
+ * whose packs actually claim a section, so every other verdict keeps the boundary list it had.
+ */
+const BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION =
+  'that the boot accepts a top-level section an extension pack claims: this preview validated the ' +
+  "document with the deployment's packs loaded, but the boot validates it with the core grammar " +
+  'alone before it resolves any pack, and that grammar rejects a key it does not own (`--check-env`, ' +
+  "which reads the boot's own module, reports that refusal for this document)";
 
 /**
  * The `--check-env` verdict (JSON, stdout). It is the `@rayspec/server` boot-environment report — the
@@ -488,6 +507,7 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // static profile — it boots the full platform, which GATES on every mount — so the mounts are
     // reported here rather than silently dropped; omitted entirely when the document declares none.
     const mounts = backend.value.frontend ?? [];
+    const claimedSections = fromTree?.claimedSections ?? [];
     return withClaimedSections(
       {
         ...base,
@@ -501,9 +521,13 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
           ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
         },
         errors: [],
-        notProven: BACKEND_DRY_RUN_NOT_PROVEN,
+        // The claim the packs made is also a boundary this preview does not cross — see the constant.
+        notProven:
+          claimedSections.length > 0
+            ? [...BACKEND_DRY_RUN_NOT_PROVEN, BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION]
+            : BACKEND_DRY_RUN_NOT_PROVEN,
       },
-      fromTree?.claimedSections ?? [],
+      claimedSections,
     );
   }
 

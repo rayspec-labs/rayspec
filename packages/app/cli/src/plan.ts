@@ -193,8 +193,11 @@ export interface PlanResult {
    * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
    * section key and the pack that owns it — `plan` is the command an operator debugs with, so the key
    * that is neither the core grammar's nor an error is named here rather than left to be inferred.
-   * Present only for a document that references a pack and validated, so a pack-free plan's envelope
-   * stays byte-identical. NEVER affects `ok`.
+   * Present only for a document that references a pack, and only once THE PLANNED DOCUMENT's own parse
+   * validated — so a pack-free plan's envelope stays byte-identical. It can therefore ride an
+   * `ok:false` envelope whose refusal came from a later step (an `--against` baseline that did not
+   * validate, a blocked gate): the claim is a fact about the document that was planned, and it is
+   * exactly as true when the plan goes on to fail. NEVER affects `ok`.
    */
   readonly claimedSections?: readonly string[];
 }
@@ -671,15 +674,19 @@ interface SpecFile {
 /**
  * The backend-profile plan: `spec.stores` are the declared stores; update mode diffs old→new.
  *
- * BOTH documents are parsed from their own deployment tree, so a top-level section a pack claims is
- * validated by that pack on each side. The baseline gets the same treatment as the new document
- * deliberately: it is a prior revision of the same deployment's document, so a claimed section it
- * carries is as owned as the new one's — parsing it with the core grammar alone would refuse the
- * baseline as an unknown field and block an update the deployment can perform.
+ * BOTH documents are parsed with the packs of ONE deployment — the one being planned, whose tree is
+ * the NEW document's. The baseline gets the pack-aware parse deliberately: it is a prior revision of
+ * the same deployment's document, so a claimed section it carries is as owned as the new one's, and
+ * parsing it with the core grammar alone would refuse the baseline as an unknown field and block an
+ * update the deployment can perform. It gets that parse from the DEPLOYMENT's tree just as
+ * deliberately: `--against` takes a diff INPUT, a file the operator produced wherever it suited them
+ * (`git show HEAD~1:rayspec.yaml > …`), and the packs able to validate it are the installed ones — not
+ * whatever happens to sit beside that file, which would be both the wrong pack set and pack code
+ * imported out of a directory nobody named as a deployment.
  */
 async function planRaySpec(
   next: SpecFile,
-  prior: SpecFile | undefined,
+  priorText: string | undefined,
   allowlist: AllowlistEntry[],
   opts: RunPlanOpts,
 ): Promise<PlanResult> {
@@ -708,11 +715,14 @@ async function planRaySpec(
   const specWarnings = lintSpecWarnings(spec);
 
   let oldStores: StoreSpec[] | undefined;
-  if (prior !== undefined) {
-    const priorFromTree = await parseFromDeploymentTree(prior.path, prior.text);
+  if (priorText !== undefined) {
+    // `next.path` — the baseline is a prior revision of THIS deployment's document, so its packs are
+    // this deployment's packs. The baseline file's own directory is a diff input's location, never a
+    // deployment tree.
+    const priorFromTree = await parseFromDeploymentTree(next.path, priorText);
     const parsedOld =
       priorFromTree === undefined
-        ? parseSpec(prior.text)
+        ? parseSpec(priorText)
         : priorFromTree.spec !== undefined
           ? ({ ok: true, value: priorFromTree.spec } as const)
           : ({ ok: false, errors: priorFromTree.errors } as const);
@@ -915,13 +925,13 @@ export async function runPlan(
   }
   const newKind = detectSpecKind(text);
 
-  // --against: read the PRIOR spec (jailed) and require the SAME family (a cross-family diff is undefined).
+  // --against: read the PRIOR spec (jailed) and require the SAME family (a cross-family diff is
+  // undefined). Its path is used to READ it and for nothing else: the baseline is a diff input, and
+  // the deployment whose packs judge both documents is the new document's.
   let oldText: string | undefined;
-  let oldPath: string | undefined;
   if (opts.against !== undefined) {
     try {
-      oldPath = resolveSpecPath([opts.against]);
-      oldText = await readSpecFile(oldPath);
+      oldText = await readSpecFile(resolveSpecPath([opts.against]));
     } catch (e) {
       if (e instanceof ReadSpecError) {
         return {
@@ -1021,12 +1031,5 @@ export async function runPlan(
 
   return newKind === 'product'
     ? planProduct(text, oldText, allowlist, opts)
-    : planRaySpec(
-        { text, path: specPath },
-        oldText !== undefined && oldPath !== undefined
-          ? { text: oldText, path: oldPath }
-          : undefined,
-        allowlist,
-        opts,
-      );
+    : planRaySpec({ text, path: specPath }, oldText, allowlist, opts);
 }

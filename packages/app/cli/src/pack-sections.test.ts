@@ -19,13 +19,18 @@
  *     would send an operator to delete the configuration instead of installing the pack;
  *   • the exact version pin is load-bearing: a document whose pin does not match the manifest is
  *     `extension_pack_refused` — the pack is present, so deploying it again changes nothing.
+ *   • `plan --against` judges its BASELINE by the packs of the deployment being planned, from a
+ *     baseline file held outside the deployment tree — which is where an operator's prior revision
+ *     actually lives;
+ *   • `deploy --dry-run` states, in the verdict, the one thing `ok:true` does not mean for a document
+ *     like this: the boot validates it with the core grammar alone and refuses the claimed key.
  *
  * NO DATABASE, NO NETWORK, NO SECRET: `doctor` and a backend `--dry-run` touch none, and the fixture
  * document declares no store, so `plan`'s optional shadow-apply has nothing to apply and never runs.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SpecError } from '@rayspec/spec';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -240,5 +245,108 @@ describe('a pack-free document is untouched', () => {
     if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
     expect(dryRun.result.ok).toBe(true);
     expect('claimedSections' in dryRun.result).toBe(false);
+  });
+
+  it("keeps the dry-run boundary list it had — the claimed-section line is a claim's, not everyone's", async () => {
+    process.chdir(root);
+    const dryRun = await runDeploy(['--dry-run', 'rayspec.yaml']);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.notProven.join('\n')).not.toContain('extension pack claims');
+  });
+});
+
+/**
+ * `plan --against` — the BASELINE is a diff INPUT, and the deployment is the new document's.
+ *
+ * An operator produces a prior revision wherever it suits them (`git show HEAD~1:rayspec.yaml > …`),
+ * so the file holding it is almost never inside the deployment tree. It is still a prior revision of
+ * THIS deployment's document, so the packs that can validate it are the ones installed here. Resolving
+ * them from the baseline FILE's own directory answers with a pack set this deployment does not have —
+ * and reports `extension_pack_unavailable` for a pack that is deployed, which is the wrong-remedy
+ * report this whole seam exists to remove.
+ *
+ * The baseline is written to a throwaway directory under the repo root because `--against` is jailed to
+ * the working directory (the repo root, as everywhere in this suite) — and the point of the case is a
+ * baseline OUTSIDE `packages/test/fixture-pack`.
+ */
+describe("plan --against: the baseline is judged by the DEPLOYMENT's packs", () => {
+  let baselineDir = '';
+  /** The `--against` argument: repo-root-relative (the jail), and outside the deployment tree. */
+  const against = (file: string): string => `${basename(baselineDir)}/${file}`;
+
+  beforeAll(() => {
+    baselineDir = mkdtempSync(join(repoRoot, '.rayspec-plan-baseline-'));
+    // Byte-for-byte the documents that sit beside the pack — only the directory differs, and that
+    // directory holds no pack, no `dist/`, nothing.
+    for (const doc of [VALID_DOC, INVALID_SECTION_DOC]) {
+      writeFileSync(
+        join(baselineDir, basename(doc)),
+        readFileSync(join(repoRoot, doc), 'utf8'),
+        'utf8',
+      );
+    }
+  });
+  afterAll(() => {
+    rmSync(baselineDir, { recursive: true, force: true });
+  });
+
+  it('a prior revision carrying the claimed section no longer blocks the update it is the baseline for', async () => {
+    const result = await runPlan([VALID_DOC], {
+      against: against('rayspec.yaml'),
+      shadowDatabaseUrl: undefined,
+    });
+    expect(result.errors, show(result.errors)).toEqual([]);
+    expect(result.ok).toBe(true);
+    expect(result.claimedSections).toEqual([CLAIMED_LINE]);
+  });
+
+  it("the baseline reaches the pack's OWN validator — the deployment's pack, not the baseline directory's", async () => {
+    const result = await runPlan([VALID_DOC], {
+      against: against('rayspec.invalid-section.yaml'),
+      shadowDatabaseUrl: undefined,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.phase).toBe('validate');
+    // The pack's own two violations, identical to what `doctor` reports for that document — so the
+    // baseline was validated by the pack that owns the section, from a directory that holds no pack.
+    const doctor = await runDoctor([INVALID_SECTION_DOC]);
+    expect(result.errors, show(result.errors)).toEqual(doctor.errors);
+    // The planned document's claim is a fact about the planned document: a baseline that fails later
+    // does not unmake it, and the envelope carries it on the refusal too.
+    expect(result.claimedSections).toEqual([CLAIMED_LINE]);
+  });
+});
+
+/**
+ * WHAT `deploy --dry-run` DOES NOT PROVE ABOUT A CLAIMED SECTION, stated in the verdict.
+ *
+ * The preview validates the document with the deployment's packs loaded. The BOOT validates it with
+ * the core grammar alone, before it resolves any pack, and that grammar rejects a key it does not own.
+ * So for this one class of document `ok:true` is further from "it boots" than anywhere else on this
+ * arm, and the verdict says so rather than leaving it to a refused `deploy`.
+ *
+ * Both halves are pinned, because a disclosure that outlives the divergence is its own kind of false
+ * report: when the boot is taught the pack-aware parse, the second case reds and the line goes.
+ */
+describe('deploy --dry-run names the boot boundary a claimed section has', () => {
+  it('states it in `notProven`, in the same verdict that reports the claim', async () => {
+    const dryRun = await runDeploy(['--dry-run', VALID_DOC]);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.ok).toBe(true);
+    expect(dryRun.result.claimedSections).toEqual([CLAIMED_LINE]);
+    expect(dryRun.result.notProven.join('\n')).toContain(
+      'that the boot accepts a top-level section an extension pack claims',
+    );
+  });
+
+  it('and the boot still refuses that document — the fact the line states', async () => {
+    // `--check-env` reads `@rayspec/server`'s own boot-env module, the one the boot refusals are
+    // composed from, and it loads no pack by design. Its verdict for this document IS the boot's.
+    const outcome = await runDeploy(['--check-env', VALID_DOC]);
+    if (outcome.kind !== 'check-env') throw new Error('expected a check-env verdict');
+    expect(outcome.result.ok).toBe(false);
+    expect(outcome.result.errors.join('\n')).toContain(
+      "spec did not validate: unknown_field at auditing: unknown field 'auditing'",
+    );
   });
 });
