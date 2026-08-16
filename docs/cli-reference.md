@@ -891,7 +891,12 @@ change is applied by the explicit `--apply-migration` flag below.
   **applied**, and the boot names the object it looked for — including when the live schema
   is drift-clean against the spec, which it always is for an object the spec cannot express
   (a hand-shaped index). A delta found only **partly** applied is **refused**, naming both
-  sides, rather than half re-applied. It is rejected with `--dry-run` (a dry-run touches no database) and against a
+  sides, rather than half re-applied — including the mixed case, where a reviewed `DROP`
+  target is still there beside an object the same delta already created. Names are read the
+  way the catalog stores them (an unquoted identifier folded, a quoted one verbatim); one the
+  boot cannot read whole, such as a schema-qualified name, is not probed and not guessed at,
+  and the mount log then says the boot measured nothing rather than claiming a result. It is
+  rejected with `--dry-run` (a dry-run touches no database) and against a
   frontend-only spec (the static profile below touches no database either), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
   Both file paths are jailed exactly like the spec path.

@@ -642,12 +642,15 @@ export async function serveDeployment(
   // LEFTOVER-ENV REBOOT SEMANTICS (honest): a delta is NON-IDEMPOTENT, and this env PERSISTS in the
   // process — a process manager (systemd/docker `Restart=always`) that RESTARTS the command with
   // --apply-migration still present re-enters update mode on the next boot. BOTH profiles are reboot-safe
-  // by construction: they CLASSIFY the live schema FIRST and MOUNT a present-matching schema (the delta
-  // already landed on a prior boot) instead of re-applying a non-idempotent delta and crash-looping on a
-  // duplicate_column (42701) — the PRODUCT profile in product-boot, the BACKEND profile in the
-  // composition root's update branch (both route through the shared planUpdateBoot). Leaving
-  // --apply-migration in a process-managed unit is therefore SAFE (it applies once, mounts thereafter);
-  // still, drop it once the delta has landed to keep the operator intent explicit.
+  // by construction: they CLASSIFY the live schema FIRST and then PROBE THE OBJECTS THE DELTA ITSELF
+  // NAMES — a present-matching classification is reached BOTH by a delta that landed and by one that
+  // never ran, so it does not decide on its own. A delta whose objects are all in the state an applied
+  // delta leaves them in MOUNTS instead of re-applying a non-idempotent delta and crash-looping on a
+  // duplicate_column (42701); one whose objects are not there is APPLIED; a HALF-LANDED one is REFUSED,
+  // naming both sides — the PRODUCT profile in product-boot, the BACKEND profile in the composition
+  // root's update branch (both route through the shared planUpdateBoot). Leaving --apply-migration in a
+  // process-managed unit is therefore SAFE (it applies once, mounts thereafter); still, drop it once the
+  // delta has landed to keep the operator intent explicit.
   if (migrationPath !== undefined) process.env.RAYSPEC_UPDATE_MIGRATION = migrationPath;
   if (allowlistPath !== undefined) process.env.RAYSPEC_UPDATE_ALLOWLIST = allowlistPath;
 
