@@ -30,6 +30,11 @@
  * neutral `RunJob` onto the SAME `DurableExecutor`, so a turn a service schedules is read, streamed,
  * cancelled and journaled by the surfaces that already exist. `agentId` is resolved against the
  * DEPLOYED agent registry: an undeclared id is fail-closed here, never a silent, dangling enqueue.
+ * The header write is advisory, and it carries the SAME COMPENSATION the other two enqueue-with-header
+ * paths carry (`routes/runs.ts`, `cron-scheduler.ts`): when the enqueue throws, the engine is probed
+ * and the header this call wrote is removed ONLY for a job that is provably absent — so a runId that
+ * will never run does not read back as `enqueued` for ever, and a job that may be live keeps its
+ * header. That pairing is what makes "best-effort" safe rather than merely cheap.
  *
  * HONEST LIMIT (stated, not silently accepted): this seam mints a FRESH runId per call and promises
  * no exactly-once key. A service that must reconcile a crash-retry to one run keys that in its own
@@ -39,7 +44,11 @@
 import { randomUUID } from 'node:crypto';
 import type { TenantDb } from '@rayspec/db';
 import type { DurableExecutor } from './durable/types.js';
-import { insertEnqueuedRunHeader, type RunHeaderIdentity } from './run-header.js';
+import {
+  deleteEnqueuedRunHeader,
+  insertEnqueuedRunHeader,
+  type RunHeaderIdentity,
+} from './run-header.js';
 
 /** What a service asks for when it schedules one durable agent turn. */
 export interface TurnDispatchRequest {
@@ -130,22 +139,46 @@ export function makeTurnDispatch(deps: TurnDispatchDeps): TurnDispatch {
       // The header FIRST, so the runId this call hands back resolves on the run-read routes for the
       // whole run instead of 404ing until the worker finishes it. BEST-EFFORT and advisory, exactly as
       // on the HTTP async path: a failing header write must not cost a service the enqueue it could
-      // have had, and the run re-persists its own header when it starts.
+      // have had, and the run re-persists its own header when it starts. `headerCreated` records
+      // whether THIS call created the row, so the enqueue-failure path below can remove it again for a
+      // job that provably never existed — the other half of what makes best-effort safe here.
+      let headerCreated = false;
       try {
-        await insertEnqueuedRunHeader(deps.tdb, { runId, ...identity });
+        headerCreated = await insertEnqueuedRunHeader(deps.tdb, { runId, ...identity });
       } catch (err) {
         console.error(`[platform] turn-dispatch run header write failed runId=${runId}`, err);
       }
 
-      await deps.executor.enqueue(deps.tenantId, {
-        runId,
-        // The tenant CORE bound — never a value that came in on the request (there is no such field).
-        tenantId: deps.tenantId,
-        agentId: request.agentId,
-        input: request.input,
-        ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
-        ...(request.maxTurns !== undefined ? { maxTurns: request.maxTurns } : {}),
-      });
+      try {
+        await deps.executor.enqueue(deps.tenantId, {
+          runId,
+          // The tenant CORE bound — never a value that came in on the request (there is no such field).
+          tenantId: deps.tenantId,
+          agentId: request.agentId,
+          input: request.input,
+          ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
+          ...(request.maxTurns !== undefined ? { maxTurns: request.maxTurns } : {}),
+        });
+      } catch (err) {
+        // The enqueue THREW — mirror `runs.ts` / `cron-scheduler.ts`, the two enqueue-with-header paths
+        // this one shares its header write with. The throw does NOT prove the job was never created:
+        // the durable engine persists the workflow status BEFORE `enqueue` resolves, so a throw after
+        // that persist means the job WILL still run. Probe the engine and remove the header ONLY when
+        // the job is provably ABSENT (status 'unknown') AND this call created the row — otherwise a
+        // runId that will never run reads back as `enqueued` for ever on every run-read surface. The
+        // status read is fail-CLOSED: unreadable ⇒ the job may be live ⇒ KEEP the header. The delete is
+        // best-effort, so a failure here cannot mask the original error, which is always rethrown.
+        if (headerCreated) {
+          let jobAbsent = false;
+          try {
+            jobAbsent = (await deps.executor.status(runId)) === 'unknown';
+          } catch {
+            jobAbsent = false;
+          }
+          if (jobAbsent) await deleteEnqueuedRunHeader(deps.tdb, runId).catch(() => {});
+        }
+        throw err;
+      }
 
       return { runId };
     },

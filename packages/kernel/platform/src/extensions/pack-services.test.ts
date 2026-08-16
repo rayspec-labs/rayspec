@@ -20,7 +20,10 @@
  *       module that names the capability fails the build. Nothing proved the positive, so these arms
  *       do: the capability reaches a service's `boot`, it schedules a turn onto the durable seam, and
  *       the TENANT it schedules under is the one CORE bound — the request object has no tenant field
- *       to name one with, and an undeclared agent is fail-closed rather than silently enqueued.
+ *       to name one with, and an undeclared agent is fail-closed rather than silently enqueued. The
+ *       last three arms are the FAILING enqueue, which is where the advisory header write earns its
+ *       keep or leaves a phantom `enqueued` run behind: the engine is probed, and the header is
+ *       removed for a provably-absent job and KEPT for one that may be live or cannot be read.
  *
  * No DB and no on-disk pack: the pack entry and its service modules are provided through the injected
  * importer, and the durable executor + the tenant-scoped handle are fakes — exactly as the sibling
@@ -31,7 +34,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { TenantDb } from '@rayspec/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { DurableExecutor, EnqueueResult, RunJob } from '../durable/types.js';
+import type { DurableExecutor, DurableJobStatus, EnqueueResult, RunJob } from '../durable/types.js';
 import type { ModuleImporter } from '../handlers/loader.js';
 import { makeTurnDispatch } from '../turn-dispatch.js';
 import { defineExtension, type ExtensionManifest } from './extension.js';
@@ -294,17 +297,26 @@ describe('bootPackServices — boot order, and its exact reverse on shutdown', (
 });
 
 describe('makeTurnDispatch — the one sanctioned way a service schedules an agent turn', () => {
-  /** A fake durable executor recording what it was asked to enqueue. */
-  function fakeExecutor(): DurableExecutor & { readonly jobs: Array<[string, RunJob]> } {
+  /**
+   * A fake durable executor recording what it was asked to enqueue. `enqueueThrows` makes the enqueue
+   * REJECT (the failure the compensating delete exists for) and `statusAnswer` is what the engine
+   * probe then reads back — `'unknown'` for a job that provably never durably existed, anything else
+   * for one that may be live, and `'throw'` for an engine that cannot answer at all.
+   */
+  function fakeExecutor(
+    opts: { enqueueThrows?: boolean; statusAnswer?: DurableJobStatus | 'throw' } = {},
+  ): DurableExecutor & { readonly jobs: Array<[string, RunJob]> } {
     const jobs: Array<[string, RunJob]> = [];
     return {
       jobs,
       async enqueue(tenantId: string, job: RunJob): Promise<EnqueueResult> {
+        if (opts.enqueueThrows) throw new Error('the durable engine refused the enqueue');
         jobs.push([tenantId, job]);
         return { jobId: job.runId };
       },
       async status() {
-        return 'enqueued' as const;
+        if (opts.statusAnswer === 'throw') throw new Error('the engine status is unreadable');
+        return opts.statusAnswer ?? ('enqueued' as const);
       },
       async cancel() {},
       async start() {},
@@ -315,8 +327,12 @@ describe('makeTurnDispatch — the one sanctioned way a service schedules an age
     };
   }
 
-  /** A fake tenant-scoped handle recording the run headers written through it. */
-  function fakeTdb(written: unknown[]): TenantDb {
+  /**
+   * A fake tenant-scoped handle recording the run headers written through it AND the runIds deleted
+   * again. The delete is what the enqueue-failure arms below read: the compensation is a real write,
+   * so measuring it means measuring a write, not a flag.
+   */
+  function fakeTdb(written: unknown[], deleted: string[] = []): TenantDb {
     return {
       select: () => ({
         where: () => ({ limit: async () => [] }),
@@ -325,11 +341,23 @@ describe('makeTurnDispatch — the one sanctioned way a service schedules an age
         onConflictDoNothing: () => ({
           returning: async () => {
             written.push(values);
-            return [{ runId: 'x' }];
+            return [{ runId: (values as { runId: string }).runId }];
           },
         }),
       }),
+      // `deleteEnqueuedRunHeader` filters on `(runId, status='enqueued')`; the fake records the runId
+      // the compensating delete was issued for, which is the fact these arms are about.
+      delete: () => ({
+        where: async (..._args: unknown[]) => {
+          deleted.push(lastRunId(written));
+        },
+      }),
     } as unknown as TenantDb;
+  }
+
+  /** The runId of the most recent header write — what a compensating delete must be removing. */
+  function lastRunId(written: unknown[]): string {
+    return (written[written.length - 1] as { runId?: string } | undefined)?.runId ?? '';
   }
 
   const TENANT = '00000000-0000-4000-8000-0000000004aa';
@@ -360,6 +388,77 @@ describe('makeTurnDispatch — the one sanctioned way a service schedules an age
     // routes for the whole run rather than 404ing until the worker finishes it.
     expect(written).toHaveLength(1);
     expect(written[0]).toMatchObject({ runId, backend: 'anthropic', agentName: 'Summarizer' });
+  });
+
+  /**
+   * THE ENQUEUE THREW — the header this call wrote must not outlive the job it was written for.
+   *
+   * The header write is advisory and deliberately best-effort, which is only safe while it is PAIRED
+   * with a compensation: the two other enqueue-with-header paths (`routes/runs.ts`,
+   * `cron-scheduler.ts`) probe the engine and remove the row for a job that provably never existed.
+   * Without it a failed enqueue leaves a `runs` row at `status='enqueued'` for a runId that will never
+   * run — readable on the run-read routes and in every listing for that tenant, for ever.
+   *
+   * The three arms are one decision table, and the middle two are each other's control: the engine's
+   * answer is the ONLY variable, so a delete that fired unconditionally would fail the second arm and
+   * a compensation that never fired would fail the first.
+   */
+  it('(D) enqueue THREW and the job is provably absent → the header is removed, the error rethrown', async () => {
+    const executor = fakeExecutor({ enqueueThrows: true, statusAnswer: 'unknown' });
+    const written: unknown[] = [];
+    const deleted: string[] = [];
+    const dispatch = makeTurnDispatch({
+      tenantId: TENANT,
+      tdb: fakeTdb(written, deleted),
+      executor,
+      resolveAgent: () => ({ backend: 'anthropic', agentName: 'S', model: 'm' }),
+    });
+
+    await expect(dispatch.schedule({ agentId: 'a', input: 'i' })).rejects.toThrow(
+      /refused the enqueue/,
+    );
+    // The header was written, and then removed again for the runId it was written for.
+    expect(written).toHaveLength(1);
+    expect(deleted).toEqual([(written[0] as { runId: string }).runId]);
+  });
+
+  it('(D) enqueue THREW but the job MAY be live → the header STAYS (the run it belongs to owns it)', async () => {
+    // A throw does not prove the job was never created: the engine persists the workflow status before
+    // `enqueue` resolves, so a job the engine still reports on WILL run and needs its header.
+    const executor = fakeExecutor({ enqueueThrows: true, statusAnswer: 'enqueued' });
+    const written: unknown[] = [];
+    const deleted: string[] = [];
+    const dispatch = makeTurnDispatch({
+      tenantId: TENANT,
+      tdb: fakeTdb(written, deleted),
+      executor,
+      resolveAgent: () => ({ backend: 'anthropic', agentName: 'S', model: 'm' }),
+    });
+
+    await expect(dispatch.schedule({ agentId: 'a', input: 'i' })).rejects.toThrow(
+      /refused the enqueue/,
+    );
+    expect(written).toHaveLength(1);
+    expect(deleted).toEqual([]);
+  });
+
+  it('(D) enqueue THREW and the status is UNREADABLE → fail-closed, the header STAYS', async () => {
+    const executor = fakeExecutor({ enqueueThrows: true, statusAnswer: 'throw' });
+    const written: unknown[] = [];
+    const deleted: string[] = [];
+    const dispatch = makeTurnDispatch({
+      tenantId: TENANT,
+      tdb: fakeTdb(written, deleted),
+      executor,
+      resolveAgent: () => ({ backend: 'anthropic', agentName: 'S', model: 'm' }),
+    });
+
+    // The ORIGINAL error is what the caller sees — never the probe's.
+    await expect(dispatch.schedule({ agentId: 'a', input: 'i' })).rejects.toThrow(
+      /refused the enqueue/,
+    );
+    expect(written).toHaveLength(1);
+    expect(deleted).toEqual([]);
   });
 
   it('(D) an UNDECLARED agent is fail-closed — never a silent, dangling enqueue', async () => {
