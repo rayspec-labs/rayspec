@@ -143,6 +143,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
+  carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
+  may not contain a `$`, so digits after the first character are legal (`$tag1$`). The scan matched
+  a tag with a letters-only pattern, so on `$tag1$…$tag1$` it read "no dollar quote here", took the
+  inner `$hi$` for an opener, found no partner for it and ran to the end of the file — every
+  statement behind a perfectly valid literal was swallowed into one buffer and blanked away before
+  the detectors ran. A `DROP TABLE` after such a literal scanned clean, and `rayspec plan` reported
+  no destructive statement for it. Both the statement splitter and the literal-blanking pass now
+  share one pattern that accepts a digit-bearing tag, and the same statement is reported as
+  `drop-table`. No migration in this repository contains a dollar quote, so the platform chain's
+  scan result is unchanged.
+
 - **A trigger handler now receives `init.fsSource`, `init.stt` and `init.tts`.** Those three
   capabilities reached a `handler`-kind route and a tool but never a trigger, so a handler that read
   a file from the deployment's source root or transcribed audio worked when it was called over HTTP

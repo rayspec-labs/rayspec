@@ -158,6 +158,17 @@ function collapse(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * The opening (or closing) delimiter of a dollar-quoted string, `$tag$` — the tag may be empty
+ * (`$$`). A tag follows unquoted-identifier rules EXCEPT that it may not contain a `$`, so DIGITS
+ * after the first character are legal. A pattern that allowed letters only read `$tag1$hi$tag1$`
+ * as "no dollar quote here", then took the inner `$hi$` for an opener, found no partner for it and
+ * ran to the end of the file — every statement after a perfectly valid literal was swallowed into
+ * one buffer and blanked away before the detectors ran, so a `DROP TABLE` behind such a literal
+ * scanned clean.
+ */
+const DOLLAR_TAG_RE = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/;
+
 interface RawStatement {
   /** 1-based starting line number of the statement in the original SQL. */
   line: number;
@@ -240,7 +251,7 @@ function splitStatements(sql: string): RawStatement[] {
 
     // Dollar-quoted string $tag$ ... $tag$ (tag may be empty: $$ ... $$). Copy verbatim.
     if (ch === '$') {
-      const tagMatch = /^\$[A-Za-z_]*\$/.exec(sql.slice(i));
+      const tagMatch = DOLLAR_TAG_RE.exec(sql.slice(i));
       if (tagMatch) {
         const tag = tagMatch[0];
         for (const c of tag) pushChar(c);
@@ -312,7 +323,7 @@ function stripStringLiteralBodies(s: string): string {
       continue;
     }
     if (ch === '$') {
-      const tag = /^\$[A-Za-z_]*\$/.exec(s.slice(i))?.[0];
+      const tag = DOLLAR_TAG_RE.exec(s.slice(i))?.[0];
       if (tag) {
         out += tag;
         i += tag.length;
