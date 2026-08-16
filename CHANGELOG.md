@@ -366,7 +366,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PackStoreFilter`, `PackSelectOptions`, `PackUpsertOptions`). A pack handler module of either
   contracted kind now imports `@rayspec/pack-sdk` and nothing else, for both halves of a
   contribution, and `gate:handler-imports` sanctions that import over the manifest-derived pack
-  handler roots alongside `@rayspec/handler-sdk`.
+  handler roots alongside `@rayspec/handler-sdk`. **That sanction is now load-bearing**: the gate
+  refuses every *other* `@rayspec/`-scoped specifier under a handler root, rather than enumerating
+  the platform internals someone thought of — so `@rayspec/server`, `@rayspec/durable-dbos`, a
+  capability runtime or a package added next release is refused on the day it lands, and a subpath of
+  a sanctioned contract is refused too. Its self-test proves the set decides something by mutation:
+  each sanctioned name is dropped in turn and the import that the full set accepts must be refused by
+  the shrunken one, so a name cannot sit in that set inertly. The PASS line now **reports** what the
+  scan read — modules scanned, per-contract tally, which vectors came back clean — instead of
+  generalizing a property over files that do not all have it. An ordinary third-party or node-builtin
+  import stays deliberately unflagged, and the header says so: the path jail bounds which file loads,
+  this gate bounds the trust-boundary crossings.
   **What a pack handler does not get is stated, not omitted.** The injected capability handles (a blob
   backend, the read-only file source, the speech providers, the event-bus append), the durable
   enqueue, the play-token mint and the branded status/header response envelope are each named in the

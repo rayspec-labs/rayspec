@@ -237,7 +237,8 @@ export interface DefinedExtension extends ExtensionManifest {
  * contracts (`PackToolHandler`, `PackRouteHandler`), or `@rayspec/handler-sdk` for a shape the pack
  * surface does not promise (a `route`-kind handler behind a `{kind:'stream'}` action needs
  * `StreamRouteHandler` from there). `gate:handler-imports` sanctions exactly those two over the
- * manifest-derived pack handler root and refuses everything else. The two surfaces are deliberately
+ * manifest-derived pack handler root and refuses every OTHER `@rayspec/`-scoped import there, along
+ * with agent SDKs and `..`-escapes out of the handler tree. The two surfaces are deliberately
  * distinct: the entry DECLARES the pack (platform types), a handler RUNS with injected capabilities
  * (handler-contract types).
  */

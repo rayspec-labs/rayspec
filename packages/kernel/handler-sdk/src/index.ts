@@ -3,15 +3,19 @@
  *
  * This is the public, TYPE-ONLY contract for a trusted-author escape-hatch handler (the escape-hatch
  * layer): the `HandlerInit` the engine constructs + injects, and the neutral data shapes a handler
- * returns. An escape-hatch module imports a type-only handler contract and nothing else — this
- * package, or `@rayspec/pack-sdk` for a handler an extension pack contributes — never
- * `@rayspec/{platform,db,core,api-auth}` internals or any agent SDK type. The `gate:handler-imports`
- * CI tripwire enforces that boundary over both.
+ * returns. Under the `@rayspec/` scope an escape-hatch module names one of the two handler contracts
+ * and nothing else — this package, or `@rayspec/pack-sdk` for a handler an extension pack contributes
+ * — never `@rayspec/{platform,db,core,api-auth}` internals or any agent SDK type. The
+ * `gate:handler-imports` CI tripwire holds that boundary over both: it refuses every OTHER
+ * `@rayspec/`-scoped import under a handler root, agent SDKs, and `..`-escapes into platform source.
  *
- * WHY TYPE-ONLY: a handler receives its capabilities by INJECTION (the engine builds the concrete
- * `HandlerInit` per run and passes it in). The handler never CONSTRUCTS a capability, so the SDK
- * ships no runtime — only the shapes the handler declares against. This keeps the package a pure
- * contract and makes the external-exposure isolate seam trivial: the init is a SERIALIZABLE-shaped
+ * WHY THE CONTRACT IS TYPES: a handler receives its capabilities by INJECTION (the engine builds the
+ * concrete `HandlerInit` per run and passes it in). The handler never CONSTRUCTS a capability, so no
+ * capability here is a runtime value — only the shapes the handler declares against. The package is
+ * not empty at runtime (it also carries the response-envelope helpers and the `@rayspec/core` conduit
+ * documented below, none of them a capability), but nothing a handler is INJECTED with is something
+ * it could build from this package. That makes the external-exposure isolate seam trivial: the init
+ * is a SERIALIZABLE-shaped
  * value (name-keyed store access + plain rows), so the in-process call can become a cross-isolate
  * call WITHOUT changing a single handler or spec.
  *
@@ -31,10 +35,10 @@
 // Pure text utilities re-exported from @rayspec/core. These are stateless,
 // dependency-free functions (UAX-29 word tokenization + a token-run subset check) — NOT a capability,
 // platform internal, or runtime state — so re-exporting them keeps handler-sdk a thin, serializable-
-// seam SDK. A handler is confined by the `gate:handler-imports` tripwire to a type-only handler
-// contract (this package, or @rayspec/pack-sdk for a handler an extension pack contributes), so this
-// conduit is how a handler that names THIS package CONSUMES the harvested tokenizer instead of
-// keeping its own copy.
+// seam SDK. A handler is confined by the `gate:handler-imports` tripwire to a sanctioned handler
+// contract (this package, or @rayspec/pack-sdk for a handler an extension pack contributes) for
+// anything `@rayspec/`-scoped, so this conduit is how a handler that names THIS package CONSUMES the
+// harvested tokenizer instead of keeping its own copy — @rayspec/core is refused to it directly.
 // The shared bounded body reader — re-exported from @rayspec/core on the same conduit as the
 // tokenizer (a stateless, dependency-free byte primitive; not a capability or platform internal). A
 // capability binding (e.g. audio ingest) uses it to cap the bytes it buffers from the raw request

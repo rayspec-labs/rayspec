@@ -13,7 +13,7 @@
  * one. It names `@rayspec/pack-sdk` and nothing else, now that the same package carries the contract a
  * handler is written against — which keeps this subtree inside the boundary `gate:handler-imports`
  * enforces over it once the deployment document beside this pack registers it: that gate sanctions
- * the two type-only handler contracts and refuses everything else.
+ * the two handler contracts and refuses every other `@rayspec/`-scoped import under that root.
  */
 import type { PackRouteHandler } from '@rayspec/pack-sdk';
 
