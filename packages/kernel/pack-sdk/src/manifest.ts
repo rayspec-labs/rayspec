@@ -173,6 +173,31 @@ export interface PackSectionClaim {
 }
 
 /**
+ * The MIGRATION CHAIN a pack brings — the third contribution kind, and the only one that is not part
+ * of the document at all. A `stores` fragment is a business table the platform generates and owns;
+ * this is PLATFORM state the pack owns, for what a generator cannot express: hand-shaped indexes, a
+ * foreign key onto a platform table, an append-only ledger.
+ *
+ * The chain is applied by the deployment through the SAME migrator that applies the platform's own,
+ * strictly AFTER it, and journaled in a table named for the pack — so the chain restarts at `0000`
+ * and is its OWN chain rather than an extension of the platform's, and neither can renumber the
+ * other.
+ *
+ * Both fields are checked fail-closed at boot, naming the pack. `dir` is resolved under the PACK
+ * root with the same jail as a handler module. `tablePrefix` is MANDATORY whenever `migrations` is
+ * present: every table and index the chain creates must carry it, it may not contain a platform
+ * table, and it may not overlap the prefix another pack declares — a collision is a boot failure
+ * naming both parties. There is no default, because a namespace nobody declared is a namespace
+ * nothing can hold the chain to.
+ */
+export interface PackMigrationChain {
+  /** The chain directory (`.sql` files plus `meta/_journal.json`), pack-relative and jailed. */
+  readonly dir: string;
+  /** The namespace every table and index in the chain carries (mandatory). */
+  readonly tablePrefix: string;
+}
+
+/**
  * One pack manifest — the value a pack's entry module default-exports.
  *
  *  - `version`      — the pack's OWN declared version. It must equal the EXACT pin the deployment's
@@ -182,6 +207,9 @@ export interface PackSectionClaim {
  *                     absent = claims none). It sits beside `fragments`, not inside it, because a
  *                     claim is not content merged into the document — it is ownership of a key the
  *                     DEPLOYMENT writes.
+ *  - `migrations`   — the pack's OWN migration chain for the platform tables it owns (optional;
+ *                     absent = the pack owns no platform state). Beside `fragments` for the same
+ *                     reason a claim is: it is not content merged into the document.
  *  - `capabilities` — the capability instances the pack provides (optional).
  */
 export interface PackManifest {
@@ -191,6 +219,8 @@ export interface PackManifest {
   readonly fragments: PackFragments;
   /** The top-level document sections the pack claims the grammar of (optional). */
   readonly sections?: readonly PackSectionClaim[];
+  /** The pack's own migration chain for the platform tables it owns (optional). */
+  readonly migrations?: PackMigrationChain;
   /** The capability instances the pack provides (optional). */
   readonly capabilities?: PackCapabilities;
 }

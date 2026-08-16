@@ -36,6 +36,7 @@ import type {
   PackHandlerFragment,
   PackManifest,
   PackManifestBrand,
+  PackMigrationChain,
   PackSectionClaim,
   PackStoreFragment,
   PackToolFragment,
@@ -52,6 +53,7 @@ import type {
   EXTENSION_BRAND,
   ExtensionCapabilities,
   ExtensionManifest,
+  ExtensionMigrationChain,
   ExtensionSectionClaim,
 } from './extension.js';
 
@@ -95,6 +97,15 @@ type _AgentsFit = Assert<AgentSpecConfig extends PackAgentFragment ? true : fals
 type _SectionClaimsFit = Assert<ExtensionSectionClaim extends PackSectionClaim ? true : false>;
 
 /**
+ * The MIGRATION-CHAIN kind, named on its own for the same reason: the two fields a pack author
+ * writes are the two the boot refuses without, so a divergence should say that the chain declaration
+ * stopped fitting rather than that a manifest did.
+ */
+type _MigrationChainsFit = Assert<
+  ExtensionMigrationChain extends PackMigrationChain ? true : false
+>;
+
+/**
  * Both sides spell the brand literal out. The pack surface ships no runtime, so it cannot import
  * the constant — it declares a copy, and a copy that drifts makes every loader check reject every
  * pack. Pinned in BOTH directions so neither a widening nor a narrowing passes.
@@ -118,8 +129,9 @@ const pins: [
   _ApiRoutesFit,
   _AgentsFit,
   _SectionClaimsFit,
+  _MigrationChainsFit,
   _BrandLiteralsAgree,
-] = [true, true, true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true, true, true];
 
 /**
  * The pins, widened. The exported TYPE is deliberately `readonly boolean[]` rather than the tuple

@@ -4,15 +4,18 @@
  * An EXTENSION PACK is product code authored + versioned in its OWN repo (a product pack lives
  * outside this repo entirely; the platform stays 100% product-empty). A pack carries ALL of
  * its product: its `stores` / `handlers` / `tooling` / `api` SPEC FRAGMENTS, the top-level spec
- * SECTIONS it claims the grammar of, + the capability INSTANCES
+ * SECTIONS it claims the grammar of, the MIGRATION CHAIN for the platform tables it owns, + the
+ * capability INSTANCES
  * it provides (a blob backend, vendor SDK clients — serializable-shaped, sandbox-forward). A
  * deployment's `rayspec.yaml` names a pack by REFERENCE (`extensions: [{ id, module, version }]`); at
  * boot `loadExtensions` resolves the pack's `defineExtension` MANIFEST, version-pin-checks it, jails
  * its handler root, and MERGES its fragments into the deployment's spec sections + the same
- * `RolloutConfig` the UNCHANGED `deploy()` consumes — so a pack store rides the existing migration
- * gate + the chokepoint probe (NO new migration path), a pack route rides the existing api
- * interpreter, a pack handler rides the existing path-jailed loader. `deploy()` / the migration gate /
- * `dispatchTool` / the chokepoint stay BYTE-UNCHANGED.
+ * `RolloutConfig` the UNCHANGED `deploy()` consumes — so a pack STORE rides the existing product
+ * migration gate + the chokepoint probe, a pack route rides the existing api
+ * interpreter, a pack handler rides the existing path-jailed loader. `deploy()` / the product
+ * migration gate / `dispatchTool` / the chokepoint stay BYTE-UNCHANGED. The PLATFORM tables a pack
+ * OWNS travel separately, as a migration chain of the pack's own (`migrations` below), because they
+ * are not spec at all.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * WHY A `defineExtension` MANIFEST (not a bare default-export object).
@@ -125,12 +128,39 @@ export interface ExtensionSectionClaim {
 }
 
 /**
+ * The MIGRATION CHAIN a pack brings — the third contribution kind, and the one that is not spec at
+ * all. A `stores` fragment is a generated business table the platform owns; this is PLATFORM state
+ * the pack owns: hand-shaped indexes, a foreign key onto a platform table, an append-only ledger —
+ * everything the generator does not express and that used to have no home but `packages/kernel/db`.
+ *
+ * The chain runs through the SAME drizzle migrator as the platform's, strictly AFTER it, journaled
+ * in the pack's own `__migrations_<packId>` table — so a pack chain restarts at `0000` and neither
+ * it nor the core one can renumber the other (see `applyPackMigrations` in `@rayspec/db`).
+ *
+ *  - `dir`         — the chain directory, resolved RELATIVE TO THE PACK ROOT and jailed there, with
+ *                    the same discipline as the pack entry and every pack handler. It holds the
+ *                    `.sql` files and the `meta/_journal.json` the migrator reads.
+ *  - `tablePrefix` — MANDATORY, and the namespace the whole chain lives in: every table and index it
+ *                    creates must carry it, and it may neither contain a platform table nor overlap
+ *                    another pack's prefix. A chain with no namespace is a chain that can reach into
+ *                    anything, so the field is required whenever `migrations` is present at all.
+ */
+export interface ExtensionMigrationChain {
+  /** The chain directory, pack-relative and path-jailed under the pack root. */
+  readonly dir: string;
+  /** The namespace every table and index in the chain carries (mandatory). */
+  readonly tablePrefix: string;
+}
+
+/**
  * One extension-pack MANIFEST (the value a pack's entry module default-exports via `defineExtension`).
  *  - `version`      — the pack's OWN declared version. `loadExtensions` FAIL-CLOSED-checks it equals
  *                     the EXACT `ref.version` pin in the deployment spec (the silent-skip class:
  *                     a SKEW is a hard error, NEVER a silent skip).
  *  - `fragments`    — the spec sections the pack contributes (merged into the deployment spec).
  *  - `sections`     — the top-level spec sections the pack CLAIMS (optional; absent = claims none).
+ *  - `migrations`   — the pack's OWN migration chain for the platform tables it owns (optional;
+ *                     absent = the pack owns no platform state).
  *  - `capabilities` — the capability instances the pack provides (optional).
  */
 export interface ExtensionManifest {
@@ -140,6 +170,8 @@ export interface ExtensionManifest {
   readonly fragments: ExtensionSpecFragments;
   /** The top-level spec sections the pack claims the grammar of (optional). */
   readonly sections?: readonly ExtensionSectionClaim[];
+  /** The pack's own migration chain for the platform tables it owns (optional). */
+  readonly migrations?: ExtensionMigrationChain;
   /** The capability instances the pack provides (optional). */
   readonly capabilities?: ExtensionCapabilities;
 }

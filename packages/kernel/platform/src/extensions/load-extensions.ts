@@ -17,6 +17,11 @@
  *      its own pack), and REWRITES it to a jail-safe VIRTUAL path UNDER THE DEPLOYMENT ROOT so the
  *      UNCHANGED `deploy()` → `loadHandlers(deployRoot, mergedSpec.handlers, importer)` jails it
  *      (trivially, in-root) and the supplied multi-root importer imports the REAL pack file.
+ *   4b. RESOLVES the MIGRATION CHAIN the manifest declares, if any: the declared `tablePrefix` is
+ *      MANDATORY (a chain with no namespace could reach into anything), and the chain directory is
+ *      jailed against the PACK ROOT exactly as the entry and every handler module are. What the
+ *      chain CONTAINS, and whether its namespace collides with the platform's or with another
+ *      pack's, is decided by `applyPackMigrations` — the one door it reaches a database through.
  *   5. MERGES the pack's store/handler/tooling/api fragments onto the deployment's sections + the
  *      capability instances into the merge result — so a pack store rides the existing migration gate,
  *      a pack route the existing api interpreter, a pack handler the existing loader. `deploy()` / the
@@ -37,6 +42,7 @@
  */
 import { existsSync } from 'node:fs';
 import { basename, isAbsolute, normalize } from 'node:path';
+import type { PackMigrationChain } from '@rayspec/db';
 import {
   type AgentSpecConfig,
   AgentSpecConfig as AgentSpecConfigSchema,
@@ -116,6 +122,13 @@ export interface LoadedExtensions {
    * a key no claim covers stays an unknown field, refused by the unchanged strict top level.
    */
   readonly sections: SectionClaim[];
+  /**
+   * The MIGRATION CHAINS the loaded packs declare — one per pack that owns platform tables, in the
+   * order the deployment's `extensions[]` lists them, each with its directory already resolved to an
+   * absolute path inside the pack. The boot hands these to `applyPackMigrations` AFTER the platform
+   * chain has been applied; a pack that declares none contributes nothing here.
+   */
+  readonly migrations: PackMigrationChain[];
   /** The capability instances packs provided (the LAST pack to set a field wins; a collision throws). */
   readonly capabilities: ExtensionCapabilities;
   /**
@@ -184,6 +197,7 @@ export async function loadExtensions(
   const capabilities: { blobFactory?: ExtensionCapabilities['blobFactory'] } = {};
   const packHandlerRoots: string[] = [];
   const sections: SectionClaim[] = [];
+  const migrations: PackMigrationChain[] = [];
   // claimed top-level key → the pack that claimed it first (so a collision can name BOTH packs).
   const sectionOwners = new Map<string, string>();
 
@@ -336,6 +350,15 @@ export async function loadExtensions(
     }
     packHandlerRoots.push(packRoot);
 
+    // (4b) THE MIGRATION CHAIN, if the pack owns platform tables. Both fields are required and the
+    //      directory is jailed against the PACK root, so a chain can no more be read from outside the
+    //      pack than a handler can be loaded from there. `tablePrefix` is mandatory rather than
+    //      defaulted: a default would be a namespace nobody declared, and the whole safety of running
+    //      two chains against one database is that each one's namespace was declared and checked.
+    if (manifest.migrations !== undefined) {
+      migrations.push(resolvePackMigrationChain(manifest.migrations, ref.id, packRoot));
+    }
+
     // (5) MERGE the remaining fragments (stores/tooling/api/agents), each validated through its section
     //     schema. A pack agent is validated by the SAME `AgentSpecConfig` schema a
     //     deployment agent is — and post-merge it is INDISTINGUISHABLE from a deployment agent: it lands
@@ -381,9 +404,48 @@ export async function loadExtensions(
     api,
     agents,
     sections,
+    migrations,
     capabilities,
     importer: mergedImporter,
     packHandlerRoots,
+  };
+}
+
+/**
+ * Resolve ONE `{ dir, tablePrefix }` declaration into the chain the boot applies, or FAIL CLOSED
+ * naming the pack. Both fields are load-bearing and neither has a default: a chain with no directory
+ * names nothing, and a chain with no table prefix has no namespace — and a namespace that was never
+ * declared is one nothing can check the chain against.
+ */
+function resolvePackMigrationChain(
+  declared: { readonly dir?: unknown; readonly tablePrefix?: unknown },
+  packId: string,
+  packRoot: string,
+): PackMigrationChain {
+  const { dir, tablePrefix } = declared;
+  if (typeof dir !== 'string' || dir.length === 0) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': declares a migration chain with no \`dir\` — the chain is a directory ` +
+        'of .sql files (plus meta/_journal.json) inside the pack, and the manifest must say which ' +
+        'one. Fail-closed.',
+      packId,
+    );
+  }
+  if (typeof tablePrefix !== 'string' || tablePrefix.length === 0) {
+    throw new ExtensionLoadError(
+      `extension '${packId}': declares a migration chain with no \`tablePrefix\`. The prefix is the ` +
+        "namespace the chain's tables and indexes live in, and it is what keeps a pack chain and " +
+        'the platform chain out of each other — a chain with no declared namespace could reach into ' +
+        'any table in the database. Fail-closed.',
+      packId,
+    );
+  }
+  return {
+    packId,
+    // Jailed against the PACK root with the same discipline as the entry and every handler module:
+    // `..`/absolute/symlink/outside-root are all rejected, so a pack's chain is a pack's own.
+    dir: jailModulePathFor(packRoot, dir, packId),
+    tablePrefix,
   };
 }
 

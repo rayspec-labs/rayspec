@@ -392,3 +392,81 @@ describe('loadExtensions — fail-closed resolution + merge', () => {
     expect((modB.run as () => string)()).toBe('real-B');
   });
 });
+
+/**
+ * The MIGRATION-CHAIN half of a manifest: a pack that owns platform state declares
+ * `migrations: { dir, tablePrefix }`, and the loader resolves that pair the same way it resolves
+ * every other path a pack declares — jailed against the PACK root, never the deployment's.
+ *
+ * What is decided HERE is what the manifest says: the prefix is MANDATORY when the field is present,
+ * and the directory cannot climb out of the pack. What the chain CONTAINS, and whether its namespace
+ * collides with the platform's or with another pack's, is decided by `applyPackMigrations` — the one
+ * door the chain reaches the database through (see @rayspec/db).
+ */
+describe('loadExtensions — the migration chain a pack declares', () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-ext-migrations-'));
+  });
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const ref = (over: Partial<ExtensionRefLike> = {}): ExtensionRefLike => ({
+    id: 'p1',
+    module: './pack',
+    version: '1.0.0',
+    ...over,
+  });
+
+  /** A manifest whose `migrations` member is exactly `over` (cast where the arm plants a hole). */
+  const withMigrations = (over: unknown): ExtensionManifest =>
+    ({ version: '1.0.0', fragments: {}, migrations: over }) as ExtensionManifest;
+
+  const load = async (manifest: ExtensionManifest) => {
+    const entry = resolve(root, 'pack', 'index.ts');
+    const importer = fakeImporter(new Map([[entry, { default: defineExtension(manifest) }]]));
+    return loadExtensions([ref()], { packsRoot: root, deploymentRoot: root, importer });
+  };
+
+  it('resolves { dir, tablePrefix } into a chain rooted INSIDE the pack', async () => {
+    const out = await load(withMigrations({ dir: 'migrations', tablePrefix: 'fx_' }));
+    expect(out.migrations).toEqual([
+      { packId: 'p1', dir: resolve(root, 'pack', 'migrations'), tablePrefix: 'fx_' },
+    ]);
+  });
+
+  it('a pack that declares NO migrations contributes no chain', async () => {
+    const out = await load({ version: '1.0.0', fragments: {} });
+    expect(out.migrations).toEqual([]);
+  });
+
+  it('MANDATORY PREFIX: `migrations` without a tablePrefix is a load failure naming the pack', async () => {
+    await expect(load(withMigrations({ dir: 'migrations' }))).rejects.toThrow(ExtensionLoadError);
+    await expect(load(withMigrations({ dir: 'migrations' }))).rejects.toThrow(
+      /'p1'[\s\S]*tablePrefix/,
+    );
+  });
+
+  it('MANDATORY PREFIX: an EMPTY tablePrefix is the same failure (a chain with no namespace)', async () => {
+    await expect(load(withMigrations({ dir: 'migrations', tablePrefix: '' }))).rejects.toThrow(
+      /tablePrefix/,
+    );
+  });
+
+  it('a missing `dir` is a load failure naming the pack', async () => {
+    await expect(load(withMigrations({ tablePrefix: 'fx_' }))).rejects.toThrow(/'p1'[\s\S]*dir/);
+  });
+
+  it('PATH-JAIL: a chain directory that climbs out of the pack is rejected', async () => {
+    await expect(load(withMigrations({ dir: '../elsewhere', tablePrefix: 'fx_' }))).rejects.toThrow(
+      ExtensionLoadError,
+    );
+  });
+
+  it('PATH-JAIL: an ABSOLUTE chain directory is rejected', async () => {
+    await expect(
+      load(withMigrations({ dir: resolve(root, 'elsewhere'), tablePrefix: 'fx_' })),
+    ).rejects.toThrow(ExtensionLoadError);
+  });
+});
