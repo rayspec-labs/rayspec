@@ -43,6 +43,7 @@
     "@rayspec/audio-runtime": "workspace:*",
     "@rayspec/capability-bridges": "workspace:*",
     "@rayspec/file-runtime": "workspace:*",
+    "@rayspec/fixture-pack": "workspace:*",
     "@rayspec/stt-port": "workspace:*",
     "@rayspec/views-runtime": "workspace:*",
     "@rayspec/workflow-durable": "workspace:*",

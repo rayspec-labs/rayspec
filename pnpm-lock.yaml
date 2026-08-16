@@ -593,6 +593,9 @@ importers:
       '@rayspec/file-runtime':
         specifier: workspace:*
         version: link:../../capabilities/file-runtime
+      '@rayspec/fixture-pack':
+        specifier: workspace:*
+        version: link:../../test/fixture-pack
       '@rayspec/foundation':
         specifier: workspace:*
         version: link:../../workflow/foundation
