@@ -181,8 +181,16 @@ const BACKEND_DRY_RUN_NOT_PROVEN = [
  * `--check-env`, which reads the boot's own module, reports exactly that refusal for such a document.
  *
  * So it is stated, in the verdict, rather than left for a `deploy` to discover — a claimed section is
- * the one shape for which `ok:true` here is furthest from "it boots". Appended ONLY for a document
- * whose packs actually claim a section, so every other verdict keeps the boundary list it had.
+ * the one shape for which `ok:true` here is furthest from "it boots".
+ *
+ * APPENDED FOR A DOCUMENT THAT WRITES ONE, NOT FOR ONE WHOSE PACKS CLAIM ONE. The two differ, and the
+ * entry is only true of the first: what a pack claims is a fact about the deployment, while the boot's
+ * core-grammar parse meets what the DOCUMENT wrote. A document that references a claiming pack and
+ * writes none of the keys it claims is written entirely in the grammar the boot has — it carries the
+ * claim line, and `--check-env` reports no refusal for it, so appending this entry there would send an
+ * operator to look for a refusal that is not there. That is the wrong-remedy report this seam exists to
+ * remove, and it would be reintroduced on the surface added to be honest about the boot. Every verdict
+ * that does not write a claimed key therefore keeps the boundary list it had.
  */
 const BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION =
   'that the boot accepts a top-level section an extension pack claims: this preview validated the ' +
@@ -508,6 +516,10 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     // reported here rather than silently dropped; omitted entirely when the document declares none.
     const mounts = backend.value.frontend ?? [];
     const claimedSections = fromTree?.claimedSections ?? [];
+    // The claim LINE rides every document whose packs claim a section; the boot BOUNDARY rides only a
+    // document that actually writes one, which is the only document the boot's core-grammar parse
+    // refuses. See the constant.
+    const writtenSections = fromTree?.writtenSections ?? [];
     return withClaimedSections(
       {
         ...base,
@@ -521,9 +533,9 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
           ...(mounts.length > 0 ? { frontendMounts: mounts } : {}),
         },
         errors: [],
-        // The claim the packs made is also a boundary this preview does not cross — see the constant.
+        // A claimed section the document WROTE is also a boundary this preview does not cross.
         notProven:
-          claimedSections.length > 0
+          writtenSections.length > 0
             ? [...BACKEND_DRY_RUN_NOT_PROVEN, BOOT_DOES_NOT_ACCEPT_A_CLAIMED_SECTION]
             : BACKEND_DRY_RUN_NOT_PROVEN,
       },

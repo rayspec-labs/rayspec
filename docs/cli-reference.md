@@ -775,14 +775,20 @@ change is applied by the explicit `--apply-migration` flag below.
   also the profile whose grammar carries `extensions[]`, so a document that
   references a pack claiming a top-level section is validated with that pack
   loaded and carries the same `claimedSections` list [`doctor`](#doctor) and
-  [`plan`](#plan) report. That is also the one place `ok:true` here is furthest
-  from *it boots*, and `notProven` says so in the same verdict: **the boot
-  validates the document with the core grammar alone**, before it resolves any
-  pack, so a top-level key a pack claims is refused there — the pack-aware parse
-  is a diagnostic surface, and the boot has not been taught it yet.
-  (`--check-env` still loads no pack: running one is exactly the side effect that
-  command promises not to have — and for such a document it reports the boot's
+  [`plan`](#plan) report. A document that **writes** such a section is also the one
+  place `ok:true` here is furthest from *it boots*, and `notProven` says so in the
+  same verdict: **the boot validates the document with the core grammar alone**,
+  before it resolves any pack, so a top-level key a pack claims is refused there —
+  the pack-aware parse is a diagnostic surface, and the boot has not been taught it
+  yet. (`--check-env` still loads no pack: running one is exactly the side effect
+  that command promises not to have — and for such a document it reports the boot's
   refusal, which is the same fact from the boot's own module.)
+  That entry rides **exactly the documents that write a claimed key**, not every
+  document whose packs claim one: a document that references the pack without
+  writing the section it claims is written entirely in the grammar the boot has, so
+  it carries the `claimedSections` line and keeps the boundary list every other
+  backend verdict gets — being sent to `--check-env` for a refusal that is not
+  there would be the wrong-remedy report this surface exists to remove.
 
   A **frontend-only** document has nothing to compose either, and what its check does
   not prove narrows instead: it reads only the document, so it says nothing about

@@ -23,7 +23,9 @@
  *     baseline file held outside the deployment tree — which is where an operator's prior revision
  *     actually lives;
  *   • `deploy --dry-run` states, in the verdict, the one thing `ok:true` does not mean for a document
- *     like this: the boot validates it with the core grammar alone and refuses the claimed key.
+ *     that WRITES a claimed key: the boot validates it with the core grammar alone and refuses that
+ *     key — while a document that references the same pack and writes none of the keys it claims is
+ *     accepted by that same grammar, and is told no such thing.
  *
  * NO DATABASE, NO NETWORK, NO SECRET: `doctor` and a backend `--dry-run` touch none, and the fixture
  * document declares no store, so `plan`'s optional shadow-apply has nothing to apply and never runs.
@@ -47,6 +49,8 @@ const VALID_DOC = `${PACK_DIR}/rayspec.yaml`;
 const INVALID_SECTION_DOC = `${PACK_DIR}/rayspec.invalid-section.yaml`;
 const VERSION_SKEW_DOC = `${PACK_DIR}/rayspec.version-skew.yaml`;
 const RANGE_PIN_DOC = `${PACK_DIR}/rayspec.range-pin.yaml`;
+/** The same pack, the same pin, and the claimed section NOT written. */
+const NO_SECTION_DOC = `${PACK_DIR}/rayspec.no-section.yaml`;
 
 /**
  * The ONE line each command reports for the section this pack claims. It names the key and the pack,
@@ -325,10 +329,38 @@ describe("plan --against: the baseline is judged by the DEPLOYMENT's packs", () 
  * So for this one class of document `ok:true` is further from "it boots" than anywhere else on this
  * arm, and the verdict says so rather than leaving it to a refused `deploy`.
  *
- * Both halves are pinned, because a disclosure that outlives the divergence is its own kind of false
- * report: when the boot is taught the pack-aware parse, the second case reds and the line goes.
+ * WHICH DOCUMENTS ARE THAT CLASS is what the last two cases pin, and the two facts differ: the pack
+ * here CLAIMS `auditing` for both documents, and only one of them WRITES it. The boundary belongs to
+ * the one that writes it — the other is written entirely in the grammar the boot has, so telling it
+ * that the boot refuses a claimed key would send an operator to `--check-env` to read a refusal that
+ * is not there. So the third case runs `--check-env` on it too: the entry is withheld for exactly the
+ * reason the boot accepts the document, not by coincidence.
+ *
+ * The disclosure and the divergence are pinned together, because a disclosure that outlives the
+ * divergence is its own kind of false report: when the boot is taught the pack-aware parse, the
+ * second case reds and the line goes.
  */
 describe('deploy --dry-run names the boot boundary a claimed section has', () => {
+  /**
+   * A pack-free backend document, under the repo root so the spec-path jail (which resolves against
+   * the CWD every case here runs from) accepts it without a chdir. It is the CONTROL for the third
+   * case: the boundary list every backend verdict that diverges from the boot in no way receives.
+   */
+  let packFreeDir = '';
+  let packFreeDoc = '';
+  beforeAll(() => {
+    packFreeDir = mkdtempSync(join(repoRoot, '.rayspec-dry-run-control-'));
+    writeFileSync(
+      join(packFreeDir, 'rayspec.yaml'),
+      "version: '1.0'\nmetadata:\n  name: no-packs-here\n",
+      'utf8',
+    );
+    packFreeDoc = `${basename(packFreeDir)}/rayspec.yaml`;
+  });
+  afterAll(() => {
+    rmSync(packFreeDir, { recursive: true, force: true });
+  });
+
   it('states it in `notProven`, in the same verdict that reports the claim', async () => {
     const dryRun = await runDeploy(['--dry-run', VALID_DOC]);
     if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
@@ -348,5 +380,31 @@ describe('deploy --dry-run names the boot boundary a claimed section has', () =>
     expect(outcome.result.errors.join('\n')).toContain(
       "spec did not validate: unknown_field at auditing: unknown field 'auditing'",
     );
+  });
+
+  it('a document that references the pack and writes NO claimed key keeps the claim line and NOT the boundary', async () => {
+    const dryRun = await runDeploy(['--dry-run', NO_SECTION_DOC]);
+    if (dryRun.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.ok).toBe(true);
+    // The pack still claims the key on this deployment, so the ownership line is still reported.
+    expect(dryRun.result.claimedSections).toEqual([CLAIMED_LINE]);
+    // But nothing here diverges from the boot, so the boundary list is the one every other backend
+    // verdict gets. Pinned by EQUALITY against a pack-free document's list, not only by the absence of
+    // the sentence: a reworded entry would still be an extra entry, and this catches that too.
+    expect(dryRun.result.notProven.join('\n')).not.toContain(
+      'that the boot accepts a top-level section an extension pack claims',
+    );
+    const packFree = await runDeploy(['--dry-run', packFreeDoc]);
+    if (packFree.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
+    expect(dryRun.result.notProven).toEqual(packFree.result.notProven);
+
+    // And the REASON it is withheld: the boot's own module accepts this document's grammar. Asserted
+    // on `errors`, not on `ok` — `ok` also folds in `missing`, which is whatever this environment
+    // happens to have set, while every `errors` entry is derived from the document (this one declares
+    // no agent, so no backend selection can contribute one either). An empty list here is exactly
+    // "the boot raises no refusal for this document", which is what the withheld entry would claim.
+    const outcome = await runDeploy(['--check-env', NO_SECTION_DOC]);
+    if (outcome.kind !== 'check-env') throw new Error('expected a check-env verdict');
+    expect(outcome.result.errors, JSON.stringify(outcome.result.errors)).toEqual([]);
   });
 });

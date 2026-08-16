@@ -1,0 +1,19 @@
+# The same deployment as `rayspec.yaml` — same pack, same exact pin — with the claimed section NOT
+# written. It is the boundary between the two facts the claimed-section seam reports:
+#
+#   the pack here CLAIMS `auditing`  — true of this document, so it carries the claim line;
+#   this document WRITES `auditing`  — false, so every top-level key here is one the core grammar
+#                                      owns, and the boot's own core-grammar parse accepts it.
+#
+# So this document must NOT be told that the boot refuses a key it does not carry: `deploy --dry-run`
+# reports the claim line and leaves its boundary list alone, and `--check-env` reports no refusal for
+# it. A document referencing a pack it does not (yet) configure is the ordinary case — a pack is
+# installed before the section that configures it is written.
+version: '1.0'
+metadata:
+  name: fixture-pack-deployment-no-section
+  description: The deployment that references the fixture pack without writing the section it claims.
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: 1.0.0

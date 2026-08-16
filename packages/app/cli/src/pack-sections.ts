@@ -47,6 +47,18 @@ export interface DeploymentTreeParse {
   readonly errors: SpecError[];
   /** ONE neutral line per claimed section; empty when the document did not parse. */
   readonly claimedSections: readonly string[];
+  /**
+   * The claimed keys THIS DOCUMENT ACTUALLY WRITES — the claim list above intersected with the
+   * document's own top level, as keys rather than as lines. Empty when the document did not parse,
+   * and empty for a document that references a claiming pack but writes none of the keys it claims.
+   *
+   * The distinction is not cosmetic, and a caller that reasons about the BOOT needs it: what a pack
+   * claims is a fact about the deployment, while what the document writes is what the boot's own
+   * core-grammar parse would meet. A document that names the pack and writes no claimed key is a
+   * document the core grammar owns entirely — `claimedSections` is non-empty for it, and nothing
+   * about it diverges from what the boot accepts.
+   */
+  readonly writtenSections: readonly string[];
 }
 
 /**
@@ -103,13 +115,17 @@ export async function parseFromDeploymentTree(
   const { parseSpecWithPacks } = await import('@rayspec/platform');
   const root = deploymentRootFor(deploymentSpecPath, env);
   const parsed = await parseSpecWithPacks(specText, { packsRoot: root, deploymentRoot: root });
-  if (!parsed.ok) return { errors: parsed.errors, claimedSections: [] };
+  if (!parsed.ok) return { errors: parsed.errors, claimedSections: [], writtenSections: [] };
   return {
     spec: parsed.value.spec,
     errors: [],
     claimedSections: (parsed.value.extensions?.sections ?? []).map((claim) =>
       claimedSectionLine(claim.key, claim.packId),
     ),
+    // The intersection is the parse's own, not a second guess at it: `parseSpecSections` keys
+    // `sections` by exactly the claimed keys it LIFTED OUT OF THIS DOCUMENT, so a key the document
+    // does not write is absent here for the same reason it was never lifted.
+    writtenSections: Object.keys(parsed.value.sections),
   };
 }
 

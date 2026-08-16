@@ -28,7 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer blocks the update it is the baseline for. `deploy --dry-run` states the boundary this
   preview does not cross, in the same verdict: the **boot** validates the document with the core
   grammar alone before it resolves any pack, so a claimed top-level section is not accepted there yet,
-  and `notProven` says so for exactly the documents that carry one. No further pack-contributed detail
+  and `notProven` says so for exactly the documents that **write** one. A document that references a
+  claiming pack without writing the section it claims is written entirely in the grammar the boot has:
+  it carries the `claimedSections` line and keeps the boundary list every other backend verdict gets,
+  because sending its operator to look for a boot refusal that is not there would be the same
+  wrong-remedy report this surface exists to remove. No further pack-contributed detail
   is reported: what a pack configures stays the pack's business. A document that references no pack
   loads no pack module and reaches no code in its own tree, which is pinned by a test rather than
   intended.
