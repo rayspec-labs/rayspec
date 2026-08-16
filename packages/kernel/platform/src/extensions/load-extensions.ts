@@ -137,13 +137,26 @@ export interface LoadedExtensions {
  * `packId` carries the same id as a FIELD, so a caller that has to re-report the failure in its own
  * vocabulary — the pack-aware parse turns it into a typed `SpecError` — can name the pack without
  * reading it back out of the message.
+ *
+ * `unresolved` separates the ONE failure that means the pack is not on this deployment (its entry
+ * module did not import — a missing directory, a missing file, an unbuilt pack) from every failure
+ * that happened AFTER the pack was found and read (a version skew, a claim collision, a handler
+ * outside `handlers/`). The distinction is load-bearing rather than cosmetic: the two classes
+ * prescribe opposite remedies — deploy the pack, versus fix the pack that is already deployed — and
+ * the caller that re-reports this has no other way to tell them apart. The path jail deliberately
+ * does NOT count as unresolved: it fails on a `..`, an absolute path or a symlink escape in the
+ * declared `module`, which is a mis-declaration, and it passes cleanly for a directory that simply
+ * is not there (it is lexical — the missing pack surfaces at the entry import a step later).
  */
 export class ExtensionLoadError extends Error {
   readonly packId: string | undefined;
-  constructor(message: string, packId?: string) {
+  /** True iff the pack could not be resolved on this deployment at all (its entry did not import). */
+  readonly unresolved: boolean;
+  constructor(message: string, packId?: string, unresolved = false) {
     super(message);
     this.name = 'ExtensionLoadError';
     this.packId = packId;
+    this.unresolved = unresolved;
   }
 }
 
@@ -211,11 +224,13 @@ export async function loadExtensions(
     try {
       mod = await importer(entryAbsolute);
     } catch (e) {
+      // The one UNRESOLVED failure: the pack's entry did not import, so the pack is not here.
       throw new ExtensionLoadError(
         `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
           `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
           'a defineExtension(...) manifest (fail-closed).',
         ref.id,
+        true,
       );
     }
     const manifest = mod.default;
@@ -440,7 +455,7 @@ async function resolveSectionClaim(
   }
 
   sectionOwners.set(key, packId);
-  return { key, packId, validate: sectionValidatorFrom(schema, key) };
+  return { key, packId, validate: sectionValidatorFrom(schema, key, packId) };
 }
 
 /**

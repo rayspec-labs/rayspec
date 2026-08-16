@@ -5,8 +5,10 @@
  *   - the claim resolves through the SAME jailed, `.js`-preferred module resolution the pack entry
  *     and every pack handler use — a `schemaModule` outside the pack directory is refused;
  *   - the key is a SafeIdentifier;
- *   - a key the CORE grammar owns cannot be claimed, and the denylist is the grammar's own key set
- *     (never a second list that can drift) — the refusal names the pack;
+ *   - a key EITHER document grammar owns cannot be claimed — the backend profile's keys and the
+ *     product profile's, `product` above all, since that key is what tells the two profiles apart —
+ *     and the denylist is the grammars' own key sets (never a second list that can drift); the
+ *     refusal names the pack;
  *   - two packs claiming ONE key is a load failure naming BOTH pack ids;
  *   - a schema module whose default export cannot validate anything is refused, naming the pack.
  *
@@ -159,6 +161,9 @@ describe('loadExtensions — the sections contribution kind', () => {
     ).rejects.toThrow(/acme-notes/);
   });
 
+  // Both document profiles of the `version:'1.0'` language, not just the backend one. `product` is
+  // the profile DISCRIMINANT — a pack allowed to claim it would re-classify a backend document as a
+  // product document for every caller that detects the profile before parsing.
   it.each([
     'stores',
     'api',
@@ -167,7 +172,13 @@ describe('loadExtensions — the sections contribution kind', () => {
     'version',
     'metadata',
     'managed',
-  ])('a key the core grammar owns cannot be claimed: %s', async (key) => {
+    'product',
+    'views',
+    'capabilities',
+    'artifacts',
+    'contracts',
+    'workflows',
+  ])('a key a document grammar owns cannot be claimed: %s', async (key) => {
     const importer = fakeImporter(new Map(packModules('pack', manifestClaiming(key))));
     const err = await loadExtensions([ref()], {
       packsRoot: root,

@@ -1,17 +1,25 @@
 /**
- * `parseSpecWithPacks` — the two-phase parse wired to the pack loader.
+ * `parseSpecWithPacks` — the section-aware parse wired to the pack loader.
  *
- * Phase A loads the document and reads its `extensions[]`; the loader resolves each referenced pack
- * with the SAME path jail and the SAME exact-version pin the merge already used; phase B hands each
+ * The load reads the document and its `extensions[]`; the loader resolves each referenced pack with
+ * the SAME path jail and the SAME exact-version pin the merge already used; the lift hands each
  * claimed top-level section to the claiming pack's validator.
  *
- * The golden case is the one an operator meets: a document that declares a claimed section, taken to
- * a deployment where the pack is NOT there. Its code, path and message are product surface, so they
- * are pinned verbatim (with the throwaway root redacted — it is the only part that moves).
+ * THREE MESSAGES ARE PRODUCT SURFACE and are pinned verbatim here (with the throwaway root redacted —
+ * it is the only part that moves), because each prescribes a DIFFERENT action and a wrong one costs
+ * an operator a wasted deployment:
+ *   • the pack is NOT on this deployment          → `extension_pack_unavailable` — deploy it;
+ *   • the pack IS here and was refused (a skew)   → `extension_pack_refused` — deploying it again
+ *                                                   changes nothing;
+ *   • two present packs claim one section         → `extension_pack_refused`, naming both.
+ * A fourth case is pinned by its FULL error list rather than its wording: a document whose
+ * `extensions[]` does not typecheck must not additionally report the section it declares as an
+ * unknown field, which is the exact report this entry point exists to avoid.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import * as rayspecPlatform from '@rayspec/platform';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ModuleImporter } from '../handlers/loader.js';
 import { defineExtension } from './extension.js';
@@ -47,6 +55,22 @@ metadata:
 extensions:
   - id: acme-notes
     module: ./pack
+    version: 1.0.0
+acme_notes:
+  retentionDays: 30
+`;
+
+/** The same document referencing TWO packs, both of which claim `acme_notes`. */
+const DOC_TWO_PACKS = `
+version: '1.0'
+metadata:
+  name: base
+extensions:
+  - id: pack-a
+    module: ./pack
+    version: 1.0.0
+  - id: pack-b
+    module: ./pack-b
     version: 1.0.0
 acme_notes:
   retentionDays: 30
@@ -165,6 +189,113 @@ describe('parseSpecWithPacks — a document whose top-level section a pack owns'
     expect(res.ok).toBe(false);
     if (res.ok) return;
     expect(called).toBe(false);
-    expect(res.errors.some((e) => e.path === 'extensions[0].version')).toBe(true);
+    // THE FULL LIST, not just "the pin error is in there". While `extensions[]` does not typecheck,
+    // which top-level keys the packs own is unknowable — so the claimed section must NOT also be
+    // reported as an unknown field. That second error would send an operator to delete a section the
+    // referenced pack owns, over one character in the pin above it: the exact misreport this entry
+    // point exists to prevent. Asserting only `.some(…)` cannot see it.
+    expect(res.errors).toEqual([
+      {
+        code: 'schema_violation',
+        path: 'extensions[0].version',
+        message:
+          'extension version must be an EXACT semver pin (MAJOR.MINOR.PATCH with optional ' +
+          '-prerelease/+build) — ranges, wildcards (incl. uppercase X), floating dist-tags ' +
+          '(latest/beta/…), and partial versions (1, 1.2) are rejected',
+      },
+    ]);
+  });
+
+  it('GOLDEN — the pack is PRESENT but its version skews: refused, not "unavailable"', async () => {
+    const res = await parseSpecWithPacks(DOC, {
+      packsRoot: root,
+      deploymentRoot: root,
+      importer: fakeImporter(
+        new Map<string, Record<string, unknown>>([
+          [
+            resolve(root, 'pack', 'index.ts'),
+            {
+              default: defineExtension({
+                version: '2.0.0',
+                fragments: {},
+                sections: [{ key: 'acme_notes', schemaModule: 'sections/notes.ts' }],
+              }),
+            },
+          ],
+          [resolve(root, 'pack', 'sections', 'notes.ts'), { default: PackSection }],
+        ]),
+      ),
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toEqual([
+      {
+        code: 'extension_pack_refused',
+        path: 'extensions[0]',
+        message:
+          "extension pack 'acme-notes' is present on this deployment but was REFUSED, so the " +
+          'top-level sections it claims cannot be validated. Deploying it again changes nothing: ' +
+          'fix the pack, or the extensions[] entry that references it. Load failure: version SKEW ' +
+          "— the spec pins version '1.0.0' but the pack manifest declares version '2.0.0'. A " +
+          'version skew is a HARD fail-closed error (never a silent skip): pin the exact version ' +
+          'the pack declares, or update the pack.',
+      },
+    ]);
+  });
+
+  it('GOLDEN — two PRESENT packs claim one section: refused, naming both', async () => {
+    const claiming = (): Record<string, unknown> => ({
+      default: defineExtension({
+        version: '1.0.0',
+        fragments: {},
+        sections: [{ key: 'acme_notes', schemaModule: 'sections/notes.ts' }],
+      }),
+    });
+    const res = await parseSpecWithPacks(DOC_TWO_PACKS, {
+      packsRoot: root,
+      deploymentRoot: root,
+      importer: fakeImporter(
+        new Map<string, Record<string, unknown>>([
+          [resolve(root, 'pack', 'index.ts'), claiming()],
+          [resolve(root, 'pack', 'sections', 'notes.ts'), { default: PackSection }],
+          [resolve(root, 'pack-b', 'index.ts'), claiming()],
+          [resolve(root, 'pack-b', 'sections', 'notes.ts'), { default: PackSection }],
+        ]),
+      ),
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toEqual([
+      {
+        code: 'extension_pack_refused',
+        path: 'extensions[1]',
+        message:
+          "extension pack 'pack-b' is present on this deployment but was REFUSED, so the top-level " +
+          'sections it claims cannot be validated. Deploying it again changes nothing: fix the ' +
+          'pack, or the extensions[] entry that references it. Load failure: claims the top-level ' +
+          "section 'acme_notes', which extension 'pack-a' already claims. Two packs cannot both own " +
+          'one top-level key — nothing would decide whose grammar validates it (fail-closed ' +
+          'collision).',
+      },
+    ]);
+  });
+
+  // The barrel gap this file cannot see: every case above imports `./parse-with-packs.js` by
+  // relative path, which resolves whether or not the package EXPORTS the entry point. `.` is the
+  // one declared export of @rayspec/platform, so this asserts the shipped surface through the
+  // package specifier — the way the CHANGELOG says a consumer reaches it. It reads the BUILT dist
+  // (as `gate:byte-identity` does), so it runs after `pnpm build`.
+  it('is reachable from `@rayspec/platform` itself, not only by relative path', () => {
+    expect(typeof rayspecPlatform.parseSpecWithPacks).toBe('function');
+    // The two types that travel with it must be exported too, or a consumer can call it and not
+    // name what it returns. Naming them through the package specifier is the assertion; the
+    // expectations below just keep the bindings from being stripped as unused.
+    const claim: rayspecPlatform.ExtensionSectionClaim = {
+      key: 'acme_notes',
+      schemaModule: 'sections/notes.ts',
+    };
+    const sections: rayspecPlatform.SpecWithPacks['sections'] = {};
+    expect(claim.key).toBe('acme_notes');
+    expect(sections).toEqual({});
   });
 });

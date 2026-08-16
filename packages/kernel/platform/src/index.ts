@@ -113,8 +113,12 @@ export type {
 export { DEFAULT_MAX_QUEUE, EventPipeline } from './event-pipeline.js';
 // The minimal extension-pack mechanism: the `defineExtension` manifest
 // contract + `loadExtensions` (directory-only path-jailed resolution, version-pin FAIL-CLOSED,
-// multi-root handler jail, and the merge of pack store/handler/tooling/api fragments + capability
-// instances into the spec the UNCHANGED `deploy()` consumes — no new migration path).
+// multi-root handler jail, the top-level sections a pack claims, and the merge of pack
+// store/handler/tooling/api fragments + capability instances into the spec the UNCHANGED `deploy()`
+// consumes — no new migration path). `parseSpecWithPacks` is the pack-aware parse: the core grammar
+// plus the top-level sections the deployment's packs own. It belongs on THIS list, not only on the
+// extensions/ barrel: `.` is the package's one declared export, so a name missing here is a name no
+// consumer can import (`extensions.test.ts` asserts these three through the package specifier).
 export {
   type DefinedExtension,
   defineExtension,
@@ -124,11 +128,14 @@ export {
   ExtensionLoadError,
   type ExtensionManifest,
   type ExtensionRefLike,
+  type ExtensionSectionClaim,
   type ExtensionSpecFragments,
   isDefinedExtension,
   type LoadExtensionsContext,
   type LoadedExtensions,
   loadExtensions,
+  parseSpecWithPacks,
+  type SpecWithPacks,
 } from './extensions/index.js';
 // The fs-backed READ-ONLY, path-jailed `FsSource` impl + composition-root factory (the path jail is the
 // ENTIRE containment; a symlink/traversal/absolute escape is refused fail-closed — never foreign bytes).
