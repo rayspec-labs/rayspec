@@ -780,10 +780,10 @@ change is applied by the explicit `--apply-migration` flag below.
   document**, so a claimed section boots exactly as this preview validated it, and
   the verdict keeps the boundary list every other backend verdict gets.
   (`--check-env` still loads no pack: running one is exactly the side effect that
-  command promises not to have. For such a document it therefore neither validates
-  the claimed section nor refuses it — it lifts the key out unexamined and names it
-  in `notChecked`, because a key whose grammar belongs to a pack it never loaded is
-  one it cannot stand behind a verdict on.)
+  command promises not to have. Having loaded none, it cannot tell a claimed key from
+  a mistyped one, so on a **pack-bearing** document it lifts out **every** top-level
+  key the core grammar does not own and names each in `notChecked` — see
+  [`--check-env`](#deploy) below for what that costs.)
 
   A **frontend-only** document has nothing to compose either, and what its check does
   not prove narrows instead: it reads only the document, so it says nothing about
@@ -850,7 +850,21 @@ change is applied by the explicit `--apply-migration` flag below.
   [`stream-backend` example](../examples/stream-backend/rayspec.yaml) is exactly that
   shape) reports the three unconditional secrets and nothing more. To keep that from
   reading as a clean bill of health, the verdict **names the packs the document
-  declares** — parsed off `extensions[]`, never loaded. A set `<VAR>_FILE` mount counts
+  declares** — parsed off `extensions[]`, never loaded.
+
+  Loading no pack has one further cost, and it is a **loss of coverage** rather than a
+  missing demand. A pack may claim a top-level key of the document, and only the loaded
+  pack can say which key. So on a document that **declares any pack**, this command lifts
+  out **every** top-level key the core grammar does not own — claimed or not — accepts it
+  unexamined, and names it in `notChecked`. **It therefore no longer refuses a mistyped
+  top-level section on such a document**: `auditting:` where the pack claims `auditing:`
+  is reported as a key whose owner it did not ask about, and the verdict's `errors` stays
+  empty. The boot still refuses it, and so do [`doctor`](#doctor), [`plan`](#plan) and
+  `--dry-run`, which all load the packs — run one of those for the verdict that has read
+  them. On a document that declares **no** pack nothing is lifted and an unknown
+  top-level key is refused here exactly as before.
+
+  A set `<VAR>_FILE` mount counts
   as set from the variable alone: the file is
   never opened, so a missing, unreadable or empty secret file still refuses the boot.
   And **no value is validated** — a malformed PKCS#8 PEM, a non-UUID

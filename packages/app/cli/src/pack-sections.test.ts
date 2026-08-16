@@ -50,6 +50,8 @@ const VERSION_SKEW_DOC = `${PACK_DIR}/rayspec.version-skew.yaml`;
 const RANGE_PIN_DOC = `${PACK_DIR}/rayspec.range-pin.yaml`;
 /** The same pack, the same pin, and the claimed section NOT written. */
 const NO_SECTION_DOC = `${PACK_DIR}/rayspec.no-section.yaml`;
+/** The same pack, the same pin, and the claimed key MISTYPED — so NO pack claims it. */
+const MISTYPED_KEY_DOC = `${PACK_DIR}/rayspec.mistyped-key.yaml`;
 
 /**
  * The ONE line each command reports for the section this pack claims. It names the key and the pack,
@@ -338,7 +340,12 @@ describe("plan --against: the baseline is judged by the DEPLOYMENT's packs", () 
  *   • `--check-env`, which reads `@rayspec/server`'s own boot-env module and loads no pack by design,
  *     no longer reports a refusal for it either. It cannot validate the section — nothing was loaded
  *     that could — so it says so in `notChecked` rather than refusing a key whose owner it never
- *     asked about.
+ *     asked about;
+ *   • and the PRICE of that, measured rather than assumed: having loaded no pack it cannot tell a
+ *     claimed key from a MISTYPED one, so on a pack-bearing document it lifts out both. The last two
+ *     cases pin that divergence from each side — `doctor`, which does load the packs, refuses the
+ *     mistyped document that `--check-env` accepts, and the same key on a PACK-FREE document is still
+ *     refused by `--check-env` itself, so the lift is demonstrably what silences it.
  */
 describe('deploy --dry-run reports a claimed section with no boot boundary attached', () => {
   /**
@@ -376,6 +383,55 @@ describe('deploy --dry-run reports a claimed section with no boot boundary attac
     const packFree = await runDeploy(['--dry-run', packFreeDoc]);
     if (packFree.kind !== 'dry-run') throw new Error('expected a dry-run verdict');
     expect(dryRun.result.notProven).toEqual(packFree.result.notProven);
+  });
+
+  /**
+   * THE COST OF LOADING NO PACK, PINNED — and pinned as a DIVERGENCE, not as a feature.
+   *
+   * `--check-env` cannot know which top-level keys a pack claims, because it loads none. So on a
+   * document that DECLARES a pack it lifts out every key the core grammar does not own — which
+   * includes a MISTYPED one. `auditting:` (for the claimed `auditing:`) is owned by nothing, and this
+   * command accepts it unexamined.
+   *
+   * The control is the SAME document through `doctor`, which loads the packs exactly as the boot does
+   * and refuses it. Two commands, one document, opposite verdicts: that is the divergence, it is
+   * deliberate (validating with the core grammar alone refused every legitimately claimed section, and
+   * sent an operator to delete correct configuration), and it is what the docs now state. Without the
+   * `doctor` half this would read as "the key is fine"; without the `--check-env` half a regression
+   * that started refusing claimed sections again would go unmeasured.
+   */
+  it('a MISTYPED top-level key: --check-env lifts it out, and doctor — which loads the packs — refuses it', async () => {
+    const checkEnv = await runDeploy(['--check-env', MISTYPED_KEY_DOC]);
+    if (checkEnv.kind !== 'check-env') throw new Error('expected a check-env verdict');
+    // No error at all for a key no pack claims: this command did not load the packs, so it cannot say
+    // that nothing claims it. `errors` (not `ok`) for the reason the arm below states.
+    expect(checkEnv.result.errors, JSON.stringify(checkEnv.result.errors)).toEqual([]);
+    // It is NOT silent about it: the key it could not resolve an owner for is named.
+    expect(checkEnv.result.notChecked.join('\n')).toContain('auditting');
+
+    // The CONTROL: the same document, judged by a command that loads this deployment's packs — the
+    // same resolution the boot performs. No pack claims the key, so it is refused, at the key.
+    const doctor = await runDoctor([MISTYPED_KEY_DOC]);
+    expect(doctor.ok).toBe(false);
+    expect(doctor.errors.map((e) => e.code)).toContain('unknown_field');
+    expect(doctor.errors.map((e) => e.path)).toContain('auditting');
+  });
+
+  it('the lift is what silences it — the SAME key on a PACK-FREE document is still refused', async () => {
+    // The accept control for the arm above: only the `extensions:` declaration differs, so a
+    // `--check-env` that had simply stopped reporting unknown fields would fail here.
+    const packFreeMistyped = join(packFreeDir, 'mistyped.yaml');
+    writeFileSync(
+      packFreeMistyped,
+      "version: '1.0'\nmetadata:\n  name: no-packs-here\nauditting:\n  retentionDays: 30\n",
+      'utf8',
+    );
+    const checkEnv = await runDeploy([
+      '--check-env',
+      `${basename(packFreeDir)}/${basename(packFreeMistyped)}`,
+    ]);
+    if (checkEnv.kind !== 'check-env') throw new Error('expected a check-env verdict');
+    expect(checkEnv.result.errors.join('\n')).toContain("unknown field 'auditting'");
   });
 
   it('and the boot’s own module raises no refusal for either — it says what it did not check', async () => {

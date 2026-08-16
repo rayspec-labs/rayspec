@@ -750,6 +750,17 @@ export async function checkBootEnv(
   // in `notChecked`. Reporting it as `unknown_field` instead would be a refusal the boot does not
   // raise — the wrong-remedy report (delete correct configuration) this whole seam exists to remove.
   // A document that declares NO pack lifts nothing: no pack could own the key, so the refusal stands.
+  //
+  // WHAT THE LIFT COSTS, STATED RATHER THAN DISCOVERED. Which keys a pack claims is knowable only
+  // from a loaded pack, so this cannot lift the claimed ones and refuse the rest: on a pack-bearing
+  // document it lifts EVERY non-core top-level key, and a MISTYPED section (`auditting` for a claimed
+  // `auditing`) is therefore accepted here and reported as unchecked. It is not accepted anywhere
+  // else — the boot, `doctor`, `plan` and `deploy --dry-run` all load the packs and all still refuse
+  // it — so what is lost is one command's ability to catch a typo, not the refusal. That trade is the
+  // deliberate one: refusing every claimed section (which is what validating with the core grammar
+  // alone did) sends an operator to delete correct configuration, and a wrong refusal is worse than a
+  // narrower check. `pack-sections.test.ts` pins BOTH halves against one another on one document.
+  // `notChecked` is what keeps it visible, so a reader is never told the document is clean.
   const loaded = loadSpecDocument(specText);
   const unresolved = loaded.ok ? unresolvedTopLevelKeys(loaded.value) : [];
   const parsed = loaded.ok
@@ -777,6 +788,10 @@ export async function checkBootEnv(
  * The top-level keys of a PACK-BEARING document that the core grammar does not own — the keys whose
  * owner only a loaded pack could name. Empty for a document that declares no pack (nothing could own
  * a key there, so an unknown one is genuinely unknown) and empty for one whose keys are all core.
+ *
+ * DELIBERATELY NOT NARROWER, and it cannot be: no pack is loaded here, so "a key some declared pack
+ * claims" is not a set this function can compute. Every non-core key is lifted, which includes a
+ * mistyped one — see the caller for what that costs and why it is the right trade.
  */
 function unresolvedTopLevelKeys(loaded: Record<string, unknown>): string[] {
   const declared = loaded.extensions;
