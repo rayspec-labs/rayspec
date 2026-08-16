@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`sections` — an extension pack can claim a top-level key of the spec document, and validate it.**
+  A pack manifest may now declare `sections: [{ key, schemaModule }]`. A deployment then writes that
+  key at the top level of its own `rayspec.yaml`, and the pack's schema module — not the core grammar
+  — decides whether what is written there is valid. Pack configuration that previously had to be
+  squeezed into the opaque `config` blob on an `extensions[]` entry, where no lint and no schema
+  export could see into it, becomes a first-class section that fails at parse with the same closed
+  error codes and the same `<section>.<field>` paths a core section produces.
+  Reading a document that carries such a section is the new `parseSpecWithPacks` entry point
+  (`@rayspec/platform`): it loads the document, resolves the packs the document references through
+  the existing loader — same path jail, same exact-version pin — and hands each claimed node to the
+  pack that owns it. Everything the core grammar owns is parsed by the core grammar exactly as
+  before, and **a top-level key no pack claims is still refused with the same `unknown_field`, the
+  same message and the same path**: a document on a deployment with no packs parses byte-identically
+  to before, value and errors alike, which is measured over every checked-in example document rather
+  than asserted. `parseSpec` itself is unchanged and resolves no packs.
+  What a claim may be is fail-closed at load, with the pack named in every refusal: the key must be a
+  safe identifier, it may not be a key either document grammar owns (that denylist is read off the
+  grammar objects themselves — both the backend profile's shape and the product profile's, `product:`
+  included, since that key is what tells the two profiles apart — so a section added to a document
+  grammar is closed to packs the moment it is declared), no two packs may claim one key (the refusal
+  names both), and the schema module resolves through the same jail, preferring the same compiled
+  sibling, as the pack entry and every pack handler — a module outside the pack directory does not
+  load. The validator itself is treated as what it is, code from another repository: it runs inside
+  the same fail-closed envelope as everything else a pack supplies, so one that throws, one that
+  answers with something that is not a verdict, and one that refuses a section without reporting a
+  violation all REFUSE the section, naming the pack. None of them can escape as an exception, and
+  none can leave a document accepted with a section its owner rejected.
+  Taking such a document to a deployment that does not have the pack fails at parse with a new typed
+  error, `extension_pack_unavailable`, naming the missing pack. A pack owns the grammar of the section
+  it claims, so the honest report is "this pack is not here", not an unknown field pointing at the
+  section — which would send an operator to delete the configuration rather than to install the pack.
+  A pack that IS deployed and was refused — a version skew, two packs claiming one key — is the
+  opposite situation with the opposite remedy, and reports under its own code,
+  `extension_pack_refused`, which says the pack is present and that redeploying it changes nothing.
+  Both codes join `PackErrorCode` in `@rayspec/pack-sdk`, alongside the `sections` slot on
+  `PackManifest`, so a pack that ships in its own repository can declare a claim and handle both
+  outcomes against the contract rather than against internals.
+
 - **`@rayspec/pack-sdk` — the one surface an extension pack that ships in its own repository
   compiles against.** A pack has to import *something* to build: the manifest types, the error
   vocabulary a failed boot reports under, the identifier rule, the journal entries its work is

@@ -26,15 +26,30 @@ import type {
   PackJournalEntry,
   PackManifest,
   PackManifestBrand,
+  PackSectionClaim,
   PackStoreFragment,
   PackToolFragment,
 } from './index.js';
 
 type Assert<_T extends true> = true;
 
-/** Every contribution kind that exists today has a slot on the fragments half of the manifest. */
+/**
+ * Every contribution kind that exists today has a slot on the manifest: the five FRAGMENT kinds a
+ * pack contributes content to, and the SECTION CLAIMS it takes ownership of. A claim is not a
+ * fragment — it sits on the manifest itself — so the pin has to name both halves or a kind can be
+ * dropped from one of them without the compiler noticing.
+ */
 type _EveryContributionKindHasASlot = Assert<
-  'stores' | 'handlers' | 'tooling' | 'api' | 'agents' extends keyof PackFragments ? true : false
+  'stores' | 'handlers' | 'tooling' | 'api' | 'agents' extends keyof PackFragments
+    ? 'sections' extends keyof PackManifest
+      ? true
+      : false
+    : false
+>;
+
+/** A section claim stays nameable by the pair the loader resolves and jails it by. */
+type _SectionClaimIsAddressable = Assert<
+  PackSectionClaim extends { key: string; schemaModule: string } ? true : false
 >;
 
 /** The declared version is REQUIRED — the boot-time pin check has nothing to compare otherwise. */
@@ -65,7 +80,12 @@ type _BrandIsPinned = Assert<PackManifestBrand extends '@rayspec/extension@1' ? 
 
 /** The codes a pack author branches on are members of the closed set. */
 type _PackFacingErrorCodes = Assert<
-  'duplicate_name' | 'dangling_ref' | 'unknown_field' | 'reserved_store_name' extends PackErrorCode
+    | 'duplicate_name'
+    | 'dangling_ref'
+    | 'unknown_field'
+    | 'reserved_store_name'
+    | 'extension_pack_unavailable'
+    | 'extension_pack_refused' extends PackErrorCode
     ? true
     : false
 >;
@@ -87,6 +107,7 @@ type _IdentifierRuleIsCheckable = Assert<
 // Touch the type aliases so unused-locals cannot strip the pins (they are the point of the module).
 export const PACK_CONTRACT_TYPEPINS: [
   _EveryContributionKindHasASlot,
+  _SectionClaimIsAddressable,
   _VersionIsRequired,
   _HandlerIsAddressable,
   _SectionsKeepTheirIdentity,
@@ -94,4 +115,4 @@ export const PACK_CONTRACT_TYPEPINS: [
   _PackFacingErrorCodes,
   _JournalEntryVocabulary,
   _IdentifierRuleIsCheckable,
-] = [true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true];

@@ -56,6 +56,7 @@ export type {
   PackHttpMethod,
   PackManifest,
   PackManifestBrand,
+  PackSectionClaim,
   PackStoreFragment,
   PackToolFragment,
 } from './manifest.js';

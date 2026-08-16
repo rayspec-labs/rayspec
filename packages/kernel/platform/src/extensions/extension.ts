@@ -3,7 +3,8 @@
  *
  * An EXTENSION PACK is product code authored + versioned in its OWN repo (a product pack lives
  * outside this repo entirely; the platform stays 100% product-empty). A pack carries ALL of
- * its product: its `stores` / `handlers` / `tooling` / `api` SPEC FRAGMENTS + the capability INSTANCES
+ * its product: its `stores` / `handlers` / `tooling` / `api` SPEC FRAGMENTS, the top-level spec
+ * SECTIONS it claims the grammar of, + the capability INSTANCES
  * it provides (a blob backend, vendor SDK clients — serializable-shaped, sandbox-forward). A
  * deployment's `rayspec.yaml` names a pack by REFERENCE (`extensions: [{ id, module, version }]`); at
  * boot `loadExtensions` resolves the pack's `defineExtension` MANIFEST, version-pin-checks it, jails
@@ -98,11 +99,38 @@ export interface ExtensionCapabilities {
 }
 
 /**
+ * One TOP-LEVEL SPEC SECTION the pack claims — the contribution kind that lets a pack be CONFIGURED
+ * by the deployment's own document instead of through the opaque `config` blob on its `extensions[]`
+ * entry, which no lint and no schema export can see into.
+ *
+ *  - `key`          — the top-level key the pack owns. A safe identifier, and never a key the core
+ *                     grammar already owns; a second pack claiming the same key is a load failure
+ *                     naming both packs (see `loadExtensions`).
+ *  - `schemaModule` — the module INSIDE THE PACK whose default export validates the section node. It
+ *                     is resolved by the same path jail, and preferring the same compiled `.js`
+ *                     sibling, as the pack entry and every pack handler. Its default export only has
+ *                     to be able to `safeParse` a node: a pack ships in its own repository and
+ *                     validates with its own library, so the contract is structural, not an instance
+ *                     of this repository's Zod.
+ *
+ * The deployment's own parse is what calls the validator — a claimed section is validated at PARSE,
+ * beside every core section, and a violation inside it is reported at `<key>.<field>` with the same
+ * closed codes a core section's violation carries.
+ */
+export interface ExtensionSectionClaim {
+  /** The claimed top-level key (a safe identifier; never a key the core grammar owns). */
+  readonly key: string;
+  /** The pack-relative module whose default export validates the section node (path-jailed). */
+  readonly schemaModule: string;
+}
+
+/**
  * One extension-pack MANIFEST (the value a pack's entry module default-exports via `defineExtension`).
  *  - `version`      — the pack's OWN declared version. `loadExtensions` FAIL-CLOSED-checks it equals
  *                     the EXACT `ref.version` pin in the deployment spec (the silent-skip class:
  *                     a SKEW is a hard error, NEVER a silent skip).
  *  - `fragments`    — the spec sections the pack contributes (merged into the deployment spec).
+ *  - `sections`     — the top-level spec sections the pack CLAIMS (optional; absent = claims none).
  *  - `capabilities` — the capability instances the pack provides (optional).
  */
 export interface ExtensionManifest {
@@ -110,6 +138,8 @@ export interface ExtensionManifest {
   readonly version: string;
   /** The declarative spec fragments the pack contributes. */
   readonly fragments: ExtensionSpecFragments;
+  /** The top-level spec sections the pack claims the grammar of (optional). */
+  readonly sections?: readonly ExtensionSectionClaim[];
   /** The capability instances the pack provides (optional). */
   readonly capabilities?: ExtensionCapabilities;
 }

@@ -41,6 +41,24 @@ import { z } from 'zod';
  *                               Only `__proto__`: `constructor`/`prototype` survive validation as
  *                               ordinary keys and stay legal. Applies to a KEY only — a store
  *                               column named `__proto__` is a value and is still served.
+ *  - `extension_pack_unavailable` — the document references an extension pack that is NOT ON this
+ *                               deployment: its entry module did not load. A pack owns the grammar of
+ *                               every top-level section it claims, so a document carrying such a
+ *                               section cannot be validated where the pack is absent: the parse fails
+ *                               NAMING the pack rather than reporting its section as an unknown
+ *                               field, which would send the operator after the wrong thing. The
+ *                               remedy this code asserts is to DEPLOY the pack.
+ *  - `extension_pack_refused`  — the pack IS on this deployment, was read, and was then refused: a
+ *                               version skew against the exact pin, two packs claiming one section,
+ *                               a claim on a key a document grammar owns, a handler outside the
+ *                               pack's `handlers/`, a malformed fragment. Deploying the pack again
+ *                               changes nothing — the fix is the pack or the `extensions[]` entry
+ *                               that references it. Kept apart from `extension_pack_unavailable`
+ *                               because the two prescribe OPPOSITE actions, and a message that
+ *                               prescribes the wrong one costs more than no message.
+ *                               Both are emitted by the pack-aware parse (`parseSpecWithPacks`,
+ *                               `@rayspec/platform`), the only entry point that resolves packs; the
+ *                               pack-free `parseSpec` never emits either.
  *  - `dangling_ref`          — a cross-reference points at an id/name that is not declared.
  *  - `duplicate_name`         — two entries in one section share an id/name.
  *  - `capability_violation`   — an agent demands a capability its chosen backend lacks
@@ -161,6 +179,8 @@ export const SpecErrorCode = z.enum([
   'schema_violation',
   'unknown_field',
   'reserved_document_key',
+  'extension_pack_unavailable',
+  'extension_pack_refused',
   'dangling_ref',
   'duplicate_name',
   'capability_violation',

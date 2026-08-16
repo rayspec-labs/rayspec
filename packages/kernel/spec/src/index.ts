@@ -25,3 +25,4 @@ export * from './product-parse.js';
 export * from './product-scope.js';
 export * from './product-views.js';
 export * from './product-views-lint.js';
+export * from './sections.js';

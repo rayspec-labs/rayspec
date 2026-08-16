@@ -25,9 +25,13 @@
  *                             run when the shape parse SUCCEEDS (lint needs a typed spec).
  *
  * Any non-empty error list -> `{ ok:false, errors }` (the value is NEVER returned partially).
+ *
+ * The first three steps are `loadSpecDocument` — the PRE-SHAPE half, shared verbatim with the
+ * section-aware parse (`sections.ts`), which differs only from the strict Zod parse onwards. One
+ * implementation, so the two entry points cannot drift on a version message or on the reserved-key
+ * short-circuit.
  */
 import { parse as parseYaml } from 'yaml';
-import type { z } from 'zod';
 import { scanReservedDocumentKeys } from './document-keys.js';
 import { type Result, type SpecError, specError } from './errors.js';
 import { RaySpec, SPEC_VERSION } from './grammar.js';
@@ -52,12 +56,34 @@ function joinKey(base: string | undefined, key: string): string {
   return base === undefined ? key : `${base}.${key}`;
 }
 
+/** Prefix a rendered issue path with a base path (`acme_notes` + `a[0].b` -> `acme_notes.a[0].b`). */
+function underBasePath(
+  basePath: string | undefined,
+  rendered: string | undefined,
+): string | undefined {
+  if (basePath === undefined) return rendered;
+  if (rendered === undefined) return basePath;
+  return rendered.startsWith('[') ? `${basePath}${rendered}` : `${basePath}.${rendered}`;
+}
+
+/**
+ * The parts of a Zod issue this mapper reads. Declared STRUCTURALLY (not as `z.core.$ZodIssue`) so
+ * the same mapping serves a validator an extension pack brings with its own copy of Zod — the
+ * package a pack validates with is the pack's business, and it is not this repo's Zod instance.
+ */
+export interface ZodIssueLike {
+  readonly code?: string;
+  readonly path: ReadonlyArray<PropertyKey>;
+  readonly message: string;
+  readonly keys?: readonly string[];
+}
+
 /** Map a single Zod issue to one or more SpecErrors (an unrecognized-keys issue fans out per key). */
-function issueToSpecErrors(issue: z.core.$ZodIssue): SpecError[] {
-  const base = renderPath(issue.path);
+function issueToSpecErrors(issue: ZodIssueLike, basePath?: string): SpecError[] {
+  const base = underBasePath(basePath, renderPath(issue.path));
   if (issue.code === 'unrecognized_keys') {
     // Fail-closed unknown-key rejection — one SpecError per offending key, pathed at the key.
-    return issue.keys.map((key) =>
+    return (issue.keys ?? []).map((key) =>
       specError(
         'unknown_field',
         `unknown field '${key}' (unknown keys are rejected)`,
@@ -69,10 +95,27 @@ function issueToSpecErrors(issue: z.core.$ZodIssue): SpecError[] {
 }
 
 /**
- * Parse + validate a raw RaySpec YAML spec. Returns the typed spec on success, or the FULL
- * aggregated list of fail-closed violations.
+ * Map a Zod issue LIST to the full SpecError list, optionally under a base JSON path. `basePath` is
+ * how a claimed top-level section's own violations are reported at `<section>.<field>` rather than
+ * at the pack grammar's own root.
  */
-export function parseSpec(rawYamlText: string): Result<RaySpec, SpecError> {
+export function specErrorsFromZodIssues(
+  issues: readonly ZodIssueLike[],
+  basePath?: string,
+): SpecError[] {
+  return issues.flatMap((issue) => issueToSpecErrors(issue, basePath));
+}
+
+/**
+ * The PRE-SHAPE half of the pipeline: YAML safe-load, the version check, and the raw
+ * reserved-document-key scan, each short-circuiting exactly as documented above. Returns the loaded
+ * document object for the shape parse to read.
+ *
+ * Split out so the section-aware parse runs the SAME stages rather than a second copy of them: the
+ * two entry points can differ only from the strict shape parse onwards, which is the half the accept
+ * control in `sections-accept-control.test.ts` measures.
+ */
+export function loadSpecDocument(rawYamlText: string): Result<Record<string, unknown>, SpecError> {
   // ---- 1. YAML SAFE-LOAD ----------------------------------------------------------------
   let loaded: unknown;
   try {
@@ -133,10 +176,21 @@ export function parseSpec(rawYamlText: string): Result<RaySpec, SpecError> {
     return { ok: false, errors: reservedKeyErrors };
   }
 
+  return { ok: true, value: doc };
+}
+
+/**
+ * Parse + validate a raw RaySpec YAML spec. Returns the typed spec on success, or the FULL
+ * aggregated list of fail-closed violations.
+ */
+export function parseSpec(rawYamlText: string): Result<RaySpec, SpecError> {
+  const loaded = loadSpecDocument(rawYamlText);
+  if (!loaded.ok) return loaded;
+
   // ---- 4. STRICT ZOD PARSE (full issue list) --------------------------------------------
-  const parsed = RaySpec.safeParse(loaded);
+  const parsed = RaySpec.safeParse(loaded.value);
   if (!parsed.success) {
-    const errors = parsed.error.issues.flatMap(issueToSpecErrors);
+    const errors = specErrorsFromZodIssues(parsed.error.issues);
     return { ok: false, errors };
   }
 
