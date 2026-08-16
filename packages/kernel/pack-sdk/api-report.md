@@ -58,6 +58,7 @@ export type PackCapabilities = object;
 ```ts
 export interface PackDatabase {
     query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+    transaction<T>(fn: (tx: PackDatabase) => Promise<T>): Promise<T>;
 }
 ```
 

@@ -22,6 +22,7 @@ import type {
   MAX_IDENTIFIER_LENGTH,
   PackAgentFragment,
   PackApiRouteFragment,
+  PackDatabase,
   PackErrorCode,
   PackFragments,
   PackHandlerFragment,
@@ -100,6 +101,22 @@ type _ServiceContextCarriesTheContract = Assert<
     : false
 >;
 
+/**
+ * The DATABASE door keeps BOTH of its members. The single-statement executor is what a service reads
+ * and writes through; `transaction` is what makes an atomic pair and a held row lock expressible at
+ * all, and it hands the callback the same door rather than a wider one — so the pin names the shape of
+ * the callback's parameter too. Dropping either member, or handing the callback something else, is a
+ * contract change and fails to compile here.
+ */
+type _DatabaseDoorIsTransactional = Assert<
+  PackDatabase extends {
+    query: (sql: string, params?: readonly unknown[]) => Promise<Record<string, unknown>[]>;
+    transaction: <T>(fn: (tx: PackDatabase) => Promise<T>) => Promise<T>;
+  }
+    ? true
+    : false
+>;
+
 /** The declared version is REQUIRED — the boot-time pin check has nothing to compare otherwise. */
 type _VersionIsRequired = Assert<undefined extends PackManifest['version'] ? false : true>;
 
@@ -159,6 +176,7 @@ export const PACK_CONTRACT_TYPEPINS: [
   _ServiceDeclarationIsAddressable,
   _ServiceModuleIsBootable,
   _ServiceContextCarriesTheContract,
+  _DatabaseDoorIsTransactional,
   _VersionIsRequired,
   _HandlerIsAddressable,
   _SectionsKeepTheirIdentity,
@@ -166,4 +184,4 @@ export const PACK_CONTRACT_TYPEPINS: [
   _PackFacingErrorCodes,
   _JournalEntryVocabulary,
   _IdentifierRuleIsCheckable,
-] = [true, true, true, true, true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true];

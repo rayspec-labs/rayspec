@@ -40,11 +40,20 @@ const PACK_ROOT = join(repoRoot, 'packages/test/fixture-pack');
 /** The declared agent the fixture's dispatch-holding service schedules a turn for. */
 const FOLLOW_UP_AGENT = 'fixture_follow_up';
 
+/**
+ * The database door a service is booted with. `transaction` runs the callback on the SAME stub
+ * handle — these arms vary the dispatch capability, never the database.
+ */
+const stubDb: PackServiceContext['db'] = {
+  query: async () => [],
+  transaction: async (fn) => await fn(stubDb),
+};
+
 /** The context a service is booted with, with only what these arms vary spelled out. */
 function contextFor(over: Partial<PackServiceContext> = {}): PackServiceContext {
   return {
     packId: 'fixture-pack',
-    db: { query: async () => [] },
+    db: stubDb,
     spec: { metadata: { name: 'fixture' }, agents: [{ id: FOLLOW_UP_AGENT }] },
     sections: {},
     env: {},

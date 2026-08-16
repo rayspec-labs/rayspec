@@ -38,6 +38,17 @@ export interface ObservedContext {
   readonly dispatch: boolean;
   /** The row count this service read back through the database door at boot. */
   readonly ledgerRows?: number;
+  /**
+   * How many rows the service's TRANSACTIONAL write committed at boot — the pair that is only ever
+   * right together. Zero on a deployment that had registered no tenant to write under.
+   */
+  readonly ledgerPairRows?: number;
+  /**
+   * The message of the error the service threw out of a transaction it ABANDONED mid-write, as its own
+   * catch saw it. The rollback itself is read off the database; this is how the suite sees that the
+   * error reached the pack unchanged rather than as something the platform rewrote.
+   */
+  readonly abandonedError?: string;
 }
 
 /** The one environment key this pack's services read, so a suite can prove `ctx.env` arrived. */

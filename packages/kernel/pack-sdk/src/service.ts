@@ -87,6 +87,43 @@ export interface TurnDispatch {
 export interface PackDatabase {
   /** Run one parameterized statement and read its rows back. */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+  /**
+   * Run `fn` inside ONE transaction, on a connection PINNED for the callback's whole duration. `tx` is
+   * a `PackDatabase` again — the same parameterized `query` — so a statement reads the same inside a
+   * transaction as outside one: nothing new to learn, nothing extra to import.
+   *
+   * WHY THE METHOD HAS TO EXIST. `query` runs on a POOLED handle, where two calls are not promised the
+   * same connection: a bare `BEGIN` through it is refused by the driver, and a `SELECT … FOR UPDATE`
+   * through it holds NOTHING once the call returns — correct for a pool, and fatal for a
+   * read-decide-write whose correctness rests on the row not moving. Inside `fn` the connection is one
+   * and the same, so a lock taken there is held until the callback returns, and two writes land
+   * together or not at all.
+   *
+   * A CALLBACK THAT THROWS ROLLS BACK, and the error propagates UNCHANGED — the same value the
+   * callback threw, so a pack's own error class and message reach its own catch intact. What the
+   * callback RETURNS is what this resolves with.
+   *
+   * NESTING IS REFUSED, not left to the driver: `tx.transaction(…)` rejects with a typed refusal (an
+   * `Error` whose `name` is `PackTransactionError`) and, like any other failure inside a callback,
+   * rolls the transaction it was attempted in back. A nested call could not be a second transaction —
+   * the connection is already in one — so it could only be a SAVEPOINT, a different guarantee wearing
+   * the same name: rolling a savepoint back leaves the OUTER transaction alive and committing, so a
+   * pack that believed it had opened a transaction would watch its "rollback" commit. Refusing says so
+   * at the call site instead.
+   *
+   * ⚠ A TRANSACTION IS A RESOURCE DECISION, NOT A FREE CONVENIENCE. The pinned connection comes out of
+   * the pool the WHOLE DEPLOYMENT shares — every request it serves and every run it executes draws
+   * from the same one — and it is not returned until `fn` returns. A callback that awaits a model call,
+   * an HTTP round trip or a timer holds it for exactly that long, and enough of those starve the
+   * deployment. Keep what is inside `fn` to database work and do the slow part before or after it.
+   *
+   * TENANCY IS STILL THE PLATFORM'S JOB. `tx` is scoped exactly as `query` is and carries nothing else
+   * — no tenant handle, no journal writer, no escape hatch — so a transaction is not a seam a pack can
+   * widen its reach through. A service has no tenant of its own to name either way: there is no
+   * `tenantId` on its context, in a transaction or out of one, exactly as there is none on a
+   * `TurnDispatchRequest`.
+   */
+  transaction<T>(fn: (tx: PackDatabase) => Promise<T>): Promise<T>;
 }
 
 /** One step a service records in the run journal. `input` is HASHED by the platform, never stored. */

@@ -3,9 +3,11 @@
  *
  * It is the ordinary shape: work with no caller. At boot it reads its own pack's configuration out of
  * the top-level section the pack CLAIMS (`auditing`), reads its own pack-owned platform table through
- * the database door, and records one journal entry for having done so; then it arms a timer that
- * records another on every tick, which is the thing no reactive contribution can do at all — a route
- * is served, a tool is invoked, a trigger fires, and none of them runs when nothing calls.
+ * the database door, WRITES to it transactionally — the pair of rows that are only ever right
+ * together, then a second transaction it abandons mid-write so the rollback is exercised too — and
+ * records one journal entry for having done so; then it arms a timer that records another on every
+ * tick, which is the thing no reactive contribution can do at all — a route is served, a tool is
+ * invoked, a trigger fires, and none of them runs when nothing calls.
  *
  * IT NAMES NO DISPATCH CAPABILITY. That is the point of having two services: this one demonstrates
  * that a service is not privileged BY BEING a service — it gets what its context carries, and it
@@ -17,7 +19,7 @@
  * throwing — a boot that throws would fail the whole deployment, which is right for a service that
  * cannot work at all and wrong for one whose optional recording is simply not wired.
  */
-import type { PackServiceContext, PackServiceModule } from '@rayspec/pack-sdk';
+import type { PackDatabase, PackServiceContext, PackServiceModule } from '@rayspec/pack-sdk';
 import { contexts, ENV_MARKER_KEY, record, specName, tick } from './observed.js';
 
 /** The shape this pack's own `auditing` grammar accepts (see `../auditing.ts`). */
@@ -28,6 +30,14 @@ interface AuditingSection {
 
 /** How often the ledger sweep records a journal entry. Short, because the fixture is measured. */
 const SWEEP_INTERVAL_MS = 50;
+
+/** The two ledger rows that are only ever right TOGETHER — the atomic pair the boot writes. */
+const LEDGER_OPENED = 'ledger-opened';
+const LEDGER_CLOSED = 'ledger-closed';
+/** The row the ABANDONED transaction attempts. Nothing may ever read it back. */
+const LEDGER_ABANDONED = 'ledger-abandoned';
+/** The message the abandoning callback throws — the exact value the caller must catch. */
+const ABANDONED_MESSAGE = 'the ledger sweep was abandoned mid-write';
 
 /** The service's own correlation id for the work it does — one journal "run" per boot. */
 let sweepRunId = '';
@@ -51,6 +61,42 @@ const auditLedger: PackServiceModule = {
     const rows = await ctx.db.query('SELECT count(*)::int AS n FROM fixture_pack_audit_events');
     const ledgerRows = Number((rows[0] as { n?: unknown } | undefined)?.n ?? 0);
 
+    // THE ATOMIC PAIR, through the TRANSACTIONAL half of the same door: two rows that are only ever
+    // right together, written on one pinned connection so they land together or not at all. The rows
+    // this pack already holds for the tenant are taken `FOR UPDATE` first — the read-decide-write a
+    // pooled statement cannot hold, because the lock would be gone before the decision was written.
+    //
+    // THE TENANT IS THE PLATFORM'S, NOT THIS PACK'S. A service has no `tenantId` on its context, in a
+    // transaction or out of one, so the only tenant it can write under is the one the deployment
+    // registered — and a deployment that registered none writes nothing, which is a legitimate
+    // posture rather than a fault.
+    const tenantId = await deploymentTenant(ctx);
+    let ledgerPairRows = 0;
+    let abandonedError: string | undefined;
+    if (tenantId !== undefined) {
+      ledgerPairRows = await ctx.db.transaction(async (tx) => {
+        const held = await tx.query(
+          'SELECT id FROM fixture_pack_audit_events WHERE tenant_id = $1 FOR UPDATE',
+          [tenantId],
+        );
+        await appendEvent(tx, tenantId, LEDGER_OPENED, { held: held.length });
+        await appendEvent(tx, tenantId, LEDGER_CLOSED, { held: held.length });
+        return 2;
+      });
+
+      // THE NEGATIVE CASE, kept beside the positive one on purpose: a callback that throws rolls the
+      // WHOLE transaction back, and what the pack catches is the error the pack threw. Without it,
+      // "the pair landed" would be indistinguishable from "every write lands".
+      try {
+        await ctx.db.transaction(async (tx) => {
+          await appendEvent(tx, tenantId, LEDGER_ABANDONED, { abandoned: true });
+          throw new Error(ABANDONED_MESSAGE);
+        });
+      } catch (e) {
+        abandonedError = e instanceof Error ? e.message : String(e);
+      }
+    }
+
     // The DOCUMENT and the ENVIRONMENT are on the contract too, so one fact off each is read back
     // here — a context handed an empty document or an empty environment then fails a suite instead of
     // passing unnoticed.
@@ -63,6 +109,8 @@ const auditLedger: PackServiceModule = {
       journal: ctx.journal !== undefined,
       dispatch: ctx.dispatch !== undefined,
       ledgerRows,
+      ledgerPairRows,
+      ...(abandonedError !== undefined ? { abandonedError } : {}),
     });
 
     sweepRunId = `${ctx.packId}:audit-ledger:${Date.now()}`;
@@ -83,6 +131,35 @@ const auditLedger: PackServiceModule = {
     timer = undefined;
   },
 };
+
+/**
+ * The one tenant a service can write under — the tenant the DEPLOYMENT registered, read back off the
+ * platform's own table. Absent on a deployment that has registered none, which is what makes the boot
+ * above write nothing rather than fail.
+ */
+async function deploymentTenant(ctx: PackServiceContext): Promise<string | undefined> {
+  const rows = await ctx.db.query('SELECT id FROM orgs ORDER BY id LIMIT 1');
+  const id = (rows[0] as { id?: unknown } | undefined)?.id;
+  return typeof id === 'string' ? id : undefined;
+}
+
+/**
+ * Append ONE ledger row. It takes a `PackDatabase`, so the SAME call serves the pooled door and the
+ * transactional one — which is the whole point of the transactional handle being a `PackDatabase`
+ * again: a pack writes one statement and decides elsewhere whether it runs inside a transaction.
+ */
+async function appendEvent(
+  db: PackDatabase,
+  tenantId: string,
+  action: string,
+  payload: unknown,
+): Promise<void> {
+  await db.query(
+    'INSERT INTO fixture_pack_audit_events (tenant_id, actor, action, payload) ' +
+      'VALUES ($1, $2, $3, $4::jsonb)',
+    [tenantId, auditLedger.name, action, JSON.stringify(payload)],
+  );
+}
 
 /** Record ONE journal entry for a sweep. A deployment with no journal writer records none. */
 async function sweep(ctx: PackServiceContext, ledgerRows: number): Promise<void> {

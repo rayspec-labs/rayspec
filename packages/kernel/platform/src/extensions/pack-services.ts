@@ -44,6 +44,23 @@ import type { TurnDispatch } from '../turn-dispatch.js';
 export interface PackServiceDatabase {
   /** Run one parameterized statement and read its rows back. */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
+  /**
+   * Run `fn` inside ONE transaction, on a connection PINNED for the callback's duration — so a lock
+   * taken inside it is still held when the next statement runs, and two writes land together or not at
+   * all. `tx` is a `PackServiceDatabase` again: the same parameterized `query`, and nothing else.
+   *
+   * WHY IT CANNOT BE THE POOLED EXECUTOR ABOVE: on a pooled handle two calls are not promised the same
+   * connection, so the driver refuses a bare `BEGIN` and a `SELECT … FOR UPDATE` is released the moment
+   * the call returns. The deployment builds this half over a RESERVED connection (see the composition
+   * root's `makePackServiceDatabase`), which is also why it is a RESOURCE DECISION: the pin comes out
+   * of the pool the whole deployment shares and is not returned until `fn` returns.
+   *
+   * A callback that throws ROLLS BACK and its error propagates unchanged. NESTING IS REFUSED with a
+   * typed error rather than silently demoted to a savepoint, whose rollback would leave the outer
+   * transaction alive. TENANCY IS UNCHANGED: the transactional handle is scoped exactly as the pooled
+   * one, so a pack cannot widen its reach by opening a transaction.
+   */
+  transaction<T>(fn: (tx: PackServiceDatabase) => Promise<T>): Promise<T>;
 }
 
 /**

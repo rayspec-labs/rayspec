@@ -67,6 +67,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boot. (`gate:dispatch-boundary` proves the negative over the contribution roots it declares and over
   its own self-test trees; it does not scan this package.)
 
+- **A pack service can open a transaction, on a pinned connection.** The database door a service is
+  handed (`PackServiceContext['db']`, the `PackDatabase` in `@rayspec/pack-sdk`) gained one member:
+  `transaction<T>(fn: (tx: PackDatabase) => Promise<T>): Promise<T>`. Until now the door was a single
+  parameterized `query`, so a pack could write single statements and nothing else — a pack whose
+  correctness rests on writing two rows atomically, or on holding a row lock across a
+  read-decide-write, could not be built on it. Not for want of a method name: the handle underneath is
+  **pooled**, where two calls are not promised the same connection, so a bare `BEGIN` issued through
+  `query()` is refused by the driver (`UNSAFE_TRANSACTION: Only use sql.begin, sql.reserved or
+  max: 1`) and a `SELECT … FOR UPDATE` issued through it holds nothing once the call returns — a
+  second connection takes the same row with `FOR UPDATE NOWAIT` immediately.
+  **What a consumer observes.** Inside `fn` the connection is **pinned** — one and the same for every
+  statement — so a `FOR UPDATE` taken there is still held on the next statement (a second connection's
+  `NOWAIT` is refused with `55P03` until the callback returns), and two writes land together or not at
+  all. `tx` is a `PackDatabase` again, with the same parameterized `query`, so a statement reads the
+  same inside a transaction as outside one and there is nothing extra to import. A callback that
+  **throws rolls back**, and the error propagates unchanged — the same value the callback threw, so a
+  pack's own error class and message reach its own catch intact; what the callback returns is what the
+  call resolves with. **Nesting is refused** rather than silently demoted to a savepoint:
+  `tx.transaction(…)` rejects with an error whose `name` is `PackTransactionError` and rolls back the
+  transaction it was attempted in, because a savepoint's rollback would leave the outer transaction
+  alive and committing under a pack that believed it had opened a transaction. **Tenancy is unchanged
+  and still the platform's**: the transactional handle is scoped exactly as the pooled one and carries
+  nothing else — no tenant handle, no journal writer, no escape hatch — so a transaction is not a seam
+  a pack can widen its reach through, and a service still has no `tenantId` on its context either way.
+  **The pin is a resource decision, not a free convenience**: the connection is reserved out of the
+  pool the whole deployment shares and is not returned until `fn` returns, so a callback that awaits a
+  model call or an HTTP round trip holds it for that long and enough of those starve the deployment.
+  That consequence is stated in the docblock beside the method, where a pack author reading only the
+  signature meets it. The frozen contract surface moves with it: `@rayspec/pack-sdk`'s checked-in
+  `api-report.md` carries the new member. A pack that only consumes the injected door is unaffected; a
+  pack that builds its own stand-in `PackDatabase` in its tests has to add the member to it.
+
 - **`migrations` — an extension pack can own platform tables, and bring the chain that creates
   them.** A pack manifest may now declare `migrations: { dir, tablePrefix }`. `dir` is a directory
   inside the pack holding `.sql` files and `meta/_journal.json`; `tablePrefix` is the namespace every
