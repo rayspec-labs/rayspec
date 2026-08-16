@@ -3,7 +3,11 @@
 --
 -- Every object this file creates carries the pack's declared table prefix (`fixture_pack_`), and
 -- every statement is additive: a pack chain has no allowlist to clear anything else. That is what
--- `gate:pack-migrations` reads these bytes for -- nothing applies them yet.
+-- `gate:pack-migrations` reads these bytes for, and the same rule set refuses them at boot.
+--
+-- The foreign key below targets `orgs`, a PLATFORM table, which is why a pack chain runs strictly
+-- AFTER the platform chain: on a database the platform chain has not reached, this file cannot apply
+-- at all.
 CREATE TABLE "fixture_pack_audit_events" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"tenant_id" uuid NOT NULL,

@@ -68,6 +68,7 @@ import {
 } from '@rayspec/auth-core';
 import type { Backend, BackendId } from '@rayspec/core';
 import {
+  applyPackMigrations,
   buildProductTables,
   classifyProductSchema,
   type Db,
@@ -78,6 +79,8 @@ import {
   generateProductSql,
   makeDb,
   migrationsDir,
+  type PackMigrationChain,
+  PackMigrationError,
 } from '@rayspec/db';
 import {
   crontabParseError,
@@ -2201,6 +2204,12 @@ interface MergedExtensions {
   readonly extensionImporter?: ModuleImporter;
   /** A pack-provided blob backend (undefined when no pack provided one — the default fs is used). */
   readonly packBlobFactory?: BlobStoreFactory;
+  /**
+   * The migration chains the loaded packs declare — the platform tables those packs OWN. Empty when
+   * no pack declares one (and always empty for an `extensions[]`-free deployment, which loads
+   * nothing at all).
+   */
+  readonly packMigrations: readonly PackMigrationChain[];
 }
 
 /**
@@ -2238,6 +2247,7 @@ async function mergeExtensions(
     return {
       spec: baseSpec,
       specSource: baseSpecSource,
+      packMigrations: [],
       ...(moduleImporter ? { extensionImporter: moduleImporter } : {}),
     };
   }
@@ -2294,6 +2304,7 @@ async function mergeExtensions(
     spec: reparsed.value,
     specSource: mergedSource,
     extensionImporter: loaded.importer,
+    packMigrations: loaded.migrations,
     ...(loaded.capabilities.blobFactory
       ? { packBlobFactory: loaded.capabilities.blobFactory }
       : {}),
@@ -2414,15 +2425,18 @@ async function deployDeclaredSpec(
   // MERGED onto the deployment's sections + a multi-root importer (virtual pack-handler path → the
   // real pack file) + any capability instances the packs provide. The MERGED spec is what every
   // downstream step (product tables / migration SQL / blob guard / deploy()'s re-parse + handler load)
-  // sees — so a pack store rides the UNCHANGED migration gate + chokepoint probe (NO new migration
-  // path), a pack route the existing api interpreter (incl. the stream arms), a pack handler the
-  // existing path-jailed loader. `deploy()` / the migration pipeline / the chokepoint stay
-  // BYTE-UNCHANGED — the multi-root resolution rides the existing `rollout.importer` seam.
+  // sees — so a pack STORE rides the UNCHANGED product migration gate + chokepoint probe, a pack
+  // route the existing api interpreter (incl. the stream arms), a pack handler the
+  // existing path-jailed loader. `deploy()` / the product migration pipeline / the chokepoint stay
+  // BYTE-UNCHANGED — the multi-root resolution rides the existing `rollout.importer` seam. The
+  // PLATFORM tables a pack owns are the one thing that does not travel through the spec: they are a
+  // migration chain of the pack's own, applied just below, before any product DDL.
   const {
     spec: effectiveSpec,
     specSource: effectiveSpecSource,
     extensionImporter,
     packBlobFactory,
+    packMigrations,
   } = await mergeExtensions(
     parsed.value,
     specSource,
@@ -2430,6 +2444,28 @@ async function deployDeclaredSpec(
     specPath,
     opts.moduleImporter,
   );
+
+  // ── The PLATFORM TABLES the packs OWN, applied strictly after the platform chain ────────────
+  // `applyMigrations` ran in assembleServer, so the platform tables exist and a pack table may carry
+  // a foreign key onto one. Each pack chain now runs through the SAME drizzle migrator, journaled in
+  // its own `__migrations_<packId>` table — so a pack chain restarts at 0000 and neither it nor the
+  // core chain can renumber the other. Fail-closed and BEFORE any product DDL: a chain whose
+  // namespace collides with a platform table or another pack's, or that the chain scan refuses,
+  // aborts the boot with nothing applied, in the same operator-actionable class as every other
+  // pack-load refusal here.
+  if (packMigrations.length > 0) {
+    try {
+      await applyPackMigrations(db, packMigrations);
+    } catch (e) {
+      if (e instanceof PackMigrationError) {
+        throw new BootConfigError(
+          `Boot aborted — an extension pack's migration chain was refused for the spec at ` +
+            `${specPath}: ${e.message}`,
+        );
+      }
+      throw e;
+    }
+  }
 
   const specStores = [...effectiveSpec.stores];
   const productTables = buildProductTables(specStores);

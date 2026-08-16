@@ -2,9 +2,11 @@
  * The pack ENTRY — the manifest a deployment's `extensions[]` reference resolves to.
  *
  * This pack exists to be LOADED, by the real loader, from a real deployment document, so that the
- * claimed-section seam has something in the repository that exercises it end to end. It is therefore
+ * pack seams have something in the repository that exercises them end to end. It is therefore
  * deliberately boring: it contributes no store, no handler, no route, no agent and no capability. It
- * claims ONE top-level section, `auditing`, and ships the module that validates it.
+ * claims ONE top-level section, `auditing`, ships the module that validates it, and OWNS one
+ * platform table through a migration chain of its own — an append-only ledger with hand-shaped
+ * indexes and a foreign key, which is exactly what a generated `stores` table is not.
  *
  * WHY IT IS A NORMAL WORKSPACE MEMBER. The two example packs under the `examples/` tree are named
  * `@spike/...` so CI's `--filter='!@spike/*'` excludes them. That is right for a demo and wrong for a
@@ -30,8 +32,14 @@ const fixturePack: DefinedPack = defineExtension({
   // The pack's OWN version. A deployment pins it EXACTLY; a skew is a hard load failure, never a
   // silent skip — which is why the documents beside this file pin `1.0.0` and one of them does not.
   version: '1.0.0',
-  // Nothing contributed: this pack is about the section it claims, and only that.
+  // No spec fragment: what this pack contributes to the document is the section it claims, and what
+  // it contributes to the database is the chain below — neither is a `stores` business table.
   fragments: {},
+  // The platform tables this pack OWNS. `dir` is pack-relative (the chain is emitted beside the
+  // compiled entry by this package's build) and `tablePrefix` is the namespace every object in it
+  // carries — mandatory, and the reason the chain can run against the same database as the
+  // platform's own without either being able to reach the other's tables.
+  migrations: { dir: 'migrations', tablePrefix: 'fixture_pack_' },
   sections: [
     {
       key: 'auditing',

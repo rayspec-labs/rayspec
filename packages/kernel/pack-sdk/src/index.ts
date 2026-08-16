@@ -56,6 +56,7 @@ export type {
   PackHttpMethod,
   PackManifest,
   PackManifestBrand,
+  PackMigrationChain,
   PackSectionClaim,
   PackStoreFragment,
   PackToolFragment,

@@ -5,7 +5,10 @@
 # --> statement-breakpoint markers) and reaches the intended end state. The destructive-scan gate
 # (pnpm gate:migrations) only READS the SQL; this step is the "scan -> shadow-DB dry-run" chain the
 # exit-gate advertises: scan != apply. It also covers the PRODUCT half (the throwaway-generated
-# product migration + generic tenancy/cascade invariants) — see the product section below.
+# product migration + generic tenancy/cascade invariants) — see the product section below — and the
+# PACK half: the in-tree fixture pack's OWN chain, applied on top of the platform chain in the same
+# throwaway DB, which is where "a pack chain runs strictly AFTER the platform chain" stops being a
+# sentence (its foreign key targets a platform table).
 #
 # 0000 is now SELF-BOOTSTRAPPING (it CREATEs the three run tables in their
 # authentic spike pre-state before retrofitting them), so this script NO LONGER pre-seeds them —
@@ -374,6 +377,44 @@ SQL
 assert_eq "1" "SELECT count(*) FROM journal_steps;" "row present before org delete"
 psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000c1';" >/dev/null
 assert_eq "0" "SELECT count(*) FROM journal_steps;" "row cascaded away after org delete"
+
+# =====================================================================================
+# THE PACK HALF — an extension pack's OWN migration chain, applied on top of the platform's.
+#
+# A pack that owns platform tables (hand-shaped indexes, a foreign key, an append-only ledger)
+# declares `migrations: { dir, tablePrefix }` and brings a chain of its own. It runs strictly AFTER
+# the platform chain, and the in-tree fixture pack's chain is applied HERE, into the SAME throwaway
+# DB the platform chain was just applied to and asserted against — the ordering is the point: its
+# foreign key targets `orgs`, so on a database the platform chain has not reached the chain cannot
+# apply at all. Lexical per-statement apply, exactly like the platform half above (the REAL
+# programmatic wiring — `applyPackMigrations`, the namespace rules and the per-pack journal — is the
+# from-clean-DB gate's Step 4).
+# =====================================================================================
+PACK_CHAIN_DIR="$(cd "$(dirname "$0")/../../../test/fixture-pack/migrations" && pwd)"
+PACK_TENANT='00000000-0000-0000-0000-0000000000f1'
+
+echo "== apply the in-tree fixture pack's OWN chain on top of the platform chain =="
+for PACK_FILE in "$PACK_CHAIN_DIR"/[0-9]*.sql; do
+  echo "  applying pack $(basename "$PACK_FILE") ..."
+  sed 's#--> statement-breakpoint##g' "$PACK_FILE" | psql -d "$DRYRUN_DB" -1 >/dev/null
+done
+
+echo "== ASSERT the pack's objects exist, and every one of them carries the declared prefix =="
+assert_eq "1" "SELECT count(*) FROM pg_tables WHERE tablename = 'fixture_pack_audit_events';" "the pack's table exists"
+assert_eq "3" "SELECT count(*) FROM pg_indexes WHERE tablename = 'fixture_pack_audit_events';" "the pack's indexes (primary key + two hand-shaped)"
+# The namespace rule the gate reads statically, read back off the LIVE database: nothing the pack
+# created sits outside its declared prefix.
+assert_eq "0" "SELECT count(*) FROM pg_indexes WHERE tablename = 'fixture_pack_audit_events' AND indexname NOT LIKE 'fixture_pack\\_%';" "no pack index outside the declared prefix"
+
+echo "== ASSERT the pack table's FK CASCADE onto the PLATFORM's orgs (why it runs after) =="
+psql -d "$DRYRUN_DB" >/dev/null <<SQL
+INSERT INTO orgs (id, name, slug) VALUES ('$PACK_TENANT', 'PackOrg', 'packorg');
+INSERT INTO fixture_pack_audit_events (tenant_id, actor, action, payload)
+VALUES ('$PACK_TENANT', 'someone', 'created', '{}'::jsonb);
+SQL
+assert_eq "1" "SELECT count(*) FROM fixture_pack_audit_events;" "pack audit row present before org delete"
+psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='$PACK_TENANT';" >/dev/null
+assert_eq "0" "SELECT count(*) FROM fixture_pack_audit_events;" "pack audit row cascaded away after org delete"
 
 # =====================================================================================
 # GENERIC, SPEC-DERIVED PRODUCT-TABLE invariants on the THROWAWAY-generated migration.

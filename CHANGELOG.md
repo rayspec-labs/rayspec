@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`migrations` — an extension pack can own platform tables, and bring the chain that creates
+  them.** A pack manifest may now declare `migrations: { dir, tablePrefix }`. `dir` is a directory
+  inside the pack holding `.sql` files and `meta/_journal.json`; `tablePrefix` is the namespace every
+  table and index in that chain lives under, and it is **mandatory** whenever `migrations` is
+  present. This is the mechanism for platform state a pack needs and the `stores` generator cannot
+  express — hand-shaped indexes, a foreign key onto a platform table, an append-only ledger — which
+  until now had nowhere to live but the platform's own `packages/kernel/db`.
+  At boot the chain runs through **the same migrator as the platform chain, strictly after it**, so a
+  pack table may reference a platform one, and it is applied before any product-store DDL. Each pack
+  chain is journaled in **its own `__migrations_<packId>` table** beside the platform's
+  `__drizzle_migrations`, so a pack chain starts at `0000` and is a chain of its own: neither it nor
+  the core chain can renumber the other, and two packs whose chains both start at `0000` no longer
+  skip each other. Re-applying is a no-op, exactly as it is for the platform chain, so a reboot
+  changes nothing.
+  Every refusal happens **before a single statement runs, and names both parties**: a `tablePrefix`
+  whose namespace contains a platform table names the pack and the table; two packs whose prefixes
+  overlap names both packs; a chain directory that climbs out of the pack, that reads no `.sql` file,
+  or whose `meta/_journal.json` does not list a migration committed beside it is refused as well —
+  and every one of those comparisons is made **in PostgreSQL's own case space**, because the server's
+  is: an unquoted identifier is folded to lower case before it names anything, so `Orgs` is the
+  platform's `orgs` and two packs declaring `fx_` and `FX_` own one namespace rather than two. A
+  declared `tablePrefix` is therefore written in lower case (anything else is refused fail-closed, as
+  a namespace the database never writes down), and an unquoted object name in a chain is folded
+  before it is measured against it, while a quoted one keeps its case exactly as Postgres does.
+  a migration that ships and never runs is not a smaller failure than one that fails. A pack chain is
+  held to the same rule set `gate:pack-migrations` applies in CI (`scanPackMigrationChain`, one
+  module with two callers): every created table and index must carry the declared prefix, no
+  statement may leave that namespace, and the platform's own destructive scan runs over it with an
+  empty allowlist — a pack chain has no allowlist and no mechanism to author one, so a chain that
+  never passed through this repository's CI still cannot reach a database. A deployment that
+  references no pack, or whose packs declare no chain, applies nothing new and boots exactly as
+  before.
+  The seam is exercised end to end by the in-tree `packages/test/fixture-pack`, which now owns a
+  table through a chain of its own: it is loaded by the real loader from its real deployment document
+  on its real exact version pin, and its chain is applied to a real database after the platform's —
+  including through a whole real boot, which is what pins the ordering against the platform chain and
+  the abort a refused chain produces. The two database migration gates extend over it — the shadow
+  dry-run applies it on top of the platform chain and proves its foreign key cascades from `orgs`,
+  and the from-clean-DB gate applies it through the real wiring and reads back that the platform
+  journal is untouched.
+
 - **`rayspec doctor`, `rayspec plan` and `rayspec deploy --dry-run` now say who owns a claimed
   top-level section.** All three resolve the deployment's extension packs before they judge the
   document — the same loader the boot runs, over the same deployment tree (`RAYSPEC_HANDLER_ROOT`
