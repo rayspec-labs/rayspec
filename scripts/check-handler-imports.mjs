@@ -19,6 +19,19 @@
  * (no AST), COMMENT- and STRING-LITERAL-stripped before analysis, with a SELF-TEST that proves the
  * detector fires on every forbidden vector AND passes the one sanctioned import.
  *
+ * HONEST CEILING: being a tripwire, it vets what a module WRITES DOWN — a source it can read — and
+ * the reader is a matcher, not a parser. Two shapes it cannot read are REFUSED rather than cleared:
+ * an opaque dynamic `import()`/`require()` argument is flagged on sight, and so is a member named
+ * with a STRING rather than an identifier (`{ "runAgent" as go }`, legal since ES2022) — the clause
+ * reader cannot extract such a statement at all, so leaving it unflagged would clear it against every
+ * rule at once. That refusal covers the spellings enumerated at the rule below (the brace clause alone,
+ * after `type`, after a default binding — `import platform, { "runAgent" as go } from …`, the binding
+ * read as a superset of the identifier grammar rather than an ASCII-only one — and the namespace
+ * re-export `export * as "p" from …`), each pinned by a self-test case alongside the plain spelling it
+ * would otherwise hide. What the refusals do NOT buy is a parser: a spelling no matcher here
+ * anticipates is still read as clean, which is why the OS-level isolate, not this gate, is the
+ * boundary that actually holds.
+ *
  * ESCAPE-HATCH ROOTS: a RaySpec deployment's escape-hatch library lives outside the platform
  * (zero-product-code). On the platform main line the ONLY escape-hatch modules that exist are
  * the THROWAWAY's (examples/acme-notes-backend/handlers). A real deployment would add its own root here
@@ -188,7 +201,9 @@ function stripComments(src) {
  *   - `import '<src>'`                     (side-effect import)
  *   - `import('<src>')` / `require('<src>')` (dynamic, static-string arg)
  * A dynamic import/require with a NON-static-string arg is handled separately (see
- * `detectDynamicImportViolations` — it is FLAGGED as opaque, not source-extracted).
+ * `detectDynamicImportViolations` — it is FLAGGED as opaque, not source-extracted), and so is a clause
+ * that names a member with a STRING literal (see `detectQuotedNameViolations` — the clause body below
+ * excludes quotes, so such a statement is never extracted here).
  * Returns the list of source specifiers (the strings inside the quotes/backticks).
  */
 function extractImportSources(codeNoComments) {
@@ -213,6 +228,70 @@ function extractImportSources(codeNoComments) {
     }
   }
   return sources;
+}
+
+/**
+ * ES2022 lets a brace group name a member with a STRING rather than an identifier
+ * (`import { "runAgent" as go } from '@rayspec/platform'`). `extractImportSources` builds its clause
+ * from a character class that EXCLUDES quotes, so such a statement is not merely read wrong — it is
+ * never extracted, its source is never vetted, and every rule this gate owns silently reads zero for
+ * it.
+ *
+ * The reader stays a greppable tripwire rather than learning to parse the name: it REFUSES the
+ * statement it cannot read, the same posture the opaque-dynamic-specifier rule already takes. Applied
+ * to the COMMENT-STRIPPED source, so an apostrophe inside a comment between the braces cannot
+ * manufacture a violation.
+ *
+ * The spellings MATCHED are enumerated here, each pinned by a self-test case; the list is kept as wide
+ * as a matcher can be, because a spelling that is NOT matched is cleared against every rule at once —
+ * the exact defect this rule exists to close:
+ *   - the brace clause on its own, or after `type` (`import type { "AgentSpec" as A } from …`);
+ *   - the brace clause after a DEFAULT BINDING — `ImportClause : ImportedDefaultBinding , NamedImports`
+ *     puts a binding and a comma before the brace (`import platform, { "runAgent" as go } from …`),
+ *     one comma away from the plain spelling. The binding is read as a SUPERSET of the identifier
+ *     grammar (see `DEFAULT_BINDING`), since an ASCII-only class would clear `import é, { "runAgent"
+ *     as go } from …` — a statement that parses clean and runs;
+ *   - the namespace re-export whose EXPORTED name is a string — `ExportFromClause : * as
+ *     ModuleExportName`, and a `ModuleExportName` may be a StringLiteral (`export * as "p" from …`).
+ * The clause body reads a quoted run AS a run (backslash escapes honored), so a name that itself
+ * carries a brace (`{ "a}b" as c }`) does not end the clause early and slip past. What no widening
+ * here buys is a parser: this stays a matcher, so a spelling it does not anticipate is still read as
+ * clean — which is why the OS-level isolate, not this gate, is the boundary that actually holds.
+ */
+// A member/export NAME written as a string: a quoted run, escapes honored.
+const NAME_STRING = String.raw`(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")`;
+// The module SPECIFIER: the same three quote styles `extractImportSources` accepts, sans its captures.
+const SOURCE_STRING = String.raw`(?:'[^']+'|"[^"]+"|\`[^\`$]+\`)`;
+// A brace clause that CARRIES a quote (the lookahead: a quoted name always opens before the clause's
+// first `}`), read as runs so a `}` inside a name is not mistaken for the end of the clause.
+const QUOTED_CLAUSE = String.raw`\{(?=[^{}]*['"])(?:[^{}'"]|${NAME_STRING})*\}`;
+// The DEFAULT BINDING that may precede the brace clause, read as a SUPERSET of the identifier grammar
+// — one run of anything that is not whitespace, a comma, a brace or a quote. An ES identifier is NOT
+// ASCII-only: it may carry any non-ASCII ID_Start/ID_Continue code point (`import é, …`,
+// `import 平台, …`) or spell a code point as a unicode escape (a backslash form), and an ASCII-only
+// class here would hide exactly the statement this rule exists to refuse. The superset cannot
+// manufacture a match because the position is pinned on both sides (`import`/`export` before it,
+// `, { … } from '…'` after). WHITESPACE IS EXCLUDED DELIBERATELY: the `\s+`/`\s*` around this run
+// would otherwise compete with it over the same characters (non-ASCII whitespace is both), and a run
+// of a few thousand of those costs seconds of backtracking rather than microseconds.
+const DEFAULT_BINDING = String.raw`[^\s,{}'"]+`;
+const QUOTED_MEMBER_NAME = new RegExp(
+  String.raw`\b(?:import|export)(?:\s*type)?(?:\s+${DEFAULT_BINDING}\s*,)?\s*${QUOTED_CLAUSE}\s*from\s*${SOURCE_STRING}` +
+    String.raw`|\bexport(?:\s*type)?\s*\*\s*as\s*${NAME_STRING}\s*from\s*${SOURCE_STRING}`,
+  'g',
+);
+
+function detectQuotedNameViolations(rel, codeNoComments) {
+  const found = [];
+  for (const [statement] of codeNoComments.matchAll(QUOTED_MEMBER_NAME)) {
+    found.push(
+      `${rel}: names an imported member with a string literal (${statement.trim().slice(0, 80)}…) — ` +
+        'this gate reads an import clause to reach the source it names, and a quoted member name is ' +
+        'one it cannot read, so the statement is refused rather than cleared (fail-closed). Write ' +
+        'the member as a plain identifier.',
+    );
+  }
+  return found;
 }
 
 /**
@@ -336,6 +415,8 @@ export function detectViolations(rel, src) {
     // deployment vendors in its own library) is NOT flagged here — the path jail (loader.ts) bounds
     // WHICH file loads; this gate bounds the trust-boundary-crossing imports specifically.
   }
+  // A member named with a STRING literal — refuse the statement (its source is never extracted).
+  found.push(...detectQuotedNameViolations(rel, code));
   // LOADER-1: an opaque dynamic import()/require()/createRequire — flag (cannot be vetted).
   found.push(...detectDynamicImportViolations(rel, code));
   return found;
@@ -449,6 +530,96 @@ function selfTest() {
       src: "import { forTenant } from '../../packages/kernel/db/src/tenant-db.js';",
       expect: true,
     },
+    // ── a QUOTED member name (ES2022) is not extracted at all, so the statement walks past EVERY
+    //    rule above at once. It is refused as unreadable, not read. Each vector is the quoted
+    //    spelling of a plain one already above, and the accept controls below prove the refusal is
+    //    not a blanket one.
+    { rel: 'h/x.ts', src: 'import { "runAgent" as go } from \'@rayspec/platform\';', expect: true },
+    { rel: 'h/x.ts', src: 'import { "makeDb" as m } from \'@rayspec/db/testing\';', expect: true },
+    { rel: 'h/x.ts', src: 'import { "default" as p } from \'@rayspec/platform\';', expect: true },
+    { rel: 'h/x.ts', src: "import { 'forTenant' as f } from '@rayspec/db';", expect: true },
+    { rel: 'h/x.ts', src: 'export { "default" as p } from \'@rayspec/platform\';', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import type { "AgentSpec" as A } from \'@rayspec/core\';',
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: 'import { "forTenant" as f } from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    // a name carrying a BRACE (`"a}b"`) — the clause must not be read as ending inside the string
+    { rel: 'h/x.ts', src: 'import { "a}b" as c } from \'@rayspec/platform\';', expect: true },
+    // ── the same name after a DEFAULT BINDING and as the namespace re-export's exported name. Each
+    //    group opens with the PLAIN spelling of that shape, which the ordinary rules already flag,
+    //    and is followed by the quoted spellings of it (single- and double-quoted, and one whose
+    //    source escapes the scanned root). The plain reading is what makes the quoted zero a hole
+    //    rather than a benign miss — and a spelling missing here is cleared against every rule.
+    { rel: 'h/x.ts', src: "import platform, { runAgent } from '@rayspec/platform';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import platform, { "runAgent" as go } from \'@rayspec/platform\';',
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "import d, { 'makeDb' as m } from '@rayspec/db/testing';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import x, { "forTenant" as f } from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "export * as p from '@rayspec/platform';", expect: true },
+    { rel: 'h/x.ts', src: 'export * as "p" from \'@rayspec/platform\';', expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'export * as "t" from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    // …and the same default binding written as a NON-ASCII identifier, which an ASCII-only binding
+    // class would read as no statement at all. Each is paired with its plain spelling, which the
+    // ordinary rules flag, so the quoted zero would again be a hole rather than a benign miss.
+    { rel: 'h/x.ts', src: "import é, { runAgent } from '@rayspec/platform';", expect: true },
+    {
+      rel: 'h/x.ts',
+      src: 'import é, { "runAgent" as go } from \'@rayspec/platform\';',
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: 'import 平台, { "runAgent" as go } from \'@rayspec/platform\';',
+      expect: true,
+    },
+    // …and the binding written with a unicode escape, which carries a backslash rather than a
+    // non-ASCII code point.
+    {
+      rel: 'h/x.ts',
+      src: 'import \\u0070lat, { "runAgent" as go } from \'@rayspec/platform\';',
+      expect: true,
+    },
+    {
+      rel: 'h/x.ts',
+      src: 'import é, { "forTenant" as f } from \'../../packages/kernel/db/src/tenant-db.js\';',
+      expect: true,
+    },
+    // …and the accept controls for it: a quote in the SOURCE, in an object literal, in a default
+    // export, in a comment between the braces, a legitimate enumerable re-export under the name
+    // `default`, and the widened spellings written WITHOUT a quoted name against a benign source (a
+    // default binding, ASCII and non-ASCII, and a namespace re-export).
+    { rel: 'h/x.ts', src: 'import { helper } from "./shared.js";', expect: false },
+    { rel: 'h/x.ts', src: 'export const o = { a: "x" };', expect: false },
+    { rel: 'h/x.ts', src: 'export default { a: "x" };', expect: false },
+    {
+      rel: 'h/x.ts',
+      src: "import { /* don't */ helper } from '@rayspec/handler-sdk';",
+      expect: false,
+    },
+    { rel: 'h/x.ts', src: "export { helper as default } from './shared.js';", expect: false },
+    { rel: 'h/x.ts', src: "import helper, { shared } from './shared.js';", expect: false },
+    { rel: 'h/x.ts', src: "export * as shared from './shared.js';", expect: false },
+    // the widened binding, spelled non-ASCII, against a benign source: the widening buys the QUOTED
+    // NAME after such a binding, not the binding itself.
+    { rel: 'h/x.ts', src: "import é, { shared } from './shared.js';", expect: false },
+    { rel: 'h/x.ts', src: "import 平台, { shared } from './shared.js';", expect: false },
     // a DEAD STRING mentioning a forbidden module (not an import) — must NOT fire (#16-style)
     {
       rel: 'h/x.ts',
