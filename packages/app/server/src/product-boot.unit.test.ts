@@ -1193,7 +1193,7 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
     );
     expect(plan.deployMode).toBe('mounted');
     expect(logs[0]).not.toMatch(/additive objects are present/); // nothing measured that
-    expect(logs[0]).toMatch(/NO object this boot can probe/);
+    expect(logs[0]).toMatch(/NO object whose live state can tell the two cases apart/);
     expect(logs[0]).toMatch(/nothing in this boot can tell you/); // true here: an INSERT leaves no trace
   });
 
@@ -1290,15 +1290,20 @@ describe('planUpdateBoot — the ENV-DRIVEN update boot is REBOOT-SAFE by classi
   it('the zero-evidence wording fires ONLY when there is no evidence of any kind', () => {
     // Both wordings pinned side by side: the honest "nothing measured this" and the honest "this was
     // measured" must never be printed for the other case.
-    expect(leftoverUpdateEnvMountLog({ present: [], gone: [], proven: [] })).toMatch(
+    expect(leftoverUpdateEnvMountLog({ present: [], gone: [], renamed: [], proven: [] })).toMatch(
       /nothing in this boot can tell you/,
     );
     expect(
-      leftoverUpdateEnvMountLog({ present: [], gone: [], proven: ["rename-table ('…')"] }),
+      leftoverUpdateEnvMountLog({
+        present: [],
+        gone: [],
+        renamed: [],
+        proven: ["rename-table ('…')"],
+      }),
     ).not.toMatch(/nothing in this boot can tell you/);
-    expect(leftoverUpdateEnvMountLog({ present: ['index "x"'], gone: [], proven: [] })).not.toMatch(
-      /nothing in this boot can tell you/,
-    );
+    expect(
+      leftoverUpdateEnvMountLog({ present: ['index "x"'], gone: [], renamed: [], proven: [] }),
+    ).not.toMatch(/nothing in this boot can tell you/);
   });
 
   it('present-matching + a HALF-LANDED delta → REFUSES, naming what it found and what it did not', async () => {
@@ -1378,7 +1383,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
     );
     expect(route).toEqual({
       kind: 'mount',
-      probed: { present: [], gone: ['table "highlights"'], proven: [] },
+      probed: { present: [], gone: ['table "highlights"'], renamed: [], proven: [] },
     });
   });
 
@@ -1390,7 +1395,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
     });
     expect(route).toEqual({
       kind: 'mount',
-      probed: { present: ['table "x"'], gone: [], proven: [] },
+      probed: { present: ['table "x"'], gone: [], renamed: [], proven: [] },
     });
     expect(probed).toEqual([{ kind: 'table', table: 'x' }]);
   });
@@ -1434,6 +1439,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       probed: {
         present: [],
         gone: [],
+        renamed: [],
         proven: [`set-not-null ('ALTER TABLE "note_artifacts" ALTER COLUMN "note" SET NOT NULL')`],
       },
     });
@@ -1454,7 +1460,10 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       probe(new Set()),
       new Set(['note_artifacts.note']), // "scratch"."note" is NOT inspected
     );
-    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: [], proven: [] } });
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
   });
 
   it('a reviewed RENAME whose OLD name is STILL there → { kind: apply } (it never ran)', async () => {
@@ -1504,7 +1513,10 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       ]),
       probe(new Set()),
     );
-    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: [], proven: [] } });
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
   });
 
   it('an `ADD COLUMN … NOT NULL` is measured ONCE — by the probe on the column it adds', async () => {
@@ -1531,7 +1543,7 @@ describe('routePresentMatchingUpdate — the DB-free present-matching discrimina
       ),
     ).toEqual({
       kind: 'mount',
-      probed: { present: ['column "parts"."note"'], gone: [], proven: [] },
+      probed: { present: ['column "parts"."note"'], gone: [], renamed: [], proven: [] },
     });
   });
 
@@ -1865,7 +1877,10 @@ describe('the additive extractor reads an identifier WHOLE, folded, or not at al
     // Nothing here is claimed as proof: `t_new` is gone, which an applied delta leaves behind — and so
     // does a delta that never created it. The mount rests on there being NO un-landed evidence, and the
     // log says exactly that.
-    expect(route).toEqual({ kind: 'mount', probed: { present: [], gone: [], proven: [] } });
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
   });
 
   it('…and the SAME delta before it ran (the created table is still absent) still APPLIES', async () => {
@@ -1935,7 +1950,12 @@ describe('routePresentMatchingUpdate — the four quadrants of a delta with BOTH
     const route = await routePresentMatchingUpdate(MIXED, live(new Set(['parts_label_idx'])));
     expect(route).toEqual({
       kind: 'mount',
-      probed: { present: ['index "parts_label_idx"'], gone: ['table "highlights"'], proven: [] },
+      probed: {
+        present: ['index "parts_label_idx"'],
+        gone: ['table "highlights"'],
+        renamed: [],
+        proven: [],
+      },
     });
   });
 
@@ -1974,6 +1994,360 @@ describe('routePresentMatchingUpdate — the four quadrants of a delta with BOTH
     ).rejects.toThrow(
       /HALF LANDED[\s\S]*ALREADY landed[\s\S]*highlights[\s\S]*NOT landed[\s\S]*parts_label_idx/,
     );
+  });
+});
+
+/**
+ * A name the SAME delta puts BACK cannot decide whether that delta ran.
+ *
+ * `ALTER TABLE "parts" RENAME TO "parts_archive"` beside a `CREATE TABLE "parts"` leaves `parts` in the
+ * catalog at BOTH ends: before the delta (the table being renamed away) and after it (the table the
+ * delta creates in its place). Reading "the old name is still there" as "the rename has not run" was
+ * therefore true of a delta that had FULLY landed, which routed it to APPLY — and a rename cannot run
+ * twice, so the boot died on 42P07 and, under `Restart=always`, never served. The name the rename GIVES
+ * the object is the one that discriminates, and it is the only measurement such a statement gets.
+ *
+ * Both arms are pinned for every shape below, because fixing one at the cost of the other is exactly how
+ * this arrived: an already-applied delta must MOUNT (never re-apply), and one that never ran must APPLY.
+ */
+describe('routePresentMatchingUpdate — a name the SAME delta re-creates settles nothing', () => {
+  const mig = (sql: string, allowlist: PlannedMigration['allowlist'] = []): PlannedMigration[] => [
+    { name: 'd.sql', sql, allowlist },
+  ];
+  const live = (names: ReadonlySet<string>) => async (p: SchemaObjectProbe) =>
+    names.has(
+      p.kind === 'table'
+        ? p.table
+        : p.kind === 'column'
+          ? `${p.table}.${p.column}`
+          : p.kind === 'index'
+            ? p.index
+            : `${p.table}#${p.constraint}`,
+    );
+
+  // RENAME the table away, then CREATE a new one under the freed name.
+  const RECYCLED_TABLE = mig(
+    'ALTER TABLE "parts" RENAME TO "parts_archive";\n--> statement-breakpoint\n' +
+      'CREATE TABLE "parts" ("id" uuid PRIMARY KEY, "label" text);',
+    [
+      {
+        kind: 'rename-table',
+        match: 'ALTER TABLE "parts" RENAME TO "parts_archive"',
+        reason: 'reviewed',
+      },
+    ],
+  );
+
+  it('FULLY APPLIED (both names live) → MOUNT, naming the name the RENAME gave the table', async () => {
+    // The regression, in one reading: `parts` is there because the delta re-created it, and demanding
+    // it be gone re-ran `RENAME TO "parts_archive"` — 42P07 on a delta that had entirely landed.
+    const route = await routePresentMatchingUpdate(
+      RECYCLED_TABLE,
+      live(new Set(['parts', 'parts_archive'])),
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: ['table "parts_archive"'], proven: [] },
+    });
+  });
+
+  it('NEVER APPLIED (only the freed name live) → APPLY — the change is not lost either', async () => {
+    // The arm the fix above must not buy: `parts` is there because the rename has not run yet, and
+    // `parts_archive` is not there at all. Mounting here would call the env stale and lose the rename.
+    const route = await routePresentMatchingUpdate(RECYCLED_TABLE, live(new Set(['parts'])));
+    expect(route).toEqual({ kind: 'apply', absent: [] });
+  });
+
+  it('…and the boot MOUNTS the applied one with ZERO migrations, claiming only what it probed', async () => {
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      RECYCLED_TABLE,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set(['parts', 'parts_archive'])),
+    );
+    expect(plan.deployMode).toBe('mounted');
+    expect(plan.migrations).toEqual([]); // the rename is NOT re-run
+    expect(logs[0]).toMatch(/table "parts_archive"/); // the log names the object the probe asked about
+    expect(logs[0]).not.toMatch(/nothing in this boot can tell you/); // something WAS measured
+  });
+
+  it('…and the boot APPLIES the un-landed one, without calling the env stale', async () => {
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      RECYCLED_TABLE,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set(['parts'])),
+    );
+    expect(plan.deployMode).toBe('updated');
+    expect(plan.migrations).toBe(RECYCLED_TABLE);
+    expect(logs.join('\n')).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  it('the RENAME COLUMN shape reads the same way, in both directions', async () => {
+    const recycledColumn = mig(
+      'ALTER TABLE "parts" RENAME COLUMN "note" TO "note_legacy";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "parts" ADD COLUMN "note" text;',
+      [
+        {
+          kind: 'rename-column',
+          match: 'ALTER TABLE "parts" RENAME COLUMN "note" TO "note_legacy"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(
+      await routePresentMatchingUpdate(
+        recycledColumn,
+        live(new Set(['parts.note', 'parts.note_legacy'])),
+      ),
+    ).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: ['column "parts"."note_legacy"'], proven: [] },
+    });
+    expect(await routePresentMatchingUpdate(recycledColumn, live(new Set(['parts.note'])))).toEqual(
+      { kind: 'apply', absent: [] },
+    );
+  });
+
+  it('a delta that ROTATES two names measures each rename by the name that decides it', async () => {
+    // `a → b` frees `a`, and the second statement puts `a` back — so `a` decides nothing and `b` does.
+    // `c` is freed by nobody's re-creation, so it keeps the reading it always had.
+    const rotate = mig(
+      'ALTER TABLE "a" RENAME TO "b";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "c" RENAME TO "a";',
+      [
+        { kind: 'rename-table', match: 'ALTER TABLE "a" RENAME TO "b"', reason: 'reviewed' },
+        { kind: 'rename-table', match: 'ALTER TABLE "c" RENAME TO "a"', reason: 'reviewed' },
+      ],
+    );
+    // Applied: `b` and `a` stand, `c` is gone.
+    expect(await routePresentMatchingUpdate(rotate, live(new Set(['a', 'b'])))).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: ['table "b"'], proven: [] },
+    });
+    // Never ran: `a` and `c` stand, `b` does not — both statements say so.
+    expect(await routePresentMatchingUpdate(rotate, live(new Set(['a', 'c'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+  });
+
+  it('a HALF-landed recycled rename REFUSES, naming the new name as landed', async () => {
+    // The landed pile is wired, not merely carried: the rename ran (`parts_archive` is there) while the
+    // index the same delta creates is not, and re-applying would raise 42P07 on the renamed table.
+    const withIndex = mig(
+      'ALTER TABLE "parts" RENAME TO "parts_archive";\n--> statement-breakpoint\n' +
+        'CREATE TABLE "parts" ("id" uuid PRIMARY KEY);\n--> statement-breakpoint\n' +
+        'CREATE INDEX "parts_archive_label_idx" ON "parts_archive" ("label");',
+      [
+        {
+          kind: 'rename-table',
+          match: 'ALTER TABLE "parts" RENAME TO "parts_archive"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(
+      await routePresentMatchingUpdate(withIndex, live(new Set(['parts', 'parts_archive']))),
+    ).toEqual({
+      kind: 'refuse-half-landed',
+      landed: [
+        'table "parts_archive" — a reviewed RENAME in the delta renames TO it, and it is THERE',
+      ],
+      unlanded: [
+        'index "parts_archive_label_idx" — a CREATE in the delta names it, and it is NOT there',
+      ],
+    });
+  });
+
+  it('ACCEPT CONTROL: an ORDINARY rename is still measured by the name it renames AWAY', async () => {
+    // The delta that does NOT put the freed name back keeps the reading this describe does not touch —
+    // the guard is scoped to the recycled shape, not a blanket "renames claim nothing".
+    const ordinary = mig(
+      'ALTER TABLE "parts" RENAME TO "parts_archive";\n--> statement-breakpoint\n' +
+        'CREATE TABLE "widgets" ("id" uuid PRIMARY KEY);',
+      [
+        {
+          kind: 'rename-table',
+          match: 'ALTER TABLE "parts" RENAME TO "parts_archive"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(ordinary, live(new Set(['parts', 'widgets'])))).toEqual(
+      {
+        kind: 'refuse-half-landed',
+        landed: ['table "widgets" — a CREATE in the delta names it, and it is THERE'],
+        unlanded: [
+          'table "parts" — a reviewed RENAME in the delta renames it away, and it is STILL there',
+        ],
+      },
+    );
+  });
+
+  it('a reviewed DROP whose target the SAME delta re-creates claims nothing, and the log says so', async () => {
+    // The destructive half of the same reading. `DROP TABLE "parts"` + `CREATE TABLE "parts"` leaves the
+    // name standing either way, so nothing here can tell an applied delta from an unapplied one — and
+    // "still there ⇒ un-landed" was FALSE of the applied one, which re-ran the DROP over the table the
+    // same delta had just re-created. Zero evidence is the honest reading; the mount log says exactly
+    // that and does NOT call the env stale.
+    const rebuild = mig(
+      'DROP TABLE "parts";\n--> statement-breakpoint\nCREATE TABLE "parts" ("id" uuid PRIMARY KEY);',
+      [{ kind: 'drop-table', match: 'DROP TABLE "parts"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(rebuild, live(new Set(['parts'])))).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
+    const logs: string[] = [];
+    await planUpdateBoot(
+      'present-matching',
+      rebuild,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set(['parts'])),
+    );
+    expect(logs[0]).toMatch(/nothing in this boot can tell you/);
+    expect(logs[0]).toMatch(/frees and puts BACK/); // and it says WHY nothing could be measured
+  });
+
+  it('ACCEPT CONTROL: a DROP whose target the delta does NOT re-create is still un-landed evidence', async () => {
+    const plainDrop = mig('DROP TABLE "parts";', [
+      { kind: 'drop-table', match: 'DROP TABLE "parts"', reason: 'reviewed' },
+    ]);
+    expect(await routePresentMatchingUpdate(plainDrop, live(new Set(['parts'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+  });
+});
+
+/**
+ * ONE statement may alter SEVERAL columns, and the classify has to have inspected every one of them.
+ *
+ * `ALTER TABLE "t" ALTER COLUMN "a" TYPE text, ALTER COLUMN "b" SET NOT NULL` is one statement and one
+ * finding. Reading only its FIRST clause called the whole statement proven applied on the strength of a
+ * column `detectDrift` introspects while `"b"` — which the check may never have looked at — carried the
+ * claim: the same "proven by a measurement nobody took" this module exists to close (#440).
+ */
+describe('routePresentMatchingUpdate — a multi-clause ALTER COLUMN is measured on ALL its columns', () => {
+  const MULTI_CLAUSE =
+    'ALTER TABLE "note_artifacts" ALTER COLUMN "note" TYPE text, ' +
+    'ALTER COLUMN "hand_added" SET NOT NULL';
+  const multi = (): PlannedMigration[] => [
+    {
+      name: 'd.sql',
+      sql: `${MULTI_CLAUSE};\n`,
+      allowlist: [
+        { kind: 'type-change-no-using', match: MULTI_CLAUSE, reason: 'reviewed' },
+        { kind: 'set-not-null', match: MULTI_CLAUSE, reason: 'reviewed' },
+      ],
+    },
+  ];
+  const nothingLive = async () => false;
+
+  it('claims NOTHING when the classify inspects only the FIRST clause’s column', async () => {
+    // `"hand_added"` is not one of the spec's declared columns, so no drift query ever compared it: an
+    // unapplied SET NOT NULL on it would have classified drift-clean all the same.
+    const route = await routePresentMatchingUpdate(
+      multi(),
+      nothingLive,
+      new Set(['note_artifacts.note']),
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
+  });
+
+  it('…nor when it inspects only the SECOND', async () => {
+    const route = await routePresentMatchingUpdate(
+      multi(),
+      nothingLive,
+      new Set(['note_artifacts.hand_added']),
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
+  });
+
+  it('ACCEPT CONTROL: with EVERY altered column inspected, the classify IS the measurement', async () => {
+    // The control that keeps the two arms above from being "the rule was switched off": the statement is
+    // still evidence where the premise actually holds for all of it.
+    const route = await routePresentMatchingUpdate(
+      multi(),
+      nothingLive,
+      new Set(['note_artifacts.note', 'note_artifacts.hand_added']),
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: {
+        present: [],
+        gone: [],
+        renamed: [],
+        // …quoted the way the log truncates a long statement (80 chars + an ellipsis).
+        proven: [
+          `type-change-no-using ('${MULTI_CLAUSE.slice(0, 80)}…')`,
+          `set-not-null ('${MULTI_CLAUSE.slice(0, 80)}…')`,
+        ],
+      },
+    });
+  });
+
+  it('a further clause this cannot read WHOLE makes the statement evidence for nothing', async () => {
+    // The same whole-or-nothing rule the identifier reader has: an unterminated quote in the second
+    // clause is not a licence to fall back on the first one's key.
+    const unreadable: PlannedMigration[] = [
+      {
+        name: 'd.sql',
+        sql: 'ALTER TABLE "note_artifacts" ALTER COLUMN "note" TYPE text, ALTER COLUMN "hand_added SET NOT NULL;\n',
+        allowlist: [],
+      },
+    ];
+    const route = await routePresentMatchingUpdate(
+      unreadable,
+      nothingLive,
+      new Set(['note_artifacts.note']),
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
+  });
+
+  it('ACCEPT CONTROL: a SINGLE-clause statement is unchanged — one column, one key', async () => {
+    const single: PlannedMigration[] = [
+      {
+        name: 'd.sql',
+        sql: 'ALTER TABLE "note_artifacts" ALTER COLUMN "note" SET NOT NULL;\n',
+        allowlist: [
+          {
+            kind: 'set-not-null',
+            match: 'ALTER TABLE "note_artifacts" ALTER COLUMN "note" SET NOT NULL',
+            reason: 'reviewed',
+          },
+        ],
+      },
+    ];
+    const route = await routePresentMatchingUpdate(
+      single,
+      nothingLive,
+      new Set(['note_artifacts.note']),
+    );
+    expect(route).toEqual({
+      kind: 'mount',
+      probed: {
+        present: [],
+        gone: [],
+        renamed: [],
+        proven: [`set-not-null ('ALTER TABLE "note_artifacts" ALTER COLUMN "note" SET NOT NULL')`],
+      },
+    });
   });
 });
 

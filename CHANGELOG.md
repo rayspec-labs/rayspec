@@ -378,6 +378,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose target is missing may never have had one (re-dropping it raises nothing), and a `RENAME` whose
   old name is already gone says as little; a target that is still **there** remains un-landed, for the
   `IF EXISTS` form as much as the plain one, so the drop is never silently skipped.
+- **A name the same delta puts back decides nothing, and the boot no longer reads it as un-landed.**
+  `ALTER TABLE "parts" RENAME TO "parts_archive"` beside a `CREATE TABLE "parts"` leaves `parts` in the
+  catalog at both ends — before the delta and after it — so "the old name is still there" was true of a
+  delta that had **fully landed**, which sent it to be applied again; a rename cannot run twice, so the
+  boot died on `42P07` and under `Restart=always` never served. Such a rename is now measured by the
+  name it renames **to**, which the delta leaves standing only if it ran: present ⇒ mount, absent ⇒
+  apply. The same reading covers a reviewed `DROP` whose target the same delta re-creates
+  (`DROP TABLE "t"` + `CREATE TABLE "t"`), which re-ran the drop over the table just re-created: nothing
+  in the schema can tell those two states apart, so the boot claims nothing for it and the mount log
+  says so instead of calling the environment stale. Whether a name is left standing is decided by the
+  **last** statement that touches it, so the reverse order (`CREATE TABLE "t_new"` +
+  `RENAME TO "t"`, which leaves no `t_new`) is unaffected.
 - **An identifier is read the way the catalog stores it, or it is not read at all.** The probe turns a
   statement into a question about a named object, so a name read only partly is worse than no name.
   A double-quoted name is now read to its closing quote (a space, a hyphen or a dot inside it belongs
@@ -391,12 +403,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The drift-clean mount log no longer states a probe result it did not produce, in either
   direction.** It read "its additive objects are present and any destructive targets were PROBED gone"
   on every mount, including one where nothing had been looked for. It is now built from what the boot
-  established: the objects found present, the targets found gone, and the statements the drift-clean
-  classification itself measured — a type change or a `SET NOT NULL` **over a column the drift check
-  actually introspects** (the document's own stores and their declared columns), which unapplied would
-  have classified as drift. Over any other column the drift check never looked, so nothing is claimed
-  for it. Only a delta that leaves **no** evidence of any kind gets the "nothing in this boot can tell
-  you" wording — and it keeps it, rather than being told the environment is stale.
+  established: the objects found present, the targets found gone, the new name a reviewed `RENAME` was
+  found to have given an object, and the statements the drift-clean classification itself measured — a
+  type change or a `SET NOT NULL` **over a column the drift check actually introspects** (the document's
+  own stores and their declared columns), which unapplied would have classified as drift. Over any other
+  column the drift check never looked, so nothing is claimed for it — and one statement may alter
+  **several** columns (`ALTER COLUMN "a" TYPE text, ALTER COLUMN "b" SET NOT NULL` is one statement),
+  so it stands as evidence only where the drift check introspects **every** column it touches; reading
+  the first clause alone called such a statement proven on the strength of a column nothing had
+  inspected. Only a delta that leaves **no** evidence of any kind gets the "nothing in this boot can
+  tell you" wording — and it keeps it, rather than being told the environment is stale.
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
