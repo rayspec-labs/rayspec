@@ -393,9 +393,12 @@ function resolveHelpRequest(args: readonly string[]): string | undefined {
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<number> {
   // DEV-DX: auto-load a local `.env` — `$PWD/.env` first, then the install-root `.env` (no-override
   // per key, opt-out via RAYSPEC_SKIP_DOTENV=1) — ONCE at startup so `plan`'s optional shadow-apply
-  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). Harmless to
-  // `doctor` (needs no env); does NOT change plan's read-only guarantee — it only makes DATABASE_URL
-  // readable so the read-only guard has a compare target.
+  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). A DEFAULT
+  // `doctor` needs no env; `doctor --with-packs` DOES read one from here — `RAYSPEC_HANDLER_ROOT`
+  // selects the deployment tree its packs are imported from (`deploymentRootFor` in pack-sections.ts),
+  // so a `.env` here can move the tree that pack code is executed out of. Does NOT change plan's
+  // read-only guarantee — it only makes DATABASE_URL readable so the read-only guard has a compare
+  // target.
   loadLocalDotenvIfPresent();
 
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns

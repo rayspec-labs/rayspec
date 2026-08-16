@@ -136,9 +136,12 @@ mount's `dir` `stat`ed and access-checked, reported as `frontend_dir_missing` on
 a miss. Nothing in the tree is ever *imported* — the `--with-packs` flag below is
 the only thing that changes that. (The CLI's startup
 [`.env` auto-load](#rayspec-serve--the-boot-server) runs ahead of every
-subcommand, `doctor` included; `doctor` reads no variable from it, and
-`RAYSPEC_SKIP_DOTENV=1` skips it.) It runs the strict parser plus the semantic
-linter and reports the full, fail-closed list of violations (not just the first).
+subcommand, `doctor` included. A default `doctor` reads no variable from it;
+`--with-packs` reads `RAYSPEC_HANDLER_ROOT`, which **selects the deployment tree
+the packs are imported from** — so a `.env` in the invoking directory, or at the
+install root, can move that tree. `RAYSPEC_SKIP_DOTENV=1` skips the auto-load.)
+It runs the strict parser plus the semantic linter and reports the full,
+fail-closed list of violations (not just the first).
 Validates either profile — it dispatches on the `product:` discriminant.
 
 - **Postgres:** not needed.
@@ -147,10 +150,13 @@ Validates either profile — it dispatches on the `product:` discriminant.
     document declares, so a top-level section one of them claims is validated by
     its owner. **This runs code from the deployment tree**: resolving a pack means
     importing its entry module, and the schema module of each section it claims.
-    Without it no pack is read at all — see the `notResolved` key below for what
-    that leaves unchecked. `plan`, `deploy --dry-run` and the deploy/boot paths
-    resolve packs either way; [`deploy --check-env`](#deploy) resolves none, by
-    design (see its section).
+    The tree is `RAYSPEC_HANDLER_ROOT` when the deployment sets one (including via
+    the `.env` auto-load), otherwise the directory the spec file sits in — the same
+    root the boot resolves handlers under, so this previews the boot's tree rather
+    than a second guess at it. Without it no pack is read at all — see the
+    `notResolved` key below for what that leaves unchecked. `plan`,
+    `deploy --dry-run` and the deploy/boot paths resolve packs either way;
+    [`deploy --check-env`](#deploy) resolves none, by design (see its section).
 - **Output:**
 
   ```json
