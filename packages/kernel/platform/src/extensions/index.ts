@@ -35,6 +35,7 @@ export {
 export {
   EXTENSION_VIRTUAL_PREFIX,
   ExtensionLoadError,
+  type ExtensionLoadFailureClass,
   type ExtensionRefLike,
   type LoadExtensionsContext,
   type LoadedExtensions,

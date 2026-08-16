@@ -393,23 +393,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **An extension pack that is present but UNBUILT is now reported as refused, with the build named,
-  instead of as a pack that is not on this deployment.** A pack's entry module is resolved
-  `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the production importer
-  refuses outright, because a deploy runtime loads compiled JavaScript only. That refusal was reported
-  as `extension_pack_unavailable`, whose sentence says the pack "is not available on this deployment"
-  and whose remedy is "deploy the pack": the pack was right there, and the remedy the operator needed —
-  build it — was named nowhere in the verdict. Which of the two codes an import failure gets is now read
-  off the disk rather than off the error: **nothing at the resolved entry** is `extension_pack_unavailable`
-  (deploy the pack), an **entry that is there and did not load** is `extension_pack_refused` (the pack is
-  here; deploying it again changes nothing), and the load failure it carries is the importer's own
-  message, which names the TypeScript source and tells you to compile it and deploy the built module.
-  Two of the shipped examples are exactly this shape, so `rayspec plan examples/stream-backend/rayspec.yaml`
-  and its `agent-pack-deployment` sibling now answer with the code and the remedy that fit. A pack whose
-  directory or entry file is genuinely absent reports `extension_pack_unavailable` exactly as before, and
-  a pack that loads is untouched. The same reclassification reaches every path that resolves packs
-  (`plan`, `deploy --dry-run`, `doctor --with-packs`, and the boot), because all of them read the one
-  flag the loader sets.
+- **An extension pack whose entry module is present and does not load is now reported as refused,
+  under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module
+  is resolved `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the
+  production importer refuses outright, because a deploy runtime loads compiled JavaScript only. That
+  refusal was reported as `extension_pack_unavailable`, whose opening sentence says the pack "is not
+  available on this deployment" and whose prescription is "deploy the pack" — sending an operator to
+  deploy what was already sitting there. (The verdict did carry the importer's own message, naming the
+  TypeScript source and the build, in the trailing `Load failure:` clause; what was wrong is the code
+  and the sentence that prescribes an action, not whether the build appeared anywhere.) Which of the
+  two codes an import failure gets is now read off the disk rather than off the error: **nothing at
+  the resolved entry** is `extension_pack_unavailable` (deploy the pack), an **entry that is there and
+  did not load** is `extension_pack_refused`. That class gets its own prescription rather than the
+  read-and-refused one, because two different faults reach it and neither is answered by a re-deploy
+  of the same artifact: the pack is not built, or it did not arrive with the dependencies its entry
+  imports (a `dist/` shipped without its `node_modules/`, which the bundled example README documents
+  as a shipping hazard). The `Load failure:` clause carries the importer's own words, which say which
+  of the two it is. Two of the shipped examples are exactly this shape, so
+  `rayspec plan examples/stream-backend/rayspec.yaml` and its `agent-pack-deployment` sibling now
+  answer with the code and the prescription that fit. A pack whose directory or entry file is
+  genuinely absent reports `extension_pack_unavailable` exactly as before, a pack that was read and
+  then refused (a version skew, a claim collision, a handler outside `handlers/`) keeps its unchanged
+  sentence, and a pack that loads is untouched. The reclassification reaches every path that resolves
+  packs (`plan`, `deploy --dry-run`, `doctor --with-packs`, and the boot), because all of them read
+  the one class the loader records. The error-code catalogues both packages publish
+  (`@rayspec/spec`, `@rayspec/pack-sdk`) and `docs/cli-reference.md` describe the split the same way.
 
 - **`rayspec deploy --dry-run` now composes a conversation-declaring product document instead of
   failing on its own stub.** The dry-run composes against a rollout whose runtime-only instances are

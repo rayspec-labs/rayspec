@@ -233,13 +233,16 @@ Validates either profile — it dispatches on the `product:` discriminant.
   deployment** — nothing is on disk at the entry the reference resolves to, so
   install it, or drop it from `extensions[]` together with the sections it claims.
   `extension_pack_refused` means the pack **is** here and was refused: an entry
-  module that is on disk and did not load (an **unbuilt** pack, whose TypeScript
-  entry the deploy runtime refuses — build it and point the reference at the built
-  directory), a version pin that does not match its manifest, two packs claiming
-  one key, a `module:` that escapes the deployment tree. Deploying that pack again
-  changes nothing. A violation **inside** a claimed section is the pack's
-  own, reported at `<section>.<field>` with the same codes a core section's
-  violation carries.
+  module that is on disk and did not load — an **unbuilt** pack, whose TypeScript
+  entry the deploy runtime refuses (build it and point the reference at the built
+  directory), or one that arrived without the dependencies its entry imports (a
+  `dist/` shipped without its `node_modules/`; deploy the pack directory complete)
+  — a version pin that does not match its manifest, two packs claiming one key, a
+  `module:` that escapes the deployment tree. Deploying the **same** artifact again
+  changes nothing in any of those cases; the message names which part of it to fix,
+  and for an entry that did not load it carries the importer's own words. A
+  violation **inside** a claimed section is the pack's own, reported at
+  `<section>.<field>` with the same codes a core section's violation carries.
 
 - **Exit:** `0` if valid, `1` otherwise.
 

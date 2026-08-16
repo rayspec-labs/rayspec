@@ -12,10 +12,13 @@
  *   • the pack IS here and was refused (a skew)   → `extension_pack_refused` — deploying it again
  *                                                   changes nothing;
  *   • two present packs claim one section         → `extension_pack_refused`, naming both;
- *   • the pack is here and UNBUILT               → `extension_pack_refused` — its entry is
- *                                                   TypeScript source, which the deploy runtime
- *                                                   refuses; build it. That one sits between the
- *                                                   first two and is pinned at the end of this file.
+ *   • the pack is here and its ENTRY DID NOT LOAD → `extension_pack_refused`, under its own
+ *                                                   sentence: the artifact is incomplete, and the
+ *                                                   importer's message says how. Two causes reach
+ *                                                   it — an UNBUILT pack (a TypeScript entry the
+ *                                                   deploy runtime refuses) and a pack shipped
+ *                                                   without the dependencies its entry imports —
+ *                                                   and both are pinned at the end of this file.
  * A further case is pinned by its FULL error list rather than its wording: a document whose
  * `extensions[]` does not typecheck must not additionally report the section it declares as an
  * unknown field, which is the exact report this entry point exists to avoid.
@@ -305,15 +308,20 @@ describe('parseSpecWithPacks — a document whose top-level section a pack owns'
 });
 
 /**
- * The pack is ON DISK and UNBUILT — the entry the resolution lands on is TypeScript source, which the
- * production importer refuses because a deploy runtime loads compiled JavaScript only. This case runs
- * with NO injected importer, so the refusal is the real one a deploy meets, over a real file.
+ * The pack is ON DISK and its ENTRY DID NOT LOAD. Both cases here run with NO injected importer, so
+ * the failure is the real one a deploy meets, over a real file.
  *
- * It is the case between the two the file opens with, and the one that used to be reported as the
- * wrong one: the pack IS on this deployment, so `extension_pack_unavailable` would send an operator to
- * deploy what they already deployed, and never name the build that is the whole remedy.
+ * This is the class between the two the file opens with, and the one whose CODE used to be wrong: the
+ * pack IS on this deployment, so `extension_pack_unavailable` sent an operator to deploy what they
+ * had already deployed. What the old report did carry, in both classes, is the importer's own message
+ * — so the build was named there too, and it still is. What changed is the code and the sentence that
+ * prescribes an action.
+ *
+ * Its own remedy sentence is pinned in BOTH cases, because they are the reason it cannot borrow the
+ * read-and-refused one: an unbuilt pack needs a build, a pack shipped without its dependencies needs
+ * the directory deployed complete, and "deploying it again changes nothing" is false for the second.
  */
-describe('parseSpecWithPacks — a pack that is present but not built', () => {
+describe('parseSpecWithPacks — a pack that is present and whose entry does not load', () => {
   let root: string;
   beforeAll(() => {
     root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-unbuilt-'));
@@ -325,7 +333,7 @@ describe('parseSpecWithPacks — a pack that is present but not built', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('GOLDEN — refused, naming the build; never "unavailable"', async () => {
+  it('GOLDEN — UNBUILT: refused, naming the build; never "unavailable"', async () => {
     const res = await parseSpecWithPacks(DOC, { packsRoot: root, deploymentRoot: root });
     expect(res.ok).toBe(false);
     if (res.ok) return;
@@ -333,11 +341,48 @@ describe('parseSpecWithPacks — a pack that is present but not built', () => {
     const [error] = res.errors;
     expect(error?.path).toBe('extensions[0]');
     expect(error?.message).toContain(
-      "extension pack 'acme-notes' is present on this deployment but was REFUSED",
+      "extension pack 'acme-notes' is present on this deployment but its ENTRY MODULE DID NOT LOAD",
     );
-    // The cause and the remedy, in the loader's own words — the reason the code had to change.
+    // The remedy sentence names BOTH artifact faults and prescribes neither a deploy nor nothing.
+    expect(error?.message).toContain('deploying the same artifact again lands the same way');
+    expect(error?.message).toContain('did not arrive with the dependencies its entry imports');
+    // The cause and the concrete remedy, in the loader's own words.
     expect(error?.message).toContain("is TypeScript source ('.ts')");
     expect(error?.message).toContain('Compile it to JavaScript first and deploy the built module');
+  });
+
+  it('GOLDEN — BUILT but shipped without its dependencies: the same class, never "unavailable"', async () => {
+    // `dist/` without `node_modules/`, which the bundled example README documents as a shipping
+    // hazard: the entry is compiled JavaScript, resolution lands on it, and the import throws. The
+    // remedy here is to deploy the pack DIRECTORY complete — so a refusal asserting that deploying it
+    // again changes nothing would be as wrong as the "deploy the pack" this class was moved off.
+    const shipped = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-nodeps-'));
+    try {
+      mkdirSync(join(shipped, 'pack'), { recursive: true });
+      writeFileSync(
+        join(shipped, 'pack', 'index.js'),
+        "import 'no-such-dependency-the-pack-needs';\nexport default {};\n",
+        'utf8',
+      );
+      const res = await parseSpecWithPacks(DOC, {
+        packsRoot: shipped,
+        deploymentRoot: shipped,
+      });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_refused']);
+      const [error] = res.errors;
+      expect(error?.message).toContain(
+        "extension pack 'acme-notes' is present on this deployment but its ENTRY MODULE DID NOT LOAD",
+      );
+      expect(error?.message).toContain('did not arrive with the dependencies its entry imports');
+      // NOT the read-and-refused sentence: re-deploying the directory, complete, IS the fix here.
+      expect(error?.message).not.toContain('Deploying it again changes nothing');
+      // The importer's own words say WHICH of the two faults this is.
+      expect(error?.message).toContain('no-such-dependency-the-pack-needs');
+    } finally {
+      rmSync(shipped, { recursive: true, force: true });
+    }
   });
 
   it('the same document beside an EMPTY pack directory is unavailable — the control', async () => {

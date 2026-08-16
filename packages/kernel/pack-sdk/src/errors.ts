@@ -29,9 +29,10 @@ export type PackErrorCode =
   | 'unknown_field'
   /** The document carries a mapping key literally named `__proto__` (refused anywhere it appears). */
   | 'reserved_document_key'
-  /** A referenced pack is not on the deployment at all — its entry module did not load. */
+  /** A referenced pack is not on the deployment at all — nothing is on disk at the entry it resolves to. */
   | 'extension_pack_unavailable'
-  /** A referenced pack IS on the deployment and was refused (version skew, claim collision, …). */
+  /** A referenced pack IS on the deployment and was refused (an entry that did not load — an unbuilt
+   * pack, or one missing the dependencies its entry imports — a version skew, a claim collision, …). */
   | 'extension_pack_refused'
   /** A cross-reference names an id that is not declared post-merge (a tool's handler, an agent's tool). */
   | 'dangling_ref'
