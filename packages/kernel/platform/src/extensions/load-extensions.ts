@@ -187,19 +187,23 @@ export interface LoadedExtensions {
  * vocabulary — the pack-aware parse turns it into a typed `SpecError` — can name the pack without
  * reading it back out of the message.
  *
- * `unresolved` separates the ONE failure that means the pack is not on this deployment (its entry
- * module did not import — a missing directory, a missing file, an unbuilt pack) from every failure
- * that happened AFTER the pack was found and read (a version skew, a claim collision, a handler
- * outside `handlers/`). The distinction is load-bearing rather than cosmetic: the two classes
+ * `unresolved` separates the failure that means the pack is not on this deployment (nothing is at
+ * the entry the resolution landed on — a missing directory, a missing file) from every failure that
+ * happened with the pack ON DISK (its entry did not import, a version skew, a claim collision, a
+ * handler outside `handlers/`). The distinction is load-bearing rather than cosmetic: the two classes
  * prescribe opposite remedies — deploy the pack, versus fix the pack that is already deployed — and
- * the caller that re-reports this has no other way to tell them apart. The path jail deliberately
- * does NOT count as unresolved: it fails on a `..`, an absolute path or a symlink escape in the
- * declared `module`, which is a mis-declaration, and it passes cleanly for a directory that simply
- * is not there (it is lexical — the missing pack surfaces at the entry import a step later).
+ * the caller that re-reports this has no other way to tell them apart. WHICH CLASS AN IMPORT FAILURE
+ * IS, IS READ OFF THE DISK, never off the error: an entry file that IS there and did not import is a
+ * pack that is here and was refused, and the commonest reason for it is an UNBUILT pack, whose `.ts`
+ * entry the production importer rejects because a deploy runtime loads compiled JavaScript only. That
+ * one needs to be built — a remedy "deploy the pack" never names. The path jail deliberately does NOT
+ * count as unresolved either: it fails on a `..`, an absolute path or a symlink escape in the declared
+ * `module`, which is a mis-declaration, and it passes cleanly for a directory that simply is not there
+ * (it is lexical — the missing pack surfaces at the entry import a step later).
  */
 export class ExtensionLoadError extends Error {
   readonly packId: string | undefined;
-  /** True iff the pack could not be resolved on this deployment at all (its entry did not import). */
+  /** True iff the pack is not on this deployment at all (nothing is at the entry it resolved to). */
   readonly unresolved: boolean;
   constructor(message: string, packId?: string, unresolved = false) {
     super(message);
@@ -279,13 +283,17 @@ export async function loadExtensions(
     try {
       mod = await importer(entryAbsolute);
     } catch (e) {
-      // The one UNRESOLVED failure: the pack's entry did not import, so the pack is not here.
+      // UNRESOLVED only if NOTHING IS THERE. An entry file that exists and did not import is a pack
+      // that IS on this deployment and was refused — most often an unbuilt one, whose `.ts` entry the
+      // production importer rejects (compiled JavaScript only). Reporting that as "not available"
+      // would send an operator to deploy what they already deployed and never name the build the
+      // message below does. The disk answers this; the error text is not scraped for it.
       throw new ExtensionLoadError(
         `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
           `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
           'a defineExtension(...) manifest (fail-closed).',
         ref.id,
-        true,
+        !existsSync(entryAbsolute),
       );
     }
     const manifest = mod.default;

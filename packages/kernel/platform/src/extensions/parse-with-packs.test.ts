@@ -11,12 +11,16 @@
  *   • the pack is NOT on this deployment          → `extension_pack_unavailable` — deploy it;
  *   • the pack IS here and was refused (a skew)   → `extension_pack_refused` — deploying it again
  *                                                   changes nothing;
- *   • two present packs claim one section         → `extension_pack_refused`, naming both.
- * A fourth case is pinned by its FULL error list rather than its wording: a document whose
+ *   • two present packs claim one section         → `extension_pack_refused`, naming both;
+ *   • the pack is here and UNBUILT               → `extension_pack_refused` — its entry is
+ *                                                   TypeScript source, which the deploy runtime
+ *                                                   refuses; build it. That one sits between the
+ *                                                   first two and is pinned at the end of this file.
+ * A further case is pinned by its FULL error list rather than its wording: a document whose
  * `extensions[]` does not typecheck must not additionally report the section it declares as an
  * unknown field, which is the exact report this entry point exists to avoid.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import * as rayspecPlatform from '@rayspec/platform';
@@ -297,5 +301,54 @@ describe('parseSpecWithPacks — a document whose top-level section a pack owns'
     const sections: rayspecPlatform.SpecWithPacks['sections'] = {};
     expect(claim.key).toBe('acme_notes');
     expect(sections).toEqual({});
+  });
+});
+
+/**
+ * The pack is ON DISK and UNBUILT — the entry the resolution lands on is TypeScript source, which the
+ * production importer refuses because a deploy runtime loads compiled JavaScript only. This case runs
+ * with NO injected importer, so the refusal is the real one a deploy meets, over a real file.
+ *
+ * It is the case between the two the file opens with, and the one that used to be reported as the
+ * wrong one: the pack IS on this deployment, so `extension_pack_unavailable` would send an operator to
+ * deploy what they already deployed, and never name the build that is the whole remedy.
+ */
+describe('parseSpecWithPacks — a pack that is present but not built', () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-unbuilt-'));
+    mkdirSync(join(root, 'pack'), { recursive: true });
+    // Never imported: the production importer refuses a `.ts` path before it opens the file.
+    writeFileSync(join(root, 'pack', 'index.ts'), 'export default {};\n', 'utf8');
+  });
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('GOLDEN — refused, naming the build; never "unavailable"', async () => {
+    const res = await parseSpecWithPacks(DOC, { packsRoot: root, deploymentRoot: root });
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_refused']);
+    const [error] = res.errors;
+    expect(error?.path).toBe('extensions[0]');
+    expect(error?.message).toContain(
+      "extension pack 'acme-notes' is present on this deployment but was REFUSED",
+    );
+    // The cause and the remedy, in the loader's own words — the reason the code had to change.
+    expect(error?.message).toContain("is TypeScript source ('.ts')");
+    expect(error?.message).toContain('Compile it to JavaScript first and deploy the built module');
+  });
+
+  it('the same document beside an EMPTY pack directory is unavailable — the control', async () => {
+    const bare = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-absent-'));
+    try {
+      const res = await parseSpecWithPacks(DOC, { packsRoot: bare, deploymentRoot: bare });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_unavailable']);
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
+    }
   });
 });

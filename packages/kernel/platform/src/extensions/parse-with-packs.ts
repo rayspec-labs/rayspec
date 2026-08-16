@@ -21,8 +21,9 @@
  * section it claims, so a document taken to a deployment that does not have the pack cannot be
  * validated at all. That fails here, at parse, as a TYPED `extension_pack_unavailable` naming the
  * pack — not as an `unknown_field` pointing at the section, which would send the operator to delete
- * the section rather than to install the pack. But a pack that IS here and was REFUSED (a version
- * skew, two packs claiming one key, a handler outside `handlers/`) is a different failure with a
+ * the section rather than to install the pack. But a pack that IS here and was REFUSED (an entry that
+ * is on disk and did not load — an unbuilt pack is the common one — a version skew, two packs
+ * claiming one key, a handler outside `handlers/`) is a different failure with a
  * different remedy, and it is reported under its own code, `extension_pack_refused`. Telling an
  * operator to deploy a pack that is already deployed is worse than telling them nothing, so the
  * loader marks which class a failure is (`ExtensionLoadError.unresolved`) and this file never guesses.
@@ -103,10 +104,11 @@ export async function parseSpecWithPacks(
  * the error as a field (not scraped out of its message), which is also what paths the error at the
  * `extensions[]` entry that named the pack.
  *
- * WHICH CODE is decided by the loader, not guessed here: `unresolved` is set at the ONE throw site
- * that means the pack is not on this deployment (its entry did not import). Everything else got as
- * far as reading the pack, so the sentence an operator reads says the pack is here and was refused —
- * and does not send them to deploy something they already deployed.
+ * WHICH CODE is decided by the loader, not guessed here: `unresolved` is set only where nothing is on
+ * disk at the entry the resolution landed on, which is what "the deployment does not have this pack"
+ * means. Everything else — an entry that is there and did not load included — is a pack this
+ * deployment HAS, so the sentence an operator reads says it is here and was refused, and does not
+ * send them to deploy something they already deployed.
  */
 function packLoadFailure(
   e: ExtensionLoadError,
