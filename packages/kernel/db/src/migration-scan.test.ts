@@ -111,6 +111,31 @@ describe('comment-strip is literal-aware (literal-stripping guard regression)', 
     expect(r.pass).toBe(false);
   });
 
+  it('a dollar-quote tag carrying a DIGIT does not swallow the rest of the file', () => {
+    // A tag follows unquoted-identifier rules except that it may not hold a `$`, so digits after
+    // the first character are legal. A letters-only tag pattern read `$tag1$hi$tag1$` as "no
+    // dollar quote here", took the inner `$hi$` for an opener, found no partner for it and ran to
+    // the end of the file — everything behind a perfectly valid literal was swallowed into one
+    // buffer and blanked away before the detectors ran, so this DROP TABLE scanned CLEAN.
+    const r = scanMigrationSql(
+      'CREATE TABLE "t" ("n" text DEFAULT $tag1$hi$tag1$);\nDROP TABLE "orgs";',
+    );
+    expect(r.findings.some((f) => f.kind === 'drop-table')).toBe(true);
+    expect(r.pass).toBe(false);
+  });
+
+  it('a digit-tagged literal whose BODY holds `DROP TABLE` still scans clean', () => {
+    // The accept control for the case above: the fix has to keep BLANKING the body, not merely
+    // stop swallowing. Without this, a scan that gave up on dollar quotes entirely and grepped the
+    // raw text for keywords would pass the test above while flagging every literal that mentions
+    // one.
+    const r = scanMigrationSql(
+      'CREATE TABLE "t" ("n" text DEFAULT $tag1$DROP TABLE "orgs";$tag1$);',
+    );
+    expect(r.findings).toHaveLength(0);
+    expect(r.pass).toBe(true);
+  });
+
   it('an escaped doubled-quote inside a literal does not end the string early', () => {
     // The '' is an escaped apostrophe; the `;` and DROP are still inside the literal until the
     // real closing quote, after which the trailing DROP TABLE must be flagged.
