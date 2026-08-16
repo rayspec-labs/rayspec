@@ -18,7 +18,10 @@
  *
  * WHAT IS PINNED: the direction a pack author depends on — the value `defineExtension` returns is
  * assignable to the type the pack surface tells them to annotate it with — plus the brand literal
- * both sides spell out and the per-kind arms that make a failure name its own section.
+ * both sides spell out and the per-kind arms that make a failure name its own section. The SERVICE
+ * kind is pinned in both directions, because it is the one kind where values cross the seam in both:
+ * the deployment builds the boot context a pack's `boot` is annotated against, and the pack exports
+ * the module this loader calls.
  *
  * WHAT IS DELIBERATELY NOT PINNED: the REVERSE direction. A value typed as `PackManifest` is NOT
  * accepted by `defineExtension`, and that is the design: the pack fragment types pin the addressing
@@ -37,7 +40,11 @@ import type {
   PackManifest,
   PackManifestBrand,
   PackMigrationChain,
+  PackServiceContext as PackSdkServiceContext,
+  PackServiceModule as PackSdkServiceModule,
+  TurnDispatch as PackSdkTurnDispatch,
   PackSectionClaim,
+  PackServiceDeclaration,
   PackStoreFragment,
   PackToolFragment,
 } from '@rayspec/pack-sdk';
@@ -48,6 +55,7 @@ import type {
   StoreSpec,
   ToolSpecConfig,
 } from '@rayspec/spec';
+import type { TurnDispatch } from '../turn-dispatch.js';
 import type {
   DefinedExtension,
   EXTENSION_BRAND,
@@ -55,7 +63,9 @@ import type {
   ExtensionManifest,
   ExtensionMigrationChain,
   ExtensionSectionClaim,
+  ExtensionServiceDeclaration,
 } from './extension.js';
+import type { PackServiceContext, PackServiceModule } from './pack-services.js';
 
 /** Compile-time assertion: fails to compile unless `T` is exactly `true`. */
 type Assert<_T extends true> = true;
@@ -106,6 +116,44 @@ type _MigrationChainsFit = Assert<
 >;
 
 /**
+ * The SERVICE kind, in the three places it can diverge.
+ *
+ * The DECLARATION arm is the manifest half, named on its own like every other kind. The other two are
+ * the ones a pack author's build actually depends on, and they run in OPPOSITE directions on purpose:
+ *
+ *  - CONTEXT: the value this deployment BUILDS must satisfy the type a pack ANNOTATES its `boot`
+ *    parameter with, or the pack's own `boot(ctx: PackServiceContext)` would refuse the argument the
+ *    platform hands it. So the platform's context must extend the pack surface's.
+ *  - MODULE: the value a pack EXPORTS must satisfy the shape this loader accepts and calls, so the
+ *    pack surface's module type must extend the platform's. Pinning only one direction would leave
+ *    the other free to drift into a failure that surfaces in somebody else's repository.
+ */
+type _ServiceDeclarationsFit = Assert<
+  ExtensionServiceDeclaration extends PackServiceDeclaration ? true : false
+>;
+type _ServiceContextFitsWhatAPackAnnotates = Assert<
+  PackServiceContext extends PackSdkServiceContext ? true : false
+>;
+type _APackServiceIsBootableHere = Assert<
+  PackSdkServiceModule extends PackServiceModule ? true : false
+>;
+
+/**
+ * The DISPATCH capability, pinned in BOTH directions. It is the one member of the service context the
+ * pack surface re-expresses that has behaviour rather than shape — a widening on either side would let
+ * a pack call a method this platform does not implement, or leave a platform method a pack cannot
+ * reach. Naming `TurnDispatch` here also puts the identifier in a module the dispatch-boundary gate
+ * has no reason to scan and every reason to leave alone: this is platform code, not a contribution.
+ */
+type _DispatchCapabilitiesAgree = Assert<
+  TurnDispatch extends PackSdkTurnDispatch
+    ? PackSdkTurnDispatch extends TurnDispatch
+      ? true
+      : false
+    : false
+>;
+
+/**
  * Both sides spell the brand literal out. The pack surface ships no runtime, so it cannot import
  * the constant — it declares a copy, and a copy that drifts makes every loader check reject every
  * pack. Pinned in BOTH directions so neither a widening nor a narrowing passes.
@@ -130,8 +178,12 @@ const pins: [
   _AgentsFit,
   _SectionClaimsFit,
   _MigrationChainsFit,
+  _ServiceDeclarationsFit,
+  _ServiceContextFitsWhatAPackAnnotates,
+  _APackServiceIsBootableHere,
+  _DispatchCapabilitiesAgree,
   _BrandLiteralsAgree,
-] = [true, true, true, true, true, true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true, true, true, true, true, true, true, true];
 
 /**
  * The pins, widened. The exported TYPE is deliberately `readonly boolean[]` rather than the tuple

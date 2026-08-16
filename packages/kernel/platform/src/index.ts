@@ -120,6 +120,7 @@ export { DEFAULT_MAX_QUEUE, EventPipeline } from './event-pipeline.js';
 // extensions/ barrel: `.` is the package's one declared export, so a name missing here is a name no
 // consumer can import (`extensions.test.ts` asserts these three through the package specifier).
 export {
+  bootPackServices,
   type DefinedExtension,
   defineExtension,
   EXTENSION_BRAND,
@@ -129,11 +130,21 @@ export {
   type ExtensionManifest,
   type ExtensionRefLike,
   type ExtensionSectionClaim,
+  type ExtensionServiceDeclaration,
   type ExtensionSpecFragments,
   isDefinedExtension,
+  isPackServiceModule,
   type LoadExtensionsContext,
   type LoadedExtensions,
+  type LoadedPackService,
   loadExtensions,
+  type PackServiceContext,
+  type PackServiceDatabase,
+  PackServiceError,
+  type PackServiceJournal,
+  type PackServiceJournalStep,
+  type PackServiceModule,
+  type PackServicesHandle,
   parseSpecWithPacks,
   type SpecWithPacks,
 } from './extensions/index.js';
@@ -246,3 +257,16 @@ export {
   TriggerRegistrationError,
   TriggerRegistry,
 } from './triggers/index.js';
+// The ONE sanctioned way a pack schedules a durable agent turn — handed to a pack's `services`
+// contribution and to nothing else (the CI dispatch-boundary gate fails the build on a handler or
+// tooling module that so much as names it). It writes the SAME enqueue-time run header and enqueues
+// the SAME neutral RunJob the HTTP async path does; the tenant is bound by the composition root, so
+// the request object has no way to name one.
+export {
+  makeTurnDispatch,
+  type TurnDispatch,
+  type TurnDispatchDeps,
+  TurnDispatchError,
+  type TurnDispatchRequest,
+  type TurnDispatchResult,
+} from './turn-dispatch.js';

@@ -13,6 +13,9 @@
  *  - parse-with-packs.ts `parseSpecWithPacks(yaml, ctx)` — the pack-aware parse: the core grammar
  *                        plus the top-level sections the deployment's packs own, with a typed
  *                        failure when a referenced pack is not there.
+ *  - pack-services.ts    the `services` contribution kind — the shape a service module exports, the
+ *                        context it boots with, and `bootPackServices` (declaration-order boot,
+ *                        reverse-order shutdown, a failing boot that names its pack).
  */
 export {
   type DefinedExtension,
@@ -22,6 +25,7 @@ export {
   type ExtensionManifest,
   type ExtensionMigrationChain,
   type ExtensionSectionClaim,
+  type ExtensionServiceDeclaration,
   type ExtensionSpecFragments,
   isDefinedExtension,
 } from './extension.js';
@@ -33,4 +37,16 @@ export {
   type LoadedExtensions,
   loadExtensions,
 } from './load-extensions.js';
+export {
+  bootPackServices,
+  isPackServiceModule,
+  type LoadedPackService,
+  type PackServiceContext,
+  type PackServiceDatabase,
+  PackServiceError,
+  type PackServiceJournal,
+  type PackServiceJournalStep,
+  type PackServiceModule,
+  type PackServicesHandle,
+} from './pack-services.js';
 export { parseSpecWithPacks, type SpecWithPacks } from './parse-with-packs.js';

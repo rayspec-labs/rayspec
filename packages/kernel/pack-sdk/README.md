@@ -13,8 +13,11 @@ silent break for every pack.
 A pack's **entry** module builds its manifest with the platform's manifest helper — which
 typechecks the full document grammar at the pack's own edge — and names `DefinedPack` from
 this package for what it exports. A pack's **handler** modules run with injected
-capabilities and import only `@rayspec/handler-sdk`. The two surfaces are deliberately
-distinct.
+capabilities and import only `@rayspec/handler-sdk`. A pack's **service** modules — the one
+contribution kind the deployment boots rather than calls — are typed here, against
+`PackServiceModule`: what they receive is a boot context rather than a per-invocation init,
+and it carries `TurnDispatch`, the capability a handler may not even name. The three
+surfaces are deliberately distinct.
 
 The fragment types here pin the fields a contribution is *addressed* by and leave the rest
 of each section body open, so they are deliberately **wider** than that grammar: they

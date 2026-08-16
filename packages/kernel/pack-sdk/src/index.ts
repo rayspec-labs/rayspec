@@ -29,6 +29,11 @@
  * is the DECLARATION-side contract: the shapes a pack author writes down and the vocabulary the
  * deployment answers them with.
  *
+ * A pack's SERVICE modules are the third surface, and they are typed HERE rather than against the
+ * handler contract: a service is not called by the platform, it is BOOTED by it, so what it receives
+ * is a boot context rather than a per-invocation init — including `TurnDispatch`, the one capability
+ * a handler may not even name (see `service.ts`).
+ *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * COMPATIBILITY.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -61,3 +66,14 @@ export type {
   PackStoreFragment,
   PackToolFragment,
 } from './manifest.js';
+export type {
+  PackDatabase,
+  PackJournalStep,
+  PackJournalWriter,
+  PackServiceContext,
+  PackServiceDeclaration,
+  PackServiceModule,
+  TurnDispatch,
+  TurnDispatchRequest,
+  TurnDispatchResult,
+} from './service.js';
