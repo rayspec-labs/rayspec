@@ -1,0 +1,13 @@
+# The same deployment with the exact version pin moved off the version the pack manifest declares.
+# The pack IS present here, so this is not the missing-pack case: it is a refusal, and the remedy is
+# the opposite one (fix the pin or the pack — deploying the pack again changes nothing). It is what
+# makes the pin in the document beside this one load-bearing rather than decorative.
+version: '1.0'
+metadata:
+  name: fixture-pack-deployment
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: 9.9.9
+auditing:
+  retentionDays: 30

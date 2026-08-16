@@ -1,0 +1,19 @@
+# The fixture deployment document: it references the pack beside it and writes the top-level section
+# that pack claims. `module` points at the BUILT pack (`tsc -b` emits src/ to dist/), because the
+# loader imports compiled JavaScript only, and `version` is the EXACT pin the loader checks against
+# the manifest's own declared version.
+#
+# The `auditing:` key below is not a key the core grammar owns. On this deployment it parses because
+# the pack claims it and the pack's own validator accepts what is written under it; on a deployment
+# without the pack, the same document fails with the typed missing-pack error.
+version: '1.0'
+metadata:
+  name: fixture-pack-deployment
+  description: The deployment that exercises the claimed-section seam against the in-tree fixture pack.
+extensions:
+  - id: fixture-pack
+    module: ./dist
+    version: 1.0.0
+auditing:
+  retentionDays: 30
+  redactPayloads: true

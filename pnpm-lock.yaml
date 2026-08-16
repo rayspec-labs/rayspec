@@ -272,6 +272,9 @@ importers:
       '@rayspec/db':
         specifier: workspace:*
         version: link:../../kernel/db
+      '@rayspec/platform':
+        specifier: workspace:*
+        version: link:../../kernel/platform
       '@rayspec/product-yaml':
         specifier: workspace:*
         version: link:../../compose/product-yaml
@@ -288,6 +291,9 @@ importers:
         specifier: 3.4.9
         version: 3.4.9
     devDependencies:
+      '@rayspec/fixture-pack':
+        specifier: workspace:*
+        version: link:../../test/fixture-pack
       '@types/node':
         specifier: 22.12.0
         version: 22.12.0
@@ -877,6 +883,19 @@ importers:
       vitest:
         specifier: 4.1.9
         version: 4.1.9(@opentelemetry/api@1.9.0)(@types/node@22.12.0)(vite@8.0.16(@types/node@22.12.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
+
+  packages/test/fixture-pack:
+    dependencies:
+      '@rayspec/platform':
+        specifier: workspace:*
+        version: link:../../kernel/platform
+    devDependencies:
+      '@rayspec/pack-sdk':
+        specifier: workspace:*
+        version: link:../../kernel/pack-sdk
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
 
   packages/test/parity:
     dependencies:
