@@ -383,8 +383,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catalog at both ends — before the delta and after it — so "the old name is still there" was true of a
   delta that had **fully landed**, which sent it to be applied again; a rename cannot run twice, so the
   boot died on `42P07` and under `Restart=always` never served. Such a rename is now measured by the
-  name it renames **to**, which the delta leaves standing only if it ran: present ⇒ mount, absent ⇒
-  apply. The same reading covers a reviewed `DROP` whose target the same delta re-creates
+  name it renames **to**: present ⇒ mount, and absent ⇒ apply **only where the delta leaves that name
+  standing**, which is what makes it the discriminating one. The same reading covers a reviewed `DROP`
+  whose target the same delta re-creates
   (`DROP TABLE "t"` + `CREATE TABLE "t"`), which re-ran the drop over the table just re-created: nothing
   in the schema can tell those two states apart, so the boot claims nothing for it and the mount log
   says so instead of calling the environment stale. Whether a name is left standing is decided by the
@@ -418,6 +419,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   earlier. The same suppression settles the mirror case, a rebuild (`DROP TABLE "t"` + `CREATE TABLE
   "t"`) whose name is **absent**: it mounted claiming the target was probed gone and told the operator
   the environment was stale, and now claims nothing at all.
+- **A name a `RENAME` gives an object is only evidence while the same delta LEAVES it standing.** The
+  rule above is what makes the new name discriminating, and the absence reading was made without it. A
+  rebuild authored as rename-aside — `ALTER TABLE "parts" RENAME TO "parts_archive"` +
+  `CREATE TABLE "parts"` + `DROP TABLE "parts_archive"` — leaves `parts` standing and `parts_archive`
+  missing **before** the delta and **after** it, so nothing separates the two states; reading the
+  missing new name as un-landed put a **fully applied** delta on the un-landed pile, while the
+  delta-creates rule above had just withheld the one `DROP` reading that would have refused it as half
+  landed. The route came out **apply**, and re-running a rebuild over the schema it had already produced
+  renames the *live* table aside, gives the freed name to an empty one and drops the aside: three seeded
+  rows, one row written by the served app after the delta landed, **zero** after the next restart, and
+  again on every restart after that. It is the recycled-name limit reached from the rename side, so it
+  now gets the limit's answer — claim nothing, mount, and say the boot measured nothing. Its **presence**
+  still lands, so a genuinely half-landed rebuild (the rename ran, the drop did not) is still refused
+  naming both sides. Both `CREATE` spellings behave identically, and so does the column form, which is
+  the ordinary way to retype a column: `RENAME COLUMN` aside, `ADD COLUMN`, `DROP COLUMN` the aside.
 - **Both halves of the update boot read the same statement split, and so does the migration gate.**
   `scanMigrationSql` stripped comments before splitting, so a `--> statement-breakpoint` marker was
   swallowed together with the statement in front of it — while `splitMigrationStatements`, which the

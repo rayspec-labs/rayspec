@@ -2659,6 +2659,160 @@ describe('routePresentMatchingUpdate — a DROP target the SAME delta creates pr
 });
 
 /**
+ * The SECOND mirror, and the one the `created` guard above did not cover.
+ *
+ * A rename whose OLD name the same delta puts back is measured by the name it renames TO — that name
+ * stands iff the rename ran, which is what makes it the discriminating one. It is NOT discriminating
+ * when the SAME delta takes it away again: after `RENAME "parts" TO "parts_archive"` +
+ * `CREATE TABLE "parts"` + `DROP TABLE "parts_archive"` the live schema holds `parts` and no
+ * `parts_archive` — BEFORE the delta and AFTER it. Reading the new name's ABSENCE as un-landed put a
+ * FULLY APPLIED delta on the un-landed pile, and the `created` guard had just emptied the landed pile
+ * of the one `DROP` that would have refused it: the route came out APPLY, and re-running a rebuild
+ * over the schema it had already produced renames the LIVE table aside, gives the freed name to an
+ * empty one and drops the aside. Measured on real Postgres, three seeded rows, one row written by the
+ * served app after the delta landed: rows=1 → 0 → 0, silently, on EVERY restart.
+ *
+ * This is the recycled-name limit, reached from the rename side — so the answer is the limit's answer:
+ * claim NOTHING, MOUNT, and say the boot measured nothing. Both spellings behave identically (the
+ * standing reader accepts `IF NOT EXISTS`, which is the point of the reader), and so does the column
+ * form, which is the ordinary retype idiom: rename the column aside, add the new one, drop the aside.
+ */
+describe('routePresentMatchingUpdate — a RENAME whose NEW name the delta takes away settles nothing', () => {
+  const mig = (sql: string, allowlist: PlannedMigration['allowlist'] = []): PlannedMigration[] => [
+    { name: 'd.sql', sql, allowlist },
+  ];
+  const live = (names: ReadonlySet<string>) => async (p: SchemaObjectProbe) =>
+    names.has(p.kind === 'table' ? p.table : `${p.table}.${p.column}`);
+  const NOTHING = { present: [], gone: [], renamed: [], proven: [] };
+
+  /** Rename the table aside, take the freed name, discard the aside. */
+  const rebuild = (create: string) =>
+    mig(
+      'ALTER TABLE "parts" RENAME TO "parts_archive";\n--> statement-breakpoint\n' +
+        `${create}\n--> statement-breakpoint\nDROP TABLE "parts_archive";`,
+      [
+        {
+          kind: 'rename-table',
+          match: 'ALTER TABLE "parts" RENAME TO "parts_archive"',
+          reason: 'reviewed',
+        },
+        { kind: 'drop-table', match: 'DROP TABLE "parts_archive"', reason: 'reviewed' },
+      ],
+    );
+  const PLAIN = rebuild('CREATE TABLE "parts" ("id" uuid PRIMARY KEY, "label" text);');
+  const IF_NOT_EXISTS = rebuild(
+    'CREATE TABLE IF NOT EXISTS "parts" ("id" uuid PRIMARY KEY, "label" text);',
+  );
+
+  // The two states are INDISTINGUISHABLE — that is the finding. `parts` stands either way and
+  // `parts_archive` is absent either way, so the same live schema is asserted twice on purpose.
+  it('the FULLY APPLIED rebuild claims nothing and MOUNTS — it is not re-applied', async () => {
+    // RED → {kind:'apply',absent:[]}, which re-runs the rebuild over the schema it produced and
+    // drops the table holding every row written since the delta landed.
+    expect(await routePresentMatchingUpdate(PLAIN, live(new Set(['parts'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+  });
+
+  it('…and the NEVER-APPLIED one reads the same, because nothing separates them', async () => {
+    expect(await routePresentMatchingUpdate(PLAIN, live(new Set(['parts'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+  });
+
+  it('the IF NOT EXISTS spelling — the one drizzle-kit emits — reads identically', async () => {
+    expect(await routePresentMatchingUpdate(IF_NOT_EXISTS, live(new Set(['parts'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+  });
+
+  it('the mount log says it measured nothing, and does NOT call the env stale', async () => {
+    const logs: string[] = [];
+    await planUpdateBoot(
+      'present-matching',
+      IF_NOT_EXISTS,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set(['parts'])),
+    );
+    expect(logs[0]).toMatch(/frees and puts BACK/);
+    expect(logs[0]).toMatch(/nothing in this boot can tell you/);
+    expect(logs[0]).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  it('the COLUMN retype idiom reads the same way', async () => {
+    // Rename the column aside, add the new one, drop the aside — the standard way to change a
+    // column's type without a USING cast.
+    const retype = mig(
+      'ALTER TABLE "parts" RENAME COLUMN "note" TO "note_old";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "parts" ADD COLUMN "note" jsonb;\n--> statement-breakpoint\n' +
+        'ALTER TABLE "parts" DROP COLUMN "note_old";',
+      [
+        {
+          kind: 'rename-column',
+          match: 'ALTER TABLE "parts" RENAME COLUMN "note" TO "note_old"',
+          reason: 'reviewed',
+        },
+        {
+          kind: 'drop-column',
+          match: 'ALTER TABLE "parts" DROP COLUMN "note_old"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(retype, live(new Set(['parts.note'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+  });
+
+  it('ACCEPT CONTROL: the genuinely HALF-landed rebuild still REFUSES, naming both sides', async () => {
+    // Both names live: the rename ran and the DROP did not. Withholding the absence reading must not
+    // withhold the PRESENCE one — otherwise this finding could be closed by refusing nothing at all.
+    expect(
+      await routePresentMatchingUpdate(PLAIN, live(new Set(['parts', 'parts_archive']))),
+    ).toEqual({
+      kind: 'refuse-half-landed',
+      landed: [
+        'table "parts_archive" — a reviewed RENAME in the delta renames TO it, and it is THERE',
+      ],
+      unlanded: [
+        'table "parts_archive" — a reviewed DROP in the delta names it, and it is STILL there',
+      ],
+    });
+  });
+
+  it('ACCEPT CONTROL: a rebuild the delta LEAVES standing is still measured by its new name', async () => {
+    // The same shape WITHOUT the trailing DROP: `parts_archive` survives the delta, so its absence is
+    // the discriminating reading and must keep being made — this is the arm the guard must not break.
+    const kept = mig(
+      'ALTER TABLE "parts" RENAME TO "parts_archive";\n--> statement-breakpoint\n' +
+        'CREATE TABLE IF NOT EXISTS "parts" ("id" uuid PRIMARY KEY);',
+      [
+        {
+          kind: 'rename-table',
+          match: 'ALTER TABLE "parts" RENAME TO "parts_archive"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(kept, live(new Set(['parts'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+    expect(
+      await routePresentMatchingUpdate(kept, live(new Set(['parts', 'parts_archive']))),
+    ).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: ['table "parts_archive"'], proven: [] },
+    });
+  });
+});
+
+/**
  * BOTH halves of the router read the SAME statement split.
  *
  * The additive half read `splitMigrationStatements` (breakpoint-first, the boundaries drizzle's own

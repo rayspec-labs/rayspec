@@ -651,7 +651,9 @@ export async function serveDeployment(
   // root's update branch (both route through the shared planUpdateBoot). ONE SHAPE is not decidable this
   // way and is the one place this path can silently drop a reviewed change: a delta that FREES a name and
   // PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one multi-clause
-  // `ALTER TABLE`; the `IF [NOT] EXISTS` spellings count the same) leaves the schema holding that name in
+  // `ALTER TABLE`, or a rename-aside rebuild — `RENAME TO "t_old"` + `CREATE TABLE "t"` +
+  // `DROP TABLE "t_old"`, where the name the rename gives the table is gone in both states too; the
+  // `IF [NOT] EXISTS` spellings count the same) leaves the schema holding that name in
   // BOTH states, so the boot claims nothing, MOUNTS, and its log says it measured nothing rather than
   // calling the env stale. Leaving --apply-migration in a
   // process-managed unit is therefore SAFE (it applies once, mounts thereafter); still, drop it once the

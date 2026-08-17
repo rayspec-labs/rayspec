@@ -905,8 +905,15 @@ change is applied by the explicit `--apply-migration` flag below.
   spelling. Nothing in the schema separates the two states, so the boot claims nothing,
   **mounts**, and logs that it measured nothing rather than calling the flag stale —
   re-applying would re-drop the object the delta had just re-created. **Check the schema by
-  hand when you see that log.** (A `RENAME` that frees a recycled name *is* decidable and is
-  decided: the name the rename gives the object stands only if the delta ran.) It is
+  hand when you see that log.** A `RENAME` that frees a recycled name *is* decidable and is
+  decided — the name the rename gives the object stands only if the delta ran — **unless the
+  same delta takes that name away too**. `ALTER TABLE "t" RENAME TO "t_old"` +
+  `CREATE TABLE "t"` + `DROP TABLE "t_old"` — rename the table aside, take the freed name,
+  discard the aside — is the same undecidable shape reached from the rename side: `t` stands
+  and `t_old` is missing in **both** states, so it too claims nothing and mounts. Re-applying
+  such a rebuild would rename the *live* table aside and drop it, losing every row written
+  since the delta landed. The column form is the ordinary way to retype a column — `RENAME
+  COLUMN` aside, `ADD COLUMN`, `DROP COLUMN` the aside — and reads the same way. It is
   rejected with `--dry-run` (a dry-run touches no database) and against a
   frontend-only spec (the static profile below touches no database either), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).

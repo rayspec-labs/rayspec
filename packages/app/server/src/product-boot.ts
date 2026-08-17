@@ -478,7 +478,7 @@ export interface ProbedObjects {
   readonly gone: readonly string[];
   /**
    * Names a reviewed RENAME gives an object, which the live schema HAS. Only the renames whose OLD name
-   * the SAME delta puts back are measured this way (see {@link objectsTheDeltaLeavesBehind}) — for every
+   * the SAME delta puts back are measured this way (see {@link namesTheDeltaTouches}) — for every
    * other rename the old name is the discriminating one and its absence proves nothing, so nothing is
    * claimed for it here.
    */
@@ -536,7 +536,10 @@ const PROBEABLE_SUPERSET_BLIND: ReadonlySet<DestructiveKind> = new Set<Destructi
  *     probeable ({@link removedObject} reads it): STILL THERE ⇒ the rename has NOT run — UNLESS the same
  *     delta puts that name BACK (a `RENAME "parts" TO "parts_archive"` beside a `CREATE TABLE "parts"`),
  *     which leaves it there in BOTH states. Such a rename is measured by the name it renames TO instead
- *     ({@link renamedToObject}), which the delta leaves standing iff it ran.
+ *     ({@link renamedToObject}) — but its ABSENCE settles anything only where the delta LEAVES that
+ *     name standing, which is what makes it discriminating. Where the same delta takes it away too
+ *     (a `DROP TABLE "parts_archive"` behind the rebuild), it is missing in BOTH states and nothing is
+ *     claimed; its PRESENCE is landed evidence either way, since the rename must have run to give it.
  *   - {@link CLASSIFY_MEASURED_COLUMN_KINDS} — a type change / SET NOT NULL alters a column's SHAPE and
  *     names no object whose EXISTENCE settles it. For these, and ONLY for a column `detectDrift`
  *     actually introspects, the drift-clean classification is itself the measurement: unapplied, the
@@ -1327,15 +1330,19 @@ export type PresentMatchingRoute =
  *                renames TO and the schema HAS, where that is the discriminating name.
  *   - UNLANDED — an object a CREATE names and the schema does NOT have; a reviewed DROP target that is
  *                STILL there; the name a RENAME renames AWAY and the schema STILL has (or the name it
- *                renames TO and the schema does NOT have, where that is the discriminating one).
+ *                renames TO and the schema does NOT have, where the delta LEAVES that name standing and
+ *                it is therefore the discriminating one).
  * A statement whose state the schema genuinely cannot settle contributes to NEITHER, rather than to the
  * pile that reads best: an `IF EXISTS` DROP whose target is missing (it may never have existed), a
  * RENAME whose old name is already gone (it may never have existed either), a column-shape statement
- * over a column `detectDrift` does not introspect, and — the one this decides per DELTA rather than per
- * statement — a freed name the SAME delta puts BACK ({@link objectsTheDeltaLeavesBehind}), which stands
- * in the live schema whether or not the delta ran. Silence is what the schema said; claiming otherwise
- * is how a delta gets called applied when it never ran (#440), and reading a name the delta restores as
- * "not renamed yet" is how a delta that HAD run got re-applied.
+ * over a column `detectDrift` does not introspect, and — the two this decides per DELTA rather than per
+ * statement ({@link namesTheDeltaTouches}) — a freed name the SAME delta puts BACK, which stands in the
+ * live schema whether or not the delta ran, and a name the delta brings into existence and then takes
+ * away again (the target of a staging `DROP`, or the name a RENAME gives an object that a later
+ * statement drops), which is MISSING whether or not it ran. Silence is what the schema said; claiming
+ * otherwise is how a delta gets called applied when it never ran (#440), reading a name the delta
+ * restores as "not renamed yet" is how a delta that HAD run got re-applied, and reading a name the
+ * delta itself removes as "not renamed yet" is how a rebuild re-ran over its own result.
  * then:
  *   - nothing UNLANDED → MOUNT, carrying WHAT was established so the log can claim only that (a delta
  *     that names nothing probeable at all lands here too, with an empty pile and a log that says so).
@@ -1415,13 +1422,22 @@ export async function routePresentMatchingUpdate(
         const renamedAway = removedObject(finding.text);
         if (renamedAway !== undefined && deltaNames.leftStanding.has(objectKey(renamedAway))) {
           // …EXCEPT where the same delta puts that name back, which leaves it standing either way. The
-          // name it renames TO is then the one that discriminates — the delta leaves it iff it ran — and
-          // it is the ONLY measurement this statement gets, in whichever direction the probe answers.
+          // name it renames TO is then the one that discriminates — but ONLY where the delta LEAVES it
+          // standing, which is what makes it discriminating. Where the same delta takes it away again
+          // (`RENAME "parts" TO "parts_archive"` + `CREATE TABLE "parts"` + `DROP TABLE
+          // "parts_archive"` — a rebuild), the new name is absent BEFORE the delta and after it, so its
+          // absence is the same dead reading the `gone` branch guards against: it put a FULLY APPLIED
+          // delta on the un-landed pile, and re-running that rebuild renames the LIVE table aside,
+          // gives the freed name to an empty one and drops the aside (measured: rows 1 → 0, per
+          // restart). Its PRESENCE still lands — the rename ran and the DROP did not, which is exactly
+          // the half-landed state the router must keep refusing.
           const newName = renamedToObject(finding.text);
           if (newName !== undefined) {
-            ((await probeObject(newName)) ? renamed : noNewName).push(
-              describeSchemaObject(newName),
-            );
+            if (await probeObject(newName)) {
+              renamed.push(describeSchemaObject(newName));
+            } else if (deltaNames.leftStanding.has(objectKey(newName))) {
+              noNewName.push(describeSchemaObject(newName));
+            }
           }
         } else if (renamedAway !== undefined && (await probeObject(renamedAway))) {
           notRenamed.push(describeSchemaObject(renamedAway));
