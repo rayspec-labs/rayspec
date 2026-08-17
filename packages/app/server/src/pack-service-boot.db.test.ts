@@ -542,12 +542,18 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
     await exec(appDbUrl, "INSERT INTO orgs (id, name, slug) VALUES ($1, 'Other', 'other')", [
       OTHER_TENANT,
     ]);
-    //      It is planted with a created_at OLDER than any of the service's own steps, deliberately:
-    //      the read is bounded and ordered oldest-first, so a plant stamped `now()` would sort past
-    //      the end of the page and the arm would pass whether or not the tenant predicate exists.
-    //      Dated backwards it sorts FIRST — an unscoped read returns it before anything else, which
-    //      is what makes this arm able to fail. (Measured: with the tenant predicate removed from the
-    //      reader, this arm goes red; with it restored, green.)
+    //      ⚠ THE PLANT IS DATED BACKWARDS, AND THAT IS THE LOAD-BEARING PART OF THIS ARM. Do not
+    //      "simplify" it to a default `created_at`. The read under test is BOUNDED and ORDERED
+    //      oldest-first, so a row stamped `now()` sorts past the end of the returned page and is
+    //      invisible to the assertion whatever the reader does — the arm would then be measuring the
+    //      ORDERING, not the tenant predicate it believes it is testing. That is not hypothetical:
+    //      the first version of this arm was written that way, and when the tenant predicate was
+    //      removed from `makeHandlerJournal` as a control, it STILL PASSED. A control that measures
+    //      nothing is green and stays green, which is the worst failure mode a guard has.
+    //      THE GENERAL RULE, for any accept control against an `ORDER BY` + `LIMIT` read: planting
+    //      the row is not enough — it has to land inside the WINDOW the read actually returns.
+    //      Dated a day backwards it sorts FIRST, and the control behaves: with the tenant predicate
+    //      removed the arm goes red naming the planted entry, with it restored the arm is green.
     await scalar(
       appDbUrl,
       `INSERT INTO journal_steps (run_id, tenant_id, backend, type, idempotency_key, input_hash,

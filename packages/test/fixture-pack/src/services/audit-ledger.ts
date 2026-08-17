@@ -195,11 +195,12 @@ async function appendEvent(
  * Record ONE journal entry for a sweep, then READ BACK what this service has recorded so far. A
  * deployment with no journal door does neither.
  *
- * THE READ IS THE POINT, not decoration. A service is the surface that WRITES journal steps, and
- * until the door carried both verbs its own record was write-only to it: the only way back was the
- * escape hatch with a core table name in a SQL string. Reading here is what a recall does — look at
- * what this pack already did before deciding what to do next — and it happens where that work
- * happens, with no request behind it and nothing being served.
+ * THE READ IS WHY THIS FIXTURE EXISTS, and it is worth being exact about what it stands for. A
+ * service is the surface that WRITES journal steps, and until the door carried both verbs its own
+ * record was write-only to it: the only way back was the escape hatch with a core table name in a SQL
+ * string. Out in the world the write side is in use and the read side is not yet — this fixture is
+ * the repository's only exerciser of it. That is what a fixture is for: the seam gets a witness
+ * before it gets a caller, rather than shipping with neither.
  *
  * It is SCOPED BY THE DEPLOYMENT, not by this pack: there is no tenant argument on either verb, so
  * the entries this reads are the bound tenant's and no other's. `runId` narrows to this boot's own

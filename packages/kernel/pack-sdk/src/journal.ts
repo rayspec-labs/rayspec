@@ -24,9 +24,12 @@
  * BOTH DIRECTIONS ARE CONTRACTED. The shapes above describe a value going IN — what a step is recorded
  * as. `PackJournalReader` below is the way back OUT: a typed, tenant-scoped, bounded page with a
  * stable cursor. It is handed to BOTH surfaces that have something to do with it — to a SERVICE on
- * `PackServiceContext.journal`, which is the surface that WRITES steps and therefore the one with
- * something to read back, and to a ROUTE on `PackRouteHandlerInit.journal`, which is the surface that
- * SERVES a read to a client. It exists because the alternative was a pack
+ * `PackServiceContext.journal`, because that is where the WRITE is, and to a ROUTE on
+ * `PackRouteHandlerInit.journal`, because that is where a read is SERVED to a client and where the
+ * request's resume cursor arrives. This reader is the ONLY cursored read on this surface: a declared
+ * store is paged by `limit`/`offset`, which the option's own docblock warns can repeat a row, so
+ * without this an incremental response would be handed a resume position with nothing to resume
+ * against. It exists because the alternative was a pack
  * naming the core's journal table and its column layout in a SQL string through the escape hatch —
  * an unversioned dependency on a core internal expressed as text, in the one package whose purpose is
  * that packs do not do this. What the read door is scoped to, and what it withholds, is stated on the

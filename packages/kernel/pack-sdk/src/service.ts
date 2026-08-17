@@ -187,13 +187,20 @@ export interface PackJournalWriter {
  * The JOURNAL DOOR a service is handed — BOTH verbs on one handle: append what this service did, and
  * read back what it (and the rest of this tenant's work) was recorded as.
  *
- * THE READ HALF BELONGS HERE, not only on a route. A service is the surface that WRITES journal
- * steps, so it is the surface with something to read back; and the work that needs a recall — what
- * did this pack already do, before deciding what to do next — has no request behind it and nothing it
- * is serving. A read door reachable only from a route would leave the writing surface exactly where
- * it started: naming a core table in a SQL string through the escape hatch, which is the dependency
- * this contract exists to remove. `PackRouteHandlerInit.journal` carries the same reader for the
- * other case, where a read IS being served to a client.
+ * THE READ HALF BELONGS HERE, not only on a route, because THIS is where the write is. A service is
+ * the one surface that puts steps into the run journal, so a read door reachable only from a route
+ * would leave the writing surface exactly where it started: naming a core table in a SQL string
+ * through the escape hatch, which is the dependency this contract exists to remove.
+ * `PackRouteHandlerInit.journal` carries the same reader for the other case, where a read IS being
+ * served to a client.
+ *
+ * WHAT ASKS FOR THIS, STATED PLAINLY, because a contract that overstates its own demand is worse than
+ * one that admits a gap: the WRITE side is real and in use — an extension pack's service records a
+ * coarse step through `record` at boot — and NOTHING READS THOSE ENTRIES BACK TODAY beyond the
+ * repository's own fixture pack. So this half closes an asymmetry (a door a pack can write through
+ * and not read through) rather than unblocking a caller that is waiting on it. The half that IS
+ * blocking is the route's: see `PackRouteHandlerInit.resumeFrom`, which has no other cursor on this
+ * surface to pair with.
  *
  * TENANT-BOUND BY CONSTRUCTION, in both directions and for the same reason: the deployment binds the
  * tenant when it builds this handle, so neither verb takes a `tenantId` and neither can reach another
