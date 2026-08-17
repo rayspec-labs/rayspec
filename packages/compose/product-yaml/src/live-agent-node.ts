@@ -27,7 +27,7 @@
 import { createHash } from 'node:crypto';
 import type { AgentRuntimeStepContract } from '@rayspec/agent-runtime';
 import type { AgentSpec, Backend, RunResult } from '@rayspec/core';
-import { schema, type TenantDb } from '@rayspec/db';
+import { operatorSafeDbErrorMessage, schema, type TenantDb } from '@rayspec/db';
 import type {
   ArtifactRef,
   CapabilityInvocationContext,
@@ -346,7 +346,9 @@ export function makeLiveExtractionNode(cfg: LiveExtractionNodeConfig): Capabilit
         ...(cfg.requireNativeStructuredOutput ? { requireNativeStructuredOutput: true } : {}),
       });
     } catch (e) {
-      return fail('agent_run_exception', e instanceof Error ? e.message : String(e));
+      // RENDERED, not raw — `runAgent` writes the run header before the model runs, so a database
+      // refusal on that write arrives here, and a step failure is journaled. No-op otherwise.
+      return fail('agent_run_exception', operatorSafeDbErrorMessage(e));
     }
 
     if (result.status !== 'completed') {

@@ -24,6 +24,7 @@
 
 import { type AgentRuntimeRegistry, createAgentRuntimeHandler } from '@rayspec/agent-runtime';
 import { AUDIO_TRACKS_STORE } from '@rayspec/audio-runtime';
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 import type {
   ArtifactRef,
   CapabilityInvocationContext,
@@ -361,7 +362,11 @@ export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): Capabil
               tenant_id: cfg.tenantId,
               session_id: sessionId,
               track: t.track,
-              error: e instanceof Error ? e.message : String(e),
+              // RENDERED, not raw: the comment above already names a DB error as one of the two
+              // faults that reach this catch, and this line is JSON on an operator log. A driver
+              // error's message carries the statement and its bound values through the ORM door and
+              // the offending value through the raw one.
+              error: operatorSafeDbErrorMessage(e),
             }),
           );
         }

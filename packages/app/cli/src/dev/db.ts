@@ -59,6 +59,13 @@ function redact(message: string): string {
  * `.code`; other paths nest the underlying error on `.cause`. Draw from all of those, de-duplicated,
  * so whichever layer holds the detail reaches the operator. The caller still runs the result through
  * `redact()`, so no connection string or password can leak.
+ *
+ * NOT ROUTED THROUGH `operatorSafeDbErrorMessage`, deliberately. This describes a CONNECT failure —
+ * a socket error raised before any statement is sent, so there is no statement, no SQLSTATE and no
+ * `detail`, and nothing it reports can be a row value: a caller's data has not reached the server.
+ * The renderer is for a database's REFUSAL of a statement; running a socket error through it would
+ * return the same text and buy nothing. The one disclosure risk here is the DSN, which is what
+ * `redact()` already covers.
  */
 export function describeConnectError(e: unknown): string {
   if (!(e instanceof Error)) return String(e);

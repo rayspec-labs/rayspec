@@ -20,6 +20,7 @@
  * must not pay for a command it is not running.
  */
 import { parseArgs } from 'node:util';
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 import type {
   loadTenantProvisionSecrets,
   OwnerHandoff,
@@ -228,8 +229,16 @@ export async function runTenantEnsure(
     // layer's own error may name one. Reading `code` off any thrown value put a Postgres SQLSTATE
     // ('23505') or a Node errno ('ECONNREFUSED') into the same field the reference documents as
     // ORG_TOMBSTONED / OWNER_INVITE_OUT_EXISTS / ORG_NAME_SLUG_IN_USE — a caller matching on it would
-    // be reading a namespace nobody promised. Everything else is a plain PROVISION_FAILED; the driver's
-    // own words still reach the operator through `message`.
+    // be reading a namespace nobody promised. Everything else is a plain PROVISION_FAILED.
+    //
+    // The driver's own words do NOT reach the operator through `message` any more. Provisioning
+    // writes an org and its owner, so the values it binds are the operator's own inputs — and a
+    // constraint violation on them (a taken slug, a duplicate owner email) comes back with the value
+    // in the driver's `detail`, while a coercion refusal puts it in the message itself.
+    // `redactSecrets` below masks the DATABASE_URL and the pepper; it was never a row-value filter,
+    // and widening it into one would be an allowlist against a vocabulary the server owns. The
+    // renderer keeps the SQLSTATE, the constraint and the statement, which is what an operator acts
+    // on, and withholds the values visibly.
     //
     // Matched by NAME rather than `instanceof`: `@rayspec/server` is loaded dynamically (and is
     // replaced wholesale in tests), so the constructor identity here is not guaranteed to be the one
@@ -238,13 +247,9 @@ export async function runTenantEnsure(
     return {
       ok: false,
       command: 'tenant ensure',
-      errors: [{ code, message: redactSecrets(errorMessage(err), secrets) }],
+      errors: [{ code, message: redactSecrets(operatorSafeDbErrorMessage(err), secrets) }],
     };
   }
-}
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }
 
 /**

@@ -60,6 +60,14 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
       });
     } catch (err) {
       // slug unique-index collision → 409.
+      //
+      // `String(err)` is a CLASSIFICATION read, not an output: nothing derived from it is written
+      // anywhere. The matched branch answers a fixed sentence, and the re-throw below reaches the
+      // app's `onError`, whose only arm for a driver error is the closed `INTERNAL` envelope —
+      // 'Internal server error.', no details field. So no part of this error, message or `detail`,
+      // crosses to the client or to a log from here. Left unrendered deliberately: passing the
+      // rendering to `.includes` would match against a sentence this module owns rather than
+      // against the constraint name the server actually named, which is the fact being tested.
       if (String(err).includes('orgs_slug_lower_idx') || String(err).includes('duplicate')) {
         throw new ApiError('CONFLICT', 'Org slug already taken.');
       }

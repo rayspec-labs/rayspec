@@ -78,10 +78,10 @@ export function uniqueViolationConstraintName(err: unknown): string | undefined 
 }
 
 /**
- * The ORM wrapper's own shape: the statement it ran, and the values it bound. Detected STRUCTURALLY
- * (a `query` string beside a `params` array) rather than by class identity, for the same reason the
- * SQLSTATE walk above is structural — the wrapper is the ORM's internal class, it is not exported,
- * and an `instanceof` against it would silently stop matching on a version bump.
+ * A failed statement's own shape: the SQL it ran, and the values it bound. Detected STRUCTURALLY
+ * (a `query` string beside an array of bound values) rather than by class identity, for the same
+ * reason the SQLSTATE walk above is structural — the shapes belong to the ORM and the driver, are
+ * not exported, and an `instanceof` against either would silently stop matching on a version bump.
  */
 interface WrappedStatement {
   readonly node: { readonly cause?: unknown };
@@ -89,13 +89,61 @@ interface WrappedStatement {
   readonly params: readonly unknown[];
 }
 
-/** Walk the bounded, cycle-safe `.cause` chain for the wrapper carrying a statement + its values. */
+/**
+ * The bound values, under EITHER of the two names the stack uses for them.
+ *
+ * The ORM's wrapper calls them `params`; the driver's own error calls them `parameters`. Both sit
+ * beside a `query` string, so one reader covers both — which is what lets the raw-SQL door render
+ * exactly like the ORM door instead of falling through to the driver's own sentence.
+ */
+function boundValues(node: {
+  params?: unknown;
+  parameters?: unknown;
+}): readonly unknown[] | undefined {
+  if (Array.isArray(node.params)) return node.params;
+  if (Array.isArray(node.parameters)) return node.parameters;
+  return undefined;
+}
+
+/** Walk the bounded, cycle-safe `.cause` chain for the node carrying a statement + its values. */
 function wrappedStatement(err: unknown): WrappedStatement | undefined {
   let cur: unknown = err;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
-    const node = cur as { query?: unknown; params?: unknown; cause?: unknown };
-    if (typeof node.query === 'string' && Array.isArray(node.params)) {
-      return { node, query: node.query, params: node.params };
+    const node = cur as {
+      query?: unknown;
+      params?: unknown;
+      parameters?: unknown;
+      cause?: unknown;
+    };
+    const values = boundValues(node);
+    if (typeof node.query === 'string' && values !== undefined) {
+      return { node, query: node.query, params: values };
+    }
+    cur = node.cause;
+  }
+  return undefined;
+}
+
+/**
+ * A DRIVER ERROR, recognised by the WIRE SHAPE it was built from rather than by its class.
+ *
+ * Postgres answers a failed statement with an ErrorResponse whose fields the driver copies onto the
+ * error verbatim: a five-character SQLSTATE in `code`, a `severity`, and — on a constraint violation
+ * — the offending value in `detail`. A node carrying a SQLSTATE-shaped `code` beside a `severity`
+ * IS that error; nothing else in this stack has both. Detecting it this way keeps the same property
+ * the SQLSTATE walk has: the driver's class is internal and unexported, so an identity check would
+ * fail silently on a version bump, and failing silently here means re-emitting the server's words.
+ */
+function driverErrorNode(err: unknown): Record<string, unknown> | undefined {
+  let cur: unknown = err;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
+    const node = cur as Record<string, unknown>;
+    if (
+      typeof node.code === 'string' &&
+      /^[0-9A-Z]{5}$/.test(node.code) &&
+      typeof node.severity === 'string'
+    ) {
+      return node;
     }
     cur = node.cause;
   }
@@ -140,9 +188,17 @@ const REFUSAL_BY_SQLSTATE: Readonly<Record<string, string>> = {
   '57014': 'the statement was cancelled',
 };
 
-/** The structured node the driver hung the SQLSTATE on, if the chain carries one. */
+/**
+ * The structured node the driver hung the SQLSTATE on, if the chain carries one.
+ *
+ * The walk STARTS AT `from` itself rather than at its `.cause`, because the node carrying the
+ * statement is not always a wrapper around the driver error — through the raw-SQL door it IS the
+ * driver error, with the SQLSTATE on the same object as the statement. Starting one link in cost
+ * that door its reason phrase and left it falling back to the server's own sentence. For the ORM
+ * wrapper this changes nothing: the wrapper carries no `code`, so the first hit is still its cause.
+ */
 function sqlstateNode(from: { readonly cause?: unknown }): Record<string, unknown> | undefined {
-  let cur: unknown = from.cause;
+  let cur: unknown = from;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
     const node = cur as Record<string, unknown>;
     if (typeof node.code === 'string') return node;
@@ -227,6 +283,22 @@ function oneLine(statement: string): string {
  * that version printed a value in the same sentence that announced values were withheld. See
  * `REFUSAL_BY_SQLSTATE` for the measurement and for why an allowlist of safe codes is the wrong shape.
  *
+ * AND THE MESSAGE IS NOT THE ONLY FIELD. Postgres fills `detail` with the offending value on every
+ * constraint violation — `Key (id)=(…) already exists` for a unique, `Key (parent)=(…) is not
+ * present in table …` for a foreign key, and for a CHECK the whole failing row: `Failing row
+ * contains (…)`. `detail` is an OWN ENUMERABLE property of the driver's error while `message` and
+ * `stack` are not, so it escapes through the shapes that never touch `.message` at all —
+ * `console.error(msg, err)`, `JSON.stringify(err)`, `{...err}`, `Object.entries(err)`. Nothing here
+ * reads it; that is a property of the assembly, not a filter applied to it.
+ *
+ * BOTH DOORS, NOT ONE. The ORM wraps a driver failure in an error of its own; the raw-SQL door
+ * (`sql.unsafe`, a pack service's `tx.query`) throws the driver's error DIRECTLY, with its statement
+ * under `parameters` rather than `params` and its SQLSTATE on the same object rather than on a
+ * `.cause`. Shipped code catches both, so both render from the owned parts. An earlier revision
+ * covered only the wrapped door and returned a bare driver error's message unchanged — which for a
+ * coercion refusal is the offending value, handed back by the very function a caller reached for to
+ * avoid printing it.
+ *
  * Bind values are arbitrary row data — whatever a caller decided to persist, from whatever source it
  * read. An operator-facing log is exactly where that must not appear, because those logs travel:
  * into tickets, into chat threads, into support attachments.
@@ -250,19 +322,28 @@ function oneLine(statement: string): string {
  */
 export function operatorSafeDbErrorMessage(err: unknown): string {
   const wrapped = wrappedStatement(err);
-  if (wrapped === undefined) {
-    const message = err instanceof Error ? err.message : String(err);
-    // A chain deeper than the walk fails in the SAFE direction — nothing is re-emitted — but the
-    // operator silently loses the statement and has no way to tell that from an error that never
-    // carried one. Say which happened, keeping the withholding visible the same way the value count
-    // does. `cause` at the boundary is the only evidence available without walking further.
-    return deeperThanTheWalk(err)
-      ? `${message} (the failed statement is not recoverable from this error: its cause chain is deeper than ${MAX_CAUSE_DEPTH} links)`
-      : message;
+  if (wrapped !== undefined) {
+    const count = wrapped.params.length;
+    const withheld = count === 1 ? '1 bind value withheld' : `${count} bind values withheld`;
+    return `${refusalReason(wrapped.node)} — failed statement: ${oneLine(wrapped.query)} (${withheld} from this message; they are caller data and do not belong in a log)`;
   }
-  const count = wrapped.params.length;
-  const withheld = count === 1 ? '1 bind value withheld' : `${count} bind values withheld`;
-  return `${refusalReason(wrapped.node)} — failed statement: ${oneLine(wrapped.query)} (${withheld} from this message; they are caller data and do not belong in a log)`;
+  // A DATABASE FAILURE THAT CARRIES NO STATEMENT is still a database failure, and its message is
+  // still the server's. Reaching the message fallback below with one would re-emit exactly what the
+  // phrase table exists to avoid — measured: a coercion refusal arriving without a statement renders
+  // as `invalid input syntax for type uuid: "<the caller's value>"`. Render it from the owned parts
+  // instead, and say that the statement is missing rather than leaving its absence to be inferred.
+  const driver = driverErrorNode(err);
+  if (driver !== undefined) {
+    return `${refusalReason(driver)} — this driver error carries no statement, so the failed SQL is not recoverable from it (the server's own message and its \`detail\` field are withheld: on a constraint violation \`detail\` echoes the offending value, and on a coercion refusal the message does)`;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  // A chain deeper than the walk fails in the SAFE direction — nothing is re-emitted — but the
+  // operator silently loses the statement and has no way to tell that from an error that never
+  // carried one. Say which happened, keeping the withholding visible the same way the value count
+  // does. `cause` at the boundary is the only evidence available without walking further.
+  return deeperThanTheWalk(err)
+    ? `${message} (the failed statement is not recoverable from this error: its cause chain is deeper than ${MAX_CAUSE_DEPTH} links)`
+    : message;
 }
 
 /**
@@ -275,7 +356,10 @@ export function operatorSafeDbErrorMessage(err: unknown): string {
  */
 export function operatorSafeDbErrorStack(err: unknown): string | undefined {
   if (!(err instanceof Error) || typeof err.stack !== 'string') return undefined;
-  if (wrappedStatement(err) === undefined) return err.stack;
+  // Both database shapes get the replaced header: the ORM wrapper, whose stack begins with the
+  // statement and its values, AND a bare driver error, whose stack begins with the server's own
+  // sentence — the one that echoes the offending value on a coercion refusal.
+  if (wrappedStatement(err) === undefined && driverErrorNode(err) === undefined) return err.stack;
   // Frames start at the first `    at …` line; everything above it is the message header.
   const frames = err.stack.split('\n').filter((line) => /^\s+at\s/.test(line));
   return [operatorSafeDbErrorMessage(err), ...frames].join('\n');

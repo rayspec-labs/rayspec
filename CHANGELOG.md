@@ -794,6 +794,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A driver error's `detail` field no longer reaches an operator log, a run journal or a model.**
+  Postgres does not put the offending value only in the sentence it writes. On a constraint violation
+  it fills the error's `detail` field with the caller's own data: `Key (id)=(…) already exists` for a
+  unique violation, `Key (parent)=(…) is not present in table "…"` for a foreign key, and — the widest
+  case — `Failing row contains (…)` for a CHECK, which is **every column of the row**, not the one the
+  constraint named. `detail` is an **own enumerable property** of the driver's error while `message`
+  and `stack` are not, so it escapes through exactly the shapes that never touch `.message`:
+  `console.error(msg, err)`, `JSON.stringify(err)`, `{...err}`, `Object.entries(err)`. A path could
+  therefore read no message at all and still disclose the value.
+  The renderer introduced for the bind-value half already excluded `detail`, but only for the error
+  shape the ORM produces. **A bare driver error — what the raw-SQL door throws — fell through to the
+  server's own message**, which for a coercion refusal *is* the offending value: asked to make
+  `invalid input syntax for type uuid: "<the caller's value>"` safe, it returned it unchanged. The
+  renderer now recognises the driver's error by the wire shape it is built from (a five-character
+  SQLSTATE beside a `severity`) rather than by its class, reads the bound values under either name the
+  stack uses for them, and assembles both shapes from the same owned parts. Nothing server-authored is
+  read on either path.
+  A repository-wide, multi-line-aware sweep then covered every shape a caught error can escape
+  through, and each site is either routed through the renderer or carries a comment saying why its
+  error cannot carry caller data. Newly routed: the `rayspec deploy` boot-failure stack print, which
+  had drifted from the `rayspec-serve` print its own comment says it must match; the cron scheduler's
+  enqueue-time run-header log, the third writer of a header whose two siblings were already covered;
+  the workflow runtime's `store_read`/`store_write` step failures and the media-prep log line, all of
+  which are journaled and read back through the run API; the four `runAgent` call sites, which catch
+  the run-header write that happens before the model is invoked; the terminal journal-write failure in
+  the durable worker; the daily system cleanup; the tenant event-bus LISTEN failure, which handed the
+  raw error object to a logger; the live-run diagnostic, whose existing `redact` is a credential
+  masker that a short row value walks straight through; and `rayspec tenant ensure`, which provisions
+  an org from the operator's own inputs.
+  **A generated persist handler now reports a database refusal by its SQLSTATE and never quotes it.**
+  Its `detail` string is journaled *and* handed back to the model, and it was interpolating
+  `${err.message}` — which for the ORM's wrapper is the statement and every bound value. A rendered
+  handler imports the SDK type-only and takes no runtime dependency, so it cannot reach the shared
+  renderer; the same structural check is emitted inline with it instead. An error that is **not** a
+  database refusal keeps its own words, so an author does not lose the line that says what broke.
+
 - **A failed database write no longer prints its bind values into an operator-facing log.** When a
   statement failed, the ORM wrapped the driver's error in one whose message embeds both the SQL *and*
   every value it bound — and which carries them again as enumerable own properties, so the values

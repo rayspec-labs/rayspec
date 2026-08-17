@@ -108,6 +108,14 @@ const auditLedger: PackServiceModule = {
           throw new Error(ABANDONED_MESSAGE);
         });
       } catch (e) {
+        // Left unrendered deliberately, and the reason is what this catch is FOR: the assertion is
+        // that the message is the one the callback threw (`ABANDONED_MESSAGE`, a constant of this
+        // fixture's), which is how the suite tells a rolled-back transaction from a silent one.
+        // Routing it through the database renderer would be a no-op for that error and would blur
+        // the one distinction the case exists to draw. A database refusal reaching here instead
+        // could carry no caller data either way: the two statements in this block bind the
+        // deployment's own tenant id and a fixed `{ abandoned: true }` payload, into a table this
+        // fixture pack's own migration chain created.
         abandonedError = e instanceof Error ? e.message : String(e);
       }
     }

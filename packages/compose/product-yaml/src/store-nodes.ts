@@ -26,6 +26,7 @@
  *    into a text column) is rejected by the facade's column-type-aware guard at run time.
  */
 
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 import type {
   CapabilityInvocationContext,
   CapabilityInvocationResult,
@@ -159,10 +160,16 @@ export function makeStoreReadNode(cfg: StoreNodeConfig): CapabilityNodeHandler {
         orderBy: [{ column: keyColumn, dir: 'asc' }],
       });
     } catch (e) {
+      // RENDERED, not interpolated raw. A step failure is journaled and read back through the run
+      // API, so it travels exactly like an operator log does. A read that fails on a coercion —
+      // a filter value the store's column type rejects — comes back with that value in the driver's
+      // own message, and the facade only sanitizes UNIQUE violations, so every other class arrives
+      // with `detail` and the server's sentence intact. The renderer keeps the statement and the
+      // SQLSTATE and withholds the values visibly.
       return fail(
         'store_read_failed',
         `store_read step '${step.id}' failed reading '${store.name}': ` +
-          (e instanceof Error ? e.message : String(e)),
+          operatorSafeDbErrorMessage(e),
       );
     }
 
@@ -260,10 +267,14 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
       // run transaction; the upsert's ON CONFLICT converges re-executions on ONE row per key).
       row = await cfg.db.upsert(store.name, [...store.key], values);
     } catch (e) {
+      // RENDERED, not interpolated raw — and this is the site with the most to disclose. The upsert
+      // binds the row the workflow resolved, so a CHECK violation's `detail` is `Failing row
+      // contains (…)`: every column, including the ones no constraint named. The facade sanitizes
+      // only 23505, so a check/foreign-key/coercion refusal reaches here whole.
       return fail(
         'store_write_failed',
         `store_write step '${step.id}' failed upserting into '${store.name}': ` +
-          (e instanceof Error ? e.message : String(e)),
+          operatorSafeDbErrorMessage(e),
       );
     }
 
@@ -289,11 +300,13 @@ export function makeStoreWriteNode(cfg: StoreNodeConfig): CapabilityNodeHandler 
           { limit: 1 },
         );
       } catch (e) {
+        // RENDERED, not interpolated raw — same reason as the read above: this select binds the key
+        // column's value, so a coercion refusal on it echoes that value in the driver's message.
         return fail(
           'store_write_failed',
           `store_write step '${step.id}' failed verifying its ensure-exists write on ` +
             `'${store.name}': ` +
-            (e instanceof Error ? e.message : String(e)),
+            operatorSafeDbErrorMessage(e),
         );
       }
       if (mine.length === 0) return conflict;

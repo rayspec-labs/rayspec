@@ -34,6 +34,7 @@
  */
 
 import { type ParseArgsConfig, parseArgs } from 'node:util';
+import { operatorSafeDbErrorStack } from '@rayspec/db';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
 // FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
@@ -845,9 +846,15 @@ export async function serveDeployment(
       // searched — the one fact the operator whose ./.env sits in the invoking project needs.
       console.error(`[rayspec deploy] ${err.message}${missingEnvSearchedSuffix(err.message)}`);
     } else {
+      // The stack, redacted — the other half of the parity the list above is kept for. A boot
+      // failure on a database write arrives as a driver error whose stack BEGINS with what the
+      // server said: through the ORM door the statement and every value it bound, through the
+      // raw-SQL door the server's own sentence, which on a coercion refusal is the offending value.
+      // The renderer replaces that header and keeps the frames; anything that is not a database
+      // failure passes through unchanged.
       console.error(
         '[rayspec deploy] boot failed:',
-        err instanceof Error ? err.stack : String(err),
+        operatorSafeDbErrorStack(err) ?? (err instanceof Error ? err.stack : String(err)),
       );
     }
     process.exit(1);
