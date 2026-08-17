@@ -15,7 +15,7 @@
  *      forever, if the run ends by throwing).
  *
  * The response SHAPES of a handler-action fire / a deduped no-op (no runId key) are pinned
- * deterministically in api-auth's triggers.test.ts (fake firer) and durable-dbos's
+ * deterministically in api-auth's triggers.db.test.ts (fake firer) and durable-dbos's
  * cron-scheduler-run-header.db.test.ts (stub executor + controlled instants); this test covers the
  * composition-root WIRING those tests cannot.
  *

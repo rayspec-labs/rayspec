@@ -109,7 +109,7 @@ describe('generator golden', () => {
   it('META: the runtime twin and the committed source agree on the bigint drizzle MODE', () => {
     // The mode is baked into COMMITTED product source by `DRIZZLE_BUILDER` and into the RUNTIME twin
     // by `build-product-tables.ts` `businessBuilder`. Nothing else pins the two together: the
-    // three-way twin pin in product-pipeline.test.ts compares `getSQLType()` + nullability, and BOTH
+    // three-way twin pin in product-pipeline.db.test.ts compares `getSQLType()` + nullability, and BOTH
     // drizzle modes report `getSQLType() === 'bigint'` (asserted below), so that test structurally
     // cannot see a divergence. `columnType` can — `{ mode: 'bigint' }` is PgBigInt64, `{ mode:
     // 'number' }` is PgBigInt53 — and the two halves differing is not cosmetic: a runtime column

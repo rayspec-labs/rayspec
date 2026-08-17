@@ -18,7 +18,7 @@
  * product-schema.ts` (the populated-schema fixture pin) — a real populated module composed against schema.ts.
  *
  * The RUNTIME half of the tuple invariant (an unregistered table throws at access) is proven by
- * product-pipeline.test.ts + the api-auth cross-tenant gate.
+ * product-pipeline.db.test.ts + the api-auth cross-tenant gate.
  */
 import { pgTable, uuid } from 'drizzle-orm/pg-core';
 import { CORE_TENANT_SCOPED_TABLES, orgs, type TENANT_SCOPED_TABLES } from '../schema.js';

@@ -12,7 +12,7 @@
  * that are NOT persisted in the adapter, so THIS file asserts isolation at the token-CLAIM level.
  * The PERSISTED store-row isolation (AuthorizationCode/Grant/RefreshToken rows partitioned by
  * client + grant, and revokeByGrantId grant-partitioning) is proven in the full-surface gate —
- * see `cross-tenant-gate.test.ts` › "OIDC store cross-tenant/client isolation". does NOT ship
+ * see `cross-tenant-gate.db.test.ts` › "OIDC store cross-tenant/client isolation". does NOT ship
  * OIDC client_credentials ORG-binding (no org_id stamped onto the token; an OIDC token cannot
  * authenticate a /v1 endpoint); the live M2M path in is the api-key `m2m_client`. OIDC
  * org-binding / consumption-by-/v1 is DEFERRED.

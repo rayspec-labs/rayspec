@@ -43,7 +43,7 @@ const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TE
 // (no CI, no opt-in) the whole file skips cleanly via `describeDb` — never a vacuous pass, never a crash.
 if (requireDb && !hasDb) {
   throw new Error(
-    'declared-routes.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent — ' +
+    'declared-routes.db.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent — ' +
       'refusing to silently skip a security-load-bearing suite.',
   );
 }

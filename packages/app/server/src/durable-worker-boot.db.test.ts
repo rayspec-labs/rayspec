@@ -20,7 +20,7 @@
  * derives `<appdb>_dbos_sys`, which DBOS auto-creates). We create the throwaway APP database and drop
  * BOTH it and the derived system DB on teardown. DB ISOLATION: a whole throwaway DATABASE (not a
  * schema) — the migration chain materializes the platform into a database's default + `drizzle`
- * schema, exactly as boot.smoke.test.ts does.
+ * schema, exactly as boot.smoke.db.test.ts does.
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

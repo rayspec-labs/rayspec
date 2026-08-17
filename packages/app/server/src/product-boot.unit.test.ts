@@ -42,7 +42,7 @@ import {
 
 /**
  * The two `@openai/agents` registration entry points, spied so the boot-side wiring can be observed
- * through what the adapter REALLY registers — the technique packages/adapters/openai/src/auth.test.ts
+ * through what the adapter REALLY registers — the technique packages/adapters/openai/src/auth.db.test.ts
  * uses, which pins the adapter's half of the same contract. Everything else in the SDK stays the real
  * module. `vi.hoisted` holds the spies, because this file imports its subject statically and the mock
  * factory therefore runs before any plain top-level const exists.

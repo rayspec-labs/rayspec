@@ -171,6 +171,6 @@ idempotent: it bootstraps a clean empty DB AND no-ops on an already-migrated one
 
 ## Smoke test
 
-`src/boot.smoke.test.ts` boots the real composition root against a throwaway database (created +
+`src/boot.smoke.db.test.ts` boots the real composition root against a throwaway database (created +
 dropped per run), proving the migration-chain boot path, then exercises a real authed round-trip
 (`/health` → register → me → login → 401) with **no live-LLM call** — deterministic, CI-safe.
