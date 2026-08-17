@@ -150,6 +150,7 @@ import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { makePackServiceDatabase } from './pack-service-db.js';
 import {
   deployProductYamlSpec,
+  driftInspectedColumns,
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
@@ -2735,13 +2736,22 @@ async function deployDeclaredSpec(
     // vs the NEW spec FIRST (the SAME read-only detectDrift the mount path below uses — NO DDL) and ROUTE
     // through the SHARED planUpdateBoot instead of blindly re-applying the delta:
     //   - 'drifted'          → APPLY the reviewed delta (the NORMAL update — the delta closes the gap).
-    //   - 'present-matching' → the delta ALREADY landed on a PRIOR boot: MOUNT (zero migrations, loud
-    //                          log) so a LEFTOVER --apply-migration in a process-managed unit
-    //                          (systemd/docker `Restart=always`) MOUNTS instead of re-applying + crash-
-    //                          looping on a duplicate_column (42701). planUpdateBoot's live target-probe
-    //                          discriminates a genuine leftover (MOUNT) from an UNAPPLIED pure-subset
-    //                          removal (APPLY — the reviewed drop target still exists) and REFUSES an
-    //                          undeterminable destructive delta fail-closed — parity with product-boot.
+    //   - 'present-matching' → reached BOTH by a delta that landed and by one that never ran, so the
+    //                          classify does NOT decide: planUpdateBoot's live probe of the objects the
+    //                          DELTA names discriminates a genuine leftover (MOUNT — zero migrations,
+    //                          loud log, so a LEFTOVER --apply-migration in a process-managed unit
+    //                          (systemd/docker `Restart=always`) mounts instead of re-applying + crash-
+    //                          looping on a duplicate_column (42701)) from an UNAPPLIED delta (APPLY — a
+    //                          reviewed drop target still exists, or an object the delta CREATEs is
+    //                          absent), and REFUSES a half-landed or undeterminable delta fail-closed —
+    //                          parity with product-boot. The ONE shape it cannot decide is a delta that
+    //                          FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or
+    //                          the same change in one multi-clause `ALTER TABLE`, or a rename-aside
+    //                          rebuild — `RENAME TO "t_old"` + `CREATE TABLE "t"` + `DROP TABLE "t_old"`,
+    //                          whose renamed-to name is missing in both states too; the `IF [NOT] EXISTS`
+    //                          spellings count the same): the schema holds that name in BOTH states, so
+    //                          it MOUNTS claiming nothing and the log says so — the one place this path
+    //                          can silently drop a reviewed change, and the reason the log is loud.
     //   - 'absent'           → REFUSE fail-closed (update mode evolves an EXISTING schema; a first boot
     //                          must materialize via the plain path — dropping --apply-migration).
     // `deploy()` stays BYTE-UNCHANGED throughout: when planUpdateBoot routes APPLY it GATES each migration
@@ -2757,6 +2767,9 @@ async function deployDeclaredSpec(
       specPath,
       (m) => console.warn(m),
       makeSchemaProbe(queryFn, 'public'),
+      // The columns the classify just above ACTUALLY introspected — the only ones a drift-clean reading
+      // may stand as evidence for (see planUpdateBoot). Built from the SAME stores detectDrift was given.
+      driftInspectedColumns(specStores),
     );
     migrations = plan.migrations;
     // A zero-store backend spec ('present-matching' by construction) keeps its 'auth-only' deployMode;

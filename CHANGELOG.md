@@ -510,6 +510,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`deploy --apply-migration` (and `RAYSPEC_UPDATE_MIGRATION`) now probes the objects the delta
+  itself names, so a reviewed delta is applied instead of being reported as already applied.** The
+  boot decided that question on the drift check alone, and the drift check only ever inspects what
+  the document declares. An object the grammar cannot express — a hand-shaped index is the canonical
+  one — is therefore invisible to it, so the live schema read "drift-clean" whether or not the delta
+  had run: such a delta was **mounted without applying**, the boot said it "was already applied on a
+  PRIOR boot", and it told the operator to remove the flag — after which the change was lost unless
+  someone checked the catalog by hand. The boot now probes the delta's own objects before deciding.
+  Every object an additive statement creates (`CREATE TABLE`, `CREATE [UNIQUE] INDEX`,
+  `ALTER TABLE … ADD COLUMN`, `ALTER TABLE … ADD CONSTRAINT`) must be **present** for a mount, exactly
+  as every reviewed `DROP` target must already be **gone**. A delta whose objects are absent is
+  **applied**, through the same reviewed gate a drifted boot uses, and the boot names the object it
+  looked for and did not find. A delta found only **partly** applied is **refused**, fail-closed,
+  naming what landed and what did not — it can be neither re-applied nor called applied. That holds
+  across **both** halves of a delta: a reviewed `DROP` target still sitting there beside an object the
+  same delta already created is as half-landed as two additive objects disagreeing, and re-applying it
+  would raise `42P07` on the object it re-creates or `42P01` on the target it re-drops. A delta that
+  genuinely did land still **mounts**, unchanged: a non-idempotent delta is never re-applied. The
+  allowlist gate is untouched, and a still-present `DROP` target on a delta with no landed evidence
+  still routes to apply exactly as before. A reviewed **`RENAME`** is measured by the name it renames
+  **away**, which the boot can probe: still there, and the delta has not run, so it is applied rather
+  than mounted and lost. And a statement whose state the schema genuinely cannot settle now contributes
+  **no** evidence in either direction, rather than the reading that looks best — a `DROP … IF EXISTS`
+  whose target is missing may never have had one (re-dropping it raises nothing), and a `RENAME` whose
+  old name is already gone says as little; a target that is still **there** remains un-landed, for the
+  `IF EXISTS` form as much as the plain one, so the drop is never silently skipped.
+- **A name the same delta puts back decides nothing, and the boot no longer reads it as un-landed.**
+  `ALTER TABLE "parts" RENAME TO "parts_archive"` beside a `CREATE TABLE "parts"` leaves `parts` in the
+  catalog at both ends — before the delta and after it — so "the old name is still there" was true of a
+  delta that had **fully landed**, which sent it to be applied again; a rename cannot run twice, so the
+  boot died on `42P07` and under `Restart=always` never served. Such a rename is now measured by the
+  name it renames **to**: present ⇒ mount, and absent ⇒ apply **only where the delta leaves that name
+  standing**, which is what makes it the discriminating one. The same reading covers a reviewed `DROP`
+  whose target the same delta re-creates
+  (`DROP TABLE "t"` + `CREATE TABLE "t"`), which re-ran the drop over the table just re-created: nothing
+  in the schema can tell those two states apart, so the boot claims nothing for it and the mount log
+  says so instead of calling the environment stale. Whether a name is left standing is decided by the
+  **last** statement that touches it, so the reverse order (`CREATE TABLE "t_new"` +
+  `RENAME TO "t"`, which leaves no `t_new`) is unaffected.
+- **"Does this delta leave that name standing?" is not the same question as "is this object evidence
+  that the delta ran?", and one reader was answering both.** The evidence reader excludes every
+  `IF NOT EXISTS` form, correctly: such a statement's object may predate the delta, so its presence
+  proves nothing. Whether the delta leaves the *name* standing is a different question with a different
+  answer — after `CREATE TABLE IF NOT EXISTS "t"` the schema holds `t` either way — and the exclusion
+  made the whole recycled-name reading blind to the spelling **drizzle-kit actually generates**. Against
+  a generated delta, `ALTER TABLE "parts" RENAME TO "parts_archive"` beside `CREATE TABLE IF NOT EXISTS
+  "parts"` was read as un-landed in **both** schema states: fully applied, the rename re-ran and raised
+  `42P07`, and under `Restart=always` the boot never served. `DROP TABLE "scratch"` beside `CREATE TABLE
+  IF NOT EXISTS "scratch"` re-dropped the table the delta had just re-created — three seeded rows, one
+  row written by the served app after the delta landed, zero rows after the next restart, silently, on
+  every restart. The two questions now have two readers, each documented with the question it answers.
+  One statement can recycle a name by itself (`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" text`),
+  so the standing reader reads **every** member clause of an `ALTER TABLE` rather than only its first —
+  read by its first clause alone, that statement wiped the column on every restart while the identical
+  change written as two statements mounted. The destructive reader reads every clause too: a
+  multi-clause statement whose `DROP` was not its first clause could not be read at all and **refused
+  the boot permanently**, on a statement drizzle applies fine.
+- **A `DROP` whose target the same delta CREATES is gone before the delta as much as after it.** The
+  presence reading already had that guard; the absence reading had none, so an ordinary staging-table
+  delta — `CREATE TABLE "parts_backup"`, do the work, `DROP TABLE "parts_backup"` — reported its own
+  un-created table as **already landed**. Beside one genuinely un-landed object that is a HALF-LANDED
+  refusal: a delta that had plainly never run refused the boot, and no restart cleared it. Absence now
+  proves nothing for a name the delta itself brings into existence, which is the rule the `IF EXISTS`
+  form already had — and here it is not even a "may": the delta creates the target two statements
+  earlier. The same suppression settles the mirror case, a rebuild (`DROP TABLE "t"` + `CREATE TABLE
+  "t"`) whose name is **absent**: it mounted claiming the target was probed gone and told the operator
+  the environment was stale, and now claims nothing at all.
+- **A name a `RENAME` gives an object is only evidence while the same delta LEAVES it standing.** The
+  rule above is what makes the new name discriminating, and the absence reading was made without it. A
+  rebuild authored as rename-aside — `ALTER TABLE "parts" RENAME TO "parts_archive"` +
+  `CREATE TABLE "parts"` + `DROP TABLE "parts_archive"` — leaves `parts` standing and `parts_archive`
+  missing **before** the delta and **after** it, so nothing separates the two states; reading the
+  missing new name as un-landed put a **fully applied** delta on the un-landed pile, while the
+  delta-creates rule above had just withheld the one `DROP` reading that would have refused it as half
+  landed. The route came out **apply**, and re-running a rebuild over the schema it had already produced
+  renames the *live* table aside, gives the freed name to an empty one and drops the aside: three seeded
+  rows, one row written by the served app after the delta landed, **zero** after the next restart, and
+  again on every restart after that. It is the recycled-name limit reached from the rename side, so it
+  now gets the limit's answer — claim nothing, mount, and say the boot measured nothing. Its **presence**
+  still lands, so a genuinely half-landed rebuild (the rename ran, the drop did not) is still refused
+  naming both sides. Both `CREATE` spellings behave identically, and so does the column form, which is
+  the ordinary way to retype a column: `RENAME COLUMN` aside, `ADD COLUMN`, `DROP COLUMN` the aside.
+- **Both halves of the update boot read the same statement split, and so does the migration gate.**
+  `scanMigrationSql` stripped comments before splitting, so a `--> statement-breakpoint` marker was
+  swallowed together with the statement in front of it — while `splitMigrationStatements`, which the
+  additive half reads, cuts on the marker first the way drizzle's own `readMigrationFiles` does. A delta
+  separated by markers with **no** trailing semicolons is several statements to the migrator and was one
+  merged statement to the scan: the update boot refused it as "an unparseable drop-table statement"
+  whose text was two statements run together, and a reviewed allowlist entry — which must equal a whole
+  statement — could never have covered the `DROP` inside it either. Fail-closed, but permanent, on a
+  delta drizzle applies cleanly. The scan now reads the same breakpoint-first split.
+- **An identifier is read the way the catalog stores it, or it is not read at all.** The probe turns a
+  statement into a question about a named object, so a name read only partly is worse than no name.
+  A double-quoted name is now read to its closing quote (a space, a hyphen or a dot inside it belongs
+  to the name), an **unquoted** name is folded to lower case the way PostgreSQL folds it — probing
+  `Parts_Label_Idx` verbatim asked about an index no `CREATE INDEX Parts_Label_Idx` ever created, and
+  the boot re-applied a delta that had landed — and a **schema-qualified** name, or any name that
+  cannot be read whole, now yields **no object at all** rather than a guess: previously
+  `CREATE TABLE public.audit_log` was read as a table called `public`. An object the **same delta**
+  later renames or drops away is no longer required to be present either (`CREATE TABLE "t_new"` +
+  `ALTER TABLE "t_new" RENAME TO "t"` leaves no `t_new`).
+- **The drift-clean mount log no longer states a probe result it did not produce, in either
+  direction.** It read "its additive objects are present and any destructive targets were PROBED gone"
+  on every mount, including one where nothing had been looked for. It is now built from what the boot
+  established: the objects found present, the targets found gone, the new name a reviewed `RENAME` was
+  found to have given an object, and the statements the drift-clean classification itself measured — a
+  type change or a `SET NOT NULL` **over a column the drift check actually introspects** (the document's
+  own stores and their declared columns), which unapplied would have classified as drift. Over any other
+  column the drift check never looked, so nothing is claimed for it — and one statement may alter
+  **several** columns (`ALTER COLUMN "a" TYPE text, ALTER COLUMN "b" SET NOT NULL` is one statement),
+  so it stands as evidence only where the drift check introspects **every** column it touches; reading
+  the first clause alone called such a statement proven on the strength of a column nothing had
+  inspected. Only a delta that leaves **no** evidence of any kind gets the "nothing in this boot can
+  tell you" wording — and it keeps it, rather than being told the environment is stale.
+- **An extension pack whose entry module is present and does not load is now reported as refused,
+  under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module
+  is resolved `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the
+  production importer refuses outright, because a deploy runtime loads compiled JavaScript only. That
+  refusal was reported as `extension_pack_unavailable`, whose opening sentence says the pack "is not
+  available on this deployment" and whose prescription is "deploy the pack" — sending an operator to
+  deploy what was already sitting there. (The verdict did carry the importer's own message, naming the
+  TypeScript source and the build, in the trailing `Load failure:` clause; what was wrong is the code
+  and the sentence that prescribes an action, not whether the build appeared anywhere.) Which of the
+  two codes an import failure gets is now read off the disk rather than off the error: **nothing at
+  the resolved entry** is `extension_pack_unavailable` (deploy the pack), an **entry that is there and
+  did not load** is `extension_pack_refused`. That class gets its own prescription rather than the
+  read-and-refused one, because two different faults reach it and neither is answered by a re-deploy
+  of the same artifact: the pack is not built, or it did not arrive with the dependencies its entry
+  imports (a `dist/` shipped without its `node_modules/`, which the bundled example README documents
+  as a shipping hazard). The `Load failure:` clause carries the importer's own words, which say which
+  of the two it is. Two of the shipped examples are exactly this shape, so
+  `rayspec plan examples/stream-backend/rayspec.yaml` and its `agent-pack-deployment` sibling now
+  answer with the code and the prescription that fit. A pack whose directory or entry file is
+  genuinely absent reports `extension_pack_unavailable` exactly as before, a pack that was read and
+  then refused (a version skew, a claim collision, a handler outside `handlers/`) keeps its unchanged
+  sentence, and a pack that loads is untouched. The reclassification reaches every path that resolves
+  packs (`plan`, `deploy --dry-run`, `doctor --with-packs`, and the boot), because all of them read
+  the one class the loader records. The error-code catalogues both packages publish
+  (`@rayspec/spec`, `@rayspec/pack-sdk`) and `docs/cli-reference.md` describe the split the same way.
+
+- **`rayspec deploy --dry-run` now composes a conversation-declaring product document instead of
+  failing on its own stub.** The dry-run composes against a rollout whose runtime-only instances are
+  inert, on the stated assumption that compose presence-checks them and never calls them. That is true
+  of every seam but one: the conversation turn responder is supplied as a FACTORY, and compose calls it
+  to read the bounded store-context read the responder declares and cross-reference it against the
+  composed stores. The stub factory threw on call, so **every** document declaring `conversation_input`
+  came back `ok:false` with `spec did not compose against the wired surface: dry-run: responder must not
+  be called` — an internal sentence about the checker, on a document that was fine
+  (`examples/support-intake-chat` is one). The stub is now an inert responder instance behind that
+  factory; `respond` still throws, because running a reply is what a dry-run must not do. It declares no
+  store-context read — the real one is read from the deployment's per-agent responder config, which a
+  dry-run never opens — and the verdict's `notProven` now says so rather than leaving it to inference.
+  A document that declares no conversation input is unaffected.
+
+- **Every document shipped under `examples/` is now held to the read-only floor by CI.** No gate
+  covered example documents, and this is the second release in which a shipped example broke without
+  anything going red. `pnpm gate:example-documents` (deterministic CI lane, after the build) runs
+  `doctor`, `plan` and `deploy --dry-run` through the built CLI over every document it finds by
+  **walking** `examples/` — the list is never kept in the gate, so a new or renamed example is covered
+  the moment it lands, and a walk that finds no document fails rather than passing quietly. Two
+  expectations are derived the same way: a `*.invalid.*` document is a negative fixture and must stay
+  refused (the gate's own accept control — if the floor stops refusing it, every green verdict beside
+  it is worthless), and a document referencing a pack whose entry is TypeScript source with no compiled
+  sibling must be answered `extension_pack_refused`, never `extension_pack_unavailable`. Repository
+  infrastructure only: no published package, API or runtime behavior changes.
+
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
   may not contain a `$`, so digits after the first character are legal (`$tag1$`). The scan matched
@@ -566,6 +732,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment's own mounts are covered without the engine knowing about them.
 
 ### Security
+
+- **A failed database write no longer prints its bind values into an operator-facing log.** When a
+  statement failed, the ORM wrapped the driver's error in one whose message embeds both the SQL *and*
+  every value it bound — and which carries them again as enumerable own properties, so the values
+  escaped three ways at once: through `${err.message}`, through `String(err)`, and through
+  `console.error(msg, err)`, which prints them whether or not anything touched the message. The most
+  visible instance was an extension pack's service failing on a write during boot: the abort message
+  named the deployment-stopping refusal and pasted the whole parameter list after it, in the one log
+  an operator is most likely to attach to a ticket or a chat thread. Bind values are arbitrary row
+  data — whatever the caller decided to persist, from whatever source it read.
+  A shared renderer now stands between a caught database error and every such message, and its
+  safety is structural rather than asserted: the line it produces is assembled only from a fixed
+  phrase table this codebase owns, the SQLSTATE, the schema identifiers the refusal named
+  (constraint, relation, column) and the parameterized statement. **No server-authored free text is
+  read at all** — not the primary message, not `detail`. That matters because neither is safe: on
+  every coercion failure Postgres echoes the offending value into the primary message itself
+  (`invalid input syntax for type uuid: "…"`), and into `detail` on a unique violation. A refusal
+  shape nobody anticipated therefore renders as its code and a generic sentence — it fails closed
+  rather than passing through on the assumption its message was harmless.
+  Where a message read
+  `Failed query: INSERT INTO … VALUES ($1, $2)` / `params: dup,<the row's data>`,
+  it now reads `a unique constraint was violated (SQLSTATE 23505, constraint "…", relation "…") —
+  failed statement: INSERT INTO … VALUES ($1, $2) (2 bind values withheld from this message; they
+  are caller data and do not belong in a log)`. Applied at every path that formatted a caught
+  database error for an operator: the extension-service boot abort and its shutdown log, the two
+  run-header write logs, the durable-cancel log, the two migration scripts, the uncontrolled-500
+  server log (message **and** stack — a wrapped error's stack begins with the values), the two
+  boot-failure stack prints, and the two dispatch paths that render a failed marker write or a
+  handler error into a tool result. An error that carries no statement is passed through unchanged,
+  so no other refusal's wording moved.
 
 - **The bundled `stream-backend` example no longer serves an uploaded blob under the `Content-Type`
   its uploader declared.** The example's playback handler read the `content_type` recorded on the

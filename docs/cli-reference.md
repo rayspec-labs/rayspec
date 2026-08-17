@@ -205,10 +205,12 @@ Validates either profile — it dispatches on the `product:` discriminant.
   What that leaves unchecked is the reason to reach for the flag. The packs
   themselves are never read, so **nothing** the loader would have said about them
   is said: a pack that is **not installed** is invisible, and so is one that is
-  here and the loader would **refuse** — a version pin that does not match its
-  manifest, two packs claiming one top-level key, a `module:` that escapes the
-  deployment tree. (With `--with-packs` both become one of the two errors
-  described below: `extension_pack_unavailable` and `extension_pack_refused`.)
+  here and the loader would **refuse** — an entry module that is on disk and did
+  not load (an **unbuilt** pack is the common one: a deploy runtime loads compiled
+  JavaScript only), a version pin that does not match its manifest, two packs
+  claiming one top-level key, a `module:` that escapes the deployment tree. (With
+  `--with-packs` both become one of the two errors described below:
+  `extension_pack_unavailable` and `extension_pack_refused`.)
   And because only a loaded pack can say which top-level keys are claimed, every
   top-level key the core grammar does not own is accepted **unexamined** rather
   than refused — on a pack-bearing document that includes a **mistyped** section
@@ -228,13 +230,19 @@ Validates either profile — it dispatches on the `product:` discriminant.
 
   Two of those codes are about the packs themselves, and they prescribe opposite
   actions: `extension_pack_unavailable` means the pack is **not on this
-  deployment** (install it, or drop it from `extensions[]` together with the
-  sections it claims), while `extension_pack_refused` means the pack **is** here
-  and was refused — a version pin that does not match its manifest, two packs
-  claiming one key, a `module:` that escapes the deployment tree — so deploying it
-  again changes nothing. A violation **inside** a claimed section is the pack's
-  own, reported at `<section>.<field>` with the same codes a core section's
-  violation carries.
+  deployment** — nothing is on disk at the entry the reference resolves to, so
+  install it, or drop it from `extensions[]` together with the sections it claims.
+  `extension_pack_refused` means the pack **is** here and was refused: an entry
+  module that is on disk and did not load — an **unbuilt** pack, whose TypeScript
+  entry the deploy runtime refuses (build it and point the reference at the built
+  directory), or one that arrived without the dependencies its entry imports (a
+  `dist/` shipped without its `node_modules/`; deploy the pack directory complete)
+  — a version pin that does not match its manifest, two packs claiming one key, a
+  `module:` that escapes the deployment tree. Deploying the **same** artifact again
+  changes nothing in any of those cases; the message names which part of it to fix,
+  and for an entry that did not load it carries the importer's own words. A
+  violation **inside** a claimed section is the pack's own, reported at
+  `<section>.<field>` with the same codes a core section's violation carries.
 
 - **Exit:** `0` if valid, `1` otherwise.
 
@@ -952,10 +960,38 @@ change is applied by the explicit `--apply-migration` flag below.
   schema (author the delta with [`plan --against`](#plan)). It reaches the same gated
   migration engine `plan` previews: a **destructive** statement without a covering
   reviewed **`--allowlist <file.json>`** entry is **blocked**. It is **reboot-safe** —
-  the boot classifies the live schema first and mounts a present-matching schema
-  instead of re-applying a non-idempotent delta, so a `Restart=always` unit applies the
-  delta once and mounts thereafter (still, drop the flag once it lands to keep intent
-  explicit). It is rejected with `--dry-run` (a dry-run touches no database) and against a
+  before deciding, the boot probes the objects the delta itself names: one whose objects
+  are already in the state an applied delta leaves them in is **mounted** rather than
+  re-applied (a non-idempotent delta re-applied would crash the boot), so a
+  `Restart=always` unit applies the delta once and mounts thereafter (still, drop the flag
+  once it lands to keep intent explicit). A delta whose objects are **not** there is
+  **applied**, and the boot names the object it looked for — including when the live schema
+  is drift-clean against the spec, which it always is for an object the spec cannot express
+  (a hand-shaped index). A delta found only **partly** applied is **refused**, naming both
+  sides, rather than half re-applied — including the mixed case, where a reviewed `DROP`
+  target is still there beside an object the same delta already created. Names are read the
+  way the catalog stores them (an unquoted identifier folded, a quoted one verbatim); one the
+  boot cannot read whole, such as a schema-qualified name, is not probed and not guessed at,
+  and the mount log then says the boot measured nothing rather than claiming a result.
+  **One shape is not decidable this way, and it is the one place this path can silently drop
+  a reviewed change:** a delta that **frees a name and puts it back** leaves the live schema
+  holding that name whether or not the delta ran — a reviewed `DROP` beside a re-`CREATE` of
+  the same name (`DROP TABLE "t"` + `CREATE TABLE "t"`, a rebuild), and the same change
+  written as one statement (`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" …`). The
+  `IF [NOT] EXISTS` spellings count the same; it is the **name** that decides, not the
+  spelling. Nothing in the schema separates the two states, so the boot claims nothing,
+  **mounts**, and logs that it measured nothing rather than calling the flag stale —
+  re-applying would re-drop the object the delta had just re-created. **Check the schema by
+  hand when you see that log.** A `RENAME` that frees a recycled name *is* decidable and is
+  decided — the name the rename gives the object stands only if the delta ran — **unless the
+  same delta takes that name away too**. `ALTER TABLE "t" RENAME TO "t_old"` +
+  `CREATE TABLE "t"` + `DROP TABLE "t_old"` — rename the table aside, take the freed name,
+  discard the aside — is the same undecidable shape reached from the rename side: `t` stands
+  and `t_old` is missing in **both** states, so it too claims nothing and mounts. Re-applying
+  such a rebuild would rename the *live* table aside and drop it, losing every row written
+  since the delta landed. The column form is the ordinary way to retype a column — `RENAME
+  COLUMN` aside, `ADD COLUMN`, `DROP COLUMN` the aside — and reads the same way. It is
+  rejected with `--dry-run` (a dry-run touches no database) and against a
   frontend-only spec (the static profile below touches no database either), and a bare
   `--allowlist` without `--apply-migration` is refused (it would be silently ignored).
   Both file paths are jailed exactly like the spec path.

@@ -14,7 +14,7 @@
  * calling gate's `set -e` stops there.
  */
 import { resolve } from 'node:path';
-import { applyPackMigrations, makeDb } from '../src/index.js';
+import { applyPackMigrations, makeDb, operatorSafeDbErrorMessage } from '../src/index.js';
 
 const [packId, chainDir, tablePrefix] = process.argv.slice(2);
 const url = process.env.PACK_CHAIN_URL;
@@ -37,7 +37,9 @@ try {
     );
   }
 } catch (e) {
-  console.error(`APPLY PACK CHAIN: FAIL — ${e instanceof Error ? e.message : String(e)}`);
+  // Rendered rather than raw: a chain statement that fails arrives wrapped by the ORM, whose message
+  // carries the statement and every value it bound.
+  console.error(`APPLY PACK CHAIN: FAIL — ${operatorSafeDbErrorMessage(e)}`);
   process.exitCode = 1;
 } finally {
   await db.$client.end();

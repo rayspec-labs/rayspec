@@ -21,12 +21,15 @@
  * section it claims, so a document taken to a deployment that does not have the pack cannot be
  * validated at all. That fails here, at parse, as a TYPED `extension_pack_unavailable` naming the
  * pack — not as an `unknown_field` pointing at the section, which would send the operator to delete
- * the section rather than to install the pack. But a pack that IS here and was REFUSED (a version
- * skew, two packs claiming one key, a handler outside `handlers/`) is a different failure with a
+ * the section rather than to install the pack. But a pack that IS here and was REFUSED (an entry that
+ * is on disk and did not load — an unbuilt pack is the common one — a version skew, two packs
+ * claiming one key, a handler outside `handlers/`) is a different failure with a
  * different remedy, and it is reported under its own code, `extension_pack_refused`. Telling an
  * operator to deploy a pack that is already deployed is worse than telling them nothing, so the
- * loader marks which class a failure is (`ExtensionLoadError.unresolved`) and this file never guesses.
- * Both are fail-closed regardless of whether the document declares a section: a referenced pack that
+ * loader marks which class a failure is (`ExtensionLoadError.failure`) and this file never guesses.
+ * Two codes, THREE classes: the remedy an entry that did not load needs is not the remedy a pack that
+ * was read and refused needs, so that class gets its own sentence under the shared code.
+ * All are fail-closed regardless of whether the document declares a section: a referenced pack that
  * cannot be used is exactly as unusable either way.
  *
  * A document that references NO pack never reaches the loader: it is parsed by the load + the lift
@@ -103,10 +106,18 @@ export async function parseSpecWithPacks(
  * the error as a field (not scraped out of its message), which is also what paths the error at the
  * `extensions[]` entry that named the pack.
  *
- * WHICH CODE is decided by the loader, not guessed here: `unresolved` is set at the ONE throw site
- * that means the pack is not on this deployment (its entry did not import). Everything else got as
- * far as reading the pack, so the sentence an operator reads says the pack is here and was refused —
- * and does not send them to deploy something they already deployed.
+ * WHICH CODE is decided by the loader, not guessed here: `pack-absent` is set only where nothing is
+ * on disk at the entry the resolution landed on, which is what "the deployment does not have this
+ * pack" means. Everything else is a pack this deployment HAS, so the sentence an operator reads says
+ * it is here and was refused, and does not send them to deploy something they already deployed.
+ *
+ * THE REMEDY SENTENCE IS PER CLASS, not per code. A pack that was READ and then refused holds a
+ * complete artifact that is wrong, so "deploying it again changes nothing" is exactly true. A pack
+ * whose ENTRY DID NOT LOAD holds an artifact that is incomplete — unbuilt, or missing the
+ * dependencies its entry imports — and for the second of those, deploying the pack directory again,
+ * complete this time, IS the fix. Asserting the refused sentence over that case would trade one wrong
+ * remedy for another, so it gets its own: the same artifact lands the same way, and the load failure
+ * carried below names which incompleteness it is.
  */
 function packLoadFailure(
   e: ExtensionLoadError,
@@ -116,13 +127,24 @@ function packLoadFailure(
   const reason = e.message.replace(/^extension '[^']*': /, '');
   const named = e.packId === undefined ? 'an extension pack' : `extension pack '${e.packId}'`;
   const path = index >= 0 ? `extensions[${index}]` : 'extensions';
-  if (e.unresolved) {
+  if (e.failure === 'pack-absent') {
     return specError(
       'extension_pack_unavailable',
       `${named} is not available on this deployment — a pack owns the grammar of every top-level ` +
         'section it claims, so a document that declares one cannot be validated without it. Deploy ' +
         'the pack, or remove it from extensions[] together with the sections it claims. Load ' +
         `failure: ${reason}`,
+      path,
+    );
+  }
+  if (e.failure === 'entry-did-not-load') {
+    return specError(
+      'extension_pack_refused',
+      `${named} is present on this deployment but its ENTRY MODULE DID NOT LOAD, so the top-level ` +
+        'sections it claims cannot be validated. The pack is here, so deploying the same artifact ' +
+        'again lands the same way: it is either not built (a deploy runtime loads compiled ' +
+        'JavaScript only) or it did not arrive with the dependencies its entry imports. The load ' +
+        `failure below says which. Load failure: ${reason}`,
       path,
     );
   }

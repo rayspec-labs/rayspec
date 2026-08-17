@@ -51,6 +51,7 @@ import type {
   ToolError,
 } from '@rayspec/core';
 import { hashJson } from '@rayspec/core';
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 // The NAMED class export `Ajv2020` is usable as a TYPE (its instance type); the default/namespace
 // import is what carries the runtime constructor across the CJS/ESM interop quirk.
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
@@ -368,7 +369,10 @@ export function makeDispatchTool(
           name,
           callId,
           `failed to record non-idempotent-taint marker before the side effect (fail-closed, ` +
-            `the tool was NOT run): ${String(e)}`,
+            // The marker write is a statement through the chokepoint, so a failure here arrives
+            // wrapped by the ORM with the SQL and its bound values in the message. The renderer is a
+            // no-op for anything that is not a wrapped statement error.
+            `the tool was NOT run): ${operatorSafeDbErrorMessage(e)}`,
         );
         await recordToolStep(deps, callId, rawArgs, err, 'error', 0);
         await emitResult(deps, err);
@@ -392,7 +396,9 @@ export function makeDispatchTool(
         timeoutPromise,
       ]);
     } catch (e) {
-      const err = toolError(name, callId, `handler error: ${String(e)}`);
+      // Same renderer: a handler that wrote through the store facade fails with a wrapped statement
+      // error carrying its bound row, and this string is returned to the run.
+      const err = toolError(name, callId, `handler error: ${operatorSafeDbErrorMessage(e)}`);
       await recordToolStep(deps, callId, rawArgs, err, 'error', Date.now() - startedAt);
       await emitResult(deps, err);
       return err;
