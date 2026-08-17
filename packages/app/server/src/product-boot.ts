@@ -1425,6 +1425,21 @@ function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNam
     for (const { text } of splitMigrationStatements(migration.sql)) {
       for (const change of standingChanges(text)) {
         const key = objectKey(change.object);
+        // A NAME THE DELTA TAKES AWAY BEFORE IT MAKES IT WAS STANDING BEFORE THE DELTA.
+        //
+        // `absentAtBothEnds` reads a name's PRESENCE as proof the delta ran, and that rests on the
+        // name being absent before it. The code inferred "absent before" from some statement creating
+        // it unguarded — which only proves it was absent when THAT statement ran. If an earlier
+        // statement took the name away, the schema held it at the start, and finding it there says
+        // nothing at all. `mayPredate` is exactly the set for names whose presence proves nothing, so
+        // this is the same withholding the `IF NOT EXISTS` rule performs, for the same reason.
+        //
+        // Measured, on a delta that had run NOTHING: `RENAME "a" TO "b"` + `CREATE TABLE "a"` +
+        // `RENAME "a" TO "c"` against a live `{a}` — the only state reachable before the delta — was
+        // refused as HALF LANDED, permanently, with an operator message asserting something false
+        // about the schema. Two more shapes did the same, one of them an INDEX redefinition, the
+        // class the operator copy names first as the likeliest real instance.
+        if (!standing.has(key) && !change.standing) mayPredate.add(key);
         standing.set(key, change.standing);
         if (change.standing) {
           created.add(key);

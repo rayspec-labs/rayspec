@@ -2364,6 +2364,80 @@ describe('routePresentMatchingUpdate — a name the delta MAKES and TAKES AWAY, 
     });
   });
 
+  it('a name the delta TAKES AWAY before it MAKES it proves nothing by being there', async () => {
+    // The third rule reads a name's PRESENCE as evidence the delta ran, which needs the name to have
+    // been absent BEFORE it. Inferring that from "some statement creates it unguarded" proves only
+    // that it was absent when THAT statement ran. Where an earlier statement takes the name away, the
+    // schema held it at the start — and the state below is reachable ONLY before the delta has run at
+    // all, so the honest answer is APPLY. Reading it as landed refused a boot that applied nothing,
+    // permanently: no restart clears it, and the message asserts something false about the schema.
+    const chain = mig(
+      'ALTER TABLE "a" RENAME TO "b";\n--> statement-breakpoint\n' +
+        'CREATE TABLE "a" ("id" uuid);\n--> statement-breakpoint\n' +
+        'ALTER TABLE "a" RENAME TO "c";',
+      [
+        { kind: 'rename-table', match: 'ALTER TABLE "a" RENAME TO "b"', reason: 'reviewed' },
+        { kind: 'rename-table', match: 'ALTER TABLE "a" RENAME TO "c"', reason: 'reviewed' },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(chain, live(new Set(['a'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+
+    // The same shape as an INDEX redefinition — the instance the operator copy names FIRST as the
+    // likeliest real one — and as a drop/re-create/drop.
+    const reindex = mig(
+      'DROP INDEX "ix_parts_sku";\n--> statement-breakpoint\n' +
+        'CREATE INDEX "ix_parts_sku" ON "parts" ("sku");\n--> statement-breakpoint\n' +
+        'ALTER INDEX "ix_parts_sku" RENAME TO "parts_sku_tenant_idx";',
+      [
+        { kind: 'drop-index', match: 'DROP INDEX "ix_parts_sku"', reason: 'reviewed' },
+        {
+          kind: 'rename-index',
+          match: 'ALTER INDEX "ix_parts_sku" RENAME TO "parts_sku_tenant_idx"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(reindex, live(new Set(['ix_parts_sku'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+
+    const churn = mig(
+      'DROP TABLE "t";\n--> statement-breakpoint\n' +
+        'CREATE TABLE "t" ("id" uuid);\n--> statement-breakpoint\n' +
+        'DROP TABLE "t";',
+      [{ kind: 'drop-table', match: 'DROP TABLE "t"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(churn, live(new Set(['t'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+  });
+
+  it('ACCEPT CONTROL: a name only MADE and taken away still lands on its presence', async () => {
+    // The withholding above must not swallow the rule it guards. Here nothing takes the name away
+    // BEFORE it is made — an ordinary staging table — so its presence is still evidence the delta
+    // ran, and beside one un-landed object that is a genuine half-landed refusal. Without this arm a
+    // rule that withheld every name would look identical to the fix.
+    const staged = mig(
+      'CREATE TABLE "parts_backup" ("id" uuid PRIMARY KEY);\n--> statement-breakpoint\n' +
+        'DROP TABLE "parts_backup";\n--> statement-breakpoint\n' +
+        'DROP TABLE "highlights";',
+      [
+        { kind: 'drop-table', match: 'DROP TABLE "parts_backup"', reason: 'reviewed' },
+        { kind: 'drop-table', match: 'DROP TABLE "highlights"', reason: 'reviewed' },
+      ],
+    );
+    const route = await routePresentMatchingUpdate(
+      staged,
+      live(new Set(['parts_backup', 'highlights'])),
+    );
+    expect(route.kind).toBe('refuse-half-landed');
+  });
+
   it('ACCEPT CONTROL: one name, ONE landed claim — the rebuild is not counted twice', async () => {
     // `parts_archive` is a name this delta makes (the RENAME gives it) and takes away (the DROP behind
     // the rebuild), so the third rule names it — but the rename half already landed it, and saying it
