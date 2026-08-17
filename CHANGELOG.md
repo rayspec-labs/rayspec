@@ -522,6 +522,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pack's `query` now refuses a string carrying more than one command — on the pooled handle and
+  inside a transaction alike.** The door already refused a transaction-control statement (`BEGIN`,
+  `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `START TRANSACTION`, `PREPARE TRANSACTION`, …), but that guard
+  reads the **first token**, and a statement with no bind values is sent in Postgres's simple-query
+  mode, which runs **every** command in the string. Every refused verb was therefore reachable behind
+  an innocent one. Measured against a live server: `tx.query('SELECT 1; COMMIT')` inside a
+  `transaction()` callback ended the pin, and the two rows written around it **both survived** the
+  callback's throw — the wrapper's rollback found `25P01 there is no transaction in progress` and had
+  nothing left to undo, so a pack could break the atomicity the method promises from inside it. On the
+  pooled handle `query('SELECT 1; BEGIN')` reached the wire, the server opened the transaction, and
+  the driver's own refusal arrived only afterwards — leaving one of the deployment's four HTTP
+  connections `idle in transaction` for the life of the process, which a pack retrying in a loop turns
+  into pool exhaustion for every other caller. Both now raise the same `PackTransactionError` the door
+  already raises, before the statement reaches the server, for carrying a **second command** rather
+  than for what that command says — so there is no verb list behind it to go stale. **The contract has
+  not changed**: `query` has always been documented as running one parameterized statement. What
+  changed is that it is enforced.
+  **A `;` that is not a separator is still not a second command**, which is the half that matters most
+  — a guard that refused correct SQL would leave a pack author a typed error and no way around it. The
+  boundary is decided by the same literal-aware splitter `@rayspec/db` already reads migration chains
+  with, rather than by a second hand-written parser, so a `;` inside a string literal (`'a;b'`), a
+  dollar-quoted body (`$tag$a;b$tag$` — tagged, untagged, or holding a foreign tag), a quoted
+  identifier or a comment still runs, as does a lone statement with a trailing `;`, trailing
+  whitespace, or a trailing comment.
+  **One legal statement is now refused, deliberately.** A string whose literals the splitter cannot
+  read fails closed, and there is exactly one shape where that is not already a syntax error: an
+  **unquoted identifier carrying a `$…$` run**. `a$b$c` has the shape of a dollar-quote opener, so
+  `SELECT 1 AS a$b$c` reads as an unterminated literal here while Postgres reads an ordinary
+  identifier — and `SELECT 1 AS a$b$c; INSERT …` really does run both commands, which is why the
+  count alone would have been a hole rather than a guard. Quote the identifier (`"a$b$c"`) and it runs.
+
 - **A gate now covers documented command paths.** Three findings in two releases had one cause:
   nothing in the repository checked that a command a document tells a reader to run does what the
   document says. `scripts/check-documented-commands.mjs` walks every shipped markdown file, extracts

@@ -86,15 +86,22 @@ export interface TurnDispatch {
  */
 export interface PackDatabase {
   /**
-   * Run one parameterized statement and read its rows back.
+   * Run ONE parameterized statement and read its rows back.
    *
-   * A TRANSACTION-CONTROL STATEMENT IS REFUSED HERE — `BEGIN`, `START TRANSACTION`, `COMMIT`,
-   * `ROLLBACK`, `SAVEPOINT` and the rest reject with an `Error` whose `name` is
-   * `PackTransactionError`, before the statement reaches the server. This handle is POOLED, so such a
-   * statement cannot do what it looks like it does: the connection it lands on goes back to the pool
-   * still inside a transaction nothing ever commits, and every later write that happens to be issued
-   * on it is invisible to every other connection while its locks are held indefinitely. Use
-   * `transaction(fn)` below.
+   * "ONE" IS ENFORCED, NOT ASSUMED. A string carrying more than one `;`-separated command is
+   * REFUSED, on this handle and on `tx` alike, with an `Error` whose `name` is
+   * `PackTransactionError`. It has to be: the statement is sent in Postgres's simple-query mode,
+   * which runs every command in the string, so `query('SELECT 1; COMMIT')` really does commit.
+   * Issue each statement through its own call, and use `transaction(fn)` when they must land
+   * together. A `;` inside a string literal, a dollar-quoted body (`$tag$…$tag$`) or a comment is
+   * NOT a second command and is not refused — the boundary is read the way Postgres reads it.
+   *
+   * A TRANSACTION-CONTROL STATEMENT IS REFUSED HERE TOO — `BEGIN`, `START TRANSACTION`, `COMMIT`,
+   * `ROLLBACK`, `SAVEPOINT` and the rest reject with the same typed error, before the statement
+   * reaches the server. This handle is POOLED, so such a statement cannot do what it looks like it
+   * does: the connection it lands on goes back to the pool still inside a transaction nothing ever
+   * commits, and every later write that happens to be issued on it is invisible to every other
+   * connection while its locks are held indefinitely. Use `transaction(fn)` below.
    */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
   /**

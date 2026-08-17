@@ -46,10 +46,13 @@ import type { TurnDispatch } from '../turn-dispatch.js';
  */
 export interface PackServiceDatabase {
   /**
-   * Run one parameterized statement and read its rows back. A TRANSACTION-CONTROL statement (`BEGIN`,
-   * `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is REFUSED here before it reaches the server: this handle is
-   * pooled, so the connection such a statement lands on would go back to the pool still inside a
-   * transaction nothing ever commits.
+   * Run ONE parameterized statement and read its rows back, and "one" is ENFORCED: a string carrying
+   * more than one `;`-separated command is REFUSED, on this handle and on `tx` alike, because the
+   * statement is sent in simple-query mode and every command in it would run. A `;` inside a string
+   * literal, a dollar-quoted body or a comment is not a second command. A TRANSACTION-CONTROL
+   * statement (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is refused before it reaches the server
+   * too: this handle is pooled, so the connection such a statement lands on would go back to the pool
+   * still inside a transaction nothing ever commits.
    */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
   /**

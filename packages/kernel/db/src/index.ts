@@ -109,11 +109,19 @@ export { migrationsDir } from './migrations.js';
 // The pack-migration chain scan — the ONE rule set `gate:pack-migrations` holds this repository's
 // committed chains to and `applyPackMigrations` holds a deployment's chains to. A pack is code from
 // somewhere else, so CI alone would only ever have covered the chains we happen to ship.
+// `splitSqlStatements` rides along because it has a SECOND consumer that is not a migration at all:
+// the pack database door builds on "how many commands does this string carry", and a second
+// hand-written parser for quoting, dollar-quoting and comments would diverge from this one at the
+// first edge nobody thought of. The file-oriented parts around it stay private (see its docblock).
 export {
   type PackMigrationChainScan,
   type PackMigrationFileScan,
+  type SqlStatement,
+  type SqlStatementSplit,
   scanPackMigrationChain,
   scanPackMigrationSql,
+  splitSqlStatements,
+  type UnterminatedLiteral,
 } from './pack-migration-scan.js';
 // Pack-owned PLATFORM tables: a pack's own migration chain, applied through the same drizzle
 // migrator as the platform's and strictly after it, journaled in `__migrations_<packId>` so core and

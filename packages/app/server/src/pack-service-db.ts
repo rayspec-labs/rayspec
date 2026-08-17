@@ -31,9 +31,18 @@
  * deployment's process as a trusted, non-sandboxed author — the manifest contract's posture note).
  * A service has no `tenantId` on its context in either case; a pack that attributes rows to a tenant
  * gets that value from the deployment, not from this door.
+ *
+ * ONE STATEMENT PER `query`, ON BOTH HALVES — the contract's own sentence, enforced rather than
+ * hoped for. `unsafe` with no bound parameters runs Postgres's SIMPLE-QUERY protocol, which executes
+ * EVERY command in the string, so a second command in the string is a second command RUN: a
+ * `;`-separated `COMMIT` ends the pin from inside the callback (measured — both rows written around
+ * it survived the callback's throw), and a `;`-separated `BEGIN` leaves a pooled connection
+ * idle-in-transaction for the life of the process. Refusing the multi-command string closes both
+ * without a verb list, and the boundary is decided by the literal-aware splitter `@rayspec/db`
+ * already reads migration chains with, so a `;` inside a literal or a comment stays ordinary SQL.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Db } from '@rayspec/db';
+import { type Db, splitSqlStatements } from '@rayspec/db';
 import type { PackServiceDatabase } from '@rayspec/platform';
 
 /**
@@ -79,6 +88,9 @@ const TRANSACTION_CONTROL_PAIRS = new Set(['PREPARE TRANSACTION', 'SET TRANSACTI
  * `transaction()` — and it is deliberately not a parser: a pack is a trusted, non-sandboxed author
  * and can always reach further if it means to. What it buys is that the ordinary mistake fails
  * CLOSED, before the statement reaches the wire, instead of costing the deployment a connection.
+ *
+ * IT READS THE FIRST TOKEN ONLY, which is why it is not the whole guard — see
+ * `refuseMultipleStatements` below, which is what closes the `SELECT 1; COMMIT` shape.
  */
 function refuseTransactionControl(sql: string, consequence: string): void {
   const head = sql.replace(/^(?:\s+|--[^\n]*\n?|\/\*[\s\S]*?\*\/)+/, '');
@@ -107,6 +119,72 @@ const PINNED_CONSEQUENCE =
   'move or end that transaction under the code that opened it. A savepoint is no way around it ' +
   'either: the driver latches the first statement error on this connection and re-raises it when ' +
   'the callback returns, so a rolled-back savepoint does not make the call succeed.';
+
+/** What to write instead, on the POOLED half — where "together" is what `transaction` is for. */
+const POOLED_SPLIT_ADVICE =
+  'Issue each statement through its own `query` call, and put them in `transaction(fn)` if they ' +
+  'must land together.';
+
+/** The same, INSIDE a callback — where they already land together, so the advice would be circular. */
+const PINNED_SPLIT_ADVICE =
+  'Issue each statement through its own `query` call — they are already inside this callback’s ' +
+  'transaction, so they already land together.';
+
+/**
+ * Refuse a string that carries MORE THAN ONE command. This is the guard the tripwire above cannot
+ * be: it reads the FIRST token, and every transaction-control verb in the language is reachable
+ * behind an innocent one.
+ *
+ * WHY A SECOND COMMAND IS NOT A SECOND CALL. `query` runs the statement through `postgres`'s
+ * `unsafe`, and `unsafe` with no bound parameters selects Postgres's SIMPLE-QUERY protocol, which
+ * executes EVERY command in the string on that connection. So `query('SELECT 1; COMMIT')` inside a
+ * callback ends the pin — measured: the two rows written around it both survived the callback's
+ * throw, and the wrapper's rollback found `25P01 there is no transaction in progress` — and
+ * `query('SELECT 1; BEGIN')` on the pooled half leaves its connection idle-in-transaction for the
+ * life of the process, because the driver's own refusal arrives only after the server has run it.
+ * The extended protocol does not help: `prepare: true` accepts `SELECT 1; SELECT 2` too, so this is
+ * a text decision or it is nothing.
+ *
+ * THIS IS ENFORCING THE CONTRACT, NOT ADDING A RULE. `query` is documented as running ONE
+ * parameterized statement, on both halves. A `;`-separated `COMMIT` is refused here for being a
+ * SECOND COMMAND rather than for what it says, which is why the guard needs no verb list of its own
+ * and closes both shapes at once — including the ones no verb list would have named.
+ *
+ * THE BOUNDARY DECISION IS NOT MADE HERE. It is `@rayspec/db`'s `splitSqlStatements`, the same
+ * literal-aware splitter the pack-migration scan reads, so a `;` inside a string literal, a
+ * dollar-quoted body or a comment is NOT a second command in either place. That matters more than
+ * the refusal does: a guard that rejected `INSERT INTO t VALUES ('a;b')` would refuse correct code
+ * and leave the author a typed error and no way around it.
+ *
+ * A STRING THE SPLITTER CANNOT READ IS REFUSED TOO, and that branch is not belt-and-braces. Three of
+ * the four unterminated-literal kinds are syntax errors the server rejects outright, so passing them
+ * through would cost nothing — but the fourth is not. The splitter opens a dollar-quote on the
+ * `$tag$` SHAPE, and `$b$` inside the perfectly legal identifier `a$b$c` HAS that shape: measured,
+ * `SELECT 1 AS a$b$c; INSERT INTO t (id) VALUES (99)` reads as ONE unterminated statement here while
+ * Postgres reads two commands and runs both (row 99 landed). So an unreadable string fails CLOSED.
+ * What that costs is an identifier carrying two `$`, which now gets a typed refusal naming the
+ * literal instead of running — the one accept-control case this guard knowingly gives up, written
+ * down here so the next reader does not mistake the branch for paranoia and delete it.
+ */
+function refuseMultipleStatements(sql: string, advice: string): void {
+  const { statements, unterminated } = splitSqlStatements(sql);
+  if (unterminated) {
+    throw new PackTransactionError(
+      'a pack database handle could not read where the commands in this string end: an ' +
+        `unterminated ${unterminated.what} runs to the end of it, so everything after it was read ` +
+        'as part of that literal and a second command could be hiding behind it. Close the literal ' +
+        `— or, if it is an identifier carrying a \`$…$\` run, quote it ("a$b$c"). ${advice}`,
+    );
+  }
+  if (statements.length <= 1) return;
+  throw new PackTransactionError(
+    `a pack database handle runs ONE statement per \`query\` call, and this string carries ` +
+      `${statements.length} commands. A multi-command string is sent in Postgres's simple-query ` +
+      'mode, which runs every command in it — so a `;`-separated `COMMIT`, `BEGIN` or `ROLLBACK` ' +
+      'would move the connection’s transaction state however the leading statement reads. ' +
+      advice,
+  );
+}
 
 /**
  * Build the database door over the deployment's one raw handle.
@@ -148,6 +226,7 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
   return {
     query: async (sql: string, params: readonly unknown[] = []) => {
       refuseTransactionControl(sql, POOLED_CONSEQUENCE);
+      refuseMultipleStatements(sql, POOLED_SPLIT_ADVICE);
       return (await client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
     },
 
@@ -166,6 +245,7 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
             return await fn({
               query: async (sql: string, params: readonly unknown[] = []) => {
                 refuseTransactionControl(sql, PINNED_CONSEQUENCE);
+                refuseMultipleStatements(sql, PINNED_SPLIT_ADVICE);
                 return (await tx.unsafe(sql, params as never[])) as unknown as Record<
                   string,
                   unknown

@@ -50,6 +50,11 @@
  * marker and with it every statement the migrator would go on to run. A statement whose text still
  * holds a second top-level verb after that, or an unterminated literal that swallows the rest of the
  * file, is refused rather than scanned at its opening keywords alone.
+ *
+ * ONE THING HERE IS EXPORTED FOR A CONSUMER THAT IS NOT A MIGRATION: the literal-aware splitter
+ * (`splitSqlStatements`), which the pack database door in `@rayspec/app-server` reads to refuse a
+ * `query` string carrying more than one command. Its own docblock states what that second consumer
+ * is promised and what stays file-oriented; everything else in this file is private.
  */
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -145,16 +150,22 @@ interface Chunk {
   readonly lineOffset: number;
 }
 
-/** One scanned statement: its 1-based line and its whitespace-collapsed text. */
-interface Statement {
+/** One split statement: its 1-based line and its whitespace-collapsed text. */
+export interface SqlStatement {
   readonly line: number;
   readonly text: string;
 }
 
 /** An unterminated literal — the first one found, and what kind it was. */
-interface Unterminated {
+export interface UnterminatedLiteral {
   readonly line: number;
   readonly what: string;
+}
+
+/** What one literal-aware split read: the statements, and the first unterminated literal if any. */
+export interface SqlStatementSplit {
+  readonly statements: SqlStatement[];
+  readonly unterminated: UnterminatedLiteral | null;
 }
 
 /**
@@ -188,28 +199,40 @@ function breakpointChunks(sql: string): Chunk[] {
 }
 
 /**
- * Split ONE breakpoint chunk into statements, LITERAL-AWARE. Walks the text tracking lexer state so
- * a `--`, a slash-star block comment or a `;` inside a single-quoted string ('', the escaped quote),
- * a dollar-quoted body ($tag$...$tag$) or a double-quoted identifier ("", the escaped quote) is not
- * mistaken for structure. Comments are dropped; literal and identifier bodies are kept verbatim so
- * the object-name match below still sees the name it must check. Each statement is returned with its
- * 1-based starting line WITHIN THE CHUNK and its internal whitespace collapsed to single spaces, so
- * a newline-split `DROP\nTABLE` reads as one statement.
+ * Split a piece of SQL TEXT into statements, LITERAL-AWARE — the primitive, and the only place in
+ * this repository that decides where one statement ends and the next begins. Walks the text tracking
+ * lexer state so a `--`, a slash-star block comment or a `;` inside a single-quoted string ('', the
+ * escaped quote), a dollar-quoted body ($tag$...$tag$) or a double-quoted identifier ("", the escaped
+ * quote) is not mistaken for structure. Comments are dropped; literal and identifier bodies are kept
+ * verbatim so a caller that matches object names still sees the name it must check. Each statement
+ * comes back with its 1-based starting line WITHIN THE TEXT GIVEN and its internal whitespace
+ * collapsed to single spaces, so a newline-split `DROP\nTABLE` reads as one statement.
  *
- * The `--> statement-breakpoint` marker needs no case here: `breakpointChunks` already removed every
- * one of them from the raw text, which is the only order in which a comment strip cannot swallow a
- * boundary the migrator honours.
+ * TWO CONSUMERS, DIFFERENT SHAPES — which is why this is exported and the rest of this file is not.
+ * The migration scan below feeds it ONE BREAKPOINT CHUNK of a file at a time and uses everything it
+ * returns: the line numbers become `<file>:<line>` diagnostics, and the statements are scanned one by
+ * one. `@rayspec/app-server`'s pack database door feeds it ONE STRING a pack passed to `query` and
+ * uses only HOW MANY came back — `query` runs one statement, and `postgres`'s `unsafe` with no
+ * parameters runs Postgres SIMPLE-QUERY mode, which executes every command in the string. So the
+ * file-oriented machinery around this function — the `--> statement-breakpoint` cut, the line
+ * lifting, the additive-form rules — is NOT part of what the second consumer is promised, and an
+ * edit that folded any of it INTO this function would silently change the door's answer. What both
+ * consumers depend on is exactly this: what counts as a statement boundary and what does not.
  *
- * `unterminated` is the first literal that ran to the end of the chunk without a closing delimiter —
- * everything after it was swallowed into one statement and cannot have been scanned, which the
- * caller turns into a refusal instead of a silent pass.
+ * The `--> statement-breakpoint` marker needs no case here: it is a drizzle FILE convention, and
+ * `breakpointChunks` has already removed every one of them from the raw text before this runs, which
+ * is the only order in which a comment strip cannot swallow a boundary the migrator honours.
+ *
+ * `unterminated` is the first literal that ran to the end of the text without a closing delimiter —
+ * everything after it was swallowed into one statement and cannot have been read. BOTH consumers
+ * REFUSE on it rather than reading `statements` alone, and the door's reason is worth recording
+ * here: a dollar-quote is opened on the `$tag$` SHAPE, and the legal identifier `a$b$c` has that
+ * shape, so `SELECT 1 AS a$b$c; INSERT …` swallows the whole string into one statement here while
+ * Postgres reads two commands and runs both. An unreadable string is not a short one.
  */
-function splitChunkStatements(sql: string): {
-  statements: Statement[];
-  unterminated: Unterminated | null;
-} {
-  const statements: Statement[] = [];
-  let unterminated: Unterminated | null = null;
+export function splitSqlStatements(sql: string): SqlStatementSplit {
+  const statements: SqlStatement[] = [];
+  let unterminated: UnterminatedLiteral | null = null;
   let buf = '';
   let line = 1;
   let startLine = 0;
@@ -314,18 +337,19 @@ function splitChunkStatements(sql: string): {
 
 /**
  * Split a whole migration FILE into the statements the migrator would run: cut the raw text on the
- * breakpoint marker first (`breakpointChunks`), then walk each chunk for a literal-aware `;`. Line
- * numbers from each chunk are lifted back onto the file, so a diagnostic still points at the line on
- * disk. The first unterminated literal ANYWHERE in the file is the one reported.
+ * breakpoint marker first (`breakpointChunks`), then walk each chunk with the literal-aware splitter.
+ * Line numbers from each chunk are lifted back onto the file, so a diagnostic still points at the
+ * line on disk. The first unterminated literal ANYWHERE in the file is the one reported.
+ *
+ * FILE-ORIENTED, AND PRIVATE FOR THAT REASON: the breakpoint marker and the line lifting are facts
+ * about a drizzle migration file on disk, not about SQL, so the other consumer of the splitter above
+ * must not reach them.
  */
-function splitStatements(sql: string): {
-  statements: Statement[];
-  unterminated: Unterminated | null;
-} {
-  const statements: Statement[] = [];
-  let unterminated: Unterminated | null = null;
+function splitFileStatements(sql: string): SqlStatementSplit {
+  const statements: SqlStatement[] = [];
+  let unterminated: UnterminatedLiteral | null = null;
   for (const chunk of breakpointChunks(sql)) {
-    const result = splitChunkStatements(chunk.text);
+    const result = splitSqlStatements(chunk.text);
     for (const stmt of result.statements) {
       statements.push({ line: stmt.line + chunk.lineOffset, text: stmt.text });
     }
@@ -481,7 +505,7 @@ export function scanPackMigrationSql(
     }
   }
 
-  const { statements, unterminated } = splitStatements(sql);
+  const { statements, unterminated } = splitFileStatements(sql);
   if (unterminated) {
     violations.push(
       `${rel}:${unterminated.line}: an UNTERMINATED ${unterminated.what} runs to the end of the ` +
