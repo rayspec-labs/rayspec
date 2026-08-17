@@ -189,11 +189,19 @@ function packLoadFailure(
   if (e.failure === 'pack-incomplete') {
     return specError(
       'extension_pack_refused',
+      // NAMES THE OPEN CASE RATHER THAN CLOSING THE SET. This branch is the fall-through for every
+      // way a declared module can fail to load, so an enumeration reading "either A, or B, or C"
+      // presents itself as exhaustive and is false the moment a fourth way exists. It does: a module
+      // present, built, importing nothing, and carrying a syntax error or a module-scope throw is
+      // none of absent, unbuilt or missing a dependency — and the sentence this one replaced was
+      // correct there. Splitting at "absent" vs "there and did not load" is a real dichotomy; what
+      // follows the dash is examples, not the list.
       `${named} is present on this deployment but a MODULE ITS MANIFEST DECLARES did not load, so ` +
         'the top-level sections it claims cannot be validated. The pack is here, so deploying the ' +
-        'same artifact again lands the same way: the module is either absent from this pack, or ' +
-        'not built, or missing something it imports. The load failure below says which — and when ' +
-        `it is absent, every path that was looked for. Load failure: ${reason}`,
+        'same artifact again lands the same way: the module is absent from this pack, or it is ' +
+        'there and did not load — not built, missing something it imports, or broken. The load ' +
+        'failure below says which — and when it is absent, every path that was looked for. ' +
+        `Load failure: ${reason}`,
       path,
     );
   }

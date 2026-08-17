@@ -551,13 +551,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disk is asked instead, and the refusal names the absence and every path that was looked for. It is
   asked **only on the failure path**, so an injected importer — the dev/test seam, and every suite
   that fakes a pack — still resolves modules that are not on disk.
-  **The class was swept past the entry, and the same defect was found twice more.** A manifest also
+  **The class was swept past the entry, and the same defect was found three times more — at a declared service module, a claimed section schema, and a pack HANDLER module, whose guessed path is handed to the deploy handler loader rather than reported by this one.** A manifest also
   declares *service* modules and, for every top-level section it claims, a *schema* module; both
   resolve the same way, so both answered "compile it first" for a module the pack simply does not
   contain. Both also fell through to the read-and-refused class, whose sentence — *"Deploying it
   again changes nothing"* — is false when a pack arrived incomplete. They now carry their own class
   and a remedy true of every case it covers: the module is absent, or unbuilt, or missing something
-  it imports, and the load failure below says which. Of the 24 operator-facing refusals on this path,
+  it imports, and the load failure below says which. Of the 24 operator-facing refusals this loader constructs,
   these three are the only ones that interpolate an importer's words after a guessed path; the other
   21 report something the loader itself observed, where "deploying it again changes nothing" holds.
 - **A declared route that claims a platform path is reported by `doctor`, `plan` and

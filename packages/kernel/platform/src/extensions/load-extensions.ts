@@ -183,7 +183,7 @@ export interface LoadedExtensions {
 
 /**
  * WHICH CLASS a load failure is, as the loader OBSERVED it — off the disk, never scraped back out of
- * the error text. The distinction is load-bearing rather than cosmetic: the three prescribe three
+ * the error text. The distinction is load-bearing rather than cosmetic: the four prescribe four
  * different actions, and the caller that re-reports this has no other way to tell them apart.
  *
  *  - `pack-absent`        — nothing is at the entry the resolution landed on (a missing pack
@@ -274,8 +274,21 @@ export async function loadExtensions(
   // equality, so this is a list rather than a keyed map (see `routePrefixesOverlap`).
   const prefixOwners: { readonly packId: string; readonly prefix: string }[] = [];
 
-  // virtual rewritten absolute path → real pre-jailed pack-file absolute path (the importer's map).
-  const virtualToReal = new Map<string, string>();
+  // virtual rewritten absolute path → the real pre-jailed pack file, AND what it takes to say why a
+  // load failed. The path alone was enough to IMPORT; it is not enough to REFUSE well. When the real
+  // file is not there, the importer's own complaint is about the guessed path — for a `.ts` module
+  // never written, "compile it to JavaScript first", which sends an operator to build a file that
+  // does not exist. This is the fourth `resolvePackModule` site and the one the first sweep missed.
+  const virtualToReal = new Map<
+    string,
+    {
+      readonly real: string;
+      readonly candidates: readonly string[];
+      readonly what: string;
+      readonly moduleSpec: string;
+      readonly packId: string;
+    }
+  >();
 
   const seenIds = new Set<string>();
   for (const [refIndex, ref] of refs.entries()) {
@@ -438,7 +451,13 @@ export async function loadExtensions(
           ref.id,
         );
       }
-      virtualToReal.set(virtualAbsolute, realHandlerAbsolute);
+      virtualToReal.set(virtualAbsolute, {
+        real: realHandlerAbsolute,
+        candidates: packModuleCandidates(packRoot, h.module, `${ref.id}:${h.id}`, ref.id),
+        what: `the handler module for '${h.id}'`,
+        moduleSpec: h.module,
+        packId: ref.id,
+      });
       handlers.push({ ...h, module: virtualModule });
     }
     packHandlerRoots.push(packRoot);
@@ -533,8 +552,23 @@ export async function loadExtensions(
   // The multi-root importer: a rewritten virtual pack-handler path → the real pack file; otherwise the
   // default (a deployment's own handler, already jailed against the deployment root by the loader).
   const mergedImporter: ModuleImporter = async (absolutePath: string) => {
-    const real = virtualToReal.get(absolutePath);
-    return importer(real ?? absolutePath);
+    const mapped = virtualToReal.get(absolutePath);
+    if (mapped === undefined) return importer(absolutePath);
+    try {
+      return await importer(mapped.real);
+    } catch (e) {
+      // ONLY on the failure path, so what changes is which SENTENCE a failure gets and never whether
+      // a load is attempted — a pre-check would break every caller injecting an importer that resolves
+      // modules not on disk, which is the dev/test seam.
+      const absent = absentModuleRefusal(
+        mapped.candidates,
+        mapped.what,
+        mapped.moduleSpec,
+        mapped.packId,
+        'pack-incomplete',
+      );
+      throw absent ?? e;
+    }
   };
 
   return {

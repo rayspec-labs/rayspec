@@ -17,9 +17,9 @@
  * fast + deterministic without an on-disk pack — except the rewrite test, which asserts the importer
  * maps the virtual path to the jailed-real path the loader would import.
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ModuleImporter } from '../handlers/loader.js';
 import { defineExtension, type ExtensionManifest } from './extension.js';
@@ -117,6 +117,62 @@ describe('loadExtensions — fail-closed resolution + merge', () => {
     expect((mod.run as () => string)()).toBe('real-handler');
     // A NON-virtual path falls through to the underlying importer unchanged (a deployment's own handler).
     await expect(out.importer(realHandler)).resolves.toMatchObject({ run: expect.any(Function) });
+  });
+
+  it('a handler module that is NOT ON DISK is reported as absent, not as the wrong kind of file', async () => {
+    // THE FOURTH `resolvePackModule` SITE. Three were swept; this one hands its guessed path to the
+    // deploy handler loader instead of reporting here, so the importer's own extension complaint
+    // reached the operator: for a `.ts` module never written, "Compile it to JavaScript first" — an
+    // instruction to build a file that does not exist, and the documented handler remedy beside it
+    // says the same. The message and the doc disagreed about what happened, which is #460's subject.
+    const entry = resolve(root, 'pack', 'index.ts');
+    const realHandler = resolve(root, 'pack', 'handlers', 'h.ts');
+    // The entry loads; the handler file is NOT registered, so importing it throws — exactly what a
+    // production importer does for a path with nothing behind it.
+    const importer = fakeImporter(
+      new Map([[entry, { default: defineExtension(manifest('1.0.0')) }]]),
+    );
+    const out = await loadExtensions([ref()], { packsRoot: root, deploymentRoot: root, importer });
+    const virtualAbsolute = resolve(root, out.handlers[0]?.module ?? '');
+
+    const failure = await out.importer(virtualAbsolute).catch((e: unknown) => e as Error);
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain('is not on disk');
+    expect(message).toContain('this is an absent module, not a module of the wrong kind');
+    // Every path that was looked for — the `.js` sibling first, then the authored `.ts`.
+    expect(message).toContain(resolve(root, 'pack', 'handlers', 'h.js'));
+    expect(message).toContain(realHandler);
+    // …and never the remedy for a file that IS there and is the wrong kind.
+    expect(message).not.toContain('Compile it to JavaScript first');
+  });
+
+  it("ACCEPT CONTROL: a handler module that IS on disk keeps the importer's own failure", async () => {
+    // The refusal above must fire only where nothing is on disk. A module that is present and fails
+    // for its own reason — a syntax error, a module-scope throw — is neither absent nor unbuilt, and
+    // substituting the absent-module sentence there would replace a true diagnosis with a false one.
+    // Without this arm, a rewrite that answered "not on disk" for every failure looks identical.
+    const entry = resolve(root, 'pack', 'index.ts');
+    const realHandler = resolve(root, 'pack', 'handlers', 'h.ts');
+    mkdirSync(dirname(realHandler), { recursive: true });
+    writeFileSync(realHandler, 'export const run = () => 1;\n');
+    try {
+      const importer: ModuleImporter = async (absolutePath: string) => {
+        if (absolutePath === entry) return { default: defineExtension(manifest('1.0.0')) };
+        throw new Error('the pack author wrote a bug at module scope');
+      };
+      const out = await loadExtensions([ref()], {
+        packsRoot: root,
+        deploymentRoot: root,
+        importer,
+      });
+      const virtualAbsolute = resolve(root, out.handlers[0]?.module ?? '');
+      const failure = await out.importer(virtualAbsolute).catch((e: unknown) => e as Error);
+      expect((failure as Error).message).toContain('the pack author wrote a bug at module scope');
+      expect((failure as Error).message).not.toContain('is not on disk');
+    } finally {
+      rmSync(realHandler, { force: true });
+    }
   });
 
   it('VERSION-PIN FAIL-CLOSED: a manifest version ≠ the ref pin ABORTS (never a silent skip)', async () => {

@@ -5,7 +5,7 @@
  * the SAME path jail and the SAME exact-version pin the merge already used; the lift hands each
  * claimed top-level section to the claiming pack's validator.
  *
- * THREE MESSAGES ARE PRODUCT SURFACE and are pinned verbatim here (with the throwaway root redacted —
+ * THE OPERATOR-FACING MESSAGES ARE PRODUCT SURFACE and are pinned verbatim here (with the throwaway root redacted —
  * it is the only part that moves), because each prescribes a DIFFERENT action and a wrong one costs
  * an operator a wasted deployment:
  *   • the pack is NOT on this deployment          → `extension_pack_unavailable` — deploy it;
@@ -454,7 +454,14 @@ describe('parseSpecWithPacks — a module the manifest declares is not on disk',
       // What it says instead: the pack is here, the module is not, and BOTH causes are named —
       // a manifest pointing at a path the pack lacks, and a directory deployed partially.
       expect(error?.message).toContain('a MODULE ITS MANIFEST DECLARES did not load');
-      expect(error?.message).toContain('either absent from this pack, or not built, or missing');
+      // The remedy NAMES the open case rather than closing the set: this branch is the fall-through
+      // for every way a declared module can fail to load, and a module present, built, importing
+      // nothing and carrying a syntax error is none of absent/unbuilt/missing-a-dependency.
+      expect(error?.message).toContain('the module is absent from this pack, or it is there and');
+      expect(error?.message).toContain('not built, missing something it imports, or broken');
+      expect(error?.message, 'the enumeration must not present itself as closed').not.toContain(
+        'either absent from this pack, or not built, or missing',
+      );
       // The evidence: the module, and every path that was looked for.
       expect(error?.message).toContain("the service module ('./services/audit.ts') is not on disk");
       expect(error?.message).toContain(resolve(root, 'pack', 'services', 'audit.js'));
@@ -544,6 +551,10 @@ describe('parseSpecWithPacks — an absent pack under the production importer', 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+/**
  * THE MERGED SURFACE. Every rule above is asked of the deployment's own document; a pack contributes
  * onto it, and a rule can be true of each half and false of the sum. The boot already asks this — it
  * concatenates the fragments and re-parses — and until this parse did too, `doctor --with-packs`

@@ -74,6 +74,11 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', '.turbo', 'coverage', 'build']);
+/**
+ * How many shipped scripts sit beside a document declaring an agent surface, today. A FLOOR, not an
+ * expectation: the set may grow, and shrinking it is a claim that needs a deliberate edit here.
+ */
+const LIVE_MODEL_FLOOR = 3;
 /** A script that has not answered in this long has not answered. */
 const RUN_TIMEOUT_MS = 90_000;
 
@@ -287,6 +292,21 @@ async function main() {
       'is gated here, and their success path is exercised by hand.',
   );
   for (const p of liveModel) console.log(`  ${relative(REPO_ROOT, p)}`);
+  // A COUNT WITH NO GUARD IS NOT A SIGNAL. `declaresAgentSurface` reads a manifest key beside the
+  // script; a key rename or a document moving out of that directory makes this quietly print zero and
+  // the gate still passes — the gap this paragraph exists to make visible would become invisible, with
+  // nothing to notice. Every other count here fails closed on a zero; so does this one. The floor is
+  // the current set rather than 1, so the reachability can only be measured to have grown.
+  if (liveModel.length < LIVE_MODEL_FLOOR) {
+    console.error(
+      `SHIPPED-SCRIPT GATE: FAIL — ${liveModel.length} script(s) were recognised as needing a live ` +
+        `model, fewer than the ${LIVE_MODEL_FLOOR} this repository ships. The recogniser reads a ` +
+        'manifest key beside the script, so this means the key was renamed, a document moved, or a ' +
+        'script did — not that the gap closed. Fix the recogniser, or lower the floor deliberately.',
+    );
+    process.exitCode = 1;
+    return false;
+  }
 
   const failed = results.filter((r) => !r.ok);
   if (failed.length > 0) {
@@ -310,6 +330,7 @@ async function main() {
  * is exactly the shape a broken one takes.
  */
 async function selfTest() {
+  let failed = false;
   const planted = join(REPO_ROOT, '.gate-selftest-shipped-scripts');
   rmSync(planted, { recursive: true, force: true });
   mkdirSync(planted, { recursive: true });
@@ -352,15 +373,22 @@ async function selfTest() {
     }
     if (problems.length > 0) {
       for (const p of problems) console.error(`SELF-TEST: FAIL — ${p}.`);
-      process.exit(2);
+      // NOT `process.exit` here. Node does not run `finally` on exit, so leaving from inside the try
+      // stranded the planted scripts in the repository root — untracked, un-ignored, and inside the
+      // corpus this gate walks. The NEXT run then failed over a liar that is not part of the tree, and
+      // that second red was attributable to nothing anybody had changed. A self-test that poisons the
+      // checkout when it fails is worse than no self-test: it makes the failure it reports unreadable.
+      failed = true;
+    } else {
+      console.log(
+        'SELF-TEST: PASS — the gate goes red on a script that exits 0 having measured nothing, and ' +
+          'green on one that reports its failure.',
+      );
     }
-    console.log(
-      'SELF-TEST: PASS — the gate goes red on a script that exits 0 having measured nothing, and ' +
-        'green on one that reports its failure.',
-    );
   } finally {
     rmSync(planted, { recursive: true, force: true });
   }
+  if (failed) process.exit(2);
 }
 
 if (process.argv.includes('--self-test')) {
