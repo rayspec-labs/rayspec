@@ -151,4 +151,10 @@ export { CORE_TENANT_SCOPED_TABLES } from './schema.js';
 // to fold `deleted_at IS NULL` into reads/updates + stamp the tombstone on delete (parity with the CRUD
 // routes). Mirrors the `registerScopedTables` identity-set pattern (no wide param plumbing).
 export { isSoftDeleteTable, markSoftDeleteTable } from './soft-delete-registry.js';
-export { forTenant, TENANT_GUC, TenantDb } from './tenant-db.js';
+export {
+  forTenant,
+  type PinnedConnection,
+  pinnedConnectionOf,
+  TENANT_GUC,
+  TenantDb,
+} from './tenant-db.js';

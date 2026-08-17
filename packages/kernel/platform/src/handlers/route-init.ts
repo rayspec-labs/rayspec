@@ -35,6 +35,7 @@ import {
   type TtsCapability,
 } from '@rayspec/handler-sdk';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import type { PackServiceDatabase } from '../extensions/pack-services.js';
 import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime } from './handler-runtime.js';
 import { makeHandlerJournal } from './journal-reader.js';
@@ -132,6 +133,11 @@ export async function invokeRouteHandler(
   // by the api interpreter through the deployment's ONE resolver. Spread onto the init when present ⇒
   // `init.resumeFrom` is ABSENT on a first request, which means "from the beginning".
   resumeFrom?: string,
+  // The deployment's factory for the pack's OWN-tables door. Threaded identically on both postures:
+  // the ENGINE-TX one binds it to the transaction it opened (so a pack's statements are atomic with
+  // the route's and cannot deadlock against them), the DETACHED one to the pooled handle, and the
+  // factory reads which it was given from the handle itself rather than from a flag a caller sets.
+  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     // The request-local emit buffer, bound to the TRANSACTIONAL handle. Built before the handler runs
@@ -157,6 +163,7 @@ export async function invokeRouteHandler(
       tts,
       bus?.emit,
       resumeFrom,
+      packDbFactory,
     );
     const result = await getHandlerRuntime().invokeRoute(fn, init);
     // THE LAST STATEMENT BEFORE COMMIT. It runs only on the success path — a handler that threw
@@ -210,6 +217,10 @@ function buildRouteHandlerInit(
   // The resume cursor the request carried, ALREADY resolved by the api interpreter. Absent ⇒
   // init.resumeFrom omitted (a first request), which means "from the beginning".
   resumeFrom?: string,
+  // The door onto the PACK'S OWN platform tables, built by the deployment from the handle this
+  // invocation is bound to (see `pinnedConnectionOf`). Absent ⇒ `init.packDb` is omitted, which is
+  // what a deployment with no pack chain, and a deployment older than the contract, both look like.
+  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
@@ -218,6 +229,9 @@ function buildRouteHandlerInit(
     // deployment opts into — the journal exists for every deployment — so it is populated on every
     // invocation and the contract can promise it without an absence to model.
     journal: makeHandlerJournal(journalTdb),
+    // The pack's OWN-tables door. Spread so the field is ABSENT (not `undefined`) when the deployment
+    // injected no factory — the same shape rule every optional capability here follows.
+    ...(packDbFactory ? { packDb: packDbFactory(boundTdb) } : {}),
     // The incremental-response constructor. The engine's OWN `sseResponse`, injected rather than
     // re-implemented, so a handler that may import no runtime still builds the one branded envelope
     // the response discriminator keys on — and there is exactly one implementation of that brand.
@@ -307,6 +321,11 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL resume cursor — see invokeRouteHandler. Threaded identically so this posture receives
   // `init.resumeFrom` the same way the engine-tx posture does.
   resumeFrom?: string,
+  // The deployment's factory for the pack's OWN-tables door. Threaded identically on both postures:
+  // the ENGINE-TX one binds it to the transaction it opened (so a pack's statements are atomic with
+  // the route's and cannot deadlock against them), the DETACHED one to the pooled handle, and the
+  // factory reads which it was given from the handle itself rather than from a flag a caller sets.
+  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): Promise<unknown> {
   // Same buffer, bound to the BASE handle: this posture holds no engine transaction (that is its
   // whole reason for existing), so the flush below is its own standalone statement rather than the
@@ -333,6 +352,7 @@ export async function invokeRouteHandlerDetached(
     tts,
     bus?.emit,
     resumeFrom,
+    packDbFactory,
   );
   const result = await getHandlerRuntime().invokeRoute(fn, init);
   // Only on the success path — a throwing handler's buffered events are never written (the buffer

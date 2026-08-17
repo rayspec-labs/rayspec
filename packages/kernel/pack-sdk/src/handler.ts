@@ -93,6 +93,9 @@
  */
 
 import type { PackJournalReader } from './journal.js';
+// The door onto a pack's OWN platform tables. Declared with the service context because that is where
+// it was first handed out; named here because a handler now receives the same one — see `packDb`.
+import type { PackDatabase } from './service.js';
 
 /**
  * One row of a DECLARED store as a handler sees it — a plain, serializable record. The injected `id`
@@ -220,6 +223,42 @@ export interface PackHandlerInit {
   readonly tenantId: string;
   /** The tenant-bound, name-keyed door onto the stores the merged document declares. */
   readonly db: PackStoreDb;
+  /**
+   * The door onto the PLATFORM TABLES THIS PACK'S OWN MIGRATION CHAIN CREATED — a different thing
+   * from `db` above, which is the deployment's declared stores.
+   *
+   * A pack that declares `migrations: { dir, tablePrefix }` owns tables no store name reaches. Until
+   * this existed, only a `services[]` module could read them (`PackServiceContext['db']`), so the two
+   * contribution kinds did not compose: a pack could own tables and could contribute a route, and the
+   * route could not read a row the pack itself had written. The only way across was to capture a
+   * service's handle in a module variable at boot, which makes a handler depend on boot order, on a
+   * service having been declared at all, and on a value no contract promises.
+   *
+   * IT IS THE SAME DOOR A SERVICE GETS. Same parameterized `query`, same refusals, same posture: it
+   * does not rewrite a pack's SQL and it is NOT a tenant filter, because a pack runs in the
+   * deployment's process as a trusted, non-sandboxed author. **Scoping the statement is therefore the
+   * pack's job, and here it is dischargeable rather than merely stated** — `init.tenantId` above is
+   * server-derived and nothing a caller or a model can write reaches it, so a handler has, on the same
+   * object, both the obligation and the value that meets it. (A service context carries no `tenantId`
+   * at all and has to be handed one by the deployment; this is the better position of the two.)
+   *
+   * `transaction(fn)` DEPENDS ON WHERE THE HANDLER RUNS, and the difference is not a wart to work
+   * around but the truth about the two situations:
+   *   · in a ROUTE it is REFUSED, because the deployment already opened one around the invocation and
+   *     the statements are already atomic with the route's own. What a second one would be is not a
+   *     savepoint — it reserves another connection out of the same small pool while this request holds
+   *     one, which under load is a deadlock rather than a hazard. Do the work in the transaction you
+   *     are in, or split it into two.
+   *   · in a TOOL it OPENS one, because a tool holds no outer transaction (several tools of one turn
+   *     run concurrently, and an implicit wrapper would hold a connection across model latency).
+   *
+   * OPTIONAL because it is ADDITIVE: a deployment older than this contract injects none, so
+   * feature-detect (`if (!init.packDb) …`) and fail-close loudly rather than reading `undefined`. The
+   * deployment this ships with populates it on every invocation of both kinds — the optionality is
+   * about version skew, not a capability a deployment opts into. It is ALSO absent, on any version,
+   * for a pack that declares no migration chain: there are no tables of its own to open a door onto.
+   */
+  readonly packDb?: PackDatabase;
 }
 
 /**

@@ -139,6 +139,7 @@ export interface PackHandlerFragment {
 export interface PackHandlerInit {
     readonly tenantId: string;
     readonly db: PackStoreDb;
+    readonly packDb?: PackDatabase;
 }
 ```
 

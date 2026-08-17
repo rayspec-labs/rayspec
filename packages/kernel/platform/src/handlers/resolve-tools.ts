@@ -42,6 +42,7 @@ import type {
 } from '@rayspec/handler-sdk';
 import type { RaySpec, ToolSpecConfig } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import type { PackServiceDatabase } from '../extensions/pack-services.js';
 import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime, type ResolvedHandler } from './handler-runtime.js';
 import { makeHandlerDb } from './store-facade.js';
@@ -91,6 +92,10 @@ function buildNeutralTool(
   stt?: SttCapability,
   tts?: TtsCapability,
   emit?: EmitEvent,
+  // The door onto the PACK'S OWN platform tables. A tool holds no outer transaction — several tools of
+  // one turn run concurrently — so the factory is handed the POOLED handle here and its `transaction`
+  // opens one, where a route's refuses. Absent ⇒ `init.packDb` is omitted.
+  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): NeutralTool {
   return {
     spec: {
@@ -119,6 +124,9 @@ function buildNeutralTool(
         ...(tts ? { tts } : {}),
         // The tenant-bound event-bus emit (spread so ABSENT when the bus is not enabled).
         ...(emit ? { emit } : {}),
+        // The pack's OWN-tables door, spread so it is ABSENT rather than `undefined` when the
+        // deployment injected no factory — the shape rule every optional capability here follows.
+        ...(packDbFactory ? { packDb: packDbFactory(tdb) } : {}),
       };
       return getHandlerRuntime().invokeTool(fn, rawArgs, init);
     },
@@ -172,6 +180,10 @@ export function buildToolFactory(
   stt?: SttCapability,
   tts?: TtsCapability,
   eventBus?: TenantEventBus,
+  // The door onto the PACK'S OWN platform tables. A tool holds no outer transaction — several tools of
+  // one turn run concurrently — so the factory is handed the POOLED handle here and its `transaction`
+  // opens one, where a route's refuses. Absent ⇒ `init.packDb` is omitted.
+  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): ToolFactory {
   const toolById = new Map(spec.tooling.map((t) => [t.id, t]));
 
@@ -205,7 +217,18 @@ export function buildToolFactory(
     // the same per-run, tenant-bound construction `init.blob` gets.
     const emit = eventBus?.immediate(tdb);
     return resolved.map(({ tool, fn }) =>
-      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt, tts, emit),
+      buildNeutralTool(
+        tool,
+        fn,
+        tdb,
+        productTables,
+        blobFactory,
+        fsSourceFactory,
+        stt,
+        tts,
+        emit,
+        packDbFactory,
+      ),
     );
   };
 }

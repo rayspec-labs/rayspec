@@ -186,6 +186,9 @@ export function makeRouteHandler(args: {
   // shared, deployment-static read root the tool arm gets. Absent ⇒ `init.fsSource` is omitted (a
   // handler that reads it fail-closes loudly on `undefined`). Read once at registration.
   const fsSourceFactory = deps.engine?.fsSourceFactory;
+  // the pack-own-tables door factory the deployment wired onto the engine. Read once at
+  // registration, exactly as the fs-source factory above is.
+  const packDbFactory = deps.engine?.packDbFactory;
   // the speech-to-text capability the deployment wired onto the engine (`STT_PROVIDER`). When
   // present, a `{handler}` route receives `init.stt` — the same handle the tool arm gets. Absent ⇒
   // `init.stt` is omitted (a handler that reads it fail-closes loudly on `undefined`). Read once at
@@ -295,6 +298,12 @@ export function makeRouteHandler(args: {
       // omitted, which a handler reads as "from the beginning". UNTRUSTED CALLER DATA: an opaque
       // position marker the journal reader refuses if it did not issue it — never a tenant signal.
       resolveResumeCursor(c),
+      // the door onto the PACK'S OWN platform tables — the tables a pack's `migrations` chain
+      // created, which no store name reaches. Built by the deployment from whichever handle the
+      // posture above bound the invocation to, so a route inside the engine transaction runs its
+      // pack statements on THAT connection. Absent ⇒ init.packDb is omitted (no pack chain, or a
+      // deployment older than the contract), and a handler that needs it fail-closes on `undefined`.
+      packDbFactory,
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

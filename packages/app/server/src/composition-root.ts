@@ -82,6 +82,8 @@ import {
   migrationsDir,
   type PackMigrationChain,
   PackMigrationError,
+  pinnedConnectionOf,
+  type TenantDb,
 } from '@rayspec/db';
 import {
   crontabParseError,
@@ -109,6 +111,7 @@ import {
   makeJournalSink,
   makeTurnDispatch,
   type PackServiceContext,
+  type PackServiceDatabase,
   PackServiceError,
   type PackServicesHandle,
   parseSpecWithPacks,
@@ -148,7 +151,7 @@ import {
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
-import { makePackServiceDatabase } from './pack-service-db.js';
+import { makePackHandlerDatabase, makePackServiceDatabase } from './pack-service-db.js';
 import {
   deployProductYamlSpec,
   driftInspectedColumns,
@@ -2861,6 +2864,37 @@ async function deployDeclaredSpec(
   // refusal is re-raised HERE in the house form: it names the VARIABLE the operator has to fix, and a
   // BootConfigError is one of the classes the entrypoint prints message-only (serve.ts). Injected into
   // the engine in buildApp (below), like blobFactory.
+  /**
+   * THE DOOR ONTO A PACK'S OWN PLATFORM TABLES, for a contributed ROUTE or TOOL.
+   *
+   * A pack that declares `migrations: { dir, tablePrefix }` owns tables no store name reaches. Until
+   * this existed only a `services[]` module could read them, so a pack could own tables and could
+   * contribute a route, and the route could not read a row the pack itself had written — the two
+   * kinds did not compose. It is the SAME door a service gets (same `query`, same refusals, same
+   * posture: it does not rewrite a pack's SQL and is not a tenant filter, because a pack is a
+   * trusted, non-sandboxed author in this process). What a handler has that a service does not is a
+   * server-derived `init.tenantId`, so here the tenancy obligation is dischargeable rather than only
+   * stated.
+   *
+   * THE HANDLE DECIDES THE MOUNT, not the caller. A route runs inside the transaction the deployment
+   * opened; its pack statements must run on THAT connection, or they lose atomicity with the route's
+   * own writes AND take a second connection out of a pool this request is already holding one of —
+   * a deadlock under concurrency, not a hazard. `pinnedConnectionOf` reads which handle it was given
+   * and refuses rather than guessing if the driver ever changes shape.
+   *
+   * Built only when a loaded pack actually declares a chain: with none, there are no such tables and
+   * `init.packDb` is honestly absent.
+   */
+  const packDbFactory: ((tdb: TenantDb) => PackServiceDatabase) | undefined =
+    packMigrations.length > 0
+      ? (tdb: TenantDb) => {
+          const pinned = pinnedConnectionOf(tdb);
+          return pinned
+            ? makePackHandlerDatabase({ pinned: true, client: pinned })
+            : makePackHandlerDatabase({ pinned: false, db });
+        }
+      : undefined;
+
   let fsSourceFactory: FsSourceFactory | undefined;
   if (config.fsSourceRoot) {
     try {
@@ -3212,6 +3246,11 @@ async function deployDeclaredSpec(
               // Every one is spread-when-wired, so a deployment that configured none builds a
               // byte-identical registry to before.
               ...(fsSourceFactory ? { fsSourceFactory } : {}),
+              // Inject the door onto a PACK'S OWN platform tables so a contributed route or tool can
+              // read the rows its own migration chain created — until this, only a `services[]` module
+              // could, and the two contribution kinds did not compose. Spread so ABSENT when no loaded
+              // pack declares a chain, which is the only honest answer then: there are no such tables.
+              ...(packDbFactory ? { packDbFactory } : {}),
               ...(sttCapability ? { sttCapability } : {}),
               ...(ttsCapability ? { ttsCapability } : {}),
               // `eventBus` is DELIBERATELY NOT threaded here, and it is the one capability that
@@ -3253,6 +3292,11 @@ async function deployDeclaredSpec(
             // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
             // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
             ...(fsSourceFactory ? { fsSourceFactory } : {}),
+            // Inject the door onto a PACK'S OWN platform tables so a contributed route or tool can
+            // read the rows its own migration chain created — until this, only a `services[]` module
+            // could, and the two contribution kinds did not compose. Spread so ABSENT when no loaded
+            // pack declares a chain, which is the only honest answer then: there are no such tables.
+            ...(packDbFactory ? { packDbFactory } : {}),
             // Inject the media-token service (when wired) so the playback arm's 2nd auth path
             // + the mint capability are available. Spread so ABSENT for a no-playback spec.
             ...(mediaTokenService ? { mediaTokenService } : {}),

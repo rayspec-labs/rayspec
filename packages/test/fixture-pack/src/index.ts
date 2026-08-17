@@ -86,6 +86,16 @@ const fixturePack: DefinedPack = defineExtension({
         kind: 'route',
         readonly: true,
       },
+      // The route that reads THIS pack's OWN table — the one contribution the pack could not make
+      // until a handler was handed the door onto the tables its migration chain creates. `readonly`
+      // like its siblings: it counts rows and writes none.
+      {
+        id: 'fixture_pack_count_audit_events',
+        module: 'handlers/count-audit-events.ts',
+        export: 'countAuditEvents',
+        kind: 'route',
+        readonly: true,
+      },
     ],
     api: [
       {
@@ -101,6 +111,13 @@ const fixturePack: DefinedPack = defineExtension({
         method: 'GET',
         path: '/ext/fixture-pack/journal/{run_id}',
         action: { kind: 'handler', handler: 'fixture_pack_replay_journal' },
+      },
+      // Same namespace, same chain, same auth: what differs is that this one's handler reads a table
+      // this pack owns rather than echoing a parameter.
+      {
+        method: 'GET',
+        path: '/ext/fixture-pack/audit/count',
+        action: { kind: 'handler', handler: 'fixture_pack_count_audit_events' },
       },
     ],
     // The TOOL contribution, wired to the handler id above. It is declared without an agent to

@@ -189,6 +189,92 @@ function asPackRefusal(error: unknown): unknown {
 }
 
 /**
+ * The transaction handle the driver hands `client.begin`'s callback, as the ONE member this door uses.
+ *
+ * Deriving it (`Parameters<Parameters<Db['$client']['begin']>[0]>[0]`) does not work and the reason is
+ * worth leaving here: `begin` is OVERLOADED, `Parameters<>` resolves the LAST overload, and that one
+ * takes `(options: string, cb)` — so the derivation silently yields `string`. Spelled structurally
+ * instead, and as a METHOD rather than a property: method parameters are compared bivariantly, which
+ * is what lets the driver's own richer `unsafe` satisfy it. Written as a property (`unsafe: (…) => …`)
+ * `strictFunctionTypes` compares them contravariantly and the driver's handle is REFUSED — measured,
+ * on the first attempt at this type.
+ *
+ * The narrowness is the point: this door calls exactly one method on the handle, so that is all the
+ * type asks for, and `postgres` stays a non-dependency of this package.
+ */
+interface PinnedSql {
+  unsafe(
+    sql: string,
+    params: never[],
+    options: { prepare?: boolean | undefined },
+  ): Promise<unknown>;
+}
+
+/**
+ * The handle a pack holds INSIDE a transaction — the pinned half, extracted so there is exactly one
+ * of it. Two callers build it and they are the same situation seen from two sides:
+ *
+ *   · `makePackServiceDatabase` below, for the transaction IT opened on a reserved connection;
+ *   · `makePackHandlerDatabase`, for the transaction the DEPLOYMENT already opened around a route —
+ *     where the connection is pinned by the request rather than by this door.
+ *
+ * They are one implementation because they are one contract: a statement a pack writes inside a
+ * transaction is the statement it writes outside one, and the refusals do not change with who opened
+ * it. In particular `transaction` refuses in BOTH — the message is the same because the situation is
+ * the same, and its advice ("do the work in the transaction you are in, or split it into two") is
+ * exactly the advice a route author needs. What the driver would do instead is not a savepoint: it
+ * reserves a SECOND connection out of the same four-connection pool and opens an independent
+ * transaction, which commits even when the outer one rolls back and blocks forever on any row the
+ * outer one holds. Around a ROUTE that is not a hazard but a certainty under load — the request
+ * already holds one of those four for its whole duration.
+ */
+function pinnedPackDatabase(tx: PinnedSql): PackServiceDatabase {
+  return {
+    query: async (sql: string, params: readonly unknown[] = []) => {
+      refuseTransactionControl(sql, PINNED_CONSEQUENCE);
+      try {
+        return (await tx.unsafe(sql, params as never[], EXTENDED_PROTOCOL)) as unknown as Record<
+          string,
+          unknown
+        >[];
+      } catch (e) {
+        throw asPackRefusal(e);
+      }
+    },
+    transaction: async () => {
+      throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
+    },
+  };
+}
+
+/**
+ * The door a pack's ROUTE or TOOL handler holds onto the platform tables its OWN migration chain
+ * created — the gap a pack could otherwise only close by smuggling a service's handle out of boot.
+ *
+ * IT IS THE SAME DOOR A SERVICE GETS, deliberately: same parameterized `query`, same three refusals,
+ * same posture. The door does not rewrite a pack's SQL and is not a tenant filter, exactly as the
+ * service door is not — a pack runs in the deployment's process as a trusted, non-sandboxed author.
+ * What differs, and it cuts in the handler's favour, is that a handler init carries a SERVER-DERIVED
+ * `tenantId` while a service context carries none: the tenancy obligation is not merely stated here,
+ * it is dischargeable, and `init.tenantId` is what discharges it.
+ *
+ * `pinned` decides the mount, and the caller knows which because it knows which posture it is in:
+ *   · a route inside the deployment's engine transaction ⇒ the connection that transaction holds, so
+ *     the pack's statements are atomic with the route's own and cannot deadlock against them;
+ *   · a route on the detached posture, and every tool ⇒ the pooled executor, because neither holds a
+ *     transaction to join.
+ */
+export function makePackHandlerDatabase(
+  connection:
+    | { readonly pinned: true; readonly client: Parameters<typeof pinnedPackDatabase>[0] }
+    | { readonly pinned: false; readonly db: Db },
+): PackServiceDatabase {
+  return connection.pinned
+    ? pinnedPackDatabase(connection.client)
+    : makePackServiceDatabase(connection.db);
+}
+
+/**
  * Build the database door over the deployment's one raw handle.
  *
  * `query` is the pooled executor. `transaction` reserves a connection for the callback, commits when
@@ -259,23 +345,9 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
         return (await client.begin(async (tx) =>
           insideTransaction.run(scope, async () => {
             try {
-              return await fn({
-                query: async (sql: string, params: readonly unknown[] = []) => {
-                  refuseTransactionControl(sql, PINNED_CONSEQUENCE);
-                  try {
-                    return (await tx.unsafe(
-                      sql,
-                      params as never[],
-                      EXTENDED_PROTOCOL,
-                    )) as unknown as Record<string, unknown>[];
-                  } catch (e) {
-                    throw asPackRefusal(e);
-                  }
-                },
-                transaction: async () => {
-                  throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
-                },
-              });
+              // The SAME pinned handle a route is handed. One implementation, so the refusals a pack
+              // meets inside a transaction cannot drift apart depending on who opened it.
+              return await fn(pinnedPackDatabase(tx));
             } finally {
               // Ends the refusal with the callback — a context it created and left running is not
               // nesting once the transaction is over, and must not be refused as if it were.

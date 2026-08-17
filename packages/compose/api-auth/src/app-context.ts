@@ -12,11 +12,12 @@
 import type { HttpBindings } from '@hono/node-server';
 import type { JwksProvider, RateLimiter, TokenSigner } from '@rayspec/auth-core';
 import type { AgentSpec, Backend, BackendId, NeutralTool } from '@rayspec/core';
-import type { Db, StoreConflictKeys } from '@rayspec/db';
+import type { Db, StoreConflictKeys, TenantDb } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   DurableExecutor,
   FsSourceFactory,
+  PackServiceDatabase,
   ResolvedHandler,
   SttCapability,
   TenantEventBus,
@@ -165,6 +166,22 @@ export interface DeclarativeEngine {
    * root ⇒ available to every handler; unset ⇒ absent. NOT tenant-partitioned (see `FsSource`).
    */
   fsSourceFactory?: FsSourceFactory;
+  /**
+   * the composition-root factory for the door onto a PACK'S OWN platform tables — the tables a pack's
+   * `migrations: { dir, tablePrefix }` chain created, which no store name reaches and which, before
+   * this, only a `services[]` module could read. A route or tool handler receives the result as
+   * `init.packDb`.
+   *
+   * It takes the handle the INVOCATION is bound to, not a tenant id, and that is the whole point: a
+   * route runs inside the transaction the deployment opened, so its pack statements have to run on
+   * THAT connection — atomic with the route's own writes, and not blocking on them from a second
+   * connection out of the same small pool. The factory reads which handle it was given from the
+   * handle itself (`pinnedConnectionOf`), so no caller can claim the wrong posture.
+   *
+   * OPTIONAL: absent when the deployment loaded no pack with a migration chain — a handler that reads
+   * `init.packDb` then fail-closes loudly on `undefined`.
+   */
+  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase;
   /**
    * the composition-root `SttCapability` — the speech-to-text handle a tool/route handler
    * receives as `init.stt` (transcribe audio bytes the handler already holds; no tenant arg, since it

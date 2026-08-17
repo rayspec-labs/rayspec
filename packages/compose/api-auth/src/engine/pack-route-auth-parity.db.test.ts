@@ -117,10 +117,12 @@ async function mergedSpec(): Promise<{
     packsRoot: PACK_DIR,
     deploymentRoot: PACK_DIR,
   });
-  // BOTH contributed routes are registered: the JSON one and the INCREMENTAL one. Asserting the set
-  // rather than a count is what makes the third arm of every refusal below a real route rather than a
-  // path that quietly stopped existing.
+  // EVERY contributed route is registered: the JSON one, the INCREMENTAL one, and the one that reads
+  // this pack's OWN table. Asserting the SET rather than a count is what makes each arm below a real
+  // route rather than a path that quietly stopped existing — and it is why adding the third one had
+  // to be done here too, deliberately, instead of a count silently absorbing it.
   expect(loaded.api.map((r) => r.path).sort()).toEqual([
+    '/ext/fixture-pack/audit/count',
     '/ext/fixture-pack/journal/{run_id}',
     '/ext/fixture-pack/turns/{turn_id}',
   ]);
