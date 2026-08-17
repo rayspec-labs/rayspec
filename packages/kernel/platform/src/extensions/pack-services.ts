@@ -27,8 +27,9 @@
  * customer. The services that DID boot are shut down again, in reverse, before the failure is raised —
  * a refused boot must not leave a timer or a connection running behind it.
  */
-import type { HandlerJournal } from '@rayspec/handler-sdk';
+
 import { operatorSafeDbErrorMessage } from '@rayspec/db';
+import type { HandlerJournal } from '@rayspec/handler-sdk';
 import type { TurnDispatch } from '../turn-dispatch.js';
 
 /**
