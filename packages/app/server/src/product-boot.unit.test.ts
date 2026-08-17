@@ -2224,6 +2224,498 @@ describe('routePresentMatchingUpdate — a name the SAME delta re-creates settle
       absent: [],
     });
   });
+
+  it('RESIDUAL (pinned, not endorsed): a half-landed rename CHAIN routes to APPLY', async () => {
+    // `a → b; b → c` with only `b` live is HALF landed: the first rename ran, the second did not. The
+    // boot measures each rename by the name it renames AWAY; `a` is gone, which proves nothing under
+    // the standing rule (an object that never existed is gone too), so the only reading left is
+    // "b is still there ⇒ the second rename has not run" — un-landed, with no landed evidence beside
+    // it, which is APPLY. Measured on real Postgres: re-running `ALTER TABLE "a" RENAME TO "b"` raises
+    // 42P01 (`relation "a" does not exist`) and the boot exits before serving.
+    //
+    // Neither fix in this revision settles it: what would is reading `b` — a name the delta itself
+    // brings into existence — as evidence that the FIRST rename ran, which is a THIRD rule and not one
+    // this change measured. Pinned as it BEHAVES so that closing it lands as a visible diff; it is a
+    // known gap, not a guarantee.
+    const chain = mig(
+      'ALTER TABLE "a" RENAME TO "b";\n--> statement-breakpoint\nALTER TABLE "b" RENAME TO "c";',
+      [
+        { kind: 'rename-table', match: 'ALTER TABLE "a" RENAME TO "b"', reason: 'reviewed' },
+        { kind: 'rename-table', match: 'ALTER TABLE "b" RENAME TO "c"', reason: 'reviewed' },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(chain, live(new Set(['b'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+    // The two states the chain actually reaches are read correctly, which is why this is a gap in the
+    // half-landed guarantee rather than in the applied-vs-unapplied one.
+    expect(await routePresentMatchingUpdate(chain, live(new Set(['a'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+    expect(await routePresentMatchingUpdate(chain, live(new Set(['c'])))).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: [], proven: [] },
+    });
+  });
+});
+
+/**
+ * "Is this object EVIDENCE that the delta ran?" and "does the delta leave that NAME standing?" are two
+ * questions, and ONE extractor was answering both. Its `IF NOT EXISTS` exclusion is right for the first
+ * — an idempotent statement's object may predate the delta — and plainly wrong for the second: after
+ * `CREATE TABLE IF NOT EXISTS "t"` the schema holds `t` either way.
+ *
+ * That mattered more than the plain spelling does, because `CREATE TABLE IF NOT EXISTS` is what
+ * drizzle-kit emits: every recycled-name reading the previous revision added was hollow against a real
+ * generated delta. Each shape below returned the SAME answer in BOTH schema states before the fix, so
+ * nothing about the reading could have been right; each has its plain-spelling accept control beside it,
+ * which behaved correctly throughout and must keep doing so.
+ */
+describe('routePresentMatchingUpdate — an IF NOT EXISTS create leaves the name standing too', () => {
+  const mig = (sql: string, allowlist: PlannedMigration['allowlist'] = []): PlannedMigration[] => [
+    { name: 'd.sql', sql, allowlist },
+  ];
+  const live = (names: ReadonlySet<string>) => async (p: SchemaObjectProbe) =>
+    names.has(
+      p.kind === 'table'
+        ? p.table
+        : p.kind === 'column'
+          ? `${p.table}.${p.column}`
+          : p.kind === 'index'
+            ? p.index
+            : `${p.table}#${p.constraint}`,
+    );
+  const NOTHING = { present: [], gone: [], renamed: [], proven: [] };
+
+  const recycledRename = (create: string) =>
+    mig(`ALTER TABLE "parts" RENAME TO "parts_archive";\n--> statement-breakpoint\n${create}`, [
+      {
+        kind: 'rename-table',
+        match: 'ALTER TABLE "parts" RENAME TO "parts_archive"',
+        reason: 'reviewed',
+      },
+    ]);
+
+  it('a RENAME beside a CREATE TABLE IF NOT EXISTS that takes the freed name: MOUNT when applied', async () => {
+    // RED, both states → {kind:'apply'}: the delta had FULLY landed and the boot re-ran the rename.
+    // On real Postgres that raises 42P07 (`relation "parts_archive" already exists`) and under
+    // Restart=always the boot never serves.
+    expect(
+      await routePresentMatchingUpdate(
+        recycledRename('CREATE TABLE IF NOT EXISTS "parts" ("id" uuid PRIMARY KEY);'),
+        live(new Set(['parts', 'parts_archive'])),
+      ),
+    ).toEqual({
+      kind: 'mount',
+      probed: { ...NOTHING, renamed: ['table "parts_archive"'] },
+    });
+  });
+
+  it('…and APPLY when it never ran — the same delta, the other state', async () => {
+    expect(
+      await routePresentMatchingUpdate(
+        recycledRename('CREATE TABLE IF NOT EXISTS "parts" ("id" uuid PRIMARY KEY);'),
+        live(new Set(['parts'])),
+      ),
+    ).toEqual({ kind: 'apply', absent: [] });
+  });
+
+  it('ACCEPT CONTROL: the plain CREATE spelling of the same delta reads identically', async () => {
+    const plain = recycledRename('CREATE TABLE "parts" ("id" uuid PRIMARY KEY);');
+    expect(
+      await routePresentMatchingUpdate(plain, live(new Set(['parts', 'parts_archive']))),
+    ).toEqual({ kind: 'mount', probed: { ...NOTHING, renamed: ['table "parts_archive"'] } });
+    expect(await routePresentMatchingUpdate(plain, live(new Set(['parts'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+  });
+
+  it('a DROP beside a CREATE TABLE IF NOT EXISTS of the same name claims NOTHING', async () => {
+    // RED → {kind:'apply'} in both states, which re-ran `DROP TABLE "scratch"` over the table the same
+    // delta had just re-created. Measured on real Postgres: seed 3 rows → apply once (1 row) → apply
+    // again → 0 rows, on every restart. The name stands at BOTH ends, so nothing here settles it.
+    const rebuild = mig(
+      'DROP TABLE "scratch";\n--> statement-breakpoint\n' +
+        'CREATE TABLE IF NOT EXISTS "scratch" ("id" uuid PRIMARY KEY);',
+      [{ kind: 'drop-table', match: 'DROP TABLE "scratch"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(rebuild, live(new Set(['scratch'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+    const logs: string[] = [];
+    await planUpdateBoot(
+      'present-matching',
+      rebuild,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set(['scratch'])),
+    );
+    expect(logs[0]).toMatch(/frees and puts BACK/);
+    expect(logs[0]).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  it('the RENAME COLUMN + ADD COLUMN IF NOT EXISTS shape reads both directions', async () => {
+    const recycled = mig(
+      'ALTER TABLE "parts" RENAME COLUMN "note" TO "note_legacy";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "parts" ADD COLUMN IF NOT EXISTS "note" text;',
+      [
+        {
+          kind: 'rename-column',
+          match: 'ALTER TABLE "parts" RENAME COLUMN "note" TO "note_legacy"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(
+      await routePresentMatchingUpdate(
+        recycled,
+        live(new Set(['parts.note', 'parts.note_legacy'])),
+      ),
+    ).toEqual({
+      kind: 'mount',
+      probed: { ...NOTHING, renamed: ['column "parts"."note_legacy"'] },
+    });
+    expect(await routePresentMatchingUpdate(recycled, live(new Set(['parts.note'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+  });
+
+  it('an IF EXISTS drop beside an IF NOT EXISTS create of the same name claims NOTHING', async () => {
+    // RED → {kind:'apply'}: the target is still there, but it is there at both ends, so "still there"
+    // was never evidence. Idempotent on both sides and STILL not a delta whose state is readable.
+    const both = mig(
+      'DROP TABLE IF EXISTS "scratch";\n--> statement-breakpoint\n' +
+        'CREATE TABLE IF NOT EXISTS "scratch" ("id" uuid PRIMARY KEY);',
+      [{ kind: 'drop-table', match: 'DROP TABLE IF EXISTS "scratch"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(both, live(new Set(['scratch'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+  });
+
+  it('the INDEX pair reads the same way — DROP INDEX beside CREATE INDEX IF NOT EXISTS', async () => {
+    const recycledIndex = mig(
+      'DROP INDEX "parts_label_idx";\n--> statement-breakpoint\n' +
+        'CREATE INDEX IF NOT EXISTS "parts_label_idx" ON "parts" ("label");',
+      [{ kind: 'drop-index', match: 'DROP INDEX "parts_label_idx"', reason: 'reviewed' }],
+    );
+    expect(
+      await routePresentMatchingUpdate(recycledIndex, live(new Set(['parts_label_idx']))),
+    ).toEqual({ kind: 'mount', probed: NOTHING });
+  });
+
+  it('ACCEPT CONTROL: an IF NOT EXISTS create is still no EVIDENCE on its own', async () => {
+    // The rule the OTHER question keeps: the object may predate the delta, so its presence proves
+    // nothing about whether THIS delta ran. Standing-ness and evidence stay separate readings.
+    expect(extractAdditiveObjects('CREATE TABLE IF NOT EXISTS "parts" ("id" uuid);')).toEqual([]);
+    expect(extractAdditiveObjects('CREATE INDEX IF NOT EXISTS "i" ON "parts" ("label");')).toEqual(
+      [],
+    );
+    expect(
+      extractAdditiveObjects('ALTER TABLE "parts" ADD COLUMN IF NOT EXISTS "n" text;'),
+    ).toEqual([]);
+    // …while the plain spellings are, exactly as before.
+    expect(extractAdditiveObjects('CREATE TABLE "parts" ("id" uuid);')).toEqual([
+      { kind: 'table', table: 'parts' },
+    ]);
+  });
+
+  it('ONE statement can free a name and put it back — every member clause is read', async () => {
+    // RED → {kind:'apply'} with the column PRESENT, so a leftover env wiped `note` on every restart —
+    // while the identical change written as two statements mounted. `additiveObject` was anchored at
+    // the first member clause, so the `ADD COLUMN` half of this statement was invisible.
+    const oneStatement = mig('ALTER TABLE "parts" DROP COLUMN "note", ADD COLUMN "note" text;', [
+      {
+        kind: 'drop-column',
+        match: 'ALTER TABLE "parts" DROP COLUMN "note", ADD COLUMN "note" text',
+        reason: 'reviewed',
+      },
+    ]);
+    expect(await routePresentMatchingUpdate(oneStatement, live(new Set(['parts.note'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+    // ACCEPT CONTROL: the SAME change as two statements, which always read this way.
+    const twoStatements = mig(
+      'ALTER TABLE "parts" DROP COLUMN "note";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "parts" ADD COLUMN "note" text;',
+      [
+        {
+          kind: 'drop-column',
+          match: 'ALTER TABLE "parts" DROP COLUMN "note"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(twoStatements, live(new Set(['parts.note'])))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+  });
+
+  it('a multi-clause statement whose DROP is not its FIRST clause is read, not refused', async () => {
+    // RED → {kind:'refuse', reason:"an unparseable drop-column statement (…)"} in BOTH states: the
+    // destructive reader was anchored at the first member clause too, so this statement — which drizzle
+    // applies fine — refused the boot PERMANENTLY, with no restart able to clear it.
+    const addThenDrop = mig('ALTER TABLE "parts" ADD COLUMN "hand" text, DROP COLUMN "note";', [
+      {
+        kind: 'drop-column',
+        match: 'ALTER TABLE "parts" ADD COLUMN "hand" text, DROP COLUMN "note"',
+        reason: 'reviewed',
+      },
+    ]);
+    expect(await routePresentMatchingUpdate(addThenDrop, live(new Set(['parts.note'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+    expect(await routePresentMatchingUpdate(addThenDrop, live(new Set(['parts.hand'])))).toEqual({
+      kind: 'mount',
+      probed: { ...NOTHING, gone: ['column "parts"."note"'] },
+    });
+    // …and the target it reads is the one the DROP clause names, whichever clause carries it.
+    expect(
+      extractDestructiveTarget(
+        'drop-column',
+        'ALTER TABLE "parts" ADD COLUMN "hand" text, DROP COLUMN "note"',
+      ),
+    ).toEqual({ kind: 'drop-column', table: 'parts', column: 'note' });
+    expect(
+      extractDestructiveTarget(
+        'drop-constraint',
+        'ALTER TABLE "parts" ADD COLUMN "hand" text, DROP CONSTRAINT "parts_label_fk"',
+      ),
+    ).toEqual({ kind: 'drop-constraint', table: 'parts', constraint: 'parts_label_fk' });
+  });
+
+  it('a comma INSIDE a type, an identifier or a literal does not open a new clause', async () => {
+    // The clause split is depth- and literal-aware, or `numeric(10,2)` would read as two clauses and a
+    // DEFAULT string could spell one into existence.
+    expect(
+      extractDestructiveTarget(
+        'drop-column',
+        'ALTER TABLE "parts" ADD COLUMN "amount" numeric(10,2) DEFAULT 0, DROP COLUMN "note"',
+      ),
+    ).toEqual({ kind: 'drop-column', table: 'parts', column: 'note' });
+    expect(
+      extractDestructiveTarget(
+        'drop-column',
+        `ALTER TABLE "parts" ADD COLUMN "n" text DEFAULT 'x, DROP COLUMN "spoof"', DROP COLUMN "note"`,
+      ),
+    ).toEqual({ kind: 'drop-column', table: 'parts', column: 'note' });
+    // A name inside a literal never becomes a name the delta leaves standing, either.
+    const spoof = mig(
+      `ALTER TABLE "parts" DROP COLUMN "note";\n--> statement-breakpoint\n` +
+        `INSERT INTO "audit" ("what") VALUES ('ALTER TABLE "parts" ADD COLUMN "note" text');`,
+      [
+        {
+          kind: 'drop-column',
+          match: 'ALTER TABLE "parts" DROP COLUMN "note"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(spoof, live(new Set(['parts.note'])))).toEqual({
+      kind: 'apply',
+      absent: [],
+    });
+  });
+});
+
+/**
+ * The mirror of the rule above, on the destructive side: a `DROP` whose target the SAME delta CREATEs
+ * is GONE before the delta and gone after it, so its absence is not evidence that the `DROP` ran.
+ *
+ * The `stillThere` branch already withheld the presence reading for a name the delta leaves standing;
+ * the `gone` branch had no such guard at all, and an ordinary staging-table delta — create a backup
+ * table, do the work, drop the backup — therefore reported its own un-created table as ALREADY LANDED.
+ * Beside one genuinely un-landed object that is a HALF-LANDED refusal: the boot never serves, and no
+ * restart clears it. commit f92d2c4 wrote exactly this rule for `IF EXISTS` ("absence proves nothing,
+ * the target may never have existed"); here it is not even a "may" — the delta creates the target two
+ * statements earlier.
+ */
+describe('routePresentMatchingUpdate — a DROP target the SAME delta creates proves nothing when gone', () => {
+  const mig = (sql: string, allowlist: PlannedMigration['allowlist'] = []): PlannedMigration[] => [
+    { name: 'd.sql', sql, allowlist },
+  ];
+  const live = (names: ReadonlySet<string>) => async (p: SchemaObjectProbe) =>
+    names.has(
+      p.kind === 'table' ? p.table : p.kind === 'index' ? p.index : `${p.table}.${p.column}`,
+    );
+  const NOTHING = { present: [], gone: [], renamed: [], proven: [] };
+
+  const STAGING = mig(
+    'CREATE TABLE "parts_backup" ("id" uuid, "label" text);\n--> statement-breakpoint\n' +
+      'CREATE INDEX "parts_label_idx" ON "parts" ("label");\n--> statement-breakpoint\n' +
+      'DROP TABLE "parts_backup";',
+    [{ kind: 'drop-table', match: 'DROP TABLE "parts_backup"', reason: 'reviewed' }],
+  );
+
+  it('a NEVER-APPLIED staging delta is APPLIED, not refused as half landed', async () => {
+    // RED → {kind:'refuse-half-landed', landed:['table "parts_backup" … it is GONE'],
+    //        unlanded:['index "parts_label_idx" … it is NOT there']}
+    // for a delta that had plainly never run: the boot never served, and no restart cleared it.
+    expect(await routePresentMatchingUpdate(STAGING, live(new Set()))).toEqual({
+      kind: 'apply',
+      absent: ['index "parts_label_idx"'],
+    });
+  });
+
+  it('…and the FULLY-APPLIED one still mounts, on the evidence that remains', async () => {
+    expect(await routePresentMatchingUpdate(STAGING, live(new Set(['parts_label_idx'])))).toEqual({
+      kind: 'mount',
+      probed: { ...NOTHING, present: ['index "parts_label_idx"'] },
+    });
+  });
+
+  it('the boot SERVES the never-applied one instead of throwing HALF LANDED', async () => {
+    const logs: string[] = [];
+    const plan = await planUpdateBoot(
+      'present-matching',
+      STAGING,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set()),
+    );
+    expect(plan.deployMode).toBe('updated');
+    expect(plan.migrations).toBe(STAGING);
+    expect(logs.join('\n')).toMatch(/index "parts_label_idx"/);
+    expect(logs.join('\n')).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  it('the same delta WITHOUT the index no longer calls a never-applied env stale', async () => {
+    // RED → {kind:'mount', probed:{gone:['table "parts_backup"']}} and a log telling the operator to
+    // REMOVE the env: a probe result claimed for an object the delta itself had not created yet.
+    const noIndex = mig(
+      'CREATE TABLE "parts_backup" ("id" uuid);\n--> statement-breakpoint\nDROP TABLE "parts_backup";',
+      [{ kind: 'drop-table', match: 'DROP TABLE "parts_backup"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(noIndex, live(new Set()))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+    const logs: string[] = [];
+    await planUpdateBoot(
+      'present-matching',
+      noIndex,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set()),
+    );
+    expect(logs[0]).toMatch(/nothing in this boot can tell you/);
+    expect(logs[0]).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+
+  it('ACCEPT CONTROL: a DROP target the delta does NOT create is still landed evidence when gone', async () => {
+    // The reading this must not switch off — the whole reason the `gone` pile exists.
+    const plain = mig(
+      'DROP TABLE "highlights";\n--> statement-breakpoint\n' +
+        'CREATE INDEX "parts_label_idx" ON "parts" ("label");',
+      [{ kind: 'drop-table', match: 'DROP TABLE "highlights"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(plain, live(new Set(['parts_label_idx'])))).toEqual({
+      kind: 'mount',
+      probed: { ...NOTHING, present: ['index "parts_label_idx"'], gone: ['table "highlights"'] },
+    });
+    // …and half-landed on that same evidence, which is the guarantee the shipped copy makes.
+    expect(await routePresentMatchingUpdate(plain, live(new Set()))).toEqual({
+      kind: 'refuse-half-landed',
+      landed: ['table "highlights" — a reviewed DROP in the delta names it, and it is GONE'],
+      unlanded: ['index "parts_label_idx" — a CREATE in the delta names it, and it is NOT there'],
+    });
+  });
+
+  it('a DROP + re-CREATE of the same name claims nothing in the ABSENT state either', async () => {
+    // The reviewer's note 4. The additive evidence for a recycled name was already suppressed (the name
+    // stands at both ends) while the destructive evidence for the SAME name was not, so an absent `t`
+    // mounted with `gone:['table "t"']` and told the operator the env was stale — a landed claim for a
+    // state that is neither end of the delta. Both directions are suppressed now, and the log says so.
+    // The delta's two REACHABLE states (never-applied and fully-applied, both with `t` present) keep
+    // the deliberate mount this revision's predecessor introduced; see the limit pinned above.
+    const rebuild = mig(
+      'DROP TABLE "t";\n--> statement-breakpoint\nCREATE TABLE "t" ("id" uuid PRIMARY KEY);',
+      [{ kind: 'drop-table', match: 'DROP TABLE "t"', reason: 'reviewed' }],
+    );
+    expect(await routePresentMatchingUpdate(rebuild, live(new Set()))).toEqual({
+      kind: 'mount',
+      probed: NOTHING,
+    });
+    const logs: string[] = [];
+    await planUpdateBoot(
+      'present-matching',
+      rebuild,
+      '/tmp/acme.product.yaml',
+      (m) => logs.push(m),
+      live(new Set()),
+    );
+    expect(logs[0]).toMatch(/nothing in this boot can tell you/);
+    expect(logs[0]).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+  });
+});
+
+/**
+ * BOTH halves of the router read the SAME statement split.
+ *
+ * The additive half read `splitMigrationStatements` (breakpoint-first, the boundaries drizzle's own
+ * `readMigrationFiles` uses); the destructive half read the findings of `scanMigrationSql`, which
+ * stripped comments FIRST and so swallowed a `--> statement-breakpoint` marker together with the
+ * statement in front of it. A delta separated by markers with NO trailing semicolons — which drizzle
+ * applies fine — was therefore REFUSED with "an unparseable drop-table statement" whose text was two
+ * statements merged into one. Fail-closed, but PERMANENT.
+ */
+describe('routePresentMatchingUpdate — both halves read the breakpoint-first split', () => {
+  const live = (names: ReadonlySet<string>) => async (p: SchemaObjectProbe) =>
+    names.has(
+      p.kind === 'table' ? p.table : p.kind === 'index' ? p.index : `${p.table}.${p.column}`,
+    );
+  // No trailing `;` anywhere — the marker is the only boundary, exactly as drizzle reads it.
+  const NO_SEMICOLONS: PlannedMigration[] = [
+    {
+      name: 'd.sql',
+      sql:
+        'DROP TABLE "highlights"\n--> statement-breakpoint\n' +
+        'CREATE INDEX "parts_label_idx" ON "parts" ("label")',
+      allowlist: [{ kind: 'drop-table', match: 'DROP TABLE "highlights"', reason: 'reviewed' }],
+    },
+  ];
+
+  it('a marker-separated delta with no semicolons routes, instead of refusing forever', async () => {
+    // RED, both states → {kind:'refuse', reason:'an unparseable drop-table statement
+    //   (\'DROP TABLE "highlights" CREATE INDEX "parts_label_idx" ON "parts" ("label")\')'}
+    expect(await routePresentMatchingUpdate(NO_SEMICOLONS, live(new Set(['highlights'])))).toEqual({
+      kind: 'apply',
+      absent: ['index "parts_label_idx"'],
+    });
+    expect(
+      await routePresentMatchingUpdate(NO_SEMICOLONS, live(new Set(['parts_label_idx']))),
+    ).toEqual({
+      kind: 'mount',
+      probed: {
+        present: ['index "parts_label_idx"'],
+        gone: ['table "highlights"'],
+        renamed: [],
+        proven: [],
+      },
+    });
+  });
+
+  it('…and the reviewed allowlist entry covers it, because the gate reads the same statement', async () => {
+    // The other half of the same defect: an allowlist entry must equal a WHOLE statement, so against
+    // the merged text the reviewed `DROP TABLE "highlights"` could never have been covered at all.
+    const plan = await planUpdateBoot(
+      'present-matching',
+      NO_SEMICOLONS,
+      '/tmp/acme.product.yaml',
+      () => {},
+      live(new Set(['highlights'])),
+    );
+    expect(plan.deployMode).toBe('updated');
+  });
 });
 
 /**

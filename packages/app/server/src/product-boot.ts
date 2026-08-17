@@ -666,6 +666,66 @@ function afterDropKeyword(
 }
 
 /**
+ * Split an `ALTER TABLE`'s member list into its comma-separated CLAUSES — one statement may carry
+ * several (`ALTER TABLE "t" DROP COLUMN "note", ADD COLUMN "note" text`), and a reader anchored at the
+ * FIRST of them decides the whole statement on a fraction of what it says.
+ *
+ * Only a comma at nesting depth ZERO and outside every literal separates two clauses: a type's own
+ * comma (`numeric(10,2)`), an index expression's, an `ADD CONSTRAINT … ("a", "b")` column list's and a
+ * comma inside a quoted identifier or a string / dollar-quoted body are all INSIDE something. Each
+ * clause comes back with the one leading space the member-clause keywords (`^\s+ADD …`) anchor on, so
+ * a clause reads identically whether it was the first or the fifth.
+ *
+ * An unterminated quote runs to the end of the input, which yields ONE unreadable clause rather than a
+ * plausible-looking wrong split — the whole-or-nothing rule {@link readIdentifier} enforces, applied a
+ * level up: the caller gets a clause it cannot read a name out of, and claims nothing for it.
+ */
+function memberClauses(memberList: string): string[] {
+  const clauses: string[] = [];
+  let depth = 0;
+  let start = 0;
+  let i = 0;
+  const runTo = (close: string, escapedByDoubling: boolean): void => {
+    i += 1;
+    while (i < memberList.length) {
+      if (memberList[i] === close) {
+        if (escapedByDoubling && memberList[i + 1] === close) {
+          i += 2;
+          continue;
+        }
+        i += 1;
+        return;
+      }
+      i += 1;
+    }
+  };
+  while (i < memberList.length) {
+    const ch = memberList[i] as string;
+    if (ch === '"' || ch === "'") {
+      runTo(ch, true);
+      continue;
+    }
+    if (ch === '$') {
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(memberList.slice(i))?.[0];
+      if (tag !== undefined) {
+        const close = memberList.indexOf(tag, i + tag.length);
+        i = close === -1 ? memberList.length : close + tag.length;
+        continue;
+      }
+    }
+    if (ch === '(') depth += 1;
+    else if (ch === ')' && depth > 0) depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      clauses.push(` ${memberList.slice(start, i).trim()}`);
+      start = i + 1;
+    }
+    i += 1;
+  }
+  clauses.push(` ${memberList.slice(start).trim()}`);
+  return clauses;
+}
+
+/**
  * Parse a superset-blind destructive statement's text (whitespace already collapsed by the scan; a
  * trailing `;` tolerated) into the target it names PLUS whether it is idempotent. Returns `undefined`
  * for anything it cannot parse with confidence — the router treats that as fail-closed REFUSE (never a
@@ -703,20 +763,28 @@ function readDestructive(
     if (head === undefined) return undefined;
     const table = readLocalName(head);
     if (table === undefined) return undefined;
-    const member = afterDropKeyword(
-      kind === 'drop-column' ? DROP_COLUMN_KW : DROP_CONSTRAINT_KW,
-      table.rest,
-    );
-    if (member === undefined) return undefined;
-    const read = readLocalName(member.rest);
-    if (read === undefined) return undefined;
-    return {
-      target:
-        kind === 'drop-column'
-          ? { kind: 'drop-column', table: table.name, column: read.name }
-          : { kind: 'drop-constraint', table: table.name, constraint: read.name },
-      idempotent: member.ifExists,
-    };
+    // EVERY member clause, not just the first: `ALTER TABLE "t" ADD COLUMN "a" text, DROP COLUMN "b"`
+    // is ONE statement the scan flags drop-column, and anchoring at the first clause read no target at
+    // all — so the router refused it fail-closed, PERMANENTLY, on a statement drizzle applies fine.
+    // The statement is ATOMIC, so the first DROP clause of this kind measures the whole of it; a
+    // second one would say the same thing, and a clause this cannot read whole is not read at all.
+    for (const clause of memberClauses(table.rest)) {
+      const member = afterDropKeyword(
+        kind === 'drop-column' ? DROP_COLUMN_KW : DROP_CONSTRAINT_KW,
+        clause,
+      );
+      if (member === undefined) continue;
+      const read = readLocalName(member.rest);
+      if (read === undefined) continue;
+      return {
+        target:
+          kind === 'drop-column'
+            ? { kind: 'drop-column', table: table.name, column: read.name }
+            : { kind: 'drop-constraint', table: table.name, constraint: read.name },
+        idempotent: member.ifExists,
+      };
+    }
+    return undefined;
   }
   return undefined;
 }
@@ -743,17 +811,48 @@ function destructiveTargetObject(target: DestructiveTargetProbe): SchemaObjectPr
 }
 
 /**
- * The ADDITIVE statement forms this boot can name a created object for. Each is ANCHORED at the
- * statement's first keyword and captures only its FIRST action, which is what makes them literal-safe:
- * by the time a string literal can appear in a statement (a DEFAULT, a NOTICE body), the capture is
- * already made, so SQL written INSIDE a literal can never be read as an object. Together they cover
- * exactly what `generateProductSql` / `diffProductStores` emit for an additive change, plus the
- * hand-authored index the `stores` grammar cannot express.
+ * ── Two questions, and they are NOT the same question ──────────────────────────────────────────────
+ *
+ * A delta's additive statements are read for TWO different reasons, and one extractor answering both
+ * got the second one wrong for every `IF NOT EXISTS` spelling — which is the spelling drizzle-kit
+ * actually emits:
+ *
+ *   1. "Is this object EVIDENCE that THIS delta ran?"  → {@link additiveObject}, the heads below.
+ *   2. "Does this delta leave that NAME standing?"      → {@link standingChanges}, further down.
+ *
+ * The `IF NOT EXISTS` exclusion is right for (1) and WRONG for (2). For (1) an idempotent statement's
+ * object proves nothing — the object may predate the delta. For (2) the answer is plainly YES: after
+ * `CREATE TABLE IF NOT EXISTS "t"` the schema holds `t` either way, so a `RENAME "t" TO "t_archive"`
+ * beside it frees a name the same delta puts BACK, and reading "t is still there" as un-landed re-ran
+ * the rename over a delta that had FULLY landed (42P07, and under `Restart=always` the boot never
+ * serves). The same conflation lost data: `DROP TABLE "scratch"` beside `CREATE TABLE IF NOT EXISTS
+ * "scratch"` re-dropped the table the delta had just re-created, on every restart.
+ *
+ * The heads BELOW are the evidence heads and keep every `(?!IF\b)` guard. {@link standingChanges}
+ * has its own, which accept the `IF [NOT] EXISTS` spellings — and reads EVERY member clause of an
+ * `ALTER TABLE`, not just its first, because `DROP COLUMN "note", ADD COLUMN "note" text` puts the
+ * name back in ONE statement.
+ */
+
+/**
+ * The ADDITIVE statement forms this boot can name a created object for — question (1), EVIDENCE. Each
+ * is ANCHORED at the statement's first keyword and captures only its FIRST action, which is what makes
+ * them literal-safe: by the time a string literal can appear in a statement (a DEFAULT, a NOTICE body),
+ * the capture is already made, so SQL written INSIDE a literal can never be read as an object. Together
+ * they cover exactly what `generateProductSql` / `diffProductStores` emit for an additive change, plus
+ * the hand-authored index the `stores` grammar cannot express.
+ *
+ * FIRST action, deliberately, and that is also why these heads are NOT the ones that answer question
+ * (2): one statement gets ONE measurement. A multi-clause `ALTER TABLE "t" ADD COLUMN "a" text, DROP
+ * COLUMN "b"` is measured by the target its reviewed DROP names (the router's destructive half), so
+ * reading `a` here as a second, independent claim about the SAME statement is exactly the both-piles
+ * reading that refused a delta for having run and not run at once.
  *
  * `IF NOT EXISTS` is EXCLUDED from every one of them (the `(?!IF\b)` guards, and the CREATE INDEX
  * lookahead the unnamed-index case already needed): such a statement is IDEMPOTENT, so its object's
- * presence proves nothing about whether THIS delta ran — the object may predate it — and re-running it
- * cannot crash. Reading it as evidence would be another claim the schema never supported.
+ * presence proves nothing about whether THIS delta ran — the object may predate it. Re-running the
+ * idempotent statement itself cannot crash; re-running the NON-idempotent sibling it shares a delta
+ * with can, which is question (2)'s business and not this one's.
  */
 const CREATE_TABLE_HEAD = /^CREATE\s+TABLE\s+(?!IF\b)/i;
 const CREATE_INDEX_HEAD =
@@ -895,6 +994,135 @@ function renamedToObject(text: string): SchemaObjectProbe | undefined {
   return read === undefined ? undefined : { kind: 'column', table: table.name, column: read.name };
 }
 
+// ── question (2): does the delta leave that NAME standing? ─────────────────────────────────────────
+
+/**
+ * The heads that answer question (2) — see the two-questions note above {@link CREATE_TABLE_HEAD}.
+ * They are the EVIDENCE heads with the `IF NOT EXISTS` guards taken OUT, and that is the whole
+ * difference: after `CREATE TABLE IF NOT EXISTS "t"` the schema holds `t`, so the delta leaves `t`
+ * standing — whether or not `t` was there before, which is the question the evidence heads ask and
+ * this one does not. `IF NOT EXISTS` is the spelling drizzle-kit emits, so excluding it here made the
+ * whole recycled-name reading blind against real generated deltas.
+ */
+const CREATE_TABLE_ANY_HEAD = /^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?/i;
+const CREATE_INDEX_ANY_HEAD =
+  /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!(?:ON|CONCURRENTLY)\b)/i;
+const ADD_COLUMN_ANY_KW = /^\s+ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?/i;
+
+/** One name a statement takes AWAY or LEAVES STANDING, in the order the statement does it. */
+interface StandingChange {
+  readonly object: SchemaObjectProbe;
+  /** `true` — the statement leaves this name in the schema; `false` — it takes the name away. */
+  readonly standing: boolean;
+}
+
+/**
+ * What ONE statement does to the NAMES it touches — question (2), and nothing else. This is the
+ * SEPARATE reader the two questions need: {@link additiveObject} answers "is this object evidence that
+ * THIS delta ran", which is why its heads exclude `IF NOT EXISTS` and stop at the first member clause.
+ * Neither rule applies here. A name is left standing if the statement leaves the schema holding it,
+ * idempotently or not; and a statement decides that with EVERY clause it carries, because
+ * `ALTER TABLE "parts" DROP COLUMN "note", ADD COLUMN "note" text` frees a name and puts it back in
+ * one statement — read by its first clause alone, the boot wiped that column on every restart while
+ * the identical change written as two statements mounted.
+ *
+ * Order is preserved and matters: a rename FREES its old name and then leaves the new one standing,
+ * and {@link namesTheDeltaTouches} lets the LAST word about a name win.
+ *
+ * Whole or not at all, as everywhere here: a clause whose name this cannot read yields no change for
+ * that clause rather than a guess, and the other clauses still count.
+ */
+function standingChanges(text: string): StandingChange[] {
+  const s = text.replace(/\s*;\s*$/, '').trim();
+  const changes: StandingChange[] = [];
+  const leaves = (object: SchemaObjectProbe | undefined): StandingChange[] => {
+    if (object !== undefined) changes.push({ object, standing: true });
+    return changes;
+  };
+  const createTable = afterKeyword(CREATE_TABLE_ANY_HEAD, s);
+  if (createTable !== undefined) {
+    const read = readLocalName(createTable);
+    return leaves(read && { kind: 'table', table: read.name });
+  }
+  const createIndex = afterKeyword(CREATE_INDEX_ANY_HEAD, s);
+  if (createIndex !== undefined) {
+    const read = readLocalName(createIndex);
+    return leaves(read && { kind: 'index', index: read.name });
+  }
+  // The whole-statement DROPs and the index rename read exactly as the destructive half reads them.
+  for (const kind of ['drop-table', 'drop-index'] as const) {
+    const target = extractDestructiveTarget(kind, s);
+    if (target !== undefined) {
+      changes.push({ object: destructiveTargetObject(target), standing: false });
+      return changes;
+    }
+  }
+  const alterIndex = afterKeyword(ALTER_INDEX_HEAD, s);
+  if (alterIndex !== undefined) {
+    const index = readLocalName(alterIndex);
+    if (index === undefined) return changes;
+    const to = afterKeyword(RENAME_TO_KW, index.rest);
+    if (to === undefined) return changes;
+    changes.push({ object: { kind: 'index', index: index.name }, standing: false });
+    const read = readLocalName(to);
+    return leaves(read && { kind: 'index', index: read.name });
+  }
+  const alterTable = afterKeyword(ALTER_TABLE_HEAD, s);
+  if (alterTable === undefined) return changes;
+  const table = readLocalName(alterTable);
+  if (table === undefined) return changes;
+  // The RENAME forms are checked BEFORE the member clauses, exactly as in {@link removedObject}, so
+  // `RENAME TO "x"` is never read as a member named `TO`. A rename is never one clause among several
+  // (Postgres takes one per `ALTER TABLE`), so this reads the statement whole and returns: it frees
+  // the name it renames away and leaves the name it renames to. Both come from the readers that
+  // already answer exactly that, so the two directions cannot drift apart.
+  if (afterKeyword(RENAME_COLUMN_KW, table.rest) !== undefined) {
+    const renamedAway = removedObject(s);
+    if (renamedAway !== undefined) changes.push({ object: renamedAway, standing: false });
+    return leaves(renamedToObject(s));
+  }
+  for (const clause of memberClauses(table.rest)) {
+    // drop-constraint BEFORE drop-column, for the reason {@link removedObject} gives: the bare-DROP
+    // column form also matches `DROP CONSTRAINT "c"` and would read the keyword as the column name.
+    const dropConstraint = afterDropKeyword(DROP_CONSTRAINT_KW, clause);
+    const dropped = dropConstraint ?? afterDropKeyword(DROP_COLUMN_KW, clause);
+    if (dropped !== undefined) {
+      const read = readLocalName(dropped.rest);
+      if (read !== undefined) {
+        changes.push({
+          object:
+            dropConstraint !== undefined
+              ? { kind: 'constraint', table: table.name, constraint: read.name }
+              : { kind: 'column', table: table.name, column: read.name },
+          standing: false,
+        });
+      }
+      continue;
+    }
+    const addColumn = afterKeyword(ADD_COLUMN_ANY_KW, clause);
+    if (addColumn !== undefined) {
+      const read = readLocalName(addColumn);
+      if (read !== undefined) {
+        changes.push({
+          object: { kind: 'column', table: table.name, column: read.name },
+          standing: true,
+        });
+      }
+      continue;
+    }
+    const addConstraint = afterKeyword(ADD_CONSTRAINT_KW, clause);
+    if (addConstraint === undefined) continue;
+    const read = readLocalName(addConstraint);
+    if (read !== undefined) {
+      changes.push({
+        object: { kind: 'constraint', table: table.name, constraint: read.name },
+        standing: true,
+      });
+    }
+  }
+  return changes;
+}
+
 const ALTER_COLUMN_KW = /^\s+ALTER\s+(?:COLUMN\s+)?/i;
 /**
  * A FURTHER `ALTER [COLUMN]` clause of the same statement — unanchored on purpose, because the clause
@@ -996,15 +1224,20 @@ export function extractAdditiveObjects(sql: string): SchemaObjectProbe[] {
   const removed = new Set<string>();
   const removedTables = new Set<string>();
   for (const { text } of splitMigrationStatements(sql)) {
-    const object = additiveObject(text);
-    if (object !== undefined) {
-      created.push(object);
+    // What a statement TAKES AWAY is read first, and a statement that takes something away is never
+    // also read for what it adds. One statement, ONE measurement: a multi-clause `ALTER TABLE "t" ADD
+    // COLUMN "a" text, DROP COLUMN "b"` is settled by the target its reviewed DROP names (the router's
+    // destructive half probes it), and adding `a` here as a second, independent claim about the SAME
+    // statement is the both-piles reading that refuses a statement for having run and not run at once.
+    // For every single-clause form the two readers are mutually exclusive, so nothing else moves.
+    const gone = removedObject(text);
+    if (gone !== undefined) {
+      removed.add(objectKey(gone));
+      if (gone.kind === 'table') removedTables.add(gone.table);
       continue;
     }
-    const gone = removedObject(text);
-    if (gone === undefined) continue;
-    removed.add(objectKey(gone));
-    if (gone.kind === 'table') removedTables.add(gone.table);
+    const object = additiveObject(text);
+    if (object !== undefined) created.push(object);
   }
   return created.filter(
     (object) =>
@@ -1014,33 +1247,50 @@ export function extractAdditiveObjects(sql: string): SchemaObjectProbe[] {
 }
 
 /**
- * The names the delta LEAVES BEHIND: every object a fully-applied delta would leave the live schema
- * holding. The LAST statement that touches a name decides — a name freed and then put back (a
- * `RENAME "parts" TO "parts_archive"` followed by a `CREATE TABLE "parts"`, a `DROP TABLE "t"` followed
- * by a `CREATE TABLE "t"`) is left BEHIND; one created and then taken away again (`CREATE TABLE "t_new"`
- * + `RENAME TO "t"`) is not.
+ * What the DELTA — not any one statement — does to the names it touches. Two sets, because the router
+ * asks two different things about a live-schema answer, and each direction has its own way of being
+ * uninformative:
  *
- * That ordering is the whole point. Such a name is in the live schema in BOTH states — before the delta
- * and after it — so "it is still there" is NOT evidence the statement that frees it has not run. Reading
- * it as evidence routed a FULLY APPLIED delta to APPLY, which re-runs a rename that cannot succeed twice
- * (and under `Restart=always` the boot never serves) and re-runs a `DROP` over the table the same delta
- * had just re-created. The router therefore withholds that reading for exactly these names, and measures
- * a rename among them by the name it renames TO instead.
+ *   - `leftStanding` — every name a fully-applied delta would leave the live schema HOLDING. The LAST
+ *     statement that touches a name decides, so a name freed and then put back (`RENAME "parts" TO
+ *     "parts_archive"` + `CREATE TABLE "parts"`, `DROP TABLE "t"` + `CREATE TABLE "t"`, and the same
+ *     thing inside ONE statement: `DROP COLUMN "note", ADD COLUMN "note" text`) is left standing, while
+ *     one created and then taken away again (`CREATE TABLE "t_new"` + `RENAME TO "t"`) is not.
+ *     Such a name is in the schema BEFORE the delta and AFTER it, so "it is STILL THERE" proves nothing
+ *     — reading it as un-landed routed a FULLY APPLIED delta to APPLY, re-running a rename that cannot
+ *     succeed twice (42P07, and under `Restart=always` the boot never serves) and a `DROP` over the
+ *     table the delta had just re-created (measured: three seeded rows → one → zero, per restart).
+ *
+ *   - `created` — every name the delta brings INTO existence at any point, whether or not it survives
+ *     to the end. For a name in this set "it is GONE" proves nothing either: an ordinary staging-table
+ *     delta (`CREATE TABLE "parts_backup"` … `DROP TABLE "parts_backup"`) leaves it absent before the
+ *     delta AND after it, so reading its absence as "the reviewed DROP landed" manufactured landed
+ *     evidence for a delta that had never run — which, beside one genuinely un-landed object, refused
+ *     the boot as HALF LANDED with no restart able to clear it.
+ *
+ * Both sets are built from {@link standingChanges}, the reader that answers "does this delta leave that
+ * name standing" — NOT from the evidence reader, whose `IF NOT EXISTS` exclusion answers a different
+ * question and made every drizzle-kit-generated recycled name invisible here.
  */
-function objectsTheDeltaLeavesBehind(migrations: readonly PlannedMigration[]): ReadonlySet<string> {
+interface DeltaNames {
+  readonly leftStanding: ReadonlySet<string>;
+  readonly created: ReadonlySet<string>;
+}
+
+function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNames {
   const standing = new Map<string, boolean>();
+  const created = new Set<string>();
   for (const migration of migrations) {
     for (const { text } of splitMigrationStatements(migration.sql)) {
-      // A rename does both, in this order: it frees its old name and leaves the new one standing.
-      const freed = removedObject(text);
-      if (freed !== undefined) standing.set(objectKey(freed), false);
-      const left = additiveObject(text) ?? renamedToObject(text);
-      if (left !== undefined) standing.set(objectKey(left), true);
+      for (const change of standingChanges(text)) {
+        standing.set(objectKey(change.object), change.standing);
+        if (change.standing) created.add(objectKey(change.object));
+      }
     }
   }
-  const keys = new Set<string>();
-  for (const [key, present] of standing) if (present) keys.add(key);
-  return keys;
+  const leftStanding = new Set<string>();
+  for (const [key, present] of standing) if (present) leftStanding.add(key);
+  return { leftStanding, created };
 }
 
 /** How an object is NAMED to an operator — the same words the probe asked its question in. */
@@ -1121,9 +1371,10 @@ export async function routePresentMatchingUpdate(
   const stillThere: string[] = []; // a reviewed DROP target, probed PRESENT → unlanded
   const notRenamed: string[] = []; // a RENAME's OLD name, probed PRESENT    → unlanded
   const noNewName: string[] = []; // a RENAME's NEW name, probed MISSING     → unlanded
-  // The names a fully-applied delta would LEAVE STANDING. A freed name among them is in the live schema
-  // in both states, so its presence settles nothing (see {@link objectsTheDeltaLeavesBehind}).
-  const leftBehind = objectsTheDeltaLeavesBehind(migrations);
+  // What the DELTA does to the names it touches (see {@link namesTheDeltaTouches}): the names it
+  // LEAVES STANDING, whose presence therefore settles nothing, and the names it CREATES, whose absence
+  // settles nothing either. Both are properties of the whole delta, not of one statement.
+  const deltaNames = namesTheDeltaTouches(migrations);
   for (const migration of migrations) {
     const scan = scanMigrationSql(migration.sql, migration.allowlist ?? []);
     for (const finding of scan.findings) {
@@ -1141,13 +1392,18 @@ export async function routePresentMatchingUpdate(
           // but NOT of a target the same delta re-creates (`DROP TABLE "t"` + `CREATE TABLE "t"`), which
           // stands there in both states: reading that as un-landed re-ran the DROP over the re-created
           // table. Nothing else in the delta names it either, so it contributes no evidence at all.
-          if (!leftBehind.has(objectKey(object))) stillThere.push(describeSchemaObject(object));
-        } else if (!read.idempotent) {
+          if (!deltaNames.leftStanding.has(objectKey(object)))
+            stillThere.push(describeSchemaObject(object));
+        } else if (!read.idempotent && !deltaNames.created.has(objectKey(object))) {
           gone.push(describeSchemaObject(object));
         }
-        // …and an IF EXISTS target that is GONE is NOT evidence: the statement runs clean either way, so
-        // the object may simply never have existed. Reading it as "the delta landed" refused a delta
-        // that never ran (and that re-drop would have raised nothing).
+        // …and a GONE target is NOT evidence in two cases, for the same reason in both — the schema
+        // reads that way whether or not the delta ran:
+        //   · an IF EXISTS statement runs clean either way, so the object may never have existed;
+        //   · a target the SAME delta CREATEs is absent BEFORE the delta too — an ordinary staging
+        //     table (`CREATE TABLE "parts_backup"` … `DROP TABLE "parts_backup"`) is gone at both ends.
+        // Reading either as "the delta landed" manufactured landed evidence for a delta that had never
+        // run: beside one genuinely un-landed object that REFUSED the boot as half-landed, permanently.
       } else if (PROBED_BY_ITS_OWN_ADD.has(finding.kind)) {
         // An `ADD COLUMN … NOT NULL` — the additive half below probes the very column it adds, and that
         // probe IS the measurement. Asserting a second, classify-derived proof here would put ONE
@@ -1157,7 +1413,7 @@ export async function routePresentMatchingUpdate(
         // the rename has not run — the one reading the schema supports. (Gone proves nothing: an object
         // that never existed is gone too, so it contributes nothing rather than a claim.)
         const renamedAway = removedObject(finding.text);
-        if (renamedAway !== undefined && leftBehind.has(objectKey(renamedAway))) {
+        if (renamedAway !== undefined && deltaNames.leftStanding.has(objectKey(renamedAway))) {
           // …EXCEPT where the same delta puts that name back, which leaves it standing either way. The
           // name it renames TO is then the one that discriminates — the delta leaves it iff it ran — and
           // it is the ONLY measurement this statement gets, in whichever direction the probe answers.
@@ -3186,7 +3442,11 @@ export async function deployProductYamlSpec(
   // planUpdateBoot PROBES THE OBJECTS THE DELTA ITSELF NAMES. That is what makes a LEFTOVER update env
   // reboot-safe: a delta whose objects are all in the state an applied delta leaves them in MOUNTS instead
   // of re-applying a non-idempotent delta (which would 42P07/duplicate-column crash-loop the boot), one
-  // whose objects are NOT there is applied, and a HALF-LANDED one is refused naming both sides. `deploy()`
+  // whose objects are NOT there is applied, and a HALF-LANDED one is refused naming both sides. The one
+  // shape this cannot decide — and the one place this path can silently drop a reviewed change — is a
+  // delta that FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change
+  // as one multi-clause `ALTER TABLE`; the `IF [NOT] EXISTS` spellings count the same), which leaves the
+  // schema holding that name in BOTH states: the boot claims nothing, MOUNTS, and says so. `deploy()`
   // stays BYTE-UNCHANGED throughout: it GATES each migration (scanMigrationSql over the reviewed allowlist —
   // a destructive statement WITHOUT a covering entry BLOCKS with a DeployError at [lint/gate], never a
   // silent apply) then applies it, evolving the live schema in place while existing rows survive.

@@ -359,9 +359,9 @@ export interface MigrationStatement {
 }
 
 /**
- * Split migration SQL into the statements a MIGRATOR would run — the same literal-aware reading
- * `scanMigrationSql` does, exposed for a caller that must decide something about the statements
- * themselves rather than about their destructiveness.
+ * Split migration SQL into the statements a MIGRATOR would run — the ONE reading of a delta in this
+ * package: `scanMigrationSql` reads it too, so a caller deciding something ABOUT the statements and a
+ * caller deciding whether they are DESTRUCTIVE never disagree about where one statement ends.
  *
  * The RAW text is cut on the breakpoint marker FIRST and each chunk is only then walked for a
  * literal-aware `;`. That ORDER is the point: drizzle has no lexer, so a marker sitting behind a `--`
@@ -382,16 +382,25 @@ export function splitMigrationStatements(sql: string): MigrationStatement[] {
 }
 
 /**
- * Scan migration SQL for destructive statements. Uses the literal-aware `splitStatements`
- * tokenizer (comments + `;` terminators inside string/dollar-quote literals are NOT mistaken
- * for structure), maps each statement back to its starting line, runs every detector on a
- * literal-stripped copy (the literal-stripping guard: a destructive keyword inside a string literal is NOT flagged), and
- * marks a finding `allowed` only if a matching allowlist entry (same kind + full-statement
- * equality) exists. `pass` is true iff no UN-allowlisted destructive finding remains.
+ * Scan migration SQL for destructive statements. Reads it through {@link splitMigrationStatements} —
+ * the literal-aware tokenizer (comments + `;` terminators inside string/dollar-quote literals are NOT
+ * mistaken for structure) run BREAKPOINT-FIRST, so the statements scanned here are the statements the
+ * MIGRATOR runs. It maps each back to its starting line, runs every detector on a literal-stripped copy
+ * (the literal-stripping guard: a destructive keyword inside a string literal is NOT flagged), and marks
+ * a finding `allowed` only if a matching allowlist entry (same kind + full-statement equality) exists.
+ * `pass` is true iff no UN-allowlisted destructive finding remains.
+ *
+ * Breakpoint-first is not cosmetic here. Drizzle splits on the marker whether or not the statement
+ * before it ended in `;`, so a delta written WITHOUT the semicolons is several statements to the
+ * migrator; reading it as one merged statement gave the merged text to the detectors — and an allowlist
+ * entry, which must equal a WHOLE statement, could then never cover the reviewed `DROP` inside it. That
+ * is fail-closed but PERMANENT: a delta drizzle applies cleanly could not be reviewed at all. The same
+ * merged text reached every other reader of these findings (the update boot's probe, which reported
+ * "an unparseable drop-table statement"), so the split is now decided in exactly one place.
  */
 export function scanMigrationSql(sql: string, allowlist: AllowlistEntry[] = []): ScanResult {
   const findings: DestructiveFinding[] = [];
-  const statements = splitStatements(sql);
+  const statements = splitMigrationStatements(sql);
 
   for (const stmt of statements) {
     const collapsedStmt = stripTerminator(stmt.text);

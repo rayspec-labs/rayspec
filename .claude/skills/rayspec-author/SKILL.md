@@ -600,7 +600,13 @@ PROBES the objects the delta itself names FIRST, so a delta that ALREADY landed 
 (its objects are there) instead of re-applying and crash-looping on a duplicate column — a leftover
 `--apply-migration` in a `Restart=always` unit applies once, then mounts. A delta whose objects are NOT
 there is applied and the boot names them, even on a drift-clean schema (the drift check only ever
-inspects what the spec declares, so an object the grammar cannot express is invisible to it). (`--apply-migration`/
+inspects what the spec declares, so an object the grammar cannot express is invisible to it). ONE SHAPE
+IS NOT DECIDABLE that way, and it is the one place the boot can silently drop a reviewed change: a delta
+that FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one
+`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" …`; the `IF [NOT] EXISTS` spellings count the same)
+leaves the schema holding that name in BOTH states, so the boot claims nothing, MOUNTS, and logs that it
+measured nothing rather than calling the flag stale — prefer a delta that does not recycle a name, and
+check the schema by hand when you see that log. (`--apply-migration`/
 `--allowlist` cannot be combined with `--dry-run`, which touches no DB; a bare `--allowlist` without
 `--apply-migration` is a usage error.)
 

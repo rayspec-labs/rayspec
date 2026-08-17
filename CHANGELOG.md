@@ -390,6 +390,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says so instead of calling the environment stale. Whether a name is left standing is decided by the
   **last** statement that touches it, so the reverse order (`CREATE TABLE "t_new"` +
   `RENAME TO "t"`, which leaves no `t_new`) is unaffected.
+- **"Does this delta leave that name standing?" is not the same question as "is this object evidence
+  that the delta ran?", and one reader was answering both.** The evidence reader excludes every
+  `IF NOT EXISTS` form, correctly: such a statement's object may predate the delta, so its presence
+  proves nothing. Whether the delta leaves the *name* standing is a different question with a different
+  answer — after `CREATE TABLE IF NOT EXISTS "t"` the schema holds `t` either way — and the exclusion
+  made the whole recycled-name reading blind to the spelling **drizzle-kit actually generates**. Against
+  a generated delta, `ALTER TABLE "parts" RENAME TO "parts_archive"` beside `CREATE TABLE IF NOT EXISTS
+  "parts"` was read as un-landed in **both** schema states: fully applied, the rename re-ran and raised
+  `42P07`, and under `Restart=always` the boot never served. `DROP TABLE "scratch"` beside `CREATE TABLE
+  IF NOT EXISTS "scratch"` re-dropped the table the delta had just re-created — three seeded rows, one
+  row written by the served app after the delta landed, zero rows after the next restart, silently, on
+  every restart. The two questions now have two readers, each documented with the question it answers.
+  One statement can recycle a name by itself (`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" text`),
+  so the standing reader reads **every** member clause of an `ALTER TABLE` rather than only its first —
+  read by its first clause alone, that statement wiped the column on every restart while the identical
+  change written as two statements mounted. The destructive reader reads every clause too: a
+  multi-clause statement whose `DROP` was not its first clause could not be read at all and **refused
+  the boot permanently**, on a statement drizzle applies fine.
+- **A `DROP` whose target the same delta CREATES is gone before the delta as much as after it.** The
+  presence reading already had that guard; the absence reading had none, so an ordinary staging-table
+  delta — `CREATE TABLE "parts_backup"`, do the work, `DROP TABLE "parts_backup"` — reported its own
+  un-created table as **already landed**. Beside one genuinely un-landed object that is a HALF-LANDED
+  refusal: a delta that had plainly never run refused the boot, and no restart cleared it. Absence now
+  proves nothing for a name the delta itself brings into existence, which is the rule the `IF EXISTS`
+  form already had — and here it is not even a "may": the delta creates the target two statements
+  earlier. The same suppression settles the mirror case, a rebuild (`DROP TABLE "t"` + `CREATE TABLE
+  "t"`) whose name is **absent**: it mounted claiming the target was probed gone and told the operator
+  the environment was stale, and now claims nothing at all.
+- **Both halves of the update boot read the same statement split, and so does the migration gate.**
+  `scanMigrationSql` stripped comments before splitting, so a `--> statement-breakpoint` marker was
+  swallowed together with the statement in front of it — while `splitMigrationStatements`, which the
+  additive half reads, cuts on the marker first the way drizzle's own `readMigrationFiles` does. A delta
+  separated by markers with **no** trailing semicolons is several statements to the migrator and was one
+  merged statement to the scan: the update boot refused it as "an unparseable drop-table statement"
+  whose text was two statements run together, and a reviewed allowlist entry — which must equal a whole
+  statement — could never have covered the `DROP` inside it either. Fail-closed, but permanent, on a
+  delta drizzle applies cleanly. The scan now reads the same breakpoint-first split.
 - **An identifier is read the way the catalog stores it, or it is not read at all.** The probe turns a
   statement into a question about a named object, so a name read only partly is worse than no name.
   A double-quoted name is now read to its closing quote (a space, a hyphen or a dot inside it belongs

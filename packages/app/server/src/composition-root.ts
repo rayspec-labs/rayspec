@@ -2734,7 +2734,12 @@ async function deployDeclaredSpec(
     //                          looping on a duplicate_column (42701)) from an UNAPPLIED delta (APPLY — a
     //                          reviewed drop target still exists, or an object the delta CREATEs is
     //                          absent), and REFUSES a half-landed or undeterminable delta fail-closed —
-    //                          parity with product-boot.
+    //                          parity with product-boot. The ONE shape it cannot decide is a delta that
+    //                          FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or
+    //                          the same change in one multi-clause `ALTER TABLE`; the `IF [NOT] EXISTS`
+    //                          spellings count the same): the schema holds that name in BOTH states, so
+    //                          it MOUNTS claiming nothing and the log says so — the one place this path
+    //                          can silently drop a reviewed change, and the reason the log is loud.
     //   - 'absent'           → REFUSE fail-closed (update mode evolves an EXISTING schema; a first boot
     //                          must materialize via the plain path — dropping --apply-migration).
     // `deploy()` stays BYTE-UNCHANGED throughout: when planUpdateBoot routes APPLY it GATES each migration
