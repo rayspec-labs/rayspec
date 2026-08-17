@@ -142,8 +142,16 @@ describe('parseSpecWithPacks — a document whose top-level section a pack owns'
     expect(res.errors.map((e) => e.path)).toContain('acme_notes.retentionDays');
   });
 
-  it('GOLDEN — the pack is absent: a typed parse error naming it', async () => {
-    // Nothing registered ⇒ the pack entry cannot be loaded: the deployment does not have this pack.
+  it('GOLDEN — the pack is absent: a typed parse error naming it, and NOT the importer’s words', async () => {
+    // Nothing registered AND nothing on disk ⇒ the deployment does not have this pack.
+    //
+    // WHAT THE MESSAGE MUST NOT BE. The entry resolution prefers a compiled sibling and otherwise
+    // falls back to the declared `.ts` WITHOUT asking whether anything is at it, so for an absent
+    // pack the path handed to the importer is a guess. Carrying the importer's complaint about that
+    // path is how this refusal came to describe a file that was never written — and under the
+    // production importer, which refuses on the EXTENSION before opening anything, the complaint was
+    // "compile it to JavaScript first", inside a refusal whose own remedy is to deploy the pack.
+    // The disk is asked instead, and every path that was looked for is named.
     const res = await parseSpecWithPacks(DOC, {
       packsRoot: root,
       deploymentRoot: root,
@@ -151,7 +159,8 @@ describe('parseSpecWithPacks — a document whose top-level section a pack owns'
     });
     expect(res.ok).toBe(false);
     if (res.ok) return;
-    const entry = resolve(root, 'pack', 'index.ts');
+    const compiled = resolve(root, 'pack', 'index.js');
+    const source = resolve(root, 'pack', 'index.ts');
     expect(res.errors).toEqual([
       {
         code: 'extension_pack_unavailable',
@@ -160,11 +169,18 @@ describe('parseSpecWithPacks — a document whose top-level section a pack owns'
           "extension pack 'acme-notes' is not available on this deployment — a pack owns the " +
           'grammar of every top-level section it claims, so a document that declares one cannot be ' +
           'validated without it. Deploy the pack, or remove it from extensions[] together with the ' +
-          "sections it claims. Load failure: failed to load pack entry 'index.ts' " +
-          `(${entry}): fake importer: nothing registered for ${entry} — a pack's entry module must ` +
-          'default-export a defineExtension(...) manifest (fail-closed).',
+          "sections it claims. Load failure: the pack entry ('index.ts') is not on disk. Neither " +
+          `'${compiled}' nor '${source}' exists, so nothing was loaded and no ` +
+          'file was inspected — this is an absent module, not a module of the wrong kind. ' +
+          'Fail-closed.',
       },
     ]);
+    // The ACCEPT CONTROL for this case: the sentence the old message carried must be gone. Without
+    // it the assertion above would pass against a message that ALSO told the operator to compile
+    // something, which is the defect.
+    const [error] = res.errors;
+    expect(error?.message).not.toContain('Compile it to JavaScript first');
+    expect(error?.message).not.toContain("is TypeScript source ('.ts')");
   });
 
   it('a document that references no pack is parsed exactly as `parseSpec` does', async () => {
@@ -394,6 +410,139 @@ describe('parseSpecWithPacks — a pack that is present and whose entry does not
       expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_unavailable']);
     } finally {
       rmSync(bare, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * THE MODULE A MANIFEST DECLARES AND THE PACK DOES NOT CONTAIN — the rest of the class.
+ *
+ * The entry is not the only module a pack names. A manifest also declares SERVICE modules and, for
+ * every top-level section it claims, a SCHEMA module; all three reach their importer through the same
+ * resolution, whose `.ts` fallback is a guess when nothing is on disk. Nothing had swept past the
+ * entry, so both of these still answered with the production importer's complaint about the extension
+ * of a path that was never written — and, because they fell through to the read-and-refused class,
+ * they said "deploying it again changes nothing" over a pack that may simply have arrived incomplete.
+ *
+ * Run with NO injected importer, so the refusal is the one a real deploy meets over a real directory.
+ */
+describe('parseSpecWithPacks — a module the manifest declares is not on disk', () => {
+  /** A pack whose ENTRY is real, built and loadable — only the module it names is missing. */
+  function packDeclaring(root: string, manifestBody: string): void {
+    mkdirSync(join(root, 'pack'), { recursive: true });
+    writeFileSync(join(root, 'pack', 'index.js'), manifestBody, 'utf8');
+  }
+
+  it('a declared SERVICE module that is absent: named as absent, never as the wrong kind of file', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-nosvc-'));
+    try {
+      packDeclaring(
+        root,
+        "export default { __rayspecExtension: '@rayspec/extension@1', version: '1.0.0', " +
+          "fragments: {}, services: [{ module: './services/audit.ts' }] };\n",
+      );
+      const res = await parseSpecWithPacks(DOC, { packsRoot: root, deploymentRoot: root });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_refused']);
+      const [error] = res.errors;
+      // ACCEPT CONTROL — the two sentences the old message carried, both false here. A test that
+      // asserted only the new wording would pass against a message that still said these.
+      expect(error?.message).not.toContain('Compile it to JavaScript first');
+      expect(error?.message).not.toContain("is TypeScript source ('.ts')");
+      expect(error?.message).not.toContain('Deploying it again changes nothing');
+      // What it says instead: the pack is here, the module is not, and BOTH causes are named —
+      // a manifest pointing at a path the pack lacks, and a directory deployed partially.
+      expect(error?.message).toContain('a MODULE ITS MANIFEST DECLARES did not load');
+      expect(error?.message).toContain('either absent from this pack, or not built, or missing');
+      // The evidence: the module, and every path that was looked for.
+      expect(error?.message).toContain("the service module ('./services/audit.ts') is not on disk");
+      expect(error?.message).toContain(resolve(root, 'pack', 'services', 'audit.js'));
+      expect(error?.message).toContain(resolve(root, 'pack', 'services', 'audit.ts'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a claimed section’s SCHEMA module that is absent: the same class, the same evidence', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-noschema-'));
+    try {
+      packDeclaring(
+        root,
+        "export default { __rayspecExtension: '@rayspec/extension@1', version: '1.0.0', " +
+          "fragments: {}, sections: [{ key: 'acme_notes', schemaModule: './sections/notes.ts' }] };\n",
+      );
+      const res = await parseSpecWithPacks(DOC, { packsRoot: root, deploymentRoot: root });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_refused']);
+      const [error] = res.errors;
+      expect(error?.message).not.toContain('Compile it to JavaScript first');
+      expect(error?.message).not.toContain('Deploying it again changes nothing');
+      expect(error?.message).toContain('a MODULE ITS MANIFEST DECLARES did not load');
+      expect(error?.message).toContain(
+        "the schema module for the claimed section 'acme_notes' ('./sections/notes.ts') is not on disk",
+      );
+      expect(error?.message).toContain(resolve(root, 'pack', 'sections', 'notes.js'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('CONTROL — a declared module that IS on disk and is the wrong kind still says so', async () => {
+    // The other half of the accept control: the "compile it" sentence is not being suppressed
+    // globally, it is being kept off the case it was false for. Here the file IS there, as
+    // TypeScript source, and the production importer's complaint is exactly right.
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-svc-ts-'));
+    try {
+      packDeclaring(
+        root,
+        "export default { __rayspecExtension: '@rayspec/extension@1', version: '1.0.0', " +
+          "fragments: {}, services: [{ module: './services/audit.ts' }] };\n",
+      );
+      mkdirSync(join(root, 'pack', 'services'), { recursive: true });
+      writeFileSync(join(root, 'pack', 'services', 'audit.ts'), 'export default {};\n', 'utf8');
+      const res = await parseSpecWithPacks(DOC, { packsRoot: root, deploymentRoot: root });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      const [error] = res.errors;
+      expect(error?.message).toContain("is TypeScript source ('.ts')");
+      expect(error?.message).toContain('Compile it to JavaScript first');
+      expect(error?.message).not.toContain("('./services/audit.ts') is not on disk");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * THE ABSENT PACK, UNDER THE PRODUCTION IMPORTER — the case the suite above could not see.
+ *
+ * The golden absent-pack case injects a fake importer, so the message it pins is the FAKE's. That is
+ * what let the production wording drift: under the real importer an absent pack was refused on the
+ * EXTENSION of the `.ts` the resolution guessed, and told to compile it. This runs the same absence
+ * with NO importer injected, which is what a deploy does.
+ */
+describe('parseSpecWithPacks — an absent pack under the production importer', () => {
+  it('says nothing is on disk, and never prescribes a build', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-ghost-'));
+    try {
+      const res = await parseSpecWithPacks(DOC, { packsRoot: root, deploymentRoot: root });
+      expect(res.ok).toBe(false);
+      if (res.ok) return;
+      expect(res.errors.map((e) => e.code)).toEqual(['extension_pack_unavailable']);
+      const [error] = res.errors;
+      // ACCEPT CONTROL: the exact sentences the shipped message used to carry.
+      expect(error?.message).not.toContain('Compile it to JavaScript first');
+      expect(error?.message).not.toContain("is TypeScript source ('.ts')");
+      // And what it says instead — which agrees with docs/cli-reference.md ("nothing is on disk at
+      // the entry the reference resolves to, so install it").
+      expect(error?.message).toContain("the pack entry ('index.ts') is not on disk");
+      expect(error?.message).toContain('Deploy the pack, or remove it from extensions[]');
+      expect(error?.message).toContain(resolve(root, 'pack', 'index.js'));
+      expect(error?.message).toContain(resolve(root, 'pack', 'index.ts'));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

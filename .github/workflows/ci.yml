@@ -309,6 +309,21 @@ jobs:
       - name: Documented-command gate
         run: pnpm gate:documented-commands
 
+      # The shipped-script gate: a script that presents itself as a check must report a FAILURE when
+      # the thing it checks is not there. It walks the shipped `*.sh`, classifies each by the
+      # precondition it depends on, and runs it with that precondition unmet — a server script against
+      # a port proven closed first, a database script against an unreachable DSN (unsetting
+      # DATABASE_URL is NOT enough: both database scripts fall back to a default and pass wherever a
+      # local Postgres answers). Each must exit non-zero, and a script that boots a server while being
+      # probed fails too. Scanned count printed; an empty walk is a failure; the scripts needing a live
+      # model are counted out loud. Its self-test runs first and requires both verdicts, so a detector
+      # that fails everything cannot pass for one that works. Needs no build and no database.
+      - name: Shipped-script gate — accept control
+        run: pnpm test:gate-shipped-scripts
+
+      - name: Shipped-script gate
+        run: pnpm gate:shipped-scripts
+
       # The public-API report gate: a package that promises a surface to code built outside this repo
       # declares its report file in its own manifest ("rayspecPublicApi"), and this re-derives that
       # report from the package's BUILT type declarations and byte-compares it. A change to the surface
