@@ -93,6 +93,7 @@ const PROBE_SECTION_SCHEMA = `export default {
 let root: string;
 let marker: string;
 let prevCwd: string;
+let prevHandlerRoot: string | undefined;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'rayspec-doctor-pack-probe-'));
@@ -107,12 +108,19 @@ beforeEach(() => {
   writeFileSync(join(root, 'rayspec.yaml'), VALID_DOC, 'utf8');
   writeFileSync(join(root, 'malformed.yaml'), MALFORMED_DOC, 'utf8');
   // The spec path is jailed to the working directory, so every case runs from the deployment tree.
+  // `deploymentRootFor` honours RAYSPEC_HANDLER_ROOT OVER `dirname(specPath)` — deliberately, since it
+  // mirrors what the boot hands the loader. That makes an ambient value a redirect for a test that
+  // resolves packs: it would measure a tree it did not build. Cleared for the run, restored after.
+  prevHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  delete process.env.RAYSPEC_HANDLER_ROOT;
   prevCwd = process.cwd();
   process.chdir(root);
 });
 
 afterEach(() => {
   process.chdir(prevCwd);
+  if (prevHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevHandlerRoot;
   rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
 });

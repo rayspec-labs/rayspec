@@ -78,12 +78,20 @@ beforeAll(() => {
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
+let prevHandlerRoot: string | undefined;
 beforeEach(() => {
+  // `deploymentRootFor` honours RAYSPEC_HANDLER_ROOT OVER `dirname(specPath)` — deliberately, since it
+  // mirrors what the boot hands the loader. That makes an ambient value a redirect for a test that
+  // resolves packs: it would measure a tree it did not build. Cleared for the run, restored after.
+  prevHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  delete process.env.RAYSPEC_HANDLER_ROOT;
   prevCwd = process.cwd();
   process.chdir(root);
 });
 afterEach(() => {
   process.chdir(prevCwd);
+  if (prevHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevHandlerRoot;
 });
 
 describe('the pack loader stays off the path of a document that references no pack', () => {

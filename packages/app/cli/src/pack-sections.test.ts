@@ -81,12 +81,23 @@ if (!existsSync(PACK_ENTRY)) {
 // The spec-path jail resolves against the CWD, so every command runs from the repo root (the fixture
 // documents are inside it). The missing-pack case chdirs into its own throwaway tree instead.
 let prevCwd: string;
+// `deploymentRootFor` honours RAYSPEC_HANDLER_ROOT OVER `dirname(specPath)` — deliberately, because it
+// mirrors what the boot hands the loader, so a command previews the boot's tree rather than a second
+// guess at it. That makes an ambient value a redirect: these tests resolve packs, so with one set they
+// measure a tree they did not build, and the failure surfaces as fourteen assertion mismatches with no
+// indication why. Measured: pointing it at an empty directory turns 14 of 30 arms red. Cleared here so
+// the run measures its own fixtures whatever the machine has in its environment.
+let prevHandlerRoot: string | undefined;
 beforeEach(() => {
   prevCwd = process.cwd();
+  prevHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  delete process.env.RAYSPEC_HANDLER_ROOT;
   process.chdir(repoRoot);
 });
 afterEach(() => {
   process.chdir(prevCwd);
+  if (prevHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevHandlerRoot;
 });
 
 /** Render a violation list compactly, so a failure names what was actually reported. */

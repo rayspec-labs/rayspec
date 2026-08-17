@@ -522,6 +522,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every test that needs a database is named for it, and a gate keeps it that way.** `*.db.test.ts`
+  is a convention, not a collector — none of the repository's vitest configs splits on it, and CI's
+  lanes are split per package — so what it is for is the ad-hoc `--exclude` a maintainer runs to get
+  "the subset that needs no database". Twenty-two test files needed one under a name outside it,
+  across `@rayspec/api-auth`, `@rayspec/platform`, `@rayspec/db` and `@rayspec/server`; that subset
+  was a misnomer in every one of those packages, which is how a count taken from it reached a pull
+  request and was wrong in a way nobody could see. All twenty-two are renamed and a gate now refuses
+  the state: the signal is not reading `DATABASE_URL` but REFUSING TO RUN without it, reached
+  directly or through a test-support module that carries the guard. Separately,
+  `parseFromDeploymentTree` resolves packs within `RAYSPEC_HANDLER_ROOT` when the deployment declares
+  one — deliberately, mirroring the boot — which made an ambient value a redirect for the three
+  suites that resolve packs: with it pointed at an empty directory, 14 of their 30 arms turned red.
+  Those suites now clear it, and a regression pins the resolution with its own control.
+
 - **A gate now covers documented command paths.** Three findings in two releases had one cause:
   nothing in the repository checked that a command a document tells a reader to run does what the
   document says. `scripts/check-documented-commands.mjs` walks every shipped markdown file, extracts

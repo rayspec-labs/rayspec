@@ -19,7 +19,7 @@
  *       env→makeFsBlobStoreFactory→engine.blobFactory injection wires end-to-end through the REAL
  *       composition root (not via a test harness that hands the factory in directly).
  *
- * DB ISOLATION: a whole throwaway DATABASE (not a per-schema), exactly as boot.smoke.test.ts /
+ * DB ISOLATION: a whole throwaway DATABASE (not a per-schema), exactly as boot.smoke.db.test.ts /
  * durable-worker-boot.db.test.ts — the migration chain materializes the platform into a database's
  * default + `drizzle` schema, so per-schema isolation does not fit the chain-based boot.
  *
