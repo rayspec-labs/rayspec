@@ -184,6 +184,7 @@ export {
   loadHandlersMultiRoot,
   type ModuleImporter,
   makeHandlerDb,
+  makeHandlerJournal,
   type ResolvedHandler,
   StoreInputError,
   setHandlerRuntime,

@@ -48,10 +48,15 @@
  *  - THE PLAY-TOKEN MINT. It is injected only when the deployment configured a media signing key, and
  *    it closes over that key; a capability a deployment opts into is not a shape this surface can
  *    promise on its behalf.
- *  - THE ENRICHED RESPONSE ENVELOPE. Choosing an HTTP status or setting response headers needs the
- *    platform's branded envelope, and the brand is a RUNTIME value this types-only package does not
- *    ship. A pack route handler returns a plain body, which the deployment serializes as JSON with
- *    HTTP 200; spelling the brand out by hand would couple a pack to a marker it does not own.
+ *  - THE STATUS-AND-HEADERS RESPONSE ENVELOPE. Choosing an HTTP status or setting response headers
+ *    needs the platform's branded envelope, and the brand is a RUNTIME value this types-only package
+ *    does not ship. A pack route handler returns a plain body, which the deployment serializes as JSON
+ *    with HTTP 200; spelling the brand out by hand would couple a pack to a marker it does not own.
+ *    The INCREMENTAL response is the one shape of that envelope a pack can reach, and it is reached
+ *    the only way this package's posture allows: the constructor is INJECTED (`init.sseResponse`), so
+ *    the pack builds the platform's own envelope through the platform's own implementation and still
+ *    names no marker. Status and headers stay withheld — an incremental response is a 200 stream whose
+ *    status is already flushed before the first frame, so there is nothing left for a pack to choose.
  *  - THE STREAM ROUTE SHAPE. A `route`-kind handler placed behind a `{kind:'stream'}` api action is a
  *    DIFFERENT contract from `PackRouteHandler` — it is handed the raw Web `Request` plus a REQUIRED
  *    blob backend and returns a raw `Response`, not a JSON body — and this package does not promise
@@ -60,6 +65,12 @@
  *    stream route annotates `StreamRouteHandler`/`StreamRouteHandlerInit` from `@rayspec/handler-sdk`
  *    instead — `examples/stream-backend/packs/stream-pack` is the in-tree witness, and
  *    `gate:handler-imports` sanctions that import over a pack handler root for exactly this case.
+ *    IT IS NOT THE INCREMENTAL RESPONSE ABOVE, and the two are easy to confuse because both are
+ *    called streaming. The `{kind:'stream'}` action moves BYTES through a blob backend — binary
+ *    ingest, Range playback — and a route declared under it never reaches `PackRouteHandler` at all.
+ *    `init.sseResponse` answers an ORDINARY `{kind:'handler'}` route with an event stream instead of
+ *    a JSON body, needs no blob backend, and changes nothing about how that route is registered.
+ *    Two doors, not one widened.
  *
  * Everything withheld is withheld from THE CONTRACT, not from the running deployment: the platform
  * builds one init per invocation and a pack simply has no promised name for the rest of it.
@@ -80,6 +91,8 @@
  * is a pack author holding a `TS2339` about a missing `request` property with nothing in this package
  * telling them the shape exists elsewhere and where.
  */
+
+import type { PackJournalReader } from './journal.js';
 
 /**
  * One row of a DECLARED store as a handler sees it — a plain, serializable record. The injected `id`
@@ -217,6 +230,66 @@ export interface PackHandlerInit {
 export type PackToolHandlerInit = PackHandlerInit;
 
 /**
+ * ONE frame of an incremental response — the Server-Sent-Events wire shape (`id:`/`event:`/`data:`).
+ * Transport-neutral DATA: the pack owns its own `event:` names and its own `data:` payloads, and the
+ * deployment owns the encoding.
+ */
+export interface PackSseFrame {
+  /**
+   * OPTIONAL frame id — the RESUME CURSOR a client echoes back as `Last-Event-ID`. Emit the journal
+   * entry's own `cursor` here and a reconnecting client resumes exactly one entry past the last one it
+   * received; emit nothing and it can only start over.
+   */
+  readonly id?: string;
+  /** OPTIONAL frame type. Absent ⇒ the client's default `message` handler. */
+  readonly event?: string;
+  /** The frame body — an ALREADY-SERIALIZED string (the pack owns the serialization). */
+  readonly data: string;
+}
+
+/**
+ * The function that PRODUCES an incremental response, driven ONCE by the deployment. It receives:
+ *   - `emit(frame)` — write one frame; a write after the client disconnected is a safe no-op;
+ *   - `signal.aborted` — flips `true` when the client disconnects. A producer MAY stop emitting on it
+ *     and MUST NOT rely on it for durability: work the stream is only a VIEW of completes server-side
+ *     regardless of the connection.
+ *
+ * ⚠ IT RUNS AFTER THE ROUTE'S TRANSACTION HAS COMMITTED. The response status is already flushed by
+ * the time the first frame is written, so a producer cannot change it and owns its own terminal /
+ * error framing. `init.db` belongs to a transaction that has closed by then: read what a producer
+ * needs in the handler BODY, or read it through `init.journal`, which is bound to the tenant handle
+ * rather than to the route transaction for exactly this reason.
+ */
+export type PackSseProducer = (
+  emit: (frame: PackSseFrame) => Promise<void>,
+  signal: { readonly aborted: boolean },
+) => Promise<void>;
+
+/**
+ * The OPAQUE value `init.sseResponse(...)` returns — the incremental response itself. A pack RETURNS
+ * it from its handler and does nothing else with it: its shape is the deployment's, and a hand-built
+ * copy would not carry the marker the deployment discriminates on. Naming it as a route handler's
+ * `Out` (`PackRouteHandler<PackRouteResponse>`) is the whole of what this type is for.
+ *
+ * IT IS DELIBERATELY UNSTRUCTURED, for the reason `PackCapabilities` is: the members the deployment's
+ * envelope carries are the deployment's own, and re-stating one here would freeze this surface to
+ * every additive change made there — and would invite a pack to CONSTRUCT the value instead of
+ * passing back the one it was handed, which is the one thing that cannot work.
+ */
+export type PackRouteResponse = object;
+
+/**
+ * The INCREMENTAL-RESPONSE constructor a route handler is handed on its init (`init.sseResponse`).
+ *
+ * It is a CONSTRUCTOR rather than a writable stream on purpose, and it is INJECTED rather than
+ * imported for a stated reason: the deployment's response envelope is discriminated by a runtime
+ * marker this types-only package does not ship, so the only honest way to let a pack build one is to
+ * hand it the deployment's own builder. A pack therefore emits frames through the SAME implementation
+ * a first-party route uses, and still names no platform marker.
+ */
+export type PackSseResponder = (producer: PackSseProducer) => PackRouteResponse;
+
+/**
  * What a ROUTE handler receives — the common init plus what the request carried.
  *
  * A contributed route rides the deployment's own app: the same auth chain, the same interpreter, the
@@ -246,6 +319,45 @@ export interface PackRouteHandlerInit extends PackHandlerInit {
    * fabricated, so a handler that needs one fail-closes loudly on `undefined`.
    */
   readonly principal?: PackHandlerPrincipal;
+  /**
+   * The RUN-JOURNAL READ door for this invocation's tenant (see `PackJournalReader` for what it is
+   * scoped to and what it withholds).
+   *
+   * OPTIONAL because it is ADDITIVE: a deployment older than this contract injects none, so
+   * feature-detect (`if (!init.journal) …`) and fail-close loudly rather than reading `undefined`.
+   * The deployment this ships with populates it on every route invocation — the OPTIONALITY is about
+   * version skew, not about a capability a deployment opts into.
+   *
+   * IT SURVIVES THE ROUTE TRANSACTION, which is what makes it usable from inside a `PackSseProducer`:
+   * the reader is bound to the tenant handle rather than to the transaction the route opened. The cost
+   * is stated rather than hidden — a read does not see the route's own uncommitted writes — and it
+   * costs nothing here, because a route does not write the journal.
+   */
+  readonly journal?: PackJournalReader;
+  /**
+   * The INCREMENTAL-RESPONSE constructor (see `PackSseResponder`). A handler that returns
+   * `init.sseResponse(producer)` answers with an event stream the deployment drives, on the SAME
+   * registration every other `{kind:'handler'}` route rides — the same auth chain, the same tenant
+   * resolution, the same permission gate and the same per-route budget. Nothing about the refusal of
+   * an unauthenticated or under-scoped call changes: the response shape is chosen inside the handler,
+   * and the handler is reached only after the chain has already let the request through.
+   *
+   * OPTIONAL for the same version-skew reason as `journal`, and absent for no other: fail-close on
+   * `undefined` rather than falling back to a plain body a client would have to detect.
+   */
+  readonly sseResponse?: PackSseResponder;
+  /**
+   * The request's RESUME CURSOR — what a reconnecting client sent as `Last-Event-ID`, or an explicit
+   * `?lastEventId=` query on a first request, with the header taking precedence. The deployment
+   * resolves it with the SAME resolver its own resumable feeds use, so a pack receives a decided value
+   * instead of carrying a second copy of that precedence.
+   *
+   * ABSENT when the request carried neither — which means "from the beginning", never an empty read.
+   * UNTRUSTED CALLER DATA: an opaque position marker and never a tenant signal, so passing it straight
+   * to `journal.read({ after })` cannot widen a read past the run's own tenant; a value the reader
+   * cannot parse is refused there rather than silently replayed from zero.
+   */
+  readonly resumeFrom?: string;
 }
 
 /**
@@ -270,6 +382,11 @@ export type PackToolHandler<In = unknown, Out = unknown> = (
  * `{kind:'handler'}` action exports. It runs behind the deployment's auth chain, inside the
  * tenant-scoped transaction the deployment opened, and what it returns is the response body,
  * serialized as JSON with HTTP 200.
+ *
+ * ONE RETURN, TWO SHAPES. `Out` is a plain JSON body by default; a handler that answers INCREMENTALLY
+ * returns `init.sseResponse(producer)` instead and annotates `PackRouteHandler<PackRouteResponse>`.
+ * That is still one returned value — the increments are written by the producer the deployment drives
+ * — which is why no writable stream appears on the init.
  *
  * NOT the shape for a `{kind:'stream'}` action. That action also resolves against a declared
  * `route`-kind handler, but the module behind it exchanges a raw Web `Request`/`Response` and needs

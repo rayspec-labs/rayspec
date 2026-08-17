@@ -26,7 +26,7 @@
  * that receives `TurnDispatch`. The exemption is structural, so it cannot be bought by naming a folder
  * `services` inside `handlers/`.
  */
-import type { PackJournalStatus, PackJournalStepType } from './journal.js';
+import type { PackJournalReader, PackJournalStatus, PackJournalStepType } from './journal.js';
 
 /** One long-lived service a pack declares on its manifest. */
 export interface PackServiceDeclaration {
@@ -184,12 +184,50 @@ export interface PackJournalWriter {
 }
 
 /**
+ * The JOURNAL DOOR a service is handed — BOTH verbs on one handle: append what this service did, and
+ * read back what it (and the rest of this tenant's work) was recorded as.
+ *
+ * THE READ HALF BELONGS HERE, not only on a route, because THIS is where the write is. A service is
+ * the one surface that puts steps into the run journal, so a read door reachable only from a route
+ * would leave the writing surface exactly where it started: naming a core table in a SQL string
+ * through the escape hatch, which is the dependency this contract exists to remove.
+ * `PackRouteHandlerInit.journal` carries the same reader for the other case, where a read IS being
+ * served to a client.
+ *
+ * WHAT ASKS FOR THIS, STATED PLAINLY, because a contract that overstates its own demand is worse than
+ * one that admits a gap.
+ *
+ * FIRST, the reader is what makes the STREAMING half a contract rather than advice: it is the only
+ * cursored read this package carries, and without it `PackRouteHandlerInit.resumeFrom` would be a
+ * resume position with nothing contracted to produce one. That argument needs no consumer — it is
+ * internal to the surface. (It is also specific: a pack streaming its OWN table resumes over its own
+ * cursor, and this reader is not involved.)
+ *
+ * SECOND, the asymmetry is live rather than theoretical. `record` is in use — an extension pack's
+ * service writes a coarse step through it at boot — and until this door carried both verbs there was
+ * no contracted way back to it.
+ *
+ * AND NOTHING READS THOSE ENTRIES BACK TODAY beyond the repository's own fixture pack. This half
+ * closes a one-way door in a shipped contract; it does not unblock a caller that is waiting on it.
+ *
+ * TENANT-BOUND BY CONSTRUCTION, in both directions and for the same reason: the deployment binds the
+ * tenant when it builds this handle, so neither verb takes a `tenantId` and neither can reach another
+ * tenant's rows. That is why this door is tenant-scoped while `PackDatabase` beside it is not — the
+ * database door runs the SQL a pack wrote, this one runs the platform's own scoped read.
+ *
+ * `PackJournalWriter` stays exactly what it was and is still exported: a service that only appends
+ * may keep annotating it, and this is the wider handle the context now hands over.
+ */
+export interface PackJournal extends PackJournalWriter, PackJournalReader {}
+
+/**
  * What a service's `boot` receives.
  *
  * `journal` and `dispatch` are OPTIONAL, and their absence is a real answer rather than an oversight:
- * a deployment that bound no tenant has no journal writer to give, and one that wired no durable
- * worker has no dispatch capability. An ABSENT key is what makes a service that needs one fail-closed
- * loudly on `undefined` instead of silently doing nothing.
+ * a deployment that bound no tenant has no journal door to give — neither half of it, because an
+ * unattributable write and an unscoped read are equally not what they claim to be — and one that
+ * wired no durable worker has no dispatch capability. An ABSENT key is what makes a service that needs
+ * one fail-closed loudly on `undefined` instead of silently doing nothing.
  */
 export interface PackServiceContext {
   /** The id the deployment's `extensions[]` entry gave this pack — what its own messages name it by. */
@@ -209,8 +247,12 @@ export interface PackServiceContext {
    * declared it.
    */
   readonly sections: Readonly<Record<string, unknown>>;
-  /** The tenant-bound run-journal writer (absent when the deployment bound no tenant). */
-  readonly journal?: PackJournalWriter;
+  /**
+   * The tenant-bound run-journal door — `record` to append, `read` to page back through what was
+   * recorded (absent when the deployment bound no tenant, because a row nobody can attribute is not a
+   * record and a read with no tenant to scope to is not a read).
+   */
+  readonly journal?: PackJournal;
   /** The deployment's environment, read-only. */
   readonly env: Readonly<Record<string, string | undefined>>;
   /** The one sanctioned way to schedule a durable agent turn (absent when no durable worker is wired). */

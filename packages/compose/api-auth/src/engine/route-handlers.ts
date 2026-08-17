@@ -34,6 +34,7 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
+import { resolveResumeCursor } from '../http/journal-replay.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { makeEnqueueAgentRunCapability } from '../routes/runs.js';
 import { handlerPrincipal, principalActor } from './principal-actor.js';
@@ -288,6 +289,12 @@ export function makeRouteHandler(args: {
       // the request's buffered events as the last statement before COMMIT. Absent ⇒ init.emit is
       // omitted (a handler that needs it fail-closes loudly on `undefined`).
       eventBus,
+      // the RESUME CURSOR this request carried, through the deployment's ONE resolver — the same
+      // `Last-Event-ID`-over-`?lastEventId=` precedence its own resumable feeds read, rather than a
+      // second copy of it here or, worse, in every handler that streams. Absent ⇒ init.resumeFrom is
+      // omitted, which a handler reads as "from the beginning". UNTRUSTED CALLER DATA: an opaque
+      // position marker the journal reader refuses if it did not issue it — never a tenant signal.
+      resolveResumeCursor(c),
     );
     // a BRANDED enriched return chooses the status + headers; a plain return keeps the
     // existing behavior (HTTP 200 + that value as the JSON body). The brand check is unambiguous — a

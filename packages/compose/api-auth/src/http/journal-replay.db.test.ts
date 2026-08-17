@@ -142,6 +142,29 @@ describeDb('the journal replay cursor', () => {
     // stored seq and serve an EMPTY stream, which reads exactly like "there is nothing to resume".
     expect(await cursorFor({ 'last-event-id': 'not-a-number' }, '')).toBe(-1);
   });
+
+  /**
+   * (A2) AN EMPTY HEADER IS ABSENT, NOT A CURSOR — so it does not outrank a query supplied beside it.
+   *
+   * A browser `EventSource` sends `Last-Event-ID:` empty when it has no last id, and a proxy can
+   * synthesise one. Under a plain `??` the empty string wins (it is neither null nor undefined), and
+   * the client's own `?lastEventId=` is discarded.
+   *
+   * THIS IS A DELIBERATE CHANGE TO THIS FUNCTION, pinned here so it is a decision rather than a
+   * side effect: an empty header beside `?lastEventId=5` previously resolved to -1 (replay
+   * everything) and now resolves to 5 (resume where the client asked). Both are "safe" for this
+   * numeric feed — neither skips an entry — but only one honours what the caller sent. On the
+   * contributed-route feed the same input was not merely suboptimal: `''` travelled through every
+   * `!== undefined` test downstream and turned a well-formed request into a 500.
+   */
+  it('(A2) an EMPTY Last-Event-ID is absent, and does not beat the query beside it', async () => {
+    expect(await cursorFor({ 'last-event-id': '' }, '?lastEventId=5')).toBe(5);
+    // Empty on both sides ⇒ from the beginning, exactly as carrying neither.
+    expect(await cursorFor({ 'last-event-id': '' }, '?lastEventId=')).toBe(-1);
+    expect(await cursorFor({}, '?lastEventId=')).toBe(-1);
+    // Accept control: a NON-empty header still outranks the query, so the precedence is intact.
+    expect(await cursorFor({ 'last-event-id': '9' }, '?lastEventId=5')).toBe(9);
+  });
 });
 
 describeDb('the journal replay', () => {

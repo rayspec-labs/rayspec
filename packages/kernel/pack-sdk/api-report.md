@@ -12,7 +12,7 @@ must be regenerated here and committed in the same change:
 
 ## Entry point `.` — `dist/index.d.ts`
 
-43 export(s).
+52 export(s).
 
 ### `DefinedPack` — `dist/manifest.d.ts`
 
@@ -163,6 +163,13 @@ export interface PackHandlerPrincipal {
 export type PackHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 ```
 
+### `PackJournal` — `dist/service.d.ts`
+
+```ts
+export interface PackJournal extends PackJournalWriter, PackJournalReader {
+}
+```
+
 ### `PackJournalEntry` — `dist/journal.d.ts`
 
 ```ts
@@ -179,6 +186,42 @@ export interface PackJournalEntry {
     readonly latencyMs: number;
     readonly status: PackJournalStatus;
     readonly createdAt: string;
+}
+```
+
+### `PackJournalPage` — `dist/journal.d.ts`
+
+```ts
+export interface PackJournalPage {
+    readonly entries: readonly PackJournalReadEntry[];
+    readonly nextCursor?: string;
+    readonly hasMore: boolean;
+}
+```
+
+### `PackJournalQuery` — `dist/journal.d.ts`
+
+```ts
+export interface PackJournalQuery {
+    readonly runId?: string;
+    readonly after?: string;
+    readonly limit?: number;
+}
+```
+
+### `PackJournalReadEntry` — `dist/journal.d.ts`
+
+```ts
+export interface PackJournalReadEntry extends PackJournalEntry {
+    readonly cursor: string;
+}
+```
+
+### `PackJournalReader` — `dist/journal.d.ts`
+
+```ts
+export interface PackJournalReader {
+    read(query?: PackJournalQuery): Promise<PackJournalPage>;
 }
 ```
 
@@ -259,7 +302,16 @@ export interface PackRouteHandlerInit extends PackHandlerInit {
     readonly body?: unknown;
     readonly headers?: Readonly<Record<string, string>>;
     readonly principal?: PackHandlerPrincipal;
+    readonly journal?: PackJournalReader;
+    readonly sseResponse?: PackSseResponder;
+    readonly resumeFrom?: string;
 }
+```
+
+### `PackRouteResponse` — `dist/handler.d.ts`
+
+```ts
+export type PackRouteResponse = object;
 ```
 
 ### `PackSectionClaim` — `dist/manifest.d.ts`
@@ -292,7 +344,7 @@ export interface PackServiceContext {
     readonly db: PackDatabase;
     readonly spec: Readonly<Record<string, unknown>>;
     readonly sections: Readonly<Record<string, unknown>>;
-    readonly journal?: PackJournalWriter;
+    readonly journal?: PackJournal;
     readonly env: Readonly<Record<string, string | undefined>>;
     readonly dispatch?: TurnDispatch;
 }
@@ -314,6 +366,30 @@ export interface PackServiceModule {
     boot(ctx: PackServiceContext): Promise<void> | void;
     shutdown(): Promise<void> | void;
 }
+```
+
+### `PackSseFrame` — `dist/handler.d.ts`
+
+```ts
+export interface PackSseFrame {
+    readonly id?: string;
+    readonly event?: string;
+    readonly data: string;
+}
+```
+
+### `PackSseProducer` — `dist/handler.d.ts`
+
+```ts
+export type PackSseProducer = (emit: (frame: PackSseFrame) => Promise<void>, signal: {
+    readonly aborted: boolean;
+}) => Promise<void>;
+```
+
+### `PackSseResponder` — `dist/handler.d.ts`
+
+```ts
+export type PackSseResponder = (producer: PackSseProducer) => PackRouteResponse;
 ```
 
 ### `PackStoreDb` — `dist/handler.d.ts`

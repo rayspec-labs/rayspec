@@ -33,14 +33,21 @@
  * accepted by `defineExtension`, and that is the design: the pack fragment types pin the addressing
  * fields only, so they are WIDER than the document grammar this package validates against. A pack
  * builds its manifest with `defineExtension` (which typechecks the full grammar at the pack's edge)
- * and names the pack-surface type for the RESULT. The error and journal halves of that surface are
- * re-expressions of vocabulary owned elsewhere (`@rayspec/spec`, the run journal) and are not in the
- * scope of this file.
+ * and names the pack-surface type for the RESULT. The error vocabulary, and the journal shapes a
+ * WRITE is recorded under, are re-expressions of vocabulary owned elsewhere (`@rayspec/spec`, the run
+ * journal's writer) and are not in the scope of this file. The journal READ is, and for the usual
+ * reason: this repository builds the reader a pack calls, so the two belong side by side here.
  */
 import type {
   HandlerDb,
+  HandlerJournal,
+  HandlerJournalEntry,
+  HandlerJournalPage,
+  HandlerJournalQuery,
+  HttpResponse,
   RouteHandler,
   RouteHandlerInit,
+  SseProducer,
   ToolHandler,
   ToolHandlerInit,
 } from '@rayspec/handler-sdk';
@@ -53,10 +60,17 @@ import type {
   PackManifest,
   PackManifestBrand,
   PackMigrationChain,
+  PackJournalPage as PackSdkJournalPage,
+  PackJournalQuery as PackSdkJournalQuery,
+  PackJournalReadEntry as PackSdkJournalReadEntry,
+  PackJournalReader as PackSdkJournalReader,
+  PackJournalStep as PackSdkJournalStep,
   PackRouteHandler as PackSdkRouteHandler,
   PackRouteHandlerInit as PackSdkRouteHandlerInit,
+  PackRouteResponse as PackSdkRouteResponse,
   PackServiceContext as PackSdkServiceContext,
   PackServiceModule as PackSdkServiceModule,
+  PackSseProducer as PackSdkSseProducer,
   PackStoreDb as PackSdkStoreDb,
   PackToolHandler as PackSdkToolHandler,
   PackToolHandlerInit as PackSdkToolHandlerInit,
@@ -83,7 +97,11 @@ import type {
   ExtensionSectionClaim,
   ExtensionServiceDeclaration,
 } from './extension.js';
-import type { PackServiceContext, PackServiceModule } from './pack-services.js';
+import type {
+  PackServiceContext,
+  PackServiceJournalStep,
+  PackServiceModule,
+} from './pack-services.js';
 
 /** Compile-time assertion: fails to compile unless `T` is exactly `true`. */
 type Assert<_T extends true> = true;
@@ -203,6 +221,111 @@ type _APackRouteHandlerIsServableHere = Assert<
 type _StoreDoorFitsWhatAPackAnnotates = Assert<HandlerDb extends PackSdkStoreDb ? true : false>;
 
 /**
+ * THE ROUTE INIT'S TWO NEW DOORS — the journal READ and the INCREMENTAL response — in the four places
+ * they can diverge.
+ *
+ * These arms are INDEXED ACCESSES rather than plain `extends` tests, and that is the whole point of
+ * them. Both members are OPTIONAL on the pack surface (a deployment older than the contract injects
+ * neither, so a pack feature-detects), and an optional member of a TARGET type is satisfied by a
+ * source that simply does not have it — so `RouteHandlerInit extends PackRouteHandlerInit` above would
+ * stay green if this platform dropped either door tomorrow. `RouteHandlerInit['journal']` cannot: a
+ * member this side no longer declares is a compile error at the index itself, in this file, at the
+ * seam that owns it. That is the difference between a pin and a comment.
+ *
+ *  - THE READER the deployment BUILDS must satisfy what a pack ANNOTATES against, and its PAGE and its
+ *    QUERY are named on their own so a divergence says which half moved. The page arm is the one a
+ *    resumable client depends on: an entry that stopped carrying its cursor, or a page that stopped
+ *    saying whether more entries wait, is a resume that silently replays.
+ *  - THE RESPONSE CONSTRUCTOR is pinned through what it RETURNS and what it TAKES. The return arm says
+ *    the deployment's envelope is still the value a pack may hand back; the parameter arm runs the
+ *    OTHER way (a function parameter is contravariant), so a pack producer the engine could not drive
+ *    fails here rather than at the first emitted frame.
+ */
+type _JournalReaderFitsWhatAPackAnnotates = Assert<
+  RouteHandlerInit['journal'] extends PackSdkJournalReader ? true : false
+>;
+type _JournalEntryFitsWhatAPackAnnotates = Assert<
+  HandlerJournalEntry extends PackSdkJournalReadEntry ? true : false
+>;
+type _JournalPageFitsWhatAPackAnnotates = Assert<
+  HandlerJournalPage extends PackSdkJournalPage ? true : false
+>;
+type _APackJournalQueryIsReadableHere = Assert<
+  PackSdkJournalQuery extends HandlerJournalQuery ? true : false
+>;
+type _AJournalReadIsBoundedAndCursored = Assert<
+  Awaited<ReturnType<HandlerJournal['read']>> extends HandlerJournalPage ? true : false
+>;
+type _SseResponderFitsWhatAPackAnnotates = Assert<
+  RouteHandlerInit['sseResponse'] extends NonNullable<PackSdkRouteHandlerInit['sseResponse']>
+    ? true
+    : false
+>;
+type _APackProducerIsDrivableHere = Assert<PackSdkSseProducer extends SseProducer ? true : false>;
+type _TheEngineEnvelopeIsAPackRouteResponse = Assert<
+  HttpResponse extends PackSdkRouteResponse ? true : false
+>;
+/**
+ * The RESUME CURSOR is carried here and is the plain string the pack surface names. Indexed on this
+ * side for the same reason as the doors above: dropping it is a compile error rather than a member a
+ * pack would find missing at runtime.
+ */
+type _ResumeCursorFitsWhatAPackAnnotates = Assert<
+  RouteHandlerInit['resumeFrom'] extends PackSdkRouteHandlerInit['resumeFrom'] ? true : false
+>;
+
+/**
+ * THE SERVICE JOURNAL DOOR, in the two directions a service author depends on: the handle this
+ * deployment BUILDS must satisfy what a pack annotates `ctx.journal` as — both verbs.
+ *
+ * Indexed on THIS side, like the route arms above and for the same reason: `journal` is optional on
+ * the pack surface, so `_ServiceContextFitsWhatAPackAnnotates` would stay green if this platform
+ * stopped handing a service a journal at all. It would also stay green if the door kept `record` and
+ * lost `read` — which is not a hypothetical: this contract's first shape put the reader on the route
+ * init alone, and the surface that WRITES journal steps was left unable to read one back. This arm is
+ * what makes that a compile error rather than a discovery made downstream.
+ */
+type _AServiceJournalDoorIsBuiltHere = Assert<
+  NonNullable<PackServiceContext['journal']>['read'] extends NonNullable<
+    NonNullable<PackSdkServiceContext['journal']>['read']
+  >
+    ? true
+    : false
+>;
+
+/**
+ * …and the STEP a pack builds is one this deployment accepts. Pinned on the step TYPE rather than
+ * through `record`'s signature, and the difference is the whole value of the arm.
+ *
+ * `record` is declared METHOD-style on both sides, so TypeScript compares its parameter BIVARIANTLY
+ * even under `strictFunctionTypes` — a signature test therefore cannot see the platform NARROWING
+ * what it accepts. Measured: a test written as `['record'] extends (step: never) => Promise<void>`
+ * passes for `(step: string) => Promise<void>` as well, because `never` is assignable to everything;
+ * only a change in arity or return type would fail it. The drift that actually breaks a pack author
+ * is the one it cannot see — ONE new REQUIRED member on this side's step, which stops
+ * `ctx.journal.record({…})` compiling in their repository while every arm here stays green.
+ *
+ * Comparing the two STEP types directly puts that in the compiler's reach: the value a pack
+ * constructs must be assignable to what this deployment's writer takes, in that direction, which is
+ * the direction a pack author depends on.
+ */
+type _AWriteStepAPackBuildsIsAcceptedHere = Assert<
+  PackSdkJournalStep extends PackServiceJournalStep ? true : false
+>;
+/**
+ * …and it reads through the SAME reader a route reads through. Both are built from
+ * `makeHandlerJournal` over a `forTenant` handle, so this arm pins that the shape stays single —
+ * two journal reads returning different pages would be two contracts wearing one name.
+ */
+type _OneReaderServesBothSurfaces = Assert<
+  NonNullable<PackServiceContext['journal']>['read'] extends HandlerJournal['read']
+    ? RouteHandlerInit['journal']['read'] extends HandlerJournal['read']
+      ? true
+      : false
+    : false
+>;
+
+/**
  * Both sides spell the brand literal out. The pack surface ships no runtime, so it cannot import
  * the constant — it declares a copy, and a copy that drifts makes every loader check reject every
  * pack. Pinned in BOTH directions so neither a widening nor a narrowing passes.
@@ -236,8 +359,32 @@ const pins: [
   _APackToolHandlerIsDispatchableHere,
   _APackRouteHandlerIsServableHere,
   _StoreDoorFitsWhatAPackAnnotates,
+  _JournalReaderFitsWhatAPackAnnotates,
+  _JournalEntryFitsWhatAPackAnnotates,
+  _JournalPageFitsWhatAPackAnnotates,
+  _APackJournalQueryIsReadableHere,
+  _AJournalReadIsBoundedAndCursored,
+  _SseResponderFitsWhatAPackAnnotates,
+  _APackProducerIsDrivableHere,
+  _TheEngineEnvelopeIsAPackRouteResponse,
+  _ResumeCursorFitsWhatAPackAnnotates,
+  _AServiceJournalDoorIsBuiltHere,
+  _AWriteStepAPackBuildsIsAcceptedHere,
+  _OneReaderServesBothSurfaces,
   _BrandLiteralsAgree,
 ] = [
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
   true,
   true,
   true,

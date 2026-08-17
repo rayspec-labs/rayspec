@@ -13,6 +13,8 @@
  *                           (the engine builds the init, dispatch.ts is UNCHANGED).
  *  - event-bus.ts           the tenant event-bus injection seam (the buffered route form + the
  *                           immediate tool form) the composition root wires when the bus is enabled.
+ *  - journal-reader.ts      the tenant-bound, bounded, keyset-cursored READ door onto the run journal
+ *                           a `{handler}` route receives as `init.journal`.
  *  - resolve-tools.ts   (2) declared `tooling[]` → `NeutralTool[]` factory (per-run, tenant-bound).
  *  - route-init.ts          builders for the route/trigger `HandlerInit` (the transaction-wrapped
  *                           route/trigger path).
@@ -25,6 +27,7 @@ export {
   type ResolvedHandler,
   setHandlerRuntime,
 } from './handler-runtime.js';
+export { makeHandlerJournal } from './journal-reader.js';
 export {
   assertCompiledJavaScriptModule,
   defaultImporter,
