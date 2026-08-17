@@ -10,9 +10,16 @@
  * turned 14 of 30 arms red across the three pack-resolving suites, which now clear the variable in
  * their own `beforeEach`.
  *
- * This file exists so that clearing cannot be removed silently. The first arm is the property; the
- * SECOND ARM IS THE CONTROL, and it is what makes the first one mean something — an implementation
- * that simply ignored the variable would satisfy arm one and fail arm two.
+ * This file pins the RESOLVER, not the clearing. The FIRST ARM is the property an implementation that
+ * ignored the variable would fail; the SECOND ARM is its control, pinning that the spec's own
+ * directory is still the fallback — so arm one cannot be satisfied by a root that swallows everything.
+ * Measured, with `deploymentRootFor` mutated to `return dirname(deploymentSpecPath)`: arm one fails,
+ * arm two passes.
+ *
+ * WHAT THIS FILE DOES NOT DO is prove the clearing cannot be removed. It passes unchanged on a tree
+ * without the clearing, because it never puts a value there to be cleared. That control lives where
+ * the clearing does — the three pack-resolving suites now seed an ambient decoy in a `beforeAll`,
+ * ahead of their own `beforeEach`, so removing the clearing turns 14 of 30 arms red.
  */
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

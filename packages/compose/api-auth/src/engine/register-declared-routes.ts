@@ -280,7 +280,7 @@ export function registerDeclaredRoutes(
   // has to be fixed before any per-route message is worth acting on, and both refusals abort the same
   // boot with a message naming what is wrong. What is guaranteed unconditionally is that neither
   // failure is ever silently swallowed; which of the two names itself first when a spec trips both is
-  // not. Both arms are pinned in register-declared-routes.db.test.ts.
+  // not. Both arms are pinned in register-declared-routes.test.ts.
   let limiterProbed = false;
 
   for (const route of spec.api) {

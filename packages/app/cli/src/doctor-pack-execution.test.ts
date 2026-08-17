@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EXTENSION_BRAND } from '@rayspec/platform';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runDoctor } from './doctor.js';
 import { main } from './index.js';
 
@@ -94,6 +94,28 @@ let root: string;
 let marker: string;
 let prevCwd: string;
 let prevHandlerRoot: string | undefined;
+
+/**
+ * THE ACCEPT CONTROL FOR THE CLEARING BELOW. A hermeticity guard whose suite passes just as well
+ * without it proves nothing, and deleting the `delete` left every arm here green — the guard was
+ * measured against an environment that happened to be clean. So the suite dirties its own
+ * environment once, ahead of every `beforeEach`, with an EMPTY directory: a nonexistent path could be
+ * refused by a path check and never reach the loader, which would make this control pass for a reason
+ * unrelated to the redirect. Remove the clearing and the arms that resolve packs measure the decoy.
+ */
+const AMBIENT_DECOY_PREFIX = join(tmpdir(), 'rayspec-doctor-pack-ambient-decoy-');
+let prevAmbientHandlerRoot: string | undefined;
+let ambientDecoyDir: string | undefined;
+beforeAll(() => {
+  prevAmbientHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  ambientDecoyDir = mkdtempSync(AMBIENT_DECOY_PREFIX);
+  process.env.RAYSPEC_HANDLER_ROOT = ambientDecoyDir;
+});
+afterAll(() => {
+  if (prevAmbientHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevAmbientHandlerRoot;
+  if (ambientDecoyDir !== undefined) rmSync(ambientDecoyDir, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'rayspec-doctor-pack-probe-'));
