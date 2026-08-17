@@ -669,12 +669,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   absence says it did not. Names that are **both** are now the ones a rename is measured by where its
   old name cannot answer — both halves required, because a name the delta merely puts back (an index
   redefinition) stands there either way, and a name the delta takes away again (a rebuild's aside) is
-  absent at both ends. Measured over every live schema those deltas can reach: the state after the
-  first statement used to **mount** — a delta two statements short called applied, and both of them
-  lost — and the state after the second routed to **apply**, which re-runs a rename onto a name that is
-  already there and leaves the boot dead rather than refused. The same reading gives a fully applied
-  `CREATE TABLE "t_new"` + `RENAME TO "t"` something to mount **on**: it used to reach the same verdict
-  on an empty pile, which meant a delta that had never run reached it too.
+  absent at both ends. And a COLUMN or CONSTRAINT is named *through* a table, so a delta that carries
+  its table off — `RENAME COLUMN "a" TO "b"` followed by `RENAME TABLE "t" TO "u"` — leaves that
+  member key standing under a name no end state holds, and it is subtracted before any of this is
+  read: the live column is `u`.`b`, and reading `t`.`b` as missing refused a fully applied delta.
+  Measured over every live schema those deltas can reach: the state after the first statement used to
+  **mount** — a delta two statements short called applied, and both of them lost — while the state
+  before any of it had run was **refused** as half landed, permanently, on the strength of a name whose
+  presence proves nothing. The same reading gives a fully applied `CREATE TABLE "t_new"` +
+  `RENAME TO "t"` something to mount **on**: it used to reach the same verdict on an empty pile, which
+  meant a delta that had never run reached it too.
 - **A `CREATE TABLE` brings its columns into existence, and the boot now knows it.** The set of names a
   delta creates — the set whose *absence* proves nothing — held the table name alone, so
   `CREATE TABLE "stage" ("id" uuid, "tmp" text)` + `ALTER TABLE "stage" DROP COLUMN "tmp"` reported

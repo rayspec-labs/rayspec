@@ -2516,6 +2516,105 @@ describe('routePresentMatchingUpdate — a name the delta MAKES and TAKES AWAY, 
     ).toBe('apply');
   });
 
+  it('a MEMBER key is only as good as the table it hangs off — a carried-off table takes its columns', async () => {
+    // The reader that answers "does the delta leave this name standing" records a table rename as the
+    // old name taken away and the new one left standing, and says NOTHING about that table's columns.
+    // So after `RENAME COLUMN "a" TO "b"` + `RENAME TABLE "t" TO "u"`, `column:t.b` is still standing
+    // under a name no end state holds — the live column is `u`.`b`.
+    //
+    // That over-collection is harmless where the set only WITHHOLDS evidence. Read as evidence in its
+    // own right it is not: measured, the FULLY APPLIED schema below was refused as HALF LANDED — over
+    // a column that exists — and no restart clears it, because the schema is already correct.
+    const renameColumnThenTable = mig(
+      'ALTER TABLE "t" RENAME COLUMN "a" TO "b";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "t" RENAME TO "u";',
+      [
+        {
+          kind: 'rename-column',
+          match: 'ALTER TABLE "t" RENAME COLUMN "a" TO "b"',
+          reason: 'reviewed',
+        },
+        { kind: 'rename-table', match: 'ALTER TABLE "t" RENAME TO "u"', reason: 'reviewed' },
+      ],
+    );
+    // The fully applied schema: the table is `u` and its column is `b`.
+    const applied = async (p: SchemaObjectProbe) =>
+      p.kind === 'table'
+        ? p.table === 'u'
+        : p.kind === 'column' && p.table === 'u' && p.column === 'b';
+    expect((await routePresentMatchingUpdate(renameColumnThenTable, applied)).kind).toBe('mount');
+
+    // The same subtraction for a table the delta DROPS rather than renames.
+    const renameColumnThenDrop = mig(
+      'ALTER TABLE "t" RENAME COLUMN "a" TO "b";\n--> statement-breakpoint\nDROP TABLE "t";',
+      [
+        {
+          kind: 'rename-column',
+          match: 'ALTER TABLE "t" RENAME COLUMN "a" TO "b"',
+          reason: 'reviewed',
+        },
+        { kind: 'drop-table', match: 'DROP TABLE "t"', reason: 'reviewed' },
+      ],
+    );
+    expect((await routePresentMatchingUpdate(renameColumnThenDrop, async () => false)).kind).toBe(
+      'mount',
+    );
+
+    // A table the delta itself MAKES and then carries off counts as carried off. Defining the set as
+    // "tables the delta ends without" instead of "tables any statement takes away" reads identically
+    // on every shape above, because there the table predates the delta — and puts the defect straight
+    // back here, where the fully applied schema is `y`.`b` and `column:x.b` is standing under a name
+    // nothing holds. Measured as a mutation: the narrower definition leaves this file green without
+    // this arm, and answers `refuse-half-landed` on the fully applied state below.
+    const createThenCarryOff = mig(
+      'CREATE TABLE "x" ("a" text);\n--> statement-breakpoint\n' +
+        'ALTER TABLE "x" RENAME COLUMN "a" TO "b";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "x" RENAME TO "y";',
+      [
+        {
+          kind: 'rename-column',
+          match: 'ALTER TABLE "x" RENAME COLUMN "a" TO "b"',
+          reason: 'reviewed',
+        },
+        { kind: 'rename-table', match: 'ALTER TABLE "x" RENAME TO "y"', reason: 'reviewed' },
+      ],
+    );
+    const appliedAsY = async (p: SchemaObjectProbe) =>
+      p.kind === 'table'
+        ? p.table === 'y'
+        : p.kind === 'column' && p.table === 'y' && p.column === 'b';
+    expect((await routePresentMatchingUpdate(createThenCarryOff, appliedAsY)).kind).toBe('mount');
+    // …and the state one statement short is still refused, so the arm above is not bought by a guard
+    // that stopped answering for this delta at all.
+    const afterFirstStatement = async (p: SchemaObjectProbe) =>
+      p.kind === 'table'
+        ? p.table === 'x'
+        : p.kind === 'column' && p.table === 'x' && p.column === 'a';
+    expect((await routePresentMatchingUpdate(createThenCarryOff, afterFirstStatement)).kind).toBe(
+      'refuse-half-landed',
+    );
+
+    // ACCEPT CONTROL, and it discriminates: where the delta does NOT carry the table off, the renamed
+    // column is still read, and still separates the two states. A guard that simply stopped reading
+    // member keys would pass both assertions above and fail this pair.
+    const plainColumnRename = mig('ALTER TABLE "t" RENAME COLUMN "a" TO "b";', [
+      {
+        kind: 'rename-column',
+        match: 'ALTER TABLE "t" RENAME COLUMN "a" TO "b"',
+        reason: 'reviewed',
+      },
+    ]);
+    const hasColumn = (column: string) => async (p: SchemaObjectProbe) =>
+      p.kind === 'table' ? p.table === 't' : p.kind === 'column' && p.column === column;
+    expect(await routePresentMatchingUpdate(plainColumnRename, hasColumn('b'))).toEqual({
+      kind: 'mount',
+      probed: { present: [], gone: [], renamed: ['column "t"."b"'], proven: [] },
+    });
+    expect((await routePresentMatchingUpdate(plainColumnRename, hasColumn('a'))).kind).toBe(
+      'apply',
+    );
+  });
+
   it('ACCEPT CONTROL: a name only MADE and taken away still lands on its presence', async () => {
     // The withholding above must not swallow the rule it guards. Here nothing takes the name away
     // BEFORE it is made — an ordinary staging table — so its presence is still evidence the delta
