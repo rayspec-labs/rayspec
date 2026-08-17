@@ -91,7 +91,7 @@ every command below reads the same whether you built from source or installed th
 package:
 
 ```bash
-RAYSPEC_ROOT="$PWD"                                                    # the repo root
+RAYSPEC_ROOT="$PWD"          # run this FROM the repo root — the functions close over it
 rayspec()       { node "$RAYSPEC_ROOT/packages/app/cli/dist/index.js" "$@"; }
 rayspec-serve() { node "$RAYSPEC_ROOT/packages/app/server/dist/serve.js" "$@"; }
 ```
@@ -683,7 +683,7 @@ bundled examples ship one:
 ```bash
 # A backend with custom .ts handlers: build -> dist/, then deploy the compiled artifact.
 node examples/acme-notes-backend/build.mjs
-RAYSPEC_CRON_TENANT_ID=<ORG_ID> \
+RAYSPEC_CRON_TENANT_ID=00000000-0000-4000-8000-000000000042 \
   rayspec deploy examples/acme-notes-backend/dist/rayspec.yaml
 
 # An extension pack authored in .ts: compile the pack, then deploy a spec that references it.
@@ -705,9 +705,12 @@ and it raises `cron_tenant_required` for exactly this, by name.
 > org that already exists — a deployment binds to it, and a made-up id refuses the
 > boot. `RAYSPEC_CRON_TENANT_ID` accepts an id no org owns yet: the boot serves, the
 > scheduler starts, and every firing is skipped with one log line each until that org
-> exists, at which point firing resumes with no restart. So any UUID gets you a
-> serving backend to explore; use the `<ORG_ID>` from step 4 when you want the
-> trigger to actually fire. Provision one for a real deployment with
+> exists, at which point firing resumes with no restart. So the placeholder UUID
+> above gets you a serving backend to explore; swap in the `<ORG_ID>` from step 4
+> when you want the trigger to actually fire. It must still be a **UUID** — a value
+> that is not one refuses the boot after the DDL has committed, exactly as an unset
+> variable does, which is why the line above carries a literal you can run rather
+> than a placeholder you must replace. Provision a real org with
 > [`rayspec tenant ensure`](./cli-reference.md#tenant-ensure).
 
 Each `build.mjs` is a thin `tsc` wrapper (see the example's `tsconfig.build.json`).

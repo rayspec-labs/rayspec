@@ -27,7 +27,10 @@
  *      and any warning that says a variable must be set at boot must be answered by the documented
  *      command line. The recipe that shipped without `RAYSPEC_CRON_TENANT_ID` aborted AFTER
  *      committing product-store DDL, so a reader's first attempt left state behind — and `doctor`
- *      had been predicting it by name the whole time.
+ *      had been predicting it by name the whole time. That command deploys a COMPILED artifact under
+ *      a gitignored `dist/`, which is why the examples are built before the walk and why a spec that
+ *      still will not resolve is a FAILURE here rather than a skip: skipping it is exactly how this
+ *      check came to cover everything except the command it was written for.
  *
  *   D. A PRINTED "real output" BLOCK STILL HAS THE COMMAND'S KEYS. A ```jsonc fence whose first line
  *      is `// <the command that produced it>` is run for real and compared on its TOP-LEVEL KEY SET.
@@ -37,21 +40,28 @@
  * A SKIP IS LOUD. Where a command genuinely cannot run here — it needs a database, a port, a live
  * model, or a placeholder only the reader can fill — the gate COUNTS it, GROUPS it by reason, and
  * PRINTS it. A skip that prints nothing is how a false green ships; this repository has the receipt.
+ * That includes a `console` transcript's output lines and a document's own prelude definitions,
+ * which used to vanish before the accounting rather than after it.
  *
- * EVERY ZERO NAMES ITS INPUT. The pass line carries the corpus size at each stage, and a walk that
- * finds no document, no command block or no runnable command is a FAILURE, not a pass.
+ * EVERY ZERO NAMES ITS INPUT — all SEVEN stages the pass line reports, not five. `deployChecked` and
+ * `outputChecked` were printed on the same line as the word PASSED while reading zero.
  *
- * ITS OWN ACCEPT CONTROL: `--self-test` writes a throwaway document carrying one command of each
- * defect class (a `zsh`-hostile shortcut, a command over a missing path, a `deploy` missing the
- * variable its `doctor` demands, an output block with a dropped key), runs the whole gate over that
- * directory alone, and requires all four to be caught. It is not a mock: it is this file's own
- * checks over a real document, so a detector that stops firing fails here rather than going quiet.
+ * ITS OWN ACCEPT CONTROL: `--self-test` writes one throwaway document and requires a violation from
+ * EACH OF THE FOUR CHECKS — a `zsh`-hostile shortcut (A), a command over a path that exists and
+ * fails (B), a `deploy` missing the variable its `doctor` demands (C), an output block with a
+ * dropped key (D) — plus, listed separately because they are NOT accept controls, two assertions
+ * that a skip stayed loud. Check B had none of its own: a skip assertion stood in for it, and
+ * gutting B's violation condition left the self-test green. Check C's subject is chosen from the
+ * documents the gate really walks, because proving a detector against a document the corpus never
+ * uses is how C stayed green over a command it was silently skipping.
  *
  * HERMETIC: every child runs with the `.env` auto-loader off and no database URL, so it reads the
  * same on a developer's machine as in CI and touches no database.
  *
- * NEEDS THE BUILD: it drives the CLI's built entrypoint, so it runs after `pnpm build`. A missing
- * build is exit 2 — the gate refuses rather than reporting a pass it never measured.
+ * NEEDS THE BUILD, AND BUILDS THE EXAMPLES. It drives the CLI's built entrypoint, so it runs after
+ * `pnpm build`; a missing build is exit 2. Unlike its sibling it also needs the EXAMPLES built,
+ * because documented commands name compiled artifacts — so it runs every `build.mjs` it finds one
+ * level under `examples/` itself, first, and refuses with exit 2 if one fails.
  *
  * Usage: node scripts/check-documented-commands.mjs [--self-test]
  */
@@ -65,6 +75,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(repoRoot, 'packages', 'app', 'cli', 'dist', 'index.js');
+const EXAMPLES_DIR = join(repoRoot, 'examples');
 /** Directories that ship no authored prose (installed packages, build output, VCS). */
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'coverage']);
 /** The shells a reader actually has. `zsh` is the macOS login shell; `bash` is everywhere else. */
@@ -76,6 +87,40 @@ if (!existsSync(CLI)) {
       '`pnpm build` first. The gate refuses rather than reporting a pass over commands it never ran.',
   );
   process.exit(2);
+}
+
+/**
+ * Build every example that ships a build step, BEFORE the walk.
+ *
+ * The documented deploy this gate exists to check names a COMPILED artifact
+ * (`examples/acme-notes-backend/dist/rayspec.yaml`) — `dist/` is gitignored, so on a clean checkout
+ * that path does not exist and check C skipped the one command it was written for, reporting a
+ * green line over a corpus that no longer contained the defect. The document's own two-line recipe
+ * builds it first; so does this. The scripts are WALKED, never listed here, so an example that grows
+ * a build step is covered the moment it lands.
+ *
+ * A build that fails is exit 2 — the same refusal as a missing CLI build. The gate does not report a
+ * pass over documents whose subjects it could not produce.
+ */
+async function buildExamples() {
+  const scripts = [];
+  for (const entry of readdirSync(EXAMPLES_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
+    const script = join(EXAMPLES_DIR, entry.name, 'build.mjs');
+    if (existsSync(script)) scripts.push(relative(repoRoot, script));
+  }
+  for (const script of scripts) {
+    const { code, out } = await runShell('bash', `node ${JSON.stringify(script)}`);
+    if (code !== 0) {
+      console.error(
+        `documented-commands gate: \`node ${script}\` FAILED (exit ${code}), so the artifacts the ` +
+          'documented commands name cannot be produced. The gate refuses rather than reporting a ' +
+          `pass over a corpus it could not build. Output: ${out.trim()}`,
+      );
+      process.exit(2);
+    }
+  }
+  return scripts.length;
 }
 
 /** Every markdown file under `root`, walked (never listed here), repo-relative. */
@@ -105,12 +150,16 @@ function fencedBlocks(markdown) {
 }
 
 /**
- * The logical command lines of one shell block: comments and blank lines dropped, a `\` continuation
- * joined into the line it continues, and a `console`-style `$ ` prompt stripped. Output lines of a
- * `console` transcript (anything not behind a prompt, once the block has shown one) are dropped.
+ * The logical lines of one shell block: `{ lines, dropped }`. Comments and blanks are structure and
+ * vanish; a `\` continuation is joined into the line it continues; a `console`-style `$ ` prompt is
+ * stripped. A `console` transcript's OUTPUT lines are not commands — but they are RETURNED, in
+ * `dropped`, because "a skip is loud" is this gate's own rule and it did not hold here: an
+ * un-prompted line disappeared with no count and no reason, which is the one shape a reader of the
+ * summary cannot distinguish from a line the extractor failed to see.
  */
 function commandLines(body, lang) {
   const out = [];
+  const dropped = [];
   let pending = '';
   let sawPrompt = false;
   for (const raw of body.split('\n')) {
@@ -123,7 +172,8 @@ function commandLines(body, lang) {
         sawPrompt = true;
         text = text.trimStart().slice(2);
       } else if (lang === 'console' && sawPrompt) {
-        continue; // transcript output, not a command
+        dropped.push(text.trim()); // transcript output, not a command — counted, not vanished
+        continue;
       }
     }
     if (text.endsWith('\\')) {
@@ -134,45 +184,143 @@ function commandLines(body, lang) {
     pending = '';
   }
   if (pending.trim() !== '') out.push(pending.trim());
-  return out.filter((l) => l !== '');
+  return { lines: out.filter((l) => l !== ''), dropped: dropped.filter((l) => l !== '') };
 }
 
 /**
  * The shell PRELUDE a document establishes for its own later commands: the blocks that only DEFINE
- * things (a function, or an assignment) and run nothing. A reader has these in the shell by the time
- * they reach a later block, so the gate must too — and running them is check A.
+ * things and RUN nothing. A reader has these in the shell by the time they reach a later block, so
+ * the gate must too — and probing what they define is check A.
  */
-const DEFINES_FUNCTION = /^([A-Za-z_][A-Za-z0-9_-]*)\s*\(\)\s*\{/;
+const OPENS_FUNCTION = /^([A-Za-z_][A-Za-z0-9_-]*)\s*\(\)\s*\{/;
 const DEFINES_VARIABLE = /^([A-Za-z_][A-Za-z0-9_]*)=/;
+/**
+ * A value that RUNS something when the assignment is evaluated. `stripEnvPrefix(l) === ''` tests what
+ * FOLLOWS an assignment, not what the assignment itself executes — so
+ * `LISTENER="$(node server.js)"` read as a pure definition and the prelude opened a listening socket.
+ * Command substitution in either spelling, and process substitution, are the ways a value runs code.
+ */
+const VALUE_RUNS_SOMETHING = /\$\(|`|<\(|>\(/;
+
+/**
+ * The command a function body RUNS first — `node` in `rayspec() { node "$ROOT/…" "$@"; }`. Read off
+ * the definition rather than out of `type` output, whose format differs per shell. `undefined` when
+ * the body opens with something that is not a plain command word (an assignment, a redirect), which
+ * simply means check A has nothing extra to resolve for it.
+ */
+function bodyHead(text) {
+  for (const word of shellWords(text)) {
+    if (word === '' || word === '{' || word === '}') continue;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+    return /^[A-Za-z_./][\w./-]*$/.test(word) ? word : undefined;
+  }
+  return undefined;
+}
+
+/** Net `{` minus `}` on a line, counted OUTSIDE quotes — how a multi-line function body is closed. */
+function braceDelta(line) {
+  let depth = 0;
+  let quote = '';
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote !== '') {
+      if (ch === '\\') i += 1;
+      else if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '#') break;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}') depth -= 1;
+  }
+  return depth;
+}
+
+/**
+ * Read one shell block as a sequence of DEFINITIONS, or report that it is not one.
+ *
+ * A function is read to its closing brace rather than by its first line: the one-line form
+ * `f() { …; }` and the conventional multi-line form are the same definition, and requiring EVERY
+ * line to look like a definition silently rejected the multi-line one — dropping the shortcuts of
+ * the very page this gate was written for while the summary still said PASSED.
+ */
+function readDefinitions(lines) {
+  const shortcuts = [];
+  let depth = 0;
+  let open;
+  let wraps;
+  for (const line of lines) {
+    if (depth > 0) {
+      wraps ??= bodyHead(line);
+      depth += braceDelta(line);
+      if (depth <= 0) {
+        shortcuts.push({ name: open, kind: 'function', wraps });
+        open = undefined;
+        wraps = undefined;
+        depth = 0;
+      }
+      continue;
+    }
+    const fn = OPENS_FUNCTION.exec(line);
+    if (fn !== null) {
+      const delta = braceDelta(line);
+      const head = bodyHead(line.slice(line.indexOf('{') + 1));
+      if (delta <= 0) shortcuts.push({ name: fn[1], kind: 'function', wraps: head });
+      else {
+        open = fn[1];
+        wraps = head;
+        depth = delta;
+      }
+      continue;
+    }
+    const v = DEFINES_VARIABLE.exec(line);
+    // Tested on the ASSIGNMENTS, never on the whole line: `RAYSPEC="node …"   # the `rayspec` CLI`
+    // carries backticks in its trailing PROSE, and matching those rejected a perfectly good shortcut
+    // — the gate then found none at all on the very page it was written for. `shellWords` has
+    // already cut the comment, so the prefix is the value and nothing else.
+    const assigned = envPrefixOf(line).join(' ');
+    if (v !== null && stripEnvPrefix(line) === '' && !VALUE_RUNS_SOMETHING.test(assigned)) {
+      // A shortcut only when it holds a command; a plain value is just a value.
+      if (/=("|')?node\s/.test(line)) shortcuts.push({ name: v[1], kind: 'variable' });
+      continue;
+    }
+    return { ok: false, shortcuts: [] };
+  }
+  return { ok: depth === 0, shortcuts };
+}
 
 function preludeOf(blocks) {
   const parts = [];
   /** `{ name, kind: 'function' | 'variable' }` — the kind decides how the shortcut is PROBED. */
   const shortcuts = [];
+  let preludeLines = 0;
   for (const block of blocks) {
     if (!['bash', 'sh'].includes(block.lang)) continue;
-    const lines = commandLines(block.body, block.lang);
+    const { lines } = commandLines(block.body, block.lang);
     if (lines.length === 0) continue;
-    // "Definitions only" means the line RUNS NOTHING. An env-PREFIXED command
-    // (`FOO=1 BAR=2 pnpm serve`) starts with an assignment too, and taking it for a definition put a
-    // running server into the prelude of every later command on the page — the gate booting the very
-    // things it declines to run. A variable line qualifies only when nothing remains after its
-    // assignments.
-    const defsOnly = lines.every(
-      (l) => DEFINES_FUNCTION.test(l) || (DEFINES_VARIABLE.test(l) && stripEnvPrefix(l) === ''),
-    );
-    if (!defsOnly) continue;
-    for (const l of lines) {
-      const fn = DEFINES_FUNCTION.exec(l);
-      if (fn) shortcuts.push({ name: fn[1], kind: 'function' });
-      const v = DEFINES_VARIABLE.exec(l);
-      // The variable form is a shortcut only when it holds a command; a plain value is just a value.
-      if (v && /=("|')?node\s/.test(l)) shortcuts.push({ name: v[1], kind: 'variable' });
-    }
+    const read = readDefinitions(lines);
+    if (!read.ok) continue;
+    shortcuts.push(...read.shortcuts);
+    preludeLines += lines.length;
     parts.push(block.body);
   }
-  return { script: parts.join('\n'), shortcuts, names: shortcuts.map((s) => s.name) };
+  return {
+    script: parts.join('\n'),
+    shortcuts,
+    names: shortcuts.map((s) => s.name),
+    preludeLines,
+  };
 }
+
+/**
+ * Text that LOOKS like a shell-shortcut definition, used as a per-document tripwire on the reader
+ * above. A document that plainly defines one but yields none has an extractor problem, and the
+ * GLOBAL shortcut count cannot see it: one other document defining one anywhere keeps the total
+ * non-zero while this page contributes nothing, which is how a reformat of the two functions here
+ * left the guide's own commands unchecked under a PASSED line.
+ */
+const LOOKS_LIKE_A_SHORTCUT =
+  /^\s*(?:[A-Za-z_][A-Za-z0-9_-]*\s*\(\)\s*\{|[A-Za-z_][A-Za-z0-9_]*=["']?node\s)/m;
 
 /**
  * A `rayspec` on the PATH for the duration of a probe, pointing at the CLI THIS TREE BUILDS.
@@ -212,6 +360,15 @@ async function runShell(shell, script, cwd = repoRoot) {
 const READ_ONLY_SUBCOMMANDS = new Set(['doctor', 'plan', 'openapi', 'init']);
 /** A token a reader is expected to REPLACE — the gate cannot know what it becomes. */
 const PLACEHOLDER = /<[^>]+>|\.\.\.|…|sk-…|sk-\.\.\./;
+
+/**
+ * The other spelling of "substitute your own": a path written in the `path/to/thing` convention, or
+ * one rooted at `your-`/`my-`. It is a placeholder without angle brackets, and check C must treat it
+ * as one — a document illustrating a command shape is not naming a file that ought to exist. The
+ * distinction matters because check C's unresolved-path case is a FAILURE: without this, an
+ * illustration turns a correct page red, which is the mirror of the defect it was tightened for.
+ */
+const ILLUSTRATIVE_PATH = /(^|\/)path\/to\/|(^|\/)(your|my)-/;
 
 /**
  * The command a line really invokes, when it is written through a shortcut the document defined:
@@ -323,7 +480,12 @@ function stripEnvPrefix(line) {
   return shellWords(line).slice(envPrefixOf(line).length).join(' ');
 }
 
-/** Every `<name>=` a documented command line sets, including via an `export` on an earlier line. */
+/**
+ * Every `<name>=` a documented command line sets AS ITS OWN PREFIX. Only the prefix — an `export` on
+ * an earlier line is deliberately NOT read: the gate would then have to decide which earlier block a
+ * reader still has in their shell, and guessing wrong in that direction turns a correct document
+ * red. A recipe that needs a variable states it on the line that needs it.
+ */
 function variablesSetBy(line) {
   return new Set(envPrefixOf(line).map((t) => t.split('=')[0]));
 }
@@ -380,6 +542,20 @@ async function gate(rootDir, { quiet = false } = {}) {
     blockCount += shellBlocks.length;
     const prelude = preludeOf(blocks);
 
+    // The PER-DOCUMENT tripwire on the reader. A global shortcut count cannot see one page's
+    // shortcuts disappear while another page's keep the total non-zero — and the page that goes
+    // quiet is the one whose commands then stop being checked at all.
+    if (
+      prelude.shortcuts.length === 0 &&
+      shellBlocks.some((b) => LOOKS_LIKE_A_SHORTCUT.test(b.body))
+    ) {
+      violations.push(
+        `${docRel}: a shell block here plainly DEFINES a command shortcut, and the extractor read ` +
+          'none — so every command on this page ran without it and check A probed nothing. Fix the ' +
+          'reader; this is not a documentation defect.',
+      );
+    }
+
     // ── A. the shortcuts a document defines RESOLVE, in every shell a reader has ────────────────
     // Resolution only — nothing is executed. `command -v` asks the shell what the first word of the
     // invocation names, which IS the defect: the variable form is probed exactly as the document
@@ -388,9 +564,14 @@ async function gate(rootDir, { quiet = false } = {}) {
     // instead would boot whatever it points at — `rayspec-serve --version` starts a server.
     for (const shortcut of prelude.shortcuts) {
       shortcutCount += 1;
+      // For a FUNCTION, `command -v <name>` resolves the moment the definition is evaluated, which
+      // says nothing about whether the definition is any good. The discriminating question is what
+      // the function WRAPS, so the probe resolves that too — the wrapped head is read off the
+      // definition at parse time (never by parsing `type` output, which differs per shell). Still
+      // resolution only: nothing the shortcut points at is executed.
       const probe =
         shortcut.kind === 'function'
-          ? `command -v ${shortcut.name}`
+          ? `command -v ${shortcut.name} >/dev/null && command -v ${shortcut.wraps ?? shortcut.name}`
           : `command -v $${shortcut.name}`;
       for (const shell of SHELLS) {
         const { code, out } = await runShell(shell, `${prelude.script}\n${probe} >/dev/null`);
@@ -411,8 +592,22 @@ async function gate(rootDir, { quiet = false } = {}) {
     }
 
     for (const block of shellBlocks) {
-      for (const line of commandLines(block.body, block.lang)) {
+      const read = commandLines(block.body, block.lang);
+      for (const line of read.dropped) {
         commandCount += 1;
+        noteSkip('a console transcript line that is output, not a command');
+      }
+      for (const line of read.lines) {
+        commandCount += 1;
+        // A prelude line is a DEFINITION a reader evaluates, not an instruction to judge — and it is
+        // already run, in front of every command below. Naming it keeps it out of the
+        // "not a CLI command" bucket, which it was inflating with things that are not commands.
+        if (prelude.script.includes(line)) {
+          noteSkip(
+            'a shell shortcut definition (run as this document’s prelude, not judged as an instruction)',
+          );
+          continue;
+        }
         const verdict = classify(line, prelude.names);
         if (verdict.verdict === 'skip') {
           noteSkip(verdict.reason);
@@ -437,8 +632,21 @@ async function gate(rootDir, { quiet = false } = {}) {
           (prelude.names.includes(head) || head === 'rayspec') && argv.includes('deploy');
         const spec = argv.find((a) => /\.ya?ml$/.test(a));
         if (isDeploy && spec !== undefined && !PLACEHOLDER.test(spec)) {
-          if (!existsSync(resolve(repoRoot, spec))) {
-            noteSkip('a `deploy` over a path the reader creates');
+          if (ILLUSTRATIVE_PATH.test(spec)) {
+            noteSkip('a `deploy` over an illustrative path (`path/to/…`), not a file in the tree');
+          } else if (!existsSync(resolve(repoRoot, spec))) {
+            // NOT a skip. A concrete path that will not resolve — after the examples have been built
+            // above — means this check silently stopped covering the command it was written for.
+            // That is exactly how it happened: the target is a build artifact under a gitignored
+            // `dist/`, so on a clean checkout the one deploy carrying the defect was skipped and the
+            // gate printed a green line. A placeholder the reader fills is a different thing and is
+            // still skipped, loudly, above.
+            violations.push(
+              `${docRel}: the documented \`${line}\` names \`${spec}\`, which does not exist after ` +
+                'the example builds ran — so this check could not read what the document requires ' +
+                'at boot. A path this gate cannot resolve is a failure, not a skip: skipping it is ' +
+                'how the command this check exists for stopped being covered.',
+            );
           } else {
             deployChecked += 1;
             const { vars, readable } = await requiredVarsFor(spec);
@@ -465,7 +673,12 @@ async function gate(rootDir, { quiet = false } = {}) {
     // ── D. a printed "real output" block still has the command's top-level keys ────────────────
     for (const block of blocks) {
       if (block.lang !== 'jsonc' && block.lang !== 'json') continue;
-      for (const chunk of splitLabelledOutputs(block.body)) {
+      const labelled = splitLabelledOutputs(block.body);
+      if (labelled.length === 0) {
+        noteSkip('a JSON block that names no command it is the output of');
+        continue;
+      }
+      for (const chunk of labelled) {
         // The label names how a READER invokes it (`npx -y rayspec …`), which is not how this gate
         // has to run it: the JSON being compared is the CLI's own output either way, so the local
         // build answers the question. `init` writes a file, so it runs in a throwaway directory; a
@@ -654,12 +867,16 @@ function reportSkips(skips) {
  */
 async function selfTest() {
   const dir = mkdtempSync(join(tmpdir(), 'rayspec-doccmd-selftest-'));
-  const spec = walkMarkdown(join(repoRoot, 'examples')).length >= 0 ? findCronSpec() : undefined;
+  // Check C's subject must be a spec a documented `deploy` in the CORPUS actually names — proving the
+  // detector against a document no deploy line uses is how it stayed green while the one command it
+  // was written for was being skipped. `deploySubject()` reads the tree's own documents for it.
+  const spec = await deploySubject();
+  const failing = findNegativeFixture();
   const doc = [
     '# a document with one of each defect',
     '',
     '```bash',
-    'RAYSPEC_BROKEN="node ' + join(repoRoot, 'packages/app/cli/dist/index.js') + '"',
+    `RAYSPEC_BROKEN="node ${join(repoRoot, 'packages/app/cli/dist/index.js')}"`,
     '```',
     '',
     '```bash',
@@ -670,6 +887,11 @@ async function selfTest() {
     'rayspec doctor examples/no-such-example/nope.rayspec.yaml',
     '```',
     '',
+    // Check B's own case: a path that EXISTS, so the command is RUN rather than skipped, over a
+    // document the floor refuses. Without it, gutting check B's violation condition left the
+    // self-test green — a skip assertion had been standing in for the accept control of the one
+    // check that does the running.
+    ...(failing ? ['```bash', `rayspec doctor ${failing}`, '```', ''] : []),
     ...(spec ? ['```bash', `rayspec deploy ${spec}`, '```', ''] : []),
     '```jsonc',
     '// rayspec init',
@@ -680,30 +902,56 @@ async function selfTest() {
   writeFileSync(join(dir, 'defects.md'), doc);
 
   const expected = [
-    { name: 'a zsh-hostile shortcut', match: /does not resolve to a runnable command under `zsh`/ },
-    { name: 'a printed output that dropped keys', match: /printed output for .* has drifted/ },
+    {
+      name: 'a zsh-hostile shortcut (check A)',
+      match: /does not resolve to a runnable command under `zsh`/,
+    },
+    {
+      name: 'a printed output that dropped keys (check D)',
+      match: /printed output for .* has drifted/,
+    },
   ];
+  if (failing) {
+    expected.push(
+      {
+        name: 'a documented command that FAILS, under bash (check B)',
+        match: /FAILED under `bash`/,
+      },
+      { name: 'a documented command that FAILS, under zsh (check B)', match: /FAILED under `zsh`/ },
+    );
+  }
   if (spec) {
     expected.push({
-      name: 'a deploy missing a required variable',
+      name: 'a deploy missing a required variable (check C)',
       match: /does not set `RAYSPEC_/,
     });
   }
 
   const result = await gate(dir, { quiet: true });
-  console.log(`documented-commands gate SELF-TEST over 1 synthetic document:`);
+  console.log('documented-commands gate SELF-TEST over 1 synthetic document:');
   let failed = 0;
   for (const e of expected) {
     const caught = result.violations.some((v) => e.match.test(v));
     console.log(`  ${caught ? 'CAUGHT ' : 'MISSED '} ${e.name}`);
     if (!caught) failed += 1;
   }
-  // The missing-path command must be SKIPPED with a reason, never silently dropped and never run.
-  const skipped = [...result.skips.keys()].some((r) => /names a path the reader creates/.test(r));
-  console.log(
-    `  ${skipped ? 'CAUGHT ' : 'MISSED '} a command over a path that does not exist (skipped, with a reason)`,
-  );
-  if (!skipped) failed += 1;
+  // Two SKIP assertions. They are not accept controls for any check — they prove the loud-skip rule
+  // holds — and they are listed apart so neither is mistaken for one again.
+  for (const s of [
+    { name: 'a command over a path that does not exist', match: /names a path the reader creates/ },
+    { name: 'a console transcript line that is output', match: /transcript line that is output/ },
+  ]) {
+    const seen = [...result.skips.keys()].some((r) => s.match.test(r));
+    if (s.match.source.includes('transcript') && !seen) continue; // only if the doc carries one
+    console.log(`  ${seen ? 'COUNTED' : 'MISSED '} ${s.name} (skipped, with a reason)`);
+    if (!seen) failed += 1;
+  }
+  // Check C's subject has to be a spec the corpus really deploys, or the detector is proven against
+  // a document the gate never judges.
+  if (spec === undefined) {
+    console.log('  MISSED  check C has no subject: no documented `deploy` names a resolvable spec');
+    failed += 1;
+  }
 
   rmSync(dir, { recursive: true, force: true });
   if (failed > 0) {
@@ -717,29 +965,61 @@ async function selfTest() {
   console.log('documented-commands gate SELF-TEST PASSED: every detector fires.');
 }
 
-/** A shipped spec whose `doctor` demands an environment variable — the self-test's deploy subject. */
-function findCronSpec() {
-  const candidates = walkYaml(join(repoRoot, 'examples'));
-  for (const rel of candidates) {
-    const text = readFileSync(join(repoRoot, rel), 'utf8');
-    if (/^\s*triggers:/m.test(text) && /kind:\s*cron/.test(text)) return rel;
+/**
+ * Check C's self-test subject: a spec that a documented `deploy` IN THE REAL CORPUS names, that
+ * resolves on disk, and whose `doctor` reports a required variable. All three conditions matter —
+ * proving the detector against a spec no deploy line uses is how check C stayed green while the one
+ * command it was written for was being skipped for an unresolvable path.
+ */
+async function deploySubject() {
+  for (const docRel of walkMarkdown(repoRoot)) {
+    const blocks = fencedBlocks(readFileSync(join(repoRoot, docRel), 'utf8'));
+    const prelude = preludeOf(blocks);
+    for (const block of blocks.filter((b) => ['bash', 'sh', 'console'].includes(b.lang))) {
+      for (const line of commandLines(block.body, block.lang).lines) {
+        const argv = shellWords(stripEnvPrefix(line));
+        const head = resolveHead(argv[0] ?? '', prelude.names);
+        if (!(prelude.names.includes(head) || head === 'rayspec') || !argv.includes('deploy'))
+          continue;
+        const spec = argv.find((a) => /\.ya?ml$/.test(a));
+        if (spec === undefined || PLACEHOLDER.test(spec) || !existsSync(resolve(repoRoot, spec)))
+          continue;
+        const { vars, readable } = await requiredVarsFor(spec);
+        if (readable && vars.size > 0) return spec;
+      }
+    }
   }
   return undefined;
 }
-function walkYaml(dir) {
+
+/**
+ * Check B's self-test subject: a committed document the read-only floor REFUSES, so a documented
+ * command over it is RUN (the path exists) and comes back non-zero. `*.invalid.*` is the tree's own
+ * negative-fixture convention, which `check-example-documents.mjs` relies on for the same reason.
+ */
+function findNegativeFixture() {
+  return walkYaml(join(repoRoot, 'examples'), { negativesOnly: true })[0];
+}
+function walkYaml(dir, { negativesOnly = false } = {}) {
   const found = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
-      found.push(...walkYaml(join(dir, entry.name)));
-    } else if (entry.isFile() && /\.ya?ml$/.test(entry.name) && !/\.invalid\./.test(entry.name)) {
-      found.push(relative(repoRoot, join(dir, entry.name)));
+      found.push(...walkYaml(join(dir, entry.name), { negativesOnly }));
+    } else if (entry.isFile() && /\.ya?ml$/.test(entry.name)) {
+      if (/\.invalid\./.test(entry.name) === negativesOnly) {
+        found.push(relative(repoRoot, join(dir, entry.name)));
+      }
     }
   }
   return found.sort();
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────────────────────────
+
+// The documented commands name COMPILED artifacts, so the corpus is built before it is walked — by
+// both entry points, because the self-test's check-C subject is chosen out of that same corpus.
+const examplesBuilt = await buildExamples();
 
 if (process.argv.includes('--self-test')) {
   await selfTest();
@@ -756,6 +1036,10 @@ if (result.blockCount === 0) zeroes.push('no shell block');
 if (result.commandCount === 0) zeroes.push('no command line');
 if (result.ranCount === 0) zeroes.push('no runnable command');
 if (result.shortcutCount === 0) zeroes.push('no documented shell shortcut');
+// Both of these printed their zero on the SAME LINE as the word PASSED. "Every zero names its input"
+// has to include the stages that name theirs in the summary, or the sentence is decoration.
+if (result.deployChecked === 0) zeroes.push('no documented deploy to check against its own doctor');
+if (result.outputChecked === 0) zeroes.push('no printed output block to compare');
 if (zeroes.length > 0) {
   console.error(
     `documented-commands gate FAILED: the walk of ${relative(repoRoot, repoRoot) || '.'} found ` +
@@ -778,7 +1062,8 @@ if (result.violations.length > 0) {
 }
 
 console.log(
-  `documented-commands gate PASSED: ${result.documents} markdown document(s), ` +
+  `documented-commands gate PASSED: ${examplesBuilt} example build(s) run first, ` +
+    `${result.documents} markdown document(s), ` +
     `${result.blockCount} shell block(s), ${result.commandCount} command line(s) — ` +
     `${result.shortcutCount} documented shortcut(s) resolved under ${SHELLS.join(' + ')}, ` +
     `${result.ranCount} command(s) RUN in each shell, ${result.deployChecked} documented deploy(s) ` +

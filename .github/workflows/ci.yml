@@ -298,7 +298,11 @@ jobs:
       # set the environment its own `doctor` demands, and re-runs each labelled output block to compare
       # its keys. Commands that cannot run here are counted and printed with a reason — never skipped
       # silently. Its self-test runs first: a detector that stopped firing must fail loudly rather than
-      # make every green verdict below it meaningless. Runs after Build; touches no database.
+      # make every green verdict below it meaningless. Runs after Build, and — unlike the
+      # example-document gate beside it — BUILDS THE EXAMPLES itself first, because the documented
+      # commands name compiled artifacts under a gitignored `dist/`: without that step the one deploy
+      # carrying the cron-tenant defect resolves to nothing and is skipped rather than checked.
+      # Touches no database.
       - name: Documented-command gate — accept control
         run: pnpm test:gate-documented-commands
 

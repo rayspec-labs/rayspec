@@ -47,10 +47,14 @@ command -v jq >/dev/null || { echo "this smoke needs jq" >&2; exit 1; }
 #
 # There is no self-skip now. If the server cannot run a live agent the assertions below fail loudly and
 # non-zero, which is what `smoke.sh` next to this one already does.
-if ! curl -fsS -o /dev/null --max-time 10 "$BASE/health"; then
+# curl's own diagnostic is CAPTURED rather than printed, so the failure reads as one block instead of
+# a bare `curl: (7) …` ahead of the sentence that explains it — and it is still shown, because
+# "connection refused" and "could not resolve host" are different problems for the reader.
+if ! CURL_SAID="$(curl -fsS -o /dev/null --max-time 10 "$BASE/health" 2>&1)"; then
   echo "no deployment is answering at $BASE/health." >&2
   echo "Start one first (see README.md) — this script measures a LIVE agent, so it needs the" >&2
   echo "lead-qualifier document served with OPENAI_API_KEY in the SERVER's environment." >&2
+  [ -n "$CURL_SAID" ] && echo "  (curl said: $CURL_SAID)" >&2
   exit 1
 fi
 if [ -z "${OPENAI_API_KEY:-}" ]; then

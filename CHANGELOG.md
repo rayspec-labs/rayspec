@@ -464,8 +464,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a database, a port, a live model, or a placeholder only the reader can fill — is **counted and
   printed with its reason**, because a skip that prints nothing is how a false green ships. Every stage
   reports its input size and a zero anywhere is a failure. Its `--self-test` is the accept control: one
-  throwaway document carrying one defect of each class, all four of which must be caught. Run against
-  the documents as they shipped, it reports five violations.
+  throwaway document carrying one defect of each class — one per check, so gutting any single check
+  fails the self-test — plus separate assertions that a skip stayed loud. Run against the documents as
+  they shipped, on a clean checkout, it reports five violations.
+  Two preconditions are stated rather than assumed: it needs `pnpm build`, like the gate beside it,
+  and it needs the **examples built**, which it does itself — the documented `deploy` names a
+  compiled artifact under a gitignored `dist/`, so without that step the one command carrying the
+  cron-tenant defect resolves to nothing. A documented `deploy` whose spec still cannot be resolved is
+  therefore a **failure**, not a skip; a path written in the `path/to/…` illustration convention is a
+  skip, counted like every other.
 
 - **The documented deploy recipe for `examples/acme-notes-backend` sets the variable it needs.** The
   two-line recipe under "Custom handlers ship compiled" gave the build and the deploy with no
