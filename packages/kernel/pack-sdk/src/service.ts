@@ -86,15 +86,23 @@ export interface TurnDispatch {
  */
 export interface PackDatabase {
   /**
-   * Run one parameterized statement and read its rows back.
+   * Run ONE parameterized statement and read its rows back.
    *
-   * A TRANSACTION-CONTROL STATEMENT IS REFUSED HERE — `BEGIN`, `START TRANSACTION`, `COMMIT`,
-   * `ROLLBACK`, `SAVEPOINT` and the rest reject with an `Error` whose `name` is
-   * `PackTransactionError`, before the statement reaches the server. This handle is POOLED, so such a
-   * statement cannot do what it looks like it does: the connection it lands on goes back to the pool
-   * still inside a transaction nothing ever commits, and every later write that happens to be issued
-   * on it is invisible to every other connection while its locks are held indefinitely. Use
-   * `transaction(fn)` below.
+   * "ONE" IS ENFORCED BY THE SERVER, NOT ASSUMED. The statement goes over Postgres's EXTENDED
+   * protocol, where the server itself decides where one command ends — and refuses a string carrying
+   * more than one, at parse time, before any part of it runs. On this handle and on `tx` alike, that
+   * refusal reaches you as an `Error` whose `name` is `PackTransactionError`. It has to be enforced
+   * somewhere: sent the other way, `query('SELECT 1; COMMIT')` really does commit. Issue each
+   * statement through its own call, and use `transaction(fn)` when they must land together.
+   * A `;` inside a string literal, a dollar-quoted body (`$tag$…$tag$`), an `E''` escape or a
+   * comment is not a second command, and none of them is refused.
+   *
+   * A TRANSACTION-CONTROL STATEMENT IS REFUSED HERE TOO — `BEGIN`, `START TRANSACTION`, `COMMIT`,
+   * `ROLLBACK`, `SAVEPOINT` and the rest reject with the same typed error, before the statement
+   * reaches the server. This handle is POOLED, so such a statement cannot do what it looks like it
+   * does: the connection it lands on goes back to the pool still inside a transaction nothing ever
+   * commits, and every later write that happens to be issued on it is invisible to every other
+   * connection while its locks are held indefinitely. Use `transaction(fn)` below.
    */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
   /**
