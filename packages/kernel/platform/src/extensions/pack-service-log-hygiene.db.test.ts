@@ -19,7 +19,7 @@
  * so each case also asserts the canary IS in the raw error it started from. A test that only checked
  * absence would keep passing if the fixture silently stopped putting the value in the statement.
  */
-import { operatorSafeDbErrorMessage } from '@rayspec/db';
+import { operatorSafeDbErrorMessage, operatorSafeDbErrorStack } from '@rayspec/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeTestDb } from '../test-support/test-db.js';
 import { bootPackServices, type LoadedPackService, PackServiceError } from './pack-services.js';
@@ -31,6 +31,8 @@ const db = makeTestDb();
 
 /** A table of this suite's own, so nothing here depends on another suite's rows. */
 const TABLE = 'pack_log_hygiene_probe';
+/** A second table whose typed columns provoke the coercion failures the unique violation cannot. */
+const COERCION_TABLE = 'pack_log_hygiene_coercion';
 
 /**
  * Provoke a REAL wrapped driver error: a parameterized insert, through the ORM, that violates the
@@ -40,14 +42,7 @@ async function realWrappedQueryError(): Promise<unknown> {
   const { sql } = await import('drizzle-orm');
   try {
     await db.execute(
-      sql.raw(`INSERT INTO ${TABLE} (id, payload) VALUES ('dup', '${CANARY.replace(/'/g, "''")}')`),
-    );
-  } catch {
-    // The raw form is only the seed for the duplicate below; its own failure is not the subject.
-  }
-  try {
-    await db.execute(
-      sql`INSERT INTO ${sql.identifier(TABLE)} (id, payload) VALUES (${'dup'}, ${CANARY})`,
+      sql`INSERT INTO ${sql.identifier(TABLE)} (id, payload) VALUES (${CANARY}, ${CANARY})`,
     );
   } catch (e) {
     return e;
@@ -55,18 +50,47 @@ async function realWrappedQueryError(): Promise<unknown> {
   throw new Error('expected the duplicate-key insert to fail');
 }
 
+/**
+ * A COERCION failure, which is the class the first version of the renderer leaked through: Postgres
+ * echoes the offending value into the PRIMARY MESSAGE (`invalid input syntax for type uuid: "…"`),
+ * so a renderer that passed that message through printed a value in the same sentence that announced
+ * values were withheld. The unique violation above cannot catch it — its primary message is one of
+ * the few that carries no value at all.
+ */
+async function realCoercionError(column: string, type: string): Promise<unknown> {
+  const { sql } = await import('drizzle-orm');
+  await db.$client.unsafe(
+    `CREATE TABLE IF NOT EXISTS ${COERCION_TABLE} (u uuid, n integer, m numeric, t timestamptz)`,
+  );
+  try {
+    await db.execute(
+      sql`INSERT INTO ${sql.identifier(COERCION_TABLE)} (${sql.identifier(column)}) VALUES (${CANARY})`,
+    );
+  } catch (e) {
+    return e;
+  }
+  throw new Error(`expected the ${type} coercion to fail`);
+}
+
 describe('a failed extension-service write does not print its bind values', () => {
   beforeAll(async () => {
     await db.$client.unsafe(
       `CREATE TABLE IF NOT EXISTS ${TABLE} (id text primary key, payload text not null)`,
     );
+    // THE CANARY IS THE DUPLICATED KEY, not a payload beside it. Postgres echoes the offending key
+    // into the error's `detail` (`Key (id)=(…) already exists`), so seeding it here is what makes the
+    // "`detail` is never read" assertion below able to fail: with the canary in a non-key column the
+    // detail read `Key (id)=(dup) …`, carried no canary, and appending detail to the rendered message
+    // left every absence assertion green.
     await db.$client.unsafe(
-      `INSERT INTO ${TABLE} (id, payload) VALUES ('dup', 'seed') ON CONFLICT DO NOTHING`,
+      `INSERT INTO ${TABLE} (id, payload) VALUES ($1, 'seed') ON CONFLICT DO NOTHING`,
+      [CANARY] as never[],
     );
   });
 
   afterAll(async () => {
     await db.$client.unsafe(`DROP TABLE IF EXISTS ${TABLE}`);
+    await db.$client.unsafe(`DROP TABLE IF EXISTS ${COERCION_TABLE}`);
     await db.$client.end();
   });
 
@@ -90,8 +114,12 @@ describe('a failed extension-service write does not print its bind values', () =
     // Withheld VISIBLY: a reader must not conclude the statement ran without parameters.
     expect(safe).toMatch(/withheld/i);
     expect(safe).toMatch(/\b2 bind values\b/);
-    // The driver's own primary message is what tells an operator WHY it failed.
-    expect(safe).toContain('duplicate key value');
+    // WHY it failed still reaches the operator — but assembled from parts this codebase owns (a
+    // fixed phrase, the SQLSTATE, the schema identifiers) rather than from the server's sentence,
+    // which on other failure classes carries the offending value.
+    expect(safe).toContain('a unique constraint was violated');
+    expect(safe).toContain('SQLSTATE 23505');
+    expect(safe).toContain(`constraint "${TABLE}_pkey"`);
   });
 
   it('a boot abort names the extension, the service and the statement — never the values', async () => {
@@ -120,6 +148,52 @@ describe('a failed extension-service write does not print its bind values', () =
     expect(message).toMatch(/withheld/i);
     // And the whole rendered abort — not just its message — stays clean.
     expect(String(thrown)).not.toContain(CANARY);
+  });
+
+  /**
+   * THE CLASS THE FIRST VERSION SHIPPED THROUGH. Four column types, four coercion failures, and on
+   * every one of them Postgres puts the offending value in its own primary message — so a renderer
+   * that re-emitted that message announced the withholding and disclosed the value in one sentence.
+   * Note the timestamp case reports a DIFFERENT SQLSTATE from the other three, which is why the fix
+   * is "never read the message" rather than "allow-list the codes whose message is safe".
+   */
+  it.each([
+    ['u', 'uuid'],
+    ['n', 'integer'],
+    ['m', 'numeric'],
+    ['t', 'timestamptz'],
+  ])('withholds the value a %s coercion failure echoes into its own message', async (col, type) => {
+    const raw = await realCoercionError(col, type);
+
+    // The control: the driver really does put the value in the primary message here.
+    const primary = (raw as { cause?: { message?: string } }).cause?.message ?? '';
+    expect(primary).toContain(CANARY);
+
+    const safe = operatorSafeDbErrorMessage(raw);
+    expect(safe).not.toContain(CANARY);
+    // Still diagnosable: the code and the statement survive.
+    expect(safe).toMatch(/SQLSTATE \w{5}/);
+    expect(safe).toContain(COERCION_TABLE);
+    expect(safe).toMatch(/withheld/i);
+  });
+
+  it('never re-emits the driver’s `detail`, which echoes the offending key', async () => {
+    const raw = await realWrappedQueryError();
+    // The control: `detail` genuinely carries the canary now, so its absence below means something.
+    const detail = (raw as { cause?: { detail?: string } }).cause?.detail ?? '';
+    expect(detail).toContain(CANARY);
+    expect(operatorSafeDbErrorMessage(raw)).not.toContain(CANARY);
+  });
+
+  it('keeps a stack’s frames while replacing the header that carries the values', async () => {
+    const raw = await realWrappedQueryError();
+    expect(String((raw as Error).stack)).toContain(CANARY);
+
+    const safe = operatorSafeDbErrorStack(raw) ?? '';
+    expect(safe).not.toContain(CANARY);
+    expect(safe).toMatch(/withheld/i);
+    // The frames are what makes a stack worth logging at all.
+    expect(safe).toMatch(/^\s+at\s/m);
   });
 
   it('an error carrying no statement is passed through unchanged', () => {

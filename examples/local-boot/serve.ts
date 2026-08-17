@@ -60,6 +60,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import type { AllowlistEntry } from '@rayspec/db';
+import { operatorSafeDbErrorStack } from '@rayspec/db';
 import {
   applyServeAgentTracing,
   assembleOptsFromEnv,
@@ -478,7 +479,10 @@ if (isEntrypoint) {
       // is genuinely unexpected: keep the full stack.
       console.error(`[local-boot] ${err.message}`);
     } else {
-      console.error('[local-boot] boot failed:', err instanceof Error ? err.stack : err);
+      // The stack, redacted: a boot failure on a database write arrives wrapped by the ORM, whose
+      // stack BEGINS with the statement and every value it bound. The renderer replaces that header
+      // and keeps the frames; anything that is not a wrapped statement error passes through.
+      console.error('[local-boot] boot failed:', operatorSafeDbErrorStack(err) ?? err);
     }
     process.exit(1);
   });

@@ -102,15 +102,105 @@ function wrappedStatement(err: unknown): WrappedStatement | undefined {
   return undefined;
 }
 
-/** The driver's own primary message — what says WHY the statement failed, carrying no bind value. */
-function driverPrimaryMessage(from: { readonly cause?: unknown }): string | undefined {
+/**
+ * OUR OWN PHRASE PER SQLSTATE — never the server's sentence.
+ *
+ * The driver's primary message is NOT safe to re-emit, which is the whole reason this table exists.
+ * Measured across ten SQLSTATE classes against real Postgres, the coercion failures echo the OFFENDING
+ * VALUE into the message itself: `invalid input syntax for type uuid: "<the caller's value>"`, and the
+ * same for integer, numeric and enum. A renderer that passed that through would print a bind value in
+ * the same sentence that announces bind values were withheld — the disclosure and a false assurance
+ * about it, together.
+ *
+ * ⚠ AND THE LEAKING SET IS NOT ONE SQLSTATE. The timestamp case reports `22007`, not the `22P02` the
+ * other three share, so an allowlist of "codes whose message is safe" is a list somebody has to keep
+ * complete against a server that owns the vocabulary. That is the argument for not reading the
+ * message AT ALL rather than for reading it more carefully.
+ *
+ * A code absent from this table is not a gap: it falls through to a fixed sentence plus the code, so
+ * an unanticipated refusal is diagnosable and still cannot carry a value. The list earns its keep by
+ * making the common refusals readable, not by being exhaustive.
+ */
+const REFUSAL_BY_SQLSTATE: Readonly<Record<string, string>> = {
+  '22001': 'a bound value was too long for its column',
+  '22003': 'a bound value was out of range for its column type',
+  '22007': 'a bound value was not a valid timestamp',
+  '22P02': 'a bound value was not valid for its column type',
+  '23502': 'a not-null constraint was violated',
+  '23503': 'a foreign key constraint was violated',
+  '23505': 'a unique constraint was violated',
+  '23514': 'a check constraint was violated',
+  '40001': 'the transaction was rolled back to preserve serializability',
+  '40P01': 'the transaction was rolled back to break a deadlock',
+  '42601': 'the statement is not valid SQL',
+  '42703': 'the statement names a column that does not exist',
+  '42P01': 'the statement names a relation that does not exist',
+  '53300': 'the server refused another connection',
+  '55P03': 'a row lock was not available inside the statement timeout',
+  '57014': 'the statement was cancelled',
+};
+
+/** The structured node the driver hung the SQLSTATE on, if the chain carries one. */
+function sqlstateNode(from: { readonly cause?: unknown }): Record<string, unknown> | undefined {
   let cur: unknown = from.cause;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
-    const node = cur as { message?: unknown; cause?: unknown };
-    if (typeof node.message === 'string' && node.message.length > 0) return node.message;
+    const node = cur as Record<string, unknown>;
+    if (typeof node.code === 'string') return node;
     cur = node.cause;
   }
   return undefined;
+}
+
+/**
+ * The SCHEMA identifiers a refusal names — the constraint, relation and column it was about.
+ *
+ * These are DDL names, authored in a migration, and they are the one part of a driver error that
+ * describes the SCHEMA rather than a row. The existing constraint-name readers in this module rest on
+ * exactly that distinction and say so; this is the same claim used for the same reason. `detail`,
+ * which is where Postgres echoes the offending VALUE (`Key (id)=(…) already exists`), is not read
+ * here and is not read anywhere in this module.
+ */
+function schemaIdentifiers(node: Record<string, unknown>): string[] {
+  const named: string[] = [];
+  const take = (field: string, label: string): void => {
+    const value = node[field];
+    // Identifiers only: collapse whitespace so a pathological name cannot break the log line.
+    if (typeof value === 'string' && value.length > 0) {
+      named.push(`${label} "${value.replace(/\s+/g, ' ').trim()}"`);
+    }
+  };
+  take('constraint_name', 'constraint');
+  take('table_name', 'relation');
+  take('column_name', 'column');
+  return named;
+}
+
+/**
+ * WHY the statement failed, assembled from parts this module owns.
+ *
+ * Every component is one of: a phrase from the table above, a SQLSTATE (five characters from a
+ * vocabulary the server publishes and no value can occupy), or a schema identifier. The driver's
+ * `message` and `detail` are never read, so there is no path along which server free text — and with
+ * it a value the server chose to echo — can reach the output. That is the mechanism behind this
+ * module's claim, rather than an assertion about what messages happen to contain.
+ */
+function refusalReason(from: { readonly cause?: unknown }): string {
+  const node = sqlstateNode(from);
+  if (node === undefined) return 'the database refused the statement';
+  const code = String(node.code);
+  const phrase = REFUSAL_BY_SQLSTATE[code] ?? 'the database refused the statement';
+  const named = schemaIdentifiers(node);
+  const detail = named.length > 0 ? `, ${named.join(', ')}` : '';
+  return `${phrase} (SQLSTATE ${code}${detail})`;
+}
+
+/** True when the chain still had links at the walk's boundary — see `operatorSafeDbErrorMessage`. */
+function deeperThanTheWalk(err: unknown): boolean {
+  let cur: unknown = err;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
+    cur = (cur as { cause?: unknown }).cause;
+  }
+  return cur != null;
 }
 
 /** Collapse a statement onto one line — a log entry is a line, and the ORM emits multi-line SQL. */
@@ -129,26 +219,30 @@ function oneLine(statement: string): string {
  * the values escape three different ways, and two of them look nothing like a mistake at the call
  * site: `${err.message}` in a refusal, `String(err)` in a template, and `console.error(msg, err)` —
  * which inspects the object and prints the enumerable properties whether or not the message was
- * touched. The driver's OWN error does not do this; the wrapper does, so any code path that
- * stringifies a caught database error is exposed regardless of which of the three shapes it used.
+ * touched. Any code path that stringifies a caught database error is exposed regardless of which of
+ * the three shapes it used.
+ *
+ * THE DRIVER'S OWN MESSAGE IS NOT A SAFE FALLBACK EITHER, which an earlier version of this renderer
+ * assumed. Postgres echoes the offending value into the primary message on every coercion failure, so
+ * that version printed a value in the same sentence that announced values were withheld. See
+ * `REFUSAL_BY_SQLSTATE` for the measurement and for why an allowlist of safe codes is the wrong shape.
  *
  * Bind values are arbitrary row data — whatever a caller decided to persist, from whatever source it
  * read. An operator-facing log is exactly where that must not appear, because those logs travel:
  * into tickets, into chat threads, into support attachments.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * WHAT IS KEPT, AND WHY.
+ * WHAT IS KEPT, AND THE MECHANISM THAT MAKES IT SAFE.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * The refusal stays diagnosable. It keeps the driver's primary message (WHY it failed — a constraint
- * name, a missing relation; it carries no row value) and the parameterized statement (WHICH write
- * failed — the SQL holds `$n` placeholders, not values). What it drops is the value list, and it
- * says SO: a count of what was withheld, so a reader knows there is more and does not conclude the
- * statement ran without parameters.
+ * The refusal stays diagnosable: WHY it failed (a phrase this module owns, the SQLSTATE, and the
+ * schema identifiers the refusal named) and WHICH write failed (the parameterized statement, whose
+ * text holds `$n` placeholders rather than values). What it drops is the value list, and it says so —
+ * a count, so a reader knows there is more and does not conclude the statement ran without parameters.
  *
- * The driver's `detail` field is deliberately NOT included: on a unique violation Postgres echoes the
- * offending value into it (`Key (id)=(…) already exists`), which is the same disclosure by another
- * name. This builds its message from named safe parts rather than passing anything through, so a
- * field nobody thought about cannot ride along.
+ * The safety is STRUCTURAL rather than asserted: the output is assembled from a fixed phrase table, a
+ * SQLSTATE code, schema identifiers and the statement, and no server-authored free text is read at
+ * all. A refusal shape nobody anticipated therefore renders as its code and a generic sentence — it
+ * fails closed, rather than passing through on the assumption that its message was harmless.
  *
  * An error carrying no statement is returned unchanged — this is a redactor for database failures,
  * not a general message filter, and rewriting refusals it does not understand would cost every other
@@ -156,11 +250,35 @@ function oneLine(statement: string): string {
  */
 export function operatorSafeDbErrorMessage(err: unknown): string {
   const wrapped = wrappedStatement(err);
-  if (wrapped === undefined) return err instanceof Error ? err.message : String(err);
-  const why = driverPrimaryMessage(wrapped.node) ?? 'the database rejected the statement';
+  if (wrapped === undefined) {
+    const message = err instanceof Error ? err.message : String(err);
+    // A chain deeper than the walk fails in the SAFE direction — nothing is re-emitted — but the
+    // operator silently loses the statement and has no way to tell that from an error that never
+    // carried one. Say which happened, keeping the withholding visible the same way the value count
+    // does. `cause` at the boundary is the only evidence available without walking further.
+    return deeperThanTheWalk(err)
+      ? `${message} (the failed statement is not recoverable from this error: its cause chain is deeper than ${MAX_CAUSE_DEPTH} links)`
+      : message;
+  }
   const count = wrapped.params.length;
   const withheld = count === 1 ? '1 bind value withheld' : `${count} bind values withheld`;
-  return `${why} — failed statement: ${oneLine(wrapped.query)} (${withheld} from this message; they are caller data and do not belong in a log)`;
+  return `${refusalReason(wrapped.node)} — failed statement: ${oneLine(wrapped.query)} (${withheld} from this message; they are caller data and do not belong in a log)`;
+}
+
+/**
+ * The same rendering, with the stack frames kept — for a log that prints a stack beside its message.
+ *
+ * A wrapped error's `stack` BEGINS with its message, so printing the stack alone re-emits everything
+ * the message would have: the statement and every bound value, above the frames. This replaces that
+ * header with the safe rendering and keeps the frames, which are file paths and line numbers and
+ * carry no caller data. An error with no stack, or one carrying no statement, is passed through.
+ */
+export function operatorSafeDbErrorStack(err: unknown): string | undefined {
+  if (!(err instanceof Error) || typeof err.stack !== 'string') return undefined;
+  if (wrappedStatement(err) === undefined) return err.stack;
+  // Frames start at the first `    at …` line; everything above it is the message header.
+  const frames = err.stack.split('\n').filter((line) => /^\s+at\s/.test(line));
+  return [operatorSafeDbErrorMessage(err), ...frames].join('\n');
 }
 
 /** Walk the bounded, cycle-safe `.cause` chain for the first object whose `.code` === `sqlstate`. */

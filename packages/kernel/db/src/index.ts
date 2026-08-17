@@ -133,6 +133,7 @@ export {
   isLockTimeout,
   isUniqueViolation,
   operatorSafeDbErrorMessage,
+  operatorSafeDbErrorStack,
   uniqueViolationConstraintName,
 } from './pg-errors.js';
 export * as schema from './schema.js';

@@ -506,20 +506,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   named the deployment-stopping refusal and pasted the whole parameter list after it, in the one log
   an operator is most likely to attach to a ticket or a chat thread. Bind values are arbitrary row
   data — whatever the caller decided to persist, from whatever source it read.
-  A shared renderer now stands between a caught database error and every such message. What an
-  operator sees keeps everything that diagnoses the failure and drops only the values: the driver's
-  own reason, the parameterized statement with its `$n` placeholders, and an explicit count of what
-  was withheld, so a reader knows there is more and does not conclude the statement ran without
-  parameters. Where a message read
+  A shared renderer now stands between a caught database error and every such message, and its
+  safety is structural rather than asserted: the line it produces is assembled only from a fixed
+  phrase table this codebase owns, the SQLSTATE, the schema identifiers the refusal named
+  (constraint, relation, column) and the parameterized statement. **No server-authored free text is
+  read at all** — not the primary message, not `detail`. That matters because neither is safe: on
+  every coercion failure Postgres echoes the offending value into the primary message itself
+  (`invalid input syntax for type uuid: "…"`), and into `detail` on a unique violation. A refusal
+  shape nobody anticipated therefore renders as its code and a generic sentence — it fails closed
+  rather than passing through on the assumption its message was harmless.
+  Where a message read
   `Failed query: INSERT INTO … VALUES ($1, $2)` / `params: dup,<the row's data>`,
-  it now reads `duplicate key value violates unique constraint "…" — failed statement: INSERT INTO …
-  VALUES ($1, $2) (2 bind values withheld from this message; they are caller data and do not belong
-  in a log)`. The driver's `detail` field is deliberately not included either: on a unique violation
-  Postgres echoes the offending value into it, which is the same disclosure by another name. Applied
-  at every path that formatted a caught database error for an operator — the service boot abort and
-  its shutdown log, the two run-header write logs, the durable-cancel log, and the two migration
-  scripts. An error that carries no statement is passed through unchanged, so no other refusal's
-  wording moved.
+  it now reads `a unique constraint was violated (SQLSTATE 23505, constraint "…", relation "…") —
+  failed statement: INSERT INTO … VALUES ($1, $2) (2 bind values withheld from this message; they
+  are caller data and do not belong in a log)`. Applied at every path that formatted a caught
+  database error for an operator: the extension-service boot abort and its shutdown log, the two
+  run-header write logs, the durable-cancel log, the two migration scripts, the uncontrolled-500
+  server log (message **and** stack — a wrapped error's stack begins with the values), the two
+  boot-failure stack prints, and the two dispatch paths that render a failed marker write or a
+  handler error into a tool result. An error that carries no statement is passed through unchanged,
+  so no other refusal's wording moved.
 
 - **The bundled `stream-backend` example no longer serves an uploaded blob under the `Content-Type`
   its uploader declared.** The example's playback handler read the `content_type` recorded on the
