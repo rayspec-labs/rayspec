@@ -26,7 +26,7 @@
  * of this package cannot see a half-written file, and it is removed on every path.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -128,55 +128,123 @@ export const replayJournal: PackRouteHandler<PackRouteResponse> = async (init) =
  * the real init is the ACCEPT CONTROL; substituting one with a member removed is the degradation the
  * pin exists to catch.
  */
-const pinModule = (
-  routeInit: string,
-  toolInit: string,
-  serviceJournal = 'PackServiceJournal',
-): string => `
+/**
+ * The path to the SHIPPED interop module. The pins below are not a copy of it — they are LIFTED OUT
+ * OF IT at test time (see `shippedArm`), which is the whole point of this file naming it.
+ */
+const INTEROP_MODULE = resolve(PACKAGE_ROOT, 'src/extensions/pack-sdk-interop.ts');
+
+/** The arms this suite degrades, by the names they carry in the shipped module. */
+const PINNED_ARMS = [
+  '_RouteInitFitsWhatAPackAnnotates',
+  '_ToolInitFitsWhatAPackAnnotates',
+  '_JournalReaderFitsWhatAPackAnnotates',
+  '_SseResponderFitsWhatAPackAnnotates',
+  '_ResumeCursorFitsWhatAPackAnnotates',
+  '_AServiceJournalDoorIsBuiltHere',
+  '_AWriteStepAPackBuildsIsAcceptedHere',
+] as const;
+
+/**
+ * Lift ONE `type _Name = Assert<…>;` declaration out of the shipped interop module, verbatim.
+ *
+ * WHY THIS READS THE FILE INSTEAD OF RESTATING IT. The obvious way to write this suite is to keep a
+ * copy of the pins in a template string and degrade the copy. That version passed for a while and
+ * measured the wrong artifact: the copy had already drifted from the shipped module (its write arm
+ * tested a different thing entirely), so every arm here was green about assertions the repository
+ * does not ship, and an edit to `pack-sdk-interop.ts` could not have turned a single one red. A test
+ * that cannot notice the file it is about has changed is a gate that scans nothing.
+ *
+ * Reading the real declarations removes the copy rather than checking it. What this suite supplies is
+ * only the IMPORT HEADER — the scratch project cannot resolve the platform's relative imports — and
+ * the substitution that degrades one platform type. The assertions themselves are the shipped bytes.
+ *
+ * FAIL-CLOSED, because the failure mode of an extractor is silence: a renamed or deleted arm throws
+ * here rather than yielding an empty module that would compile clean and prove nothing.
+ */
+function shippedArm(source: string, name: string): string {
+  const decl = `type ${name} = Assert<`;
+  const start = source.indexOf(decl);
+  if (start === -1) {
+    throw new Error(
+      `pack-handler-contract: no arm named '${name}' in pack-sdk-interop.ts. It was renamed or ` +
+        'removed — refusing to compile a pin module that would measure nothing.',
+    );
+  }
+  let depth = 0;
+  let i = start + decl.length - 1; // sits on the '<' of `Assert<`
+  for (; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '<') depth += 1;
+    else if (ch === '>') {
+      depth -= 1;
+      if (depth === 0) break;
+    }
+  }
+  if (depth !== 0) {
+    throw new Error(`pack-handler-contract: arm '${name}' has unbalanced angle brackets.`);
+  }
+  return `${source.slice(start, i + 1)};`;
+}
+
+/**
+ * The import header the lifted arms compile against. The names match the shipped module's own
+ * imports, INCLUDING its `PackSdk*` aliases, because the lifted text spells them. The `Platform*`
+ * aliases exist for the degradations: a substitution that replaced `RouteHandlerInit` with an
+ * expression naming `RouteHandlerInit` would be circular, so the degraded forms name the alias.
+ */
+const PIN_HEADER = `
 import type { RouteHandlerInit, ToolHandlerInit } from '@rayspec/handler-sdk';
-import type { PackServiceJournal } from '@rayspec/platform';
+import type { PackServiceContext, PackServiceJournalStep } from '@rayspec/platform';
 import type {
-  PackJournal,
-  PackJournalReader,
-  PackRouteHandlerInit,
-  PackToolHandlerInit,
+  PackJournalReader as PackSdkJournalReader,
+  PackJournalStep as PackSdkJournalStep,
+  PackRouteHandlerInit as PackSdkRouteHandlerInit,
+  PackServiceContext as PackSdkServiceContext,
+  PackToolHandlerInit as PackSdkToolHandlerInit,
 } from '@rayspec/pack-sdk';
 
 type Assert<_T extends true> = true;
 
-type _RouteInitFits = Assert<${routeInit} extends PackRouteHandlerInit ? true : false>;
-type _ToolInitFits = Assert<${toolInit} extends PackToolHandlerInit ? true : false>;
-
-// The three members the ROUTE init added, pinned by INDEXED ACCESS rather than by the assignability
-// test above — which is the whole reason the interop module writes them that way. All three are
-// OPTIONAL on the pack surface (a deployment older than the contract injects none), and an optional
-// member of a TARGET type is satisfied by a source that simply lacks it, so \`_RouteInitFits\` alone
-// would stay green while this platform quietly dropped the door. An index into a member the platform
-// no longer declares cannot.
-type _JournalDoorIsCarried = Assert<${routeInit}['journal'] extends PackJournalReader ? true : false>;
-type _SseResponderIsCarried = Assert<
-  ${routeInit}['sseResponse'] extends NonNullable<PackRouteHandlerInit['sseResponse']> ? true : false
->;
-type _ResumeCursorIsCarried = Assert<
-  ${routeInit}['resumeFrom'] extends PackRouteHandlerInit['resumeFrom'] ? true : false
->;
-
-// The SERVICE half of the journal door, pinned the same indexed way and for a sharper reason: this
-// contract's first shape put the reader on the route init ALONE, leaving the surface that WRITES
-// journal steps unable to read one back. This arm is what turns that into a compile error.
-type _ServiceJournalWrites = Assert<${serviceJournal} extends PackJournal ? true : false>;
-type _ServiceJournalReads = Assert<${serviceJournal}['read'] extends PackJournalReader['read'] ? true : false>;
-
-export const pins: [
-  _RouteInitFits,
-  _ToolInitFits,
-  _JournalDoorIsCarried,
-  _SseResponderIsCarried,
-  _ResumeCursorIsCarried,
-  _ServiceJournalWrites,
-  _ServiceJournalReads,
-] = [true, true, true, true, true, true, true];
+// The degradation aliases. A substitution replacing RouteHandlerInit with an expression that itself
+// named RouteHandlerInit would be circular, so the degraded forms name these instead.
+type PlatformRouteInit = RouteHandlerInit;
+type PlatformToolInit = ToolHandlerInit;
+type PlatformServiceContext = PackServiceContext;
+type PlatformServiceStep = PackServiceJournalStep;
+// Touched so noUnusedLocals — which this scratch project keeps, because it compiles under the SAME
+// options the platform source does — does not strip them on the undegraded accept control.
+type _DegradationAliases = [
+  PlatformRouteInit,
+  PlatformToolInit,
+  PlatformServiceContext,
+  PlatformServiceStep,
+];
+export type DegradationAliases = _DegradationAliases;
 `;
+
+/**
+ * Build a compilable module out of the SHIPPED arms, optionally degrading one platform type first.
+ * `substitutions` maps a whole identifier in the lifted text to the expression that replaces it.
+ */
+function pinModule(substitutions: Readonly<Record<string, string>> = {}): string {
+  const source = readFileSync(INTEROP_MODULE, 'utf8');
+  const arms = PINNED_ARMS.map((name) => shippedArm(source, name));
+  let body = arms.join('\n');
+  for (const [identifier, replacement] of Object.entries(substitutions)) {
+    const before = body;
+    body = body.replace(new RegExp(`\\b${identifier}\\b`, 'g'), replacement);
+    if (body === before) {
+      throw new Error(
+        `pack-handler-contract: '${identifier}' does not occur in the lifted arms, so degrading it ` +
+          'would measure nothing. The shipped arm stopped naming it.',
+      );
+    }
+  }
+  const tuple = PINNED_ARMS.join(',\n  ');
+  const values = PINNED_ARMS.map(() => 'true').join(', ');
+  return `${PIN_HEADER}\n${body}\n\nexport const pins: [\n  ${tuple},\n] = [${values}];\n`;
+}
 
 describe('the handler contract @rayspec/pack-sdk carries', () => {
   it('(A) a module written against the pack surface ALONE compiles — both handler kinds', () => {
@@ -185,17 +253,17 @@ describe('the handler contract @rayspec/pack-sdk carries', () => {
     expect(ok).toBe(true);
   });
 
-  it('(B accept control) the pin holds against the platform’s REAL route and tool inits', () => {
+  it('(B accept control) the SHIPPED arms hold against the platform’s REAL types', () => {
     const { ok, output } = typecheck({
-      'pin.ts': pinModule('RouteHandlerInit', 'ToolHandlerInit'),
+      'pin.ts': pinModule(),
     });
     expect(output).toBe('');
     expect(ok).toBe(true);
   });
 
-  it('(B) the pin goes RED when the route init loses a member the contract promises', () => {
+  it('(B) the shipped arms go RED when the route init loses a member the contract promises', () => {
     const { ok, output } = typecheck({
-      'pin.ts': pinModule(`Omit<RouteHandlerInit, 'params'>`, 'ToolHandlerInit'),
+      'pin.ts': pinModule({ RouteHandlerInit: `Omit<PlatformRouteInit, 'params'>` }),
     });
     expect(ok).toBe(false);
     expect(output).toContain('TS2344');
@@ -204,7 +272,7 @@ describe('the handler contract @rayspec/pack-sdk carries', () => {
 
   it('(B) …and when the tool init loses the store door', () => {
     const { ok, output } = typecheck({
-      'pin.ts': pinModule('RouteHandlerInit', `Omit<ToolHandlerInit, 'db'>`),
+      'pin.ts': pinModule({ ToolHandlerInit: `Omit<PlatformToolInit, 'db'>` }),
     });
     expect(ok).toBe(false);
     expect(output).toContain('TS2344');
@@ -222,7 +290,7 @@ describe('the handler contract @rayspec/pack-sdk carries', () => {
     ['resumeFrom', 'the resume cursor'],
   ])('(B) …and when the route init loses %s (%s)', (member) => {
     const { ok, output } = typecheck({
-      'pin.ts': pinModule(`Omit<RouteHandlerInit, '${member}'>`, 'ToolHandlerInit'),
+      'pin.ts': pinModule({ RouteHandlerInit: `Omit<PlatformRouteInit, '${member}'>` }),
     });
     expect(ok).toBe(false);
     // TS2339: the index names a property the degraded init no longer has — the failure is AT the
@@ -240,24 +308,29 @@ describe('the handler contract @rayspec/pack-sdk carries', () => {
    */
   it('(B) …and when the service journal door loses its READ half', () => {
     const { ok, output } = typecheck({
-      'pin.ts': pinModule(
-        'RouteHandlerInit',
-        'ToolHandlerInit',
-        `Omit<PackServiceJournal, 'read'>`,
-      ),
+      'pin.ts': pinModule({
+        PackServiceContext: `{ journal?: Omit<NonNullable<PlatformServiceContext['journal']>, 'read'> }`,
+      }),
     });
     expect(ok).toBe(false);
     expect(output).toContain('TS2339');
     expect(output).toContain('read');
   });
 
-  it('(B) …and when it loses its WRITE half', () => {
+  /**
+   * The WRITE half, degraded the way it actually breaks a pack author: ONE new REQUIRED member on the
+   * platform's journal STEP, which stops `ctx.journal.record({…})` compiling in their repository.
+   *
+   * This is the degradation a signature test cannot see. `record` is method-declared on both sides,
+   * so its parameter is compared BIVARIANTLY — a test of the form `['record'] extends (step: never)
+   * => Promise<void>` passes for any one-argument shape, `never` being assignable to everything. The
+   * shipped arm compares the STEP TYPES directly for exactly this case.
+   */
+  it('(B) …and when the platform’s journal step gains a required member', () => {
     const { ok, output } = typecheck({
-      'pin.ts': pinModule(
-        'RouteHandlerInit',
-        'ToolHandlerInit',
-        `Omit<PackServiceJournal, 'record'>`,
-      ),
+      'pin.ts': pinModule({
+        PackServiceJournalStep: `PlatformServiceStep & { readonly driftRequiredMember: string }`,
+      }),
     });
     expect(ok).toBe(false);
     expect(output).toContain('TS2344');

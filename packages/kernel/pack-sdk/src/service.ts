@@ -195,12 +195,20 @@ export interface PackJournalWriter {
  * served to a client.
  *
  * WHAT ASKS FOR THIS, STATED PLAINLY, because a contract that overstates its own demand is worse than
- * one that admits a gap: the WRITE side is real and in use — an extension pack's service records a
- * coarse step through `record` at boot — and NOTHING READS THOSE ENTRIES BACK TODAY beyond the
- * repository's own fixture pack. So this half closes an asymmetry (a door a pack can write through
- * and not read through) rather than unblocking a caller that is waiting on it. The half that IS
- * blocking is the route's: see `PackRouteHandlerInit.resumeFrom`, which has no other cursor on this
- * surface to pair with.
+ * one that admits a gap.
+ *
+ * FIRST, the reader is what makes the STREAMING half a contract rather than advice: it is the only
+ * cursored read this package carries, and without it `PackRouteHandlerInit.resumeFrom` would be a
+ * resume position with nothing contracted to produce one. That argument needs no consumer — it is
+ * internal to the surface. (It is also specific: a pack streaming its OWN table resumes over its own
+ * cursor, and this reader is not involved.)
+ *
+ * SECOND, the asymmetry is live rather than theoretical. `record` is in use — an extension pack's
+ * service writes a coarse step through it at boot — and until this door carried both verbs there was
+ * no contracted way back to it.
+ *
+ * AND NOTHING READS THOSE ENTRIES BACK TODAY beyond the repository's own fixture pack. This half
+ * closes a one-way door in a shipped contract; it does not unblock a caller that is waiting on it.
  *
  * TENANT-BOUND BY CONSTRUCTION, in both directions and for the same reason: the deployment binds the
  * tenant when it builds this handle, so neither verb takes a `tenantId` and neither can reach another

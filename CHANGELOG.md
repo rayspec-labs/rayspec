@@ -420,12 +420,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case: a read being SERVED to a client, where the request's resume cursor arrives.
   `PackJournalWriter` is unchanged and still exported, so a service that only appends may keep
   annotating it.
-  **What asks for each half, stated rather than implied.** The ROUTE half unblocks a shape that cannot
-  be expressed at all today, and it is the only cursored read on this surface — a declared store pages
-  by `limit`/`offset`, which can repeat a row, so without it `resumeFrom` would be a resume position
-  with nothing to resume against. The SERVICE half closes an asymmetry rather than unblocking a
-  caller: a pack's service does record steps through `PackJournalWriter`, and no in-tree consumer
-  reads them back beyond this repository's own fixture pack.
+  **What asks for each half, stated rather than implied.** The reader is what makes resumption a
+  contract rather than advice: it is the only CURSORED read the surface carries — a declared store is
+  paged by `limit`/`offset`, which `PackSelectOptions` warns can repeat a row — so without it
+  `resumeFrom` would be a resume position with nothing contracted to produce one. That is a statement
+  about the platform's run journal and not about every stream: a pack streaming its OWN table resumes
+  over its own cursor, and there are two resumptions with one `resumeFrom` carrying the client's
+  last-seen position into whichever the pack is running. Beyond that, the asymmetry is live rather
+  than theoretical — a pack's service does record steps through `PackJournalWriter` — and no in-tree
+  consumer reads them back beyond this repository's own fixture pack.
   **It is scoped to the tenant structurally, on both surfaces** — each reader is built from the same
   tenant-bound chokepoint handle the store facade (route) and the journal writer (service) are built
   from, so there is no tenant argument and no way to add one — **and it is bounded**: `limit` is

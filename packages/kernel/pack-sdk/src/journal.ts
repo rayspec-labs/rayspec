@@ -26,10 +26,20 @@
  * stable cursor. It is handed to BOTH surfaces that have something to do with it — to a SERVICE on
  * `PackServiceContext.journal`, because that is where the WRITE is, and to a ROUTE on
  * `PackRouteHandlerInit.journal`, because that is where a read is SERVED to a client and where the
- * request's resume cursor arrives. This reader is the ONLY cursored read on this surface: a declared
- * store is paged by `limit`/`offset`, which the option's own docblock warns can repeat a row, so
- * without this an incremental response would be handed a resume position with nothing to resume
- * against. It exists because the alternative was a pack
+ * request's resume cursor arrives.
+ *
+ * WHY IT IS PART OF THE STREAMING CONTRACT AND NOT A SEPARATE CONVENIENCE. This is the only CURSORED
+ * read this package contracts — a declared store is paged by `limit`/`offset`, and `PackSelectOptions`
+ * warns in its own docblock that such a page can repeat a row. Without a cursored read the contract
+ * would take a resume position IN (`PackRouteHandlerInit.resumeFrom`) and offer no contracted way to
+ * produce one, which is a promise it could not keep.
+ *
+ * ⚠ THAT IS A STATEMENT ABOUT THIS JOURNAL, NOT ABOUT EVERY STREAM. A pack streaming its OWN table
+ * resumes over its own cursor, from its own reads, and this reader has nothing to do with it — it
+ * reads the PLATFORM's run journal and only that. There are two resumptions, and one `resumeFrom`
+ * carrying the client's last-seen position into whichever one the pack is running.
+ *
+ * The read exists because the alternative was a pack
  * naming the core's journal table and its column layout in a SQL string through the escape hatch —
  * an unversioned dependency on a core internal expressed as text, in the one package whose purpose is
  * that packs do not do this. What the read door is scoped to, and what it withholds, is stated on the

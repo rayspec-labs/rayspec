@@ -92,7 +92,7 @@ export interface HandlerJournalEntry {
   readonly cursor: string;
 }
 
-/** What a journal read asks for. Every member is optional; `{}` reads the tenant's newest page. */
+/** What a journal read asks for. Every member is optional; `{}` reads the tenant's oldest page. */
 export interface HandlerJournalQuery {
   /** Read only the steps of this run. Absent ⇒ every run of the tenant. */
   readonly runId?: string;

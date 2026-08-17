@@ -47,14 +47,36 @@ import { streamSSE } from 'hono/streaming';
  * client sends) takes precedence over an explicit `?lastEventId=` query (what a first request can
  * carry). ABSENT when the request carried neither.
  *
+ * AN EMPTY VALUE IS ABSENT, ON BOTH SIDES, and that is the whole subtlety of this function. `??`
+ * alone falls through on null/undefined only, so an empty `Last-Event-ID` — which a browser
+ * `EventSource` sends when it has no last id, and which a proxy can synthesise — would WIN over a
+ * `?lastEventId=` a client supplied beside it, and would then travel as `''` through every
+ * downstream "absent?" test (all of which compare against `undefined`) until the reader refuses it
+ * and a well-formed request becomes a 500. An empty value cannot be mistaken for a position, so
+ * reading it as absent coerces nothing; the same is true of an empty query. A NON-empty value is
+ * passed on UNTOUCHED — a padded or malformed cursor is still refused downstream, which is the safe
+ * direction.
+ *
+ * THE RULE IS NOT INVENTED HERE. `routes/subscribe.ts` reached it first and documents it at length
+ * for the tenant event stream; this is the same rule applied to the same header.
+ *
+ * WHY THERE ARE STILL TWO RESOLVERS AND NOT ONE. The header half is identical; the rest is not.
+ * That route reads `?since=` rather than `?lastEventId=`, and its cursor grammar REFUSES a value
+ * this one accepts — `parseEventCursor('')` raises `VALIDATION_ERROR`, so an empty `?since=` is a
+ * 400 there and "from the beginning" here. Folding the two together would therefore change that
+ * route's behaviour on an input it deliberately refuses, which is a decision for that surface and
+ * not a side effect of this one. What is shared is the RULE, stated in both places; what differs is
+ * named above rather than left for a reader to discover by diffing.
+ *
  * IT IS DELIBERATELY UNTYPED HERE. What a cursor MEANS belongs to the feed being resumed — this
  * package's own run-event replay reads it as a `seq` (below), and a contributed route's journal read
  * reads it as a keyset position — so this half resolves WHERE the value comes from and nothing else.
- * Every resumable surface reads the cursor through this ONE function, which is what keeps the
- * precedence from being re-decided, slightly differently, per feed.
  */
 export function resolveResumeCursor(c: Context): string | undefined {
-  return c.req.header('last-event-id') ?? c.req.query('lastEventId');
+  const header = c.req.header('last-event-id');
+  if (header !== undefined && header !== '') return header;
+  const query = c.req.query('lastEventId');
+  return query === '' ? undefined : query;
 }
 
 /**

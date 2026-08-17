@@ -38,13 +38,14 @@
  *                                that row: the deployment route answers a uniform 404, the contributed
  *                                route answers with only what the caller itself sent, and the second
  *                                tenant's own list at the deployment route is empty.
- *                                THE LIMIT OF THIS ARM: the fixture pack's echo handler performs no
- *                                read at all — it only echoes its bound path parameter — and the
- *                                incremental one reads a run the second tenant never wrote to, so
- *                                what is measured here is that nothing of the other tenant's row
- *                                comes back through either contributed surface. The DATA-PATH
- *                                isolation of a READING contributed handler, with real rows on both
- *                                sides, is measured in `pack-journal-stream.db.test.ts`.
+ *                                A REAL journal entry is planted for the FIRST tenant under the run
+ *                                id both then name, so the incremental route's assertion can
+ *                                actually fail: an unscoped read would hand the second tenant that
+ *                                payload. Its accept control is the same run id read by the tenant
+ *                                that owns it, which does come back. (The echo handler reads
+ *                                nothing at all, so for that route what is measured is the ANSWER.
+ *                                The reading handler's isolation is measured with rows on both
+ *                                sides in `pack-journal-stream.db.test.ts`.)
  *   (5) ACCEPT CONTROL         → a correctly scoped principal of the owning tenant gets 200 from ALL
  *                                THREE, and the incremental one answers with `text/event-stream`.
  *                                Without it, (1)-(3) could be passing because the app refuses
@@ -58,6 +59,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadExtensions, loadHandlers, type ResolvedHandler } from '@rayspec/platform';
 import { parseSpec, type RaySpec } from '@rayspec/spec';
+import { sql } from 'drizzle-orm';
 import { generateKeyPair, SignJWT } from 'jose';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
@@ -311,6 +313,18 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     expect(created.status).toBe(201);
     const rowId = (await created.json()).id as string;
 
+    // A REAL journal entry for tenant A, under the run id both tenants will name below. Without it
+    // the incremental arm's "B sees nothing of A's" would be satisfied by an empty stream — true of
+    // a correctly scoped read AND of a completely unscoped one, which is an assertion that cannot
+    // fail. With it, an unscoped read hands B this payload.
+    await h.db.execute(sql`
+      INSERT INTO journal_steps
+        (run_id, tenant_id, backend, type, idempotency_key, input_hash, output, status, auth_mode)
+      VALUES
+        (${rowId}, ${a.orgId}::uuid, 'test-backend', 'tool', 'parity-cross-tenant-step',
+         'hash-parity', ${JSON.stringify({ note: 'SECRET_FROM_A' })}::jsonb, 'ok', 'api_key')
+    `);
+
     // Tenant A reads its own row at the deployment route — the accept control for the empty read.
     const ownRead = await jsonRequest(h.app, 'GET', CORE_ROUTE(rowId), {
       headers: { authorization: `Bearer ${a.token}` },
@@ -322,14 +336,22 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     const { core, pack, stream } = await allRoutes('parity-cross-tenant', rowId, {
       authorization: `Bearer ${b.token}`,
     });
-    // The incremental route answers B with a stream of B's OWN journal — which, for a run id B never
-    // recorded a step under, is no entries at all. Nothing of A's is in it. The DATA-PATH tenant
-    // isolation of a READING contributed handler is measured with real rows next door, in
-    // `pack-journal-stream.db.test.ts`; what this arm adds is that the third route shape is under the
-    // same tenant resolution as the other two.
+    // The incremental route answers B with a stream of B's OWN journal, read under the run id B
+    // named — which here is A's row id, and A HAS a journal entry under it (planted above). So this
+    // assertion can actually fail: a reader that lost its tenant predicate hands B that entry and
+    // its payload. Verified by removing the predicate from `makeHandlerJournal`, which turns this
+    // arm red rather than leaving the suite green.
     expect(stream.status).toBe(200);
     expect(stream.body).not.toContain('SECRET_FROM_A');
+    expect(stream.body).not.toContain(a.orgId);
     expect(stream.body).toContain('"hasMore":false');
+    // ACCEPT CONTROL for the line above: the SAME run id read by A, whose entry it is, does come
+    // back. Without this, "B sees nothing" would be satisfied by a route that serves nobody.
+    const ownStream = await jsonRequest(h.app, 'GET', PACK_STREAM_ROUTE(rowId), {
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(ownStream.status).toBe(200);
+    expect(await ownStream.text()).toContain('SECRET_FROM_A');
     // The deployment route: a uniform 404 — B cannot tell A's row from one that never existed.
     expect(core.status).toBe(404);
     expect(JSON.parse(core.body).error.code).toBe('NOT_FOUND');

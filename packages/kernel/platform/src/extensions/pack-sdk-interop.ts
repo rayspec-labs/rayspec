@@ -64,6 +64,7 @@ import type {
   PackJournalQuery as PackSdkJournalQuery,
   PackJournalReadEntry as PackSdkJournalReadEntry,
   PackJournalReader as PackSdkJournalReader,
+  PackJournalStep as PackSdkJournalStep,
   PackRouteHandler as PackSdkRouteHandler,
   PackRouteHandlerInit as PackSdkRouteHandlerInit,
   PackRouteResponse as PackSdkRouteResponse,
@@ -96,7 +97,11 @@ import type {
   ExtensionSectionClaim,
   ExtensionServiceDeclaration,
 } from './extension.js';
-import type { PackServiceContext, PackServiceModule } from './pack-services.js';
+import type {
+  PackServiceContext,
+  PackServiceJournalStep,
+  PackServiceModule,
+} from './pack-services.js';
 
 /** Compile-time assertion: fails to compile unless `T` is exactly `true`. */
 type Assert<_T extends true> = true;
@@ -270,7 +275,7 @@ type _ResumeCursorFitsWhatAPackAnnotates = Assert<
 >;
 
 /**
- * THE SERVICE'S JOURNAL DOOR, in the direction a service author depends on: the handle this
+ * THE SERVICE JOURNAL DOOR, in the two directions a service author depends on: the handle this
  * deployment BUILDS must satisfy what a pack annotates `ctx.journal` as — both verbs.
  *
  * Indexed on THIS side, like the route arms above and for the same reason: `journal` is optional on
@@ -284,10 +289,28 @@ type _AServiceJournalDoorIsBuiltHere = Assert<
   NonNullable<PackServiceContext['journal']>['read'] extends NonNullable<
     NonNullable<PackSdkServiceContext['journal']>['read']
   >
-    ? NonNullable<PackServiceContext['journal']>['record'] extends (step: never) => Promise<void>
-      ? true
-      : false
+    ? true
     : false
+>;
+
+/**
+ * …and the STEP a pack builds is one this deployment accepts. Pinned on the step TYPE rather than
+ * through `record`'s signature, and the difference is the whole value of the arm.
+ *
+ * `record` is declared METHOD-style on both sides, so TypeScript compares its parameter BIVARIANTLY
+ * even under `strictFunctionTypes` — a signature test therefore cannot see the platform NARROWING
+ * what it accepts. Measured: a test written as `['record'] extends (step: never) => Promise<void>`
+ * passes for `(step: string) => Promise<void>` as well, because `never` is assignable to everything;
+ * only a change in arity or return type would fail it. The drift that actually breaks a pack author
+ * is the one it cannot see — ONE new REQUIRED member on this side's step, which stops
+ * `ctx.journal.record({…})` compiling in their repository while every arm here stays green.
+ *
+ * Comparing the two STEP types directly puts that in the compiler's reach: the value a pack
+ * constructs must be assignable to what this deployment's writer takes, in that direction, which is
+ * the direction a pack author depends on.
+ */
+type _AWriteStepAPackBuildsIsAcceptedHere = Assert<
+  PackSdkJournalStep extends PackServiceJournalStep ? true : false
 >;
 /**
  * …and it reads through the SAME reader a route reads through. Both are built from
@@ -346,9 +369,11 @@ const pins: [
   _TheEngineEnvelopeIsAPackRouteResponse,
   _ResumeCursorFitsWhatAPackAnnotates,
   _AServiceJournalDoorIsBuiltHere,
+  _AWriteStepAPackBuildsIsAcceptedHere,
   _OneReaderServesBothSurfaces,
   _BrandLiteralsAgree,
 ] = [
+  true,
   true,
   true,
   true,

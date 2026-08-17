@@ -170,10 +170,11 @@ async function readStream(
   token: string,
   runId: string,
   lastEventId?: string,
+  query = '',
 ): Promise<{ status: number; contentType: string | null; frames: Frame[]; body: string }> {
   const headers: Record<string, string> = { authorization: `Bearer ${token}` };
   if (lastEventId !== undefined) headers['last-event-id'] = lastEventId;
-  const res = await jsonRequest(h.app, 'GET', STREAM_ROUTE(runId), { headers });
+  const res = await jsonRequest(h.app, 'GET', `${STREAM_ROUTE(runId)}${query}`, { headers });
   const body = await res.text();
   return {
     status: res.status,
@@ -278,6 +279,48 @@ describeDb('a pack route reads the journal back and streams it, scoped to its ow
     const accepted = await readStream(a.token, SHARED_RUN_ID);
     expect(accepted.status).toBe(200);
     expect(stepFrames(accepted.frames)).toHaveLength(1);
+  });
+
+  /**
+   * (F) AN EMPTY RESUME CURSOR IS ABSENT, NOT A CURSOR — the request is served, not refused.
+   *
+   * A browser `EventSource` sends `Last-Event-ID:` empty when it has no last id, and a proxy can
+   * synthesise one. Under a plain `??` that empty string wins over anything sent beside it and then
+   * survives every downstream "absent?" test, all of which compare against `undefined` — the init
+   * spread, the fixture's own check — until the reader refuses it and a well-formed first request
+   * comes back 500. That is the shape this arm exists to keep out, in all three of its forms.
+   */
+  it('(F) an EMPTY Last-Event-ID is served from the beginning, and never beats the query', async () => {
+    const a = await principal('journal-empty@example.test', 'Journal Empty');
+    for (const key of ['e-1', 'e-2', 'e-3']) {
+      await recordStep(a.orgId, SHARED_RUN_ID, key, { note: `PAYLOAD_${key.toUpperCase()}` });
+    }
+
+    // (i) an empty header alone: a FIRST request, served from the beginning rather than refused.
+    const empty = await readStream(a.token, SHARED_RUN_ID, '');
+    expect(empty.status).toBe(200);
+    expect(empty.contentType).toContain('text/event-stream');
+    expect(stepFrames(empty.frames)).toHaveLength(3);
+
+    // (ii) an empty QUERY is absent too — the other half of the same rule.
+    const emptyQuery = await readStream(a.token, SHARED_RUN_ID, undefined, '?lastEventId=');
+    expect(emptyQuery.status).toBe(200);
+    expect(stepFrames(emptyQuery.frames)).toHaveLength(3);
+
+    // (iii) the shape that made this blocking: an empty header supplied BESIDE a real cursor. The
+    // header must not win, or the client's own resume position is discarded.
+    const cursor = stepFrames(empty.frames)[0]?.id;
+    expect(cursor).toBeTruthy();
+    const resumed = await readStream(a.token, SHARED_RUN_ID, '', `?lastEventId=${cursor}`);
+    expect(resumed.status).toBe(200);
+    expect(
+      stepFrames(resumed.frames).map((f) => (f.data as { output: { note: string } }).output.note),
+    ).toEqual(['PAYLOAD_E-2', 'PAYLOAD_E-3']);
+
+    // Accept control: a NON-empty header still outranks the query, so precedence is intact and (iii)
+    // is not passing because the header is ignored altogether.
+    const headerWins = await readStream(a.token, SHARED_RUN_ID, cursor, '?lastEventId=');
+    expect(stepFrames(headerWins.frames)).toHaveLength(2);
   });
 
   it('(E) a second tenant asking for the SAME run sees its own entry and nothing of the first’s', async () => {

@@ -9,8 +9,15 @@
  *
  * TENANT SCOPING IS STRUCTURAL, NOT A PARAMETER. Every statement goes through the supplied `TenantDb`,
  * which AND-combines `tenant_id = <the run's server-derived tenant>` into the WHERE. There is no
- * tenant argument on this door and no way to add one to a query: a cursor, a `runId` or a `limit` from
- * another tenant reads as no rows, indistinguishable from a run that does not exist.
+ * tenant argument on this door and no way to add one to a query.
+ *
+ * WHAT THAT MEANS FOR A CURSOR OR A `runId` FROM ANOTHER TENANT, precisely, because the loose version
+ * of this sentence is wrong: a `runId` this tenant has no rows under reads as NO ROWS. A CURSOR does
+ * not — it is a POSITION, not a selector, so replaying another tenant's cursor here simply starts this
+ * tenant's own read after that instant, and the caller gets THIS tenant's entries from there. Nothing
+ * of the issuing tenant is reachable either way; what a foreign cursor leaks back to its bearer is the
+ * position it already held. Measured: a cursor issued to one tenant and replayed by another returns
+ * the second tenant's own entries, not an empty page.
  *
  * ⚠ IT IS BUILT OVER THE BASE TENANT HANDLE, NOT THE ROUTE TRANSACTION. An incremental
  * (`sseResponse`) response's producer runs AFTER the route transaction has committed — that is the
@@ -33,6 +40,13 @@
  * the beginning instead would re-deliver everything the client already saw, which is the exact failure
  * a resume exists to prevent; an empty read would be worse still, being indistinguishable from "there
  * is nothing left".
+ *
+ * IT IS A SHAPE CHECK, NOT AN ISSUANCE CHECK, and the difference is worth stating rather than leaving
+ * to be discovered: a well-formed value this reader could never have MINTED — a timestamp at a
+ * precision no row carries, a uuid naming no step — is accepted and used as a position. That is
+ * sound because a cursor is not a capability: it selects nothing, the tenant predicate is what bounds
+ * the read, and the worst a crafted one does is start the caller's OWN page somewhere arbitrary.
+ * Checking issuance would mean signing or storing cursors, which buys nothing here.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import type {
@@ -135,10 +149,15 @@ interface ProjectedRow {
 
 /**
  * Shape one row into the contracted entry. The two closed vocabularies are RE-VALIDATED on the way out
- * rather than trusted because they were valid on the way in: the column is `text` and the journal
- * carries a wider classification set than the API-facing one (a tool failure is journaled with a class
- * the neutral vocabulary deliberately does not contain), so a value outside the contract is mapped to
- * its fail-closed member instead of being handed on as a lie about the vocabulary.
+ * rather than trusted because they were valid on the way in: both columns are `text`, so nothing in
+ * the schema stops a value outside the contract from being present, and a reader that passed one
+ * through would be handing a caller a lie about a closed vocabulary.
+ *
+ * BOTH FALLBACK BRANCHES ARE UNREACHABLE FOR ROWS THIS PLATFORM WRITES TODAY — every writer goes
+ * through the journal sink, which only emits the contracted members. They exist for the row this
+ * reader does not control: a hand-repaired record, a future writer, a restored dump. Kept rather than
+ * asserted away, because the alternative on such a row is to widen the contract's own vocabulary at
+ * the point a consumer is least able to check it.
  */
 function toEntry(row: ProjectedRow): HandlerJournalEntry {
   const type: HandlerJournalStepType =
