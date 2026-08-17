@@ -96,6 +96,7 @@ export type {
 } from './manifest.js';
 export type {
   PackDatabase,
+  PackJournal,
   PackJournalStep,
   PackJournalWriter,
   PackServiceContext,

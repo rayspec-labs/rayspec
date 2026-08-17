@@ -270,6 +270,39 @@ type _ResumeCursorFitsWhatAPackAnnotates = Assert<
 >;
 
 /**
+ * THE SERVICE'S JOURNAL DOOR, in the direction a service author depends on: the handle this
+ * deployment BUILDS must satisfy what a pack annotates `ctx.journal` as — both verbs.
+ *
+ * Indexed on THIS side, like the route arms above and for the same reason: `journal` is optional on
+ * the pack surface, so `_ServiceContextFitsWhatAPackAnnotates` would stay green if this platform
+ * stopped handing a service a journal at all. It would also stay green if the door kept `record` and
+ * lost `read` — which is not a hypothetical: this contract's first shape put the reader on the route
+ * init alone, and the surface that WRITES journal steps was left unable to read one back. This arm is
+ * what makes that a compile error rather than a discovery made downstream.
+ */
+type _AServiceJournalDoorIsBuiltHere = Assert<
+  NonNullable<PackServiceContext['journal']>['read'] extends NonNullable<
+    NonNullable<PackSdkServiceContext['journal']>['read']
+  >
+    ? NonNullable<PackServiceContext['journal']>['record'] extends (step: never) => Promise<void>
+      ? true
+      : false
+    : false
+>;
+/**
+ * …and it reads through the SAME reader a route reads through. Both are built from
+ * `makeHandlerJournal` over a `forTenant` handle, so this arm pins that the shape stays single —
+ * two journal reads returning different pages would be two contracts wearing one name.
+ */
+type _OneReaderServesBothSurfaces = Assert<
+  NonNullable<PackServiceContext['journal']>['read'] extends HandlerJournal['read']
+    ? RouteHandlerInit['journal']['read'] extends HandlerJournal['read']
+      ? true
+      : false
+    : false
+>;
+
+/**
  * Both sides spell the brand literal out. The pack surface ships no runtime, so it cannot import
  * the constant — it declares a copy, and a copy that drifts makes every loader check reject every
  * pack. Pinned in BOTH directions so neither a widening nor a narrowing passes.
@@ -312,8 +345,12 @@ const pins: [
   _APackProducerIsDrivableHere,
   _TheEngineEnvelopeIsAPackRouteResponse,
   _ResumeCursorFitsWhatAPackAnnotates,
+  _AServiceJournalDoorIsBuiltHere,
+  _OneReaderServesBothSurfaces,
   _BrandLiteralsAgree,
 ] = [
+  true,
+  true,
   true,
   true,
   true,

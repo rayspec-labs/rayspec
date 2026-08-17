@@ -27,6 +27,7 @@
  * customer. The services that DID boot are shut down again, in reverse, before the failure is raised —
  * a refused boot must not leave a timer or a connection running behind it.
  */
+import type { HandlerJournal } from '@rayspec/handler-sdk';
 import type { TurnDispatch } from '../turn-dispatch.js';
 
 /**
@@ -80,12 +81,21 @@ export interface PackServiceDatabase {
  * The JOURNAL door — the run journal, which is the platform's single record of work done, so a
  * service's own work is recorded where every other kind of work is rather than in a log line.
  *
- * TENANT-BOUND BY CONSTRUCTION, exactly like `TurnDispatch`: there is no `tenantId` field, because a
- * service has no request to derive one from and the composition root binds the deployment tenant when
- * it builds the writer. ABSENT when the deployment bound no tenant — a service that wants to journal
- * then fail-closes loudly on `undefined` rather than writing rows nobody can attribute.
+ * BOTH VERBS, on one handle. `record` appends; the READ half is inherited from `HandlerJournal`
+ * rather than re-declared, so the page, the cursor and the bound a service reads through are the
+ * SAME ones a route reads through — one shape with one implementation, instead of two that agree
+ * until somebody edits one. The read half is here because a service is the surface that WRITES
+ * steps: a reader reachable only from a route would leave the writing surface naming a core table in
+ * a SQL string, which is the dependency this door exists to remove.
+ *
+ * TENANT-BOUND BY CONSTRUCTION, exactly like `TurnDispatch`: there is no `tenantId` field on either
+ * verb, because a service has no request to derive one from and the composition root binds the
+ * deployment tenant when it builds this handle — the same `forTenant` chokepoint handle both halves
+ * are built over. ABSENT when the deployment bound no tenant, and absent as a WHOLE: an
+ * unattributable write and an unscoped read fail closed together, so a service that wants either
+ * fail-closes loudly on `undefined`.
  */
-export interface PackServiceJournal {
+export interface PackServiceJournal extends HandlerJournal {
   /** Append ONE journal step for work this service performed. */
   record(step: PackServiceJournalStep): Promise<void>;
 }

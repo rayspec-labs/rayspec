@@ -128,9 +128,15 @@ export const replayJournal: PackRouteHandler<PackRouteResponse> = async (init) =
  * the real init is the ACCEPT CONTROL; substituting one with a member removed is the degradation the
  * pin exists to catch.
  */
-const pinModule = (routeInit: string, toolInit: string): string => `
+const pinModule = (
+  routeInit: string,
+  toolInit: string,
+  serviceJournal = 'PackServiceJournal',
+): string => `
 import type { RouteHandlerInit, ToolHandlerInit } from '@rayspec/handler-sdk';
+import type { PackServiceJournal } from '@rayspec/platform';
 import type {
+  PackJournal,
   PackJournalReader,
   PackRouteHandlerInit,
   PackToolHandlerInit,
@@ -155,13 +161,21 @@ type _ResumeCursorIsCarried = Assert<
   ${routeInit}['resumeFrom'] extends PackRouteHandlerInit['resumeFrom'] ? true : false
 >;
 
+// The SERVICE half of the journal door, pinned the same indexed way and for a sharper reason: this
+// contract's first shape put the reader on the route init ALONE, leaving the surface that WRITES
+// journal steps unable to read one back. This arm is what turns that into a compile error.
+type _ServiceJournalWrites = Assert<${serviceJournal} extends PackJournal ? true : false>;
+type _ServiceJournalReads = Assert<${serviceJournal}['read'] extends PackJournalReader['read'] ? true : false>;
+
 export const pins: [
   _RouteInitFits,
   _ToolInitFits,
   _JournalDoorIsCarried,
   _SseResponderIsCarried,
   _ResumeCursorIsCarried,
-] = [true, true, true, true, true];
+  _ServiceJournalWrites,
+  _ServiceJournalReads,
+] = [true, true, true, true, true, true, true];
 `;
 
 describe('the handler contract @rayspec/pack-sdk carries', () => {
@@ -215,6 +229,39 @@ describe('the handler contract @rayspec/pack-sdk carries', () => {
     // pin, naming the member, rather than a generic "does not satisfy" three types away from it.
     expect(output).toContain('TS2339');
     expect(output).toContain(member);
+  });
+
+  /**
+   * (B) THE SERVICE HALF. A service is the surface that WRITES journal steps, so it is the surface
+   * with something to read back — and the first shape of this contract handed the reader to routes
+   * alone, which left a service writing entries it could not read and reaching for the escape hatch
+   * to do it. Degrading the platform's own service journal door proves the arm that would have caught
+   * that is load-bearing: losing `read` is a red, and so is losing `record`.
+   */
+  it('(B) …and when the service journal door loses its READ half', () => {
+    const { ok, output } = typecheck({
+      'pin.ts': pinModule(
+        'RouteHandlerInit',
+        'ToolHandlerInit',
+        `Omit<PackServiceJournal, 'read'>`,
+      ),
+    });
+    expect(ok).toBe(false);
+    expect(output).toContain('TS2339');
+    expect(output).toContain('read');
+  });
+
+  it('(B) …and when it loses its WRITE half', () => {
+    const { ok, output } = typecheck({
+      'pin.ts': pinModule(
+        'RouteHandlerInit',
+        'ToolHandlerInit',
+        `Omit<PackServiceJournal, 'record'>`,
+      ),
+    });
+    expect(ok).toBe(false);
+    expect(output).toContain('TS2344');
+    expect(output).toContain(`does not satisfy the constraint 'true'`);
   });
 
   it('(C) a pack handler cannot reach a capability the contract withholds', () => {

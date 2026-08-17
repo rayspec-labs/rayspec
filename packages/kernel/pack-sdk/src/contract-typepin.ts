@@ -30,9 +30,11 @@ import type {
   PackErrorCode,
   PackFragments,
   PackHandlerFragment,
+  PackJournal,
   PackJournalEntry,
   PackJournalPage,
   PackJournalReader,
+  PackJournalWriter,
   PackManifest,
   PackManifestBrand,
   PackRouteHandler,
@@ -302,6 +304,44 @@ type _ResumeCursorIsAString = Assert<
   PackRouteHandlerInit['resumeFrom'] extends string | undefined ? true : false
 >;
 
+/**
+ * THE SERVICE'S JOURNAL DOOR CARRIES BOTH VERBS. This is the arm that would have caught the shape
+ * this contract shipped with first: a reader reachable only from a route, leaving the surface that
+ * WRITES journal steps unable to read one back — which is the sentence the whole read half exists to
+ * make false. Asserted through the context member rather than through `PackJournal` directly, because
+ * what a service is HANDED is the thing that matters; a door declared and never handed over is a type
+ * nobody receives.
+ */
+type _AServiceJournalReadsAndWrites = Assert<
+  NonNullable<PackServiceContext['journal']> extends PackJournalReader
+    ? NonNullable<PackServiceContext['journal']> extends PackJournalWriter
+      ? true
+      : false
+    : false
+>;
+/** …and the door a service is handed IS that pair, not a third shape that happens to fit both. */
+type _TheServiceDoorIsThePackJournal = Assert<
+  PackJournal extends PackJournalReader & PackJournalWriter
+    ? NonNullable<PackServiceContext['journal']> extends PackJournal
+      ? true
+      : false
+    : false
+>;
+/**
+ * BOTH SURFACES READ THROUGH THE SAME READER. A service's read and a route's read returning
+ * different pages would be two contracts wearing one name, and a pack author moving code between the
+ * two would discover it at the call site.
+ */
+type _BothSurfacesShareOneReader = Assert<
+  Awaited<ReturnType<NonNullable<PackServiceContext['journal']>['read']>> extends PackJournalPage
+    ? Awaited<
+        ReturnType<NonNullable<PackRouteHandlerInit['journal']>['read']>
+      > extends PackJournalPage
+      ? true
+      : false
+    : false
+>;
+
 /** The identifier rule is checkable, and bounded by the Postgres identifier limit. */
 type _IdentifierRuleIsCheckable = Assert<
   ReturnType<typeof isSafeIdentifier> extends boolean
@@ -336,8 +376,14 @@ export const PACK_CONTRACT_TYPEPINS: [
   _AJournalPageIsCursoredAndBounded,
   _SseResponderBuildsARouteResponse,
   _ResumeCursorIsAString,
+  _AServiceJournalReadsAndWrites,
+  _TheServiceDoorIsThePackJournal,
+  _BothSurfacesShareOneReader,
   _IdentifierRuleIsCheckable,
 ] = [
+  true,
+  true,
+  true,
   true,
   true,
   true,

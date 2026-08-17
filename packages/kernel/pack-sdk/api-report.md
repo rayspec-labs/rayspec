@@ -12,7 +12,7 @@ must be regenerated here and committed in the same change:
 
 ## Entry point `.` — `dist/index.d.ts`
 
-51 export(s).
+52 export(s).
 
 ### `DefinedPack` — `dist/manifest.d.ts`
 
@@ -161,6 +161,13 @@ export interface PackHandlerPrincipal {
 
 ```ts
 export type PackHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+```
+
+### `PackJournal` — `dist/service.d.ts`
+
+```ts
+export interface PackJournal extends PackJournalWriter, PackJournalReader {
+}
 ```
 
 ### `PackJournalEntry` — `dist/journal.d.ts`
@@ -337,7 +344,7 @@ export interface PackServiceContext {
     readonly db: PackDatabase;
     readonly spec: Readonly<Record<string, unknown>>;
     readonly sections: Readonly<Record<string, unknown>>;
-    readonly journal?: PackJournalWriter;
+    readonly journal?: PackJournal;
     readonly env: Readonly<Record<string, string | undefined>>;
     readonly dispatch?: TurnDispatch;
 }

@@ -23,7 +23,10 @@
  *
  * BOTH DIRECTIONS ARE CONTRACTED. The shapes above describe a value going IN — what a step is recorded
  * as. `PackJournalReader` below is the way back OUT: a typed, tenant-scoped, bounded page with a
- * stable cursor, handed to a route handler on its init. It exists because the alternative was a pack
+ * stable cursor. It is handed to BOTH surfaces that have something to do with it — to a SERVICE on
+ * `PackServiceContext.journal`, which is the surface that WRITES steps and therefore the one with
+ * something to read back, and to a ROUTE on `PackRouteHandlerInit.journal`, which is the surface that
+ * SERVES a read to a client. It exists because the alternative was a pack
  * naming the core's journal table and its column layout in a SQL string through the escape hatch —
  * an unversioned dependency on a core internal expressed as text, in the one package whose purpose is
  * that packs do not do this. What the read door is scoped to, and what it withholds, is stated on the
@@ -158,8 +161,10 @@ export interface PackJournalPage {
  *    one unit of work rather than the tenant's whole history.
  *  - BOUNDED, ALWAYS. A read returns at most `limit` entries and `limit` is clamped by the deployment,
  *    so this door is not a drain: reading a long journal is a sequence of pages, each one asked for.
- *  - NO APPEND. There is no write verb here. A pack's own work reaches the journal through
- *    `PackJournalWriter` on a SERVICE context; a route handler records nothing itself.
+ *  - NO APPEND — on this interface. A pack's own work reaches the journal through `PackJournalWriter`,
+ *    and a SERVICE is handed both halves on one door (`PackJournal`) precisely because it is the
+ *    surface that writes. A ROUTE handler is handed this reader alone: it records nothing itself, so
+ *    there is no write verb for it to be given.
  *  - THE NEUTRAL COLUMNS ONLY. The stored record carries further PLATFORM-OWNED accounting and
  *    provenance — which provider ran the step, how the run authenticated, which pricing entry computed
  *    the cost — that this contract deliberately does not name, exactly as this module's header already

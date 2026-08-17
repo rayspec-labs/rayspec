@@ -105,6 +105,7 @@ import {
   type ModuleImporter,
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
+  makeHandlerJournal,
   makeJournalSink,
   makeTurnDispatch,
   type PackServiceContext,
@@ -2404,8 +2405,10 @@ interface ExtensionServiceWiring {
  *  - `spec`     — always: the MERGED document, exactly as every other downstream step sees it.
  *  - `sections` — the claimed sections of THIS pack only. A pack is configured by its own grammar, not
  *                 by its neighbour's, so the union is filtered by the claiming pack id.
- *  - `journal`  — only when the deployment bound a tenant. The run journal is tenant-scoped through
- *                 the chokepoint, and a row nobody can attribute is not a record.
+ *  - `journal`  — only when the deployment bound a tenant. BOTH verbs or neither: the run journal is
+ *                 tenant-scoped through the chokepoint, a row nobody can attribute is not a record,
+ *                 and a read with no tenant to scope to is not a read. Both halves are built over
+ *                 the ONE `forTenant` handle below, so they cannot be scoped to different tenants.
  *  - `dispatch` — only when BOTH a tenant and a durable worker are wired, because a scheduled turn
  *                 needs a tenant to run under and an engine to run on. ABSENT is the fail-closed
  *                 answer a service reads, exactly as `init.enqueue` is absent on a worker-less deploy.
@@ -2428,30 +2431,37 @@ async function bootExtensionServices(
   // a rule somebody has to remember.
   const tenantId = wiring.tenantId;
   const tdb = tenantId ? forTenant(wiring.db, tenantId) : undefined;
-  const journal: PackServiceContext['journal'] = tdb
-    ? {
-        record: async (step) => {
-          // The run journal's own sink, so a service's step is priced, reconciled and shaped by the
-          // one writer every other step goes through — never a second INSERT with its own opinions.
-          // `replay: false`: a service records what it did, it does not read a replay cache.
-          await makeJournalSink(tdb, step.runId, PACK_SERVICE_JOURNAL_BACKEND, false).record({
-            type: step.type,
-            idempotencyKey: step.idempotencyKey,
-            inputHash: createHash('sha256')
-              .update(JSON.stringify(step.input ?? null))
-              .digest('hex'),
-            output: step.output,
-            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-            costUsd: 0,
-            latencyMs: step.latencyMs ?? 0,
-            status: step.status,
-            // A service's work is not a model call and authenticated as nothing: the neutral
-            // vocabulary for exactly that, recorded truthfully rather than overclaiming a path.
-            authMode: 'unauthenticated',
-          });
-        },
-      }
-    : undefined;
+  // The READ half of the journal door, built over the SAME `forTenant` handle the writer below is —
+  // so "a service reads only its own tenant" is the chokepoint's property rather than a rule this
+  // wiring has to remember, and the two halves can never be scoped to different tenants.
+  const journalReader = tdb ? makeHandlerJournal(tdb) : undefined;
+  const journal: PackServiceContext['journal'] =
+    tdb && journalReader
+      ? {
+          read: (query) => journalReader.read(query),
+          record: async (step) => {
+            // The run journal's own sink, so a service's step is priced, reconciled and shaped by
+            // the one writer every other step goes through — never a second INSERT with its own
+            // opinions. `replay: false`: a service records what it did, it does not read a replay
+            // cache.
+            await makeJournalSink(tdb, step.runId, PACK_SERVICE_JOURNAL_BACKEND, false).record({
+              type: step.type,
+              idempotencyKey: step.idempotencyKey,
+              inputHash: createHash('sha256')
+                .update(JSON.stringify(step.input ?? null))
+                .digest('hex'),
+              output: step.output,
+              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+              costUsd: 0,
+              latencyMs: step.latencyMs ?? 0,
+              status: step.status,
+              // A service's work is not a model call and authenticated as nothing: the neutral
+              // vocabulary for exactly that, recorded truthfully rather than overclaiming a path.
+              authMode: 'unauthenticated',
+            });
+          },
+        }
+      : undefined;
   const dispatch: TurnDispatch | undefined =
     tdb && tenantId && wiring.executor
       ? makeTurnDispatch({

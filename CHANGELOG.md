@@ -402,24 +402,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a pack author's. The in-tree fixture pack now contributes both contracted kinds through real
   declarations and builds against `@rayspec/pack-sdk` alone.
 
-- **A pack can now READ the run journal back, and a pack route can answer INCREMENTALLY.** Both halves
-  arrive on the init a `{kind:'handler'}` route receives, and both are contracted by
-  `@rayspec/pack-sdk` — so a pack still imports one package for everything it writes.
+- **A pack can now READ the run journal back — from a service and from a route — and a pack route can
+  answer INCREMENTALLY.** Both halves are contracted by `@rayspec/pack-sdk`, so a pack still imports
+  one package for everything it writes.
   **The journal was write-only to a pack.** The surface carried `PackJournalWriter` and the shapes a
   step is recorded under, and no way back out: a pack that needed to read what its work produced had
   exactly one route, `PackDatabase.query` with the core's journal table and column layout written into
   a SQL string — an unversioned dependency on a platform internal expressed as text, where a renamed
-  column is a silent break nothing in a build can see. `init.journal.read({ runId, after, limit })`
+  column is a silent break nothing in a build can see. `journal.read({ runId, after, limit })`
   replaces the string with a type: one bounded page of `PackJournalReadEntry`, oldest first, each
   entry carrying an opaque `cursor`, and the page saying whether more were waiting (`hasMore`) and
-  where to continue from (`nextCursor`). **It is scoped to the invocation's own tenant
-  structurally** — the reader is built from the same tenant-bound handle the store facade is, so there
-  is no tenant argument and no way to add one — **and it is bounded**: `limit` is clamped by the
-  deployment, so reading a long journal is a sequence of pages the caller asks for rather than a
-  drain. What it is NOT is stated in the contract rather than left to be discovered: it is the
-  TENANT's journal and not a per-pack slice of it (the run journal is the tenant's single record of
-  work, so filter by `runId` to read one unit of work), it carries the neutral columns only — the
-  platform's accounting and provenance columns stay platform-owned — and it has no append verb.
+  where to continue from (`nextCursor`).
+  **It reaches BOTH surfaces that have something to do with it.** `PackServiceContext.journal` is now
+  a `PackJournal` — the same door, carrying `record` AND `read` — because a service is the surface
+  that WRITES journal steps and therefore the one with something to read back, and the work that needs
+  a recall (what did this pack already do, before deciding what to do next) has no request behind it
+  and nothing it is serving. `PackRouteHandlerInit.journal` carries the reader alone, for the other
+  case: a read being SERVED to a client. A reader reachable only from a route would have left the
+  writing surface exactly where it started. `PackJournalWriter` is unchanged and still exported, so a
+  service that only appends may keep annotating it.
+  **It is scoped to the tenant structurally, on both surfaces** — each reader is built from the same
+  tenant-bound chokepoint handle the store facade (route) and the journal writer (service) are built
+  from, so there is no tenant argument and no way to add one — **and it is bounded**: `limit` is
+  clamped by the deployment, so reading a long journal is a sequence of pages the caller asks for
+  rather than a drain. What it is NOT is stated in the contract rather than left to be discovered: it
+  is the TENANT's journal and not a per-pack slice of it (the run journal is the tenant's single
+  record of work, so filter by `runId` to read one unit of work), it carries the neutral columns
+  only — the platform's accounting and provenance columns stay platform-owned — and a ROUTE gets no
+  append verb, because a route records nothing itself.
   The cursor is a keyset over `(created_at, step_id)` at the database's own microsecond precision, so
   a step appended between two reads never shifts a page under the client, and a cursor the reader did
   not issue is REFUSED (an `Error` named `PackJournalCursorError`) rather than answered by replaying
@@ -444,13 +454,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the handler, which the chain has already let through. The existing pack-route parity regression now
   drives an incremental route beside the JSON one and a deployment-declared one, and compares all
   three refusals as bytes: status, whole body, whole header map.
-  Both members are OPTIONAL on the contract — a deployment older than them injects neither, so a pack
+  Every new member is OPTIONAL on the contract — a deployment older than them injects none, so a pack
   feature-detects and fails closed — and their presence is pinned on the PLATFORM side by indexed
   access, which is the only form that can catch an optional member being dropped. The in-tree fixture
-  pack contributes a second route that reads the journal and streams it, written against
-  `@rayspec/pack-sdk` alone, and a new suite drives it with two tenants recording under the same run
-  id: each sees its own entries and nothing of the other's. The `{kind:'stream'}` api action is
-  untouched — it remains blob ingest/playback bound to the blob backend, a separate door.
+  pack witnesses both surfaces: a second route that reads the journal and streams it, written against
+  `@rayspec/pack-sdk` alone, and its existing service, which now reads back the entries it just wrote.
+  Two suites drive them with a second tenant's real rows present — the route with two tenants
+  recording under the same run id, the service with a step planted for another tenant under its own
+  run id — and each surface sees its own entries and nothing of the other's. The `{kind:'stream'}` api
+  action is untouched — it remains blob ingest/playback bound to the blob backend, a separate door.
 
 ### Changed
 

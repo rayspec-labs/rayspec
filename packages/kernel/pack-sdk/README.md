@@ -19,9 +19,10 @@ the module a `tooling` contribution points at, `PackRouteHandler` for an `api` o
 behind a `{kind:'handler'}` action, and the
 init each receives — the invocation's server-derived tenant and `PackStoreDb`, the
 name-keyed door onto the declared stores, plus what the request carried on a route. A
-route's init carries two further doors: `PackJournalReader`, a typed, tenant-scoped,
-bounded read with a stable cursor over the run journal a pack's work is recorded in — so
-reading back what was written never means naming a core table in a SQL string — and
+route's init carries two further doors: the same `PackJournalReader` a service is handed —
+a typed, tenant-scoped, bounded read with a stable cursor over the run journal a pack's
+work is recorded in, so reading back what was written never means naming a core table in a
+SQL string, on either surface — and
 `PackSseResponder`, the injected constructor for an **incremental** response, with the
 request's resume cursor beside it, so a client that reconnects continues where it stopped
 instead of replaying from zero. What a
@@ -32,8 +33,10 @@ the reason. A pack's
 **service** modules — the one contribution kind the deployment boots rather than calls —
 are typed against `PackServiceModule`: what they receive is a boot context rather than a
 per-invocation init, and it carries `TurnDispatch`, the capability a handler may not even
-name, and `PackDatabase`, the parameterized-SQL door onto the platform tables the pack
-itself owns. The three surfaces are deliberately distinct.
+name, `PackDatabase`, the parameterized-SQL door onto the platform tables the pack
+itself owns, and `PackJournal` — the run-journal door with **both** verbs, because a
+service is the surface that writes journal steps and therefore the one with something to
+read back. The three surfaces are deliberately distinct.
 
 The fragment types here pin the fields a contribution is *addressed* by and leave the rest
 of each section body open, so they are deliberately **wider** than that grammar: they
