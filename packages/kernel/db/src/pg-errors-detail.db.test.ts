@@ -33,6 +33,7 @@
  * required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent.
  */
 import { sql } from 'drizzle-orm';
+import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { operatorSafeDbErrorMessage, operatorSafeDbErrorStack } from './pg-errors.js';
 import { makeDbWithSchema } from './testing.js';
@@ -266,3 +267,220 @@ describeDb('a driver error carries the offending value in fields a message never
     expect(operatorSafeDbErrorMessage(plain)).toBe(`a handler bug mentioning ${CANARY}`);
   });
 });
+
+/**
+ * THE OTHER DIRECTION: WITHHOLDING WHERE THERE IS NOTHING TO WITHHOLD.
+ *
+ * Everything above asks whether a value escapes. These ask the opposite question, because a redactor
+ * that answers the first one perfectly can still be wrong: withholding costs the operator the fact
+ * they came for, so it has to be paid only where there is something to buy.
+ *
+ * The line is STRUCTURAL, and it is the premise the first test here pins: a bind value exists only
+ * inside a statement, and every statement-scoped failure carries its statement AND its values. So a
+ * failure arriving WITHOUT a statement cannot hold one, and the connection-scoped refusals that make
+ * up that class — `3D000`, `28P01`, `22023` — quote nothing but the DSN and the connection options.
+ * Rendering those from the phrase table replaced `database "x" does not exist` with a sentence naming
+ * two hazards, `detail` and a coercion message, that a connect-time refusal does not have.
+ *
+ * And a `code` is not a SQLSTATE just because it is a string: the driver hangs its OWN faults on the
+ * same property using words (`CONNECTION_CLOSED`). Printing one as a SQLSTATE asserts that the server
+ * answered and that the code is one an operator can look up, and neither is true.
+ */
+describeDb(
+  'a failure with no statement keeps the diagnosis, and a driver fault is not a SQLSTATE',
+  () => {
+    it('PREMISE: every statement-scoped failure carries its statement AND its values', async () => {
+      // The load-bearing claim behind the whole block. If a driver version ever stops attaching
+      // `parameters` on one of these doors, the statement-less branch below starts returning a message
+      // that COULD hold a bind value — so this pins the premise itself, not a rendering derived from it.
+      //
+      // Its OWN client: the block above ends `db.$client` in its `afterAll`, and a reused handle here
+      // fails with `CONNECTION_ENDED` before any door is measured — a red that would say nothing about
+      // the premise.
+      const client = postgres(process.env.DATABASE_URL ?? '', { max: 2, idle_timeout: 5 });
+      await client.unsafe(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA}`);
+      await client.unsafe(`DROP TABLE IF EXISTS ${SCHEMA}.doors_probe`);
+      await client.unsafe(`CREATE TABLE ${SCHEMA}.doors_probe (id uuid, n int NOT NULL)`);
+
+      const doors: ReadonlyArray<readonly [string, () => Promise<unknown>]> = [
+        [
+          'bound parameters',
+          () => client.unsafe(`INSERT INTO ${SCHEMA}.doors_probe (id, n) VALUES ($1, 1)`, [CANARY]),
+        ],
+        // Simple-query mode: NO parameters at all. `parameters` is an empty array, not absent — which
+        // is what keeps this door on the statement-carrying side of the branch.
+        [
+          'simple query mode',
+          () => client.unsafe(`INSERT INTO ${SCHEMA}.doors_probe (id, n) VALUES ('${CANARY}', 1)`),
+        ],
+        [
+          'inside a transaction',
+          () =>
+            client.begin((tx) =>
+              tx.unsafe(`INSERT INTO ${SCHEMA}.doors_probe (id, n) VALUES ('${CANARY}', 1)`),
+            ),
+        ],
+        [
+          'on a reserved connection',
+          async () => {
+            const reserved = await client.reserve();
+            try {
+              await reserved.unsafe(
+                `INSERT INTO ${SCHEMA}.doors_probe (id, n) VALUES ('${CANARY}', 1)`,
+              );
+            } finally {
+              reserved.release();
+            }
+          },
+        ],
+        [
+          'a not-null violation',
+          () => client.unsafe(`INSERT INTO ${SCHEMA}.doors_probe (id, n) VALUES (NULL, NULL)`),
+        ],
+        ['a missing relation', () => client.unsafe(`SELECT * FROM ${SCHEMA}.no_such_relation`)],
+        ['a syntax error', () => client.unsafe('this is not sql')],
+      ];
+
+      for (const [door, run] of doors) {
+        const err = (await thrownBy(run, `the ${door} statement`)) as {
+          query?: unknown;
+          parameters?: unknown;
+        };
+        expect(typeof err.query, `${door}: carries its statement`).toBe('string');
+        expect(Array.isArray(err.parameters), `${door}: carries its values`).toBe(true);
+      }
+
+      await client.unsafe(`DROP TABLE IF EXISTS ${SCHEMA}.doors_probe`);
+      await client.end({ timeout: 2 });
+    });
+
+    it('withholds an EXISTING ROW quoted by a migration that bound no values', async () => {
+      // The migration shape: `ALTER TABLE … TYPE uuid USING label::uuid` over a table already holding a
+      // value that will not cast. The statement binds NOTHING, and the offending value appears in the
+      // SQL text nowhere — it is a row, reachable only through the server's message. So this is the one
+      // case where the bind-value count is zero and something was withheld all the same, and reporting
+      // `0 bind values withheld` told an operator precisely the opposite.
+      const client = postgres(process.env.DATABASE_URL ?? '', { max: 2, idle_timeout: 5 });
+      try {
+        await client.unsafe(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA}`);
+        await client.unsafe(`DROP TABLE IF EXISTS ${SCHEMA}.cast_probe`);
+        await client.unsafe(
+          `CREATE TABLE ${SCHEMA}.cast_probe (id serial PRIMARY KEY, label text)`,
+        );
+        await client.unsafe(`INSERT INTO ${SCHEMA}.cast_probe (label) VALUES ($1)`, [CANARY]);
+
+        const ddl = `ALTER TABLE ${SCHEMA}.cast_probe ALTER COLUMN label TYPE uuid USING label::uuid`;
+        // Accept control: the DDL itself never names the value — so a rendering that keeps the
+        // statement verbatim is safe here, and any appearance of the canary came from the message.
+        expect(ddl, 'the migration names no value').not.toContain(CANARY);
+
+        const err = (await thrownBy(
+          () => client.begin((tx) => tx.unsafe(ddl)),
+          'the column type change',
+        )) as Error & { code?: string; detail?: string; parameters?: unknown };
+
+        expect(err.code).toBe('22P02');
+        expect(err.message, 'accept control: the ROW value IS in the message').toContain(CANARY);
+        expect(
+          err.detail ?? '',
+          'and it is NOT in `detail` — the message is the only door',
+        ).not.toContain(CANARY);
+        expect((err.parameters as unknown[]).length, 'the statement bound nothing').toBe(0);
+
+        const rendered = operatorSafeDbErrorMessage(err);
+        expect(rendered).not.toContain(CANARY);
+        expect(rendered).toContain('22P02');
+        expect(rendered, 'the DDL is authored and stays').toContain('ALTER COLUMN');
+        // Zero bound values must not read as "nothing was withheld".
+        expect(rendered).toContain('bound no values');
+        expect(
+          rendered,
+          "the server's message was the disclosure, and is named as withheld",
+        ).toMatch(/server's own message is withheld/);
+      } finally {
+        await client.unsafe(`DROP TABLE IF EXISTS ${SCHEMA}.cast_probe`).catch(() => {});
+        await client.end({ timeout: 2 }).catch(() => {});
+      }
+    });
+
+    it('keeps WHICH DATABASE for a connect-time refusal (3D000) instead of a generic sentence', async () => {
+      const missing = `rayspec_no_such_db_${Date.now().toString(36)}`;
+      const dsn = new URL(process.env.DATABASE_URL ?? '');
+      dsn.pathname = `/${missing}`;
+      const client = postgres(dsn.toString(), { max: 1, idle_timeout: 1, connect_timeout: 5 });
+
+      const err = (await thrownBy(
+        () => client.unsafe('SELECT 1'),
+        'a connection to a database that does not exist',
+      )) as Error & { code?: string; query?: unknown };
+      await client.end({ timeout: 2 }).catch(() => {});
+
+      // Accept control: this really is a server refusal with a real SQLSTATE, and it really does carry
+      // no statement — so it is the class the branch is about, not a socket error mislabelled as one.
+      expect(err.code).toBe('3D000');
+      expect(err.query, 'a connect-time refusal carries no statement').toBeUndefined();
+      expect(err.message, 'accept control: the name IS in the raw message').toContain(missing);
+
+      // The operator's one fact survives. Rendering this from the phrase table produced
+      // `the database refused the statement (SQLSTATE 3D000) — this driver error carries no statement…`
+      // which names two hazards a connect refusal does not have and drops the only actionable word.
+      expect(operatorSafeDbErrorMessage(err)).toContain(missing);
+    });
+
+    it('keeps WHICH ROLE for an authentication refusal (28P01)', async () => {
+      const role = `rayspec_no_such_role_${Date.now().toString(36)}`;
+      const dsn = new URL(process.env.DATABASE_URL ?? '');
+      dsn.username = role;
+      dsn.password = 'not-the-password';
+      const client = postgres(dsn.toString(), { max: 1, idle_timeout: 1, connect_timeout: 5 });
+
+      const err = (await thrownBy(
+        () => client.unsafe('SELECT 1'),
+        'a connection as a role that does not exist',
+      )) as Error & { code?: string; query?: unknown };
+      await client.end({ timeout: 2 }).catch(() => {});
+
+      expect(err.code).toMatch(/^28/);
+      expect(err.query, 'an auth refusal carries no statement').toBeUndefined();
+      expect(err.message, 'accept control: the role IS in the raw message').toContain(role);
+      expect(operatorSafeDbErrorMessage(err)).toContain(role);
+    });
+
+    it('does not call a DRIVER FAULT a SQLSTATE — and still withholds the values', async () => {
+      // Provoked, not synthesized: terminate the backend with a statement in flight. The driver builds
+      // this error itself, so `code` is a word rather than a five-character SQLSTATE, and `severity` —
+      // which the server would have sent — is absent.
+      const victim = postgres(process.env.DATABASE_URL ?? '', { max: 1, idle_timeout: 5 });
+      const killer = postgres(process.env.DATABASE_URL ?? '', { max: 1, idle_timeout: 5 });
+      try {
+        const [{ pid }] = await victim<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        const inFlight = victim`SELECT pg_sleep(5), ${CANARY}::text`;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        await killer`SELECT pg_terminate_backend(${pid})`;
+
+        const err = (await thrownBy(
+          () => inFlight,
+          'a statement whose backend was terminated',
+        )) as Error & { code?: string; severity?: string };
+
+        // Accept control: a string `code` that is NOT a SQLSTATE, on an error that DOES carry a
+        // statement and a bound value — the exact shape an ungated walk mislabels.
+        expect(err.code).toBe('CONNECTION_CLOSED');
+        expect(err.severity, 'the server never answered, so there is no severity').toBeUndefined();
+
+        const rendered = operatorSafeDbErrorMessage(err);
+        expect(rendered, 'a driver fault is not a SQLSTATE').not.toContain('SQLSTATE');
+        expect(rendered, 'but the fault token is kept — it is what names the failure').toContain(
+          'CONNECTION_CLOSED',
+        );
+        // The statement DID carry a value, so the withholding still applies: this branch changes what
+        // the failure is called, never what is disclosed.
+        expect(rendered).not.toContain(CANARY);
+        expect(rendered).toMatch(/withheld/);
+      } finally {
+        await victim.end({ timeout: 2 }).catch(() => {});
+        await killer.end({ timeout: 2 }).catch(() => {});
+      }
+    });
+  },
+);

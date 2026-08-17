@@ -231,7 +231,13 @@ export async function runTenantEnsure(
     // ORG_TOMBSTONED / OWNER_INVITE_OUT_EXISTS / ORG_NAME_SLUG_IN_USE — a caller matching on it would
     // be reading a namespace nobody promised. Everything else is a plain PROVISION_FAILED.
     //
-    // The driver's own words do NOT reach the operator through `message` any more. Provisioning
+    // The driver's own words do NOT reach the operator through `message` any more — by BOTH doors.
+    // Rendering here closes only the first: the provisioning layer bakes a driver sentence into
+    // `TenantProvisionError.message` itself, and a value already inside that string cannot be
+    // withheld by anything downstream, this line included. So the layer builds that message from the
+    // same rendering (`tenant-provision.ts`), and this call re-renders a raw error that reaches it by
+    // another route. Two places, because there are two doors, not because one distrusts the other.
+    // Provisioning
     // writes an org and its owner, so the values it binds are the operator's own inputs — and a
     // constraint violation on them (a taken slug, a duplicate owner email) comes back with the value
     // in the driver's `detail`, while a coercion refusal puts it in the message itself.

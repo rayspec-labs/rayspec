@@ -807,13 +807,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape the ORM produces. **A bare driver error — what the raw-SQL door throws — fell through to the
   server's own message**, which for a coercion refusal *is* the offending value: asked to make
   `invalid input syntax for type uuid: "<the caller's value>"` safe, it returned it unchanged. The
-  renderer now recognises the driver's error by the wire shape it is built from (a five-character
-  SQLSTATE beside a `severity`) rather than by its class, reads the bound values under either name the
-  stack uses for them, and assembles both shapes from the same owned parts. Nothing server-authored is
-  read on either path.
+  renderer now reads the bound values under **either** name the stack uses for them — the ORM calls
+  them `params`, the driver calls them `parameters` — and starts its SQLSTATE walk at the error itself
+  rather than one link in, because through the raw door the statement and the SQLSTATE are on the same
+  object. Those two changes are what close the disclosure; both shapes now assemble from the same
+  owned parts, and nothing server-authored is read on either path.
+  A `code` is also no longer assumed to be a SQLSTATE just because it is a string. The driver hangs
+  its own faults on that property using words (`CONNECTION_CLOSED`), and rendering one as
+  `SQLSTATE CONNECTION_CLOSED` asserted both that the server had answered and that the code was one an
+  operator could look up. A driver fault is now named as such, keeps its token, and still withholds
+  the values.
+  **A failure carrying no statement keeps its own message**, which is the deliberate limit of the
+  redaction rather than a gap in it. A bind value exists only inside a statement, and every
+  statement-scoped failure carries its statement — measured across all eight doors the codebase uses,
+  including simple-query mode, where the value array is empty rather than absent. What remains is the
+  connection-scoped set, where the server's sentence *is* the diagnosis and every value in it came
+  from the connection string or the connection options: `database "x" does not exist` (`3D000`),
+  `password authentication failed for user "y"` (`28P01`). Withholding those bought nothing and cost
+  an operator the only actionable word in the line.
   A repository-wide, multi-line-aware sweep then covered every shape a caught error can escape
-  through, and each site is either routed through the renderer or carries a comment saying why its
-  error cannot carry caller data. Newly routed: the `rayspec deploy` boot-failure stack print, which
+  through. Each site reached by that sweep is either routed through the renderer or carries a comment
+  saying why its error cannot carry caller data; the criterion for a comment is a mechanism, not a
+  judgement that the value looks harmless.
+  Three sites bake the driver's sentence into a string **before** any printer sees it, so no consumer
+  could have withheld it: the deploy engine's migrate arm, which put the driver's message inside
+  `DeployError.message` and left both of its printers powerless; the tenant provisioner's one-line
+  helper, which reached *past* the wrapper for the driver's own words on purpose; and the streaming
+  run route's terminal `error` frame, which is the one sink here that speaks to an **API client**
+  rather than to an operator. That frame carried `String(err)` — for the ORM's wrapper, the failed SQL
+  followed by every bound value — while the JSON sibling of the same route answers the closed
+  `INTERNAL` envelope for the identical failure. Two renderings of one run must not disagree about
+  what a caller is told, so the stream now says exactly what the JSON body says, and the diagnosis
+  goes to the log.
+  Newly routed: the `rayspec deploy` boot-failure stack print, which
   had drifted from the `rayspec-serve` print its own comment says it must match; the cron scheduler's
   enqueue-time run-header log, the third writer of a header whose two siblings were already covered;
   the workflow runtime's `store_read`/`store_write` step failures and the media-prep log line, all of

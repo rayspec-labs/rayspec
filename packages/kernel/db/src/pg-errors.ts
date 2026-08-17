@@ -9,8 +9,12 @@
  * drizzle-orm@0.45.2 + postgres@3.4.9.)
  *
  * Request-path + capability code that must map a UNIQUE violation to a typed conflict imports the
- * detector from here rather than re-inlining the walk (there is exactly ONE canonical copy of the
- * cause-chain scan).
+ * detector from here rather than re-inlining the walk. The scan lives in this MODULE and nowhere else
+ * — which is the property that matters, and is not the same as there being one function. There are
+ * several walks here because they answer different questions (which node holds a statement, which
+ * holds a SQLSTATE, which holds the driver's own fault token, is the chain deeper than the bound),
+ * and collapsing them into one parameterised scan would trade a readable answer per question for a
+ * flag argument. What must never happen is a SEVENTH copy appearing in a caller.
  */
 
 /** Bounded depth for the `.cause` walk — deep enough for driver→drizzle wrapping, cycle-safe. */
@@ -125,30 +129,18 @@ function wrappedStatement(err: unknown): WrappedStatement | undefined {
 }
 
 /**
- * A DRIVER ERROR, recognised by the WIRE SHAPE it was built from rather than by its class.
+ * A SQLSTATE IS FIVE CHARACTERS FROM A VOCABULARY THE SERVER PUBLISHES — and nothing else is.
  *
- * Postgres answers a failed statement with an ErrorResponse whose fields the driver copies onto the
- * error verbatim: a five-character SQLSTATE in `code`, a `severity`, and — on a constraint violation
- * — the offending value in `detail`. A node carrying a SQLSTATE-shaped `code` beside a `severity`
- * IS that error; nothing else in this stack has both. Detecting it this way keeps the same property
- * the SQLSTATE walk has: the driver's class is internal and unexported, so an identity check would
- * fail silently on a version bump, and failing silently here means re-emitting the server's words.
+ * The driver hangs its OWN faults on the same `code` property, using words instead of codes:
+ * `CONNECTION_CLOSED`, `UNSAFE_TRANSACTION`. So a walk that accepts any string `code` cannot tell a
+ * refusal the server sent from a fault the driver raised without ever reaching it. Measured, by
+ * terminating the backend with a statement in flight: the error carries `code: 'CONNECTION_CLOSED'`,
+ * a statement, its values, and NO `severity` — and an ungated walk rendered it as
+ * `(SQLSTATE CONNECTION_CLOSED)`, asserting both that the server answered and that this is a code an
+ * operator can look up. Neither is true, and the driver's own message — which names the host and
+ * port, the one fact a connectivity failure is about — was dropped in favour of that assertion.
  */
-function driverErrorNode(err: unknown): Record<string, unknown> | undefined {
-  let cur: unknown = err;
-  for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
-    const node = cur as Record<string, unknown>;
-    if (
-      typeof node.code === 'string' &&
-      /^[0-9A-Z]{5}$/.test(node.code) &&
-      typeof node.severity === 'string'
-    ) {
-      return node;
-    }
-    cur = node.cause;
-  }
-  return undefined;
-}
+const SQLSTATE_SHAPE = /^[0-9A-Z]{5}$/;
 
 /**
  * OUR OWN PHRASE PER SQLSTATE — never the server's sentence.
@@ -170,10 +162,13 @@ function driverErrorNode(err: unknown): Record<string, unknown> | undefined {
  * making the common refusals readable, not by being exhaustive.
  */
 const REFUSAL_BY_SQLSTATE: Readonly<Record<string, string>> = {
-  '22001': 'a bound value was too long for its column',
-  '22003': 'a bound value was out of range for its column type',
-  '22007': 'a bound value was not a valid timestamp',
-  '22P02': 'a bound value was not valid for its column type',
+  // "a value", not "a bound value": the coercion classes also fire on DDL that casts a column, where
+  // the offending value is an EXISTING ROW and the statement bound nothing at all. Measured on
+  // `ALTER TABLE … TYPE uuid USING label::uuid` over a table holding one bad row.
+  '22001': 'a value was too long for its column',
+  '22003': 'a value was out of range for its column type',
+  '22007': 'a value was not a valid timestamp',
+  '22P02': 'a value was not valid for its column type',
   '23502': 'a not-null constraint was violated',
   '23503': 'a foreign key constraint was violated',
   '23505': 'a unique constraint was violated',
@@ -201,7 +196,33 @@ function sqlstateNode(from: { readonly cause?: unknown }): Record<string, unknow
   let cur: unknown = from;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
     const node = cur as Record<string, unknown>;
-    if (typeof node.code === 'string') return node;
+    if (typeof node.code === 'string' && SQLSTATE_SHAPE.test(node.code)) return node;
+    cur = node.cause;
+  }
+  return undefined;
+}
+
+/**
+ * The DRIVER'S OWN fault token, for a chain that carries no server SQLSTATE at all.
+ *
+ * Kept, rather than collapsed into the generic sentence, because it is the only thing that
+ * distinguishes a dropped connection from a refused statement — and it is driver-authored, from a
+ * fixed vocabulary, so it can no more carry caller data than a SQLSTATE can. Bounded and collapsed
+ * onto one line for the same reason the schema identifiers are.
+ *
+ * IT REFUSES A SQLSTATE-SHAPED CODE, which is not redundant with its one caller checking first. A
+ * mutation sweep found it: with this walk accepting any code, breaking the SQLSTATE walk no longer
+ * turned the suite red — the fault path caught the server's own code and rendered `23505` as a driver
+ * error, which is both wrong and, worse, indistinguishable from correct to every test. A fallback
+ * that can answer for the branch it is a fallback FOR hides that branch's failures.
+ */
+function driverFaultCode(from: { readonly cause?: unknown }): string | undefined {
+  let cur: unknown = from;
+  for (let depth = 0; depth < MAX_CAUSE_DEPTH && cur != null; depth++) {
+    const node = cur as Record<string, unknown>;
+    if (typeof node.code === 'string' && node.code.length > 0 && !SQLSTATE_SHAPE.test(node.code)) {
+      return node.code.replace(/\s+/g, ' ').trim().slice(0, 40);
+    }
     cur = node.cause;
   }
   return undefined;
@@ -242,12 +263,20 @@ function schemaIdentifiers(node: Record<string, unknown>): string[] {
  */
 function refusalReason(from: { readonly cause?: unknown }): string {
   const node = sqlstateNode(from);
-  if (node === undefined) return 'the database refused the statement';
-  const code = String(node.code);
-  const phrase = REFUSAL_BY_SQLSTATE[code] ?? 'the database refused the statement';
-  const named = schemaIdentifiers(node);
-  const detail = named.length > 0 ? `, ${named.join(', ')}` : '';
-  return `${phrase} (SQLSTATE ${code}${detail})`;
+  if (node !== undefined) {
+    const code = String(node.code);
+    const phrase = REFUSAL_BY_SQLSTATE[code] ?? 'the database refused the statement';
+    const named = schemaIdentifiers(node);
+    const detail = named.length > 0 ? `, ${named.join(', ')}` : '';
+    return `${phrase} (SQLSTATE ${code}${detail})`;
+  }
+  // NO SQLSTATE ANYWHERE IN THE CHAIN means the server never answered this statement, so calling the
+  // failure a refusal would be wrong twice over: it names the wrong party, and it sends an operator
+  // looking up a code no SQLSTATE table contains.
+  const fault = driverFaultCode(from);
+  return fault === undefined
+    ? 'the database refused the statement'
+    : `the statement did not complete (driver error ${fault})`;
 }
 
 /** True when the chain still had links at the walk's boundary — see `operatorSafeDbErrorMessage`. */
@@ -323,19 +352,34 @@ function oneLine(statement: string): string {
 export function operatorSafeDbErrorMessage(err: unknown): string {
   const wrapped = wrappedStatement(err);
   if (wrapped !== undefined) {
+    // SAY WHAT WAS WITHHELD, not only how many values there were. A statement that bound nothing
+    // still had something withheld — the server's own sentence — and reporting `0 bind values
+    // withheld` told an operator the opposite, that nothing was hidden. The case is not exotic: a
+    // migration casting a column (`ALTER TABLE … TYPE uuid USING label::uuid`) binds no values and
+    // fails with an EXISTING ROW quoted in the message.
     const count = wrapped.params.length;
-    const withheld = count === 1 ? '1 bind value withheld' : `${count} bind values withheld`;
-    return `${refusalReason(wrapped.node)} — failed statement: ${oneLine(wrapped.query)} (${withheld} from this message; they are caller data and do not belong in a log)`;
+    const values =
+      count === 0
+        ? 'this statement bound no values'
+        : `${count === 1 ? '1 bind value' : `${count} bind values`} withheld`;
+    return `${refusalReason(wrapped.node)} — failed statement: ${oneLine(wrapped.query)} (${values}; the server's own message is withheld too — a refusal can quote caller data, and neither belongs in a log)`;
   }
-  // A DATABASE FAILURE THAT CARRIES NO STATEMENT is still a database failure, and its message is
-  // still the server's. Reaching the message fallback below with one would re-emit exactly what the
-  // phrase table exists to avoid — measured: a coercion refusal arriving without a statement renders
-  // as `invalid input syntax for type uuid: "<the caller's value>"`. Render it from the owned parts
-  // instead, and say that the statement is missing rather than leaving its absence to be inferred.
-  const driver = driverErrorNode(err);
-  if (driver !== undefined) {
-    return `${refusalReason(driver)} — this driver error carries no statement, so the failed SQL is not recoverable from it (the server's own message and its \`detail\` field are withheld: on a constraint violation \`detail\` echoes the offending value, and on a coercion refusal the message does)`;
-  }
+  // A DATABASE FAILURE CARRYING NO STATEMENT KEEPS ITS OWN MESSAGE. That is a measured decision, not
+  // a gap: what reaches this line cannot hold a bind value, because a bind value only exists inside a
+  // statement and EVERY statement-scoped failure carries its statement. Measured across all eight
+  // doors this repository uses — tagged template, `unsafe` with parameters, `unsafe` without them,
+  // inside `begin`, on a reserved connection, through a cursor, a constraint violation, a syntax
+  // error — `query` is a string and `parameters` an array in every one, including simple-query mode
+  // where that array is empty. So the branch above claims every error that could carry caller data.
+  //
+  // What is left is the CONNECTION-SCOPED set, and there the server's own sentence IS the diagnosis:
+  // `database "x" does not exist` (3D000), `password authentication failed for user "y"` (28P01),
+  // `invalid value for parameter "statement_timeout": "z"` (22023). Each of those values came from
+  // the connection string or the connection options — operator configuration, not caller data. An
+  // earlier revision rendered this class from the phrase table too, which replaced the single fact an
+  // operator needs (WHICH database, WHICH user) with a sentence naming two hazards, `detail` and a
+  // coercion message, that a connect-time refusal does not have. Withholding is not free: withheld
+  // where there is nothing to withhold, it only costs the diagnosis.
   const message = err instanceof Error ? err.message : String(err);
   // A chain deeper than the walk fails in the SAFE direction — nothing is re-emitted — but the
   // operator silently loses the statement and has no way to tell that from an error that never
@@ -356,13 +400,31 @@ export function operatorSafeDbErrorMessage(err: unknown): string {
  */
 export function operatorSafeDbErrorStack(err: unknown): string | undefined {
   if (!(err instanceof Error) || typeof err.stack !== 'string') return undefined;
-  // Both database shapes get the replaced header: the ORM wrapper, whose stack begins with the
-  // statement and its values, AND a bare driver error, whose stack begins with the server's own
-  // sentence — the one that echoes the offending value on a coercion refusal.
-  if (wrappedStatement(err) === undefined && driverErrorNode(err) === undefined) return err.stack;
+  // Both statement-carrying shapes get the replaced header: the ORM wrapper, whose stack begins with
+  // the statement and its values, AND a bare driver error from the raw-SQL door, whose stack begins
+  // with the server's own sentence — the one that echoes the offending value on a coercion refusal.
+  // A failure with no statement keeps its header, for the reason given in the message renderer.
+  if (wrappedStatement(err) === undefined) return err.stack;
   // Frames start at the first `    at …` line; everything above it is the message header.
   const frames = err.stack.split('\n').filter((line) => /^\s+at\s/.test(line));
   return [operatorSafeDbErrorMessage(err), ...frames].join('\n');
+}
+
+/**
+ * TRUE when this error came from the database, through either door.
+ *
+ * For callers that must decide WHETHER to say anything rather than HOW to phrase it. The renderers
+ * above answer "what is the safe wording"; a sink that speaks to an API CLIENT rather than to an
+ * operator needs the prior question, because for it the safe wording is no wording at all — a
+ * statement is schema, and schema is not a caller's business even when the values are withheld.
+ *
+ * Recognised by the same two structural marks the renderers use, so a caller's disposition cannot
+ * drift from theirs: a node carrying a statement beside its values, or a node carrying a SQLSTATE.
+ */
+export function isDatabaseError(err: unknown): boolean {
+  return (
+    wrappedStatement(err) !== undefined || sqlstateNode(err as { cause?: unknown }) !== undefined
+  );
 }
 
 /** Walk the bounded, cycle-safe `.cause` chain for the first object whose `.code` === `sqlstate`. */
