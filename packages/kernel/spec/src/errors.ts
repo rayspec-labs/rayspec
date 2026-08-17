@@ -89,6 +89,16 @@ import { z } from 'zod';
  *                               the platform's own table, and the boot registrar refuses to admit it
  *                               fail-closed (`@rayspec/db` composition, check 5), so the deployment
  *                               would never come up. Rename the store.
+ *  - `reserved_route_path`     — a declared `api[]` route claims a path the PLATFORM registers on the
+ *                               same app: the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`),
+ *                               either readiness probe (`/health/`, `/recovery-scope/`), or a path
+ *                               under a declared non-root static frontend mount. The platform
+ *                               registers all of those AFTER the declared routes and a router runs
+ *                               matching handlers in registration order, so the declared route would
+ *                               win the match and the platform path would answer nothing for the life
+ *                               of the process. A mount at the ROOT reserves nothing (it is a
+ *                               catch-all that coexists with the API by fall-through). Choose a path
+ *                               outside those prefixes.
  *  - `frontend_route_collision` — a declared static frontend mount's `route` collides with another
  *                               mount, with a declared `api[].path`, or with a reserved system prefix
  *                               (`/v1`, `/health`, `/oidc`) — the static mount would either shadow or be
@@ -194,6 +204,7 @@ export const SpecErrorCode = z.enum([
   'reserved_column_name',
   'reserved_query_keyword',
   'reserved_store_name',
+  'reserved_route_path',
   'frontend_route_collision',
   'frontend_dir_missing',
   'fk_cycle',

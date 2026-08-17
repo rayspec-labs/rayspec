@@ -440,6 +440,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A declared route that claims a platform path is reported by `doctor`, `plan` and
+  `deploy --dry-run`, and a deploy that trips it is refused before any product DDL is committed.** An
+  `api[]` route may not claim the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`), either
+  readiness probe (`/health/`, `/recovery-scope/`) or a path under a declared non-root static frontend
+  mount: the platform registers all of those on the same app **after** the declared routes, and a
+  router runs matching handlers in registration order, so the declared route wins the match and the
+  platform path answers nothing for the life of the process. The boot always refused such a document.
+  The read-only floor did not — it reported it as fine, which is the opposite of what a floor is for,
+  since the rule is entirely static: it resolves nothing, opens no socket and reads no schema. It is
+  now a document finding under the new closed code **`reserved_route_path`**, reported at
+  `api[<i>].path` in the boot's own sentence (both come from one shared source, so the floor and the
+  boot cannot describe one document two ways). A mount at the **root** still reserves nothing — it is
+  a catch-all that coexists with the API by fall-through — and a merely similar path (`/healthy`
+  beside `/health`) is untouched.
+  **The second half is where the deploy stops.** Because the rule is now answered at the pipeline's
+  validate step, a boot that trips it is refused **before** the migrate step rather than while the app
+  was being assembled — which is after each migration has been committed in its own transaction. Such
+  a refusal used to leave the document's product tables standing, from a roll-out that never served a
+  request, and the operator's next move (edit the stores, redeploy) then met a second, confusing
+  drift refusal. It now leaves the schema exactly as it found it. **What an operator sees changes for
+  a document that is wrong in more than one way:** the refusal is now the reserved path — the fault
+  that needs no database to diagnose and that the floor could have shown before deploying — where a
+  later roll-out fault (a handler module that is not on disk) used to be reported first, on an already
+  migrated schema. The remaining fault is reported by the same commands the moment the path is fixed.
+  Consumers branching on the closed error vocabulary should note the new member in both catalogues
+  (`@rayspec/spec`, `@rayspec/pack-sdk`). The boot's registrar keeps its fail-closed guard for a spec
+  assembled in code (the composed Product-YAML runtime), where nothing parses the document.
+
 - **An extension pack whose entry module is present and does not load is now reported as refused,
   under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module
   is resolved `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the

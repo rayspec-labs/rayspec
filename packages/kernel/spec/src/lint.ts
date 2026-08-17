@@ -56,6 +56,7 @@ import {
 import {
   type ApiRouteSpec,
   type ColumnType,
+  type FrontendSpec,
   MAX_IDENTIFIER_LENGTH,
   type RaySpec,
   type ResponseProjection,
@@ -196,6 +197,79 @@ export const FTS_SEARCH_PARAM = '__search';
  * legitimate static catch-all that coexists with `/v1/*` via registration order + fall-through.
  */
 export const RESERVED_ROUTE_PREFIXES = ['/v1', '/health', '/oidc'] as const;
+
+/**
+ * Path prefixes a declared `api[]` route may never claim — the platform surface a running deployment
+ * registers on the SAME app, written in the form the boot's registrar reserves it (the bare prefix, the
+ * prefix itself, and anything nested under it). `/v1/` is the auth/run surface and `/oidc/` the mounted
+ * OIDC provider (both registered by @rayspec/api-auth); `/health/` and `/recovery-scope/` are the
+ * readiness probes the composition root registers.
+ *
+ * Why claiming one is fatal rather than merely odd: the platform registers all four AFTER the declared
+ * routes, and a router runs matching handlers in registration order — so a declared route on one of
+ * them WINS the match and the platform path answers nothing for the life of the process.
+ *
+ * A KEEP-IN-SYNC mirror of what those two packages register (this package can import neither). The
+ * probe half is pinned against the composition root's own `platformPublicRoutePrefixes` by a parity
+ * test in @rayspec/server, so a renamed or added probe turns that test red rather than leaving this
+ * rule quietly blind to it.
+ *
+ * A DIFFERENT QUESTION FROM `RESERVED_ROUTE_PREFIXES` above, which answers what a static frontend MOUNT
+ * may claim (and what the static runtime declines). The two sets overlap without being the same one: a
+ * declared route is additionally refused under `/recovery-scope/` and under a mount's own prefix.
+ */
+export const RESERVED_API_PATH_PREFIXES = [
+  '/v1/',
+  '/oidc/',
+  '/health/',
+  '/recovery-scope/',
+] as const;
+
+/**
+ * The reserved prefixes for ONE document: the platform's own, plus each declared static frontend mount
+ * that is not the ROOT (normalized to the trailing-slash form the predicate below matches on). A
+ * non-root mount is served on the same app, so a declared route nested under it would shadow the mount.
+ *
+ * Root `/` is EXEMPT, for the reason the frontend rule exempts it: it is a legitimate catch-all that
+ * coexists with the whole API by registration order and a static miss falling through, so reserving it
+ * would reserve every path there is.
+ */
+export function reservedApiPathPrefixes(frontend: readonly FrontendSpec[] = []): readonly string[] {
+  const prefixes: string[] = [...RESERVED_API_PATH_PREFIXES];
+  for (const mount of frontend) {
+    if (mount.route === '/') continue;
+    prefixes.push(mount.route.endsWith('/') ? mount.route : `${mount.route}/`);
+  }
+  return prefixes;
+}
+
+/**
+ * Is `path` claimed by one of `prefixes`? Each prefix is matched the same three ways — the prefix
+ * itself, the bare prefix without its trailing slash, and anything nested under it — so `/health/`
+ * covers `/health` and `/health/deep` while leaving `/healthy` alone. `prefixes` are the trailing-slash
+ * form `reservedApiPathPrefixes` produces.
+ */
+export function isReservedApiPath(path: string, prefixes: readonly string[]): boolean {
+  return prefixes.some((p) => path === p || path === p.slice(0, -1) || path.startsWith(p));
+}
+
+/**
+ * The refusal a claimed platform path earns, as ONE sentence with ONE source. The boot's registrar
+ * (@rayspec/api-auth `registerDeclaredRoutes`) raises it prefixed with its own name and the rule below
+ * reports it as a document finding, so an author reading `doctor` and an operator reading a refused
+ * boot are told the same thing in the same words — a property of the wiring rather than a claim.
+ */
+export function reservedRoutePathRefusal(
+  method: string,
+  path: string,
+  prefixes: readonly string[],
+): string {
+  return (
+    `route ${method} ${path} is under a RESERVED platform prefix (${prefixes.join(', ')}) — a ` +
+    'declared route may not shadow the auth/run or OIDC surface, the readiness probes, or a declared ' +
+    'static frontend mount. Choose a path outside these prefixes.'
+  );
+}
 
 /**
  * Find duplicate keys in a list, reporting each duplicate occurrence (by index) as a SpecError.
@@ -1407,6 +1481,35 @@ export function lintSpec(spec: RaySpec): SpecError[] {
         ),
       );
     }
+  });
+
+  // ---- api[] routes that claim a PLATFORM path (fail-closed) -----------------------------------
+  // The mirror image of arm (c) above, asked of the ROUTES rather than the mounts: a declared route may
+  // not claim the auth/run or OIDC surface, either readiness probe, or a path under a declared non-root
+  // static mount — it is registered on the SAME app, ahead of all of them, so it would win the match and
+  // leave the platform path answering nothing.
+  //
+  // The boot's registrar (@rayspec/api-auth `registerDeclaredRoutes`) already refuses exactly this and
+  // keeps doing so: it is the fail-closed guard for a spec assembled in CODE, which never passes through
+  // here. What this rule adds is WHEN the author is told. The rule is STATIC — it resolves nothing, opens
+  // no socket and reads no schema — so `doctor`, `plan` and `deploy --dry-run` can answer it, and the
+  // deploy pipeline refuses at its VALIDATE step rather than while assembling the app, which is after
+  // the migrate step has committed the document's product DDL. Both refusals use the SAME sentence
+  // (`reservedRoutePathRefusal`), so the floor and the boot cannot describe one document two ways.
+  //
+  // A route that EXACTLY equals a mount route is reported here AND by arm (b) above — one collision
+  // named from each side, at each offending node. That is the aggregating parser's contract, and an
+  // author fixing either node fixes both findings.
+  const reservedRoutePrefixes = reservedApiPathPrefixes(spec.frontend ?? []);
+  spec.api.forEach((route, ri) => {
+    if (!isReservedApiPath(route.path, reservedRoutePrefixes)) return;
+    errors.push(
+      specError(
+        'reserved_route_path',
+        reservedRoutePathRefusal(route.method, route.path, reservedRoutePrefixes),
+        `api[${ri}].path`,
+      ),
+    );
   });
 
   // ---- extensions[] DUPLICATE ids (cross-ref/merge resolution lands in `loadExtensions`) ----------------

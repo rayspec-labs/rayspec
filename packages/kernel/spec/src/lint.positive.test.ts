@@ -8,7 +8,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { RaySpec } from './grammar.js';
-import { lintSpec, MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS } from './lint.js';
+import {
+  lintSpec,
+  MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS,
+  RESERVED_API_PATH_PREFIXES,
+  reservedRoutePathRefusal,
+} from './lint.js';
 import { parseSpec } from './parse.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -379,6 +384,66 @@ frontend:
     if (!notNested.ok)
       throw new Error(`expected ok:\n${JSON.stringify(notNested.errors, null, 2)}`);
     expect(notNested.value.frontend).toHaveLength(1);
+  });
+
+  // The MIRROR IMAGE of the four arms above, asked of the ROUTES: a declared `api[]` path may not claim
+  // the platform surface either. The boot refuses exactly this; these pin that the DOCUMENT is refused
+  // for it, at the offending route, in the boot's own sentence — so an author is told by `doctor` and a
+  // deploy is refused before its migrate step rather than while the app is being assembled.
+  const routeDoc = (path: string, frontend = ''): string => `
+version: '1.0'
+metadata:
+  name: route-reserved
+stores:
+  - name: notes
+    columns:
+      - { name: title, type: text }
+api:
+  - { method: GET, path: '${path}', action: { kind: store, store: notes, op: list } }
+${frontend}`;
+
+  it('rejects a declared route on/under a reserved platform prefix (reserved_route_path)', () => {
+    for (const claimed of [
+      '/v1',
+      '/v1/agents/abc/runs',
+      '/oidc/token',
+      '/health',
+      '/recovery-scope/deep',
+    ]) {
+      const res = parseSpec(routeDoc(claimed));
+      expect(res.ok).toBe(false);
+      if (res.ok) continue;
+      const found = res.errors.find((e) => e.code === 'reserved_route_path');
+      expect(found).toBeDefined();
+      expect(found?.path).toBe('api[0].path');
+      // The boot's wording, byte-shared through `reservedRoutePathRefusal`.
+      expect(found?.message).toBe(
+        reservedRoutePathRefusal('GET', claimed, RESERVED_API_PATH_PREFIXES),
+      );
+    }
+  });
+
+  it('rejects a declared route nested under a declared NON-ROOT frontend mount', () => {
+    const res = parseSpec(
+      routeDoc('/app/notes', 'frontend:\n  - { route: /app, dir: web/dist }\n'),
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const found = res.errors.find((e) => e.code === 'reserved_route_path');
+    expect(found).toBeDefined();
+    expect(found?.message).toContain('/app/');
+  });
+
+  it('a mount at the ROOT reserves nothing — the same route is accepted beside it', () => {
+    const res = parseSpec(routeDoc('/app/notes', 'frontend:\n  - { route: /, dir: web/dist }\n'));
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.api).toHaveLength(1);
+  });
+
+  it('no false positive: a merely similar path (`/healthy`) is not under `/health/`', () => {
+    const res = parseSpec(routeDoc('/healthy'));
+    if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
+    expect(res.value.api).toHaveLength(1);
   });
 
   it('accepts an agent action (api + trigger) whose persistTo maps to a compatible store', () => {

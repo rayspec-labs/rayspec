@@ -54,7 +54,14 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import type { Permission } from '@rayspec/auth-core';
 import type { StoreConflictKeys } from '@rayspec/db';
 import type { BlobStoreFactory, ResolvedHandler } from '@rayspec/platform';
-import { type HttpMethod, type RaySpec, rewriteBraceParams, type StoreOp } from '@rayspec/spec';
+import {
+  type HttpMethod,
+  isReservedApiPath,
+  type RaySpec,
+  reservedRoutePathRefusal,
+  rewriteBraceParams,
+  type StoreOp,
+} from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context, MiddlewareHandler } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
@@ -149,35 +156,19 @@ function registerOn2(
  * Reserved platform path prefixes a declared route must NEVER shadow — the ones THIS package owns and
  * registers itself. `/v1/*` is the auth + run surface (auth/orgs/oauth/runs); `/oidc/*` is the mounted
  * OIDC provider. A declared `api[]` path under either would silently override (or be overridden by) a
- * platform route on the SAME app — a boot-time fail-closed error (this is an api-auth deploy-wiring
- * guard, NOT a @rayspec/spec rule: the spec package is platform-agnostic and knows nothing of these).
+ * platform route on the SAME app — a boot-time fail-closed error.
  *
  * It is NOT the whole reserved set of a running deployment, and it deliberately does not try to be:
  * the readiness probes and the static frontend mounts are registered by the COMPOSITION ROOT, on the
  * same app, and this package does not own those paths and must not name them. The root injects them
- * through `DeclaredRoutesConfig.reservedPathPrefixes` — see `reservedPathTest` below.
+ * through `DeclaredRoutesConfig.reservedPathPrefixes`.
+ *
+ * The same set is carried, in the document's own terms, by @rayspec/spec's `RESERVED_API_PATH_PREFIXES`
+ * — the STATIC rule the read-only floor and the deploy pipeline's VALIDATE step answer from. This
+ * constant stays the deploy-wiring half: it is what a spec assembled in CODE is held to, and what
+ * names the paths only this registration pass can know (the injected ones).
  */
 const RESERVED_PATH_PREFIXES = ['/v1/', '/oidc/'] as const;
-
-/**
- * Build the reserved-path predicate for one registration pass: the prefixes this package owns, plus
- * whatever the composition root injected for the surface IT registers. Every prefix is matched the
- * same way — the bare prefix, the prefix itself, and anything nested under it — so `/health/` covers
- * `/health` and `/health/deep` while leaving `/healthy` alone.
- *
- * WHY THE INJECTED HALF EXISTS AT ALL. The platform registers its public probes AFTER the declared
- * routes, and Hono runs matching handlers in registration order: a declared route claiming `/health`
- * therefore WINS, and the probe a deploy tool waits on is dead for the life of the process. Nothing
- * caught that — the reserved set was `/v1/` and `/oidc/` only, and the lint rule that does know about
- * `/health` guards the FRONTEND mounts, not `api[]`.
- */
-function reservedPathTest(extra: readonly string[]): (path: string) => boolean {
-  const prefixes = [...RESERVED_PATH_PREFIXES, ...extra];
-  return (path: string) =>
-    prefixes.some(
-      (prefix) => path === prefix || path === prefix.slice(0, -1) || path.startsWith(prefix),
-    );
-}
 
 /** Build the deps for the declared-route engine — a spec + the resolved product-table registry. */
 export interface DeclaredRoutesConfig {
@@ -255,8 +246,15 @@ export function registerDeclaredRoutes(
   const { spec, productTables, handlers, blobFactory, mediaTokenService } = config;
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
   // The reserved set for THIS pass: the two prefixes this package owns ⊕ the platform paths the
-  // composition root registers on the same app and injects here.
-  const isReservedPath = reservedPathTest(config.reservedPathPrefixes ?? []);
+  // composition root registers on the same app and injects here. Every prefix is matched the same way
+  // — the bare prefix, the prefix itself, and anything nested under it (`isReservedApiPath`) — so
+  // `/health/` covers `/health` and `/health/deep` while leaving `/healthy` alone.
+  //
+  // WHY THE INJECTED HALF EXISTS AT ALL. The platform registers its public probes AFTER the declared
+  // routes, and Hono runs matching handlers in registration order: a declared route claiming `/health`
+  // therefore WINS, and the probe a deploy tool waits on is dead for the life of the process. api-auth
+  // does not own those paths, so the root that registers them is what names them.
+  const reservedPrefixes = [...RESERVED_PATH_PREFIXES, ...(config.reservedPathPrefixes ?? [])];
   // The shared front of the chain — IDENTICAL to every auth/run route (server-derived tenant +
   // live-membership recheck), only the trailing requirePermission(perm) differs per route.
   // The throttle leads it, BEFORE requireAuth: the global `authenticate` has already run, so the tier
@@ -287,13 +285,19 @@ export function registerDeclaredRoutes(
     // Fail-closed at BOOT: a declared route must never shadow a reserved platform prefix (/v1/*,
     // /oidc/*) — it is registered on the SAME app, so a collision would silently override a platform
     // route (or be shadowed by one). Abort the boot with a clear message rather than ship the clash.
-    if (isReservedPath(route.path)) {
+    //
+    // A spec that came through `parseSpec` was already refused for this at its VALIDATE step, in this
+    // very sentence (@rayspec/spec `reservedRoutePathRefusal`, which the lint rule and this refusal
+    // share), and refused there BEFORE any migration was applied. This guard therefore stands for the
+    // spec assembled in CODE — the composed Product-YAML runtime hands its `api[]` straight to the
+    // engine — where it is the only thing between a hand-built route and a dead platform path.
+    if (isReservedApiPath(route.path, reservedPrefixes)) {
       throw new Error(
-        `registerDeclaredRoutes: route ${route.method} ${route.path} is under a RESERVED platform ` +
-          `prefix (${[...RESERVED_PATH_PREFIXES, ...(config.reservedPathPrefixes ?? [])].join(
-            ', ',
-          )}) — a declared route may not shadow the auth/run or OIDC surface, the readiness probes, ` +
-          'or a declared static frontend mount. Choose a path outside these prefixes.',
+        `registerDeclaredRoutes: ${reservedRoutePathRefusal(
+          route.method,
+          route.path,
+          reservedPrefixes,
+        )}`,
       );
     }
     const honoPath = toHonoPath(route.path);

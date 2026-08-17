@@ -48,6 +48,8 @@ export type PackErrorCode =
   | 'reserved_query_keyword'
   /** A store is named after a platform table — its `CREATE TABLE` would collide with the platform's. */
   | 'reserved_store_name'
+  /** A declared route claims a path the platform registers itself — it would shadow that surface. */
+  | 'reserved_route_path'
   /** A static frontend mount's route collides with another mount, a declared route, or a system prefix. */
   | 'frontend_route_collision'
   /** A declared frontend directory does not resolve to a readable directory of built assets. */

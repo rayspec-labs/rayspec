@@ -994,6 +994,12 @@ action: { kind: agent, agent: <agent id>, persistTo: <store name> }
 (The grammar also has `kind: handler` and `kind: stream` — BOTH OUT OF SCOPE; do not use them. A
 `{handler}` route is a later iteration; a `stream` route needs blob wiring neither iteration produces.)
 
+- **`path` may not claim a platform path** — `/v1/*` (auth/run), `/oidc/*`, `/health*`,
+  `/recovery-scope*`, or anything under a declared non-root `frontend[]` mount. The platform registers
+  those on the same app AFTER the declared routes, so a route claiming one would win the match and the
+  platform path would answer nothing. `doctor`/`plan`/`deploy --dry-run` report it as
+  `reserved_route_path` and a deploy is refused before it touches the database. A mount at the root
+  reserves nothing.
 - **Optional `persistTo` on an agent action** — `persistTo: <store>` writes the run's validated
   `outputSchema` output as ONE row into `<store>`, exactly once, atomically with the run's completion
   (on both the sync in-request and durable / off-request paths). Safety is a **deploy**-time check, not
