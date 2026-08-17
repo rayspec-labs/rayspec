@@ -1403,6 +1403,39 @@ interface DeltaNames {
   readonly created: ReadonlySet<string>;
   readonly absentAtBothEnds: ReadonlySet<string>;
   /**
+   * The names the delta is KNOWN to find absent — its first touch of the name is a creation with no
+   * `IF NOT EXISTS` guard, and no earlier statement took the name away. Such a statement could not
+   * have run against an existing object (42P07 / 42701), so the schema did not hold the name when the
+   * delta began.
+   *
+   * `absentAtBothEnds` is this set MINUS the names the delta leaves standing; this one keeps them,
+   * and that difference is the point. A name that is absent before the delta and STANDING after it is
+   * the ordinary discriminating case — its presence says the delta got past the statement that makes
+   * it, its absence says the delta did not. `leftStanding` alone cannot say that, because it also
+   * holds names the delta merely puts BACK (`DROP INDEX "ix"` + `CREATE INDEX "ix"`), which stand
+   * there whether or not the delta ran. Where a reader wants BOTH directions from one name it needs
+   * the intersection of the two; `leftStanding` on its own still answers the one direction it always
+   * did (a name it holds, found MISSING, is not fully applied — which is why the rename branch above
+   * may use it alone to decline a claim).
+   */
+  readonly absentBefore: ReadonlySet<string>;
+  /**
+   * Tables some statement of the delta carries off — renamed away or dropped — whether or not a later
+   * statement gives the name back.
+   *
+   * `leftStanding` is built from {@link standingChanges}, which records a table rename as the old name
+   * taken away and the new one left standing and says NOTHING about that table's columns: after
+   * `ALTER TABLE "t" RENAME COLUMN "a" TO "b"` + `ALTER TABLE "t" RENAME TO "u"`, `column:t.b` is
+   * still "standing" under a name no end state holds, because the live column is `u.b`. The docblock
+   * on `leftStanding` names that over-collection and calls it safe, and it IS safe for a reader that
+   * only withholds evidence — a reader that reads a member key as evidence in its own right must
+   * subtract this set first, exactly as {@link extractAdditiveObjects} subtracts its `removedTables`.
+   *
+   * Measured without it: the FULLY APPLIED state of that two-statement delta was refused as HALF
+   * LANDED, permanently, over a `column "t"."b"` that exists — as `u.b`.
+   */
+  readonly tablesTakenAway: ReadonlySet<string>;
+  /**
    * TABLE names whose created columns cannot be enumerated from the SQL — `CREATE TABLE … AS SELECT`,
    * `PARTITION OF`, `OF <type>`. Every column of such a table counts as one the delta creates, which
    * is the same withholding `created` performs and for the same reason: a name the delta itself makes
@@ -1421,10 +1454,34 @@ function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNam
   // Names some statement leaves standing IDEMPOTENTLY, which may therefore have been standing before
   // the delta. Once a name is in here it stays: over-excluding withholds evidence, the safe direction.
   const mayPredate = new Set<string>();
+  const tablesTakenAway = new Set<string>();
   for (const migration of migrations) {
     for (const { text } of splitMigrationStatements(migration.sql)) {
       for (const change of standingChanges(text)) {
         const key = objectKey(change.object);
+        // A NAME THE DELTA TAKES AWAY BEFORE IT MAKES IT WAS STANDING BEFORE THE DELTA.
+        //
+        // `absentAtBothEnds` reads a name's PRESENCE as proof the delta ran, and that rests on the
+        // name being absent before it. The code inferred "absent before" from some statement creating
+        // it unguarded — which only proves it was absent when THAT statement ran. If an earlier
+        // statement took the name away, the schema held it at the start, and finding it there says
+        // nothing at all. `mayPredate` is exactly the set for names whose presence proves nothing, so
+        // this is the same withholding the `IF NOT EXISTS` rule performs, for the same reason.
+        //
+        // Measured, on a delta that had run NOTHING: `RENAME "a" TO "b"` + `CREATE TABLE "a"` +
+        // `RENAME "a" TO "c"` against a live `{a}` — the only state reachable before the delta — was
+        // refused as HALF LANDED, permanently, with an operator message asserting something false
+        // about the schema. Two more shapes did the same, one of them an INDEX redefinition, the
+        // class the operator copy names first as the likeliest real instance.
+        if (!standing.has(key) && !change.standing) mayPredate.add(key);
+        // A TABLE THIS DELTA CARRIES OFF TAKES ITS MEMBERS' KEYS WITH IT — and this reader does not.
+        // `standingChanges` records a table rename as `t` taken away and `u` left standing, and says
+        // nothing about `t`'s columns, so `column:t.b` keeps standing under a name no end state holds.
+        // That over-collection is harmless while `leftStanding` only WITHHOLDS evidence; it is not
+        // harmless where a member key is read as evidence in its own right, so the readers that do
+        // that subtract this set first.
+        if (change.object.kind === 'table' && !change.standing)
+          tablesTakenAway.add(change.object.table);
         standing.set(key, change.standing);
         if (change.standing) {
           created.add(key);
@@ -1438,11 +1495,45 @@ function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNam
   }
   const leftStanding = new Set<string>();
   for (const [key, present] of standing) if (present) leftStanding.add(key);
+  const absentBefore = new Set<string>();
+  for (const key of created) if (!mayPredate.has(key)) absentBefore.add(key);
   const absentAtBothEnds = new Set<string>();
-  for (const key of created) {
-    if (!leftStanding.has(key) && !mayPredate.has(key)) absentAtBothEnds.add(key);
+  for (const key of absentBefore) if (!leftStanding.has(key)) absentAtBothEnds.add(key);
+  return {
+    leftStanding,
+    created,
+    absentBefore,
+    absentAtBothEnds,
+    createdWithUnknownColumns,
+    tablesTakenAway,
+  };
+}
+
+/**
+ * Does this name settle the delta in BOTH directions — present ⇒ the statement that makes it ran,
+ * absent ⇒ it did not? Three conditions, and each one is a measured defect if dropped:
+ *
+ *   · the delta leaves it STANDING, so a full apply puts it in the live schema. Without this, a name
+ *     the delta takes away again (a rebuild's aside) reads as un-landed on a delta that fully applied,
+ *     and re-running that rebuild renames the live table aside and drops it.
+ *   · it is ABSENT BEFORE the delta, so its presence cannot predate. Without this, a name the delta
+ *     merely puts back (an index redefinition, `DROP INDEX "ix"` + `CREATE INDEX "ix"`) reads as
+ *     landed on a delta that has run nothing.
+ *   · and, for a COLUMN or CONSTRAINT, the delta does not carry its table off. Without this,
+ *     `column:t.b` survives `ALTER TABLE "t" RENAME TO "u"` in {@link DeltaNames.leftStanding} under a
+ *     name no end state holds, and the FULLY APPLIED delta is refused as half landed, permanently,
+ *     over a column that exists under the new table name.
+ *
+ * A table or an index answers for itself; a column and a constraint are named THROUGH a table, and a
+ * key is only as good as the name it hangs off.
+ */
+function discriminates(names: DeltaNames, object: SchemaObjectProbe): boolean {
+  if (!names.leftStanding.has(objectKey(object))) return false;
+  if (!names.absentBefore.has(objectKey(object))) return false;
+  if (object.kind === 'column' || object.kind === 'constraint') {
+    return !names.tablesTakenAway.has(object.table);
   }
-  return { leftStanding, created, absentAtBothEnds, createdWithUnknownColumns };
+  return true;
 }
 
 /**
@@ -1494,6 +1585,15 @@ export type PresentMatchingRoute =
  *                STILL there; the name a RENAME renames AWAY and the schema STILL has (or the name it
  *                renames TO and the schema does NOT have, where the delta LEAVES that name standing and
  *                it is therefore the discriminating one).
+ * The name a RENAME renames TO is asked in BOTH of the two branches below, but for different reasons and
+ * under different conditions, and the difference is worth stating once here. Where the OLD name is left
+ * standing by the delta, that name settles nothing and the new one is asked instead — presence LANDS,
+ * absence is un-landed only if the delta leaves the new name standing. Where the old name is NOT left
+ * standing it is usually the discriminating one, EXCEPT where the same delta gives it back; the new name
+ * is then asked as well, and only where it settles the question in both directions at once
+ * ({@link discriminates}). That is the narrower test of the two, and it has to be: this branch reads a
+ * name's ABSENCE as un-landed evidence, which manufactures a half-landed refusal for a delta that has
+ * fully applied if the name was never going to be there under that spelling.
  * A statement whose state the schema genuinely cannot settle contributes to NEITHER, rather than to the
  * pile that reads best: an `IF EXISTS` DROP whose target is missing (it may never have existed), a
  * RENAME whose old name is already gone (it may never have existed either), a column-shape statement
@@ -1631,13 +1731,41 @@ export async function routePresentMatchingUpdate(
               noNewName.push(describeSchemaObject(newName));
             }
           }
-        } else if (renamedAway !== undefined && (await probeObject(renamedAway))) {
-          notRenamed.push(describeSchemaObject(renamedAway));
-          // …and where the SAME delta MAKES the name this rename takes away — a rename CHAIN, whose
-          // middle name only ever exists between the two statements — its standing there also says the
-          // rename BEFORE this one ran. Half landed: re-applying raises 42P01 on that earlier rename,
-          // whose source is long gone, and the boot dies where it should have refused.
-          madeAndTaken(renamedAway);
+        } else {
+          if (renamedAway !== undefined && (await probeObject(renamedAway))) {
+            notRenamed.push(describeSchemaObject(renamedAway));
+            // …and where the SAME delta MAKES the name this rename takes away — a rename CHAIN, whose
+            // middle name only ever exists between the two statements — its standing there also says
+            // the rename BEFORE this one ran. Half landed: re-applying raises 42P01 on that earlier
+            // rename, whose source is long gone, and the boot dies where it should have refused.
+            madeAndTaken(renamedAway);
+          }
+          // THE OLD NAME IS NOT ALWAYS THE ONE THAT DISCRIMINATES, AND WHERE IT IS NOT, THE NEW ONE IS.
+          //
+          // The old name answers this rename only where its presence means the rename has not run.
+          // That fails whenever the SAME delta gives the old name back — `RENAME "a" TO "b"` +
+          // `CREATE TABLE "a"` + `RENAME "a" TO "c"`, a recycled name, which the branch above does not
+          // catch because such an `a` is NOT left standing at the end. Then `a` stands in the live
+          // schema after statement 2 as much as before statement 1, and no reading of `a` separates
+          // them.
+          //
+          // `b` does separate them, and it is never probed today: it is absent before the delta (an
+          // unguarded rename cannot land on an existing name) and standing after it. That is exactly
+          // `absentBefore` ∩ `leftStanding`, and BOTH halves are load-bearing — `leftStanding` alone
+          // reads a name the delta puts back (an index redefinition) as evidence it cannot be, and
+          // `absentBefore` alone reads a name the delta takes away again (the rebuild's aside) as
+          // un-landed when the delta has fully applied.
+          //
+          // Measured on the recycled-name chain above, over every live schema it can reach: without
+          // this, the state after statement 1 (`{b}` alone) MOUNTED — a delta two statements short
+          // called applied, and both of them lost — and the state after statement 2 (`{a,b}`) routed
+          // to APPLY, which re-runs a rename onto a name that is already there (42P07) and leaves the
+          // boot dead rather than refused.
+          const newName = renamedToObject(finding.text);
+          if (newName !== undefined && discriminates(deltaNames, newName)) {
+            if (await probeObject(newName)) recordLanded(renamed, newName);
+            else noNewName.push(describeSchemaObject(newName));
+          }
         }
       } else if (CLASSIFY_MEASURED_COLUMN_KINDS.has(finding.kind)) {
         // A column-shape change names no object whose existence settles it — but if the classify
