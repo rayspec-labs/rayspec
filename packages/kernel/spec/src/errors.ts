@@ -89,10 +89,15 @@ import { z } from 'zod';
  *                               the platform's own table, and the boot registrar refuses to admit it
  *                               fail-closed (`@rayspec/db` composition, check 5), so the deployment
  *                               would never come up. Rename the store.
- *  - `reserved_route_path`     — a declared `api[]` route can MATCH a path the PLATFORM registers on
- *                               the same app: the auth/run surface (`/v1/`), the OIDC mount
- *                               (`/oidc/`), either readiness probe (`/health/`, `/recovery-scope/`),
- *                               or a path under a declared non-root static frontend mount. The
+ *  - `reserved_route_path`     — a declared `api[]` route can MATCH a path this deployment RESERVES —
+ *                               the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`), either
+ *                               readiness probe (`/health/`, `/recovery-scope/`), a declared non-root
+ *                               static frontend mount, or ANY path nested under one of those, whether
+ *                               or not something answers there today. That is the STRICT reading, and
+ *                               it is argued where it is implemented (`canMatchReserved`): the
+ *                               deployment owns those prefixes precisely so it can register more under
+ *                               them, and a route accepted today would otherwise begin shadowing the
+ *                               day it does, with nothing re-checking it. The
  *                               platform registers all of those AFTER the declared routes and a
  *                               router runs matching handlers in registration order, so the declared
  *                               route would win the match and the platform path would answer nothing

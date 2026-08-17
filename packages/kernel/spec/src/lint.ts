@@ -350,6 +350,24 @@ export function isReservedApiPath(path: string, reserved: ReservedApiPaths): boo
 }
 
 /**
+ * Does the pattern reach a reserved prefix through a PARAMETER or WILDCARD rather than through literal
+ * segments? Asked only to choose the refusal's words: a pattern whose first segment is a placeholder is
+ * not UNDER a reserved path, it can MATCH one, and those two facts need different remedies. A literal
+ * first segment can never reach a prefix it does not spell, so it is the placeholder at or before the
+ * prefix's length that does the reaching.
+ */
+export function reachesReservedByPlaceholder(path: string, reserved: ReservedApiPaths): boolean {
+  const pattern = routeSegments(path);
+  const longest = Math.max(
+    0,
+    ...[...reserved.platform, ...reserved.frontendMounts].map((p) => reservedSegments(p).length),
+  );
+  return pattern
+    .slice(0, longest)
+    .some((segment) => segment.kind === 'param' || segment.kind === 'wildcard');
+}
+
+/**
  * The refusal a claimed platform path earns, as ONE sentence with ONE source. The boot's registrar
  * (@rayspec/api-auth `registerDeclaredRoutes`) raises it prefixed with its own name and the rule below
  * reports it as a document finding, so an author reading `doctor` and an operator reading a refused
@@ -364,19 +382,40 @@ export function reservedRoutePathRefusal(
   method: string,
   path: string,
   reserved: ReservedApiPaths,
+  /**
+   * Whether the pattern reaches a reserved prefix through a PARAMETER or WILDCARD rather than through
+   * literal segments. The two cases need different words and a different remedy, and saying "is under
+   * a path this deployment reserves" of the first is simply false: `/{tenant}/notes` is under none of
+   * them — it can MATCH one, because the router fills `{tenant}` with whatever the request supplies,
+   * including `v1`. Telling that author to "choose a path outside them" names no path they can choose
+   * while keeping a leading parameter, so the refusal would be true-sounding and unactionable.
+   */
+  viaPlaceholder = false,
 ): string {
   const mounts =
     reserved.frontendMounts.length > 0
       ? `; declared frontend mounts: ${reserved.frontendMounts.join(', ')}`
       : '';
+  const reservedList = `(platform: ${reserved.platform.join(', ')}${mounts})`;
+  if (viaPlaceholder) {
+    return (
+      `route ${method} ${path} begins with a PARAMETER or WILDCARD, so the pattern the router ` +
+      `registers can match every path this deployment reserves ${reservedList} and everything ` +
+      'nested under them — the auth/run and OIDC surfaces, the readiness probes, and any declared ' +
+      'static frontend mount. Whether anything answers there today does not decide it: the ' +
+      'deployment owns those prefixes so it can register more under them, and a route that can ' +
+      'capture them would start shadowing silently. Give the route a LITERAL first segment ' +
+      '(`/notes/{id}` rather than `/{id}`).'
+    );
+  }
   const remedy =
     reserved.frontendMounts.length > 0
       ? 'Choose a path outside them, or move the mount that reserves this one.'
       : 'Choose a path outside them.';
   return (
-    `route ${method} ${path} is under a path this deployment reserves (platform: ` +
-    `${reserved.platform.join(', ')}${mounts}) — a declared route may not shadow the auth/run or ` +
-    'OIDC surface, the readiness probes, or a declared static frontend mount. ' +
+    `route ${method} ${path} is under a path this deployment reserves ${reservedList} — a declared ` +
+    'route may not shadow the auth/run or OIDC surface, the readiness probes, or a declared static ' +
+    'frontend mount. ' +
     remedy
   );
 }
@@ -1620,7 +1659,12 @@ export function lintSpec(spec: RaySpec): SpecError[] {
     errors.push(
       specError(
         'reserved_route_path',
-        reservedRoutePathRefusal(route.method, route.path, reservedRoutePrefixes),
+        reservedRoutePathRefusal(
+          route.method,
+          route.path,
+          reservedRoutePrefixes,
+          reachesReservedByPlaceholder(route.path, reservedRoutePrefixes),
+        ),
         `api[${ri}].path`,
       ),
     );
