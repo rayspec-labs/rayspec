@@ -25,6 +25,7 @@
 import { getTableName, type SQL } from 'drizzle-orm';
 import { getTableConfig, type PgTable } from 'drizzle-orm/pg-core';
 import postgres from 'postgres';
+import { operatorSafeDbErrorMessage } from '../src/pg-errors.js';
 import {
   apiKeys,
   authAudit,
@@ -420,7 +421,12 @@ async function main(): Promise<void> {
 }
 
 main().catch(async (err) => {
-  console.error('MIGRATE-CLEAN: FAIL — structural cross-check threw:', err);
+  // The rendered message, never the error object — the ORM's wrapper carries the statement and its
+  // bind values as enumerable own properties, so passing the object prints them into the CI log.
+  console.error(
+    'MIGRATE-CLEAN: FAIL — structural cross-check threw:',
+    operatorSafeDbErrorMessage(err),
+  );
   try {
     await sql.end({ timeout: 5 });
   } catch {

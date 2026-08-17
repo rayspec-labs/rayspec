@@ -125,11 +125,14 @@ export {
 } from './pack-migrations.js';
 // The ONE shared Postgres-error-shape detectors (the 23505 cause-chain walk + the constraint-name
 // reader). Request-path/capability code maps a UNIQUE violation to a typed conflict through these.
+// `operatorSafeDbErrorMessage` is the same walk serving log hygiene: a failed statement reaches an
+// operator naming WHAT failed and WHY, and never the values it bound.
 export {
   foreignKeyViolationConstraintName,
   isForeignKeyViolation,
   isLockTimeout,
   isUniqueViolation,
+  operatorSafeDbErrorMessage,
   uniqueViolationConstraintName,
 } from './pg-errors.js';
 export * as schema from './schema.js';

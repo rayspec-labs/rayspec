@@ -27,6 +27,7 @@
  * customer. The services that DID boot are shut down again, in reverse, before the failure is raised —
  * a refused boot must not leave a timer or a connection running behind it.
  */
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 import type { TurnDispatch } from '../turn-dispatch.js';
 
 /**
@@ -216,9 +217,14 @@ export async function bootPackServices(
       await service.boot(contextFor(service.packId));
     } catch (e) {
       await shutdownInReverse(booted);
+      // RENDERED OPERATOR-SAFE, not interpolated raw. A service's failure is very often a failed
+      // WRITE, and the ORM's wrapper carries the statement AND every value it bound in its message —
+      // arbitrary pack data, on its way into the one log an operator pastes into a ticket. The
+      // renderer keeps what diagnoses the failure (why it failed, which statement) and withholds the
+      // values visibly; an error that is not a database failure passes through unchanged.
       throw new PackServiceError(
         `extension '${service.packId}': service '${service.name}' (${service.module}) failed to ` +
-          `boot: ${e instanceof Error ? e.message : String(e)}. A pack service starts BEFORE the ` +
+          `boot: ${operatorSafeDbErrorMessage(e)}. A pack service starts BEFORE the ` +
           'deployment serves traffic, so a service that cannot start is a deployment that must not ' +
           'come up (fail-closed); the services that had already booted were shut down again.',
         service.packId,
@@ -244,9 +250,12 @@ async function shutdownInReverse(booted: readonly LoadedPackService[]): Promise<
     try {
       await service.shutdown();
     } catch (e) {
+      // The MESSAGE, never the error object: the ORM's wrapper carries the statement and its bind
+      // values as enumerable own properties, so handing the object to `console.error` prints them
+      // even when nothing touched `.message`. Same renderer as the boot abort above.
       console.error(
-        `[platform] extension '${service.packId}': service '${service.name}' threw on shutdown`,
-        e,
+        `[platform] extension '${service.packId}': service '${service.name}' threw on shutdown:`,
+        operatorSafeDbErrorMessage(e),
       );
     }
   }
