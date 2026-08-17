@@ -32,17 +32,19 @@
  * A service has no `tenantId` on its context in either case; a pack that attributes rows to a tenant
  * gets that value from the deployment, not from this door.
  *
- * ONE STATEMENT PER `query`, ON BOTH HALVES — the contract's own sentence, enforced rather than
- * hoped for. `unsafe` with no bound parameters runs Postgres's SIMPLE-QUERY protocol, which executes
- * EVERY command in the string, so a second command in the string is a second command RUN: a
- * `;`-separated `COMMIT` ends the pin from inside the callback (measured — both rows written around
- * it survived the callback's throw), and a `;`-separated `BEGIN` leaves a pooled connection
- * idle-in-transaction for the life of the process. Refusing the multi-command string closes both
- * without a verb list, and the boundary is decided by the literal-aware splitter `@rayspec/db`
- * already reads migration chains with, so a `;` inside a literal or a comment stays ordinary SQL.
+ * ONE STATEMENT PER `query`, ON BOTH HALVES — the contract's own sentence, enforced by the SERVER.
+ * `unsafe` with no bound parameters used to fall back to Postgres's SIMPLE-QUERY protocol, which
+ * executes EVERY command in the string, so a second command in the string was a second command RUN:
+ * a `;`-separated `COMMIT` ended the pin from inside the callback (measured — both rows written
+ * around it survived the callback's throw), and a `;`-separated `BEGIN` left a pooled connection
+ * idle-in-transaction for the life of the process. Both calls now pass `{ simple: false }`, so the
+ * statement goes over the EXTENDED protocol and Postgres itself refuses a multi-command string at
+ * parse time, before any part of it runs. The reason it is the server and not a scan of ours is
+ * written at `asPackRefusal` below, and it is the whole argument: a hand-written parser was measured
+ * wrong in both directions, and cannot be proven equivalent to the grammar the server parses.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { type Db, splitSqlStatements } from '@rayspec/db';
+import type { Db } from '@rayspec/db';
 import type { PackServiceDatabase } from '@rayspec/platform';
 
 /**
@@ -89,8 +91,11 @@ const TRANSACTION_CONTROL_PAIRS = new Set(['PREPARE TRANSACTION', 'SET TRANSACTI
  * and can always reach further if it means to. What it buys is that the ordinary mistake fails
  * CLOSED, before the statement reaches the wire, instead of costing the deployment a connection.
  *
- * IT READS THE FIRST TOKEN ONLY, which is why it is not the whole guard — see
- * `refuseMultipleStatements` below, which is what closes the `SELECT 1; COMMIT` shape.
+ * IT READS THE FIRST TOKEN ONLY, and it is still LOAD-BEARING under the extended protocol: measured,
+ * a bare `BEGIN` sent with `{ simple: false }` still reaches the wire and still leaves the connection
+ * idle in transaction, because it is one perfectly valid command. What the server refuses is a string
+ * carrying SEVERAL commands, which is a different claim — so `SELECT 1; COMMIT` is the server's case
+ * and a bare `COMMIT` is this one. Neither guard covers the other.
  */
 function refuseTransactionControl(sql: string, consequence: string): void {
   const head = sql.replace(/^(?:\s+|--[^\n]*\n?|\/\*[\s\S]*?\*\/)+/, '');
@@ -120,69 +125,66 @@ const PINNED_CONSEQUENCE =
   'either: the driver latches the first statement error on this connection and re-raises it when ' +
   'the callback returns, so a rolled-back savepoint does not make the call succeed.';
 
-/** What to write instead, on the POOLED half — where "together" is what `transaction` is for. */
-const POOLED_SPLIT_ADVICE =
-  'Issue each statement through its own `query` call, and put them in `transaction(fn)` if they ' +
-  'must land together.';
-
-/** The same, INSIDE a callback — where they already land together, so the advice would be circular. */
-const PINNED_SPLIT_ADVICE =
-  'Issue each statement through its own `query` call — they are already inside this callback’s ' +
-  'transaction, so they already land together.';
+/**
+ * ONE COMMAND PER CALL — decided by the SERVER, not by a parser of ours.
+ *
+ * `query` is documented as running ONE parameterized statement. Enforcing that with a text scan was
+ * tried and MEASURED, and it was wrong in BOTH directions. It read as ONE command, while the server
+ * ran TWO, a string opening a NESTED block comment (Postgres nests them; a one-level scan closes at
+ * the first terminator and swallows the `; COMMIT` behind it) and a string with an `E''` escape (the
+ * server ends that literal at the backslash-quote, a scan reading the following pair as a doubled
+ * quote stays inside it). And it REFUSED, as more than one command, four strings the server runs:
+ * `SELECT E'a\\'b' AS v`, `SELECT 1 AS a$b$c`, `SELECT $é$x$é$ AS v` and a trailing `;;`.
+ * A parser can never be PROVEN equivalent to the grammar the server actually parses. The server can.
+ *
+ * `{ simple: false }` forces the EXTENDED protocol, where Postgres itself refuses every multi-command
+ * string at parse time — `42601 cannot insert multiple commands into a prepared statement`, before
+ * any command runs, so nothing lands and no connection is left in a transaction. It is the `simple`
+ * flag that decides this, NOT `prepare`: `postgres/src/index.js` computes
+ * `simple: 'simple' in options ? options.simple : args.length === 0` and hardcodes `prepare: false`
+ * for `unsafe`, so a `prepare: true` measurement tests a knob that never enters the decision.
+ *
+ * IT ALSO MAKES THE TWO CALL SHAPES ONE. A PARAMETERIZED call already went extended (`args.length`
+ * is not 0), so `query(sql, params)` was never vulnerable; only the no-parameter call fell back to
+ * simple-query mode. This does not add a rule — it stops one shape of the same method from being
+ * quietly weaker than the other.
+ */
+const MULTI_COMMAND_ADVICE =
+  'Issue each statement through its own `query` call; `transaction(fn)` is how two of them land ' +
+  'together.';
 
 /**
- * Refuse a string that carries MORE THAN ONE command. This is the guard the tripwire above cannot
- * be: it reads the FIRST token, and every transaction-control verb in the language is reachable
- * behind an innocent one.
+ * The option that selects the extended protocol — CAST IN, because the driver's published types
+ * declare only `prepare` on `UnsafeQueryOptions` while its implementation reads `simple` and spreads
+ * the rest. The option is real; the type declaration is incomplete.
  *
- * WHY A SECOND COMMAND IS NOT A SECOND CALL. `query` runs the statement through `postgres`'s
- * `unsafe`, and `unsafe` with no bound parameters selects Postgres's SIMPLE-QUERY protocol, which
- * executes EVERY command in the string on that connection. So `query('SELECT 1; COMMIT')` inside a
- * callback ends the pin — measured: the two rows written around it both survived the callback's
- * throw, and the wrapper's rollback found `25P01 there is no transaction in progress` — and
- * `query('SELECT 1; BEGIN')` on the pooled half leaves its connection idle-in-transaction for the
- * life of the process, because the driver's own refusal arrives only after the server has run it.
- * The extended protocol does not help: `prepare: true` accepts `SELECT 1; SELECT 2` too, so this is
- * a text decision or it is nothing.
- *
- * THIS IS ENFORCING THE CONTRACT, NOT ADDING A RULE. `query` is documented as running ONE
- * parameterized statement, on both halves. A `;`-separated `COMMIT` is refused here for being a
- * SECOND COMMAND rather than for what it says, which is why the guard needs no verb list of its own
- * and closes both shapes at once — including the ones no verb list would have named.
- *
- * THE BOUNDARY DECISION IS NOT MADE HERE. It is `@rayspec/db`'s `splitSqlStatements`, the same
- * literal-aware splitter the pack-migration scan reads, so a `;` inside a string literal, a
- * dollar-quoted body or a comment is NOT a second command in either place. That matters more than
- * the refusal does: a guard that rejected `INSERT INTO t VALUES ('a;b')` would refuse correct code
- * and leave the author a typed error and no way around it.
- *
- * A STRING THE SPLITTER CANNOT READ IS REFUSED TOO, and that branch is not belt-and-braces. Three of
- * the four unterminated-literal kinds are syntax errors the server rejects outright, so passing them
- * through would cost nothing — but the fourth is not. The splitter opens a dollar-quote on the
- * `$tag$` SHAPE, and `$b$` inside the perfectly legal identifier `a$b$c` HAS that shape: measured,
- * `SELECT 1 AS a$b$c; INSERT INTO t (id) VALUES (99)` reads as ONE unterminated statement here while
- * Postgres reads two commands and runs both (row 99 landed). So an unreadable string fails CLOSED.
- * What that costs is an identifier carrying two `$`, which now gets a typed refusal naming the
- * literal instead of running — the one accept-control case this guard knowingly gives up, written
- * down here so the next reader does not mistake the branch for paranoia and delete it.
+ * A cast that stopped working would fail OPEN — the statement would fall back to simple-query mode
+ * and the defect would return silently — so nothing here rests on the cast being right. Arms (7),
+ * (8) and (10) of `pack-service-db.db.test.ts` measure the CONSEQUENCE against a live server, by
+ * surviving rows and by `idle in transaction` count, so a driver upgrade that renamed or dropped
+ * this option turns those arms red instead of quietly re-opening the door.
  */
-function refuseMultipleStatements(sql: string, advice: string): void {
-  const { statements, unterminated } = splitSqlStatements(sql);
-  if (unterminated) {
-    throw new PackTransactionError(
-      'a pack database handle could not read where the commands in this string end: an ' +
-        `unterminated ${unterminated.what} runs to the end of it, so everything after it was read ` +
-        'as part of that literal and a second command could be hiding behind it. Close the literal ' +
-        `— or, if it is an identifier carrying a \`$…$\` run, quote it ("a$b$c"). ${advice}`,
-    );
-  }
-  if (statements.length <= 1) return;
-  throw new PackTransactionError(
-    `a pack database handle runs ONE statement per \`query\` call, and this string carries ` +
-      `${statements.length} commands. A multi-command string is sent in Postgres's simple-query ` +
-      'mode, which runs every command in it — so a `;`-separated `COMMIT`, `BEGIN` or `ROLLBACK` ' +
-      'would move the connection’s transaction state however the leading statement reads. ' +
-      advice,
+const EXTENDED_PROTOCOL = { simple: false } as unknown as { prepare?: boolean | undefined };
+
+/**
+ * The server's refusal, in the door's own vocabulary — so a pack still branches on the typed error
+ * the contract promises rather than on a driver error's SQLSTATE.
+ *
+ * The discriminator is narrow ON PURPOSE. `42601` alone is every syntax error there is; the pack's
+ * own typo would then be reported as a multi-command refusal, which is a fabricated diagnostic. The
+ * message below is emitted from exactly one place in the server (`exec_parse_message`), and a
+ * genuine syntax error carries the same SQLSTATE from `scanner_yyerror` with different text —
+ * measured. If the wording ever moves, this stops matching and the pack sees the server's own error:
+ * the failure mode is a less friendly refusal, never a wrong one, and never a statement that runs.
+ */
+function asPackRefusal(error: unknown): unknown {
+  const e = error as { code?: string; message?: string };
+  if (e?.code !== '42601' || !/cannot insert multiple commands/i.test(e.message ?? ''))
+    return error;
+  return new PackTransactionError(
+    'a pack database handle runs ONE statement per `query` call, and the server refused this ' +
+      'string for carrying more than one command (SQLSTATE 42601). Nothing in it ran. ' +
+      MULTI_COMMAND_ADVICE,
   );
 }
 
@@ -226,8 +228,15 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
   return {
     query: async (sql: string, params: readonly unknown[] = []) => {
       refuseTransactionControl(sql, POOLED_CONSEQUENCE);
-      refuseMultipleStatements(sql, POOLED_SPLIT_ADVICE);
-      return (await client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
+      try {
+        return (await client.unsafe(
+          sql,
+          params as never[],
+          EXTENDED_PROTOCOL,
+        )) as unknown as Record<string, unknown>[];
+      } catch (e) {
+        throw asPackRefusal(e);
+      }
     },
 
     transaction: async <T>(fn: (tx: PackServiceDatabase) => Promise<T>): Promise<T> => {
@@ -239,29 +248,44 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
       // convenience) — but ONLY for a callback that returns one SYNCHRONOUSLY, and the callback below
       // is `async`, so what it returns is always a Promise and that branch cannot fire. The cast is
       // the driver's return type (`UnwrapPromiseArray<T>`) staying deferred over a naked `T`.
-      return (await client.begin(async (tx) =>
-        insideTransaction.run(scope, async () => {
-          try {
-            return await fn({
-              query: async (sql: string, params: readonly unknown[] = []) => {
-                refuseTransactionControl(sql, PINNED_CONSEQUENCE);
-                refuseMultipleStatements(sql, PINNED_SPLIT_ADVICE);
-                return (await tx.unsafe(sql, params as never[])) as unknown as Record<
-                  string,
-                  unknown
-                >[];
-              },
-              transaction: async () => {
-                throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
-              },
-            });
-          } finally {
-            // Ends the refusal with the callback — a context it created and left running is not
-            // nesting once the transaction is over, and must not be refused as if it were.
-            scope.open = false;
-          }
-        }),
-      )) as T;
+      //
+      // THE TRANSLATION IS APPLIED HERE TOO, and not defensively. A server-side refusal reaches the
+      // wire, so the driver LATCHES it on the pinned connection and re-raises it when the callback
+      // returns (the limit arm (6) pins) — a path that does not go through the `tx.query` catch
+      // below. Without this, a pack that caught the refusal and returned normally would get a raw
+      // driver error where the contract promises a typed one. `asPackRefusal` returns anything else
+      // UNCHANGED, so the pack's own thrown value still arrives as the same instance.
+      try {
+        return (await client.begin(async (tx) =>
+          insideTransaction.run(scope, async () => {
+            try {
+              return await fn({
+                query: async (sql: string, params: readonly unknown[] = []) => {
+                  refuseTransactionControl(sql, PINNED_CONSEQUENCE);
+                  try {
+                    return (await tx.unsafe(
+                      sql,
+                      params as never[],
+                      EXTENDED_PROTOCOL,
+                    )) as unknown as Record<string, unknown>[];
+                  } catch (e) {
+                    throw asPackRefusal(e);
+                  }
+                },
+                transaction: async () => {
+                  throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
+                },
+              });
+            } finally {
+              // Ends the refusal with the callback — a context it created and left running is not
+              // nesting once the transaction is over, and must not be refused as if it were.
+              scope.open = false;
+            }
+          }),
+        )) as T;
+      } catch (e) {
+        throw asPackRefusal(e);
+      }
     },
   };
 }

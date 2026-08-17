@@ -88,13 +88,14 @@ export interface PackDatabase {
   /**
    * Run ONE parameterized statement and read its rows back.
    *
-   * "ONE" IS ENFORCED, NOT ASSUMED. A string carrying more than one `;`-separated command is
-   * REFUSED, on this handle and on `tx` alike, with an `Error` whose `name` is
-   * `PackTransactionError`. It has to be: the statement is sent in Postgres's simple-query mode,
-   * which runs every command in the string, so `query('SELECT 1; COMMIT')` really does commit.
-   * Issue each statement through its own call, and use `transaction(fn)` when they must land
-   * together. A `;` inside a string literal, a dollar-quoted body (`$tag$…$tag$`) or a comment is
-   * NOT a second command and is not refused — the boundary is read the way Postgres reads it.
+   * "ONE" IS ENFORCED BY THE SERVER, NOT ASSUMED. The statement goes over Postgres's EXTENDED
+   * protocol, where the server itself decides where one command ends — and refuses a string carrying
+   * more than one, at parse time, before any part of it runs. On this handle and on `tx` alike, that
+   * refusal reaches you as an `Error` whose `name` is `PackTransactionError`. It has to be enforced
+   * somewhere: sent the other way, `query('SELECT 1; COMMIT')` really does commit. Issue each
+   * statement through its own call, and use `transaction(fn)` when they must land together.
+   * A `;` inside a string literal, a dollar-quoted body (`$tag$…$tag$`), an `E''` escape or a
+   * comment is not a second command, and none of them is refused.
    *
    * A TRANSACTION-CONTROL STATEMENT IS REFUSED HERE TOO — `BEGIN`, `START TRANSACTION`, `COMMIT`,
    * `ROLLBACK`, `SAVEPOINT` and the rest reject with the same typed error, before the statement
