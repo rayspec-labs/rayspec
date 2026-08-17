@@ -663,6 +663,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A failed database write no longer prints its bind values into an operator-facing log.** When a
+  statement failed, the ORM wrapped the driver's error in one whose message embeds both the SQL *and*
+  every value it bound — and which carries them again as enumerable own properties, so the values
+  escaped three ways at once: through `${err.message}`, through `String(err)`, and through
+  `console.error(msg, err)`, which prints them whether or not anything touched the message. The most
+  visible instance was an extension pack's service failing on a write during boot: the abort message
+  named the deployment-stopping refusal and pasted the whole parameter list after it, in the one log
+  an operator is most likely to attach to a ticket or a chat thread. Bind values are arbitrary row
+  data — whatever the caller decided to persist, from whatever source it read.
+  A shared renderer now stands between a caught database error and every such message, and its
+  safety is structural rather than asserted: the line it produces is assembled only from a fixed
+  phrase table this codebase owns, the SQLSTATE, the schema identifiers the refusal named
+  (constraint, relation, column) and the parameterized statement. **No server-authored free text is
+  read at all** — not the primary message, not `detail`. That matters because neither is safe: on
+  every coercion failure Postgres echoes the offending value into the primary message itself
+  (`invalid input syntax for type uuid: "…"`), and into `detail` on a unique violation. A refusal
+  shape nobody anticipated therefore renders as its code and a generic sentence — it fails closed
+  rather than passing through on the assumption its message was harmless.
+  Where a message read
+  `Failed query: INSERT INTO … VALUES ($1, $2)` / `params: dup,<the row's data>`,
+  it now reads `a unique constraint was violated (SQLSTATE 23505, constraint "…", relation "…") —
+  failed statement: INSERT INTO … VALUES ($1, $2) (2 bind values withheld from this message; they
+  are caller data and do not belong in a log)`. Applied at every path that formatted a caught
+  database error for an operator: the extension-service boot abort and its shutdown log, the two
+  run-header write logs, the durable-cancel log, the two migration scripts, the uncontrolled-500
+  server log (message **and** stack — a wrapped error's stack begins with the values), the two
+  boot-failure stack prints, and the two dispatch paths that render a failed marker write or a
+  handler error into a tool result. An error that carries no statement is passed through unchanged,
+  so no other refusal's wording moved.
+
 - **The bundled `stream-backend` example no longer serves an uploaded blob under the `Content-Type`
   its uploader declared.** The example's playback handler read the `content_type` recorded on the
   pointer row at ingest and put it on the response verbatim, so a chunk uploaded as `text/html` came
