@@ -16,6 +16,7 @@ import type { Permission, RateLimitPolicy } from '@rayspec/auth-core';
 import { RateLimiter } from '@rayspec/auth-core';
 import type { BlobStore, BlobStoreFactory, ResolvedHandler } from '@rayspec/platform';
 import type { ApiRouteSpec, HandlerSpec, RaySpec } from '@rayspec/spec';
+import { reachesReservedByPlaceholder, reservedRoutePathRefusal } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentRegistry, AppDeps, AppEnv } from '../app-context.js';
@@ -209,15 +210,52 @@ describe('registerDeclaredRoutes — the INJECTED reserved prefixes (paths api-a
   // than the string as written. Both were measured against the real composition root: `/{a}/{b}`
   // answered `/v1/zzz` with the declared route's 401, and `/notes/{id}` left every platform path alone.
   it('refuses a pattern whose ROUTER FORM reaches a reserved path, and accepts the ordinary shape', () => {
+    // A LEADING PARAMETER gets the placeholder sentence, not the literal one. `/{a}/{b}` is under no
+    // reserved path — it MATCHES one, because the router fills `{a}` with whatever the request
+    // supplies, `v1` included. Telling that author to "choose a path outside them" names no path they
+    // can choose while keeping a leading parameter, so the literal sentence is both false and
+    // unactionable here. This arm previously pinned that literal sentence, which is how the registrar
+    // kept passing three arguments to a four-argument refusal without anything going red.
     expect(() => registerWithReserved('/{a}/{b}', ['/health/', '/recovery-scope/'])).toThrow(
-      /is under a path this deployment reserves/,
+      /begins with a PARAMETER or WILDCARD/,
     );
+    expect(() => registerWithReserved('/{a}/{b}', ['/health/', '/recovery-scope/'])).toThrow(
+      /LITERAL first segment/,
+    );
+    // …and a LITERAL path keeps the literal sentence. This is the control: a builder that answered
+    // the placeholder sentence for everything would satisfy the arm above and fail this one.
     expect(() => registerWithReserved('health', ['/health/', '/recovery-scope/'])).toThrow(
       /is under a path this deployment reserves/,
     );
     expect(() =>
       registerWithReserved('/notes/{id}', ['/health/', '/recovery-scope/']),
     ).not.toThrow();
+  });
+
+  it('answers a leading-parameter route in the SAME WORDS the diagnostic floor uses', () => {
+    // The two edges share a sentence BUILDER, which is not the same as sharing a sentence: the
+    // registrar omitted the cause and produced a different sentence from the same function. Compare
+    // the rendered strings, not the fact that both call it.
+    // `/v1/` and `/oidc/` are reserved by the registrar itself whatever the composition root injects,
+    // so the floor's fixture has to carry them or the two sentences differ only in their prefix list —
+    // which would fail this comparison for a reason that has nothing to do with the cause flag.
+    const reserved = {
+      platform: ['/v1/', '/oidc/', '/health/', '/recovery-scope/'],
+      frontendMounts: [] as string[],
+    };
+    const floorSays = reservedRoutePathRefusal(
+      'GET',
+      '/{tenant}/notes',
+      reserved,
+      reachesReservedByPlaceholder('/{tenant}/notes', reserved),
+    );
+    let registrarSays = '';
+    try {
+      registerWithReserved('/{tenant}/notes', ['/health/', '/recovery-scope/']);
+    } catch (e) {
+      registrarSays = (e as Error).message;
+    }
+    expect(registrarSays).toContain(floorSays);
   });
 });
 

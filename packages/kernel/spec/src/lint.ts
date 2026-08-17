@@ -389,8 +389,14 @@ export function reservedRoutePathRefusal(
    * them — it can MATCH one, because the router fills `{tenant}` with whatever the request supplies,
    * including `v1`. Telling that author to "choose a path outside them" names no path they can choose
    * while keeping a leading parameter, so the refusal would be true-sounding and unactionable.
+   *
+   * REQUIRED, with no default. A default made this parameter optional at the call site, and the
+   * registrar — the only guard a spec assembled in CODE ever reaches — silently kept passing three
+   * arguments and answering the literal sentence for a leading-parameter route. The two edges then
+   * described one document two ways, which is the exact defect this parameter was added to close.
+   * A default cannot be forgotten loudly; its absence can (`TS2554: Expected 4 arguments, but got 3`).
    */
-  viaPlaceholder = false,
+  viaPlaceholder: boolean,
 ): string {
   const mounts =
     reserved.frontendMounts.length > 0

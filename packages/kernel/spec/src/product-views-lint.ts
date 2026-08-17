@@ -27,6 +27,12 @@
 import { braceParamNames } from './brace-params.js';
 import { type SpecError, specError } from './errors.js';
 import { SafeIdentifier } from './grammar.js';
+import {
+  isReservedApiPath,
+  reachesReservedByPlaceholder,
+  reservedApiPathPrefixes,
+  reservedRoutePathRefusal,
+} from './lint.js';
 import type {
   ArtifactSpec,
   CapabilitySpec,
@@ -202,6 +208,32 @@ export function lintProductViews(input: ViewLintInput): SpecError[] {
     const base = `views[${vi}]`;
     const params = view.params ?? {};
     const paramNames = new Set(Object.keys(params));
+
+    // ---- the reserved platform surface ---------------------------------------------------------
+    // A view's route path is author-controlled and is registered on the SAME app as the platform's
+    // own surface, so a view under `/v1/`, `/oidc/`, `/health/` or `/recovery-scope/` shadows it. A
+    // Product-YAML document never reaches `lintSpec`, so without this rule the collision was
+    // invisible to `doctor`, `plan` and `deploy --dry-run` — all three answered `{"ok": true}` — and
+    // was caught only by the registrar during roll-out, after the migrate step had already committed
+    // the document's product DDL. That is issue #441's two halves, both of them, on this profile.
+    //
+    // The SAME predicate and the SAME sentence the `rayspec.yaml` rule uses, with the same cause
+    // flag: one document must not be described two ways because two readers reached it.
+    const viewReserved = reservedApiPathPrefixes();
+    if (isReservedApiPath(view.route.path, viewReserved)) {
+      errors.push(
+        specError(
+          'reserved_route_path',
+          reservedRoutePathRefusal(
+            view.route.method,
+            view.route.path,
+            viewReserved,
+            reachesReservedByPlaceholder(view.route.path, viewReserved),
+          ),
+          `${base}.route.path`,
+        ),
+      );
+    }
 
     // ---- reserved names in the params map -------------------------------------------------
     for (const name of Object.keys(params)) {

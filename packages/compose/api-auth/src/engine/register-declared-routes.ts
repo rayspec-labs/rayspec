@@ -59,6 +59,7 @@ import {
   isReservedApiPath,
   type RaySpec,
   type ReservedApiPaths,
+  reachesReservedByPlaceholder,
   reservedRoutePathRefusal,
   rewriteBraceParams,
   type StoreOp,
@@ -308,6 +309,12 @@ export function registerDeclaredRoutes(
           route.method,
           route.path,
           reservedPrefixes,
+          // The SAME cause the floor computes. Sharing the sentence builder is not enough to share
+          // the sentence: this edge omitted the cause and every leading-parameter route was told it
+          // "is under a path this deployment reserves" — false of `/{tenant}/notes`, which is under
+          // none of them and merely MATCHES one, and unactionable, because "choose a path outside
+          // them" names no path an author can choose while keeping a leading parameter.
+          reachesReservedByPlaceholder(route.path, reservedPrefixes),
         )}`,
       );
     }
