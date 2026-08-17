@@ -602,7 +602,9 @@ PROBES the objects the delta itself names FIRST, so a delta that ALREADY landed 
 there is applied and the boot names them, even on a drift-clean schema (the drift check only ever
 inspects what the spec declares, so an object the grammar cannot express is invisible to it). ONE SHAPE
 IS NOT DECIDABLE that way, and it is the one place the boot can silently drop a reviewed change: a delta
-that FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one
+that FREES a name and PUTS IT BACK (`DROP INDEX "ix"` + `CREATE INDEX "ix"` — an index REDEFINITION,
+the likeliest one to meet because it is what a generated delta writes for a changed index; or
+`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one
 `ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" …`, or a rename-aside rebuild — `RENAME TO "t_old"` +
 `CREATE TABLE "t"` + `DROP TABLE "t_old"`, and the column form of it: `RENAME COLUMN` aside, `ADD
 COLUMN`, `DROP COLUMN` the aside; the `IF [NOT] EXISTS` spellings count the same)

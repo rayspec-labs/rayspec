@@ -667,7 +667,9 @@ export async function serveDeployment(
   // naming both sides — the PRODUCT profile in product-boot, the BACKEND profile in the composition
   // root's update branch (both route through the shared planUpdateBoot). ONE SHAPE is not decidable this
   // way and is the one place this path can silently drop a reviewed change: a delta that FREES a name and
-  // PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one multi-clause
+  // PUTS IT BACK (`DROP INDEX "ix"` + `CREATE INDEX "ix"` — an index REDEFINITION, which drizzle emits
+  // for a changed index and is the likeliest real instance — or `DROP TABLE "t"` + `CREATE TABLE "t"`,
+  // or the same change as one multi-clause
   // `ALTER TABLE`, or a rename-aside rebuild — `RENAME TO "t_old"` + `CREATE TABLE "t"` +
   // `DROP TABLE "t_old"`, where the name the rename gives the table is gone in both states too; the
   // `IF [NOT] EXISTS` spellings count the same) leaves the schema holding that name in
