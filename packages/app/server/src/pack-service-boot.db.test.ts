@@ -41,7 +41,11 @@
  *       SQL the pack wrote. What is measured about the door's own rows is (4c): the pack was TOLD its
  *       tenant by the deployment and every ledger row it wrote transactionally carries that one and no
  *       other. The chokepoint cannot be the instrument there — a pack-owned table is not in the
- *       platform's drizzle schema — so the rows are read directly, under both tenants.
+ *       platform's drizzle schema — so the rows are read directly, under both tenants. And the
+ *       service READS ITS OWN JOURNAL BACK through the same door: the entries it gets are checked
+ *       against the rows this suite reads off the database, and a step planted for a DIFFERENT tenant
+ *       under the SAME run id never appears in them — so the read's scoping is the tenant predicate's
+ *       doing and not the run filter's.
  *   (5) SHUTDOWN IS THE REVERSE, and it really stops the work: `close()` shuts the two services down
  *       in the reverse of boot order, and the timer stops ticking afterwards.
  *   (6) FAIL-THE-FIX: a deployment whose pack ships a service that throws on boot ABORTS the boot with
@@ -77,7 +81,7 @@ import { EXTENSION_BRAND } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   assembleServer,
   BootConfigError,
@@ -199,6 +203,11 @@ interface Observed {
     }
   >;
   readonly ticks: Map<string, number>;
+  /** What each service READ BACK out of the journal it had just written to (arm (4d)). */
+  readonly recalls: Map<
+    string,
+    { readonly recalled: number; readonly recalledKeys: readonly string[] }
+  >;
   reset(): void;
 }
 async function observed(): Promise<Observed> {
@@ -490,6 +499,101 @@ describe.skipIf(!baseUrl)('the BOOT starts an extension pack’s long-lived serv
       );
     expect(await ledgerUnder(TENANT)).toBe('2');
     expect(await ledgerUnder(OTHER_TENANT)).toBe('0');
+
+    // (4d) THE SERVICE READ ITS OWN JOURNAL BACK, through the same door it wrote through. Until that
+    //      door carried both verbs this was the one thing a service could not do: it wrote steps and
+    //      the only way back was the escape hatch with a core table name in a SQL string — which is
+    //      the dependency the read contract exists to remove, and it was still there for the surface
+    //      that writes. What is asserted is the READ, not the writer's own belief: the entries the
+    //      service got back are compared against the rows this suite reads off the database itself.
+    const recall = record.recalls.get('audit-ledger');
+    expect(recall).toBeDefined();
+    expect(recall?.recalled).toBeGreaterThan(0);
+    // Its own sweeps, in RECORDED ORDER and contiguous — the keys the service wrote are the keys it
+    // read back, oldest first, with no gap. The sweep counter is process-global and this suite boots
+    // the deployment more than once (the tenant-less bootstrap boot sweeps too, journaling nothing),
+    // so the first number is NOT 1 and asserting that it is would be asserting an accident. What is
+    // invariant is the ordering and the contiguity, which is what a cursor-paged read promises.
+    const sweepNumbers = (recall?.recalledKeys ?? []).map((key) =>
+      Number(key.replace('sweep-', '')),
+    );
+    expect(sweepNumbers.every((n) => Number.isInteger(n) && n > 0)).toBe(true);
+    expect(sweepNumbers).toEqual(sweepNumbers.map((_, i) => (sweepNumbers[0] ?? 0) + i));
+    // …and the read is REAL: every key it returned exists in `journal_steps` under the deployment
+    // tenant, on this suite's own connection. A fabricated page could not satisfy this.
+    for (const key of recall?.recalledKeys ?? []) {
+      expect(
+        await scalar(
+          appDbUrl,
+          `SELECT count(*)::int FROM journal_steps WHERE idempotency_key = '${key}' ` +
+            `AND tenant_id = '${TENANT}'::uuid AND backend = '${PACK_SERVICE_BACKEND}'`,
+        ),
+      ).toBe('1');
+    }
+
+    // (4e) AND IT IS SCOPED TO THE DEPLOYMENT'S TENANT, measured with a second tenant's real rows
+    //      rather than by inspection. A step is planted for OTHER_TENANT under the SAME run id the
+    //      service journals its sweeps under — so the run filter cannot be what excludes it, only the
+    //      tenant predicate can — and the service's next sweep still reads back only its own.
+    const plantedKey = 'planted-by-another-tenant';
+    // The second tenant has to be a REGISTERED org: a journal row carries a foreign key onto `orgs`,
+    // so an unregistered tenant cannot hold one and the plant below would refuse instead of testing
+    // anything. (Arm (4b) above only ever READS under it, which needs no row.)
+    await exec(appDbUrl, "INSERT INTO orgs (id, name, slug) VALUES ($1, 'Other', 'other')", [
+      OTHER_TENANT,
+    ]);
+    //      ⚠ THE PLANT IS DATED BACKWARDS, AND THAT IS THE LOAD-BEARING PART OF THIS ARM. Do not
+    //      "simplify" it to a default `created_at`. The read under test is BOUNDED and ORDERED
+    //      oldest-first, so a row stamped `now()` sorts past the end of the returned page and is
+    //      invisible to the assertion whatever the reader does — the arm would then be measuring the
+    //      ORDERING, not the tenant predicate it believes it is testing. That is not hypothetical:
+    //      the first version of this arm was written that way, and when the tenant predicate was
+    //      removed from `makeHandlerJournal` as a control, it STILL PASSED. A control that measures
+    //      nothing is green and stays green, which is the worst failure mode a guard has.
+    //      THE GENERAL RULE, for any accept control against an `ORDER BY` + `LIMIT` read: planting
+    //      the row is not enough — it has to land inside the WINDOW the read actually returns.
+    //      Dated a day backwards it sorts FIRST, and the control behaves: with the tenant predicate
+    //      removed the arm goes red naming the planted entry, with it restored the arm is green.
+    await scalar(
+      appDbUrl,
+      `INSERT INTO journal_steps (run_id, tenant_id, backend, type, idempotency_key, input_hash,
+         output, status, auth_mode, created_at)
+       SELECT run_id, '${OTHER_TENANT}'::uuid, backend, type, '${plantedKey}', input_hash,
+         '{"planted":true}'::jsonb, status, auth_mode, now() - interval '1 day'
+       FROM journal_steps WHERE tenant_id = '${TENANT}'::uuid AND backend = '${PACK_SERVICE_BACKEND}'
+       LIMIT 1
+       RETURNING 1`,
+    );
+    // The plant is really there — without this the arm below would pass against an empty table.
+    expect(
+      await scalar(
+        appDbUrl,
+        `SELECT count(*)::int FROM journal_steps WHERE idempotency_key = '${plantedKey}'`,
+      ),
+    ).toBe('1');
+    // …and it shares its run_id with the deployment tenant's own pack-service steps, which is what
+    // makes this a TENANT-predicate measurement rather than a run-filter one: if the reader dropped
+    // its tenant scoping, this row matches the very query the service issues.
+    expect(
+      await scalar(
+        appDbUrl,
+        `SELECT count(*)::int FROM journal_steps planted
+           JOIN journal_steps own ON own.run_id = planted.run_id
+         WHERE planted.idempotency_key = '${plantedKey}'
+           AND own.tenant_id = '${TENANT}'::uuid AND own.backend = '${PACK_SERVICE_BACKEND}'`,
+      ),
+    ).not.toBe('0');
+    //      Progress is measured on the TICK counter, not on how many entries came back: the read is
+    //      bounded, so once the page is full its size stops growing and waiting on it would wait for
+    //      ever. Two ticks, so at least one WHOLE sweep (record, then read) ran after the plant landed.
+    const ticksBefore = record.ticks.get('audit-ledger') ?? 0;
+    await vi.waitFor(
+      () => {
+        expect(record.ticks.get('audit-ledger') ?? 0).toBeGreaterThan(ticksBefore + 1);
+      },
+      { timeout: 5_000, interval: 25 },
+    );
+    expect(record.recalls.get('audit-ledger')?.recalledKeys).not.toContain(plantedKey);
 
     // (5) close() stops them in the exact REVERSE of boot order — and the timer really stops.
     await server.close();

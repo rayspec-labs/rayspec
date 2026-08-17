@@ -55,7 +55,13 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import { ApiError, errorEnvelope } from '@rayspec/auth-core';
 import type { AgentSpec, ConvTurn, ErrorClass, RunResult, Usage } from '@rayspec/core';
 import { assertSpecValid, classifyUpstreamError, isErrorClass, NeutralEvent } from '@rayspec/core';
-import { forTenant, schema, type TenantDb } from '@rayspec/db';
+import {
+  forTenant,
+  isDatabaseError,
+  operatorSafeDbErrorMessage,
+  schema,
+  type TenantDb,
+} from '@rayspec/db';
 import {
   CANCELLED_CLASS,
   deleteEnqueuedRunHeader,
@@ -408,8 +414,22 @@ export async function executeAgentRun(
             : err instanceof RunCancelledError
               ? { errorClass: 'cancelled' as ErrorClass, message: err.message }
               : classifyUpstreamError(err);
+        // A DATABASE FAILURE IS THE ONE CLASS WHOSE MESSAGE MUST NOT RIDE THIS FRAME. The classifier
+        // preserves the upstream cause verbatim — deliberately, because for an upstream 4xx/429 that
+        // sentence is what a caller acts on — but it reaches it through `String(err)`, and on the
+        // ORM's wrapper `String(err)` is the failed SQL followed by every bound value. This route
+        // persists caller row data (the run header write, and the post-completion persist), so those
+        // values are other callers' data, streamed to whoever holds this connection.
+        //
+        // The disposition is not invented here, it is the JSON sibling's: on that path an
+        // unclassified throw propagates to `onError`, which answers the closed INTERNAL envelope —
+        // 'Internal server error.', no details. Two renderings of the same run must not disagree
+        // about what a client is told, so the stream says exactly what the JSON body would.
+        // Diagnosis is not lost: the operator-safe rendering reaches the LOG, and the run's own
+        // terminal outcome stays re-readable on `GET /v1/runs/{id}`.
+        const safeMessage = isDatabaseError(err) ? 'Internal server error.' : message;
         await stream
-          .writeSSE({ event: 'error', data: JSON.stringify({ message, errorClass }) })
+          .writeSSE({ event: 'error', data: JSON.stringify({ message: safeMessage, errorClass }) })
           .catch(() => {});
       }
     });
@@ -646,7 +666,12 @@ async function enqueueAgentRun(
       model: entry.spec.model,
     });
   } catch (err) {
-    console.error(`[api-auth] enqueue-time run header write failed runId=${runId}`, err);
+    // The rendered message, never the error object: the ORM's wrapper carries the statement and its
+    // bind values as enumerable own properties, so passing the object prints a run header's own data.
+    console.error(
+      `[api-auth] enqueue-time run header write failed runId=${runId}:`,
+      operatorSafeDbErrorMessage(err),
+    );
   }
   try {
     await deps.durableExecutor.enqueue(inp.tenantId, {
@@ -1118,7 +1143,12 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
         try {
           await deps.durableExecutor.cancel(runId);
         } catch (err) {
-          console.error(`[api-auth] durable cancel failed runId=${runId}`, err);
+          // Same renderer as every other database-adjacent log on this surface: a cancel that fails
+          // inside the durable engine can surface a wrapped statement error, values and all.
+          console.error(
+            `[api-auth] durable cancel failed runId=${runId}:`,
+            operatorSafeDbErrorMessage(err),
+          );
         }
       }
 

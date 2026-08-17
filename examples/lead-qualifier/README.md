@@ -43,6 +43,12 @@ policy, exception, pre-approval or routing override exists).
 `injection-smoke.sh` next to this file is the regression that keeps all three classes honest against a
 live deployment.
 
+> **`injection-smoke.sh` needs `OPENAI_API_KEY` in the SERVER's environment, not in yours.** It speaks
+> HTTP only and never reads a provider key itself, so run it exactly like `smoke.sh`:
+> `BASE=http://localhost:8080 ./injection-smoke.sh` against a boot that has the key. It does **not**
+> skip: if nothing answers at `$BASE`, or the deployment that does cannot run a live agent, it fails
+> non-zero and says which. A prompt-injection regression that measured nothing must never exit 0.
+
 ## Validate (no DB, no deploy)
 
 ```bash

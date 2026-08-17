@@ -420,7 +420,7 @@ describe('OIDC store cross-tenant/client isolation', () => {
     // `new Provider(...)` rather than the shipped `createOidcProvider` (provider.ts). The
     // load-bearing surface — the DrizzleOidcAdapter over real Postgres — IS the shipped one
     // (`DrizzleOidcAdapter.factory(gdb)`, identical to provider.ts:35), and the SHIPPED provider
-    // CONFIG is independently exercised end-to-end by `oidc/cross-client-isolation.test.ts` and the
+    // CONFIG is independently exercised end-to-end by `oidc/cross-client-isolation.db.test.ts` and the
     // served token-guard suite (both call createOidcProvider). The gate diverges because it drives a
     // PROGRAMMATIC authorization_code + PKCE + refresh round trip to PERSIST AuthorizationCode/
     // Grant/RefreshToken rows (the artifacts the store-isolation + revokeByGrantId assertions need),

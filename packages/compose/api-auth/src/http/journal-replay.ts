@@ -43,16 +43,50 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 
 /**
- * Resolve the resume cursor: the `Last-Event-ID` header (what a reconnecting client sends) takes
- * precedence over an explicit `?lastEventId=` query (what a first request can carry). An absent cursor
- * — or one that is not a number — means "from the beginning": a `NaN` cursor would compare false
- * against every stored seq and serve an EMPTY replay, which a client cannot tell apart from "there is
- * nothing left", so a malformed cursor must never be carried into the bound.
+ * Resolve the RAW resume cursor a request carries: the `Last-Event-ID` header (what a reconnecting
+ * client sends) takes precedence over an explicit `?lastEventId=` query (what a first request can
+ * carry). ABSENT when the request carried neither.
+ *
+ * AN EMPTY VALUE IS ABSENT, ON BOTH SIDES, and that is the whole subtlety of this function. `??`
+ * alone falls through on null/undefined only, so an empty `Last-Event-ID` — which a browser
+ * `EventSource` sends when it has no last id, and which a proxy can synthesise — would WIN over a
+ * `?lastEventId=` a client supplied beside it, and would then travel as `''` through every
+ * downstream "absent?" test (all of which compare against `undefined`) until the reader refuses it
+ * and a well-formed request becomes a 500. An empty value cannot be mistaken for a position, so
+ * reading it as absent coerces nothing; the same is true of an empty query. A NON-empty value is
+ * passed on UNTOUCHED — a padded or malformed cursor is still refused downstream, which is the safe
+ * direction.
+ *
+ * THE RULE IS NOT INVENTED HERE. `routes/subscribe.ts` reached it first and documents it at length
+ * for the tenant event stream; this is the same rule applied to the same header.
+ *
+ * WHY THERE ARE STILL TWO RESOLVERS AND NOT ONE. The header half is identical; the rest is not.
+ * That route reads `?since=` rather than `?lastEventId=`, and its cursor grammar REFUSES a value
+ * this one accepts — `parseEventCursor('')` raises `VALIDATION_ERROR`, so an empty `?since=` is a
+ * 400 there and "from the beginning" here. Folding the two together would therefore change that
+ * route's behaviour on an input it deliberately refuses, which is a decision for that surface and
+ * not a side effect of this one. What is shared is the RULE, stated in both places; what differs is
+ * named above rather than left for a reader to discover by diffing.
+ *
+ * IT IS DELIBERATELY UNTYPED HERE. What a cursor MEANS belongs to the feed being resumed — this
+ * package's own run-event replay reads it as a `seq` (below), and a contributed route's journal read
+ * reads it as a keyset position — so this half resolves WHERE the value comes from and nothing else.
+ */
+export function resolveResumeCursor(c: Context): string | undefined {
+  const header = c.req.header('last-event-id');
+  if (header !== undefined && header !== '') return header;
+  const query = c.req.query('lastEventId');
+  return query === '' ? undefined : query;
+}
+
+/**
+ * Resolve the resume cursor AS A RUN-EVENT SEQ. An absent cursor — or one that is not a number —
+ * means "from the beginning": a `NaN` cursor would compare false against every stored seq and serve
+ * an EMPTY replay, which a client cannot tell apart from "there is nothing left", so a malformed
+ * cursor must never be carried into the bound.
  */
 export function resolveLastEventId(c: Context): number {
-  const header = c.req.header('last-event-id');
-  const query = c.req.query('lastEventId');
-  const raw = header ?? query;
+  const raw = resolveResumeCursor(c);
   if (raw === undefined) return -1; // -1 ⇒ replay from seq 0 (seq > -1)
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) ? n : -1;

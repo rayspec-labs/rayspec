@@ -27,6 +27,9 @@
  * customer. The services that DID boot are shut down again, in reverse, before the failure is raised —
  * a refused boot must not leave a timer or a connection running behind it.
  */
+
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
+import type { HandlerJournal } from '@rayspec/handler-sdk';
 import type { TurnDispatch } from '../turn-dispatch.js';
 
 /**
@@ -43,10 +46,13 @@ import type { TurnDispatch } from '../turn-dispatch.js';
  */
 export interface PackServiceDatabase {
   /**
-   * Run one parameterized statement and read its rows back. A TRANSACTION-CONTROL statement (`BEGIN`,
-   * `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is REFUSED here before it reaches the server: this handle is
-   * pooled, so the connection such a statement lands on would go back to the pool still inside a
-   * transaction nothing ever commits.
+   * Run ONE parameterized statement and read its rows back, and "one" is ENFORCED BY THE SERVER: the
+   * statement goes over the extended protocol, where Postgres itself decides where one command ends
+   * and refuses a string carrying more than one at parse time, before any part of it runs — on this
+   * handle and on `tx` alike, surfaced as `PackTransactionError`. A TRANSACTION-CONTROL
+   * statement (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is refused before it reaches the server
+   * too: this handle is pooled, so the connection such a statement lands on would go back to the pool
+   * still inside a transaction nothing ever commits.
    */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
   /**
@@ -80,12 +86,21 @@ export interface PackServiceDatabase {
  * The JOURNAL door — the run journal, which is the platform's single record of work done, so a
  * service's own work is recorded where every other kind of work is rather than in a log line.
  *
- * TENANT-BOUND BY CONSTRUCTION, exactly like `TurnDispatch`: there is no `tenantId` field, because a
- * service has no request to derive one from and the composition root binds the deployment tenant when
- * it builds the writer. ABSENT when the deployment bound no tenant — a service that wants to journal
- * then fail-closes loudly on `undefined` rather than writing rows nobody can attribute.
+ * BOTH VERBS, on one handle. `record` appends; the READ half is inherited from `HandlerJournal`
+ * rather than re-declared, so the page, the cursor and the bound a service reads through are the
+ * SAME ones a route reads through — one shape with one implementation, instead of two that agree
+ * until somebody edits one. The read half is here because a service is the surface that WRITES
+ * steps: a reader reachable only from a route would leave the writing surface naming a core table in
+ * a SQL string, which is the dependency this door exists to remove.
+ *
+ * TENANT-BOUND BY CONSTRUCTION, exactly like `TurnDispatch`: there is no `tenantId` field on either
+ * verb, because a service has no request to derive one from and the composition root binds the
+ * deployment tenant when it builds this handle — the same `forTenant` chokepoint handle both halves
+ * are built over. ABSENT when the deployment bound no tenant, and absent as a WHOLE: an
+ * unattributable write and an unscoped read fail closed together, so a service that wants either
+ * fail-closes loudly on `undefined`.
  */
-export interface PackServiceJournal {
+export interface PackServiceJournal extends HandlerJournal {
   /** Append ONE journal step for work this service performed. */
   record(step: PackServiceJournalStep): Promise<void>;
 }
@@ -216,9 +231,14 @@ export async function bootPackServices(
       await service.boot(contextFor(service.packId));
     } catch (e) {
       await shutdownInReverse(booted);
+      // RENDERED OPERATOR-SAFE, not interpolated raw. A service's failure is very often a failed
+      // WRITE, and the ORM's wrapper carries the statement AND every value it bound in its message —
+      // arbitrary pack data, on its way into the one log an operator pastes into a ticket. The
+      // renderer keeps what diagnoses the failure (why it failed, which statement) and withholds the
+      // values visibly; an error that is not a database failure passes through unchanged.
       throw new PackServiceError(
         `extension '${service.packId}': service '${service.name}' (${service.module}) failed to ` +
-          `boot: ${e instanceof Error ? e.message : String(e)}. A pack service starts BEFORE the ` +
+          `boot: ${operatorSafeDbErrorMessage(e)}. A pack service starts BEFORE the ` +
           'deployment serves traffic, so a service that cannot start is a deployment that must not ' +
           'come up (fail-closed); the services that had already booted were shut down again.',
         service.packId,
@@ -244,9 +264,12 @@ async function shutdownInReverse(booted: readonly LoadedPackService[]): Promise<
     try {
       await service.shutdown();
     } catch (e) {
+      // The MESSAGE, never the error object: the ORM's wrapper carries the statement and its bind
+      // values as enumerable own properties, so handing the object to `console.error` prints them
+      // even when nothing touched `.message`. Same renderer as the boot abort above.
       console.error(
-        `[platform] extension '${service.packId}': service '${service.name}' threw on shutdown`,
-        e,
+        `[platform] extension '${service.packId}': service '${service.name}' threw on shutdown:`,
+        operatorSafeDbErrorMessage(e),
       );
     }
   }

@@ -191,6 +191,63 @@ function typeImport(target: EmitTarget, names: string): string {
 }
 
 /**
+ * THE DATABASE-REFUSAL DETECTOR the persist handler's catch emits, inline.
+ *
+ * A rendered handler imports the SDK TYPE-ONLY and carries zero runtime dependencies, so it cannot
+ * reach the platform's shared renderer — the check has to travel with the file. It answers the one
+ * question the catch needs: is this error something Postgres raised? If it is, the handler must not
+ * quote it, because Postgres puts the value the caller supplied INSIDE the error — in `detail` on a
+ * constraint violation (`Key (id)=(…) already exists`; for a CHECK, `Failing row contains (…)`, the
+ * entire row), and in the message itself on a coercion refusal (`invalid input syntax for type
+ * uuid: "…"`). The handler's `detail` is journaled and handed back to the model, so it is exactly
+ * the wrong place for a row value to reappear.
+ *
+ * STRUCTURAL, NEVER BY CLASS — the same discipline the platform renderer uses, for the same reason:
+ * the ORM's wrapper and the driver's error are both internal, unexported classes, and an
+ * `instanceof` would stop matching on a version bump without saying so. Two shapes are recognised
+ * along a bounded, cycle-safe `cause` walk: the ORM wrapper (a `query` string beside the array of
+ * values it bound) and the driver's own error (a five-character SQLSTATE in `code` beside one of the
+ * diagnostic fields the wire protocol fills). The SQLSTATE is returned because it comes from a
+ * vocabulary the server publishes and no row value can occupy it — which keeps the refusal
+ * diagnosable without quoting anything the server wrote.
+ */
+function emitDbRefusalDetector(target: EmitTarget): string {
+  const node = (expr: string): string =>
+    asType(target, expr, 'Record<string, unknown> | null | undefined');
+  return `/**
+ * The SQLSTATE of a DATABASE refusal ('unknown' when the shape says database but names no code), or
+ * undefined when this error is not one. Structural — the ORM wrapper and the driver error are both
+ * unexported classes, so an instanceof would fail silently on a version bump.
+ */
+function dbRefusalCode(err${ann(target, 'unknown')})${ann(target, 'string | undefined')} {
+  let cur = ${node('err')};
+  let looksLikeDatabase = false;
+  let sqlstate${ann(target, 'string | undefined')};
+  for (let depth = 0; depth < 5 && cur !== null && cur !== undefined; depth++) {
+    // The ORM wrapper: its message embeds the statement AND every value it bound.
+    if (typeof cur.query === 'string' && (Array.isArray(cur.params) || Array.isArray(cur.parameters))) {
+      looksLikeDatabase = true;
+    }
+    // The driver's error: the wire fields Postgres sends back, copied onto the error verbatim.
+    const code = cur.code;
+    if (
+      typeof code === 'string' &&
+      /^[0-9A-Z]{5}$/.test(code) &&
+      (typeof cur.severity === 'string' ||
+        typeof cur.detail === 'string' ||
+        typeof cur.routine === 'string')
+    ) {
+      looksLikeDatabase = true;
+      if (sqlstate === undefined) sqlstate = code;
+    }
+    cur = ${node('cur.cause')};
+  }
+  if (!looksLikeDatabase) return undefined;
+  return sqlstate ?? 'unknown';
+}`;
+}
+
+/**
  * OPTIONAL server-side CLAMP block(s) — the classification analogue of the FK re-check. Each declared
  * enum column is capped at its author bound, RANKED by that column's own `enumValues` order, between
  * the coercion and the write. Nothing here reads a model arg: the order, the bound and its rank are
@@ -359,6 +416,8 @@ const STORE = ${emitScalar(holes.store)}; // a DECLARED store; init.db fail-clos
 
 ${emitCoerceRow(holes, target)}
 
+${emitDbRefusalDetector(target)}
+
 ${resultShape}
 
 ${signature}
@@ -367,7 +426,19 @@ ${signature}
   try {
 ${armBody}
   } catch (err) {
-    const detail = err instanceof Error ? \`\${err.name}: \${err.message}\` : 'persist failed.';
+    // A DATABASE refusal is reported by its SQLSTATE, never quoted: Postgres echoes the offending
+    // value back inside the error (in \`detail\` on a constraint violation — for a CHECK, the whole
+    // failing row — and in the message itself on a coercion refusal), and this string is journaled
+    // and returned to the model. The withholding is said out loud so a reader does not take the
+    // short line for the whole story. Anything that is NOT a database refusal keeps its own words:
+    // this is a redactor for database failures, not a general message filter.
+    const sqlstate = dbRefusalCode(err);
+    const detail =
+      sqlstate !== undefined
+        ? \`the database refused the write (SQLSTATE \${sqlstate}); its message is withheld here because a driver error echoes the offending value.\`
+        : err instanceof Error
+          ? \`\${err.name}: \${err.message}\`
+          : 'persist failed.';
     return { status: 'failed', detail };
   }
 };

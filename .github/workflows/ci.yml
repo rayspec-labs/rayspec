@@ -163,6 +163,16 @@ jobs:
       # that reads nothing FAILS rather than skipping, so a rename cannot retire the boundary.
       - name: Contribution-dispatch-boundary gate
         run: pnpm gate:dispatch-boundary
+      # Lane 1 runs the test subset that needs no database, and it selects that subset by FILE NAME:
+      # a test that reaches Postgres must be called `*.db.test.ts`. Nothing enforced the convention,
+      # so a database-backed test under an ordinary name was silently carried into the lane that has
+      # no server — where it self-skipped and the lane reported green over an untested proof. This
+      # gate reads each test's REFUSAL to run without DATABASE_URL, directly or through a test-support
+      # module carrying that refusal, and fails when one is not named for it. Needs no database, so it
+      # belongs in this lane and not in lane 2 — and a declared root that resolves to nothing FAILS
+      # rather than scanning what is left.
+      - name: DB-test naming gate
+        run: pnpm gate:db-test-naming
       # A pack that brings its own migration chain declares the table prefix its objects live under.
       # Every CREATE TABLE / CREATE [UNIQUE] INDEX must NAME an object carrying it and every ALTER
       # TABLE / CREATE INDEX ... ON must TARGET one, so a chain cannot reach into a platform table.
@@ -290,6 +300,24 @@ jobs:
       # finds nothing fails. Runs after Build (it drives the CLI's dist entrypoint); touches no database.
       - name: Example-document gate
         run: pnpm gate:example-documents
+
+      # The documented-command gate: a command a shipped document tells a reader to RUN must do what
+      # the document says. It walks the markdown, resolves each document's own shell shortcuts under
+      # bash AND zsh (the macOS login shell, which does not word-split an unquoted expansion), runs
+      # every documented CLI command that names a path in the tree, requires a documented `deploy` to
+      # set the environment its own `doctor` demands, and re-runs each labelled output block to compare
+      # its keys. Commands that cannot run here are counted and printed with a reason — never skipped
+      # silently. Its self-test runs first: a detector that stopped firing must fail loudly rather than
+      # make every green verdict below it meaningless. Runs after Build, and — unlike the
+      # example-document gate beside it — BUILDS THE EXAMPLES itself first, because the documented
+      # commands name compiled artifacts under a gitignored `dist/`: without that step the one deploy
+      # carrying the cron-tenant defect resolves to nothing and is skipped rather than checked.
+      # Touches no database.
+      - name: Documented-command gate — accept control
+        run: pnpm test:gate-documented-commands
+
+      - name: Documented-command gate
+        run: pnpm gate:documented-commands
 
       # The public-API report gate: a package that promises a surface to code built outside this repo
       # declares its report file in its own manifest ("rayspecPublicApi"), and this re-derives that

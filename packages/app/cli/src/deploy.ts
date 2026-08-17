@@ -34,6 +34,7 @@
  */
 
 import { type ParseArgsConfig, parseArgs } from 'node:util';
+import { operatorSafeDbErrorStack } from '@rayspec/db';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
 // FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
@@ -659,12 +660,24 @@ export async function serveDeployment(
   // LEFTOVER-ENV REBOOT SEMANTICS (honest): a delta is NON-IDEMPOTENT, and this env PERSISTS in the
   // process — a process manager (systemd/docker `Restart=always`) that RESTARTS the command with
   // --apply-migration still present re-enters update mode on the next boot. BOTH profiles are reboot-safe
-  // by construction: they CLASSIFY the live schema FIRST and MOUNT a present-matching schema (the delta
-  // already landed on a prior boot) instead of re-applying a non-idempotent delta and crash-looping on a
-  // duplicate_column (42701) — the PRODUCT profile in product-boot, the BACKEND profile in the
-  // composition root's update branch (both route through the shared planUpdateBoot). Leaving
-  // --apply-migration in a process-managed unit is therefore SAFE (it applies once, mounts thereafter);
-  // still, drop it once the delta has landed to keep the operator intent explicit.
+  // by construction: they CLASSIFY the live schema FIRST and then PROBE THE OBJECTS THE DELTA ITSELF
+  // NAMES — a present-matching classification is reached BOTH by a delta that landed and by one that
+  // never ran, so it does not decide on its own. A delta whose objects are all in the state an applied
+  // delta leaves them in MOUNTS instead of re-applying a non-idempotent delta and crash-looping on a
+  // duplicate_column (42701); one whose objects are not there is APPLIED; a HALF-LANDED one is REFUSED,
+  // naming both sides — the PRODUCT profile in product-boot, the BACKEND profile in the composition
+  // root's update branch (both route through the shared planUpdateBoot). ONE SHAPE is not decidable this
+  // way and is the one place this path can silently drop a reviewed change: a delta that FREES a name and
+  // PUTS IT BACK (`DROP INDEX "ix"` + `CREATE INDEX "ix"` — an index REDEFINITION, which drizzle emits
+  // for a changed index and is the likeliest real instance — or `DROP TABLE "t"` + `CREATE TABLE "t"`,
+  // or the same change as one multi-clause
+  // `ALTER TABLE`, or a rename-aside rebuild — `RENAME TO "t_old"` + `CREATE TABLE "t"` +
+  // `DROP TABLE "t_old"`, where the name the rename gives the table is gone in both states too; the
+  // `IF [NOT] EXISTS` spellings count the same) leaves the schema holding that name in
+  // BOTH states, so the boot claims nothing, MOUNTS, and its log says it measured nothing rather than
+  // calling the env stale. Leaving --apply-migration in a
+  // process-managed unit is therefore SAFE (it applies once, mounts thereafter); still, drop it once the
+  // delta has landed to keep the operator intent explicit.
   if (migrationPath !== undefined) process.env.RAYSPEC_UPDATE_MIGRATION = migrationPath;
   if (allowlistPath !== undefined) process.env.RAYSPEC_UPDATE_ALLOWLIST = allowlistPath;
 
@@ -835,9 +848,15 @@ export async function serveDeployment(
       // searched — the one fact the operator whose ./.env sits in the invoking project needs.
       console.error(`[rayspec deploy] ${err.message}${missingEnvSearchedSuffix(err.message)}`);
     } else {
+      // The stack, redacted — the other half of the parity the list above is kept for. A boot
+      // failure on a database write arrives as a driver error whose stack BEGINS with what the
+      // server said: through the ORM door the statement and every value it bound, through the
+      // raw-SQL door the server's own sentence, which on a coercion refusal is the offending value.
+      // The renderer replaces that header and keeps the frames; anything that is not a database
+      // failure passes through unchanged.
       console.error(
         '[rayspec deploy] boot failed:',
-        err instanceof Error ? err.stack : String(err),
+        operatorSafeDbErrorStack(err) ?? (err instanceof Error ? err.stack : String(err)),
       );
     }
     process.exit(1);

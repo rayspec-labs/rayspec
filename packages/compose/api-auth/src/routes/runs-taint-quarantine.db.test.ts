@@ -8,7 +8,7 @@
  * run path (`runs.ts`): when a run fails with a transient `errorClass` (rate_limited / upstream_5xx /
  * timeout) the `agent_run` reservation is RELEASED so a same-Idempotency-Key client retry RE-RUNS
  * `runAgent` FRESH (`replay=false`). That is SAFE for an idempotent / no-tool run (the existing
- * runs.test.ts proves the safe-release case). It is UNSAFE for a run that already fired a NON-idempotent
+ * runs.db.test.ts proves the safe-release case). It is UNSAFE for a run that already fired a NON-idempotent
  * (`idempotent:false`) tool (e.g. `charge_card`): the retry re-runs fresh, the `dispatch.ts` non-idempotent
  * guard only blocks on `replay===true`, so the side effect FIRES AGAIN — a double-charge.
  *

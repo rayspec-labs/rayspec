@@ -20,6 +20,7 @@ import {
   errorEnvelope,
   STATUS_BY_CODE,
 } from '@rayspec/auth-core';
+import { operatorSafeDbErrorMessage, operatorSafeDbErrorStack } from '@rayspec/db';
 import { StoreInputError } from '@rayspec/platform';
 import type { Context } from 'hono';
 import { cors } from 'hono/cors';
@@ -407,22 +408,33 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
  *
  * SERVER-SIDE ONLY: this line is never sent to the client — the client still gets the bare closed
  * envelope. HONESTY: a CURATED error (an `ApiError`, incl. the 409 conflict, or a returned run
- * envelope) carries only a code + a static message and never a row value; but a RAW unexpected-error
- * `message`/`stack` (the uncontrolled-500 path) MAY embed caller input (e.g. a Postgres
- * `Key (col)=(val) already exists` detail) — this is standard operational logging, acceptable because
- * it stays server-side. Fail-safe: a 5xx may be happening DURING a DB/logging outage, so the log path
- * does NO DB write and NEVER throws — a thrown/absent logger is swallowed so a failed log can never
- * turn a 5xx into a crash.
+ * envelope) carries only a code + a static message and never a row value; a RAW unexpected-error
+ * `message`/`stack` (the uncontrolled-500 path) may still embed caller input, and this is standard
+ * operational logging, acceptable because it stays server-side.
+ *
+ * ⚠ ONE CLASS OF CALLER INPUT IS NOT ACCEPTABLE HERE AND IS REDACTED. An earlier version of this
+ * docblock reasoned about the posture and gave its example as a Postgres `Key (col)=(val)` DETAIL —
+ * but what a failed database write actually put on this path was the whole BIND VALUE LIST, because
+ * the ORM embeds the statement and its parameters in the error's `message`, and a wrapped error's
+ * `stack` begins with that same message. That is arbitrary row data on every uncontrolled 500 of
+ * every route, so both reads now go through `operatorSafeDbErrorMessage` /
+ * `operatorSafeDbErrorStack`, which keep the refusal and the parameterized statement and drop the
+ * values. The `detail` half of the original example is a separate and narrower disclosure and is
+ * deliberately left where it was.
+ *
+ * Fail-safe: a 5xx may be happening DURING a DB/logging outage, so the log path does NO DB write and
+ * NEVER throws — a thrown/absent logger is swallowed so a failed log can never turn a 5xx into a
+ * crash.
  */
 function logServerError(deps: AppDeps, requestId: string, status: number, err: unknown): void {
   try {
     const code: ErrorCode | undefined =
       err instanceof ApiError ? err.code : err instanceof Error ? 'INTERNAL' : undefined;
-    const message = err instanceof Error ? err.message : undefined;
+    const message = err instanceof Error ? operatorSafeDbErrorMessage(err) : undefined;
     const codePart = code !== undefined ? ` code=${code}` : '';
     const messagePart = message !== undefined ? `: ${message}` : '';
     const line = `[api-auth] 5xx status=${status} requestId=${requestId}${codePart}${messagePart}`;
-    const stack = err instanceof Error ? err.stack : undefined;
+    const stack = operatorSafeDbErrorStack(err);
     const log = deps.logError ?? defaultLogError;
     log(line, stack);
   } catch {

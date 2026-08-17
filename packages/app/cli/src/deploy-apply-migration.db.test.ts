@@ -1,7 +1,7 @@
 /**
  * `rayspec deploy --apply-migration` — GROUND-TRUTH acceptance on real Postgres, END-TO-END through the
- * REAL CLI (a spawned `node dist/index.js deploy … --apply-migration …` subprocess). Two arms, each on
- * its OWN throwaway database:
+ * REAL CLI (a spawned `node dist/index.js deploy … --apply-migration …` subprocess). Seven arms, each
+ * on its OWN throwaway database:
  *
  *   1. ADDITIVE   — materialize a minimal agent-free backend, SEED rows, then reboot with
  *                   `--apply-migration <additive.sql>`; assert the reviewed delta LANDED (the new column
@@ -10,6 +10,28 @@
  *                   `--apply-migration <drop.sql>` and NO reviewed --allowlist; assert the boot is
  *                   BLOCKED (the subprocess exits non-zero at the EXISTING deploy() gate — "roll-out
  *                   refused"), and the schema + data are INTACT (fail-closed applied nothing).
+ *   3. LEFTOVER   — the additive delta applied ONCE, then the IDENTICAL command again: the second boot
+ *                   MOUNTS (no 42701 crash-loop) and the column + rows are untouched.
+ *   4. HAND-SHAPED — a delta whose only object is an index the `stores` grammar cannot express, so the
+ *                   classify is drift-clean either way: it APPLIES while the index is absent and MOUNTS
+ *                   once it is there (both read off `pg_indexes`).
+ *   5. RECYCLED NAME — a reviewed RENAME that frees a name the SAME delta re-creates. The freed name is
+ *                   in the catalog in BOTH states, so it cannot decide anything; the name the rename
+ *                   GIVES the table can. Applies while that name is absent, MOUNTS once it is there —
+ *                   and the mount is not a formality: re-running `RENAME TO` raises 42P07 and the third
+ *                   boot would never become ready.
+ *   6. GENERATED SPELLING — arm 5's delta as drizzle-kit really writes it (`CREATE TABLE IF NOT
+ *                   EXISTS`). Same three boots, same ground truth: the spelling changes nothing about
+ *                   what the delta does and everything about what the boot could read, so arm 5's
+ *                   guarantee was hollow against a generated delta until this arm passed.
+ *   7. STAGING TABLE — a delta that CREATES a backup table and DROPS it again in the same file. Its
+ *                   absence is not evidence the reviewed DROP ran (the delta creates it), and reading
+ *                   it as such refused a never-applied delta as HALF LANDED: the boot never served.
+ *   8. RENAME CHAIN — `a → b` + `b → c`, in ALL THREE states an operator can put the schema in. Never
+ *                   applied APPLIES and fully applied MOUNTS, as before; the HALF-applied one (only `b`,
+ *                   reachable by a hand-edit or an interruption between the two statements) is the one
+ *                   this arm exists for — it is REFUSED naming what it found, where it used to route to
+ *                   APPLY and die on a raw `42P01` re-running the first rename.
  *
  * This proves the CLI FLAG reaches the EXISTING gated migration engine (no new engine): arg parse →
  * read-spec jail → RAYSPEC_UPDATE_MIGRATION env → serve-opts updateMigrations → deploy()'s gated
@@ -37,11 +59,21 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let additiveRan = 0;
 let destructiveRan = 0;
 let rebootRan = 0;
+let handShapedRan = 0;
+let recycledNameRan = 0;
+let generatedSpellingRan = 0;
+let stagingTableRan = 0;
+let renameChainRan = 0;
 
 const TENANT = '00000000-0000-4000-8000-0000000000ad';
 const ADD_DB = `rayspec_cli_applymig_add_${process.pid}`;
 const DROP_DB = `rayspec_cli_applymig_drop_${process.pid}`;
 const REBOOT_DB = `rayspec_cli_applymig_reboot_${process.pid}`;
+const HAND_DB = `rayspec_cli_applymig_hand_${process.pid}`;
+const RECYCLE_DB = `rayspec_cli_applymig_recycle_${process.pid}`;
+const GENERATED_DB = `rayspec_cli_applymig_generated_${process.pid}`;
+const STAGING_DB = `rayspec_cli_applymig_staging_${process.pid}`;
+const CHAIN_DB = `rayspec_cli_applymig_chain_${process.pid}`;
 const PORT_BASE = 19000 + (process.pid % 900);
 
 // A minimal AGENT-FREE backend: one store + one declarative read route (no agents, no durable worker,
@@ -71,6 +103,97 @@ api:
 `;
 const ADDITIVE_DELTA = 'ALTER TABLE parts ADD COLUMN note text;\n';
 const DESTRUCTIVE_DELTA = 'ALTER TABLE parts DROP COLUMN label;\n';
+// A delta whose ONLY object is a HAND-SHAPED INDEX — an object the `stores` grammar cannot express and
+// therefore one `detectDrift` never inspects, so the live schema stays drift-clean against the SAME
+// spec whether or not the delta ran. The DO block is the literal decoy: a `;` inside a dollar-quoted
+// body is not a statement boundary and the `DROP TABLE` in its NOTICE text is not a DROP.
+// Two hand-shaped indexes, in the two shapes a HUMAN writes them: the generator-style quoted name, and
+// an UNQUOTED mixed-case one — which Postgres FOLDS, so the catalog holds `parts_label_hand_idx`. A boot
+// that probed the name as written would find nothing, re-run the CREATE INDEX and die on 42P07.
+const HAND_INDEX_DELTA =
+  "DO $tag1$ BEGIN PERFORM 1; RAISE NOTICE 'DROP TABLE scratchpad'; END $tag1$;\n" +
+  '--> statement-breakpoint\n' +
+  'CREATE INDEX "parts_label_idx" ON "parts" USING btree ("label");\n' +
+  '--> statement-breakpoint\n' +
+  'CREATE INDEX Parts_Label_Hand_Idx ON "parts" USING btree ("label");\n';
+
+// A reviewed RENAME that FREES a name the SAME delta re-creates — the shape where the freed name proves
+// nothing, because it is in the catalog before the delta (the table being renamed away) and after it
+// (the table the delta creates in its place). Nothing here is expressible in the `stores` grammar, so
+// the classify is drift-clean either way and only the delta's own objects can decide.
+const RECYCLED_NAME_DELTA =
+  'ALTER TABLE "scratch" RENAME TO "scratch_archive";\n' +
+  '--> statement-breakpoint\n' +
+  'CREATE TABLE "scratch" ("id" uuid PRIMARY KEY, "note" text);\n';
+const RECYCLED_NAME_ALLOWLIST = JSON.stringify(
+  [
+    {
+      kind: 'rename-table',
+      match: 'ALTER TABLE "scratch" RENAME TO "scratch_archive"',
+      reason: 'reviewed: keep the old scratch rows under an archive name, start a new scratch',
+    },
+  ],
+  null,
+  2,
+);
+
+// The SAME recycled-name shape as above, written the way drizzle-kit ACTUALLY generates it: the create
+// carries `IF NOT EXISTS`. That spelling made no difference to what the delta does to the schema — and
+// all the difference to what the boot could read, because the reader that answers "does this delta
+// leave that name standing" excluded the idempotent forms. Against that, `scratch` looked un-recycled,
+// the rename was read as un-landed on a delta that had FULLY landed, and boot 3 died on 42P07.
+const GENERATED_SPELLING_DELTA =
+  'ALTER TABLE "scratch" RENAME TO "scratch_archive";\n' +
+  '--> statement-breakpoint\n' +
+  'CREATE TABLE IF NOT EXISTS "scratch" ("id" uuid PRIMARY KEY, "note" text);\n';
+
+// An ordinary staging-table delta: build a backup table, do the work, drop the backup. The backup is a
+// name the delta itself CREATES, so "it is not there" is true BEFORE the delta as much as after it —
+// and reading that absence as "the reviewed DROP landed" made a never-applied delta look half-landed
+// (one object landed, one not), which REFUSED the boot. No restart cleared it.
+const STAGING_DELTA =
+  'CREATE TABLE "parts_backup" ("id" uuid PRIMARY KEY, "label" text);\n' +
+  '--> statement-breakpoint\n' +
+  'CREATE INDEX "parts_label_stage_idx" ON "parts" USING btree ("label");\n' +
+  '--> statement-breakpoint\n' +
+  'DROP TABLE "parts_backup";\n';
+const STAGING_ALLOWLIST = JSON.stringify(
+  [
+    {
+      kind: 'drop-table',
+      match: 'DROP TABLE "parts_backup"',
+      reason: 'reviewed: the staging table this delta created two statements earlier',
+    },
+  ],
+  null,
+  2,
+);
+
+// A RENAME CHAIN: the same table renamed twice in one delta. The middle name exists only BETWEEN the
+// two statements — not before the delta and not after it — so finding it in the catalog is the only
+// thing that separates a HALF-applied chain (the first rename ran, the second did not) from one that
+// never ran at all. Reading it as un-landed evidence alone routed the half-applied state to APPLY,
+// which re-runs `chain_a → chain_b` against a table that is no longer there.
+const RENAME_CHAIN_DELTA =
+  'ALTER TABLE "chain_a" RENAME TO "chain_b";\n' +
+  '--> statement-breakpoint\n' +
+  'ALTER TABLE "chain_b" RENAME TO "chain_c";\n';
+const RENAME_CHAIN_ALLOWLIST = JSON.stringify(
+  [
+    {
+      kind: 'rename-table',
+      match: 'ALTER TABLE "chain_a" RENAME TO "chain_b"',
+      reason: 'reviewed: the first leg of the rename chain',
+    },
+    {
+      kind: 'rename-table',
+      match: 'ALTER TABLE "chain_b" RENAME TO "chain_c"',
+      reason: 'reviewed: the second leg of the rename chain',
+    },
+  ],
+  null,
+  2,
+);
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -186,11 +309,28 @@ describe.skipIf(!baseUrl)(
       writeFileSync(join(workDir, 'v2.rayspec.yaml'), SPEC_V2);
       writeFileSync(join(workDir, '0001_add_note.sql'), ADDITIVE_DELTA);
       writeFileSync(join(workDir, '0001_drop_label.sql'), DESTRUCTIVE_DELTA);
+      writeFileSync(join(workDir, '0002_hand_index.sql'), HAND_INDEX_DELTA);
+      writeFileSync(join(workDir, '0003_recycle_scratch.sql'), RECYCLED_NAME_DELTA);
+      writeFileSync(join(workDir, '0003_recycle_scratch.allowlist.json'), RECYCLED_NAME_ALLOWLIST);
+      writeFileSync(join(workDir, '0004_recycle_generated.sql'), GENERATED_SPELLING_DELTA);
+      writeFileSync(
+        join(workDir, '0004_recycle_generated.allowlist.json'),
+        RECYCLED_NAME_ALLOWLIST,
+      );
+      writeFileSync(join(workDir, '0005_staging_backup.sql'), STAGING_DELTA);
+      writeFileSync(join(workDir, '0005_staging_backup.allowlist.json'), STAGING_ALLOWLIST);
+      writeFileSync(join(workDir, '0006_rename_chain.sql'), RENAME_CHAIN_DELTA);
+      writeFileSync(join(workDir, '0006_rename_chain.allowlist.json'), RENAME_CHAIN_ALLOWLIST);
       const { privateKey } = await generateKeyPair('RS256', { extractable: true });
       pem = await exportPKCS8(privateKey);
       await createDb(ADD_DB);
       await createDb(DROP_DB);
       await createDb(REBOOT_DB);
+      await createDb(HAND_DB);
+      await createDb(RECYCLE_DB);
+      await createDb(GENERATED_DB);
+      await createDb(STAGING_DB);
+      await createDb(CHAIN_DB);
     }, 120_000);
 
     afterAll(async () => {
@@ -203,7 +343,16 @@ describe.skipIf(!baseUrl)(
       if (baseUrl) {
         const admin = postgres(adminUrl(baseUrl), { max: 1 });
         try {
-          for (const name of [ADD_DB, DROP_DB, REBOOT_DB]) {
+          for (const name of [
+            ADD_DB,
+            DROP_DB,
+            REBOOT_DB,
+            HAND_DB,
+            RECYCLE_DB,
+            GENERATED_DB,
+            STAGING_DB,
+            CHAIN_DB,
+          ]) {
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}_dbos_sys" WITH (FORCE)`);
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
           }
@@ -377,6 +526,486 @@ describe.skipIf(!baseUrl)(
       },
       300_000,
     );
+
+    // ── The delta's OWN object decides, not the spec-derived classify (#440) ─────────────────────────
+    // A hand-shaped index is not expressible in the `stores` grammar, so `detectDrift` never inspects it
+    // and the live schema reads drift-clean against the SAME spec whether or not the delta ran. BOTH
+    // directions, on ground truth from `pg_indexes`:
+    //   (a) the index is ABSENT  ⇒ the delta is UNAPPLIED ⇒ it APPLIES (RED: the boot mounted, said the
+    //       delta "was already applied on a PRIOR boot", told the operator to remove the flag — and
+    //       `select count(*) from pg_indexes where indexname='parts_label_idx'` returned 0);
+    //   (b) the index is PRESENT ⇒ the delta really did land ⇒ the SAME command MOUNTS (re-applying the
+    //       non-idempotent CREATE INDEX raises 42P07 and the boot would never serve).
+    // One of the two indexes is written UNQUOTED and mixed-case, the way a human writes one, so (b) also
+    // pins that the boot probes the name the CATALOG holds (folded) rather than the name as typed —
+    // probing the typed name reads ABSENT on an index that is right there, and boot 3 dies on 42P07.
+    maybe(
+      'a delta whose only objects are HAND-SHAPED INDEXES APPLIES on a drift-clean schema, and MOUNTS once those objects are really there',
+      async () => {
+        handShapedRan += 1;
+        const appDb = withDbName(baseUrl as string, HAND_DB);
+
+        /** GROUND TRUTH — the exact catalog read the field report used. */
+        const indexCount = async (name = 'parts_label_idx'): Promise<number> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = $1`,
+              [name],
+            )) as unknown as { n: number }[];
+            return rows[0]?.n ?? -1;
+          } finally {
+            await c.end();
+          }
+        };
+
+        // Boot 1 — materialize the backend and seed rows (so a drop+recreate would be visible too).
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 7);
+        await waitForBoot(PORT_BASE + 7, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Org', 'org')`, [
+            TENANT,
+          ]);
+          await seed.unsafe(
+            `INSERT INTO parts (tenant_id, label) VALUES ($1,'a'),($1,'b'),($1,'c')`,
+            [TENANT],
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+        expect(await indexCount()).toBe(0);
+
+        // Boot 2 — the SAME spec (the index is not expressible in it) + the reviewed delta.
+        const boot2 = spawnDeploy(
+          ['v1.rayspec.yaml', '--apply-migration', '0002_hand_index.sql'],
+          appDb,
+          PORT_BASE + 8,
+        );
+        await waitForBoot(PORT_BASE + 8, 120_000, boot2);
+        expect(await indexCount()).toBe(1); // the delta LANDED
+        // GROUND TRUTH for the fold: the unquoted `Parts_Label_Hand_Idx` is in the catalog LOWER-CASED,
+        // so the name the boot must probe is the folded one — asking for the name as written finds nothing.
+        expect(await indexCount('parts_label_hand_idx')).toBe(1);
+        expect(await indexCount('Parts_Label_Hand_Idx')).toBe(0);
+        // and the operator was NOT told to drop a flag whose delta had not run.
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the LEFTOVER env on the now-indexed schema: the delta really did land, so the same
+        // command must MOUNT. (A re-apply raises 42P07 and this boot would never become ready.)
+        const boot3 = spawnDeploy(
+          ['v1.rayspec.yaml', '--apply-migration', '0002_hand_index.sql'],
+          appDb,
+          PORT_BASE + 9,
+        );
+        await waitForBoot(PORT_BASE + 9, 120_000, boot3);
+        expect(await indexCount()).toBe(1); // created ONCE, not twice, not dropped
+        expect(await indexCount('parts_label_hand_idx')).toBe(1); // …and so was the unquoted one
+        expect(stderrOf(boot3)).toMatch(/parts_label_idx/); // the mount log NAMES what it probed
+        expect(stderrOf(boot3)).toMatch(/parts_label_hand_idx/); // by the name the CATALOG holds
+        expect(stderrOf(boot3)).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // now it really is stale
+        const check = postgres(appDb, { max: 1 });
+        try {
+          const rows = (await check.unsafe(`SELECT count(*)::int AS n FROM parts`)) as unknown as {
+            n: number;
+          }[];
+          expect(rows[0]?.n).toBe(3); // the seeded rows never moved
+        } finally {
+          await check.end();
+        }
+        await shutdown(boot3);
+      },
+      300_000,
+    );
+
+    // ── A RENAME that frees a name the SAME delta re-creates ────────────────────────────────────────
+    // `ALTER TABLE "scratch" RENAME TO "scratch_archive"` + `CREATE TABLE "scratch"`: the name the rename
+    // frees is back at the end of the delta, so "scratch is still there" is TRUE before the delta and
+    // TRUE after it — it cannot tell the two apart, and reading it as "the rename has not run" re-applied
+    // a delta that had fully landed. `scratch_archive` is the name that decides. BOTH directions, on
+    // ground truth from `information_schema.tables`:
+    //   (a) `scratch_archive` ABSENT  ⇒ the delta never ran ⇒ it APPLIES (and the rows move with the
+    //       renamed table, which is what makes the rename observable rather than a re-create);
+    //   (b) `scratch_archive` PRESENT ⇒ it ran ⇒ the SAME command MOUNTS. (RED on this branch's previous
+    //       head: routed to APPLY, `ALTER TABLE "scratch" RENAME TO "scratch_archive"` raised 42P07
+    //       "relation already exists", the boot exited before serving and never became ready.)
+    maybe(
+      'a reviewed RENAME that frees a name the SAME delta re-creates APPLIES once, then MOUNTS (the boot still serves)',
+      async () => {
+        recycledNameRan += 1;
+        const appDb = withDbName(baseUrl as string, RECYCLE_DB);
+
+        /** GROUND TRUTH — is this table in the live catalog, and how many rows does it hold? */
+        const tables = async (): Promise<string[]> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name IN ('scratch', 'scratch_archive')
+                ORDER BY table_name`,
+            )) as unknown as { table_name: string }[];
+            return rows.map((r) => r.table_name);
+          } finally {
+            await c.end();
+          }
+        };
+        const rowCount = async (table: string): Promise<number> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM "${table}"`,
+            )) as unknown as { n: number }[];
+            return rows[0]?.n ?? -1;
+          } finally {
+            await c.end();
+          }
+        };
+
+        // Boot 1 — materialize the backend, then hand-create the `scratch` table the delta renames away
+        // and seed it. It is NOT in the spec, so `detectDrift` never inspects it: the classify reads
+        // drift-clean before AND after the delta, which is the whole reason this decision needs a probe.
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 10);
+        await waitForBoot(PORT_BASE + 10, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`CREATE TABLE "scratch" ("id" uuid PRIMARY KEY, "note" text)`);
+          await seed.unsafe(
+            `INSERT INTO "scratch" ("id", "note") VALUES (gen_random_uuid(), 'keep me')`,
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+        expect(await tables()).toEqual(['scratch']); // only the old name so far
+
+        // Boot 2 — the SAME spec + the reviewed delta: the delta has NOT run (no `scratch_archive`), so
+        // it must APPLY rather than mount and lose the rename.
+        const boot2 = spawnDeploy(
+          [
+            'v1.rayspec.yaml',
+            '--apply-migration',
+            '0003_recycle_scratch.sql',
+            '--allowlist',
+            '0003_recycle_scratch.allowlist.json',
+          ],
+          appDb,
+          PORT_BASE + 11,
+        );
+        await waitForBoot(PORT_BASE + 11, 120_000, boot2);
+        expect(await tables()).toEqual(['scratch', 'scratch_archive']); // the delta LANDED
+        expect(await rowCount('scratch_archive')).toBe(1); // the seeded row MOVED with the rename
+        expect(await rowCount('scratch')).toBe(0); // …and the re-created table is a fresh one
+        // The operator was NOT told to drop a flag whose delta had just been applied by this boot.
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the LEFTOVER env on the schema the delta leaves behind. `scratch` is there again, so
+        // the old name says nothing; `scratch_archive` is there, so the delta ran ⇒ MOUNT. Re-applying
+        // would raise 42P07 on `scratch_archive` and this boot would never become ready.
+        const boot3 = spawnDeploy(
+          [
+            'v1.rayspec.yaml',
+            '--apply-migration',
+            '0003_recycle_scratch.sql',
+            '--allowlist',
+            '0003_recycle_scratch.allowlist.json',
+          ],
+          appDb,
+          PORT_BASE + 12,
+        );
+        await waitForBoot(PORT_BASE + 12, 120_000, boot3); // becomes ready ⇒ the rename did NOT re-run
+        expect(await tables()).toEqual(['scratch', 'scratch_archive']);
+        expect(await rowCount('scratch_archive')).toBe(1); // renamed ONCE — the rows never moved again
+        expect(stderrOf(boot3)).toMatch(/scratch_archive/); // the mount log NAMES what it probed
+        expect(stderrOf(boot3)).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // now it really is stale
+        await shutdown(boot3);
+      },
+      300_000,
+    );
+
+    // ── The SAME shape in the spelling drizzle-kit generates ────────────────────────────────────────
+    // Arm 5 proves the recycled-name reading on a delta whose create is written `CREATE TABLE "scratch"`.
+    // A generator writes `CREATE TABLE IF NOT EXISTS "scratch"`, and against that spelling the reading
+    // was hollow: the reader that answers "does this delta leave that name standing" excluded every
+    // idempotent form, so `scratch` did not look recycled at all and the rename was measured by the name
+    // it renames AWAY — which is there in both states. RED end-to-end on this branch's previous head:
+    //
+    //   Error: deploy subprocess exited early (code 1) before serving
+    //   [rayspec deploy] roll-out refused: deploy aborted at [migrate]: migration
+    //     '0004_recycle_generated.sql' failed to apply (relation "scratch_archive" already exists).
+    //
+    // Under `Restart=always` that boot never serves. Same three boots, same ground truth as arm 5.
+    maybe(
+      'the recycled-name delta in the GENERATED spelling (CREATE TABLE IF NOT EXISTS) applies once, then MOUNTS',
+      async () => {
+        generatedSpellingRan += 1;
+        const appDb = withDbName(baseUrl as string, GENERATED_DB);
+
+        const tables = async (): Promise<string[]> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name IN ('scratch', 'scratch_archive')
+                ORDER BY table_name`,
+            )) as unknown as { table_name: string }[];
+            return rows.map((r) => r.table_name);
+          } finally {
+            await c.end();
+          }
+        };
+        const rowCount = async (table: string): Promise<number> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM "${table}"`,
+            )) as unknown as { n: number }[];
+            return rows[0]?.n ?? -1;
+          } finally {
+            await c.end();
+          }
+        };
+        const flags = [
+          'v1.rayspec.yaml',
+          '--apply-migration',
+          '0004_recycle_generated.sql',
+          '--allowlist',
+          '0004_recycle_generated.allowlist.json',
+        ];
+
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 13);
+        await waitForBoot(PORT_BASE + 13, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`CREATE TABLE "scratch" ("id" uuid PRIMARY KEY, "note" text)`);
+          await seed.unsafe(
+            `INSERT INTO "scratch" ("id", "note") VALUES (gen_random_uuid(), 'keep me')`,
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+        expect(await tables()).toEqual(['scratch']);
+
+        // Boot 2 — never applied ⇒ APPLY, and the rows move with the renamed table.
+        const boot2 = spawnDeploy(flags, appDb, PORT_BASE + 14);
+        await waitForBoot(PORT_BASE + 14, 120_000, boot2);
+        expect(await tables()).toEqual(['scratch', 'scratch_archive']);
+        expect(await rowCount('scratch_archive')).toBe(1);
+        expect(await rowCount('scratch')).toBe(0);
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the identical command on the schema the delta leaves behind. Becoming ready IS the
+        // proof: a re-applied `RENAME TO` raises 42P07 and this boot would exit before serving.
+        const boot3 = spawnDeploy(flags, appDb, PORT_BASE + 15);
+        await waitForBoot(PORT_BASE + 15, 120_000, boot3);
+        expect(await tables()).toEqual(['scratch', 'scratch_archive']);
+        expect(await rowCount('scratch_archive')).toBe(1); // renamed ONCE — the rows never moved again
+        expect(stderrOf(boot3)).toMatch(/scratch_archive/); // the mount log names what it probed
+        expect(stderrOf(boot3)).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot3);
+      },
+      300_000,
+    );
+
+    // ── A staging table the delta creates and drops in the same file ────────────────────────────────
+    // The `gone` reading had no dual to the guard the `stillThere` reading already had: a DROP target
+    // the SAME delta creates is absent BEFORE the delta too, so its absence is not evidence the DROP
+    // ran. RED end-to-end on this branch's head — boot 2, on a delta that had plainly never run:
+    //
+    //   Error: deploy subprocess exited early (code 1) before serving
+    //   [rayspec deploy] roll-out refused: … the reviewed delta is only HALF LANDED …
+    //     • ALREADY landed: table "parts_backup" — a reviewed DROP in the delta names it, and it is GONE
+    //     • NOT landed:     index "parts_label_stage_idx" — a CREATE in the delta names it, and it is NOT there
+    //
+    // The boot never served, and no restart cleared it.
+    maybe(
+      'a delta that CREATES and then DROPS a staging table is APPLIED, and the boot serves',
+      async () => {
+        stagingTableRan += 1;
+        const appDb = withDbName(baseUrl as string, STAGING_DB);
+
+        const objects = async (): Promise<{ index: number; backup: number }> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const idx = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'parts_label_stage_idx'`,
+            )) as unknown as { n: number }[];
+            const bak = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'parts_backup'`,
+            )) as unknown as { n: number }[];
+            return { index: idx[0]?.n ?? -1, backup: bak[0]?.n ?? -1 };
+          } finally {
+            await c.end();
+          }
+        };
+        const flags = [
+          'v1.rayspec.yaml',
+          '--apply-migration',
+          '0005_staging_backup.sql',
+          '--allowlist',
+          '0005_staging_backup.allowlist.json',
+        ];
+
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 16);
+        await waitForBoot(PORT_BASE + 16, 120_000, boot1);
+        await shutdown(boot1);
+        expect(await objects()).toEqual({ index: 0, backup: 0 }); // neither object exists yet
+
+        // Boot 2 — the delta has NEVER run: it must APPLY and the boot must SERVE.
+        const boot2 = spawnDeploy(flags, appDb, PORT_BASE + 17);
+        await waitForBoot(PORT_BASE + 17, 120_000, boot2);
+        // The index landed; the staging table was created and dropped again inside the same delta.
+        expect(await objects()).toEqual({ index: 1, backup: 0 });
+        expect(stderrOf(boot2)).not.toMatch(/HALF LANDED/);
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the leftover env on the applied schema: the index is there, so the delta ran ⇒ MOUNT.
+        // (A re-applied `CREATE INDEX` raises 42P07 and this boot would never become ready.)
+        const boot3 = spawnDeploy(flags, appDb, PORT_BASE + 18);
+        await waitForBoot(PORT_BASE + 18, 120_000, boot3);
+        expect(await objects()).toEqual({ index: 1, backup: 0 });
+        expect(stderrOf(boot3)).toMatch(/parts_label_stage_idx/); // named off the live catalog
+        // …and the mount log claims the index and NOT the staging table, whose absence proved nothing.
+        expect(stderrOf(boot3)).not.toMatch(/parts_backup/);
+        expect(stderrOf(boot3)).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot3);
+      },
+      300_000,
+    );
+
+    // ── A rename CHAIN, in all three states the schema can be in ────────────────────────────────────
+    // `chain_a → chain_b` + `chain_b → chain_c`. The middle name is at NEITHER end of the delta, so it
+    // is the only thing that can say the delta stopped halfway. Three states, one command:
+    //   · only `chain_a`  — never applied  ⇒ APPLY, and the rows arrive under `chain_c`.
+    //   · only `chain_c`  — fully applied  ⇒ MOUNT, and the boot serves (a re-applied first rename
+    //                        raises 42P01 and this boot would never become ready).
+    //   · only `chain_b`  — HALF applied   ⇒ REFUSE, naming what it found and what it did not.
+    // The half-applied state is reached the way an operator reaches it: by hand, between the two
+    // statements (`deploy()` applies a delta all-or-nothing).
+    //
+    // RED end-to-end on this branch's base — the half-applied boot routed to APPLY and died with the
+    // driver's own words, having run one statement of a delta it had called unapplied:
+    //
+    //   Error: deploy subprocess exited early (code 1) before serving
+    //   [rayspec deploy] roll-out refused: deploy aborted at [migrate]: migration
+    //     '0006_rename_chain.sql' failed to apply (relation "chain_a" does not exist).
+    //
+    // Both states exit non-zero, so the exit code proves nothing here: what changed is WHICH refusal
+    // the operator gets, and that the boot names the half-landed name instead of a raw 42P01.
+    maybe(
+      'a rename CHAIN applies once, mounts thereafter, and is REFUSED half-applied — with the rows intact throughout',
+      async () => {
+        renameChainRan += 1;
+        const appDb = withDbName(baseUrl as string, CHAIN_DB);
+
+        /** GROUND TRUTH — which of the three names the catalog holds, and how many rows it holds. */
+        const tables = async (): Promise<string[]> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name IN ('chain_a', 'chain_b', 'chain_c')
+                ORDER BY table_name`,
+            )) as unknown as { table_name: string }[];
+            return rows.map((r) => r.table_name);
+          } finally {
+            await c.end();
+          }
+        };
+        const rowCount = async (table: string): Promise<number> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM "${table}"`,
+            )) as unknown as { n: number }[];
+            return rows[0]?.n ?? -1;
+          } finally {
+            await c.end();
+          }
+        };
+        const renameByHand = async (from: string, to: string): Promise<void> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            await c.unsafe(`ALTER TABLE "${from}" RENAME TO "${to}"`);
+          } finally {
+            await c.end();
+          }
+        };
+        const flags = [
+          'v1.rayspec.yaml',
+          '--apply-migration',
+          '0006_rename_chain.sql',
+          '--allowlist',
+          '0006_rename_chain.allowlist.json',
+        ];
+
+        // Boot 1 — materialize, then hand-create the chain's table and seed it. None of these names is
+        // in the spec, so the classify is drift-clean in every state below and only the delta's own
+        // names can decide anything.
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 19);
+        await waitForBoot(PORT_BASE + 19, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`CREATE TABLE "chain_a" ("id" uuid PRIMARY KEY, "note" text)`);
+          await seed.unsafe(
+            `INSERT INTO "chain_a" ("id", "note") SELECT gen_random_uuid(), 'keep me ' || g
+               FROM generate_series(1, 3) AS g`,
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+        expect(await tables()).toEqual(['chain_a']);
+        expect(await rowCount('chain_a')).toBe(3);
+
+        // Boot 2 — NEVER applied ⇒ APPLY. Both renames run, and the rows ride along.
+        const boot2 = spawnDeploy(flags, appDb, PORT_BASE + 20);
+        await waitForBoot(PORT_BASE + 20, 120_000, boot2);
+        expect(await tables()).toEqual(['chain_c']);
+        expect(await rowCount('chain_c')).toBe(3);
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the LEFTOVER env on the applied schema ⇒ MOUNT, and it serves. Becoming ready IS
+        // the proof: re-running the first rename would raise 42P01 on a `chain_a` that is long gone.
+        const boot3 = spawnDeploy(flags, appDb, PORT_BASE + 21);
+        await waitForBoot(PORT_BASE + 21, 120_000, boot3);
+        expect(await tables()).toEqual(['chain_c']);
+        expect(await rowCount('chain_c')).toBe(3); // renamed ONCE — nothing moved again
+        await shutdown(boot3);
+
+        // Now put the schema in the HALF-applied state by hand, which is the only way it is reached:
+        // the first rename has run, the second has not.
+        await renameByHand('chain_c', 'chain_b');
+        expect(await tables()).toEqual(['chain_b']);
+
+        // Boot 4 — REFUSED fail-closed, naming the middle name on both sides. The boot exits without
+        // serving, and — the part that used to be untrue — without having run anything: the rows are
+        // where they were, under the name they were under.
+        const boot4 = spawnDeploy(flags, appDb, PORT_BASE + 22);
+        expect(await waitForExit(boot4, 120_000)).not.toBe(0);
+        expect(stderrOf(boot4)).toMatch(/only HALF LANDED/);
+        expect(stderrOf(boot4)).toMatch(/ALREADY landed: table "chain_b"/);
+        expect(stderrOf(boot4)).toMatch(/NOT landed: *table "chain_b"/);
+        expect(stderrOf(boot4)).not.toMatch(/relation "chain_a" does not exist/);
+        expect(await tables()).toEqual(['chain_b']); // nothing was applied over the half-landed state
+        expect(await rowCount('chain_b')).toBe(3); // …and every row is still there
+
+        // Boot 5 — a restart does not clear it and does not creep: the same refusal, the same rows.
+        const boot5 = spawnDeploy(flags, appDb, PORT_BASE + 23);
+        expect(await waitForExit(boot5, 120_000)).not.toBe(0);
+        expect(stderrOf(boot5)).toMatch(/only HALF LANDED/);
+        expect(await tables()).toEqual(['chain_b']);
+        expect(await rowCount('chain_b')).toBe(3);
+      },
+      420_000,
+    );
   },
 );
 
@@ -391,6 +1020,11 @@ describe('rayspec deploy --apply-migration — ran-guard (must not silently skip
       expect(additiveRan).toBe(1);
       expect(destructiveRan).toBe(1);
       expect(rebootRan).toBe(1);
+      expect(handShapedRan).toBe(1);
+      expect(recycledNameRan).toBe(1);
+      expect(generatedSpellingRan).toBe(1);
+      expect(stagingTableRan).toBe(1);
+      expect(renameChainRan).toBe(1);
     } else {
       expect(dbRequired).toBe(false);
     }

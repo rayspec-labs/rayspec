@@ -18,6 +18,8 @@
  *   6. THE IDENTIFIER RULE — checkable at authoring time, bounded by the Postgres identifier limit.
  *   7. THE HANDLER CONTRACT — the two kinds a pack can WRITE (not just declare) keep the init they
  *      take and the members that init promises on every invocation.
+ *   8. THE ROUTE INIT'S TWO DOORS — the journal READ stays a bounded, cursored page, and the
+ *      incremental response stays a constructor that hands back the value a handler returns.
  */
 import type {
   isSafeIdentifier,
@@ -28,11 +30,16 @@ import type {
   PackErrorCode,
   PackFragments,
   PackHandlerFragment,
+  PackJournal,
   PackJournalEntry,
+  PackJournalPage,
+  PackJournalReader,
+  PackJournalWriter,
   PackManifest,
   PackManifestBrand,
   PackRouteHandler,
   PackRouteHandlerInit,
+  PackRouteResponse,
   PackSectionClaim,
   PackServiceContext,
   PackServiceDeclaration,
@@ -251,6 +258,90 @@ type _StoreTransactionHandsBackTheSameDoor = Assert<
     : false
 >;
 
+/**
+ * THE ROUTE INIT'S TWO NEW DOORS keep the members a handler cannot use them without. Both are pinned
+ * through `NonNullable<…>` because both are OPTIONAL on the contract (a deployment older than them
+ * injects neither), and a pin that let the `undefined` arm satisfy it would assert nothing.
+ *
+ * ⚠ WHAT THIS FILE CAN AND CANNOT SEE. Every assertion here compares this package against ITSELF, so
+ * it goes red only when someone edits this package — it keeps the surface from being narrowed by
+ * accident, and it cannot notice the PLATFORM drifting away from it. The arms that catch that live in
+ * `pack-sdk-interop.ts`, on the side where the value is built.
+ */
+type _JournalReaderReads = Assert<
+  NonNullable<PackRouteHandlerInit['journal']> extends PackJournalReader
+    ? Awaited<ReturnType<PackJournalReader['read']>> extends PackJournalPage
+      ? true
+      : false
+    : false
+>;
+/** A page is BOUNDED + CURSORED: the entries carry their own position, and the page says if more wait. */
+type _AJournalPageIsCursoredAndBounded = Assert<
+  PackJournalPage extends { entries: readonly { cursor: string }[]; hasMore: boolean }
+    ? true
+    : false
+>;
+/**
+ * The INCREMENTAL response is reachable and is a CONSTRUCTOR, not a stream: it TAKES the producer and
+ * hands back the opaque response a handler returns unchanged. The parameter half is what this arm
+ * actually measures — it is extracted from the member rather than restated, so a responder that
+ * started taking something other than an `(emit, signal)` producer fails here. The return half is
+ * deliberately weak, because `PackRouteResponse` is deliberately opaque; the arm that gives the return
+ * teeth is the cross-package one, where the deployment's real envelope is on the other side.
+ */
+type _SseResponderBuildsARouteResponse = Assert<
+  ReturnType<NonNullable<PackRouteHandlerInit['sseResponse']>> extends PackRouteResponse
+    ? Parameters<NonNullable<PackRouteHandlerInit['sseResponse']>>[0] extends (
+        emit: (frame: { data: string }) => Promise<void>,
+        signal: { readonly aborted: boolean },
+      ) => Promise<void>
+      ? true
+      : false
+    : false
+>;
+/** The RESUME CURSOR is carried, and it is a plain string — never a parsed platform object. */
+type _ResumeCursorIsAString = Assert<
+  PackRouteHandlerInit['resumeFrom'] extends string | undefined ? true : false
+>;
+
+/**
+ * THE SERVICE'S JOURNAL DOOR CARRIES BOTH VERBS. This is the arm that would have caught the shape
+ * this contract shipped with first: a reader reachable only from a route, leaving the surface that
+ * WRITES journal steps unable to read one back — which is the sentence the whole read half exists to
+ * make false. Asserted through the context member rather than through `PackJournal` directly, because
+ * what a service is HANDED is the thing that matters; a door declared and never handed over is a type
+ * nobody receives.
+ */
+type _AServiceJournalReadsAndWrites = Assert<
+  NonNullable<PackServiceContext['journal']> extends PackJournalReader
+    ? NonNullable<PackServiceContext['journal']> extends PackJournalWriter
+      ? true
+      : false
+    : false
+>;
+/** …and the door a service is handed IS that pair, not a third shape that happens to fit both. */
+type _TheServiceDoorIsThePackJournal = Assert<
+  PackJournal extends PackJournalReader & PackJournalWriter
+    ? NonNullable<PackServiceContext['journal']> extends PackJournal
+      ? true
+      : false
+    : false
+>;
+/**
+ * BOTH SURFACES READ THROUGH THE SAME READER. A service's read and a route's read returning
+ * different pages would be two contracts wearing one name, and a pack author moving code between the
+ * two would discover it at the call site.
+ */
+type _BothSurfacesShareOneReader = Assert<
+  Awaited<ReturnType<NonNullable<PackServiceContext['journal']>['read']>> extends PackJournalPage
+    ? Awaited<
+        ReturnType<NonNullable<PackRouteHandlerInit['journal']>['read']>
+      > extends PackJournalPage
+      ? true
+      : false
+    : false
+>;
+
 /** The identifier rule is checkable, and bounded by the Postgres identifier limit. */
 type _IdentifierRuleIsCheckable = Assert<
   ReturnType<typeof isSafeIdentifier> extends boolean
@@ -281,8 +372,22 @@ export const PACK_CONTRACT_TYPEPINS: [
   _RouteParamsAreRequired,
   _StoreDoorKeepsItsMethods,
   _StoreTransactionHandsBackTheSameDoor,
+  _JournalReaderReads,
+  _AJournalPageIsCursoredAndBounded,
+  _SseResponderBuildsARouteResponse,
+  _ResumeCursorIsAString,
+  _AServiceJournalReadsAndWrites,
+  _TheServiceDoorIsThePackJournal,
+  _BothSurfacesShareOneReader,
   _IdentifierRuleIsCheckable,
 ] = [
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
+  true,
   true,
   true,
   true,

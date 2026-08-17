@@ -42,7 +42,7 @@
  * attribute a key to, and inventing one here would promise a de-duplication this seam does not do.
  */
 import { randomUUID } from 'node:crypto';
-import type { TenantDb } from '@rayspec/db';
+import { operatorSafeDbErrorMessage, type TenantDb } from '@rayspec/db';
 import type { DurableExecutor } from './durable/types.js';
 import {
   deleteEnqueuedRunHeader,
@@ -146,7 +146,13 @@ export function makeTurnDispatch(deps: TurnDispatchDeps): TurnDispatch {
       try {
         headerCreated = await insertEnqueuedRunHeader(deps.tdb, { runId, ...identity });
       } catch (err) {
-        console.error(`[platform] turn-dispatch run header write failed runId=${runId}`, err);
+        // The rendered message, never the error object — the ORM's wrapper carries the statement and
+        // every value it bound as enumerable own properties, and a run header's values are the
+        // caller's own data.
+        console.error(
+          `[platform] turn-dispatch run header write failed runId=${runId}:`,
+          operatorSafeDbErrorMessage(err),
+        );
       }
 
       try {

@@ -17,6 +17,7 @@
  *
  * The file is a pure helper with NO test-framework import, so it is safe if ever emitted.
  */
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 import type postgres from 'postgres';
 
 /** The upper bound for any logged message; anything longer is truncated (after masking, never before). */
@@ -182,9 +183,15 @@ export async function logRedactedRunFailure(sql: postgres.Sql, runId: string): P
       `[live-run-diagnostic] run=${runId} journal=none status=<no run row found in workflow or agent journal>\n`,
     );
   } catch (err) {
+    // RENDERED FIRST, then redacted. `redact` is a CREDENTIAL masker — it looks for auth headers,
+    // key prefixes, DSN passwords and long token-shaped runs — and a business value is none of
+    // those: a short row value walks straight through it. What reaches this catch is a driver error
+    // from the four `sql.unsafe` reads above, which binds `runId`; a coercion refusal on it echoes
+    // the bound value in the server's own message. The renderer is the instrument for that class,
+    // `redact` stays for the credential class, and neither substitutes for the other.
     process.stderr.write(
       `[live-run-diagnostic] run=${runId}: could not read run diagnostics: ${redact(
-        err instanceof Error ? err.message : String(err),
+        operatorSafeDbErrorMessage(err),
       )}\n`,
     );
   }

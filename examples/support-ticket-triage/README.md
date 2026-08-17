@@ -44,8 +44,8 @@ on a **YAML-only backend, with no product code**:
   same-origin (no CORS) and the token never touches the page.
 
 ```bash
-# 1. a throwaway DB + boot the backend on :8791 (Terminal 1 — leave it running)
-createdb -h localhost -p 5433 -U rayspec play_ticket
+# 1. boot the backend on :8791 (Terminal 1 — leave it running). It CREATES the
+#    throwaway `play_ticket` database if it is missing, so there is no createdb step.
 node examples/support-ticket-triage/dev-boot.mjs
 
 # 2. seed the deployment tenant + the routing catalog + a user (Terminal 2, once)

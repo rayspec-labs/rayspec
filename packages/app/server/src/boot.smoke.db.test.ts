@@ -56,7 +56,7 @@ describe('boot smoke — real composition root + migration-chain boot + authed r
   // hard-fail rather than let this DB-backed boot-smoke suite silently self-skip to a false green.
   if (requireDb && !baseUrl) {
     throw new Error(
-      'boot.smoke.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent — ' +
+      'boot.smoke.db.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but absent — ' +
         'refusing to silently skip this DB-backed suite.',
     );
   }

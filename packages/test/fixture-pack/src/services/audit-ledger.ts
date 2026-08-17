@@ -20,7 +20,7 @@
  * cannot work at all and wrong for one whose optional recording is simply not wired.
  */
 import type { PackDatabase, PackServiceContext, PackServiceModule } from '@rayspec/pack-sdk';
-import { contexts, ENV_MARKER_KEY, record, specName, tick } from './observed.js';
+import { contexts, ENV_MARKER_KEY, recalls, record, specName, tick } from './observed.js';
 
 /** The shape this pack's own `auditing` grammar accepts (see `../auditing.ts`). */
 interface AuditingSection {
@@ -46,10 +46,16 @@ const LEDGER_ABANDONED = 'ledger-abandoned';
 /** The message the abandoning callback throws — the exact value the caller must catch. */
 const ABANDONED_MESSAGE = 'the ledger sweep was abandoned mid-write';
 
+/** How many of its own journal entries a sweep reads back. Bounded, like every read on that door. */
+const RECALL_PAGE_SIZE = 10;
+
 /** The service's own correlation id for the work it does — one journal "run" per boot. */
 let sweepRunId = '';
 let timer: ReturnType<typeof setInterval> | undefined;
 let sweeps = 0;
+/** How many entries the last read back saw, and which steps they were — what a suite asserts on. */
+let recalled = 0;
+let recalledKeys: readonly string[] = [];
 
 const auditLedger: PackServiceModule = {
   name: 'audit-ledger',
@@ -102,6 +108,14 @@ const auditLedger: PackServiceModule = {
           throw new Error(ABANDONED_MESSAGE);
         });
       } catch (e) {
+        // Left unrendered deliberately, and the reason is what this catch is FOR: the assertion is
+        // that the message is the one the callback threw (`ABANDONED_MESSAGE`, a constant of this
+        // fixture's), which is how the suite tells a rolled-back transaction from a silent one.
+        // Routing it through the database renderer would be a no-op for that error and would blur
+        // the one distinction the case exists to draw. A database refusal reaching here instead
+        // could carry no caller data either way: the two statements in this block bind the
+        // deployment's own tenant id and a fixed `{ abandoned: true }` payload, into a table this
+        // fixture pack's own migration chain created.
         abandonedError = e instanceof Error ? e.message : String(e);
       }
     }
@@ -185,7 +199,21 @@ async function appendEvent(
   );
 }
 
-/** Record ONE journal entry for a sweep. A deployment with no journal writer records none. */
+/**
+ * Record ONE journal entry for a sweep, then READ BACK what this service has recorded so far. A
+ * deployment with no journal door does neither.
+ *
+ * THE READ IS WHY THIS FIXTURE EXISTS, and it is worth being exact about what it stands for. A
+ * service is the surface that WRITES journal steps, and until the door carried both verbs its own
+ * record was write-only to it: the only way back was the escape hatch with a core table name in a SQL
+ * string. Out in the world the write side is in use and the read side is not yet — this fixture is
+ * the repository's only exerciser of it. That is what a fixture is for: the seam gets a witness
+ * before it gets a caller, rather than shipping with neither.
+ *
+ * It is SCOPED BY THE DEPLOYMENT, not by this pack: there is no tenant argument on either verb, so
+ * the entries this reads are the bound tenant's and no other's. `runId` narrows to this boot's own
+ * sweeps — the pack's own correlation id — rather than to the tenant's whole history.
+ */
 async function sweep(ctx: PackServiceContext, ledgerRows: number): Promise<void> {
   sweeps += 1;
   tick(auditLedger.name);
@@ -200,6 +228,13 @@ async function sweep(ctx: PackServiceContext, ledgerRows: number): Promise<void>
     output: { ledgerRows },
     status: 'ok',
   });
+  // READ BACK what was just written, through the same door. A bounded page, oldest first, of this
+  // service's own run — so the count this stashes rises with the sweeps and can be asserted against
+  // what was recorded rather than against what the writer was called with.
+  const page = await ctx.journal.read({ runId: sweepRunId, limit: RECALL_PAGE_SIZE });
+  recalled = page.entries.length;
+  recalledKeys = page.entries.map((entry) => entry.idempotencyKey);
+  recalls.set(auditLedger.name, { recalled, recalledKeys });
 }
 
 export default auditLedger;

@@ -47,7 +47,7 @@ import type {
   TurnReplyOutcome,
 } from '@rayspec/conversation-runtime';
 import type { AgentSpec, Backend, EventSink, RunResult } from '@rayspec/core';
-import { schema, type TenantDb } from '@rayspec/db';
+import { operatorSafeDbErrorMessage, schema, type TenantDb } from '@rayspec/db';
 import { isTerminalRunStatus, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 
@@ -179,10 +179,13 @@ export function makeLiveTurnResponder(
           ...(onEvent ? { onEvent: onEvent as EventSink } : {}),
         });
       } catch (e) {
+        // RENDERED, not raw — `runAgent` writes the run header before the model runs, so a database
+        // refusal on that write arrives here and this message reaches the turn surface. No-op
+        // for the model/adapter failures that otherwise land here.
         return {
           status: 'error',
           runId,
-          message: e instanceof Error ? e.message : String(e),
+          message: operatorSafeDbErrorMessage(e),
         };
       }
 

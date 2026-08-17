@@ -100,8 +100,10 @@ export {
   type DestructiveFinding,
   type DestructiveKind,
   formatFindings,
+  type MigrationStatement,
   type ScanResult,
   scanMigrationSql,
+  splitMigrationStatements,
 } from './migration-scan.js';
 export { migrationsDir } from './migrations.js';
 // The pack-migration chain scan — the ONE rule set `gate:pack-migrations` holds this repository's
@@ -125,11 +127,16 @@ export {
 } from './pack-migrations.js';
 // The ONE shared Postgres-error-shape detectors (the 23505 cause-chain walk + the constraint-name
 // reader). Request-path/capability code maps a UNIQUE violation to a typed conflict through these.
+// `operatorSafeDbErrorMessage` is the same walk serving log hygiene: a failed statement reaches an
+// operator naming WHAT failed and WHY, and never the values it bound.
 export {
   foreignKeyViolationConstraintName,
+  isDatabaseError,
   isForeignKeyViolation,
   isLockTimeout,
   isUniqueViolation,
+  operatorSafeDbErrorMessage,
+  operatorSafeDbErrorStack,
   uniqueViolationConstraintName,
 } from './pg-errors.js';
 export * as schema from './schema.js';

@@ -7,8 +7,15 @@
  * that validates it, OWNS one platform table through a migration chain of its own — an append-only
  * ledger with hand-shaped indexes and a foreign key, which is exactly what a generated `stores` table
  * is not — brings TWO long-lived SERVICES, which is the one contribution kind the platform boots
- * rather than calls, and contributes ONE ROUTE and ONE TOOL, which are the two whose declarations
+ * rather than calls, and contributes TWO ROUTES and ONE TOOL, which are the kinds whose declarations
  * point at handler modules the pack itself has to write.
+ *
+ * WHY TWO ROUTES AND NOT ONE. A route handler may answer in two SHAPES, and a fixture that witnesses
+ * only one leaves the other's auth, tenancy and rate limiting unmeasured. `handlers/list-turns`
+ * returns a JSON body; `handlers/replay-journal` reads the run journal through the contracted reader
+ * and answers INCREMENTALLY, resuming from the client's last-seen position. Both are declared as
+ * ordinary `{kind:'handler'}` actions, so a suite can hold the two against each other and against a
+ * deployment-declared route instead of taking "it inherits the chain" on trust.
  *
  * WHY TWO SERVICES AND NOT ONE. `TurnDispatch` goes to services and to nothing else, and a capability
  * measured only where it is present is measured with no control: `services/turn-scheduler.ts` holds it
@@ -41,14 +48,17 @@ const fixturePack: DefinedPack = defineExtension({
   // The pack's OWN version. A deployment pins it EXACTLY; a skew is a hard load failure, never a
   // silent skip — which is why the documents beside this file pin `1.0.0` and one of them does not.
   version: '1.0.0',
-  // ONE authenticated route and ONE tool, and the handler modules behind them — the two contribution
+  // TWO authenticated routes and ONE tool, and the handler modules behind them — the two contribution
   // kinds whose declarations point at code a pack has to WRITE, so both are declared here rather than
-  // one standing in for the other. The route is inside this pack's DEFAULT route namespace —
+  // one standing in for the other. The two routes are the two SHAPES a route handler may answer with:
+  // one returns a JSON body, the other reads the run journal and answers INCREMENTALLY. Both are
+  // ordinary `{kind:'handler'}` actions, which is what makes the second one's auth, tenancy and rate
+  // limiting inherited rather than re-implemented. Both routes are inside this pack's DEFAULT namespace —
   // `/ext/<packId>/`, and the deployment documents beside this file reference the pack as
   // `fixture-pack` — so no `routePrefix` is declared here: the default is the case worth witnessing,
-  // and a route outside the namespace is a load failure naming this pack. Post-merge both are
-  // ordinary declarations: same app, same auth chain, same interpreter, same tool chokepoint. The
-  // route's handler is `readonly`, so its route is gated on `store:read` rather than the default
+  // and a route outside the namespace is a load failure naming this pack. Post-merge all of them are
+  // ordinary declarations: same app, same auth chain, same interpreter, same tool chokepoint. Both
+  // route handlers are `readonly`, so their routes are gated on `store:read` rather than the default
   // `store:write`.
   fragments: {
     handlers: [
@@ -65,12 +75,32 @@ const fixturePack: DefinedPack = defineExtension({
         export: 'describeTurn',
         kind: 'tool',
       },
+      // The INCREMENTAL route. Same `route` kind and same `readonly: true` gate as the echo route
+      // above — what differs is only what its module RETURNS (an event stream the deployment drives
+      // instead of a JSON body), which is the point: an incremental answer is a shape a handler
+      // chooses, not a second kind of route with a chain of its own.
+      {
+        id: 'fixture_pack_replay_journal',
+        module: 'handlers/replay-journal.ts',
+        export: 'replayJournal',
+        kind: 'route',
+        readonly: true,
+      },
     ],
     api: [
       {
         method: 'GET',
         path: '/ext/fixture-pack/turns/{turn_id}',
         action: { kind: 'handler', handler: 'fixture_pack_list_turns' },
+      },
+      // The route behind the incremental handler — declared as an ORDINARY `{kind:'handler'}` action,
+      // because it is one. It rides the same registration as every other declared route: the same
+      // throttle, the same auth chain, the same per-route budget, the same tenant resolution and the
+      // same permission gate.
+      {
+        method: 'GET',
+        path: '/ext/fixture-pack/journal/{run_id}',
+        action: { kind: 'handler', handler: 'fixture_pack_replay_journal' },
       },
     ],
     // The TOOL contribution, wired to the handler id above. It is declared without an agent to

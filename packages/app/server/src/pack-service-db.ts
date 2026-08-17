@@ -31,6 +31,17 @@
  * deployment's process as a trusted, non-sandboxed author — the manifest contract's posture note).
  * A service has no `tenantId` on its context in either case; a pack that attributes rows to a tenant
  * gets that value from the deployment, not from this door.
+ *
+ * ONE STATEMENT PER `query`, ON BOTH HALVES — the contract's own sentence, enforced by the SERVER.
+ * `unsafe` with no bound parameters used to fall back to Postgres's SIMPLE-QUERY protocol, which
+ * executes EVERY command in the string, so a second command in the string was a second command RUN:
+ * a `;`-separated `COMMIT` ended the pin from inside the callback (measured — both rows written
+ * around it survived the callback's throw), and a `;`-separated `BEGIN` left a pooled connection
+ * idle-in-transaction for the life of the process. Both calls now pass `{ simple: false }`, so the
+ * statement goes over the EXTENDED protocol and Postgres itself refuses a multi-command string at
+ * parse time, before any part of it runs. The reason it is the server and not a scan of ours is
+ * written at `asPackRefusal` below, and it is the whole argument: a hand-written parser was measured
+ * wrong in both directions, and cannot be proven equivalent to the grammar the server parses.
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Db } from '@rayspec/db';
@@ -79,6 +90,12 @@ const TRANSACTION_CONTROL_PAIRS = new Set(['PREPARE TRANSACTION', 'SET TRANSACTI
  * `transaction()` — and it is deliberately not a parser: a pack is a trusted, non-sandboxed author
  * and can always reach further if it means to. What it buys is that the ordinary mistake fails
  * CLOSED, before the statement reaches the wire, instead of costing the deployment a connection.
+ *
+ * IT READS THE FIRST TOKEN ONLY, and it is still LOAD-BEARING under the extended protocol: measured,
+ * a bare `BEGIN` sent with `{ simple: false }` still reaches the wire and still leaves the connection
+ * idle in transaction, because it is one perfectly valid command. What the server refuses is a string
+ * carrying SEVERAL commands, which is a different claim — so `SELECT 1; COMMIT` is the server's case
+ * and a bare `COMMIT` is this one. Neither guard covers the other.
  */
 function refuseTransactionControl(sql: string, consequence: string): void {
   const head = sql.replace(/^(?:\s+|--[^\n]*\n?|\/\*[\s\S]*?\*\/)+/, '');
@@ -107,6 +124,69 @@ const PINNED_CONSEQUENCE =
   'move or end that transaction under the code that opened it. A savepoint is no way around it ' +
   'either: the driver latches the first statement error on this connection and re-raises it when ' +
   'the callback returns, so a rolled-back savepoint does not make the call succeed.';
+
+/**
+ * ONE COMMAND PER CALL — decided by the SERVER, not by a parser of ours.
+ *
+ * `query` is documented as running ONE parameterized statement. Enforcing that with a text scan was
+ * tried and MEASURED, and it was wrong in BOTH directions. It read as ONE command, while the server
+ * ran TWO, a string opening a NESTED block comment (Postgres nests them; a one-level scan closes at
+ * the first terminator and swallows the `; COMMIT` behind it) and a string with an `E''` escape (the
+ * server ends that literal at the backslash-quote, a scan reading the following pair as a doubled
+ * quote stays inside it). And it REFUSED, as more than one command, four strings the server runs:
+ * `SELECT E'a\\'b' AS v`, `SELECT 1 AS a$b$c`, `SELECT $é$x$é$ AS v` and a trailing `;;`.
+ * A parser can never be PROVEN equivalent to the grammar the server actually parses. The server can.
+ *
+ * `{ simple: false }` forces the EXTENDED protocol, where Postgres itself refuses every multi-command
+ * string at parse time — `42601 cannot insert multiple commands into a prepared statement`, before
+ * any command runs, so nothing lands and no connection is left in a transaction. It is the `simple`
+ * flag that decides this, NOT `prepare`: `postgres/src/index.js` computes
+ * `simple: 'simple' in options ? options.simple : args.length === 0` and hardcodes `prepare: false`
+ * for `unsafe`, so a `prepare: true` measurement tests a knob that never enters the decision.
+ *
+ * IT ALSO MAKES THE TWO CALL SHAPES ONE. A PARAMETERIZED call already went extended (`args.length`
+ * is not 0), so `query(sql, params)` was never vulnerable; only the no-parameter call fell back to
+ * simple-query mode. This does not add a rule — it stops one shape of the same method from being
+ * quietly weaker than the other.
+ */
+const MULTI_COMMAND_ADVICE =
+  'Issue each statement through its own `query` call; `transaction(fn)` is how two of them land ' +
+  'together.';
+
+/**
+ * The option that selects the extended protocol — CAST IN, because the driver's published types
+ * declare only `prepare` on `UnsafeQueryOptions` while its implementation reads `simple` and spreads
+ * the rest. The option is real; the type declaration is incomplete.
+ *
+ * A cast that stopped working would fail OPEN — the statement would fall back to simple-query mode
+ * and the defect would return silently — so nothing here rests on the cast being right. Arms (7),
+ * (8) and (10) of `pack-service-db.db.test.ts` measure the CONSEQUENCE against a live server, by
+ * surviving rows and by `idle in transaction` count, so a driver upgrade that renamed or dropped
+ * this option turns those arms red instead of quietly re-opening the door.
+ */
+const EXTENDED_PROTOCOL = { simple: false } as unknown as { prepare?: boolean | undefined };
+
+/**
+ * The server's refusal, in the door's own vocabulary — so a pack still branches on the typed error
+ * the contract promises rather than on a driver error's SQLSTATE.
+ *
+ * The discriminator is narrow ON PURPOSE. `42601` alone is every syntax error there is; the pack's
+ * own typo would then be reported as a multi-command refusal, which is a fabricated diagnostic. The
+ * message below is emitted from exactly one place in the server (`exec_parse_message`), and a
+ * genuine syntax error carries the same SQLSTATE from `scanner_yyerror` with different text —
+ * measured. If the wording ever moves, this stops matching and the pack sees the server's own error:
+ * the failure mode is a less friendly refusal, never a wrong one, and never a statement that runs.
+ */
+function asPackRefusal(error: unknown): unknown {
+  const e = error as { code?: string; message?: string };
+  if (e?.code !== '42601' || !/cannot insert multiple commands/i.test(e.message ?? ''))
+    return error;
+  return new PackTransactionError(
+    'a pack database handle runs ONE statement per `query` call, and the server refused this ' +
+      'string for carrying more than one command (SQLSTATE 42601). Nothing in it ran. ' +
+      MULTI_COMMAND_ADVICE,
+  );
+}
 
 /**
  * Build the database door over the deployment's one raw handle.
@@ -148,7 +228,15 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
   return {
     query: async (sql: string, params: readonly unknown[] = []) => {
       refuseTransactionControl(sql, POOLED_CONSEQUENCE);
-      return (await client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
+      try {
+        return (await client.unsafe(
+          sql,
+          params as never[],
+          EXTENDED_PROTOCOL,
+        )) as unknown as Record<string, unknown>[];
+      } catch (e) {
+        throw asPackRefusal(e);
+      }
     },
 
     transaction: async <T>(fn: (tx: PackServiceDatabase) => Promise<T>): Promise<T> => {
@@ -160,28 +248,44 @@ export function makePackServiceDatabase(db: Db): PackServiceDatabase {
       // convenience) — but ONLY for a callback that returns one SYNCHRONOUSLY, and the callback below
       // is `async`, so what it returns is always a Promise and that branch cannot fire. The cast is
       // the driver's return type (`UnwrapPromiseArray<T>`) staying deferred over a naked `T`.
-      return (await client.begin(async (tx) =>
-        insideTransaction.run(scope, async () => {
-          try {
-            return await fn({
-              query: async (sql: string, params: readonly unknown[] = []) => {
-                refuseTransactionControl(sql, PINNED_CONSEQUENCE);
-                return (await tx.unsafe(sql, params as never[])) as unknown as Record<
-                  string,
-                  unknown
-                >[];
-              },
-              transaction: async () => {
-                throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
-              },
-            });
-          } finally {
-            // Ends the refusal with the callback — a context it created and left running is not
-            // nesting once the transaction is over, and must not be refused as if it were.
-            scope.open = false;
-          }
-        }),
-      )) as T;
+      //
+      // THE TRANSLATION IS APPLIED HERE TOO, and not defensively. A server-side refusal reaches the
+      // wire, so the driver LATCHES it on the pinned connection and re-raises it when the callback
+      // returns (the limit arm (6) pins) — a path that does not go through the `tx.query` catch
+      // below. Without this, a pack that caught the refusal and returned normally would get a raw
+      // driver error where the contract promises a typed one. `asPackRefusal` returns anything else
+      // UNCHANGED, so the pack's own thrown value still arrives as the same instance.
+      try {
+        return (await client.begin(async (tx) =>
+          insideTransaction.run(scope, async () => {
+            try {
+              return await fn({
+                query: async (sql: string, params: readonly unknown[] = []) => {
+                  refuseTransactionControl(sql, PINNED_CONSEQUENCE);
+                  try {
+                    return (await tx.unsafe(
+                      sql,
+                      params as never[],
+                      EXTENDED_PROTOCOL,
+                    )) as unknown as Record<string, unknown>[];
+                  } catch (e) {
+                    throw asPackRefusal(e);
+                  }
+                },
+                transaction: async () => {
+                  throw new PackTransactionError(NESTED_TRANSACTION_MESSAGE);
+                },
+              });
+            } finally {
+              // Ends the refusal with the callback — a context it created and left running is not
+              // nesting once the transaction is over, and must not be refused as if it were.
+              scope.open = false;
+            }
+          }),
+        )) as T;
+      } catch (e) {
+        throw asPackRefusal(e);
+      }
     },
   };
 }
