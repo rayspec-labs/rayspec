@@ -24,10 +24,13 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * A pack's ENTRY module DECLARES the pack: it default-exports the manifest, which it builds with
  * the platform's manifest helper (the entry is the one module that names the platform). A pack's
- * HANDLER modules RUN with injected capabilities and import only `@rayspec/handler-sdk`, the
- * type-only handler contract — a boundary the repository enforces with its own gate. This package
- * is the DECLARATION-side contract: the shapes a pack author writes down and the vocabulary the
- * deployment answers them with.
+ * HANDLER modules RUN with injected capabilities, and the contract they are written against is
+ * declared HERE too (`handler.ts`): the manifest half says where a handler lives and what it is
+ * called, and the handler half says what it IS — the value the platform calls it with, and the
+ * function it exports. So a pack still imports ONE thing to build both halves — for the shapes this
+ * package contracts, which is the `tool` kind and the `route` kind behind a `{kind:'handler'}` api
+ * action. What it does NOT contract is named in `handler.ts` with the reason, so a pack author reads
+ * a statement rather than discovering an absence.
  *
  * A pack's SERVICE modules are the third surface, and they are typed HERE rather than against the
  * handler contract: a service is not called by the platform, it is BOOTED by it, so what it receives
@@ -43,6 +46,19 @@
  * it before adding anything here.
  */
 export type { PackError, PackErrorCode } from './errors.js';
+export type {
+  PackHandlerInit,
+  PackHandlerPrincipal,
+  PackRouteHandler,
+  PackRouteHandlerInit,
+  PackSelectOptions,
+  PackStoreDb,
+  PackStoreFilter,
+  PackStoreRow,
+  PackToolHandler,
+  PackToolHandlerInit,
+  PackUpsertOptions,
+} from './handler.js';
 export { isSafeIdentifier, MAX_IDENTIFIER_LENGTH, SAFE_IDENTIFIER_RE } from './identifier.js';
 export type {
   PackJournalEntry,

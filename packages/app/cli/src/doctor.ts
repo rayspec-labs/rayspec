@@ -1,5 +1,6 @@
 /**
- * `rayspec doctor <spec.yaml>` — the STATIC validity check (no Postgres, no network).
+ * `rayspec doctor <spec.yaml>` — the STATIC validity check (no Postgres, no network, and no code out
+ * of the deployment tree).
  *
  * Wraps the already-shipped parser (`parseAnySpec`, which itself runs the strict Zod parse + `lintSpec`
  * as its lint stage — see packages/kernel/spec/src/parse.ts) and emits its result as a stable JSON
@@ -21,6 +22,15 @@
  * ONE static filesystem check beyond parse/lint: a valid backend-profile doc that declares a static
  * `frontend[]` mount has each mount's `dir` checked to resolve to a readable directory of built assets
  * (parse/lint see only the YAML; the filesystem is doctor's to check) → `frontend_dir_missing` on a miss.
+ *
+ * IT LOADS NO EXTENSION PACK unless `--with-packs` asks it to. Resolving a pack means `import()`ing
+ * its entry module and its section-schema module — third-party code, out of the deployment tree,
+ * executing in-process — and this is the first command run against a repository somebody has just
+ * cloned. The default therefore leaves a top-level section a pack claims UNRESOLVED (accepted
+ * unexamined, never refused — see `parseWithoutPacks`) and states that in one neutral line, while
+ * `--with-packs` restores the fuller check for a reader who wants it and is told what it costs. `plan`
+ * and the deploy paths are unchanged: they resolve the deployment's packs, because naming the pack
+ * that claims a section is what an operator debugging a deployment needs.
  */
 import { accessSync, constants, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -34,7 +44,11 @@ import {
   type SuppressedSpecWarning,
   specError,
 } from '@rayspec/spec';
-import { parseFromDeploymentTree, withClaimedSections } from './pack-sections.js';
+import {
+  parseFromDeploymentTree,
+  parseWithoutPacks,
+  withClaimedSections,
+} from './pack-sections.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
 /**
@@ -53,11 +67,30 @@ export interface DoctorResult {
   readonly suppressed?: SuppressedSpecWarning[];
   /**
    * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
-   * section key and the pack that owns it. Present only for a document that references a pack and
-   * validated, so a pack-free document's envelope is byte-identical to what it was before the field
-   * existed. It never affects `ok`: it states who owns a key, not whether anything is wrong.
+   * section key and the pack that owns it. Present only under `--with-packs`, for a document that
+   * references a pack and validated, so a pack-free document's envelope is byte-identical to what it
+   * was before the field existed. It never affects `ok`: it states who owns a key, not whether
+   * anything is wrong.
    */
   readonly claimedSections?: readonly string[];
+  /**
+   * ONE neutral line stating that the deployment's packs were left unresolved — present exactly when
+   * this run loaded none (the default) and the document declares one, and absent under `--with-packs`.
+   * It never affects `ok` either: a document whose packs were not read is not a document that is
+   * wrong, and a warning on every run of the first command a reader types trains people to ignore
+   * warnings.
+   */
+  readonly notResolved?: readonly string[];
+}
+
+/** How much of the document `doctor` is asked to resolve. */
+export interface DoctorOptions {
+  /**
+   * Resolve the deployment's extension packs before judging the document — which RUNS CODE from the
+   * deployment tree (each pack's entry module and each claimed section's schema module is imported).
+   * Absent/false ⇒ no pack is loaded and a claimed section is left unresolved.
+   */
+  readonly withPacks?: boolean;
 }
 
 /**
@@ -67,7 +100,10 @@ export interface DoctorResult {
  * SpecError vocabulary has no "io" code; a read failure is surfaced as the document being unreadable).
  * NEVER throws for an invalid spec — only `ok:false`.
  */
-export async function runDoctor(positionals: readonly string[]): Promise<DoctorResult> {
+export async function runDoctor(
+  positionals: readonly string[],
+  options: DoctorOptions = {},
+): Promise<DoctorResult> {
   let text: string;
   let specPath: string;
   try {
@@ -84,11 +120,15 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
     throw e;
   }
 
-  // The pack-aware parse when this deployment's document references a pack — the same loader, from
-  // the same tree, the boot uses. `undefined` ⇒ nothing to resolve, and the unchanged `parseAnySpec`
-  // answers exactly as it always did. A pack-aware parse validates the BACKEND profile (the only one
-  // whose grammar carries `extensions[]`), so its outcome is re-expressed in that profile's terms.
-  const fromTree = await parseFromDeploymentTree(specPath, text);
+  // The parse for a document that references a pack. Under `--with-packs` it is the pack-aware one —
+  // the same loader, from the same tree, the boot uses — and by DEFAULT it is the one that loads no
+  // pack and leaves the sections they claim unresolved. `undefined` ⇒ nothing to resolve either way,
+  // and the unchanged `parseAnySpec` answers exactly as it always did. Both validate the BACKEND
+  // profile (the only one whose grammar carries `extensions[]`), so the outcome is re-expressed in
+  // that profile's terms.
+  const fromTree = options.withPacks
+    ? await parseFromDeploymentTree(specPath, text)
+    : parseWithoutPacks(text);
   const parsed: AnySpecParse =
     fromTree === undefined
       ? parseAnySpec(text)
@@ -139,12 +179,15 @@ export async function runDoctor(positionals: readonly string[]): Promise<DoctorR
   }
 
   // `suppressed` is emitted only when non-empty: a suppression-free document's envelope (and its
-  // serialized bytes) stays exactly what it was before the field existed. `claimedSections` is woven
-  // on under the same rule.
-  return withClaimedSections(
+  // serialized bytes) stays exactly what it was before the field existed. `claimedSections` and
+  // `notResolved` are woven on under the same rule — and they are mutually exclusive by construction,
+  // because a run either resolved this document's packs or it did not.
+  const envelope = withClaimedSections(
     suppressed.length > 0
       ? { ok: errors.length === 0, errors, warnings, suppressed }
       : { ok: errors.length === 0, errors, warnings },
     fromTree?.claimedSections ?? [],
   );
+  const notResolved = fromTree?.notResolved ?? [];
+  return notResolved.length === 0 ? envelope : { ...envelope, notResolved };
 }

@@ -45,8 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build on that identifier anywhere reachable from a pack's `handlers/` subtree.
   **The boot now resolves a deployment's packs before it validates the document**, which is what lets a
   service be handed its own validated section. A top-level key a pack claims is therefore accepted at
-  boot exactly as `doctor`, `plan` and `deploy --dry-run` already validated it; a key no pack claims is
-  still refused **by the boot** with the same `unknown_field`.
+  boot exactly as `plan`, `deploy --dry-run` and `doctor --with-packs` already validated it; a key no
+  pack claims is still refused **by the boot** with the same `unknown_field`.
   **`rayspec deploy --check-env` is the one command that cannot tell those two apart, and it now says
   so instead of guessing.** It still loads no pack — that is the side effect the command promises not
   to have — and without a loaded pack it cannot know which keys are claimed. So on a document that
@@ -54,10 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not, names each one in `notChecked`, and raises no `unknown_field` for any of them. **The
   consequence, stated plainly: on a pack-bearing document `--check-env` no longer catches a mistyped
   top-level section** — `auditting:` for a claimed `auditing:` is reported as a key whose owner it did
-  not ask about, while the boot (and `doctor`, `plan`, `deploy --dry-run`, all of which do load the
-  packs) still refuses it. Before this release `--check-env` refused it, because it validated with the
-  core grammar alone and therefore also refused every legitimately claimed section. Run `doctor` for
-  the verdict that has read the packs; `--check-env` answers about the environment. A document that
+  not ask about, while the boot (and `plan`, `deploy --dry-run`, `doctor --with-packs`, all of which
+  do load the packs) still refuses it. Before this release `--check-env` refused it, because it
+  validated with the core grammar alone and therefore also refused every legitimately claimed section.
+  Run `doctor --with-packs` for the verdict that has read the packs; `--check-env` answers about the
+  environment. A document that
   declares no pack is unchanged: nothing is lifted, and an unknown key is refused exactly as before.
   A deployment that references no pack boots exactly as before.
   The seam is exercised end to end by the in-tree `packages/test/fixture-pack`, which now brings two
@@ -165,8 +166,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the from-clean-DB gate applies it through the real wiring and reads back that the platform
   journal is untouched.
 
-- **`rayspec doctor`, `rayspec plan` and `rayspec deploy --dry-run` now say who owns a claimed
-  top-level section.** All three resolve the deployment's extension packs before they judge the
+- **`rayspec plan`, `rayspec deploy --dry-run` and `rayspec doctor --with-packs` now say who owns a
+  claimed top-level section.** All three resolve the deployment's extension packs before they judge the
   document — the same loader the boot runs, over the same deployment tree (`RAYSPEC_HANDLER_ROOT`
   when the deployment sets one, otherwise the directory the spec file sits in) — so a top-level key a
   pack claims is validated by that pack instead of being reported as `unknown_field`. Each command's
@@ -177,12 +178,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it was before the field existed. The three commands now also report the two typed pack failures an
   operator has to tell apart — `extension_pack_unavailable` (the pack is not on this deployment) and
   `extension_pack_refused` (it is here and was refused) — instead of an unknown field pointing at the
-  section, which sent an operator to delete configuration rather than install a pack. `plan --against`
-  parses its baseline with the same deployment's packs — the baseline is a prior revision of that
-  deployment's document supplied as a diff input, so the packs that validate it are the installed
-  ones wherever the file itself is kept — and a prior revision carrying a claimed section therefore no
-  longer blocks the update it is the baseline for. A claimed section carries **no** boot boundary with
-  it: the boot resolves the deployment's packs before it validates the document (see the `services`
+  section, which sent an operator to delete configuration rather than install a pack. (`doctor` needs
+  the `--with-packs` flag for all of the above: it was narrowed later in this same cycle so that the
+  first command run against a freshly cloned repository imports no pack module — see
+  **`rayspec doctor` no longer runs code out of the deployment tree** under `### Changed`.)
+  `plan --against` parses its baseline with the same deployment's packs — the baseline is a prior
+  revision of that deployment's document supplied as a diff input, so the packs that validate it are
+  the installed ones wherever the file itself is kept — and a prior revision carrying a claimed
+  section therefore no longer blocks the update it is the baseline for. A claimed section carries
+  **no** boot boundary with it: the boot resolves the deployment's packs before it validates the
+  document (see the `services`
   entry above), so a document that **writes** a claimed key boots exactly as these commands validated
   it, and its verdict carries the boundary list every other backend verdict gets. No further
   pack-contributed detail is reported: what a pack configures stays the pack's business. A document
@@ -350,6 +355,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /v1/runs/{id}/events` now calls the helper and is byte-unchanged: same frames, same ids, same
   order, same drops, same neutral-event re-validation on read.
 
+- **`@rayspec/pack-sdk` now carries the contract a pack handler is written against, so a pack can
+  write the modules its declarations point at.** The package described *where* a handler lives and
+  *what it is called* — `PackHandlerFragment{id, module, export, kind}`, `PackToolFragment`,
+  `PackApiRouteFragment` — and nothing that said what a handler **is**. A pack that declared a
+  `tooling` or an `api` contribution therefore had no typed contract for the module behind it. The
+  platform's own handler contract, `@rayspec/handler-sdk`, releases in the same closure and a pack
+  can install it — but it carries runtime and three production dependencies, so requiring it beside
+  the pack surface would put four packages and an implementation into a pack's build for a shape one
+  types-only, zero-dependency package can promise. Eleven exports close that
+  (32 → 43, all additive): **`PackToolHandler<In, Out>`** — `(args, init) => neutral data` — and
+  **`PackRouteHandler<Out>`** — `(init) => JSON body` — with the inits they receive
+  (`PackHandlerInit`, `PackToolHandlerInit`, `PackRouteHandlerInit`, `PackHandlerPrincipal`) and the
+  tenant-bound, name-keyed store door those inits carry (`PackStoreDb`, `PackStoreRow`,
+  `PackStoreFilter`, `PackSelectOptions`, `PackUpsertOptions`). A pack handler module of either
+  contracted kind now imports `@rayspec/pack-sdk` and nothing else, for both halves of a
+  contribution, and `gate:handler-imports` sanctions that import over the manifest-derived pack
+  handler roots alongside `@rayspec/handler-sdk`. **That sanction is now load-bearing**: the gate
+  refuses every *other* `@rayspec/`-scoped specifier under a handler root, rather than enumerating
+  the platform internals someone thought of — so `@rayspec/server`, `@rayspec/durable-dbos`, a
+  capability runtime or a package added next release is refused on the day it lands, and a subpath of
+  a sanctioned contract is refused too. Its self-test proves the set decides something by mutation:
+  each sanctioned name is dropped in turn and the import that the full set accepts must be refused by
+  the shrunken one, so a name cannot sit in that set inertly. The PASS line now **reports** what the
+  scan read — modules scanned, per-contract tally, which vectors came back clean — instead of
+  generalizing a property over files that do not all have it. An ordinary third-party or node-builtin
+  import stays deliberately unflagged, and the header says so: the path jail bounds which file loads,
+  this gate bounds the trust-boundary crossings.
+  **What a pack handler does not get is stated, not omitted.** The injected capability handles (a blob
+  backend, the read-only file source, the speech providers, the event-bus append), the durable
+  enqueue, the play-token mint and the branded status/header response envelope are each named in the
+  contract's docblock with the reason they are withheld — a capability contract is versioned with the
+  platform, the promised way for a pack to schedule an agent turn is `TurnDispatch` on the `services`
+  contribution's boot context, and the
+  response brand is a runtime value a types-only package does not ship. Withheld from the **contract**,
+  not from the deployment — a deployment's own init for a route may still carry an enqueue, and what
+  it hands its routes is its affair; this is a statement about what a pack may **rely on**, enforced
+  by the type rather than by the runtime. Two declarable shapes stay uncontracted and say so: a
+  `trigger`, and a `route`-kind handler behind a `{kind:'stream'}` action — a second contract on the
+  same kind, which exchanges a raw `Request`/`Response` and requires the blob backend, so contracting
+  it would contradict the capability-handle rule above. Such a handler annotates
+  `StreamRouteHandler` from `@rayspec/handler-sdk`, as `examples/stream-backend`'s pack does.
+  **The correspondence is pinned at compile time**, on the platform side where the init value is
+  built: the init the engine passes must satisfy what a pack annotates against, and a function a pack
+  annotates must satisfy what the engine calls — so a drift fails this repository's own build instead
+  of a pack author's. The in-tree fixture pack now contributes both contracted kinds through real
+  declarations and builds against `@rayspec/pack-sdk` alone.
+
+### Changed
+
+- **`rayspec doctor` no longer runs code out of the deployment tree, and `--with-packs` is how you ask
+  it to.** `doctor` is documented as a static check of a document — the first command anyone runs
+  against a repository they have just cloned — and it resolved the deployment's extension packs before
+  judging that document. Resolving a pack means `import()`ing its entry module and the schema module of
+  each section it claims, so third-party code out of `extensions[]` executed in-process as a side
+  effect of the check. Measured with a pack whose entry writes a file at import: `doctor` returned
+  `ok: true` and the file appeared.
+  **What a consumer observes.** `rayspec doctor <spec.yaml>` now imports no module out of the
+  deployment tree at all. Its filesystem reach is otherwise unchanged and unrelated: a backend
+  document declaring `frontend[]` mounts still has each mount's `dir` `stat`ed
+  (`frontend_dir_missing` on a miss), and the CLI's startup `.env` auto-load still runs ahead of every
+  subcommand. A document that declares a pack carries one new envelope key,
+  `notResolved`: **one** neutral line (not a warning, and never a per-section list) saying that no pack
+  was loaded, so nothing about the packs was checked — neither that they are installed here, nor that
+  the loader would accept them, nor the grammar of any top-level section they claim.
+  It does not affect `ok` or the exit code, and a document that declares no pack does not
+  carry the key — a pack-free envelope is byte-identical to before. Because only a loaded pack can say
+  which top-level keys are claimed, a key the core grammar does not own is now **accepted unexamined**
+  on a pack-bearing document rather than refused: that includes a mistyped section (`auditting:` for a
+  claimed `auditing:`), and it is the deliberate trade, since refusing it sends you to delete
+  configuration that is in fact correct. Two verdicts you used to get from a bare `doctor` now need the
+  flag: `extension_pack_unavailable` (the pack is not installed here) and `extension_pack_refused` (the
+  pack is here and the loader refuses it — a version pin that does not match its manifest, two packs
+  claiming one top-level key, a `module:` that escapes the deployment tree).
+  **`rayspec doctor --with-packs <spec.yaml>` restores the previous behaviour exactly** — the same
+  loader, the same deployment tree, the same `claimedSections` list naming the pack that owns each
+  claimed key — and its help text says plainly that it runs code from the deployment tree.
+  **`plan`, `deploy --dry-run` and the deploy paths are unchanged**: they resolve the deployment's
+  packs unconditionally, because naming the pack that claims a section is what an operator debugging a
+  deployment needs, and those commands are already understood to read the tree. `deploy --check-env`
+  loaded no pack before this change and still does not.
+  The CLI reference described the whole read-only floor as "no database, no network"; it now states,
+  per command, what that command actually reads.
+
 ### Fixed
 
 - **`deploy --apply-migration` (and `RAYSPEC_UPDATE_MIGRATION`) now probes the objects the delta
@@ -466,6 +554,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first clause alone called such a statement proven on the strength of a column nothing had
   inspected. Only a delta that leaves **no** evidence of any kind gets the "nothing in this boot can
   tell you" wording — and it keeps it, rather than being told the environment is stale.
+- **An extension pack whose entry module is present and does not load is now reported as refused,
+  under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module
+  is resolved `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the
+  production importer refuses outright, because a deploy runtime loads compiled JavaScript only. That
+  refusal was reported as `extension_pack_unavailable`, whose opening sentence says the pack "is not
+  available on this deployment" and whose prescription is "deploy the pack" — sending an operator to
+  deploy what was already sitting there. (The verdict did carry the importer's own message, naming the
+  TypeScript source and the build, in the trailing `Load failure:` clause; what was wrong is the code
+  and the sentence that prescribes an action, not whether the build appeared anywhere.) Which of the
+  two codes an import failure gets is now read off the disk rather than off the error: **nothing at
+  the resolved entry** is `extension_pack_unavailable` (deploy the pack), an **entry that is there and
+  did not load** is `extension_pack_refused`. That class gets its own prescription rather than the
+  read-and-refused one, because two different faults reach it and neither is answered by a re-deploy
+  of the same artifact: the pack is not built, or it did not arrive with the dependencies its entry
+  imports (a `dist/` shipped without its `node_modules/`, which the bundled example README documents
+  as a shipping hazard). The `Load failure:` clause carries the importer's own words, which say which
+  of the two it is. Two of the shipped examples are exactly this shape, so
+  `rayspec plan examples/stream-backend/rayspec.yaml` and its `agent-pack-deployment` sibling now
+  answer with the code and the prescription that fit. A pack whose directory or entry file is
+  genuinely absent reports `extension_pack_unavailable` exactly as before, a pack that was read and
+  then refused (a version skew, a claim collision, a handler outside `handlers/`) keeps its unchanged
+  sentence, and a pack that loads is untouched. The reclassification reaches every path that resolves
+  packs (`plan`, `deploy --dry-run`, `doctor --with-packs`, and the boot), because all of them read
+  the one class the loader records. The error-code catalogues both packages publish
+  (`@rayspec/spec`, `@rayspec/pack-sdk`) and `docs/cli-reference.md` describe the split the same way.
+
+- **`rayspec deploy --dry-run` now composes a conversation-declaring product document instead of
+  failing on its own stub.** The dry-run composes against a rollout whose runtime-only instances are
+  inert, on the stated assumption that compose presence-checks them and never calls them. That is true
+  of every seam but one: the conversation turn responder is supplied as a FACTORY, and compose calls it
+  to read the bounded store-context read the responder declares and cross-reference it against the
+  composed stores. The stub factory threw on call, so **every** document declaring `conversation_input`
+  came back `ok:false` with `spec did not compose against the wired surface: dry-run: responder must not
+  be called` — an internal sentence about the checker, on a document that was fine
+  (`examples/support-intake-chat` is one). The stub is now an inert responder instance behind that
+  factory; `respond` still throws, because running a reply is what a dry-run must not do. It declares no
+  store-context read — the real one is read from the deployment's per-agent responder config, which a
+  dry-run never opens — and the verdict's `notProven` now says so rather than leaving it to inference.
+  A document that declares no conversation input is unaffected.
+
+- **Every document shipped under `examples/` is now held to the read-only floor by CI.** No gate
+  covered example documents, and this is the second release in which a shipped example broke without
+  anything going red. `pnpm gate:example-documents` (deterministic CI lane, after the build) runs
+  `doctor`, `plan` and `deploy --dry-run` through the built CLI over every document it finds by
+  **walking** `examples/` — the list is never kept in the gate, so a new or renamed example is covered
+  the moment it lands, and a walk that finds no document fails rather than passing quietly. Two
+  expectations are derived the same way: a `*.invalid.*` document is a negative fixture and must stay
+  refused (the gate's own accept control — if the floor stops refusing it, every green verdict beside
+  it is worthless), and a document referencing a pack whose entry is TypeScript source with no compiled
+  sibling must be answered `extension_pack_refused`, never `extension_pack_unavailable`. Repository
+  infrastructure only: no published package, API or runtime behavior changes.
 
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
@@ -521,6 +660,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catch-all that coexists with the API by registration order and fall-through. The reserved paths are
   supplied by the composition root that registers them rather than hardcoded in the routing engine, so a
   deployment's own mounts are covered without the engine knowing about them.
+
+### Security
+
+- **The bundled `stream-backend` example no longer serves an uploaded blob under the `Content-Type`
+  its uploader declared.** The example's playback handler read the `content_type` recorded on the
+  pointer row at ingest and put it on the response verbatim, so a chunk uploaded as `text/html` came
+  back `200 text/html`, same-origin, with no `Content-Disposition` — and a `<script>` in that body ran
+  as a live document in the origin of the deployment that stored it. `X-Content-Type-Options: nosniff`
+  (which the platform's response chain does set on this route) never helped: it stops a type from
+  being sniffed, not a declared `text/html` from rendering. Playback now derives the served type from
+  the recorded one instead of echoing it — the recorded value is a lookup key into a small allowlist
+  of inert media containers (`audio/mpeg`, `audio/mp4`, `audio/ogg`, `audio/wav`, `audio/webm`,
+  `video/mp4`, `video/webm`), served as the allowlist's own canonical string with any `; codecs=…`
+  parameter dropped, and anything else, `text/html` included, is `application/octet-stream`. Every
+  byte response (`200` and `206` alike) now also carries `Content-Disposition: attachment`. A consumer
+  who ingested an allow-listed type sees that type's bare `type/subtype` — identical when they
+  declared it bare, with any `; codecs=…` parameter dropped and any casing normalized — plus that one
+  new header; anyone who relied on the route echoing an arbitrary uploaded type gets
+  `application/octet-stream` instead. **This is an example, not the platform**: no platform path
+  reflects an uploaded `Content-Type` — the audio capability's playback route serves the type its
+  own server-side media-prep step registered, never the uploader's — but the example is documentation
+  and its handler is meant to be copied, so the rule is now stated in its README next to the code.
 
 ## [1.8.0] - 2026-08-15
 

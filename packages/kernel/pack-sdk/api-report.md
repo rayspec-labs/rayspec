@@ -12,7 +12,7 @@ must be regenerated here and committed in the same change:
 
 ## Entry point `.` — `dist/index.d.ts`
 
-32 export(s).
+43 export(s).
 
 ### `DefinedPack` — `dist/manifest.d.ts`
 
@@ -132,10 +132,29 @@ export interface PackHandlerFragment {
 }
 ```
 
+### `PackHandlerInit` — `dist/handler.d.ts`
+
+```ts
+export interface PackHandlerInit {
+    readonly tenantId: string;
+    readonly db: PackStoreDb;
+}
+```
+
 ### `PackHandlerKind` — `dist/manifest.d.ts`
 
 ```ts
 export type PackHandlerKind = 'tool' | 'route' | 'trigger';
+```
+
+### `PackHandlerPrincipal` — `dist/handler.d.ts`
+
+```ts
+export interface PackHandlerPrincipal {
+    readonly kind: 'user' | 'apikey' | 'm2m';
+    readonly id: string;
+    readonly role?: string;
+}
 ```
 
 ### `PackHttpMethod` — `dist/manifest.d.ts`
@@ -226,12 +245,42 @@ export interface PackMigrationChain {
 }
 ```
 
+### `PackRouteHandler` — `dist/handler.d.ts`
+
+```ts
+export type PackRouteHandler<Out = unknown> = (init: PackRouteHandlerInit) => Promise<Out> | Out;
+```
+
+### `PackRouteHandlerInit` — `dist/handler.d.ts`
+
+```ts
+export interface PackRouteHandlerInit extends PackHandlerInit {
+    readonly params: Readonly<Record<string, string>>;
+    readonly body?: unknown;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly principal?: PackHandlerPrincipal;
+}
+```
+
 ### `PackSectionClaim` — `dist/manifest.d.ts`
 
 ```ts
 export interface PackSectionClaim {
     readonly key: string;
     readonly schemaModule: string;
+}
+```
+
+### `PackSelectOptions` — `dist/handler.d.ts`
+
+```ts
+export interface PackSelectOptions {
+    readonly orderBy?: ReadonlyArray<{
+        readonly column: string;
+        readonly dir?: 'asc' | 'desc';
+    }>;
+    readonly limit?: number;
+    readonly offset?: number;
 }
 ```
 
@@ -267,6 +316,26 @@ export interface PackServiceModule {
 }
 ```
 
+### `PackStoreDb` — `dist/handler.d.ts`
+
+```ts
+export interface PackStoreDb {
+    select(store: string, filter?: PackStoreFilter, opts?: PackSelectOptions): Promise<PackStoreRow[]>;
+    count?(store: string, filter?: PackStoreFilter): Promise<number>;
+    insert(store: string, values: PackStoreRow): Promise<PackStoreRow>;
+    upsert(store: string, conflictColumns: string[], values: PackStoreRow, opts?: PackUpsertOptions): Promise<PackStoreRow | undefined>;
+    update(store: string, filter: PackStoreFilter, patch: PackStoreRow): Promise<PackStoreRow[]>;
+    delete(store: string, filter: PackStoreFilter): Promise<number>;
+    transaction<T>(fn: (tx: PackStoreDb) => Promise<T>): Promise<T>;
+}
+```
+
+### `PackStoreFilter` — `dist/handler.d.ts`
+
+```ts
+export type PackStoreFilter = Record<string, unknown>;
+```
+
 ### `PackStoreFragment` — `dist/manifest.d.ts`
 
 ```ts
@@ -274,6 +343,12 @@ export interface PackStoreFragment {
     readonly name: string;
     readonly [declaredKey: string]: unknown;
 }
+```
+
+### `PackStoreRow` — `dist/handler.d.ts`
+
+```ts
+export type PackStoreRow = Record<string, unknown>;
 ```
 
 ### `PackTokenUsage` — `dist/journal.d.ts`
@@ -296,6 +371,26 @@ export interface PackToolFragment {
     readonly id: string;
     readonly handler: string;
     readonly [declaredKey: string]: unknown;
+}
+```
+
+### `PackToolHandler` — `dist/handler.d.ts`
+
+```ts
+export type PackToolHandler<In = unknown, Out = unknown> = (args: In, init: PackToolHandlerInit) => Promise<Out> | Out;
+```
+
+### `PackToolHandlerInit` — `dist/handler.d.ts`
+
+```ts
+export type PackToolHandlerInit = PackHandlerInit;
+```
+
+### `PackUpsertOptions` — `dist/handler.d.ts`
+
+```ts
+export interface PackUpsertOptions {
+    readonly updateWhere?: PackStoreFilter;
 }
 ```
 

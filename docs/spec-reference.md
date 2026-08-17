@@ -1823,7 +1823,11 @@ directory and then every ancestor above it, the deployment's own tree included (
 `module` path-jail keeps every pack inside that tree, so it is always on the walk).
 The pack's own `node_modules` is therefore the first one Node reaches, and the only one
 the pack controls. A pack shipped from its own repository declares `@rayspec/platform`
-(and `@rayspec/handler-sdk`, if its handlers import the capability types) as a
+(plus, for its handler modules, `@rayspec/pack-sdk` — the types-only, zero-dependency
+surface carrying both the manifest types and the contract a `tool` handler or a
+`{kind:'handler'}` route handler is written against — or `@rayspec/handler-sdk` for a
+shape that surface does not promise, such as the `StreamRouteHandler` a
+`{kind:'stream'}` action needs) as a
 dependency on the **released** version the deployment runs, installs it, and ships the
 pack **directory** — the compiled output **and** its `node_modules` — to the deploy
 target. Ship the compiled output alone and resolution falls through to whatever the

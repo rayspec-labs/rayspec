@@ -10,11 +10,12 @@
  * It is deliberately trivial: it reads its bound path parameter and answers with it. What is being
  * witnessed is WHERE the route is allowed to live and WHO the merge says brought it, not what the
  * handler computes — and a handler that touched the database would make the namespace test depend on
- * one. Like every escape-hatch module it imports `@rayspec/handler-sdk` and nothing else (the
- * type-only capability contract), which is the boundary `gate:handler-imports` enforces over this
- * subtree once the deployment document beside this pack registers it.
+ * one. It names `@rayspec/pack-sdk` and nothing else, now that the same package carries the contract a
+ * handler is written against — which keeps this subtree inside the boundary `gate:handler-imports`
+ * enforces over it once the deployment document beside this pack registers it: that gate sanctions
+ * the two handler contracts and refuses every other `@rayspec/`-scoped import under that root.
  */
-import type { RouteHandler } from '@rayspec/handler-sdk';
+import type { PackRouteHandler } from '@rayspec/pack-sdk';
 
 /** What the route answers: the turn it was asked about, echoed back as neutral data. */
 interface TurnView {
@@ -26,6 +27,6 @@ interface TurnView {
  * route's parameters as server-parsed strings; the tenant is never among them (it stays
  * server-derived), so there is nothing here a caller could name to reach another tenant's data.
  */
-export const listTurns: RouteHandler<TurnView> = (init) => ({
+export const listTurns: PackRouteHandler<TurnView> = (init) => ({
   turnId: init.params.turn_id ?? '',
 });

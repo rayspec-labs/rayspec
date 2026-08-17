@@ -143,8 +143,10 @@ jobs:
       - name: Adapter-no-handlers gate
         run: pnpm gate:adapter-handlers
 
-      # An escape-hatch handler module may import ONLY @rayspec/handler-sdk — never a platform
-      # internal or an agent SDK, and may not '..'-tunnel into platform source.
+      # Under the @rayspec/ scope an escape-hatch handler module may name ONLY a handler contract —
+      # @rayspec/handler-sdk (a deployment's own handler) or @rayspec/pack-sdk (a handler contributed
+      # by an extension pack). Every other @rayspec/-scoped package is refused, as are agent SDKs and
+      # a '..'-tunnel into platform source.
       - name: Handler-imports gate
         run: pnpm gate:handler-imports
 
@@ -281,6 +283,13 @@ jobs:
       # Runs after Build so the cited CLI dist entrypoint resolves.
       - name: Skill-drift gate
         run: pnpm gate:skill-drift
+
+      # The example-document gate: every document under examples/ must still answer the read-only floor
+      # (doctor / plan / deploy --dry-run) exactly as it is committed. The examples are the first thing a
+      # reader runs and nothing was watching them. The list is WALKED off the filesystem, and a walk that
+      # finds nothing fails. Runs after Build (it drives the CLI's dist entrypoint); touches no database.
+      - name: Example-document gate
+        run: pnpm gate:example-documents
 
       # The public-API report gate: a package that promises a surface to code built outside this repo
       # declares its report file in its own manifest ("rayspecPublicApi"), and this re-derives that

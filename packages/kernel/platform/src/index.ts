@@ -127,6 +127,7 @@ export {
   EXTENSION_VIRTUAL_PREFIX,
   type ExtensionCapabilities,
   ExtensionLoadError,
+  type ExtensionLoadFailureClass,
   type ExtensionManifest,
   type ExtensionRefLike,
   type ExtensionSectionClaim,

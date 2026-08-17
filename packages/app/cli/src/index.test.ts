@@ -119,6 +119,18 @@ describe('main — exit codes + stream routing', () => {
     await expect(main(['doctor', '--nope', 'rayspec.yaml'])).rejects.toThrow(/invalid arguments/i);
     expect(outChunks.join('')).toBe('');
   });
+
+  // `--with-packs` is `doctor`'s alone. The flag decides whether the command imports code out of the
+  // deployment tree, and `openapi` reads the product profile, whose grammar declares no pack — so it
+  // must not quietly accept a flag it cannot honour. Both directions, because an accepted flag and a
+  // refused one are the same silence if only one of them is asserted.
+  it('doctor accepts --with-packs; openapi still refuses it as an unknown flag', async () => {
+    expect(await main(['doctor', '--with-packs', 'rayspec.yaml'])).toBe(0);
+    expect(JSON.parse(outChunks.join('')).ok).toBe(true);
+    await expect(main(['openapi', '--with-packs', 'rayspec.yaml'])).rejects.toThrow(
+      /invalid arguments/i,
+    );
+  });
 });
 
 describe('run — CliError → exit 2 mapping (IDX-EXIT2-1)', () => {

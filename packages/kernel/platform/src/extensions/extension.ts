@@ -233,10 +233,14 @@ export interface DefinedExtension extends ExtensionManifest {
  *
  * The pack ENTRY authors against `@rayspec/platform` (where this impl + the fragment types live — a
  * pack ships in its own repo that depends on the platform). A pack HANDLER module (under `handlers/`)
- * still imports ONLY `@rayspec/handler-sdk` (the type-only capability contract; `gate:handler-imports`
- * enforces that for the manifest-derived pack handler root). The two surfaces are deliberately
+ * imports a type-only handler contract and nothing else — `@rayspec/pack-sdk` for the two kinds it
+ * contracts (`PackToolHandler`, `PackRouteHandler`), or `@rayspec/handler-sdk` for a shape the pack
+ * surface does not promise (a `route`-kind handler behind a `{kind:'stream'}` action needs
+ * `StreamRouteHandler` from there). `gate:handler-imports` sanctions exactly those two over the
+ * manifest-derived pack handler root and refuses every OTHER `@rayspec/`-scoped import there, along
+ * with agent SDKs and `..`-escapes out of the handler tree. The two surfaces are deliberately
  * distinct: the entry DECLARES the pack (platform types), a handler RUNS with injected capabilities
- * (handler-sdk types).
+ * (handler-contract types).
  */
 export function defineExtension(manifest: ExtensionManifest): DefinedExtension {
   return { ...manifest, __rayspecExtension: EXTENSION_BRAND };

@@ -3,10 +3,16 @@
  * Handler-imports CI gate — the escape-hatch import boundary.
  *
  * An escape-hatch handler module (a `handlers[].module` resolved under a deployment's
- * `escapeHatchRoot`) is TRUSTED-AUTHOR product logic. Its ONLY sanctioned dependency
- * is `@rayspec/handler-sdk` — the type-only capability contract the engine injects against. It must
- * NEVER import a platform internal (`@rayspec/platform`/`db`/`core`/`api-auth`/`auth-core`/`spec`)
- * or an agent SDK (`@openai/agents`, `@anthropic-ai/*`, `@earendil-works/*`), because:
+ * `escapeHatchRoot`) is TRUSTED-AUTHOR product logic. The `@rayspec/`-scoped packages it may name are
+ * the TWO handler contracts and nothing else under that scope: `@rayspec/handler-sdk`, the contract a
+ * deployment's own handler is injected against, and `@rayspec/pack-sdk`, the contract a handler
+ * CONTRIBUTED BY AN EXTENSION PACK is written against. Each is sanctioned on its OWN property and the
+ * two properties are NOT the same one — stated per package at `ALLOWED_IMPORTS` below rather than
+ * generalized into a single claim that is false of one of them. Outside that scope the module must
+ * NEVER import an agent SDK (`@openai/agents`, `@anthropic-ai/*`, `@earendil-works/*`); inside it, a
+ * platform internal (`@rayspec/platform`/`db`/`core`/`api-auth`/`auth-core`/`spec`) is enumerated
+ * explicitly so the failure names which rule fired, and every remaining `@rayspec/` package is
+ * refused by the scope rule. Why those two refusals are the ones that matter:
  *   - a platform-internal import would let a handler reach AROUND the injected, capability-scoped
  *     `HandlerInit` (e.g. construct a raw `TenantDb`, bypassing the tenant chokepoint) — defeating
  *     the whole "handler gets ONLY a serializable-shaped init" model + the isolate seam
@@ -17,7 +23,7 @@
  *
  * MIRRORS scripts/check-adapter-no-handlers.mjs + check-tenant-chokepoint.mjs: a greppable TRIPWIRE
  * (no AST), COMMENT- and STRING-LITERAL-stripped before analysis, with a SELF-TEST that proves the
- * detector fires on every forbidden vector AND passes the one sanctioned import.
+ * detector fires on every forbidden vector AND passes each sanctioned import.
  *
  * HONEST CEILING: being a tripwire, it vets what a module WRITES DOWN — a source it can read — and
  * the reader is a matcher, not a parser. Two shapes it cannot read are REFUSED rather than cleared:
@@ -31,6 +37,15 @@
  * would otherwise hide. What the refusals do NOT buy is a parser: a spelling no matcher here
  * anticipates is still read as clean, which is why the OS-level isolate, not this gate, is the
  * boundary that actually holds.
+ *
+ * THE OTHER HALF OF THE CEILING is about WHICH specifiers are in scope at all. This gate refuses
+ * platform internals, agent SDKs, every non-sanctioned `@rayspec/`-scoped package, a `..`-escape out
+ * of the handler tree and an import statement it cannot read. It does NOT refuse an ordinary
+ * third-party or node-builtin import (`lodash`, `pg`, `node:child_process`): a deployment vendoring a
+ * util into its own escape-hatch library is legitimate, the path jail (loader.ts) bounds WHICH file
+ * loads, and this gate bounds the trust-boundary-crossing imports specifically. So "refuses
+ * everything else" is true of the `@rayspec/` scope and of the enumerated vectors — not of every
+ * import a handler can write.
  *
  * ESCAPE-HATCH ROOTS: a RaySpec deployment's escape-hatch library lives outside the platform
  * (zero-product-code). On the platform main line the ONLY escape-hatch modules that exist are
@@ -83,8 +98,42 @@ if (PACK_ROOT_ESCAPES.length > 0) {
 }
 const ESCAPE_HATCH_ROOTS = [...BASE_ESCAPE_HATCH_ROOTS, ...PACK_HANDLER_ROOTS];
 
-/** The ONE import an escape-hatch module may name. */
-const ALLOWED_IMPORT = '@rayspec/handler-sdk';
+/**
+ * The `@rayspec/`-scoped packages an escape-hatch module may name — the two handler contracts, and
+ * nothing else that carries that scope.
+ *
+ * THIS SET IS LOAD-BEARING, not a label. `isUnsanctionedScoped` refuses every OTHER specifier under
+ * the `@rayspec/` scope, so dropping a name here turns its import into a violation. That is asserted
+ * by MUTATION rather than by this sentence: `selfTest` removes each name in turn and requires the
+ * very case that accepted it to go red, which is the check that would have caught the earlier shape
+ * of this constant — where the set decided only which specifiers skipped a forbidden-prefix test they
+ * were never going to fail, and emptying it changed nothing.
+ *
+ * `@rayspec/handler-sdk` is what a DEPLOYMENT's own handler is injected against. `@rayspec/pack-sdk`
+ * is what a handler CONTRIBUTED BY AN EXTENSION PACK is written against: a pack authors both halves
+ * of a contribution — the manifest that declares it and the module the declaration points at —
+ * against one surface, and this gate scans the manifest-derived pack handler roots, so the sanctioned
+ * set has to name it.
+ *
+ * THE TRUST ARGUMENT DIFFERS PER PACKAGE, so it is stated per package. Generalizing one package's
+ * property to both is how a false claim gets written down:
+ *   - `@rayspec/pack-sdk` is a types-only, zero-dependency leaf. Its manifest declares no
+ *     `dependencies`, its built `dist/index.js` is a single re-export of its own identifier helper,
+ *     and it names no platform internal. Importing it can reach nothing.
+ *   - `@rayspec/handler-sdk` is NOT a leaf, and saying so is the point. Its manifest declares
+ *     `@rayspec/core`, `@rayspec/stt-port` and `@rayspec/tts-port` under `dependencies`; it ships
+ *     runtime (a bounded body reader, a tokenizer conduit, the response-envelope brand); and its
+ *     `src/index.ts` imports `@rayspec/core`, which is itself entry #3 on FORBIDDEN_IMPORT_PREFIXES
+ *     below. It is sanctioned because it IS the injection contract — the shape the engine builds the
+ *     `HandlerInit` against — and a handler is supposed to depend on the seam it is injected through.
+ *     What the forbidden list stops is a handler reaching AROUND that seam to construct a capability
+ *     itself; naming the seam is not that.
+ */
+const ALLOWED_IMPORTS = ['@rayspec/handler-sdk', '@rayspec/pack-sdk'];
+/** The sanctioned set, rendered for a message. */
+const ALLOWED_LIST = ALLOWED_IMPORTS.map((s) => `'${s}'`).join(' or ');
+/** The scope the sanction governs: a specifier under it is refused unless it is EXACTLY sanctioned. */
+const RAYSPEC_SCOPE = '@rayspec/';
 
 /**
  * Forbidden import specifiers (a handler may import NONE of these). Platform internals + every agent
@@ -379,8 +428,27 @@ function isForbidden(source) {
 }
 
 /**
- * A RELATIVE import is suspect: an escape-hatch module should depend only on `@rayspec/handler-sdk`
- * (a sibling .ts in the same escape-hatch library is allowed — that is still product logic, not a
+ * True if the source carries the `@rayspec/` scope but is not EXACTLY a sanctioned handler contract.
+ * This is the rule that makes `ALLOWED_IMPORTS` decide anything.
+ *
+ * It is SCOPE-shaped rather than list-shaped on purpose. `FORBIDDEN_IMPORT_PREFIXES` enumerates the
+ * platform internals someone thought of; this workspace also publishes `@rayspec/server`,
+ * `@rayspec/durable-dbos`, the capability runtimes and the adapters, and it gains packages every
+ * release. An enumeration is refused-until-listed, which fails open for exactly the reach-around
+ * vectors this gate exists to stop; a scope rule is refused-by-default, so a package added next
+ * release is covered on the day it lands rather than on the day someone remembers it.
+ *
+ * EXACT match, not a prefix: a subpath of a sanctioned contract (`@rayspec/pack-sdk/internal`) is NOT
+ * sanctioned. Both packages declare a `'.'`-only `exports` map so such an import does not resolve
+ * anyway, and reading the sanction as a prefix would re-open the scope one subpath at a time.
+ */
+function isUnsanctionedScoped(source, allowed) {
+  return source.startsWith(RAYSPEC_SCOPE) && !allowed.includes(source);
+}
+
+/**
+ * A RELATIVE import is suspect: an escape-hatch module should depend only on a sanctioned handler
+ * contract (a sibling .ts in the same escape-hatch library is allowed — that is still product logic, not a
  * platform reach-around). We ALLOW relative imports (a multi-file escape-hatch library is legitimate)
  * but FORBID a relative path that climbs OUT of the escape-hatch tree with `..` reaching a platform
  * package — caught structurally: a relative `..`-traversal is flagged so it cannot tunnel to
@@ -394,16 +462,28 @@ function isEscapingRelative(source) {
 /**
  * Detect forbidden imports in one escape-hatch module's source. Pure (no I/O) so the self-test
  * exercises the EXACT logic. `rel` is used only for the message. Returns violation strings.
+ *
+ * `allowed` is a PARAMETER (defaulting to the sanctioned set) so `selfTest` can shrink it and measure
+ * that the set is load-bearing, instead of the set being trusted to matter.
  */
-export function detectViolations(rel, src) {
+export function detectViolations(rel, src, allowed = ALLOWED_IMPORTS) {
   const found = [];
   const code = stripComments(src);
+  const allowedList = allowed.map((s) => `'${s}'`).join(' or ') || '(nothing)';
   for (const source of extractImportSources(code)) {
-    if (source === ALLOWED_IMPORT) continue; // the ONE sanctioned import
+    if (allowed.includes(source)) continue; // a sanctioned handler contract
     if (isForbidden(source)) {
       found.push(
-        `${rel}: imports '${source}' — an escape-hatch handler may import ONLY ` +
-          `'${ALLOWED_IMPORT}', never a platform internal or an agent SDK.`,
+        `${rel}: imports '${source}' — a platform internal or an agent SDK. Under the '@rayspec/' ` +
+          `scope an escape-hatch handler may name ONLY ${allowedList}, and it may never name an ` +
+          'agent SDK at all.',
+      );
+    } else if (isUnsanctionedScoped(source, allowed)) {
+      found.push(
+        `${rel}: imports '${source}' — a '@rayspec/'-scoped package that is not a sanctioned handler ` +
+          `contract. Under that scope an escape-hatch handler may name ONLY ${allowedList} (exactly; ` +
+          'a subpath of one is not sanctioned). Everything else under it is platform code a handler ' +
+          'must receive through its injected init rather than import.',
       );
     } else if (isEscapingRelative(source)) {
       found.push(
@@ -411,9 +491,10 @@ export function detectViolations(rel, src) {
           'tunnel out of the escape-hatch library into platform source.',
       );
     }
-    // A non-forbidden, non-escaping import (a sibling relative module, or a benign 3rd-party util a
+    // An UNSCOPED, non-escaping import (a sibling relative module, or a benign 3rd-party util a
     // deployment vendors in its own library) is NOT flagged here — the path jail (loader.ts) bounds
-    // WHICH file loads; this gate bounds the trust-boundary-crossing imports specifically.
+    // WHICH file loads; this gate bounds the trust-boundary-crossing imports specifically. That is a
+    // stated ceiling, not a sanction (see HONEST CEILING in the header).
   }
   // A member named with a STRING literal — refuse the statement (its source is never extracted).
   found.push(...detectQuotedNameViolations(rel, code));
@@ -422,14 +503,81 @@ export function detectViolations(rel, src) {
   return found;
 }
 
+/**
+ * Which sanctioned contracts a module actually NAMES. Used only for the PASS line, so the summary
+ * REPORTS what the scan read rather than asserting a set membership no reader can check against the
+ * tree — the failure mode of a summary that named one package while the modules under it imported
+ * another.
+ */
+export function sanctionedImportsIn(src) {
+  const named = new Set();
+  for (const source of extractImportSources(stripComments(src))) {
+    if (ALLOWED_IMPORTS.includes(source)) named.add(source);
+  }
+  return named;
+}
+
 // --- self-test: prove the detector fires for every forbidden vector + passes the clean one --------
 function selfTest() {
   const cases = [
-    // the ONE sanctioned import — must PASS
+    // the sanctioned imports — BOTH must PASS. The second is the contract a handler contributed by
+    // an extension pack is written against; it is scanned under a manifest-derived pack handler root,
+    // so a set that named only the first would make this gate's own PASS line false about the tree.
     {
       rel: 'examples/acme-notes-backend/handlers/x.ts',
       src: "import type { ToolHandler } from '@rayspec/handler-sdk';",
       expect: false,
+    },
+    {
+      rel: 'packages/test/fixture-pack/dist/handlers/x.ts',
+      src: "import type { PackToolHandler } from '@rayspec/pack-sdk';",
+      expect: false,
+    },
+    {
+      rel: 'packages/test/fixture-pack/dist/handlers/x.ts',
+      src: "import type { PackRouteHandler } from '@rayspec/pack-sdk';",
+      expect: false,
+    },
+    // The allow-check is an EXACT match, not a prefix, so a subpath does NOT ride the exemption: it
+    // is still `@rayspec/`-scoped and not sanctioned, so the scope rule FIRES. (Such an import does
+    // not resolve anyway — both packages declare a '.'-only `exports` map — but a gate that cleared
+    // it would let the scope be re-opened one subpath at a time.)
+    {
+      rel: 'h/x.ts',
+      src: "import type { T } from '@rayspec/pack-sdk/internal';",
+      expect: true,
+    },
+    { rel: 'h/x.ts', src: "import type { T } from '@rayspec/handler-sdk/blob';", expect: true },
+    // The reach-around vectors an ENUMERATED forbidden list misses. None of these is on
+    // FORBIDDEN_IMPORT_PREFIXES; each is refused because it carries the `@rayspec/` scope and is not
+    // sanctioned. `@rayspec/server` and `@rayspec/durable-dbos` are the two that matter most — the
+    // HTTP app and the durable engine, precisely what a handler must not reach around its init for.
+    { rel: 'h/x.ts', src: "import { app } from '@rayspec/server';", expect: true },
+    { rel: 'h/x.ts', src: "import { enqueue } from '@rayspec/durable-dbos';", expect: true },
+    { rel: 'h/x.ts', src: "import type { SttPort } from '@rayspec/stt-port';", expect: true },
+    { rel: 'h/x.ts', src: "import { agent } from '@rayspec/agent-runtime';", expect: true },
+    // …and the same scope in every spelling the extractor reads, so the rule is not quote-shaped.
+    { rel: 'h/x.ts', src: 'import { app } from `@rayspec/server`;', expect: true },
+    { rel: 'h/x.ts', src: "export { app } from '@rayspec/server';", expect: true },
+    { rel: 'h/x.ts', src: "import '@rayspec/server';", expect: true },
+    { rel: 'h/x.ts', src: "const s = await import('@rayspec/server');", expect: true },
+    { rel: 'h/x.ts', src: "const s = require('@rayspec/server');", expect: true },
+    // a pack handler reaching a platform internal ALONGSIDE its sanctioned contract — must FIRE (the
+    // second sanctioned import does not open a door beside itself).
+    {
+      rel: 'packages/test/fixture-pack/dist/handlers/x.ts',
+      src: "import type { PackRouteHandler } from '@rayspec/pack-sdk';\nimport { forTenant } from '@rayspec/db';",
+      expect: true,
+    },
+    // a backtick / dynamic-static-string spelling of the second sanctioned import — must NOT fire
+    { rel: 'h/x.ts', src: 'import type { T } from `@rayspec/pack-sdk`;', expect: false },
+    { rel: 'h/x.ts', src: "const sdk = await import('@rayspec/pack-sdk');", expect: false },
+    // …and a QUOTED member name is still refused even when the source is sanctioned (the statement is
+    // unreadable, so it is refused rather than cleared — the exemption is on the SOURCE, not a bypass).
+    {
+      rel: 'h/x.ts',
+      src: 'import { "PackRouteHandler" as H } from \'@rayspec/pack-sdk\';',
+      expect: true,
     },
     // platform internals — must FIRE
     {
@@ -652,6 +800,34 @@ function selfTest() {
       process.exit(2);
     }
   }
+
+  // ── THE SANCTIONED SET IS LOAD-BEARING, proved by MUTATION rather than asserted in a comment.
+  //
+  // Every accept case above would read identically if `ALLOWED_IMPORTS` decided nothing — which is
+  // what it did before the scope rule existed: a name in the set only skipped a forbidden-prefix test
+  // it was never going to fail, so emptying the set left this gate green and every case silent. The
+  // check that catches that is differential: drop each name in turn and the import that the full set
+  // ACCEPTS must be REFUSED by the shrunken one. A name for which it is not is INERT — it is in the
+  // set for decoration, and the gate's own message about it would be a claim rather than a rule.
+  for (const name of ALLOWED_IMPORTS) {
+    const src = `import type { T } from '${name}';`;
+    if (detectViolations('h/x.ts', src, ALLOWED_IMPORTS).length !== 0) {
+      console.error(
+        `handler-imports gate SELF-TEST FAILED: '${name}' is in ALLOWED_IMPORTS but the detector ` +
+          'refuses it — the sanctioned set does not accept its own member.',
+      );
+      process.exit(2);
+    }
+    const shrunk = ALLOWED_IMPORTS.filter((s) => s !== name);
+    if (detectViolations('h/x.ts', src, shrunk).length === 0) {
+      console.error(
+        `handler-imports gate SELF-TEST FAILED: '${name}' is INERT in ALLOWED_IMPORTS — removing it ` +
+          'from the sanctioned set does not make importing it a violation, so its presence there ' +
+          'decides nothing and every claim this gate makes about sanctioning it is false.',
+      );
+      process.exit(2);
+    }
+  }
 }
 
 selfTest();
@@ -659,6 +835,8 @@ selfTest();
 const violations = [];
 let scannedFiles = 0;
 let scannedRoots = 0;
+/** Per sanctioned contract: how many scanned modules NAME it (the PASS line reports this, not a claim). */
+const namedBy = new Map(ALLOWED_IMPORTS.map((s) => [s, 0]));
 for (const root of ESCAPE_HATCH_ROOTS) {
   const abs = join(repoRoot, root);
   let exists = true;
@@ -681,7 +859,9 @@ for (const root of ESCAPE_HATCH_ROOTS) {
       );
       continue;
     }
-    violations.push(...detectViolations(rel, readFileSync(full, 'utf8')));
+    const src = readFileSync(full, 'utf8');
+    violations.push(...detectViolations(rel, src));
+    for (const s of sanctionedImportsIn(src)) namedBy.set(s, (namedBy.get(s) ?? 0) + 1);
   }
 }
 
@@ -689,14 +869,24 @@ if (violations.length > 0) {
   console.error('handler-imports gate FAILED:');
   for (const v of violations) console.error(`  - ${v}`);
   console.error(
-    `\nAn escape-hatch handler may import ONLY '${ALLOWED_IMPORT}' — never a platform internal ` +
-      '(@rayspec/{platform,db,core,api-auth,auth-core,spec}) or an agent SDK. The engine injects a ' +
-      'capability-scoped HandlerInit; a handler must not reach around it.',
+    `\nUnder the '@rayspec/' scope an escape-hatch handler may name ONLY ${ALLOWED_LIST} — a ` +
+      "deployment's own handler names '@rayspec/handler-sdk', a handler contributed by an extension " +
+      "pack names '@rayspec/pack-sdk', and every other package under that scope is refused (a " +
+      'subpath of a sanctioned one included). An agent SDK is refused outright, and so are a ' +
+      "'..'-escape out of the handler tree and an import statement this gate cannot read. The engine " +
+      'injects a capability-scoped init; a handler must not reach around it.',
   );
   process.exit(1);
 }
 
+// The PASS line REPORTS what the scan read. It does NOT assert a property of every scanned module:
+// the tally counts modules that NAME a sanctioned contract, which is fewer than the modules scanned
+// (a compiled handler whose only import was type-only carries no import statement at all), and an
+// unscoped third-party import is outside every rule here by design. A summary that generalized over
+// the scanned set would be false of files this gate had just read.
+const tally = [...namedBy].map(([s, n]) => `${n}× '${s}'`).join(', ');
 console.log(
-  `handler-imports gate PASSED: ${scannedFiles} escape-hatch module(s) across ${scannedRoots} ` +
-    `root(s) import only '${ALLOWED_IMPORT}' (no platform internals / SDKs / '..'-escapes).`,
+  `handler-imports gate PASSED: ${scannedFiles} module(s) across ${scannedRoots} root(s) scanned; ` +
+    `sanctioned contracts named ${tally}; no platform internals / agent SDKs / unsanctioned ` +
+    "'@rayspec/'-scoped imports / '..'-escapes / unreadable import statements found.",
 );

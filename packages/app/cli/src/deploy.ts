@@ -119,8 +119,9 @@ export interface DeployDryRunResult {
   readonly notProven: readonly string[];
   /**
    * ONE neutral line per top-level section an extension pack on this deployment claims, naming the
-   * section key and the pack that owns it — the same line `plan` and `doctor` report, from the same
-   * loader run against the same deployment tree. Present only for a document that references a pack
+   * section key and the pack that owns it — the same line `plan` and `doctor --with-packs` report,
+   * from the same loader run against the same deployment tree. Present only for a document that
+   * references a pack
    * and validated, so every other verdict keeps the exact key set it had. NEVER affects `ok` — and
    * where `ok:true` here is furthest from "it boots", `notProven` says so in the same verdict.
    */
@@ -131,7 +132,9 @@ export interface DeployDryRunResult {
 const DRY_RUN_NOT_PROVEN = [
   'the migration (no DB was touched)',
   'boot-env sufficiency (secrets / blob root / media key are not read)',
-  'any provider credential (STT / extraction / responder are stubbed)',
+  'any provider credential (STT / extraction / responder are stubbed — and a stubbed responder ' +
+    "declares no store-context read, so a conversation document's bounded context read is not " +
+    'cross-referenced against its stores here)',
   'live-schema drift against an existing deployment',
   'that the app actually serves (no port was bound)',
 ] as const;
@@ -472,11 +475,13 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     }
     // The BACKEND profile — the shape `serveDeployment` boots through assembleServer. There is nothing
     // to compose (a backend document declares its own routes/handlers rather than lowering to them), so
-    // the verdict is the validation `doctor` runs plus the names the document declares.
+    // the verdict is the validation `doctor --with-packs` runs plus the names the document declares.
     //
-    // It is the validation `doctor` runs including its packs: this is the profile whose grammar carries
+    // It is the validation `doctor --with-packs` runs: this is the profile whose grammar carries
     // `extensions[]`, and the boot this previews resolves them from this same deployment tree. A
-    // document with no pack takes the unchanged `parseSpec` and is unaffected.
+    // dry-run is a preview of THIS deployment, so it resolves them unconditionally — `doctor`, which
+    // is a check of the document, does not unless it is asked. A document with no pack takes the
+    // unchanged `parseSpec` and is unaffected.
     const fromTree = await parseFromDeploymentTree(specPath, specText);
     const backend =
       fromTree === undefined
@@ -539,7 +544,9 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
     const withFile = declaresFileInput(spec);
 
     // A rollout typed against @rayspec/product-yaml; only the runtime-only instances are inert stubs
-    // (compose presence-checks them, never calls them). Real store bindings come from deriveProductStores.
+    // (compose presence-checks them — the conversation responder FACTORY is the one compose calls, to
+    // read the store-context declaration it cross-references). Real store bindings come from
+    // deriveProductStores.
     const rollout: ProductYamlRollout = {
       tenantId: '00000000-0000-4000-8000-000000000000',
       // Never enqueues in a dry-run (no trigger fires) — a throwing stub proves that.
@@ -558,12 +565,22 @@ async function dryRunCompose(specPath: string, specText: string): Promise<Deploy
       ...(hasExtractors
         ? { agents: { has: () => true } as unknown as ProductYamlRollout['agents'] }
         : {}),
+      // An INERT INSTANCE behind the factory, not a throwing factory: compose CALLS the factory to
+      // read the responder's declared store-context (the cross-reference against the composed
+      // stores), so a factory that threw refused every conversation-declaring document at the step
+      // that was meant to read it. What must never run in a dry-run is the reply, and `respond`
+      // still says so. The instance declares no store-context — the real one is read from the
+      // deployment's per-agent responder config, which a dry-run never opens (see `notProven`).
       ...(withConversation
         ? {
             conversation: {
-              responder: (() => {
-                throw new Error('dry-run: responder must not be called');
-              }) as unknown as NonNullable<ProductYamlRollout['conversation']>['responder'],
+              responder: (() => ({
+                agentId: 'dry-run',
+                historyWindow: { turns: 0, chars: 0 },
+                respond: () => {
+                  throw new Error('dry-run: responder must not be called');
+                },
+              })) as unknown as NonNullable<ProductYamlRollout['conversation']>['responder'],
             },
           }
         : {}),

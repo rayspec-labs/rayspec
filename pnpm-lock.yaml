@@ -896,9 +896,6 @@ importers:
         specifier: workspace:*
         version: link:../../kernel/platform
     devDependencies:
-      '@rayspec/handler-sdk':
-        specifier: workspace:*
-        version: link:../../kernel/handler-sdk
       '@rayspec/pack-sdk':
         specifier: workspace:*
         version: link:../../kernel/pack-sdk
