@@ -27,7 +27,7 @@
  */
 import { and, eq, getTableColumns, type SQL, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
-import type { Db } from './client.js';
+import { type Db, POOLED_HANDLE } from './client.js';
 import {
   appendTenantEvents,
   readTenantEventPage,
@@ -340,37 +340,44 @@ export interface PinnedConnection {
 /**
  * THE CONNECTION A TRANSACTIONAL HANDLE IS PINNED TO — `undefined` when the handle is the pooled one.
  *
- * Why this exists at all: a pack's contributed route runs inside the transaction the deployment opened
+ * Why this exists: a pack's contributed route runs inside the transaction the deployment opened
  * around the request, and the door onto that pack's own platform tables has to run its statements on
  * THAT connection. Anything else takes a second connection out of a four-connection pool while this
- * request is holding one of them, which under concurrency is not a hazard but a deadlock — and it
- * would also make a pack's write non-atomic with the route's own.
+ * request is holding one of them. That is not a hazard but a measured deadlock — eight concurrent
+ * requests through a pooled mount completed 0 of 8 and timed out at 15 s, where the pinned mount
+ * completed 8 of 8 in 24 ms — and it would also cost atomicity with the route's own writes.
  *
- * IT READS THE DRIVER'S INTERNALS, and says so rather than pretending otherwise: the transaction
- * object the query builder hands its callback is not decorated with `$client` the way the base handle
- * is, so the pinned connection is reached through the session. Measured on the pinned version:
- * `tx.session.client.unsafe(…)` and `tx.execute(…)` report the SAME `txid_current()`.
+ * IT READS THE DRIVER'S INTERNALS, and says so: the transaction object the query builder hands its
+ * callback is not decorated the way the base handle is, so the pinned connection is reached through
+ * the session. Measured: `tx.session.client.unsafe(…)` and `tx.execute(…)` report the same
+ * `txid_current()`.
  *
- * THE FAILURE MODE IS THE WHOLE DESIGN OF THE RETURN TYPE. A shape change in the driver must not look
- * like "this is the pooled handle", because that answer routes a route's statements onto a second
- * connection — the exact deadlock above, arriving silently on a version bump. So the two cases are
- * discriminated by the thing that is OURS: the base handle carries `$client` because `makeDb` puts it
- * there. Present ⇒ pooled, and there is legitimately nothing to pin. Absent ⇒ this IS a transaction,
- * and failing to find its connection is a refusal, never a fallback.
+ * THE DISCRIMINATOR IS A SYMBOL WE OWN, and an earlier version of this function got that wrong in a
+ * way worth leaving on the record. It keyed on `$client`, reasoning that the base handle carries it
+ * "because `makeDb` puts it there". `makeDb` does assign it — and so does
+ * `drizzle-orm/postgres-js/driver.js`, which sets `db.$client = client` itself. So the discriminator
+ * was the DRIVER's property, and the day a driver decorated its transactions with it too, every
+ * pinned mount would have become a pooled one SILENTLY: measured, that mutation left all three pack
+ * suites green while turning the request path into the deadlock above. {@link POOLED_HANDLE} cannot
+ * be produced outside `@rayspec/db`, so a dependency cannot add it to anything.
+ *
+ * THE FAILURE MODE IS THE RETURN TYPE'S WHOLE DESIGN. Branded ⇒ pooled, and there is legitimately
+ * nothing to pin. NOT branded ⇒ this is not the pooled handle, and failing to find a pinned
+ * connection on it is a REFUSAL, never a fallback.
  */
 export function pinnedConnectionOf(tdb: TenantDb): PinnedConnection | undefined {
   const raw = tdb.unscoped() as unknown as {
-    $client?: unknown;
+    [POOLED_HANDLE]?: true;
     session?: { client?: unknown };
   };
-  if (raw.$client !== undefined) return undefined; // the base handle: pooled by construction
+  if (raw[POOLED_HANDLE] === true) return undefined; // the base handle: pooled by construction
   const client = raw.session?.client;
   if (client === undefined || typeof (client as PinnedConnection).unsafe !== 'function') {
     throw new Error(
-      'TenantDb: this handle is transactional (it carries no `$client`) but its pinned connection ' +
+      'TenantDb: this handle is not the pooled one this package builds, and its pinned connection ' +
         'could not be reached through `session.client` — the database driver changed shape. ' +
         'Refusing rather than falling back to the pooled handle: a statement that must run inside ' +
-        'the caller’s transaction would otherwise take a second connection out of the same ' +
+        'the caller\u2019s transaction would otherwise take a second connection out of the same ' +
         'pool, block on the rows the caller already holds, and lose atomicity with them.',
     );
   }

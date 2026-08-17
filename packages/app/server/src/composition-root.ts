@@ -3246,10 +3246,13 @@ async function deployDeclaredSpec(
               // Every one is spread-when-wired, so a deployment that configured none builds a
               // byte-identical registry to before.
               ...(fsSourceFactory ? { fsSourceFactory } : {}),
-              // Inject the door onto a PACK'S OWN platform tables so a contributed route or tool can
-              // read the rows its own migration chain created — until this, only a `services[]` module
-              // could, and the two contribution kinds did not compose. Spread so ABSENT when no loaded
-              // pack declares a chain, which is the only honest answer then: there are no such tables.
+              // Inject the door onto a PACK'S OWN platform tables so a contributed ROUTE can read the
+              // rows its own migration chain created — until this, only a `services[]` module could.
+              // ROUTES ONLY for now: the tool chokepoint takes its capabilities through `buildToolFactory`,
+              // whose call site is nine positional arguments deep and would also have to decide which POOL an
+              // off-request tool draws from (the durable worker runs the whole run inside one transaction, and
+              // the sibling `eventBus` is refused here for exactly that reason). Its own change, its own arm.
+              // Spread so ABSENT when no loaded pack declares a chain — then there are no such tables.
               ...(packDbFactory ? { packDbFactory } : {}),
               ...(sttCapability ? { sttCapability } : {}),
               ...(ttsCapability ? { ttsCapability } : {}),
@@ -3292,10 +3295,13 @@ async function deployDeclaredSpec(
             // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
             // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
             ...(fsSourceFactory ? { fsSourceFactory } : {}),
-            // Inject the door onto a PACK'S OWN platform tables so a contributed route or tool can
-            // read the rows its own migration chain created — until this, only a `services[]` module
-            // could, and the two contribution kinds did not compose. Spread so ABSENT when no loaded
-            // pack declares a chain, which is the only honest answer then: there are no such tables.
+            // Inject the door onto a PACK'S OWN platform tables so a contributed ROUTE can read the
+            // rows its own migration chain created — until this, only a `services[]` module could.
+            // ROUTES ONLY for now: the tool chokepoint takes its capabilities through `buildToolFactory`,
+            // whose call site is nine positional arguments deep and would also have to decide which POOL an
+            // off-request tool draws from (the durable worker runs the whole run inside one transaction, and
+            // the sibling `eventBus` is refused here for exactly that reason). Its own change, its own arm.
+            // Spread so ABSENT when no loaded pack declares a chain — then there are no such tables.
             ...(packDbFactory ? { packDbFactory } : {}),
             // Inject the media-token service (when wired) so the playback arm's 2nd auth path
             // + the mint capability are available. Spread so ABSENT for a no-playback spec.

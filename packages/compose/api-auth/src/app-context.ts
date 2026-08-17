@@ -169,8 +169,8 @@ export interface DeclarativeEngine {
   /**
    * the composition-root factory for the door onto a PACK'S OWN platform tables — the tables a pack's
    * `migrations: { dir, tablePrefix }` chain created, which no store name reaches and which, before
-   * this, only a `services[]` module could read. A route or tool handler receives the result as
-   * `init.packDb`.
+   * this, only a `services[]` module could read. A contributed ROUTE receives the result as
+   * `init.packDb`; the tool chokepoint does not take it yet (see the composition root).
    *
    * It takes the handle the INVOCATION is bound to, not a tenant id, and that is the whole point: a
    * route runs inside the transaction the deployment opened, so its pack statements have to run on

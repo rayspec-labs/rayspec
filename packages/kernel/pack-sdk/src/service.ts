@@ -84,6 +84,21 @@ export interface TurnDispatch {
  * author. Always pass values as `params` — a name or a value interpolated into `sql` is an injection
  * seam, and the identifier rule (`isSafeIdentifier`) is what a derived name must clear first.
  */
+/*
+ * TWO MOUNTS, ONE TYPE — read this before porting code between a service and a route.
+ *
+ * This interface is what `PackServiceContext['db']` hands a service AND what `PackHandlerInit.packDb`
+ * hands a contributed ROUTE. `query` behaves identically on both. `transaction` does not: on a route
+ * it THROWS, because the deployment already opened one around the invocation and a second would
+ * reserve another connection out of the same small pool while that request holds one. The signature
+ * cannot say so — it is the same method — so the difference is stated here and on `packDb`, and it is
+ * a RUNTIME refusal a compiler will not warn you about when you move a helper from a service module
+ * to a route module.
+ *
+ * The sentences below describing the handle as POOLED, and `transaction` as reserving a connection,
+ * are true of the SERVICE mount. On a route the handle is the one the request's transaction already
+ * pinned.
+ */
 export interface PackDatabase {
   /**
    * Run ONE parameterized statement and read its rows back.

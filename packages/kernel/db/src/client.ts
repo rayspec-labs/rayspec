@@ -54,10 +54,26 @@ export function logNotice(notice: postgres.Notice): void {
  * the HTTP pool — see `@rayspec/server` composition-root.ts (fix B). Pass it explicitly there; the
  * default keeps the HTTP pool at 4 (backward-compatible).
  */
+/**
+ * THE BRAND THAT SAYS "THIS IS THE POOLED, UNSCOPED HANDLE" — and it is OURS, which is the entire
+ * point of it being a symbol declared here.
+ *
+ * `pinnedConnectionOf` has to tell a base handle (nothing to pin, legitimately) from a TRANSACTION
+ * whose reserved connection it failed to reach (a refusal, never a fallback — a pooled statement
+ * inside a route's transaction deadlocks the request path against connections that request already
+ * holds). Discriminating on `$client` looked like it did that and does NOT: measured,
+ * `drizzle-orm/postgres-js/driver.js` assigns `db.$client = client` itself, so it is the DRIVER's
+ * property and an ordinary ergonomics change there — decorating a transaction with it too — would
+ * silently turn every pinned mount into a pooled one.
+ *
+ * A symbol nothing outside this module can produce cannot be added to a transaction by a dependency.
+ */
+export const POOLED_HANDLE = Symbol('rayspec.db.pooledHandle');
+
 export function makeDb(databaseUrl: string, maxPoolSize: number = DEFAULT_POOL_MAX) {
   const sql = postgres(databaseUrl, { max: maxPoolSize, onnotice: logNotice });
   const db = drizzle(sql, { schema });
-  return Object.assign(db, { $client: sql });
+  return Object.assign(db, { $client: sql, [POOLED_HANDLE]: true as const });
 }
 
 /**
@@ -75,5 +91,5 @@ export function makeDbWithSchema(databaseUrl: string, schemaName: string, maxPoo
     connection: { search_path: `${schemaName}, public` },
   });
   const db = drizzle(sql, { schema });
-  return Object.assign(db, { $client: sql });
+  return Object.assign(db, { $client: sql, [POOLED_HANDLE]: true as const });
 }

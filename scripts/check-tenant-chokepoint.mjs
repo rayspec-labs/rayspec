@@ -6,7 +6,11 @@
  * worker — it runs runAgent under forTenant(db, tenantId), same chokepoint discipline) must hold ONLY
  * a TenantDb and never reach around it. This gate FAILS THE BUILD if, in those source roots, any
  * non-test file:
- *   - names a raw-handle factory `makeDb` OR `makeDbWithSchema` (both return the unscoped
+ *   - names a raw-handle factory `makeDb` OR `makeDbWithSchema` OR `pinnedConnectionOf` (the first
+ *     two return the unscoped handle; the third takes a TenantDb and hands back the raw `unsafe()`
+ *     executor of the connection it is pinned to, which is the same reach by a different door and
+ *     was added later — a scoped file could use it without ever writing a token this gate greps,
+ *     which is what this entry closes; the unscoped
  *     Drizzle handle; they live on the @rayspec/db/testing subpath, never the main surface), or
  *   - calls `.unscoped()` outside an explicit, reviewed whitelist.
  *
@@ -137,7 +141,7 @@ function* walk(dir) {
 
 // raw-db handle factories: makeDb AND makeDbWithSchema (the (WithSchema)? branch is the fix
 // for the gap where a SECOND factory slipped past a `\bmakeDb\b`-only detector).
-const RAW_FACTORY_RE = /\bmakeDb(WithSchema)?\b/;
+const RAW_FACTORY_RE = /\bmakeDb(WithSchema)?\b|\bpinnedConnectionOf\b/;
 // Also catch `.unscoped()` AND its bracket/computed-access equivalents — `tdb["unscoped"]()` /
 // `tdb['unscoped']()` — which the dot-only regex missed, so a forbidden escape-hatch call could
 // be smuggled past the gate as a computed member access. PLUS a bare `unscoped` token backstop
@@ -274,8 +278,8 @@ function detectViolations(rel, src) {
   const code = stripComments(src);
   if (RAW_FACTORY_RE.test(code) && !whitelisted) {
     found.push(
-      `${rel}: names a raw-db factory (makeDb/makeDbWithSchema) — request/orchestration code ` +
-        'must use forTenant(db, tenantId), not a raw unscoped handle.',
+      `${rel}: names a raw-db reach (makeDb / makeDbWithSchema / pinnedConnectionOf) — ` +
+        'request/orchestration code must use forTenant(db, tenantId), not a raw unscoped handle.',
     );
   }
   const tokenHit = UNSCOPED_TOKEN_RE.test(code);
@@ -358,6 +362,11 @@ function selfTest() {
     { src: "import { makeDbWithSchema } from '@rayspec/db/testing';", expect: true },
     { src: 'const db = makeDb(url);', expect: true },
     { src: 'const db = makeDbWithSchema(url, schema);', expect: true },
+    // The third raw reach, added when a handler door needed a route's pinned connection. It returns
+    // an `unsafe()` executor, so a scoped file holding a TenantDb could reach every table without
+    // naming `unscoped` at all.
+    { src: "import { pinnedConnectionOf } from '@rayspec/db';", expect: true },
+    { src: 'const raw = pinnedConnectionOf(tdb);', expect: true },
     { src: 'const raw = tdb.unscoped();', expect: true },
     // bracket/computed-member forms + the bare-token backstop must all fire.
     { src: 'const raw = tdb["unscoped"]();', expect: true },

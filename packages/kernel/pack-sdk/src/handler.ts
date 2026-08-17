@@ -224,39 +224,46 @@ export interface PackHandlerInit {
   /** The tenant-bound, name-keyed door onto the stores the merged document declares. */
   readonly db: PackStoreDb;
   /**
-   * The door onto the PLATFORM TABLES THIS PACK'S OWN MIGRATION CHAIN CREATED — a different thing
+   * The door onto the platform tables this pack's own migration chain created — a different thing
    * from `db` above, which is the deployment's declared stores.
    *
    * A pack that declares `migrations: { dir, tablePrefix }` owns tables no store name reaches. Until
    * this existed, only a `services[]` module could read them (`PackServiceContext['db']`), so the two
    * contribution kinds did not compose: a pack could own tables and could contribute a route, and the
-   * route could not read a row the pack itself had written. The only way across was to capture a
-   * service's handle in a module variable at boot, which makes a handler depend on boot order, on a
-   * service having been declared at all, and on a value no contract promises.
+   * route could not read a row the pack itself had written.
    *
-   * IT IS THE SAME DOOR A SERVICE GETS. Same parameterized `query`, same refusals, same posture: it
-   * does not rewrite a pack's SQL and it is NOT a tenant filter, because a pack runs in the
-   * deployment's process as a trusted, non-sandboxed author. **Scoping the statement is therefore the
-   * pack's job, and here it is dischargeable rather than merely stated** — `init.tenantId` above is
-   * server-derived and nothing a caller or a model can write reaches it, so a handler has, on the same
-   * object, both the obligation and the value that meets it. (A service context carries no `tenantId`
-   * at all and has to be handed one by the deployment; this is the better position of the two.)
+   * ⚠ WHAT IT REACHES IS NOT WHAT ITS NAME SAYS, AND THE DIFFERENCE IS YOURS TO MIND.
+   * The sentence above describes what this door is FOR. It does not describe a boundary, because
+   * there is none: this is the same unscoped executor a service holds, so it reaches EVERY table in
+   * the deployment's database — the platform's own, another pack's, `users` — and it can write and
+   * run DDL. Nothing rewrites your SQL, nothing filters by tenant and nothing checks your
+   * `tablePrefix`. That is the deliberate posture for pack code, which runs in the deployment's
+   * process as a trusted, non-sandboxed author.
    *
-   * `transaction(fn)` DEPENDS ON WHERE THE HANDLER RUNS, and the difference is not a wart to work
-   * around but the truth about the two situations:
-   *   · in a ROUTE it is REFUSED, because the deployment already opened one around the invocation and
-   *     the statements are already atomic with the route's own. What a second one would be is not a
-   *     savepoint — it reserves another connection out of the same small pool while this request holds
-   *     one, which under load is a deadlock rather than a hazard. Do the work in the transaction you
-   *     are in, or split it into two.
-   *   · in a TOOL it OPENS one, because a tool holds no outer transaction (several tools of one turn
-   *     run concurrently, and an implicit wrapper would hold a connection across model latency).
+   * On a ROUTE that posture meets something a service never does: a CALLER. Two consequences follow,
+   * and both are yours:
+   *   · `params` is not a convenience. `query(sql)` with a value interpolated from `init.body`,
+   *     `init.params` or `init.headers` is a SQL-injection seam on a live HTTP path — measured, an
+   *     allowlisted request header carrying `x' OR 1=1 --` turned a tenant-scoped count unscoped.
+   *     Pass values as `$1`-bound `params`, always.
+   *   · the tenant predicate is yours to write, and `init.tenantId` above is what discharges it: it
+   *     is server-derived, and nothing a caller or a model can send reaches it. A statement without
+   *     it reads across tenants. (A service context carries no `tenantId` at all, so this is the
+   *     better-equipped of the two positions, not the worse one.)
+   * Your statements also share the connection and the transaction the deployment opened around the
+   * request, so a session-level setting you change is changed for the rest of that request.
+   *
+   * `transaction(fn)` is REFUSED here, and the refusal is the honest answer rather than a limitation:
+   * the deployment already opened one around this invocation, so your `query` calls are already
+   * atomic with the route's own. What a second one would be is not a savepoint — it reserves another
+   * connection out of the same small pool while this request holds one, which under concurrency is a
+   * deadlock rather than a hazard (measured: eight concurrent requests completed none). Do the work
+   * in the transaction you are in, or split it into two.
    *
    * OPTIONAL because it is ADDITIVE: a deployment older than this contract injects none, so
-   * feature-detect (`if (!init.packDb) …`) and fail-close loudly rather than reading `undefined`. The
-   * deployment this ships with populates it on every invocation of both kinds — the optionality is
-   * about version skew, not a capability a deployment opts into. It is ALSO absent, on any version,
-   * for a pack that declares no migration chain: there are no tables of its own to open a door onto.
+   * feature-detect (`if (!init.packDb) …`) and fail-close loudly rather than reading `undefined`. It
+   * is also absent, on any version, for a pack that declares no migration chain — there are no tables
+   * of its own to open a door onto — and on a TOOL invocation, which does not receive it at all yet.
    */
   readonly packDb?: PackDatabase;
 }

@@ -133,10 +133,12 @@ export async function invokeRouteHandler(
   // by the api interpreter through the deployment's ONE resolver. Spread onto the init when present ⇒
   // `init.resumeFrom` is ABSENT on a first request, which means "from the beginning".
   resumeFrom?: string,
-  // The deployment's factory for the pack's OWN-tables door. Threaded identically on both postures:
-  // the ENGINE-TX one binds it to the transaction it opened (so a pack's statements are atomic with
-  // the route's and cannot deadlock against them), the DETACHED one to the pooled handle, and the
-  // factory reads which it was given from the handle itself rather than from a flag a caller sets.
+  // The deployment's factory for the pack's OWN-tables door, bound to the TRANSACTION this posture
+  // opens — so a pack's statements are atomic with the route's own and cannot deadlock against them
+  // from a second connection. The factory reads which handle it was given from the handle itself
+  // rather than from a flag a caller sets. The DETACHED posture passes none: it holds no transaction
+  // to join, and a pooled door there would open one on the request path, contradicting the contract's
+  // flat statement that a route's `transaction()` refuses.
   packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
@@ -321,11 +323,6 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL resume cursor — see invokeRouteHandler. Threaded identically so this posture receives
   // `init.resumeFrom` the same way the engine-tx posture does.
   resumeFrom?: string,
-  // The deployment's factory for the pack's OWN-tables door. Threaded identically on both postures:
-  // the ENGINE-TX one binds it to the transaction it opened (so a pack's statements are atomic with
-  // the route's and cannot deadlock against them), the DETACHED one to the pooled handle, and the
-  // factory reads which it was given from the handle itself rather than from a flag a caller sets.
-  packDbFactory?: (tdb: TenantDb) => PackServiceDatabase,
 ): Promise<unknown> {
   // Same buffer, bound to the BASE handle: this posture holds no engine transaction (that is its
   // whole reason for existing), so the flush below is its own standalone statement rather than the
@@ -352,7 +349,14 @@ export async function invokeRouteHandlerDetached(
     tts,
     bus?.emit,
     resumeFrom,
-    packDbFactory,
+    // NOT the pack's own-tables door. This posture holds NO engine transaction — that is its whole
+    // reason for existing — so the factory would hand back the POOLED handle, whose `transaction()`
+    // OPENS one and reserves a connection on the request path. The contract states flatly that on a
+    // route `transaction()` is refused; honouring that everywhere it can be reached is cheaper than
+    // qualifying the sentence, and `init.packDb` being ABSENT is a shape a handler already has to
+    // fail-close on. No pack can reach this posture today (`routeTx` is not passed through for a
+    // loader-resolved handler), so nothing loses a capability it had.
+    undefined,
   );
   const result = await getHandlerRuntime().invokeRoute(fn, init);
   // Only on the success path — a throwing handler's buffered events are never written (the buffer

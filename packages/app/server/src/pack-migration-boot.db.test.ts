@@ -304,6 +304,10 @@ describe.skipIf(!baseUrl)('the BOOT applies an extension pack’s migration chai
     armsRan += 1;
     process.env.RAYSPEC_SPEC_PATH = PACK_DOC;
     process.env.RAYSPEC_HANDLER_ROOT = PACK_ROOT;
+    // Close whatever an earlier arm left booted before taking another HTTP pool: `afterAll` closes
+    // only the LAST assignment, so reassigning without this leaks four connections for the suite —
+    // which is how a pool flake gets manufactured.
+    await server?.close();
     server = await assembleServer(loadServerConfig());
 
     // Two owner-role principals, each in its OWN org — which is the tenant the route will be scoped
@@ -333,12 +337,26 @@ describe.skipIf(!baseUrl)('the BOOT applies an extension pack’s migration chai
     // TWO, not three. The door does not rewrite a pack's SQL and is not a tenant filter — the same
     // posture a service's door has — so this number is the pack discharging that obligation with
     // `init.tenantId`, the one value a caller cannot influence.
-    expect(await readAs(a.token)).toEqual({ status: 200, body: { tenantId: a.orgId, events: 2 } });
+    //
+    // AND the GUC, which is what pins the MOUNT rather than the reach. The count alone cannot tell a
+    // pinned door from a pooled one: the rows were committed by another connection and read the same
+    // either way. `TenantDb.transaction` sets `app.current_tenant` with `is_local := true`, so it is
+    // visible ONLY on the connection this request's transaction holds — a door on a second, pooled
+    // connection reads the empty string. Without this assertion the whole change could degrade to
+    // pooled and every suite would stay green, which is measured: turning the discriminator in
+    // `pinnedConnectionOf` into "always pooled" left all three pack suites passing.
+    expect(await readAs(a.token)).toEqual({
+      status: 200,
+      body: { tenantId: a.orgId, events: 2, tenantGucSeen: a.orgId },
+    });
 
     // ACCEPT CONTROL, discriminating in the other direction: the second tenant sees its own single
-    // row through the SAME route. A handler answering a constant, or a door reading nothing at all,
-    // would satisfy the assertion above and fail this one.
-    expect(await readAs(b.token)).toEqual({ status: 200, body: { tenantId: b.orgId, events: 1 } });
+    // row through the SAME route, and its own GUC. A handler answering a constant, or a door reading
+    // nothing at all, would satisfy the assertions above and fail these.
+    expect(await readAs(b.token)).toEqual({
+      status: 200,
+      body: { tenantId: b.orgId, events: 1, tenantGucSeen: b.orgId },
+    });
   }, 180_000);
 
   it('(3) a SECOND boot on the same database re-applies nothing', async () => {

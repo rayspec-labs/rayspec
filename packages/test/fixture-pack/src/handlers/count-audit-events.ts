@@ -20,10 +20,20 @@
  */
 import type { PackRouteHandler } from '@rayspec/pack-sdk';
 
-/** What the route answers: how many audit rows this tenant has, as neutral data. */
+/** What the route answers: how many audit rows this tenant has, plus what proves WHERE it read. */
 interface AuditCount {
   readonly tenantId: string;
   readonly events: number;
+  /**
+   * The deployment's transaction-local tenant GUC, as seen THROUGH this door.
+   *
+   * It exists because the count alone cannot tell a pinned mount from a pooled one: rows committed by
+   * another connection read the same either way. `TenantDb.transaction` sets this with
+   * `is_local := true`, so it is visible ONLY on the connection that request's transaction holds — a
+   * pooled second connection sees the empty string. Answering it is therefore the one cheap
+   * observable that distinguishes the two, which is exactly what a fixture pack is for.
+   */
+  readonly tenantGucSeen: string;
 }
 
 /**
@@ -42,8 +52,15 @@ export const countAuditEvents: PackRouteHandler<AuditCount> = async (init) => {
     );
   }
   const rows = await init.packDb.query(
-    'SELECT count(*)::int AS events FROM fixture_pack_audit_events WHERE tenant_id = $1',
+    `SELECT count(*)::int AS events,
+            current_setting('app.current_tenant', true) AS tenant_guc
+       FROM fixture_pack_audit_events
+      WHERE tenant_id = $1`,
     [init.tenantId],
   );
-  return { tenantId: init.tenantId, events: Number(rows[0]?.events ?? 0) };
+  return {
+    tenantId: init.tenantId,
+    events: Number(rows[0]?.events ?? 0),
+    tenantGucSeen: String(rows[0]?.tenant_guc ?? ''),
+  };
 };
