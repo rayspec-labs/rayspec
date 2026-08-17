@@ -544,5 +544,89 @@ describe('parseSpecWithPacks — an absent pack under the production importer', 
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+ * THE MERGED SURFACE. Every rule above is asked of the deployment's own document; a pack contributes
+ * onto it, and a rule can be true of each half and false of the sum. The boot already asks this — it
+ * concatenates the fragments and re-parses — and until this parse did too, `doctor --with-packs`
+ * reported clean what the boot refused, which is the shape of defect a diagnostic floor exists to
+ * remove.
+ *
+ * The ACCEPT CONTROL is the third arm: a pack contributing inside its own namespace still parses, so
+ * the two refusals are the rules answering and not a merge that refuses every pack.
+ */
+describe('parseSpecWithPacks — the rules asked of the MERGED document', () => {
+  let root: string;
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'rayspec-parse-packs-merged-'));
+  });
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /** A document with one store and one route, referencing a pack that contributes `path`. */
+  const doc = `
+version: '1.0'
+metadata:
+  name: merged
+stores:
+  - name: notes
+    columns:
+      - { name: body, type: text }
+api:
+  - { method: GET, path: '/notes/{id}', action: { kind: store, store: notes, op: get } }
+extensions:
+  - id: contributor
+    module: ./pack
+    version: 1.0.0
+`;
+
+  function contributes(prefix: string, path: string): ModuleImporter {
+    return fakeImporter(
+      new Map<string, Record<string, unknown>>([
+        [
+          resolve(root, 'pack', 'index.ts'),
+          {
+            default: defineExtension({
+              version: '1.0.0',
+              routePrefix: prefix,
+              fragments: {
+                handlers: [
+                  { id: 'contributed', module: 'handlers/c.js', export: 'c', kind: 'route' },
+                ],
+                api: [{ method: 'GET', path, action: { kind: 'handler', handler: 'contributed' } }],
+              },
+            }),
+          },
+        ],
+      ]),
+    );
+  }
+
+  const parse = (importer: ModuleImporter) =>
+    parseSpecWithPacks(doc, { packsRoot: root, deploymentRoot: root, importer });
+
+  it('refuses a pack route under a reserved platform prefix — the prefix check does not see it', async () => {
+    // `routePrefixRefusal` asks three things of `/health/`: it is absolute, it is not `/`, and it
+    // carries no parameter. All three hold. The reserved set is not among them, and the confinement
+    // check that follows only asks whether the pack's own routes stay inside the prefix it claimed.
+    const res = await parse(contributes('/health/', '/health/steal'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toContain('reserved_route_path');
+  });
+
+  it('refuses a pack route that is the SAME route as the deployment’s once the router has it', async () => {
+    const res = await parse(contributes('/notes/', '/notes/{note_id}'));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toContain('duplicate_name');
+  });
+
+  it('ACCEPT CONTROL: a pack contributing inside its own namespace parses clean', async () => {
+    const res = await parse(contributes('/ext/contributor/', '/ext/contributor/things'));
+    if (!res.ok) throw new Error(`expected a clean parse:\n${JSON.stringify(res.errors, null, 2)}`);
+    // The DEPLOYMENT's own document comes back, unmerged: linting the sum changes what is REPORTED,
+    // never what this entry point returns.
+    expect(res.value.spec.api).toHaveLength(1);
+    expect(res.value.extensions?.api).toHaveLength(1);
   });
 });

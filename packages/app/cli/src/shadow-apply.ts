@@ -92,6 +92,14 @@ type SanitizePhase = 'connect' | 'apply';
  * enumerated {@link CONNECT_AUTH_CODES} check + the authority/host:port regex below are a secondary
  * defence-in-depth net (they also collapse an `apply`-phase message that somehow embeds an authority or
  * a bare `host:port`/IPv4:port form).
+ *
+ * NOT ROUTED THROUGH `operatorSafeDbErrorMessage`, deliberately, on two independent grounds. It
+ * reads `.message` and never the error OBJECT, so the driver's `detail` — where Postgres echoes an
+ * offending value — is out of reach here by construction. And the `apply` phase runs DEPLOYER-
+ * AUTHORED DDL against a THROWAWAY database this module just created (`rayspec_plan_<pid><random>`,
+ * dropped afterwards) whose only row is the minimal `orgs` FK root seeded above: there is no caller
+ * data in it to echo. What this function guards is the DSN, not a row value, and the phase split is
+ * the instrument for that.
  */
 function sanitizeError(e: unknown, phase: SanitizePhase): string {
   // Region fail-closed: a connect/infra failure NEVER echoes its message — independent of the code.

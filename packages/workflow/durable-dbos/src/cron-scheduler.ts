@@ -142,7 +142,7 @@
 import { createHash } from 'node:crypto';
 import { DBOS, SchedulerMode } from '@dbos-inc/dbos-sdk';
 import type { Db } from '@rayspec/db';
-import { forTenant, schema } from '@rayspec/db';
+import { forTenant, operatorSafeDbErrorMessage, schema } from '@rayspec/db';
 import type {
   DurableExecutor,
   invokeTriggerHandler as InvokeTriggerHandlerFn,
@@ -765,9 +765,14 @@ export class DbosCronScheduler {
       try {
         headerCreated = await insertEnqueuedRunHeader(tdb, { runId, ...headerIdentity });
       } catch (err) {
+        // The rendered message, never the raw error: this is the SAME write the HTTP async path and
+        // the turn dispatcher make (`insertEnqueuedRunHeader`), and both render it. A run header's
+        // columns are the caller's own data, so the ORM's wrapper carries them in its message and
+        // again as enumerable own properties, and the driver error beneath echoes the offending
+        // value in `detail` on any constraint violation. `String(err)` printed the first of those.
         this.#logger.warn(
           `[cron] enqueue-time run header write failed for trigger '${descriptor.name}' ` +
-            `runId=${runId}: ${String(err)}`,
+            `runId=${runId}: ${operatorSafeDbErrorMessage(err)}`,
         );
       }
     } else if (resolveIdentity) {

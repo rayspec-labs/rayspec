@@ -16,6 +16,11 @@
  *   THE LIFT    `parseSpecSections` takes each CLAIMED key out of the document, parses the remainder
  *               with the unchanged core grammar — an unclaimed key is still `unknown_field` — and
  *               hands each lifted node to the claiming pack's validator.
+ *   THE MERGE   `lintSpec` over the document's sections CONCATENATED with the packs' fragments — the
+ *               surface a boot would actually assemble. Every stage above asks about one half; a rule
+ *               can be true of each half and false of the sum, and the boot asks this question too
+ *               (`mergeExtensions` re-parses the merged document). Asking it here is what keeps a
+ *               command that answers pack questions from reporting clean what the boot refuses.
  *
  * TWO WAYS A PACK CAN FAIL, AND THEY PRESCRIBE OPPOSITE ACTIONS. A pack owns the grammar of every
  * section it claims, so a document taken to a deployment that does not have the pack cannot be
@@ -37,6 +42,7 @@
  * control). No packs ⇒ no import, no jail, no behaviour change.
  */
 import {
+  lintSpec,
   loadSpecDocument,
   parseSpecSections,
   type RaySpec,
@@ -98,7 +104,44 @@ export async function parseSpecWithPacks(
   }
 
   const parsed = parseSpecSections(loaded.value, packs.sections);
-  return parsed.ok ? { ok: true, value: { ...parsed.value, extensions: packs } } : parsed;
+  if (!parsed.ok) return parsed;
+
+  // ── The MERGED surface, linted here rather than only at the boot ─────────────────────────────────
+  // Every rule above was asked of the deployment's OWN document. A pack contributes stores, handlers,
+  // tooling, routes and agents onto that document, and a rule that is true of each half separately can
+  // be false of the sum: two routes that are one route to the router, a pack path under a reserved
+  // prefix, a pack tool referring to a handler the merge does not carry.
+  //
+  // The boot already asks this — `mergeExtensions` concatenates the fragments, re-serializes and
+  // re-parses, so the merged document goes through the same `lintSpec`. Until this ran here, the boot
+  // and the floor disagreed on exactly those findings: the boot refused and `doctor --with-packs`
+  // reported the same document clean, which is the shape of defect the floor exists to remove. Linting
+  // the merged surface HERE closes the class rather than one rule of it — the next rule added to
+  // `lintSpec` is answered by both edges the day it is written.
+  //
+  // WHY `lintSpec` AND NOT THE BOOT'S FULL RE-PARSE. The fragments were already validated by their
+  // owning pack's section schema at load, so the grammar half would re-decide a settled question; and
+  // a floor that reported MORE than the boot would send an author to fix a document that deploys. This
+  // is the boot's check minus the grammar re-run: never a finding the boot would not also raise.
+  //
+  // WHAT A MERGED FINDING'S `path` MEANS. It indexes the MERGED section — for a pack-contributed
+  // member, an index into an array nobody wrote. The boot has the same limit for the same reason, and
+  // the message names the offending route/store by name, which is what an operator acts on.
+  const mergedErrors = lintSpec({
+    ...parsed.value.spec,
+    stores: [...parsed.value.spec.stores, ...packs.stores],
+    handlers: [...parsed.value.spec.handlers, ...packs.handlers],
+    tooling: [...parsed.value.spec.tooling, ...packs.tooling],
+    api: [...parsed.value.spec.api, ...packs.api],
+    agents: [...parsed.value.spec.agents, ...packs.agents],
+    // `extensions[]` is spent by the merge — the boot drops it for the same reason before re-parsing.
+    extensions: [],
+  });
+  // The base parse SUCCEEDED to reach here, so it reported nothing: every error below is a fact about
+  // the merged surface alone, and none of them is a duplicate of one the author has already been told.
+  if (mergedErrors.length > 0) return { ok: false, errors: mergedErrors };
+
+  return { ok: true, value: { ...parsed.value, extensions: packs } };
 }
 
 /**

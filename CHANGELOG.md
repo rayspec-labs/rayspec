@@ -560,6 +560,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it imports, and the load failure below says which. Of the 24 operator-facing refusals on this path,
   these three are the only ones that interpolate an importer's words after a guessed path; the other
   21 report something the loader itself observed, where "deploying it again changes nothing" holds.
+- **A declared route that claims a platform path is reported by `doctor`, `plan` and
+  `deploy --dry-run`, and a deploy that trips it is refused before any product DDL is committed.** An
+  `api[]` route may not claim the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`), either
+  readiness probe (`/health/`, `/recovery-scope/`) or a path under a declared non-root static frontend
+  mount: the platform registers all of those on the same app **after** the declared routes, and a
+  router runs matching handlers in registration order, so the declared route wins the match and the
+  platform path answers nothing for the life of the process. The boot always refused such a document.
+  The read-only floor did not — it reported it as fine, which is the opposite of what a floor is for,
+  since the rule is entirely static: it resolves nothing, opens no socket and reads no schema. It is
+  now a document finding under the new closed code **`reserved_route_path`**, reported at
+  `api[<i>].path` in the boot's own sentence (both come from one shared source, so the floor and the
+  boot cannot describe one document two ways). A mount at the **root** still reserves nothing — it is
+  a catch-all that coexists with the API by fall-through — and a merely similar path (`/healthy`
+  beside `/health`) is untouched.
+  **The question is asked of the pattern the router registers, not of the path as written.** A
+  declared `{param}` is registered as a router parameter and a missing leading slash is supplied by
+  the router, so `/{anything}`, `/{a}/{b}` and `health` all reach a platform path while reading like
+  ordinary declarations — measured, each of them answered a readiness probe or the auth surface with
+  the declared route's own 401. All are now refused, under the strict reading of the rule: a declared
+  pattern may not be **able** to match a reserved path or anything nested under it, decided once at
+  the document rather than re-opened the day a path is added beneath a reserved prefix. Ordinary
+  shapes are unaffected — `/notes/{id}`, `/notes/{id}/comments`, `/a/{b}` and a root `/` route are
+  accepted, and each was measured to leave every platform path answering as it does without them.
+  **The refusal names the reserved paths by whose they are.** A collision with a declared static mount
+  used to be reported as a collision with "a RESERVED platform prefix (… `/app/`)" — but `/app/` is
+  the operator's own `frontend[].route`, and moving the **mount** fixes the collision exactly as well
+  as moving the route. Platform prefixes and declared mounts are now listed separately, and the second
+  remedy is named.
+  **The second half is where the deploy stops.** Because the rule is now answered at the pipeline's
+  validate step, a boot that trips it is refused **before** the migrate step rather than while the app
+  was being assembled — which is after each migration has been committed in its own transaction. Such
+  a refusal used to leave the document's product tables standing, from a roll-out that never served a
+  request, and the operator's next move (edit the stores, redeploy) then met a second, confusing
+  drift refusal. It now applies none of the document's product DDL — the tables its stores would
+  materialize are not created. **What an operator sees changes for
+  a document that is wrong in more than one way:** the refusal is now the reserved path — the fault
+  that needs no database to diagnose and that the floor could have shown before deploying — where a
+  later roll-out fault (a handler module that is not on disk) used to be reported first, on an already
+  migrated schema. The remaining fault is reported by the same commands the moment the path is fixed.
+  Consumers branching on the closed error vocabulary should note the new member in both catalogues
+  (`@rayspec/spec`, `@rayspec/pack-sdk`). The boot's registrar keeps its fail-closed guard for a spec
+  assembled in code (the composed Product-YAML runtime), where nothing parses the document.
+
+- **`doctor --with-packs` answers the merged route surface, the way a boot does.** A pack's
+  `routePrefix` is checked for being an absolute path that is not `/` and carries no path parameter —
+  not against the reserved prefixes. So a pack could declare `routePrefix: /health/` and contribute
+  `GET /health/steal`, and while a boot refused the merged document, the one command whose purpose is
+  to answer pack questions reported it clean. `parseSpecWithPacks` now lints the **merged** document —
+  the deployment's sections concatenated with every loaded pack's fragments, which is what a boot
+  assembles — so a finding that exists only in the sum is reported by the floor as well: a pack route
+  under a reserved prefix, a pack route that is the same route as a deployment route once the router
+  has it, a pack cross-reference that dangles against the merged sections. This closes the class
+  rather than one rule of it: a rule added to the document lint is answered by both edges the day it
+  is written. The default `doctor` is unchanged — it resolves no pack, so it has no merged surface,
+  and it still says so in its own line.
+
+- **Every test that needs a database is named for it, and a gate keeps it that way.** `*.db.test.ts`
+  is a convention, not a collector — none of the repository's vitest configs splits on it, and CI's
+  lanes are split per package — so what it is for is the ad-hoc `--exclude` a maintainer runs to get
+  "the subset that needs no database". Twenty-four test files needed one under a name outside it,
+  across `@rayspec/api-auth`, `@rayspec/platform`, `@rayspec/db` and `@rayspec/server`; that subset
+  was a misnomer in every one of those packages, which is how a count taken from it reached a pull
+  request and was wrong in a way nobody could see. All twenty-four are renamed and a gate now refuses
+  the state: the signal is not reading `DATABASE_URL` but REFUSING TO RUN without it, reached
+  directly or through a test-support module that carries the guard. Separately,
+  `parseFromDeploymentTree` resolves packs within `RAYSPEC_HANDLER_ROOT` when the deployment declares
+  one — deliberately, mirroring the boot — which made an ambient value a redirect for the three
+  suites that resolve packs: with it pointed at an empty directory, 14 of their 30 arms turned red.
+  Those suites now clear it, and a regression pins the resolution with its own control.
+- **A half-applied rename chain is refused naming what it found, not killed by a raw `42P01`.**
+  `ALTER TABLE "a" RENAME TO "b"` + `ALTER TABLE "b" RENAME TO "c"` can leave the schema holding only
+  `b` — the first rename ran, the second did not — if an operator hand-edits or is interrupted between
+  the two statements. The boot measures each rename by the name it renames **away**, and `b` still
+  standing says only "the second rename has not run": un-landed evidence with nothing landed beside it,
+  which routed to **apply** and re-ran the first rename against a table that was no longer there. The
+  boot exited before serving, with the driver's own words, on the one path whose shipped guarantee is
+  that a half-landed delta is **refused** naming both sides. The reading that was missing is a third
+  rule about the names a delta touches, and it is now stated beside the two that were already there: a
+  name the delta **brings into existence** and does **not** leave standing is in the schema at neither
+  end — not before it (a statement without an `IF NOT EXISTS` guard could not have run against an
+  existing object) and not after it — so finding it **there** says the delta got past the statement
+  that makes it and not past the one that takes it away. That is landed evidence about the *first* of
+  those two statements, beside the un-landed evidence the second one contributes, and the delta is
+  refused as half landed. The same reading settles the shape from the destructive side: a staging table
+  a delta creates and drops, found still standing, is half landed rather than un-applied (re-applying
+  raises `42P07` on its own `CREATE`). The `IF NOT EXISTS` spellings claim nothing, because such a name
+  may predate the delta entirely — that delta still applies cleanly. Both states an ordinary deployment
+  reaches keep the answers they had: never applied **applies**, fully applied **mounts**.
+- **A `CREATE TABLE` brings its columns into existence, and the boot now knows it.** The set of names a
+  delta creates — the set whose *absence* proves nothing — held the table name alone, so
+  `CREATE TABLE "stage" ("id" uuid, "tmp" text)` + `ALTER TABLE "stage" DROP COLUMN "tmp"` reported
+  `stage.tmp` as **already landed** when the delta had never run: the column is "gone" because the
+  table it lives in does not exist yet. Beside the un-landed table the same delta names, that is a
+  half-landed refusal for a delta that plainly never ran. The column list is read through the same
+  depth- and literal-aware member split the `ALTER TABLE` clauses go through, so a type's own comma
+  (`numeric(10,2)`) is inside a type and a table constraint defines no column.
+- **One reader for one grammar: the column-shape half no longer has a splitter of its own.** The keys a
+  type change or `SET NOT NULL` statement alters were collected by an unanchored `ALTER [COLUMN]` sweep
+  written before the depth- and literal-aware member split existed. Over-collecting only ever withheld
+  evidence, so nothing was wrong today — but two readers of one grammar in one file is how the next
+  change lands in only one of them, and this file has taken a defect in three consecutive cycles. Both
+  halves now read the member list the same way, which also stops a clause-shaped run of characters
+  inside a `DEFAULT` literal from disqualifying a statement on the strength of a column no clause ever
+  named.
+- **The limit an operator is likeliest to meet is now the one the documentation shows.** A delta that
+  frees a name and puts it back mounts in both states claiming nothing — the one place this path can
+  silently drop a reviewed change. Every operator-facing copy of that limit illustrated it with
+  `DROP TABLE "t"` + `CREATE TABLE "t"`, a table rebuild. The likelier real instance is an **index
+  redefinition** (`DROP INDEX "ix"` + `CREATE INDEX "ix"`), which is what a generated delta writes for
+  a changed index, and an operator reading only the table example may not recognise their own case. It
+  is named first at all seven sites that ship the limit, and pinned by a test that measures the index
+  shape reaching exactly that answer.
+- **A pack's `query` now runs over Postgres's extended protocol, so the SERVER refuses a string
+  carrying more than one command.** The door already refused transaction-control statements (`BEGIN`,
+  `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `START TRANSACTION`, `PREPARE TRANSACTION`, …), but that guard
+  reads the **first token**, and a statement with no bind values was sent in simple-query mode, which
+  runs **every** command in the string. Every refused verb was therefore reachable behind an innocent
+  one. Measured against a live server: `tx.query('SELECT 1; COMMIT')` inside a `transaction()`
+  callback ended the pin, and the two rows written around it **both survived** the callback's throw —
+  the wrapper's rollback found `25P01 there is no transaction in progress` with nothing left to undo,
+  so a pack could break the atomicity the method promises from inside it. On the pooled handle
+  `query('SELECT 1; BEGIN')` reached the wire and left one of the deployment's four HTTP connections
+  `idle in transaction` for the life of the process, which a pack retrying in a loop turns into pool
+  exhaustion for every other caller.
+  **Both halves now pass `{ simple: false }`**, so the statement goes over the extended protocol and
+  Postgres itself refuses a multi-command string at parse time — before any part of it runs, so
+  nothing lands and no connection is left inside a transaction. The refusal reaches a pack as the
+  same `PackTransactionError` the door already raises. **The contract has not changed**: `query` has
+  always been documented as running one parameterized statement. What changed is that the server now
+  holds it to that. A **parameterized** call already went over the extended protocol (the driver
+  selects it whenever bind values are present), so `query(sql, params)` was never affected; this
+  stops the no-parameter shape of the same method from being quietly weaker.
+  **Nothing legal is refused, and that is the half worth stating.** A `;` inside a string literal, an
+  `E''` escape string, a dollar-quoted body (tagged, untagged, or holding a foreign tag), a
+  non-ASCII dollar tag, a quoted identifier, a nested block comment or any comment is not a second
+  command, and neither is a trailing `;`, `;;`, trailing whitespace or a trailing comment. An
+  identifier carrying a `$…$` run (`a$b$c`) runs unquoted. The boundary is the one the server parses,
+  so there is no second grammar to keep in step with it.
+  **One behaviour inside a transaction is different, and a pack will notice.** Because the refusal is
+  now the server's, it *reaches the connection* — and a statement error on a pinned connection is
+  latched and re-raised when the callback returns. So a multi-command string inside `transaction(fn)`
+  **aborts that transaction**, even if the pack catches the refusal and returns normally. That is the
+  same rule the callback already had for every other failing statement, now covering this case too;
+  the error a pack receives is still `PackTransactionError`. On the pooled handle nothing changes:
+  the connection is unharmed and the next write commits.
 
 - **A gate now covers documented command paths.** Three findings in two releases had one cause:
   nothing in the repository checked that a command a document tells a reader to run does what the
@@ -832,6 +977,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment's own mounts are covered without the engine knowing about them.
 
 ### Security
+
+- **A driver error's `detail` field no longer reaches an operator log, a run journal or a model.**
+  Postgres does not put the offending value only in the sentence it writes. On a constraint violation
+  it fills the error's `detail` field with the caller's own data: `Key (id)=(…) already exists` for a
+  unique violation, `Key (parent)=(…) is not present in table "…"` for a foreign key, and — the widest
+  case — `Failing row contains (…)` for a CHECK, which is **every column of the row**, not the one the
+  constraint named. `detail` is an **own enumerable property** of the driver's error while `message`
+  and `stack` are not, so it escapes through exactly the shapes that never touch `.message`:
+  `console.error(msg, err)`, `JSON.stringify(err)`, `{...err}`, `Object.entries(err)`. A path could
+  therefore read no message at all and still disclose the value.
+  The renderer introduced for the bind-value half already excluded `detail`, but only for the error
+  shape the ORM produces. **A bare driver error — what the raw-SQL door throws — fell through to the
+  server's own message**, which for a coercion refusal *is* the offending value: asked to make
+  `invalid input syntax for type uuid: "<the caller's value>"` safe, it returned it unchanged. The
+  renderer now reads the bound values under **either** name the stack uses for them — the ORM calls
+  them `params`, the driver calls them `parameters` — and starts its SQLSTATE walk at the error itself
+  rather than one link in, because through the raw door the statement and the SQLSTATE are on the same
+  object. Those two changes are what close the disclosure; both shapes now assemble from the same
+  owned parts, and nothing server-authored is read on either path.
+  A `code` is also no longer assumed to be a SQLSTATE just because it is a string. The driver hangs
+  its own faults on that property using words (`CONNECTION_CLOSED`), and rendering one as
+  `SQLSTATE CONNECTION_CLOSED` asserted both that the server had answered and that the code was one an
+  operator could look up. A driver fault is now named as such, keeps its token, and still withholds
+  the values.
+  **A failure carrying no statement keeps its own message**, which is the deliberate limit of the
+  redaction rather than a gap in it. A bind value exists only inside a statement, and every
+  statement-scoped failure carries its statement — measured across all eight doors the codebase uses,
+  including simple-query mode, where the value array is empty rather than absent. What remains is the
+  connection-scoped set, where the server's sentence *is* the diagnosis and every value in it came
+  from the connection string or the connection options: `database "x" does not exist` (`3D000`),
+  `password authentication failed for user "y"` (`28P01`). Withholding those bought nothing and cost
+  an operator the only actionable word in the line.
+  A repository-wide, multi-line-aware sweep then covered every shape a caught error can escape
+  through. Each site reached by that sweep is either routed through the renderer or carries a comment
+  saying why its error cannot carry caller data; the criterion for a comment is a mechanism, not a
+  judgement that the value looks harmless.
+  Three sites bake the driver's sentence into a string **before** any printer sees it, so no consumer
+  could have withheld it: the deploy engine's migrate arm, which put the driver's message inside
+  `DeployError.message` and left both of its printers powerless; the tenant provisioner's one-line
+  helper, which reached *past* the wrapper for the driver's own words on purpose; and the streaming
+  run route's terminal `error` frame, which is the one sink here that speaks to an **API client**
+  rather than to an operator. That frame carried `String(err)` — for the ORM's wrapper, the failed SQL
+  followed by every bound value — while the JSON sibling of the same route answers the closed
+  `INTERNAL` envelope for the identical failure. Two renderings of one run must not disagree about
+  what a caller is told, so the stream now says exactly what the JSON body says, and the diagnosis
+  goes to the log.
+  Newly routed: the `rayspec deploy` boot-failure stack print, which
+  had drifted from the `rayspec-serve` print its own comment says it must match; the cron scheduler's
+  enqueue-time run-header log, the third writer of a header whose two siblings were already covered;
+  the workflow runtime's `store_read`/`store_write` step failures and the media-prep log line, all of
+  which are journaled and read back through the run API; the four `runAgent` call sites, which catch
+  the run-header write that happens before the model is invoked; the terminal journal-write failure in
+  the durable worker; the daily system cleanup; the tenant event-bus LISTEN failure, which handed the
+  raw error object to a logger; the live-run diagnostic, whose existing `redact` is a credential
+  masker that a short row value walks straight through; and `rayspec tenant ensure`, which provisions
+  an org from the operator's own inputs.
+  **A generated persist handler now reports a database refusal by its SQLSTATE and never quotes it.**
+  Its `detail` string is journaled *and* handed back to the model, and it was interpolating
+  `${err.message}` — which for the ORM's wrapper is the statement and every bound value. A rendered
+  handler imports the SDK type-only and takes no runtime dependency, so it cannot reach the shared
+  renderer; the same structural check is emitted inline with it instead. An error that is **not** a
+  database refusal keeps its own words, so an author does not lose the line that says what broke.
 
 - **A failed database write no longer prints its bind values into an operator-facing log.** When a
   statement failed, the ORM wrapped the driver's error in one whose message embeds both the SQL *and*

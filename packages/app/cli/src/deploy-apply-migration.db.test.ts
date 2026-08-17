@@ -27,6 +27,11 @@
  *   7. STAGING TABLE — a delta that CREATES a backup table and DROPS it again in the same file. Its
  *                   absence is not evidence the reviewed DROP ran (the delta creates it), and reading
  *                   it as such refused a never-applied delta as HALF LANDED: the boot never served.
+ *   8. RENAME CHAIN — `a → b` + `b → c`, in ALL THREE states an operator can put the schema in. Never
+ *                   applied APPLIES and fully applied MOUNTS, as before; the HALF-applied one (only `b`,
+ *                   reachable by a hand-edit or an interruption between the two statements) is the one
+ *                   this arm exists for — it is REFUSED naming what it found, where it used to route to
+ *                   APPLY and die on a raw `42P01` re-running the first rename.
  *
  * This proves the CLI FLAG reaches the EXISTING gated migration engine (no new engine): arg parse →
  * read-spec jail → RAYSPEC_UPDATE_MIGRATION env → serve-opts updateMigrations → deploy()'s gated
@@ -58,6 +63,7 @@ let handShapedRan = 0;
 let recycledNameRan = 0;
 let generatedSpellingRan = 0;
 let stagingTableRan = 0;
+let renameChainRan = 0;
 
 const TENANT = '00000000-0000-4000-8000-0000000000ad';
 const ADD_DB = `rayspec_cli_applymig_add_${process.pid}`;
@@ -67,6 +73,7 @@ const HAND_DB = `rayspec_cli_applymig_hand_${process.pid}`;
 const RECYCLE_DB = `rayspec_cli_applymig_recycle_${process.pid}`;
 const GENERATED_DB = `rayspec_cli_applymig_generated_${process.pid}`;
 const STAGING_DB = `rayspec_cli_applymig_staging_${process.pid}`;
+const CHAIN_DB = `rayspec_cli_applymig_chain_${process.pid}`;
 const PORT_BASE = 19000 + (process.pid % 900);
 
 // A minimal AGENT-FREE backend: one store + one declarative read route (no agents, no durable worker,
@@ -156,6 +163,32 @@ const STAGING_ALLOWLIST = JSON.stringify(
       kind: 'drop-table',
       match: 'DROP TABLE "parts_backup"',
       reason: 'reviewed: the staging table this delta created two statements earlier',
+    },
+  ],
+  null,
+  2,
+);
+
+// A RENAME CHAIN: the same table renamed twice in one delta. The middle name exists only BETWEEN the
+// two statements — not before the delta and not after it — so finding it in the catalog is the only
+// thing that separates a HALF-applied chain (the first rename ran, the second did not) from one that
+// never ran at all. Reading it as un-landed evidence alone routed the half-applied state to APPLY,
+// which re-runs `chain_a → chain_b` against a table that is no longer there.
+const RENAME_CHAIN_DELTA =
+  'ALTER TABLE "chain_a" RENAME TO "chain_b";\n' +
+  '--> statement-breakpoint\n' +
+  'ALTER TABLE "chain_b" RENAME TO "chain_c";\n';
+const RENAME_CHAIN_ALLOWLIST = JSON.stringify(
+  [
+    {
+      kind: 'rename-table',
+      match: 'ALTER TABLE "chain_a" RENAME TO "chain_b"',
+      reason: 'reviewed: the first leg of the rename chain',
+    },
+    {
+      kind: 'rename-table',
+      match: 'ALTER TABLE "chain_b" RENAME TO "chain_c"',
+      reason: 'reviewed: the second leg of the rename chain',
     },
   ],
   null,
@@ -286,6 +319,8 @@ describe.skipIf(!baseUrl)(
       );
       writeFileSync(join(workDir, '0005_staging_backup.sql'), STAGING_DELTA);
       writeFileSync(join(workDir, '0005_staging_backup.allowlist.json'), STAGING_ALLOWLIST);
+      writeFileSync(join(workDir, '0006_rename_chain.sql'), RENAME_CHAIN_DELTA);
+      writeFileSync(join(workDir, '0006_rename_chain.allowlist.json'), RENAME_CHAIN_ALLOWLIST);
       const { privateKey } = await generateKeyPair('RS256', { extractable: true });
       pem = await exportPKCS8(privateKey);
       await createDb(ADD_DB);
@@ -295,6 +330,7 @@ describe.skipIf(!baseUrl)(
       await createDb(RECYCLE_DB);
       await createDb(GENERATED_DB);
       await createDb(STAGING_DB);
+      await createDb(CHAIN_DB);
     }, 120_000);
 
     afterAll(async () => {
@@ -315,6 +351,7 @@ describe.skipIf(!baseUrl)(
             RECYCLE_DB,
             GENERATED_DB,
             STAGING_DB,
+            CHAIN_DB,
           ]) {
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}_dbos_sys" WITH (FORCE)`);
             await admin.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
@@ -841,6 +878,134 @@ describe.skipIf(!baseUrl)(
       },
       300_000,
     );
+
+    // ── A rename CHAIN, in all three states the schema can be in ────────────────────────────────────
+    // `chain_a → chain_b` + `chain_b → chain_c`. The middle name is at NEITHER end of the delta, so it
+    // is the only thing that can say the delta stopped halfway. Three states, one command:
+    //   · only `chain_a`  — never applied  ⇒ APPLY, and the rows arrive under `chain_c`.
+    //   · only `chain_c`  — fully applied  ⇒ MOUNT, and the boot serves (a re-applied first rename
+    //                        raises 42P01 and this boot would never become ready).
+    //   · only `chain_b`  — HALF applied   ⇒ REFUSE, naming what it found and what it did not.
+    // The half-applied state is reached the way an operator reaches it: by hand, between the two
+    // statements (`deploy()` applies a delta all-or-nothing).
+    //
+    // RED end-to-end on this branch's base — the half-applied boot routed to APPLY and died with the
+    // driver's own words, having run one statement of a delta it had called unapplied:
+    //
+    //   Error: deploy subprocess exited early (code 1) before serving
+    //   [rayspec deploy] roll-out refused: deploy aborted at [migrate]: migration
+    //     '0006_rename_chain.sql' failed to apply (relation "chain_a" does not exist).
+    //
+    // Both states exit non-zero, so the exit code proves nothing here: what changed is WHICH refusal
+    // the operator gets, and that the boot names the half-landed name instead of a raw 42P01.
+    maybe(
+      'a rename CHAIN applies once, mounts thereafter, and is REFUSED half-applied — with the rows intact throughout',
+      async () => {
+        renameChainRan += 1;
+        const appDb = withDbName(baseUrl as string, CHAIN_DB);
+
+        /** GROUND TRUTH — which of the three names the catalog holds, and how many rows it holds. */
+        const tables = async (): Promise<string[]> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name IN ('chain_a', 'chain_b', 'chain_c')
+                ORDER BY table_name`,
+            )) as unknown as { table_name: string }[];
+            return rows.map((r) => r.table_name);
+          } finally {
+            await c.end();
+          }
+        };
+        const rowCount = async (table: string): Promise<number> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            const rows = (await c.unsafe(
+              `SELECT count(*)::int AS n FROM "${table}"`,
+            )) as unknown as { n: number }[];
+            return rows[0]?.n ?? -1;
+          } finally {
+            await c.end();
+          }
+        };
+        const renameByHand = async (from: string, to: string): Promise<void> => {
+          const c = postgres(appDb, { max: 1 });
+          try {
+            await c.unsafe(`ALTER TABLE "${from}" RENAME TO "${to}"`);
+          } finally {
+            await c.end();
+          }
+        };
+        const flags = [
+          'v1.rayspec.yaml',
+          '--apply-migration',
+          '0006_rename_chain.sql',
+          '--allowlist',
+          '0006_rename_chain.allowlist.json',
+        ];
+
+        // Boot 1 — materialize, then hand-create the chain's table and seed it. None of these names is
+        // in the spec, so the classify is drift-clean in every state below and only the delta's own
+        // names can decide anything.
+        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 19);
+        await waitForBoot(PORT_BASE + 19, 120_000, boot1);
+        const seed = postgres(appDb, { max: 1 });
+        try {
+          await seed.unsafe(`CREATE TABLE "chain_a" ("id" uuid PRIMARY KEY, "note" text)`);
+          await seed.unsafe(
+            `INSERT INTO "chain_a" ("id", "note") SELECT gen_random_uuid(), 'keep me ' || g
+               FROM generate_series(1, 3) AS g`,
+          );
+        } finally {
+          await seed.end();
+        }
+        await shutdown(boot1);
+        expect(await tables()).toEqual(['chain_a']);
+        expect(await rowCount('chain_a')).toBe(3);
+
+        // Boot 2 — NEVER applied ⇒ APPLY. Both renames run, and the rows ride along.
+        const boot2 = spawnDeploy(flags, appDb, PORT_BASE + 20);
+        await waitForBoot(PORT_BASE + 20, 120_000, boot2);
+        expect(await tables()).toEqual(['chain_c']);
+        expect(await rowCount('chain_c')).toBe(3);
+        expect(stderrOf(boot2)).not.toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/);
+        await shutdown(boot2);
+
+        // Boot 3 — the LEFTOVER env on the applied schema ⇒ MOUNT, and it serves. Becoming ready IS
+        // the proof: re-running the first rename would raise 42P01 on a `chain_a` that is long gone.
+        const boot3 = spawnDeploy(flags, appDb, PORT_BASE + 21);
+        await waitForBoot(PORT_BASE + 21, 120_000, boot3);
+        expect(await tables()).toEqual(['chain_c']);
+        expect(await rowCount('chain_c')).toBe(3); // renamed ONCE — nothing moved again
+        await shutdown(boot3);
+
+        // Now put the schema in the HALF-applied state by hand, which is the only way it is reached:
+        // the first rename has run, the second has not.
+        await renameByHand('chain_c', 'chain_b');
+        expect(await tables()).toEqual(['chain_b']);
+
+        // Boot 4 — REFUSED fail-closed, naming the middle name on both sides. The boot exits without
+        // serving, and — the part that used to be untrue — without having run anything: the rows are
+        // where they were, under the name they were under.
+        const boot4 = spawnDeploy(flags, appDb, PORT_BASE + 22);
+        expect(await waitForExit(boot4, 120_000)).not.toBe(0);
+        expect(stderrOf(boot4)).toMatch(/only HALF LANDED/);
+        expect(stderrOf(boot4)).toMatch(/ALREADY landed: table "chain_b"/);
+        expect(stderrOf(boot4)).toMatch(/NOT landed: *table "chain_b"/);
+        expect(stderrOf(boot4)).not.toMatch(/relation "chain_a" does not exist/);
+        expect(await tables()).toEqual(['chain_b']); // nothing was applied over the half-landed state
+        expect(await rowCount('chain_b')).toBe(3); // …and every row is still there
+
+        // Boot 5 — a restart does not clear it and does not creep: the same refusal, the same rows.
+        const boot5 = spawnDeploy(flags, appDb, PORT_BASE + 23);
+        expect(await waitForExit(boot5, 120_000)).not.toBe(0);
+        expect(stderrOf(boot5)).toMatch(/only HALF LANDED/);
+        expect(await tables()).toEqual(['chain_b']);
+        expect(await rowCount('chain_b')).toBe(3);
+      },
+      420_000,
+    );
   },
 );
 
@@ -859,6 +1024,7 @@ describe('rayspec deploy --apply-migration — ran-guard (must not silently skip
       expect(recycledNameRan).toBe(1);
       expect(generatedSpellingRan).toBe(1);
       expect(stagingTableRan).toBe(1);
+      expect(renameChainRan).toBe(1);
     } else {
       expect(dbRequired).toBe(false);
     }

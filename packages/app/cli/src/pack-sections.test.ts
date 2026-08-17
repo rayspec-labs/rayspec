@@ -81,12 +81,55 @@ if (!existsSync(PACK_ENTRY)) {
 // The spec-path jail resolves against the CWD, so every command runs from the repo root (the fixture
 // documents are inside it). The missing-pack case chdirs into its own throwaway tree instead.
 let prevCwd: string;
+// `deploymentRootFor` honours RAYSPEC_HANDLER_ROOT OVER `dirname(specPath)` — deliberately, because it
+// mirrors what the boot hands the loader, so a command previews the boot's tree rather than a second
+// guess at it. That makes an ambient value a redirect: these tests resolve packs, so with one set they
+// measure a tree they did not build, and the failure surfaces as fourteen assertion mismatches with no
+// indication why. Measured: pointing it at an empty directory turns 14 of 30 arms red. Cleared here so
+// the run measures its own fixtures whatever the machine has in its environment.
+let prevHandlerRoot: string | undefined;
+
+/**
+ * THE ACCEPT CONTROL FOR THE CLEARING — and the reason this file can prove the clearing does anything.
+ *
+ * A hermeticity guard whose suite passes just as well without it proves nothing, and that is what the
+ * first version of this fix shipped: deleting the `delete` below left all thirty arms green, because
+ * nothing in the run ever put a value there to be cleared. The guard was measured against an
+ * environment that happened to be clean.
+ *
+ * So the suite makes its own environment dirty, ONCE, before any test runs. `beforeAll` lands ahead of
+ * every `beforeEach`, so each test starts from a process that really does carry an ambient
+ * `RAYSPEC_HANDLER_ROOT` pointing somewhere with no packs in it — exactly the machine this fix is
+ * about. The clearing then has something to do, and if it is removed the arms that resolve packs
+ * measure the decoy instead of their own fixtures: measured, 14 of 30 go red.
+ *
+ * The decoy is an EMPTY directory rather than a nonexistent path on purpose — a missing directory
+ * could be refused by a path check and never reach the loader, which would make this control pass for
+ * a reason that has nothing to do with the redirect.
+ */
+const AMBIENT_DECOY = join(tmpdir(), 'rayspec-pack-sections-ambient-decoy');
+let prevAmbient: string | undefined;
+beforeAll(() => {
+  prevAmbient = process.env.RAYSPEC_HANDLER_ROOT;
+  process.env.RAYSPEC_HANDLER_ROOT = mkdtempSync(`${AMBIENT_DECOY}-`);
+});
+afterAll(() => {
+  const decoy = process.env.RAYSPEC_HANDLER_ROOT;
+  if (prevAmbient === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevAmbient;
+  if (decoy?.startsWith(AMBIENT_DECOY)) rmSync(decoy, { recursive: true, force: true });
+});
+
 beforeEach(() => {
   prevCwd = process.cwd();
+  prevHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  delete process.env.RAYSPEC_HANDLER_ROOT;
   process.chdir(repoRoot);
 });
 afterEach(() => {
   process.chdir(prevCwd);
+  if (prevHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevHandlerRoot;
 });
 
 /** Render a violation list compactly, so a failure names what was actually reported. */

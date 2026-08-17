@@ -32,7 +32,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EXTENSION_BRAND } from '@rayspec/platform';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runDoctor } from './doctor.js';
 import { main } from './index.js';
 
@@ -93,6 +93,29 @@ const PROBE_SECTION_SCHEMA = `export default {
 let root: string;
 let marker: string;
 let prevCwd: string;
+let prevHandlerRoot: string | undefined;
+
+/**
+ * THE ACCEPT CONTROL FOR THE CLEARING BELOW. A hermeticity guard whose suite passes just as well
+ * without it proves nothing, and deleting the `delete` left every arm here green — the guard was
+ * measured against an environment that happened to be clean. So the suite dirties its own
+ * environment once, ahead of every `beforeEach`, with an EMPTY directory: a nonexistent path could be
+ * refused by a path check and never reach the loader, which would make this control pass for a reason
+ * unrelated to the redirect. Remove the clearing and the arms that resolve packs measure the decoy.
+ */
+const AMBIENT_DECOY_PREFIX = join(tmpdir(), 'rayspec-doctor-pack-ambient-decoy-');
+let prevAmbientHandlerRoot: string | undefined;
+let ambientDecoyDir: string | undefined;
+beforeAll(() => {
+  prevAmbientHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  ambientDecoyDir = mkdtempSync(AMBIENT_DECOY_PREFIX);
+  process.env.RAYSPEC_HANDLER_ROOT = ambientDecoyDir;
+});
+afterAll(() => {
+  if (prevAmbientHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevAmbientHandlerRoot;
+  if (ambientDecoyDir !== undefined) rmSync(ambientDecoyDir, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'rayspec-doctor-pack-probe-'));
@@ -107,12 +130,19 @@ beforeEach(() => {
   writeFileSync(join(root, 'rayspec.yaml'), VALID_DOC, 'utf8');
   writeFileSync(join(root, 'malformed.yaml'), MALFORMED_DOC, 'utf8');
   // The spec path is jailed to the working directory, so every case runs from the deployment tree.
+  // `deploymentRootFor` honours RAYSPEC_HANDLER_ROOT OVER `dirname(specPath)` — deliberately, since it
+  // mirrors what the boot hands the loader. That makes an ambient value a redirect for a test that
+  // resolves packs: it would measure a tree it did not build. Cleared for the run, restored after.
+  prevHandlerRoot = process.env.RAYSPEC_HANDLER_ROOT;
+  delete process.env.RAYSPEC_HANDLER_ROOT;
   prevCwd = process.cwd();
   process.chdir(root);
 });
 
 afterEach(() => {
   process.chdir(prevCwd);
+  if (prevHandlerRoot === undefined) delete process.env.RAYSPEC_HANDLER_ROOT;
+  else process.env.RAYSPEC_HANDLER_ROOT = prevHandlerRoot;
   rmSync(root, { recursive: true, force: true });
   vi.restoreAllMocks();
 });

@@ -86,6 +86,7 @@ import {
   detectDrift,
   formatFindings,
   generateProductSql,
+  operatorSafeDbErrorMessage,
   scanMigrationSql,
 } from '@rayspec/db';
 import {
@@ -106,9 +107,13 @@ import {
 } from '@rayspec/product-yaml';
 import {
   detectSpecKind,
+  isReservedApiPath,
   type RaySpec,
   parseProductSpec,
   parseSpec,
+  reachesReservedByPlaceholder,
+  reservedApiPathPrefixes,
+  reservedRoutePathRefusal,
   type SpecError,
 } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
@@ -310,6 +315,33 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
       throw e;
     }
     spec = product.engineSpec;
+    // THE RESERVED-PATH CHECK, at VALIDATE, for the profile that never reaches `lintSpec`.
+    //
+    // A Product-YAML document is parsed by `parseProductSpec` and COMPOSED into an engine spec; it
+    // does not go through `parseSpec`, so the lint rule that refuses a reserved route never runs on
+    // it. Its `views[].route.path` is author-controlled and reserved-checked nowhere, which left the
+    // registrar inside `buildApp` as the only guard — and that runs at ROLL OUT, step 5, after step 4
+    // MIGRATE has already committed the document's product DDL. Measured: `doctor` answered
+    // `{"ok": true}` for a view route on `/health`, the boot then threw at `[roll out]`, and the four
+    // product tables were standing. That is issue #441 verbatim, in the second of the two profiles —
+    // the read-only floor cannot see it, and the refusal arrives too late to be safe.
+    //
+    // Checked here rather than inside `composeProductDeploy` because this is the deploy PIPELINE's
+    // ordering guarantee, and the composer is also used by callers that apply no DDL.
+    const productReserved = reservedApiPathPrefixes(spec.frontend ?? []);
+    for (const route of spec.api ?? []) {
+      if (isReservedApiPath(route.path, productReserved)) {
+        throw new DeployError(
+          'validate',
+          reservedRoutePathRefusal(
+            route.method,
+            route.path,
+            productReserved,
+            reachesReservedByPlaceholder(route.path, productReserved),
+          ),
+        );
+      }
+    }
   } else {
     const parsed = parseSpec(specSource);
     if (!parsed.ok) {
@@ -352,11 +384,16 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
     try {
       await target.applyMigration(migration);
     } catch (e) {
+      // `applyMigration` is the RAW-SQL door — `$client.begin(tx => tx.unsafe(ddl))` — so `e` is the
+      // driver's own error, whose message on a coercion refusal is the offending value. Rendering it
+      // here rather than at a printer is the whole point: this line BAKES the text into
+      // `DeployError.message`, and both consumers (`serve.ts` and the CLI's `deploy`) print that
+      // message. A value that reaches this string cannot be withheld downstream by anyone.
       throw new DeployError(
         'migrate',
-        `migration '${migration.name}' failed to apply (${
-          e instanceof Error ? e.message : String(e)
-        }). No roll-out. Recovery is a new reviewed FORWARD migration.`,
+        `migration '${migration.name}' failed to apply (${operatorSafeDbErrorMessage(
+          e,
+        )}). No roll-out. Recovery is a new reviewed FORWARD migration.`,
       );
     }
   }

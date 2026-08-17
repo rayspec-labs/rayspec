@@ -163,6 +163,16 @@ jobs:
       # that reads nothing FAILS rather than skipping, so a rename cannot retire the boundary.
       - name: Contribution-dispatch-boundary gate
         run: pnpm gate:dispatch-boundary
+      # Lane 1 runs the test subset that needs no database, and it selects that subset by FILE NAME:
+      # a test that reaches Postgres must be called `*.db.test.ts`. Nothing enforced the convention,
+      # so a database-backed test under an ordinary name was silently carried into the lane that has
+      # no server — where it self-skipped and the lane reported green over an untested proof. This
+      # gate reads each test's REFUSAL to run without DATABASE_URL, directly or through a test-support
+      # module carrying that refusal, and fails when one is not named for it. Needs no database, so it
+      # belongs in this lane and not in lane 2 — and a declared root that resolves to nothing FAILS
+      # rather than scanning what is left.
+      - name: DB-test naming gate
+        run: pnpm gate:db-test-naming
       # A pack that brings its own migration chain declares the table prefix its objects live under.
       # Every CREATE TABLE / CREATE [UNIQUE] INDEX must NAME an object carrying it and every ALTER
       # TABLE / CREATE INDEX ... ON must TARGET one, so a chain cannot reach into a platform table.

@@ -602,7 +602,9 @@ PROBES the objects the delta itself names FIRST, so a delta that ALREADY landed 
 there is applied and the boot names them, even on a drift-clean schema (the drift check only ever
 inspects what the spec declares, so an object the grammar cannot express is invisible to it). ONE SHAPE
 IS NOT DECIDABLE that way, and it is the one place the boot can silently drop a reviewed change: a delta
-that FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one
+that FREES a name and PUTS IT BACK (`DROP INDEX "ix"` + `CREATE INDEX "ix"` — an index REDEFINITION,
+the likeliest one to meet because it is what a generated delta writes for a changed index; or
+`DROP TABLE "t"` + `CREATE TABLE "t"`, or the same change as one
 `ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" …`, or a rename-aside rebuild — `RENAME TO "t_old"` +
 `CREATE TABLE "t"` + `DROP TABLE "t_old"`, and the column form of it: `RENAME COLUMN` aside, `ADD
 COLUMN`, `DROP COLUMN` the aside; the `IF [NOT] EXISTS` spellings count the same)
@@ -1004,6 +1006,15 @@ action: { kind: agent, agent: <agent id>, persistTo: <store name> }
 (The grammar also has `kind: handler` and `kind: stream` — BOTH OUT OF SCOPE; do not use them. A
 `{handler}` route is a later iteration; a `stream` route needs blob wiring neither iteration produces.)
 
+- **`path` may not claim — or be able to MATCH — a platform path** — `/v1/`, `/oidc/`, `/health`,
+  `/recovery-scope`, anything under them, or anything under a declared non-root `frontend[]` mount.
+  The platform registers those on the same app AFTER the declared routes, so a route claiming one
+  would win the match and the platform path would answer nothing. The check is on the pattern the
+  router registers, so a **first-segment parameter** (`/{id}`, `/{a}/{b}`) and a **missing leading
+  slash** (`notes`) are refused too — they match `/health` and `/v1/…`. Give every route a literal
+  first segment (`/notes/{id}`), which is the shape used throughout this document.
+  `doctor`/`plan`/`deploy --dry-run` report it as `reserved_route_path` and a deploy is refused before
+  it applies any product DDL. A mount at the root reserves nothing.
 - **Optional `persistTo` on an agent action** — `persistTo: <store>` writes the run's validated
   `outputSchema` output as ONE row into `<store>`, exactly once, atomically with the run's completion
   (on both the sync in-request and durable / off-request paths). Safety is a **deploy**-time check, not

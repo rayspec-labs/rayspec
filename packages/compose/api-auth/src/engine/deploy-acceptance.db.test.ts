@@ -12,7 +12,7 @@
  * come from the throwaway YAML. The committed product-table tuple a real deployment ships is SIMULATED by the
  * deploy harness pre-registering the throwaway tables via the test seam (deploy() verifies-not-
  * registers; the NON-registered-store abort is proven in two places: the real chokepoint's deny-by-
- * default rejection in `packages/db/src/tenant-db.test.ts` (the `/not registered/` toThrow), and
+ * default rejection in `packages/db/src/tenant-db.db.test.ts` (the `/not registered/` toThrow), and
  * deploy()'s abort-propagation of that rejection at step `roll out` in `deploy.test.ts`).
  *
  * The five exit-gate invariants (each a REAL invariant, no stub for the real thing):

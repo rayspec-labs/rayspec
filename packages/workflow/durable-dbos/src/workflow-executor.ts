@@ -29,7 +29,7 @@
 import { randomUUID } from 'node:crypto';
 import { DBOS, StatusString } from '@dbos-inc/dbos-sdk';
 import type { Db } from '@rayspec/db';
-import { forTenant, type TenantDb } from '@rayspec/db';
+import { forTenant, operatorSafeDbErrorMessage, type TenantDb } from '@rayspec/db';
 import type {
   CapabilityRegistry,
   WorkflowInputEvent,
@@ -163,7 +163,13 @@ export function workflowResolveFailureJournalFailedLog(
   job: { workflowRunId: string; tenantId: string; workflowId: string },
   journalError: unknown,
 ): string {
-  const reason = journalError instanceof Error ? journalError.message : String(journalError);
+  // RENDERED, not raw. What failed here is by definition a DATABASE WRITE — `ensureRun` or
+  // `finalizeRun` against `workflow_runs` — so this is the one shape on this path guaranteed to be a
+  // driver error. Its message carries the statement and every bound value through the ORM door, and
+  // the offending value through the raw one; a run header binds the workflow's own identifiers and
+  // the terminal error text. The renderer is a no-op for anything that is not a database failure,
+  // which keeps the non-Error arm (and its unit case) exactly as it was.
+  const reason = operatorSafeDbErrorMessage(journalError);
   return (
     `[workflow] resolve FAILED for workflow '${job.workflowId}' (tenant ${job.tenantId}, run ` +
     `${job.workflowRunId}) and the terminal journal write ALSO failed (${reason}) — the run is NOT ` +

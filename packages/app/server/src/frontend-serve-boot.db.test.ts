@@ -13,7 +13,7 @@
  *       so an API path is answered by its route, never the static mount.
  *   (d) RESERVED ROUTE: `GET /health` → 200 health JSON — never shadowed by the `/` static mount.
  *
- * DB ISOLATION: a whole throwaway DATABASE (not a per-schema), exactly as boot.smoke.test.ts /
+ * DB ISOLATION: a whole throwaway DATABASE (not a per-schema), exactly as boot.smoke.db.test.ts /
  * stream-blob-boot.db.test.ts — the migration chain materializes the platform into a database's
  * default + `drizzle` schema, so per-schema isolation does not fit the chain-based boot.
  */
