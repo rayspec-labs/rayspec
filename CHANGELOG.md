@@ -522,6 +522,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A half-applied rename chain is refused naming what it found, not killed by a raw `42P01`.**
+  `ALTER TABLE "a" RENAME TO "b"` + `ALTER TABLE "b" RENAME TO "c"` can leave the schema holding only
+  `b` — the first rename ran, the second did not — if an operator hand-edits or is interrupted between
+  the two statements. The boot measures each rename by the name it renames **away**, and `b` still
+  standing says only "the second rename has not run": un-landed evidence with nothing landed beside it,
+  which routed to **apply** and re-ran the first rename against a table that was no longer there. The
+  boot exited before serving, with the driver's own words, on the one path whose shipped guarantee is
+  that a half-landed delta is **refused** naming both sides. The reading that was missing is a third
+  rule about the names a delta touches, and it is now stated beside the two that were already there: a
+  name the delta **brings into existence** and does **not** leave standing is in the schema at neither
+  end — not before it (a statement without an `IF NOT EXISTS` guard could not have run against an
+  existing object) and not after it — so finding it **there** says the delta got past the statement
+  that makes it and not past the one that takes it away. That is landed evidence about the *first* of
+  those two statements, beside the un-landed evidence the second one contributes, and the delta is
+  refused as half landed. The same reading settles the shape from the destructive side: a staging table
+  a delta creates and drops, found still standing, is half landed rather than un-applied (re-applying
+  raises `42P07` on its own `CREATE`). The `IF NOT EXISTS` spellings claim nothing, because such a name
+  may predate the delta entirely — that delta still applies cleanly. Both states an ordinary deployment
+  reaches keep the answers they had: never applied **applies**, fully applied **mounts**.
+- **A `CREATE TABLE` brings its columns into existence, and the boot now knows it.** The set of names a
+  delta creates — the set whose *absence* proves nothing — held the table name alone, so
+  `CREATE TABLE "stage" ("id" uuid, "tmp" text)` + `ALTER TABLE "stage" DROP COLUMN "tmp"` reported
+  `stage.tmp` as **already landed** when the delta had never run: the column is "gone" because the
+  table it lives in does not exist yet. Beside the un-landed table the same delta names, that is a
+  half-landed refusal for a delta that plainly never ran. The column list is read through the same
+  depth- and literal-aware member split the `ALTER TABLE` clauses go through, so a type's own comma
+  (`numeric(10,2)`) is inside a type and a table constraint defines no column.
+- **One reader for one grammar: the column-shape half no longer has a splitter of its own.** The keys a
+  type change or `SET NOT NULL` statement alters were collected by an unanchored `ALTER [COLUMN]` sweep
+  written before the depth- and literal-aware member split existed. Over-collecting only ever withheld
+  evidence, so nothing was wrong today — but two readers of one grammar in one file is how the next
+  change lands in only one of them, and this file has taken a defect in three consecutive cycles. Both
+  halves now read the member list the same way, which also stops a clause-shaped run of characters
+  inside a `DEFAULT` literal from disqualifying a statement on the strength of a column no clause ever
+  named.
+- **The limit an operator is likeliest to meet is now the one the documentation shows.** A delta that
+  frees a name and puts it back mounts in both states claiming nothing — the one place this path can
+  silently drop a reviewed change. Every operator-facing copy of that limit illustrated it with
+  `DROP TABLE "t"` + `CREATE TABLE "t"`, a table rebuild. The likelier real instance is an **index
+  redefinition** (`DROP INDEX "ix"` + `CREATE INDEX "ix"`), which is what a generated delta writes for
+  a changed index, and an operator reading only the table example may not recognise their own case. It
+  is named first at all seven sites that ship the limit, and pinned by a test that measures the index
+  shape reaching exactly that answer.
 - **A pack's `query` now runs over Postgres's extended protocol, so the SERVER refuses a string
   carrying more than one command.** The door already refused transaction-control statements (`BEGIN`,
   `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `START TRANSACTION`, `PREPARE TRANSACTION`, …), but that guard
