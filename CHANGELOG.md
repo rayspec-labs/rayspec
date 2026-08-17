@@ -440,6 +440,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`deploy --apply-migration` (and `RAYSPEC_UPDATE_MIGRATION`) now probes the objects the delta
+  itself names, so a reviewed delta is applied instead of being reported as already applied.** The
+  boot decided that question on the drift check alone, and the drift check only ever inspects what
+  the document declares. An object the grammar cannot express — a hand-shaped index is the canonical
+  one — is therefore invisible to it, so the live schema read "drift-clean" whether or not the delta
+  had run: such a delta was **mounted without applying**, the boot said it "was already applied on a
+  PRIOR boot", and it told the operator to remove the flag — after which the change was lost unless
+  someone checked the catalog by hand. The boot now probes the delta's own objects before deciding.
+  Every object an additive statement creates (`CREATE TABLE`, `CREATE [UNIQUE] INDEX`,
+  `ALTER TABLE … ADD COLUMN`, `ALTER TABLE … ADD CONSTRAINT`) must be **present** for a mount, exactly
+  as every reviewed `DROP` target must already be **gone**. A delta whose objects are absent is
+  **applied**, through the same reviewed gate a drifted boot uses, and the boot names the object it
+  looked for and did not find. A delta found only **partly** applied is **refused**, fail-closed,
+  naming what landed and what did not — it can be neither re-applied nor called applied. That holds
+  across **both** halves of a delta: a reviewed `DROP` target still sitting there beside an object the
+  same delta already created is as half-landed as two additive objects disagreeing, and re-applying it
+  would raise `42P07` on the object it re-creates or `42P01` on the target it re-drops. A delta that
+  genuinely did land still **mounts**, unchanged: a non-idempotent delta is never re-applied. The
+  allowlist gate is untouched, and a still-present `DROP` target on a delta with no landed evidence
+  still routes to apply exactly as before. A reviewed **`RENAME`** is measured by the name it renames
+  **away**, which the boot can probe: still there, and the delta has not run, so it is applied rather
+  than mounted and lost. And a statement whose state the schema genuinely cannot settle now contributes
+  **no** evidence in either direction, rather than the reading that looks best — a `DROP … IF EXISTS`
+  whose target is missing may never have had one (re-dropping it raises nothing), and a `RENAME` whose
+  old name is already gone says as little; a target that is still **there** remains un-landed, for the
+  `IF EXISTS` form as much as the plain one, so the drop is never silently skipped.
+- **A name the same delta puts back decides nothing, and the boot no longer reads it as un-landed.**
+  `ALTER TABLE "parts" RENAME TO "parts_archive"` beside a `CREATE TABLE "parts"` leaves `parts` in the
+  catalog at both ends — before the delta and after it — so "the old name is still there" was true of a
+  delta that had **fully landed**, which sent it to be applied again; a rename cannot run twice, so the
+  boot died on `42P07` and under `Restart=always` never served. Such a rename is now measured by the
+  name it renames **to**: present ⇒ mount, and absent ⇒ apply **only where the delta leaves that name
+  standing**, which is what makes it the discriminating one. The same reading covers a reviewed `DROP`
+  whose target the same delta re-creates
+  (`DROP TABLE "t"` + `CREATE TABLE "t"`), which re-ran the drop over the table just re-created: nothing
+  in the schema can tell those two states apart, so the boot claims nothing for it and the mount log
+  says so instead of calling the environment stale. Whether a name is left standing is decided by the
+  **last** statement that touches it, so the reverse order (`CREATE TABLE "t_new"` +
+  `RENAME TO "t"`, which leaves no `t_new`) is unaffected.
+- **"Does this delta leave that name standing?" is not the same question as "is this object evidence
+  that the delta ran?", and one reader was answering both.** The evidence reader excludes every
+  `IF NOT EXISTS` form, correctly: such a statement's object may predate the delta, so its presence
+  proves nothing. Whether the delta leaves the *name* standing is a different question with a different
+  answer — after `CREATE TABLE IF NOT EXISTS "t"` the schema holds `t` either way — and the exclusion
+  made the whole recycled-name reading blind to the spelling **drizzle-kit actually generates**. Against
+  a generated delta, `ALTER TABLE "parts" RENAME TO "parts_archive"` beside `CREATE TABLE IF NOT EXISTS
+  "parts"` was read as un-landed in **both** schema states: fully applied, the rename re-ran and raised
+  `42P07`, and under `Restart=always` the boot never served. `DROP TABLE "scratch"` beside `CREATE TABLE
+  IF NOT EXISTS "scratch"` re-dropped the table the delta had just re-created — three seeded rows, one
+  row written by the served app after the delta landed, zero rows after the next restart, silently, on
+  every restart. The two questions now have two readers, each documented with the question it answers.
+  One statement can recycle a name by itself (`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" text`),
+  so the standing reader reads **every** member clause of an `ALTER TABLE` rather than only its first —
+  read by its first clause alone, that statement wiped the column on every restart while the identical
+  change written as two statements mounted. The destructive reader reads every clause too: a
+  multi-clause statement whose `DROP` was not its first clause could not be read at all and **refused
+  the boot permanently**, on a statement drizzle applies fine.
+- **A `DROP` whose target the same delta CREATES is gone before the delta as much as after it.** The
+  presence reading already had that guard; the absence reading had none, so an ordinary staging-table
+  delta — `CREATE TABLE "parts_backup"`, do the work, `DROP TABLE "parts_backup"` — reported its own
+  un-created table as **already landed**. Beside one genuinely un-landed object that is a HALF-LANDED
+  refusal: a delta that had plainly never run refused the boot, and no restart cleared it. Absence now
+  proves nothing for a name the delta itself brings into existence, which is the rule the `IF EXISTS`
+  form already had — and here it is not even a "may": the delta creates the target two statements
+  earlier. The same suppression settles the mirror case, a rebuild (`DROP TABLE "t"` + `CREATE TABLE
+  "t"`) whose name is **absent**: it mounted claiming the target was probed gone and told the operator
+  the environment was stale, and now claims nothing at all.
+- **A name a `RENAME` gives an object is only evidence while the same delta LEAVES it standing.** The
+  rule above is what makes the new name discriminating, and the absence reading was made without it. A
+  rebuild authored as rename-aside — `ALTER TABLE "parts" RENAME TO "parts_archive"` +
+  `CREATE TABLE "parts"` + `DROP TABLE "parts_archive"` — leaves `parts` standing and `parts_archive`
+  missing **before** the delta and **after** it, so nothing separates the two states; reading the
+  missing new name as un-landed put a **fully applied** delta on the un-landed pile, while the
+  delta-creates rule above had just withheld the one `DROP` reading that would have refused it as half
+  landed. The route came out **apply**, and re-running a rebuild over the schema it had already produced
+  renames the *live* table aside, gives the freed name to an empty one and drops the aside: three seeded
+  rows, one row written by the served app after the delta landed, **zero** after the next restart, and
+  again on every restart after that. It is the recycled-name limit reached from the rename side, so it
+  now gets the limit's answer — claim nothing, mount, and say the boot measured nothing. Its **presence**
+  still lands, so a genuinely half-landed rebuild (the rename ran, the drop did not) is still refused
+  naming both sides. Both `CREATE` spellings behave identically, and so does the column form, which is
+  the ordinary way to retype a column: `RENAME COLUMN` aside, `ADD COLUMN`, `DROP COLUMN` the aside.
+- **Both halves of the update boot read the same statement split, and so does the migration gate.**
+  `scanMigrationSql` stripped comments before splitting, so a `--> statement-breakpoint` marker was
+  swallowed together with the statement in front of it — while `splitMigrationStatements`, which the
+  additive half reads, cuts on the marker first the way drizzle's own `readMigrationFiles` does. A delta
+  separated by markers with **no** trailing semicolons is several statements to the migrator and was one
+  merged statement to the scan: the update boot refused it as "an unparseable drop-table statement"
+  whose text was two statements run together, and a reviewed allowlist entry — which must equal a whole
+  statement — could never have covered the `DROP` inside it either. Fail-closed, but permanent, on a
+  delta drizzle applies cleanly. The scan now reads the same breakpoint-first split.
+- **An identifier is read the way the catalog stores it, or it is not read at all.** The probe turns a
+  statement into a question about a named object, so a name read only partly is worse than no name.
+  A double-quoted name is now read to its closing quote (a space, a hyphen or a dot inside it belongs
+  to the name), an **unquoted** name is folded to lower case the way PostgreSQL folds it — probing
+  `Parts_Label_Idx` verbatim asked about an index no `CREATE INDEX Parts_Label_Idx` ever created, and
+  the boot re-applied a delta that had landed — and a **schema-qualified** name, or any name that
+  cannot be read whole, now yields **no object at all** rather than a guess: previously
+  `CREATE TABLE public.audit_log` was read as a table called `public`. An object the **same delta**
+  later renames or drops away is no longer required to be present either (`CREATE TABLE "t_new"` +
+  `ALTER TABLE "t_new" RENAME TO "t"` leaves no `t_new`).
+- **The drift-clean mount log no longer states a probe result it did not produce, in either
+  direction.** It read "its additive objects are present and any destructive targets were PROBED gone"
+  on every mount, including one where nothing had been looked for. It is now built from what the boot
+  established: the objects found present, the targets found gone, the new name a reviewed `RENAME` was
+  found to have given an object, and the statements the drift-clean classification itself measured — a
+  type change or a `SET NOT NULL` **over a column the drift check actually introspects** (the document's
+  own stores and their declared columns), which unapplied would have classified as drift. Over any other
+  column the drift check never looked, so nothing is claimed for it — and one statement may alter
+  **several** columns (`ALTER COLUMN "a" TYPE text, ALTER COLUMN "b" SET NOT NULL` is one statement),
+  so it stands as evidence only where the drift check introspects **every** column it touches; reading
+  the first clause alone called such a statement proven on the strength of a column nothing had
+  inspected. Only a delta that leaves **no** evidence of any kind gets the "nothing in this boot can
+  tell you" wording — and it keeps it, rather than being told the environment is stale.
 - **An extension pack whose entry module is present and does not load is now reported as refused,
   under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module
   is resolved `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the

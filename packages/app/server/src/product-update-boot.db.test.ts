@@ -86,7 +86,6 @@ import {
   loadServerConfig,
 } from './composition-root.js';
 import {
-  LEFTOVER_UPDATE_ENV_MOUNT_LOG,
   makeSchemaProbe,
   ProductBootError,
   planUpdateBoot,
@@ -391,30 +390,30 @@ describe.skipIf(!baseUrl)(
           }>;
           expect(idxRow?.relname).toBeTruthy();
           expect(conRow?.conname).toBeTruthy();
-          // drop-table
-          expect(await probe({ kind: 'drop-table', table: 'highlights' })).toBe(true);
-          expect(await probe({ kind: 'drop-table', table: 'no_such_table_xyz' })).toBe(false);
-          // drop-column (tenant_id is injected on every product store)
-          expect(
-            await probe({ kind: 'drop-column', table: 'highlights', column: 'tenant_id' }),
-          ).toBe(true);
-          expect(
-            await probe({ kind: 'drop-column', table: 'highlights', column: 'no_such_col' }),
-          ).toBe(false);
-          // drop-index
-          expect(await probe({ kind: 'drop-index', index: idxRow!.relname })).toBe(true);
-          expect(await probe({ kind: 'drop-index', index: 'no_such_index_xyz' })).toBe(false);
-          // drop-constraint
+          // a table
+          expect(await probe({ kind: 'table', table: 'highlights' })).toBe(true);
+          expect(await probe({ kind: 'table', table: 'no_such_table_xyz' })).toBe(false);
+          // a column (tenant_id is injected on every product store)
+          expect(await probe({ kind: 'column', table: 'highlights', column: 'tenant_id' })).toBe(
+            true,
+          );
+          expect(await probe({ kind: 'column', table: 'highlights', column: 'no_such_col' })).toBe(
+            false,
+          );
+          // an index
+          expect(await probe({ kind: 'index', index: idxRow!.relname })).toBe(true);
+          expect(await probe({ kind: 'index', index: 'no_such_index_xyz' })).toBe(false);
+          // a constraint
           expect(
             await probe({
-              kind: 'drop-constraint',
+              kind: 'constraint',
               table: conRow!.tbl,
               constraint: conRow!.conname,
             }),
           ).toBe(true);
           expect(
             await probe({
-              kind: 'drop-constraint',
+              kind: 'constraint',
               table: conRow!.tbl,
               constraint: 'no_such_constraint_xyz',
             }),
@@ -530,7 +529,11 @@ describe.skipIf(!baseUrl)(
           );
           expect(plan.deployMode).toBe('mounted'); // MOUNTS — the drop targets are gone (a genuine leftover)
           expect(plan.migrations).toEqual([]); // the non-idempotent drop delta is NOT re-applied
-          expect(warnings).toEqual([LEFTOVER_UPDATE_ENV_MOUNT_LOG]); // the operator is told to clear the env
+          expect(warnings).toHaveLength(1);
+          expect(warnings[0]).toMatch(/REMOVE RAYSPEC_UPDATE_MIGRATION/); // clear the now-stale env
+          // The log may only claim what it MEASURED: both probed targets are named, off this live catalog.
+          expect(warnings[0]).toMatch(/table "pinned_moments"/);
+          expect(warnings[0]).toMatch(/table "highlights"/);
         } finally {
           await pc.end();
         }
