@@ -116,6 +116,19 @@ export type {
   TtsSynthesisResult,
   TtsSynthesizeRequest,
 } from '@rayspec/tts-port';
+// The RUN-JOURNAL READ capability contract — the injected handle a `{handler}` route may receive to
+// read the tenant's recorded steps back (interface only; the reader is built per invocation from the
+// same tenant-bound handle the store facade is built from). Re-exported here so a handler imports
+// every capability shape from the one SDK package.
+export type {
+  HandlerJournal,
+  HandlerJournalEntry,
+  HandlerJournalPage,
+  HandlerJournalQuery,
+  HandlerJournalStatus,
+  HandlerJournalStepType,
+  HandlerTokenUsage,
+} from './journal.js';
 // The neutral speech-to-text capability contract — the injected handle a handler may receive to
 // transcribe audio BYTES it already holds (interface only; the provider adapter is selected + built at
 // the composition root). Re-exported here so a handler imports every capability shape from the one SDK
@@ -127,6 +140,7 @@ export type { SttCapability, SttTranscribeOptions } from './stt.js';
 // package.
 export type { TtsCapability, TtsSynthesizeOptions } from './tts.js';
 
+import type { HandlerJournal } from './journal.js';
 import type { SttCapability } from './stt.js';
 import type { TtsCapability } from './tts.js';
 
@@ -676,6 +690,15 @@ export type SseProducer = (
 ) => Promise<void>;
 
 /**
+ * The `sseResponse` CONSTRUCTOR as an injectable value — the shape `RouteHandlerInit.sseResponse`
+ * carries. It exists so a handler that may not import this package's runtime (an extension pack's
+ * module, which is confined to its own type-only contract) can still build the ONE branded envelope
+ * the engine discriminates on, instead of spelling a platform-owned marker key out by hand. The value
+ * the engine injects IS `sseResponse` below, so there is exactly one implementation of the brand.
+ */
+export type SseResponder = (producer: SseProducer) => HttpResponse;
+
+/**
  * Build the OPT-IN enriched `{handler}` route response. A handler returns this (instead
  * of a plain body) to choose the HTTP status and/or set response headers:
  *
@@ -809,6 +832,41 @@ export interface RouteHandlerInit extends HandlerInit {
    * call is correct (the tenant + user are engine-bound, not handler-supplied).
    */
   readonly mintPlayToken?: (args: { resource: string; ttlSeconds: number }) => Promise<string>;
+  /**
+   * The RUN-JOURNAL READ door, bound to THIS request's server-derived tenant (see `HandlerJournal`).
+   * REQUIRED, unlike the capabilities above: it is not a backend a deployment opts into — it reads the
+   * journal the platform already writes for every deployment — so the ONE init builder populates it on
+   * every invocation and there is no absence to model.
+   *
+   * ⚠ BOUND TO THE BASE TENANT HANDLE, NOT TO THE ROUTE TRANSACTION, and deliberately so: an
+   * incremental (`sseResponse`) response's producer runs AFTER the route transaction has committed, so
+   * a reader bound to the transactional handle would be dead exactly where a streamed replay needs it.
+   * What that costs is stated rather than hidden: a read does not see the route's own uncommitted
+   * writes. Nothing is lost by it — a route does not write the journal (the platform records the steps
+   * its work produced), so there are no uncommitted journal rows of its own to miss.
+   */
+  readonly journal: HandlerJournal;
+  /**
+   * The INCREMENTAL-RESPONSE constructor (see `SseResponder`) — the injected form of `sseResponse`.
+   * REQUIRED for the same reason `journal` is: it closes over nothing a deployment configures, and the
+   * one init builder populates it on every invocation.
+   *
+   * A handler that returns `init.sseResponse(producer)` gets a `text/event-stream` response the engine
+   * drives, on the SAME registration as any other `{kind:'handler'}` route — same throttle, same auth
+   * chain, same per-route budget, same tenant resolution, same permission gate. A first-party handler
+   * may equally import `sseResponse` directly; this member is what makes the shape reachable from a
+   * module that may import no runtime at all.
+   */
+  readonly sseResponse: SseResponder;
+  /**
+   * The request's RESUME CURSOR — what a reconnecting client sent as `Last-Event-ID`, else an explicit
+   * `?lastEventId=` query on a first request. Resolved by the platform's ONE resolver (the same
+   * `resolveResumeCursor` the first-party journal replay reads), so a handler receives a decided value
+   * instead of re-implementing the precedence. ABSENT when the request carried neither — which means
+   * "from the beginning", never an empty read. UNTRUSTED CALLER DATA: it is an opaque position marker,
+   * never a tenant signal, and a value the reader cannot parse is refused rather than widened.
+   */
+  readonly resumeFrom?: string;
 }
 
 /** What a TRIGGER handler receives. Runs INSIDE the engine's `TenantDb.transaction()` (the tenant-GUC seam). */

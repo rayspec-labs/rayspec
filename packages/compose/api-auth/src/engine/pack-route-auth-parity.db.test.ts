@@ -12,19 +12,24 @@
  * change that gave a contributed route a refusal of its own — an extra header, a `details` key on a
  * 401 — would land green; only a changed STATUS code would not.
  *
- * This suite closes that. It boots ONE app carrying BOTH kinds of route at once:
- *   - the DEPLOYMENT's own `/notebooks/{id}` (a `{store}` read, gated on `store:read`), and
+ * This suite closes that. It boots ONE app carrying every kind of route at once:
+ *   - the DEPLOYMENT's own `/notebooks/{id}` (a `{store}` read, gated on `store:read`),
  *   - the in-tree fixture pack's `/ext/fixture-pack/turns/{turn_id}` (a `{handler}` read, `readonly`,
  *     therefore gated on `store:read` too — the SAME permission, which is what makes a 403 body
- *     comparable at all: the envelope NAMES the missing permission).
- * The pack is resolved and merged by the REAL `loadExtensions`, and its handler is loaded by the REAL
- * multi-root importer — the pack route reaches the router the way a deployed one does.
+ *     comparable at all: the envelope NAMES the missing permission), and
+ *   - that pack's `/ext/fixture-pack/journal/{run_id}`, the INCREMENTAL route: the same `{handler}`
+ *     action and the same `readonly` gate, differing only in what its handler RETURNS — an event
+ *     stream the engine drives instead of a JSON body. A response shape is exactly the kind of
+ *     difference that quietly grows a refusal of its own (a `text/event-stream` content type on a
+ *     401, a stream opened before the gate ran), and asserting the bytes is the only way to know.
+ * The pack is resolved and merged by the REAL `loadExtensions`, and its handlers are loaded by the
+ * REAL multi-root importer — the pack routes reach the router the way a deployed one does.
  *
- * Each refusal arm sends the SAME `x-request-id` to both routes, so the echoed `requestId` is not a
- * per-request nonce and the two envelopes are comparable as BYTES rather than as shapes. Compared:
- * the status, the whole body text, and the whole response header map.
+ * Each refusal arm sends the SAME `x-request-id` to all three routes, so the echoed `requestId` is not
+ * a per-request nonce and the envelopes are comparable as BYTES rather than as shapes. Compared: the
+ * status, the whole body text, and the whole response header map.
  *
- *   (1) NO CREDENTIAL          → identical 401.
+ *   (1) NO CREDENTIAL          → identical 401 at all three.
  *   (2) A FORGED CREDENTIAL    → identical 401, for both credential shapes the chain accepts:
  *                                a well-formed JWT signed by a key that is not ours, and a bearer
  *                                carrying an api-key prefix that resolves to no key.
@@ -33,14 +38,15 @@
  *                                that row: the deployment route answers a uniform 404, the contributed
  *                                route answers with only what the caller itself sent, and the second
  *                                tenant's own list at the deployment route is empty.
- *                                THE LIMIT OF THIS ARM: the fixture pack's handler performs no read at
- *                                all — it is written against `@rayspec/pack-sdk` alone and only echoes
- *                                its bound path parameter — so
- *                                a contributed route's DATA-PATH tenant isolation is out of this
- *                                suite's reach — what is measured is that nothing of the other tenant's
- *                                row comes back through the contributed surface, not that a reading
- *                                handler would be scoped.
- *   (5) ACCEPT CONTROL         → a correctly scoped principal of the owning tenant gets 200 from BOTH.
+ *                                THE LIMIT OF THIS ARM: the fixture pack's echo handler performs no
+ *                                read at all — it only echoes its bound path parameter — and the
+ *                                incremental one reads a run the second tenant never wrote to, so
+ *                                what is measured here is that nothing of the other tenant's row
+ *                                comes back through either contributed surface. The DATA-PATH
+ *                                isolation of a READING contributed handler, with real rows on both
+ *                                sides, is measured in `pack-journal-stream.db.test.ts`.
+ *   (5) ACCEPT CONTROL         → a correctly scoped principal of the owning tenant gets 200 from ALL
+ *                                THREE, and the incremental one answers with `text/event-stream`.
  *                                Without it, (1)-(3) could be passing because the app refuses
  *                                everything, and (4) because the routes serve nobody.
  *
@@ -79,6 +85,13 @@ const PACK_ID = 'fixture-pack';
 const CORE_ROUTE = (id: string) => `/notebooks/${id}`;
 /** The PACK's contributed read route — a `readonly` `{handler}`, gated on `store:read` too. */
 const PACK_ROUTE = (id: string) => `/ext/${PACK_ID}/turns/${id}`;
+/**
+ * The PACK's contributed INCREMENTAL read route — the same `readonly` `{handler}` action, differing
+ * only in what its handler RETURNS (an event stream rather than a JSON body). That difference is
+ * exactly what these arms exist to hold to account: a route that answers incrementally must refuse
+ * identically, or "it inherits the chain" is a claim about a shape nobody measured.
+ */
+const PACK_STREAM_ROUTE = (id: string) => `/ext/${PACK_ID}/journal/${id}`;
 
 let h: Harness;
 
@@ -102,8 +115,13 @@ async function mergedSpec(): Promise<{
     packsRoot: PACK_DIR,
     deploymentRoot: PACK_DIR,
   });
-  expect(loaded.api).toHaveLength(1);
-  expect(loaded.api[0]?.path).toBe('/ext/fixture-pack/turns/{turn_id}');
+  // BOTH contributed routes are registered: the JSON one and the INCREMENTAL one. Asserting the set
+  // rather than a count is what makes the third arm of every refusal below a real route rather than a
+  // path that quietly stopped existing.
+  expect(loaded.api.map((r) => r.path).sort()).toEqual([
+    '/ext/fixture-pack/journal/{run_id}',
+    '/ext/fixture-pack/turns/{turn_id}',
+  ]);
 
   const spec: RaySpec = {
     ...base,
@@ -183,19 +201,21 @@ async function observe(res: Response): Promise<Observed> {
 }
 
 /**
- * Issue the SAME request to the deployment route and to the pack route and return both observations.
- * The fixed `x-request-id` is what makes the two envelopes comparable as bytes: the middleware echoes
- * a well-formed incoming id, so `requestId` is the same in both bodies instead of a fresh UUID.
+ * Issue the SAME request to the deployment route, to the pack's JSON route and to the pack's
+ * INCREMENTAL route, and return all three observations. The fixed `x-request-id` is what makes the
+ * envelopes comparable as bytes: the middleware echoes a well-formed incoming id, so `requestId` is
+ * the same in every body instead of a fresh UUID.
  */
-async function bothRoutes(
+async function allRoutes(
   requestId: string,
   id: string,
   headers: Record<string, string> = {},
-): Promise<{ core: Observed; pack: Observed }> {
+): Promise<{ core: Observed; pack: Observed; stream: Observed }> {
   const withId = { ...headers, 'x-request-id': requestId };
   const core = await jsonRequest(h.app, 'GET', CORE_ROUTE(id), { headers: withId });
   const pack = await jsonRequest(h.app, 'GET', PACK_ROUTE(id), { headers: withId });
-  return { core: await observe(core), pack: await observe(pack) };
+  const stream = await jsonRequest(h.app, 'GET', PACK_STREAM_ROUTE(id), { headers: withId });
+  return { core: await observe(core), pack: await observe(pack), stream: await observe(stream) };
 }
 
 const SOME_ID = '00000000-0000-4000-8000-0000000000aa';
@@ -220,9 +240,13 @@ afterAll(async () => {
 
 describeDb('a pack route refuses exactly as a deployment route does', () => {
   it('(1) no credential: identical 401 — status, body envelope and header map', async () => {
-    const { core, pack } = await bothRoutes('parity-unauthenticated', SOME_ID);
+    const { core, pack, stream } = await allRoutes('parity-unauthenticated', SOME_ID);
     expect(core.status).toBe(401);
     expect(pack).toEqual(core);
+    // The INCREMENTAL route refuses BYTE-IDENTICALLY: same status, same body text, same header map —
+    // including `content-type: application/json`, so an unauthenticated caller never sees so much as
+    // the content type of the stream it did not get.
+    expect(stream).toEqual(core);
     expect(JSON.parse(core.body)).toEqual({
       error: {
         code: 'UNAUTHENTICATED',
@@ -234,22 +258,24 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
 
   it('(2) a forged JWT: identical 401 — status, body envelope and header map', async () => {
     const token = await forgedJwt();
-    const { core, pack } = await bothRoutes('parity-forged-jwt', SOME_ID, {
+    const { core, pack, stream } = await allRoutes('parity-forged-jwt', SOME_ID, {
       authorization: `Bearer ${token}`,
     });
     expect(core.status).toBe(401);
     expect(pack).toEqual(core);
+    expect(stream).toEqual(core);
     // The refusal is the UNIFORM one: a forged credential is answered exactly as an absent one, so
     // neither route tells a prober that its token was well-formed but wrongly signed.
     expect(JSON.parse(core.body).error.code).toBe('UNAUTHENTICATED');
   });
 
   it('(2) an unknown api-key: identical 401 — status, body envelope and header map', async () => {
-    const { core, pack } = await bothRoutes('parity-unknown-api-key', SOME_ID, {
+    const { core, pack, stream } = await allRoutes('parity-unknown-api-key', SOME_ID, {
       authorization: 'Bearer rk_notaknownkey.0123456789abcdef',
     });
     expect(core.status).toBe(401);
     expect(pack).toEqual(core);
+    expect(stream).toEqual(core);
     expect(JSON.parse(core.body).error.code).toBe('UNAUTHENTICATED');
   });
 
@@ -257,11 +283,14 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     const owner = await principal('parity-scope@example.test', 'Parity Scope');
     // A real, valid api-key of THIS tenant that simply does not carry `store:read`.
     const key = await mintApiKey(owner.orgId, owner.token, ['org:read']);
-    const { core, pack } = await bothRoutes('parity-insufficient-scope', SOME_ID, {
+    const { core, pack, stream } = await allRoutes('parity-insufficient-scope', SOME_ID, {
       authorization: `Bearer ${key}`,
     });
     expect(core.status).toBe(403);
     expect(pack).toEqual(core);
+    // Same 403, same named missing permission: the incremental route's gate is DERIVED from its
+    // declared handler's `readonly` flag exactly as the JSON route's is, not chosen by its shape.
+    expect(stream).toEqual(core);
     expect(JSON.parse(core.body)).toEqual({
       error: {
         code: 'FORBIDDEN',
@@ -289,10 +318,18 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     expect(ownRead.status).toBe(200);
     expect((await ownRead.json()).title).toBe('SECRET_FROM_A');
 
-    // Tenant B names A's row id at BOTH routes, with a credential that is valid for B.
-    const { core, pack } = await bothRoutes('parity-cross-tenant', rowId, {
+    // Tenant B names A's row id at ALL THREE routes, with a credential that is valid for B.
+    const { core, pack, stream } = await allRoutes('parity-cross-tenant', rowId, {
       authorization: `Bearer ${b.token}`,
     });
+    // The incremental route answers B with a stream of B's OWN journal — which, for a run id B never
+    // recorded a step under, is no entries at all. Nothing of A's is in it. The DATA-PATH tenant
+    // isolation of a READING contributed handler is measured with real rows next door, in
+    // `pack-journal-stream.db.test.ts`; what this arm adds is that the third route shape is under the
+    // same tenant resolution as the other two.
+    expect(stream.status).toBe(200);
+    expect(stream.body).not.toContain('SECRET_FROM_A');
+    expect(stream.body).toContain('"hasMore":false');
     // The deployment route: a uniform 404 — B cannot tell A's row from one that never existed.
     expect(core.status).toBe(404);
     expect(JSON.parse(core.body).error.code).toBe('NOT_FOUND');
@@ -312,7 +349,7 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
     expect(await list.json()).toEqual([]);
   });
 
-  it('(5) accept control: a correctly scoped principal gets 200 from BOTH routes', async () => {
+  it('(5) accept control: a correctly scoped principal gets 200 from ALL THREE routes', async () => {
     const owner = await principal('parity-accept@example.test', 'Parity Accept');
     const key = await mintApiKey(owner.orgId, owner.token, ['store:read']);
     for (const auth of [`Bearer ${owner.token}`, `Bearer ${key}`]) {
@@ -321,6 +358,13 @@ describeDb('a pack route refuses exactly as a deployment route does', () => {
       });
       expect(pack.status).toBe(200);
       expect(await pack.json()).toEqual({ turnId: SOME_ID });
+      // The incremental route serves the same principals, and serves an EVENT STREAM: without this
+      // the four refusal arms above could be passing because the route refuses everything.
+      const stream = await jsonRequest(h.app, 'GET', PACK_STREAM_ROUTE(SOME_ID), {
+        headers: { authorization: auth },
+      });
+      expect(stream.status).toBe(200);
+      expect(stream.headers.get('content-type')).toContain('text/event-stream');
       const core = await jsonRequest(h.app, 'GET', '/notebooks', {
         headers: { authorization: auth },
       });

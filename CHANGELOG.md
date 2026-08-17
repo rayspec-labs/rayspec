@@ -402,6 +402,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of a pack author's. The in-tree fixture pack now contributes both contracted kinds through real
   declarations and builds against `@rayspec/pack-sdk` alone.
 
+- **A pack can now READ the run journal back, and a pack route can answer INCREMENTALLY.** Both halves
+  arrive on the init a `{kind:'handler'}` route receives, and both are contracted by
+  `@rayspec/pack-sdk` — so a pack still imports one package for everything it writes.
+  **The journal was write-only to a pack.** The surface carried `PackJournalWriter` and the shapes a
+  step is recorded under, and no way back out: a pack that needed to read what its work produced had
+  exactly one route, `PackDatabase.query` with the core's journal table and column layout written into
+  a SQL string — an unversioned dependency on a platform internal expressed as text, where a renamed
+  column is a silent break nothing in a build can see. `init.journal.read({ runId, after, limit })`
+  replaces the string with a type: one bounded page of `PackJournalReadEntry`, oldest first, each
+  entry carrying an opaque `cursor`, and the page saying whether more were waiting (`hasMore`) and
+  where to continue from (`nextCursor`). **It is scoped to the invocation's own tenant
+  structurally** — the reader is built from the same tenant-bound handle the store facade is, so there
+  is no tenant argument and no way to add one — **and it is bounded**: `limit` is clamped by the
+  deployment, so reading a long journal is a sequence of pages the caller asks for rather than a
+  drain. What it is NOT is stated in the contract rather than left to be discovered: it is the
+  TENANT's journal and not a per-pack slice of it (the run journal is the tenant's single record of
+  work, so filter by `runId` to read one unit of work), it carries the neutral columns only — the
+  platform's accounting and provenance columns stay platform-owned — and it has no append verb.
+  The cursor is a keyset over `(created_at, step_id)` at the database's own microsecond precision, so
+  a step appended between two reads never shifts a page under the client, and a cursor the reader did
+  not issue is REFUSED (an `Error` named `PackJournalCursorError`) rather than answered by replaying
+  from zero — which would re-deliver everything a resuming client already had.
+  **A pack route could not stream at all.** `PackRouteHandler` returns one value and the init carried
+  no response object, so an incremental answer was not expressible: the pack shipped fewer endpoints,
+  or reimplemented polling. A handler may now return `init.sseResponse(producer)` and answer with an
+  event stream the deployment drives, emitting `{ id, event, data }` frames. The constructor is
+  INJECTED rather than importable, and that is the design: the deployment's response envelope is
+  discriminated by a runtime marker a types-only package cannot ship, so the pack builds the
+  deployment's own envelope through the deployment's own builder and still names no marker. Choosing a
+  status or setting response headers stays withheld — an incremental response is a 200 whose status is
+  flushed before the first frame.
+  **Resumption is part of the contract, not left to the pack.** `init.resumeFrom` carries what a
+  reconnecting client sent as `Last-Event-ID`, else an explicit `?lastEventId=`, resolved by the same
+  resolver the platform's own resumable feeds read — so the precedence is decided once rather than
+  per handler. Emit an entry's `cursor` as the frame `id` and pass `resumeFrom` back as `after`, and a
+  reconnect continues exactly one entry past the last one delivered.
+  **Auth, tenancy and rate limiting are inherited, not re-implemented**, because an incremental route
+  is an ordinary `{kind:'handler'}` route: same registration, same throttle, same auth chain, same
+  per-route budget, same tenant resolution, same permission gate — the response shape is chosen inside
+  the handler, which the chain has already let through. The existing pack-route parity regression now
+  drives an incremental route beside the JSON one and a deployment-declared one, and compares all
+  three refusals as bytes: status, whole body, whole header map.
+  Both members are OPTIONAL on the contract — a deployment older than them injects neither, so a pack
+  feature-detects and fails closed — and their presence is pinned on the PLATFORM side by indexed
+  access, which is the only form that can catch an optional member being dropped. The in-tree fixture
+  pack contributes a second route that reads the journal and streams it, written against
+  `@rayspec/pack-sdk` alone, and a new suite drives it with two tenants recording under the same run
+  id: each sees its own entries and nothing of the other's. The `{kind:'stream'}` api action is
+  untouched — it remains blob ingest/playback bound to the blob backend, a separate door.
+
 ### Changed
 
 - **`rayspec doctor` no longer runs code out of the deployment tree, and `--with-packs` is how you ask

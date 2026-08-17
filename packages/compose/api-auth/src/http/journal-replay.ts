@@ -43,16 +43,28 @@ import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 
 /**
- * Resolve the resume cursor: the `Last-Event-ID` header (what a reconnecting client sends) takes
- * precedence over an explicit `?lastEventId=` query (what a first request can carry). An absent cursor
- * — or one that is not a number — means "from the beginning": a `NaN` cursor would compare false
- * against every stored seq and serve an EMPTY replay, which a client cannot tell apart from "there is
- * nothing left", so a malformed cursor must never be carried into the bound.
+ * Resolve the RAW resume cursor a request carries: the `Last-Event-ID` header (what a reconnecting
+ * client sends) takes precedence over an explicit `?lastEventId=` query (what a first request can
+ * carry). ABSENT when the request carried neither.
+ *
+ * IT IS DELIBERATELY UNTYPED HERE. What a cursor MEANS belongs to the feed being resumed — this
+ * package's own run-event replay reads it as a `seq` (below), and a contributed route's journal read
+ * reads it as a keyset position — so this half resolves WHERE the value comes from and nothing else.
+ * Every resumable surface reads the cursor through this ONE function, which is what keeps the
+ * precedence from being re-decided, slightly differently, per feed.
+ */
+export function resolveResumeCursor(c: Context): string | undefined {
+  return c.req.header('last-event-id') ?? c.req.query('lastEventId');
+}
+
+/**
+ * Resolve the resume cursor AS A RUN-EVENT SEQ. An absent cursor — or one that is not a number —
+ * means "from the beginning": a `NaN` cursor would compare false against every stored seq and serve
+ * an EMPTY replay, which a client cannot tell apart from "there is nothing left", so a malformed
+ * cursor must never be carried into the bound.
  */
 export function resolveLastEventId(c: Context): number {
-  const header = c.req.header('last-event-id');
-  const query = c.req.query('lastEventId');
-  const raw = header ?? query;
+  const raw = resolveResumeCursor(c);
   if (raw === undefined) return -1; // -1 ⇒ replay from seq 0 (seq > -1)
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) ? n : -1;

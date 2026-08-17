@@ -18,7 +18,13 @@ capabilities, and the contract they are written against is here too: `PackToolHa
 the module a `tooling` contribution points at, `PackRouteHandler` for an `api` one served
 behind a `{kind:'handler'}` action, and the
 init each receives — the invocation's server-derived tenant and `PackStoreDb`, the
-name-keyed door onto the declared stores, plus what the request carried on a route. What a
+name-keyed door onto the declared stores, plus what the request carried on a route. A
+route's init carries two further doors: `PackJournalReader`, a typed, tenant-scoped,
+bounded read with a stable cursor over the run journal a pack's work is recorded in — so
+reading back what was written never means naming a core table in a SQL string — and
+`PackSseResponder`, the injected constructor for an **incremental** response, with the
+request's resume cursor beside it, so a client that reconnects continues where it stopped
+instead of replaying from zero. What a
 pack handler does **not** receive — and which declarable shapes are **not** contracted here
 (a `trigger`, and a `route`-kind handler behind a `{kind:'stream'}` action, which exchanges
 a raw `Request`/`Response` and needs the blob backend) — is stated in the same place, with
