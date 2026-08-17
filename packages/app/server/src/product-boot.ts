@@ -1039,14 +1039,36 @@ interface StandingChange {
    * 42701), which is what lets {@link DeltaNames.absentAtBothEnds} read such a name's PRESENCE.
    */
   readonly idempotent: boolean;
+  /**
+   * Meaningful only on a `table` object this statement CREATES: the statement brings columns into
+   * existence that {@link createdTableColumns} cannot enumerate — `CREATE TABLE … AS SELECT`,
+   * `PARTITION OF`, `OF <type>`. The names are unknowable from the SQL text alone (they come from a
+   * query's result shape, a parent table, or a composite type), so the reader says WHICH TABLE has
+   * unknown columns instead of pretending it has none. {@link DeltaNames.createdWithUnknownColumns}
+   * collects these, and a column of such a table is treated as one the delta creates.
+   */
+  readonly columnsUnknown?: boolean;
 }
 
 /**
  * The member clauses of a `CREATE TABLE` that are COLUMN definitions — the names the statement brings
  * into existence IMPLICITLY, alongside the table it names explicitly. `rest` is what follows the table
- * name, and only a member list that opens IMMEDIATELY (whitespace only, then `(`) is read: anything
- * else — `AS SELECT …`, `PARTITION OF … FOR VALUES (…)`, `OF <type>` — puts something between the name
- * and the first parenthesis that this does not parse, so it yields NO columns rather than a guess.
+ * name, and only a member list that opens IMMEDIATELY (whitespace only, then `(`) is read.
+ *
+ * `undefined` — NOT an empty list — when the list cannot be opened: `AS SELECT …`,
+ * `PARTITION OF … FOR VALUES (…)`, `OF <type>` all put something this does not parse between the name
+ * and the first parenthesis, and each of them creates columns all the same. The distinction is
+ * load-bearing, because for the `created` set the two answers point in OPPOSITE directions. Naming a
+ * column that is not really created only WITHHOLDS evidence; failing to name one that IS created
+ * MANUFACTURES it — a reviewed `DROP COLUMN` later in the same delta then reads its own un-created
+ * column as GONE, and the boot refuses as half-landed a delta that has never run. Measured:
+ * `CREATE TABLE "t" AS SELECT …` followed by `DROP COLUMN "c"` against an empty schema refused with
+ * `column "t"."c" — a reviewed DROP in the delta names it, and it is GONE`. An empty list therefore
+ * means "this statement creates no columns"; the absence of a list means "this statement creates
+ * columns I cannot enumerate", and the caller must treat every column of that table as created.
+ *
+ * `CREATE TABLE "t" ()` is legal and genuinely creates none, which is why the empty case has to stay
+ * distinguishable rather than being folded into the unreadable one.
  *
  * Split by {@link memberClauses}, the same depth- and literal-aware reader the `ALTER TABLE` member
  * lists go through, so a type's own comma (`numeric(10,2)`) and a `CHECK ("a" <> ',')` are inside
@@ -1056,9 +1078,9 @@ interface StandingChange {
  */
 const TABLE_CONSTRAINT_CLAUSE = /^(?:CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|EXCLUDE|LIKE)\b/i;
 
-function createdTableColumns(rest: string): string[] {
+export function createdTableColumns(rest: string): string[] | undefined {
   const open = rest.replace(/^\s+/, '');
-  if (!open.startsWith('(')) return [];
+  if (!open.startsWith('(')) return undefined;
   const columns: string[] = [];
   // Everything after the opening parenthesis goes through the ONE splitter: the member list's closing
   // `)` and whatever follows it (`WITH (…)`, `PARTITION BY …`, `TABLESPACE …`) ride along on the LAST
@@ -1108,8 +1130,21 @@ function standingChanges(text: string): StandingChange[] {
   if (createTable !== undefined) {
     const read = readLocalName(createTable.rest);
     if (read === undefined) return changes;
+    const columns = createdTableColumns(read.rest);
+    if (columns === undefined) {
+      // The table is created and so are columns this cannot name. Say so on the table's own change —
+      // silently leaving the column list empty is what let a `DROP COLUMN` later in the same delta
+      // read its own un-created column as landed evidence.
+      changes.push({
+        object: { kind: 'table', table: read.name },
+        standing: true,
+        idempotent: createTable.guarded,
+        columnsUnknown: true,
+      });
+      return changes;
+    }
     leaves({ kind: 'table', table: read.name }, createTable.guarded);
-    for (const column of createdTableColumns(read.rest)) {
+    for (const column of columns) {
       leaves({ kind: 'column', table: read.name, column }, createTable.guarded);
     }
     return changes;
@@ -1318,15 +1353,20 @@ export function extractAdditiveObjects(sql: string): SchemaObjectProbe[] {
  * schema AFTER it) can agree in either direction, and where they agree the answer settles nothing:
  *
  *   - `leftStanding` — every name a fully-applied delta would leave the live schema HOLDING. The LAST
- *     statement that touches a name decides, so a name freed and then put back (`RENAME "parts" TO
- *     "parts_archive"` + `CREATE TABLE "parts"`, `DROP TABLE "t"` + `CREATE TABLE "t"`, `DROP INDEX
- *     "ix"` + `CREATE INDEX "ix"`, and the same thing inside ONE statement: `DROP COLUMN "note", ADD
- *     COLUMN "note" text`) is left standing, while one created and then taken away again (`CREATE TABLE
- *     "t_new"` + `RENAME TO "t"`) is not.
+ *     statement that touches a name decides, so a name freed and then put back (`DROP INDEX "ix"` +
+ *     `CREATE INDEX "ix"` — an index redefinition, the likeliest real instance and the one drizzle-kit
+ *     emits; `DROP TABLE "t"` + `CREATE TABLE "t"`; `RENAME "parts" TO "parts_archive"` + `CREATE
+ *     TABLE "parts"`; and the same thing inside ONE statement: `DROP COLUMN "note", ADD COLUMN "note"
+ *     text`) is left standing, while one created and then taken away again (`CREATE TABLE "t_new"` +
+ *     `RENAME TO "t"`) is not.
  *     Such a name is in the schema BEFORE the delta and AFTER it, so "it is STILL THERE" proves nothing
  *     — reading it as un-landed routed a FULLY APPLIED delta to APPLY, re-running a rename that cannot
  *     succeed twice (42P07, and under `Restart=always` the boot never serves) and a `DROP` over the
  *     table the delta had just re-created (measured: three seeded rows → one → zero, per restart).
+ *     KNOWN OVER-COLLECTION: a renamed table's COLUMNS keep standing under the OLD table name, so
+ *     `CREATE TABLE "t_new" ("a" …)` + `RENAME TO "t"` leaves `column:t_new.a` here, a name no end
+ *     state holds. It withholds evidence rather than inventing it — the safe direction — but it does
+ *     not match the note beside the rename reader saying those names are no longer reachable.
  *
  *   - `created` — every name the delta brings INTO existence at any point, whether or not it survives
  *     to the end. For a name in this set "it is GONE" proves nothing either: an ordinary staging-table
@@ -1362,11 +1402,22 @@ interface DeltaNames {
   readonly leftStanding: ReadonlySet<string>;
   readonly created: ReadonlySet<string>;
   readonly absentAtBothEnds: ReadonlySet<string>;
+  /**
+   * TABLE names whose created columns cannot be enumerated from the SQL — `CREATE TABLE … AS SELECT`,
+   * `PARTITION OF`, `OF <type>`. Every column of such a table counts as one the delta creates, which
+   * is the same withholding `created` performs and for the same reason: a name the delta itself makes
+   * is absent before the delta too, so its absence is not evidence that the delta ran.
+   *
+   * A SET OF TABLES rather than a set of columns because the column names are precisely what is not
+   * knowable here. Over-withholding on such a table costs evidence; under-withholding manufactures it.
+   */
+  readonly createdWithUnknownColumns: ReadonlySet<string>;
 }
 
 function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNames {
   const standing = new Map<string, boolean>();
   const created = new Set<string>();
+  const createdWithUnknownColumns = new Set<string>();
   // Names some statement leaves standing IDEMPOTENTLY, which may therefore have been standing before
   // the delta. Once a name is in here it stays: over-excluding withholds evidence, the safe direction.
   const mayPredate = new Set<string>();
@@ -1378,6 +1429,9 @@ function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNam
         if (change.standing) {
           created.add(key);
           if (change.idempotent) mayPredate.add(key);
+          if (change.columnsUnknown && change.object.kind === 'table') {
+            createdWithUnknownColumns.add(change.object.table);
+          }
         }
       }
     }
@@ -1388,7 +1442,17 @@ function namesTheDeltaTouches(migrations: readonly PlannedMigration[]): DeltaNam
   for (const key of created) {
     if (!leftStanding.has(key) && !mayPredate.has(key)) absentAtBothEnds.add(key);
   }
-  return { leftStanding, created, absentAtBothEnds };
+  return { leftStanding, created, absentAtBothEnds, createdWithUnknownColumns };
+}
+
+/**
+ * Does the delta CREATE this name — counting the columns of a table whose column list it could not
+ * read? The two callers that suppress evidence for a delta-created name ask through here, so the
+ * unenumerable spellings cannot be closed for one of them and left open for the other.
+ */
+function deltaCreates(names: DeltaNames, object: SchemaObjectProbe): boolean {
+  if (names.created.has(objectKey(object))) return true;
+  return object.kind === 'column' && names.createdWithUnknownColumns.has(object.table);
 }
 
 /** How an object is NAMED to an operator — the same words the probe asked its question in. */
@@ -1529,7 +1593,7 @@ export async function routePresentMatchingUpdate(
           // …and where the SAME delta MAKES this name (a staging table it creates and drops again), a
           // target still standing also says the CREATE ran: half landed, not un-applied.
           madeAndTaken(object);
-        } else if (!read.idempotent && !deltaNames.created.has(objectKey(object))) {
+        } else if (!read.idempotent && !deltaCreates(deltaNames, object)) {
           recordLanded(gone, object);
         }
         // …and a GONE target is NOT evidence in two cases, for the same reason in both — the schema

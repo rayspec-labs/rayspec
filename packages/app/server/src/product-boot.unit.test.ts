@@ -20,6 +20,7 @@ import {
   assembleExtractionInstructions,
   buildLiveAgent,
   buildSttAdapter,
+  createdTableColumns,
   extractAdditiveObjects,
   extractDestructiveTarget,
   leftoverUpdateEnvMountLog,
@@ -2439,9 +2440,10 @@ describe('routePresentMatchingUpdate — a name the delta MAKES and TAKES AWAY, 
   it('…read through the ONE member-list splitter: a type comma and a table CONSTRAINT are not columns', async () => {
     // The column list goes through the same depth- and literal-aware split the `ALTER TABLE` member
     // lists do, so `numeric(10,2)` is one clause and `CONSTRAINT … CHECK (…)` defines no column. If
-    // the list were read by splitting on every comma, `"tmp"` would still be found here — what this
-    // pins is that the clauses AROUND it do not become column names, and that the column the delta
-    // drops is recognised as one the delta itself makes.
+    // the list were read by splitting on every comma, `"tmp"` would still be found here, and this
+    // route is the SAME under either reading — what this pins is only that the column the delta drops
+    // is recognised as one the delta itself makes. The splitter is pinned by the two tests below,
+    // which read the collected list directly and observe it through `probed.gone`.
     const stage = mig(
       'CREATE TABLE "stage" ("id" uuid, "amount" numeric(10,2), CONSTRAINT "stage_ck" CHECK ' +
         '("amount" > 0), "tmp" text);\n--> statement-breakpoint\n' +
@@ -2457,6 +2459,123 @@ describe('routePresentMatchingUpdate — a name the delta MAKES and TAKES AWAY, 
     expect(await routePresentMatchingUpdate(stage, live(new Set()))).toEqual({
       kind: 'apply',
       absent: ['table "stage"'],
+    });
+  });
+
+  it('the member-list reader itself: which clauses become column names, and which spellings it CANNOT read', () => {
+    // Read directly, because the route above cannot see this: it answers the same for a correct
+    // reader and for a naive comma split, so a defect in either half survives it. A mutation sweep
+    // found exactly that — `createdTableColumns` splitting on every comma, and the table-constraint
+    // skip deleted, both left the suite green.
+    expect(
+      createdTableColumns(
+        ' ("id" uuid, "amount" numeric(10,2), CONSTRAINT "ck" CHECK ("amount" > 0), "tmp" text)',
+      ),
+    ).toEqual(['id', 'amount', 'tmp']);
+    // A comma inside a STRING LITERAL is not a separator, and nothing inside the literal is a name.
+    expect(
+      createdTableColumns(` ("id" uuid, "note" text DEFAULT 'x, "ghost" text', "tmp" text)`),
+    ).toEqual(['id', 'note', 'tmp']);
+    // Every table-constraint keyword defines no column.
+    for (const kw of [
+      'CONSTRAINT "c" CHECK ("a" > 0)',
+      'PRIMARY KEY ("a")',
+      'FOREIGN KEY ("a") REFERENCES "t"("b")',
+      'UNIQUE ("a")',
+      'CHECK ("a" > 0)',
+      'EXCLUDE USING gist ("a" WITH =)',
+      'LIKE "other"',
+    ]) {
+      expect(createdTableColumns(` ("a" uuid, ${kw})`), kw).toEqual(['a']);
+    }
+    // `()` is legal and creates NOTHING — distinguishable from a list that cannot be read at all.
+    expect(createdTableColumns(' ()')).toEqual([]);
+    // …and these create columns whose names are not in the SQL. `undefined`, never `[]`.
+    expect(createdTableColumns(' AS SELECT * FROM "orders"')).toBeUndefined();
+    expect(
+      createdTableColumns(' PARTITION OF "orders" FOR VALUES FROM (1) TO (9)'),
+    ).toBeUndefined();
+    expect(createdTableColumns(' OF "order_type"')).toBeUndefined();
+  });
+
+  it('a comma inside a DEFAULT literal does not invent a created column that suppresses evidence', async () => {
+    // The behavioural half of the reader test above, observed where it matters: `"ghost"` sits INSIDE
+    // a string literal, so the delta does NOT create it — which makes the reviewed DROP of a `ghost`
+    // that is GONE real evidence the delta ran. Split naively, `"ghost"` reads as delta-created and
+    // the evidence is suppressed, turning a landed delta into one that claims nothing.
+    const stage = mig(
+      `CREATE TABLE "stage" ("id" uuid, "note" text DEFAULT 'x, "ghost" text', "tmp" text);\n` +
+        '--> statement-breakpoint\nALTER TABLE "stage" DROP COLUMN "ghost";',
+      [
+        {
+          kind: 'drop-column',
+          match: 'ALTER TABLE "stage" DROP COLUMN "ghost"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(stage, live(new Set(['stage', 'stage.id'])))).toEqual({
+      kind: 'mount',
+      probed: {
+        present: ['table "stage"'],
+        gone: ['column "stage"."ghost"'],
+        renamed: [],
+        proven: [],
+      },
+    });
+  });
+
+  it('a CREATE TABLE whose columns cannot be enumerated does not manufacture landed evidence', async () => {
+    // `AS SELECT`, `PARTITION OF` and `OF <type>` all create columns the SQL text never names. Reading
+    // that as "creates no columns" let the delta's own reviewed `DROP COLUMN` find its target absent
+    // — because the delta had never run — and report it as LANDED. The boot then refused a delta that
+    // had not started as half-landed, permanently: no restart clears it and the process never serves.
+    for (const create of [
+      'CREATE TABLE "orders_backup" AS SELECT * FROM "orders"',
+      'CREATE TABLE "orders_backup" PARTITION OF "orders" FOR VALUES FROM (1) TO (9)',
+      'CREATE TABLE "orders_backup" OF "order_type"',
+    ]) {
+      const delta = mig(
+        `${create};\n--> statement-breakpoint\nALTER TABLE "orders_backup" DROP COLUMN "pii_email";`,
+        [
+          {
+            kind: 'drop-column',
+            match: 'ALTER TABLE "orders_backup" DROP COLUMN "pii_email"',
+            reason: 'reviewed',
+          },
+        ],
+      );
+      // NOTHING of the delta exists — it has never run. The only honest reading is "apply it".
+      expect(await routePresentMatchingUpdate(delta, live(new Set())), create).toEqual({
+        kind: 'apply',
+        absent: ['table "orders_backup"'],
+      });
+    }
+  });
+
+  it('ACCEPT CONTROL: the unknown-column withholding is scoped to ITS table, not to every column', async () => {
+    // The suppression must not become a blanket amnesty. A reviewed DROP of a column on a DIFFERENT
+    // table is still evidence, even while an unreadable CREATE TABLE sits in the same delta — a guard
+    // that withheld everything would look identical to a correct one on the test above.
+    const delta = mig(
+      'CREATE TABLE "orders_backup" AS SELECT * FROM "orders";\n--> statement-breakpoint\n' +
+        'ALTER TABLE "customers" DROP COLUMN "pii_email";',
+      [
+        {
+          kind: 'drop-column',
+          match: 'ALTER TABLE "customers" DROP COLUMN "pii_email"',
+          reason: 'reviewed',
+        },
+      ],
+    );
+    expect(await routePresentMatchingUpdate(delta, live(new Set(['orders_backup'])))).toEqual({
+      kind: 'mount',
+      probed: {
+        present: ['table "orders_backup"'],
+        gone: ['column "customers"."pii_email"'],
+        renamed: [],
+        proven: [],
+      },
     });
   });
 
