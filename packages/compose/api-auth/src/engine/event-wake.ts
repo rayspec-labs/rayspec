@@ -25,7 +25,11 @@
  */
 
 import type { Db } from '@rayspec/db';
-import { listenTenantEvents, type TenantEventListenHandle } from '@rayspec/db';
+import {
+  listenTenantEvents,
+  operatorSafeDbErrorMessage,
+  type TenantEventListenHandle,
+} from '@rayspec/db';
 import type { TenantEventWake } from '../app-context.js';
 
 /** The wake plus the shutdown handle the composition root owns. */
@@ -69,10 +73,14 @@ export function makeTenantEventWake(
       if (closed) void h.unlisten().catch(() => {});
     })
     .catch((err: unknown) => {
+      // The RENDERED MESSAGE, never the error object. A LISTEN that the server refuses comes back as
+      // the driver's own error, whose diagnostic fields — `detail` among them — are OWN ENUMERABLE
+      // properties, so handing the object to a logger prints them even though nothing here reads
+      // `.message`. That is the shape this leaks through, not the interpolation.
       log(
         '[api-auth] the tenant event-bus LISTEN could not be established — subscriptions fall back ' +
           'to their periodic read (delivery is delayed, never lost)',
-        err,
+        operatorSafeDbErrorMessage(err),
       );
     });
 

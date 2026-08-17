@@ -976,8 +976,10 @@ change is applied by the explicit `--apply-migration` flag below.
   **One shape is not decidable this way, and it is the one place this path can silently drop
   a reviewed change:** a delta that **frees a name and puts it back** leaves the live schema
   holding that name whether or not the delta ran — a reviewed `DROP` beside a re-`CREATE` of
-  the same name (`DROP TABLE "t"` + `CREATE TABLE "t"`, a rebuild), and the same change
-  written as one statement (`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" …`). The
+  the same name. An **index redefinition** (`DROP INDEX "ix"` + `CREATE INDEX "ix"`) is the
+  likeliest one to meet, because it is what a generated delta writes for a changed index;
+  a table rebuild (`DROP TABLE "t"` + `CREATE TABLE "t"`) is the same shape, and so is the
+  same change written as one statement (`ALTER TABLE "t" DROP COLUMN "c", ADD COLUMN "c" …`). The
   `IF [NOT] EXISTS` spellings count the same; it is the **name** that decides, not the
   spelling. Nothing in the schema separates the two states, so the boot claims nothing,
   **mounts**, and logs that it measured nothing rather than calling the flag stale —

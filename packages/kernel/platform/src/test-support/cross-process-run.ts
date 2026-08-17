@@ -186,6 +186,11 @@ export async function runDurableShapeCancellable(
     // back, so anything run-core wrote inside it — including a cancellation it recorded — is gone.
     // Record it here instead, after the rollback, on the autonomous handle, where the header row is
     // free. A run that failed for its own reasons is reported as the failure it was.
+    // The NAME only, never the message or the object. `err.name` is a class name — 'PostgresError',
+    // 'RunCancelledError' — and cannot hold a bound value, so a database refusal reaching here
+    // contributes its class and nothing else. `String(err)` is the non-Error arm, which by
+    // definition is not a driver error (those are Errors). Left unrendered on that basis: there is
+    // no field read here that Postgres fills with caller data.
     const errorName = err instanceof Error ? err.name : String(err);
     if (!(await isRunCancelled(taintDb, cfg.runId))) return { outcome: 'failed', errorName };
     await recordRunCancelled(taintDb, cfg.runId);

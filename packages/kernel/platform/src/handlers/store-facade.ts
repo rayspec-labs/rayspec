@@ -816,6 +816,18 @@ function isUniqueViolation(err: unknown): boolean {
  * the model boundary CANNOT expose it, and `String(err)` is just the neutral message — so the raw
  * constraint NAME (the cross-tenant existence oracle the sanitize exists to hide) still never
  * reaches the model. (We preserve only the SQLSTATE, never the constraint/column name.)
+ *
+ * ⚠ THE SCOPE IS 23505 AND NOTHING ELSE, AND THIS IS NOT A DISCLOSURE BOUNDARY. It exists for the
+ * cross-tenant ORACLE, which is a property of the unique class alone. Every other refusal crosses
+ * the facade UNCHANGED, carrying whatever Postgres put in it: `detail` holds the offending value on
+ * a foreign-key violation and the WHOLE FAILING ROW on a check violation, and a coercion refusal
+ * echoes the value in the primary message. Widening this into a code allowlist is the wrong shape,
+ * for the reason `REFUSAL_BY_SQLSTATE` in @rayspec/db documents — the server owns the vocabulary, so
+ * the list is one somebody has to keep complete against it. The answer is to render where an error
+ * becomes OUTPUT rather than to filter where it is re-thrown: every consumer that formats a caught
+ * error for an operator, a journal or a model routes it through `operatorSafeDbErrorMessage` (or,
+ * in a zero-dependency generated handler, the same structural check emitted inline). This function
+ * is deliberately left as the oracle guard it was written to be.
  */
 function sanitizeDbError(err: unknown): unknown {
   if (!isUniqueViolation(err)) return err;

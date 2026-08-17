@@ -43,6 +43,7 @@
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { DBOS } from '@dbos-inc/dbos-sdk';
+import { operatorSafeDbErrorMessage } from '@rayspec/db';
 import type { DurableExecutor } from '@rayspec/platform';
 
 /** The default crontab — 3am daily (a quiet hour). Overridable via `RAYSPEC_CLEANUP_SCHEDULE`. */
@@ -166,8 +167,12 @@ export class SystemCleanupScheduler {
       // A cleanup failure must be LOUD (a silently-failing housekeeping job lets expired rows / tombstones
       // accumulate unnoticed) but must NOT crash the worker. Log + rethrow so the DBOS workflow records a
       // terminal failure for the instant (the next daily tick retries cleanly — the ops are idempotent).
+      // RENDERED, not raw. `runCleanup` is a set of DELETEs against the platform tables, so what
+      // lands here is a database refusal — a foreign-key violation on a row another table still
+      // references echoes the offending key in `detail`, and the ORM wrapper carries the statement
+      // and its bound values in the message. No-op for anything that is not a database failure.
       this.#logger.error(
-        `[cleanup] FAILED: ${e instanceof Error ? e.message : String(e)} (the next daily tick retries; ops are idempotent)`,
+        `[cleanup] FAILED: ${operatorSafeDbErrorMessage(e)} (the next daily tick retries; ops are idempotent)`,
       );
       throw e;
     }

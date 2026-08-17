@@ -46,10 +46,13 @@ import type { TurnDispatch } from '../turn-dispatch.js';
  */
 export interface PackServiceDatabase {
   /**
-   * Run one parameterized statement and read its rows back. A TRANSACTION-CONTROL statement (`BEGIN`,
-   * `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is REFUSED here before it reaches the server: this handle is
-   * pooled, so the connection such a statement lands on would go back to the pool still inside a
-   * transaction nothing ever commits.
+   * Run ONE parameterized statement and read its rows back, and "one" is ENFORCED BY THE SERVER: the
+   * statement goes over the extended protocol, where Postgres itself decides where one command ends
+   * and refuses a string carrying more than one at parse time, before any part of it runs — on this
+   * handle and on `tx` alike, surfaced as `PackTransactionError`. A TRANSACTION-CONTROL
+   * statement (`BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, …) is refused before it reaches the server
+   * too: this handle is pooled, so the connection such a statement lands on would go back to the pool
+   * still inside a transaction nothing ever commits.
    */
   query(sql: string, params?: readonly unknown[]): Promise<Record<string, unknown>[]>;
   /**

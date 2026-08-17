@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { AgentSpec, Backend, NeutralTool, RunResult } from '@rayspec/core';
-import { schema, type TenantDb } from '@rayspec/db';
+import { operatorSafeDbErrorMessage, schema, type TenantDb } from '@rayspec/db';
 import type {
   ArtifactRef,
   CapabilityInvocationContext,
@@ -112,11 +112,15 @@ export function makeAgentNodeHandler(deps: AgentNodeDeps): CapabilityNodeHandler
         ...(tools ? { tools } : {}),
       });
     } catch (e) {
+      // RENDERED, not raw. `runAgent` writes the run header before the model runs
+      // (`markRunHeaderRunning`, unguarded), so a database refusal on that write leaves through
+      // THIS catch — and a node's terminal error is journaled and read back through the run API.
+      // The renderer is a no-op for the model/adapter failures that otherwise land here.
       return {
         status: 'terminal_failure',
         error: {
           code: 'agent_run_exception',
-          message: e instanceof Error ? e.message : String(e),
+          message: operatorSafeDbErrorMessage(e),
           retryable: false,
         },
       };

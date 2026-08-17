@@ -593,7 +593,7 @@ async function gate(rootDir, { quiet = false } = {}) {
 
     for (const block of shellBlocks) {
       const read = commandLines(block.body, block.lang);
-      for (const line of read.dropped) {
+      for (const _dropped of read.dropped) {
         commandCount += 1;
         noteSkip('a console transcript line that is output, not a command');
       }

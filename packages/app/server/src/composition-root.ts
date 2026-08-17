@@ -2745,7 +2745,9 @@ async function deployDeclaredSpec(
     //                          reviewed drop target still exists, or an object the delta CREATEs is
     //                          absent), and REFUSES a half-landed or undeterminable delta fail-closed —
     //                          parity with product-boot. The ONE shape it cannot decide is a delta that
-    //                          FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or
+    //                          FREES a name and PUTS IT BACK (`DROP INDEX "ix"` + `CREATE INDEX "ix"` —
+    //                          an index REDEFINITION, which drizzle emits and is the likeliest real
+    //                          instance — or `DROP TABLE "t"` + `CREATE TABLE "t"`, or
     //                          the same change in one multi-clause `ALTER TABLE`, or a rename-aside
     //                          rebuild — `RENAME TO "t_old"` + `CREATE TABLE "t"` + `DROP TABLE "t_old"`,
     //                          whose renamed-to name is missing in both states too; the `IF [NOT] EXISTS`
