@@ -438,7 +438,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The CLI reference described the whole read-only floor as "no database, no network"; it now states,
   per command, what that command actually reads.
 
+- **The getting-started guide defines its CLI shortcuts as shell functions, not variables.** The page
+  opened by setting `RAYSPEC="node …/index.js"` and then used `$RAYSPEC <subcommand>` on every later
+  line. That works in `bash` and fails in `zsh` — the default macOS login shell — which does not
+  word-split an unquoted parameter expansion: `$RAYSPEC` is one command whose *name* contains a space,
+  so the very first instruction after the build returned
+  `zsh: no such file or directory: node /…/index.js` (exit 127), pointing nowhere useful. The two
+  shortcuts are now functions named exactly like the published binaries (`rayspec`, `rayspec-serve`),
+  so every command on the page reads the same whether a reader built from source or installed the
+  package, takes an environment prefix the same way, and — because the function closes over the repo
+  root rather than the working directory — keeps working after a `cd`. Both shortcuts were affected;
+  all 13 call sites moved with them.
+
 ### Fixed
+
+- **A gate now covers documented command paths.** Three findings in two releases had one cause:
+  nothing in the repository checked that a command a document tells a reader to run does what the
+  document says. `scripts/check-documented-commands.mjs` walks every shipped markdown file, extracts
+  the fenced shell blocks, and (a) proves every shell shortcut a document defines resolves under both
+  `bash` and `zsh`; (b) runs every documented CLI command that names a path in the tree, in both
+  shells, with that document's own shortcut block in front of it; (c) runs `doctor` over the spec of
+  every documented `deploy` and requires the documented command line to set each environment variable
+  `doctor` reports as required at boot; and (d) re-runs each labelled output block and compares its
+  top-level key set with what the command really emits. A command that cannot run in a gate — it needs
+  a database, a port, a live model, or a placeholder only the reader can fill — is **counted and
+  printed with its reason**, because a skip that prints nothing is how a false green ships. Every stage
+  reports its input size and a zero anywhere is a failure. Its `--self-test` is the accept control: one
+  throwaway document carrying one defect of each class, all four of which must be caught. Run against
+  the documents as they shipped, it reports five violations.
+
+- **The documented deploy recipe for `examples/acme-notes-backend` sets the variable it needs.** The
+  two-line recipe under "Custom handlers ship compiled" gave the build and the deploy with no
+  environment, and the example declares a cron trigger — so the boot refused for a missing
+  `RAYSPEC_CRON_TENANT_ID`, **after** the product-store DDL had been committed (each migration commits
+  in its own transaction and the trigger check runs after the migrate step), leaving state behind on a
+  reader's first attempt. `doctor` had been raising `cron_tenant_required` over that same document the
+  whole time. The recipe now sets it, and the page explains that this variable — unlike
+  `RAYSPEC_PRODUCT_TENANT_ID`, which must name a live org — accepts an id no org owns yet: the boot
+  serves, the scheduler starts, and each firing is skipped with a log line until that org exists.
+
+- **`examples/lead-qualifier/injection-smoke.sh` no longer exits 0 having measured nothing.** It
+  self-skipped when `OPENAI_API_KEY` was unset in the *invoking* shell, which is the wrong
+  environment: the README's precondition is about the environment `rayspec-serve` was started in, so a
+  reader who satisfied it exactly — server holding the key, live agents running, `smoke.sh` beside it
+  passing against the same boot — still got `Skipping.` and a success exit from a **prompt-injection
+  regression**. Nothing in this repository runs these smokes automatically, so the "a live smoke must
+  not fail the run it is part of" rationale was defending a run that does not exist. The self-skip is
+  gone. The script now checks the one precondition it can actually observe — that a deployment answers
+  at `$BASE` — and fails non-zero, naming what to start, when it does not; a shell without the key is
+  noted out loud and then ignored, because that is not where the key belongs. The README says so too.
+
+- **Two shipped instructions matched the tools again.** `README.md` printed `init`'s "real output"
+  without the `path` and `errors` keys the command emits, and `plan`'s without `agents`,
+  `gateFindings` and `shadowApplied`. `examples/support-ticket-triage/README.md` told the reader to
+  `createdb` before a script whose own header states it creates the database if missing — the script
+  was right, and the step is gone. All four are now held by the gate above.
 
 - **An extension pack whose entry module is present and does not load is now reported as refused,
   under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module

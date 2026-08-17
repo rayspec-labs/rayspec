@@ -86,13 +86,26 @@ pnpm db:up          # starts the local Postgres on port 5433
 
 The build produces the two executables you'll use. In a published install they
 land on your `PATH` as `rayspec` and `rayspec-serve`; from the monorepo they are
-the built entry files. Define two shell shortcuts (run everything from the repo
-root so paths resolve predictably):
+the built entry files. Define two shell **functions** with the same names, so
+every command below reads the same whether you built from source or installed the
+package:
 
 ```bash
-RAYSPEC="node $PWD/packages/app/cli/dist/index.js"          # the `rayspec` CLI
-RAYSPEC_SERVE="node $PWD/packages/app/server/dist/serve.js" # the `rayspec-serve` boot bin
+RAYSPEC_ROOT="$PWD"                                                    # the repo root
+rayspec()       { node "$RAYSPEC_ROOT/packages/app/cli/dist/index.js" "$@"; }
+rayspec-serve() { node "$RAYSPEC_ROOT/packages/app/server/dist/serve.js" "$@"; }
 ```
+
+> **Functions, not variables — `zsh` is why.** The obvious shortcut is a variable
+> (`RAYSPEC="node …/index.js"`, then `$RAYSPEC doctor …`), and it works in `bash`
+> and fails in `zsh`, the default macOS login shell: `zsh` does not word-split an
+> unquoted parameter expansion, so `$RAYSPEC` is one command whose *name* contains
+> a space and you get `zsh: no such file or directory: node /…/index.js` (exit
+> 127). A function is split correctly by both shells, takes an environment prefix
+> (`PORT=8099 rayspec-serve`) the same way, and — because it closes over
+> `RAYSPEC_ROOT` rather than the current directory — keeps working after you `cd`
+> somewhere else. If you have the package installed globally, skip the block
+> above entirely: the commands below already read as the real ones.
 
 > During development you can skip the build and run the CLI through pnpm
 > (`pnpm --filter @rayspec/cli cli <subcommand>`), but that runs with the CLI
@@ -111,7 +124,7 @@ API-key pepper (`RAYSPEC_API_KEY_PEPPER`). The CLI mints the two crypto secrets
 for you:
 
 ```bash
-$RAYSPEC dev gen-secrets      # writes ./.env with freshly minted secrets (chmod 600)
+rayspec dev gen-secrets      # writes ./.env with freshly minted secrets (chmod 600)
 ```
 
 This creates a repo-root `.env` containing the RS256 signing key, the API-key
@@ -127,10 +140,10 @@ echo 'DATABASE_URL=postgresql://rayspec:rayspec@localhost:5433/rayspec' >> .env
 Create the database if it doesn't exist yet:
 
 ```bash
-$RAYSPEC dev db               # idempotent: creates the DB only if absent, never destructive
+rayspec dev db               # idempotent: creates the DB only if absent, never destructive
 ```
 
-> To wipe a corrupt or stale dev database and start from a clean slate, `$RAYSPEC
+> To wipe a corrupt or stale dev database and start from a clean slate, `rayspec
 > dev db --reset --yes` DROPs and re-CREATEs it (destructive — the `--yes` is
 > required, and `--reset` without it refuses and touches nothing).
 
@@ -197,7 +210,7 @@ agents:
 Validate its shape — this is read-only and needs no database:
 
 ```bash
-$RAYSPEC doctor ./rayspec.yaml
+rayspec doctor ./rayspec.yaml
 ```
 
 You get a JSON verdict on stdout; exit code `0` means valid, `1` means not. A
@@ -207,7 +220,7 @@ rejected — the grammar is strict).
 Next, preview the deploy without touching your real database:
 
 ```bash
-$RAYSPEC plan ./rayspec.yaml
+rayspec plan ./rayspec.yaml
 ```
 
 `plan` runs the read-only front half of a deploy: it validates the spec, computes
@@ -224,12 +237,12 @@ up accounts, authentication, OIDC, and a health probe — the platform's own
 surface, with no product routes yet.
 
 ```bash
-$RAYSPEC_SERVE
+rayspec-serve
 # → boot banner; listening on http://localhost:8080
 
 # The server binds 8080 by default; set PORT to use another (the same PORT
 # documented in .env.example). Every curl below then targets that port.
-PORT=8099 $RAYSPEC_SERVE
+PORT=8099 rayspec-serve
 ```
 
 The boot prints a loud banner noting this is a local, single-node,
@@ -247,7 +260,7 @@ Provision the first organization and owner. The CLI does this against the runnin
 server's auth API:
 
 ```bash
-$RAYSPEC dev bootstrap-tenant --base-url http://localhost:8080 \
+rayspec dev bootstrap-tenant --base-url http://localhost:8080 \
   --email owner@example.com --password 'a-long-passphrase' --org-name "Acme"
 ```
 
@@ -491,7 +504,7 @@ RAYSPEC_BLOB_ROOT=/tmp/rayspec-blobs \
 STT_PROVIDER=fake \
 RAYSPEC_EXTRACTION_MODE=live \
 OPENAI_API_KEY=sk-placeholder \
-$RAYSPEC deploy examples/acme-notes/acme-notes.product.yaml --port 8080
+rayspec deploy examples/acme-notes/acme-notes.product.yaml --port 8080
 ```
 
 `RAYSPEC_PRODUCT_TENANT_ID` is the **one org this deployment binds to** — pass the
@@ -624,7 +637,7 @@ the ambient environment (for example the `openai` backend from `OPENAI_API_KEY`)
 with **no hand-written `AgentBackendsFactory` wrapper**.
 
 ```bash
-RAYSPEC_SPEC_PATH=<your-backend-spec>.yaml $RAYSPEC_SERVE
+RAYSPEC_SPEC_PATH=<your-backend-spec>.yaml rayspec-serve
 ```
 
 A missing or misconfigured credential fails the boot fast, naming the backend and
@@ -670,11 +683,32 @@ bundled examples ship one:
 ```bash
 # A backend with custom .ts handlers: build -> dist/, then deploy the compiled artifact.
 node examples/acme-notes-backend/build.mjs
-$RAYSPEC deploy examples/acme-notes-backend/dist/rayspec.yaml
+RAYSPEC_CRON_TENANT_ID=<ORG_ID> \
+  rayspec deploy examples/acme-notes-backend/dist/rayspec.yaml
 
 # An extension pack authored in .ts: compile the pack, then deploy a spec that references it.
 node examples/stream-backend/build.mjs   # -> examples/stream-backend/packs/stream-pack/dist/
 ```
+
+`RAYSPEC_CRON_TENANT_ID` is required here because this example declares a **cron
+trigger** (`nightly-digest`), and a trigger fires off-request under a known
+deployment tenant. Leave it out and the boot refuses — after the product-store DDL
+has already been committed, since each migration commits in its own transaction and
+the trigger check runs after the migrate step. The refusal says so and tells you to
+re-deploy the same spec once it is set (the live schema then classifies
+present-matching and mounts, applying no further DDL), but the cheaper move is to
+set it the first time. Run
+[`rayspec doctor`](./cli-reference.md#doctor) on any document before deploying it
+and it raises `cron_tenant_required` for exactly this, by name.
+
+> **It is not the same rule as `RAYSPEC_PRODUCT_TENANT_ID`.** That one must name an
+> org that already exists — a deployment binds to it, and a made-up id refuses the
+> boot. `RAYSPEC_CRON_TENANT_ID` accepts an id no org owns yet: the boot serves, the
+> scheduler starts, and every firing is skipped with one log line each until that org
+> exists, at which point firing resumes with no restart. So any UUID gets you a
+> serving backend to explore; use the `<ORG_ID>` from step 4 when you want the
+> trigger to actually fire. Provision one for a real deployment with
+> [`rayspec tenant ensure`](./cli-reference.md#tenant-ensure).
 
 Each `build.mjs` is a thin `tsc` wrapper (see the example's `tsconfig.build.json`).
 Adapt it for your own backend, or run any equivalent transpile — the runtime only
@@ -771,8 +805,8 @@ frontend:
 
 ```bash
 # No DATABASE_URL, no JWT key, no pepper — a static profile needs none of them.
-RAYSPEC_SPEC_PATH=$PWD/my-ui.yaml $RAYSPEC_SERVE
-# (equivalently: $RAYSPEC deploy ./my-ui.yaml)
+RAYSPEC_SPEC_PATH=$PWD/my-ui.yaml rayspec-serve
+# (equivalently: rayspec deploy ./my-ui.yaml)
 
 curl -s http://localhost:8080/            # → index.html (200)
 curl -s http://localhost:8080/health      # → {"status":"ok","frontend":"ok"}   (no db field)
