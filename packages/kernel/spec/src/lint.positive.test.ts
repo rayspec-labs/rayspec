@@ -934,6 +934,22 @@ describe('the placeholder cause is asked per RESERVED PREFIX, not at one global 
     expect(reachesReservedByPlaceholder('/{a}/{b}', appFirst)).toBe(true);
   });
 
+  it('a WILDCARD reaches a reserved prefix exactly as a parameter does', () => {
+    // The window test accepts `param` OR `wildcard` and the second disjunct had no arm at all.
+    // Measured: deleting `|| segment.kind === 'wildcard'` leaves all 735 tests in this package green
+    // while changing the sentence on thirteen route/mount pairs — `/*` among them, which would then be
+    // told it "is under a path this deployment reserves" and to choose a path outside them, said of a
+    // pattern that is under nothing, can match everything, and has no such path to choose.
+    expect(reachesReservedByPlaceholder('/*', flat)).toBe(true);
+    expect(reachesReservedByPlaceholder('/*', deep)).toBe(true);
+    expect(reachesReservedByPlaceholder('/{a}/*', flat)).toBe(true);
+    // ACCEPT CONTROL, and it discriminates: a wildcard is not a free pass. `/health/*` opens with the
+    // literal `health`, so it is under `/health/` in fact and keeps the literal sentence, and
+    // `/orders/*` reaches no reserved prefix at all.
+    expect(reachesReservedByPlaceholder('/health/*', flat)).toBe(false);
+    expect(isReservedApiPath('/orders/*', deep)).toBe(false);
+  });
+
   it('a route that reaches NO reserved prefix is not the placeholder case either', () => {
     // `every` over an EMPTY set is vacuously TRUE, so the emptiness check above it is load-bearing on
     // its own — without it an ordinary unreserved route would be described as reaching everything the

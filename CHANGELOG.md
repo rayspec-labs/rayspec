@@ -590,11 +590,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remedy is named.
   **Two faults, two sentences, and which one you are told is decided per reserved prefix.** A route
   that is literally under a reserved path (`/health/{id}`) is told so and asked to choose a path
-  outside them; a route that merely *can match* one because it opens with a placeholder (`/{tenant}/
-  notes`) is told that instead, and asked for a literal first segment — advice the first route has
-  already taken, and the only advice the second one can act on. The cause is asked of each prefix the
-  route can actually reach, so a deployment that mounts a static frontend more than one segment deep
-  (`frontend: [{ route: '/app/admin' }]`) no longer changes how an unrelated route's fault is
+  outside them; a route that reaches every prefix it can reach only *through* a parameter or wildcard
+  (`/{tenant}/notes`) is told that instead, and asked for a literal first segment — advice the first
+  route has already taken, and the only advice the second one can act on. The cause is asked of each
+  prefix the route can actually reach, so a deployment that mounts a static frontend deeper than one
+  segment (`frontend: [{ route: '/app/admin' }]`) no longer changes how an unrelated route's fault is
   described. Where a route reaches several reserved prefixes with different causes — `/app/{x}` under
   a deployment mounting both `/app` and `/app/admin` — it is under a reserved path in fact, so the
   literal sentence is the one given, whichever order the mounts are declared in. Which routes are
