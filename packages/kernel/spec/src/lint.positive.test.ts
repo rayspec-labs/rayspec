@@ -9,9 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { RaySpec } from './grammar.js';
 import {
+  isReservedApiPath,
   lintSpec,
   MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS,
   RESERVED_API_PATH_PREFIXES,
+  reachesReservedByPlaceholder,
   reservedApiPathPrefixes,
   reservedRoutePathRefusal,
 } from './lint.js';
@@ -843,5 +845,117 @@ api:
         (e) => e.path?.startsWith('api[0].rateLimit') === true,
       ),
     ).toEqual([]);
+  });
+});
+
+describe('the placeholder cause is asked per RESERVED PREFIX, not at one global depth', () => {
+  /**
+   * A deployment may declare a static mount deeper than one segment, and then the reserved set is no
+   * longer uniform. Taking a single `longest = max(segment length)` over the whole set and asking
+   * "is any of the first `longest` segments a placeholder" answers about prefixes the route cannot
+   * reach — so an unrelated `frontend[]` entry changed how an unrelated route's fault was described,
+   * and named a remedy that fixed nothing.
+   */
+  const deep = { platform: RESERVED_API_PATH_PREFIXES, frontendMounts: ['/app/admin/'] };
+  const flat = { platform: RESERVED_API_PATH_PREFIXES, frontendMounts: [] as string[] };
+
+  it('a LITERAL first segment keeps the literal sentence, whatever else the deployment mounts', () => {
+    // `/health/{id}` is refused for being literally under `/health/`. It begins with `health`, and
+    // "give the route a LITERAL first segment" is advice it has already taken.
+    expect(reachesReservedByPlaceholder('/health/{id}', deep)).toBe(false);
+    expect(reachesReservedByPlaceholder('/health/{id}', flat)).toBe(false);
+    // The two renderings must agree — the mount is not this route's business.
+    expect(reservedRoutePathRefusal('GET', '/health/{id}', deep, false)).toMatch(
+      /is under a path this deployment reserves/,
+    );
+  });
+
+  it('a route reaching a DEEP mount through a placeholder still gets the placeholder sentence', () => {
+    // `/app/{x}` is under no platform prefix; it is refused because `{x}` can be `admin`. That IS the
+    // placeholder case, and it must survive the fix — otherwise the correction traded one wrong
+    // sentence for another.
+    expect(isReservedApiPath('/app/{x}', deep)).toBe(true);
+    expect(reachesReservedByPlaceholder('/app/{x}', deep)).toBe(true);
+    // ACCEPT CONTROL: with no such mount the route is not reserved at all.
+    expect(isReservedApiPath('/app/{x}', flat)).toBe(false);
+  });
+
+  it('a route matching one prefix LITERALLY and another through a placeholder gets the literal sentence', () => {
+    // The quantifier arm. `/v1/{x}` reaches TWO reserved prefixes: `/v1/` literally — its first
+    // segment IS `v1` — and a declared `/v1/ui` mount through `{x}`. It really is under `/v1/`, so the
+    // literal sentence is true and its remedy is the one an author can act on; the placeholder
+    // sentence would tell them to give a literal first segment they already have.
+    //
+    // This separates "every matched prefix is reached through a placeholder" from "any is": measured,
+    // relaxing that quantifier to `some` leaves every other arm here green.
+    const mounted = { platform: RESERVED_API_PATH_PREFIXES, frontendMounts: ['/v1/ui/'] };
+    expect(isReservedApiPath('/v1/{x}', mounted)).toBe(true);
+    expect(reachesReservedByPlaceholder('/v1/{x}', mounted)).toBe(false);
+    expect(reservedRoutePathRefusal('GET', '/v1/{x}', mounted, false)).toMatch(
+      /is under a path this deployment reserves/,
+    );
+  });
+
+  it('a leading placeholder is still the placeholder case in both shapes', () => {
+    expect(reachesReservedByPlaceholder('/{a}', deep)).toBe(true);
+    expect(reachesReservedByPlaceholder('/{a}', flat)).toBe(true);
+  });
+
+  it('the quantifier holds over the WHOLE matched set, in either declaration order', () => {
+    // The arm above separates EVERY from ANY. It does not separate EVERY from "whichever prefix the
+    // set happens to list first", and the difference is not academic: an operator who mounts a section
+    // and a page inside it declares two nested prefixes, and a route can reach both with DIFFERENT
+    // causes.
+    //
+    // `/app/{x}` reaches `/app/admin/` only through `{x}`, and `/app/` LITERALLY — its first segment
+    // IS `app`. It is genuinely under a path this deployment reserves, so the literal sentence is the
+    // true one and "move the route, or move the mount that reserves it" is the remedy that works.
+    //
+    // Asserted in BOTH orders because that is the whole point: with the placeholder-reached prefix
+    // listed first, reading only the first match answers `true`; with it listed last, reading only the
+    // last match does. Neither order may change the answer, since the set is a document's `frontend[]`
+    // and its order is the author's business, not this rule's.
+    const adminFirst = {
+      platform: RESERVED_API_PATH_PREFIXES,
+      frontendMounts: ['/app/admin/', '/app/'],
+    };
+    const appFirst = {
+      platform: RESERVED_API_PATH_PREFIXES,
+      frontendMounts: ['/app/', '/app/admin/'],
+    };
+    expect(isReservedApiPath('/app/{x}', adminFirst)).toBe(true);
+    expect(isReservedApiPath('/app/{x}', appFirst)).toBe(true);
+    expect(reachesReservedByPlaceholder('/app/{x}', adminFirst)).toBe(false);
+    expect(reachesReservedByPlaceholder('/app/{x}', appFirst)).toBe(false);
+    // ACCEPT CONTROL, and it has to discriminate: the SAME two-mount deployment still answers `true`
+    // for a route that reaches both prefixes through a placeholder. A rule that simply stopped saying
+    // "placeholder" would pass every assertion above and fail this one.
+    expect(reachesReservedByPlaceholder('/{a}/{b}', adminFirst)).toBe(true);
+    expect(reachesReservedByPlaceholder('/{a}/{b}', appFirst)).toBe(true);
+  });
+
+  it('a WILDCARD reaches a reserved prefix exactly as a parameter does', () => {
+    // The window test accepts `param` OR `wildcard` and the second disjunct had no arm at all.
+    // Measured: deleting `|| segment.kind === 'wildcard'` leaves all 735 tests in this package green
+    // while changing the sentence on thirteen route/mount pairs — `/*` among them, which would then be
+    // told it "is under a path this deployment reserves" and to choose a path outside them, said of a
+    // pattern that is under nothing, can match everything, and has no such path to choose.
+    expect(reachesReservedByPlaceholder('/*', flat)).toBe(true);
+    expect(reachesReservedByPlaceholder('/*', deep)).toBe(true);
+    expect(reachesReservedByPlaceholder('/{a}/*', flat)).toBe(true);
+    // ACCEPT CONTROL, and it discriminates: a wildcard is not a free pass. `/health/*` opens with the
+    // literal `health`, so it is under `/health/` in fact and keeps the literal sentence, and
+    // `/orders/*` reaches no reserved prefix at all.
+    expect(reachesReservedByPlaceholder('/health/*', flat)).toBe(false);
+    expect(isReservedApiPath('/orders/*', deep)).toBe(false);
+  });
+
+  it('a route that reaches NO reserved prefix is not the placeholder case either', () => {
+    // `every` over an EMPTY set is vacuously TRUE, so the emptiness check above it is load-bearing on
+    // its own — without it an ordinary unreserved route would be described as reaching everything the
+    // deployment owns. No shipped caller asks this question without first asking `isReservedApiPath`,
+    // which is exactly why the exported function has to answer it correctly by itself.
+    expect(isReservedApiPath('/orders/{id}', deep)).toBe(false);
+    expect(reachesReservedByPlaceholder('/orders/{id}', deep)).toBe(false);
   });
 });
