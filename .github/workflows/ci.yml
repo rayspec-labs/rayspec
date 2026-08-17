@@ -291,6 +291,24 @@ jobs:
       - name: Example-document gate
         run: pnpm gate:example-documents
 
+      # The documented-command gate: a command a shipped document tells a reader to RUN must do what
+      # the document says. It walks the markdown, resolves each document's own shell shortcuts under
+      # bash AND zsh (the macOS login shell, which does not word-split an unquoted expansion), runs
+      # every documented CLI command that names a path in the tree, requires a documented `deploy` to
+      # set the environment its own `doctor` demands, and re-runs each labelled output block to compare
+      # its keys. Commands that cannot run here are counted and printed with a reason — never skipped
+      # silently. Its self-test runs first: a detector that stopped firing must fail loudly rather than
+      # make every green verdict below it meaningless. Runs after Build, and — unlike the
+      # example-document gate beside it — BUILDS THE EXAMPLES itself first, because the documented
+      # commands name compiled artifacts under a gitignored `dist/`: without that step the one deploy
+      # carrying the cron-tenant defect resolves to nothing and is skipped rather than checked.
+      # Touches no database.
+      - name: Documented-command gate — accept control
+        run: pnpm test:gate-documented-commands
+
+      - name: Documented-command gate
+        run: pnpm gate:documented-commands
+
       # The public-API report gate: a package that promises a surface to code built outside this repo
       # declares its report file in its own manifest ("rayspecPublicApi"), and this re-derives that
       # report from the package's BUILT type declarations and byte-compares it. A change to the surface

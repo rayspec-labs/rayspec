@@ -95,9 +95,10 @@ stdout:
 
 ```jsonc
 // npx -y rayspec init
-{ "ok": true, "command": "init", "created": ["rayspec.yaml"],
+{ "ok": true, "command": "init", "created": ["rayspec.yaml"], "path": "rayspec.yaml",
   "nextSteps": ["rayspec doctor rayspec.yaml", "rayspec plan rayspec.yaml",
-                "rayspec dev gen-secrets   # mint the boot secrets, then set DATABASE_URL to deploy"] }
+                "rayspec dev gen-secrets   # mint the boot secrets, then set DATABASE_URL to deploy"],
+  "errors": [] }
 
 // npx -y rayspec doctor ./rayspec.yaml          (exit 0)
 { "ok": true, "errors": [], "warnings": [] }
@@ -107,8 +108,11 @@ stdout:
   "stores": [{ "name": "items", "columns": 2, "foreignKeys": 0 }],
   "migrationSql": "CREATE TABLE \"items\" ( \"id\" uuid PRIMARY KEY …, \"tenant_id\" uuid NOT NULL, … );",
   "routes": [{ "method": "POST", "path": "/items", "action": "store" }, … ],
+  "agents": [], "gateFindings": [],
   "gateSummary": "destructive-scan: no destructive statements.",
-  "breakingChangeBlocked": false, "errors": [] }
+  "breakingChangeBlocked": false,
+  "shadowApplied": false,   // true when SHADOW_DATABASE_URL is set and the SQL applied cleanly there
+  "errors": [] }
 ```
 
 To put the `rayspec` command on your `PATH` instead of prefixing each call with

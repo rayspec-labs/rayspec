@@ -20,8 +20,10 @@
 # (`enterprise`) — so the suite cannot pass by an agent that has simply learned to answer `smb` to
 # everything.
 #
-# Assumes `rayspec-serve` is already serving this document with OPENAI_API_KEY in its environment (see
-# README.md), exactly like smoke.sh next to it.
+# Assumes `rayspec-serve` is already serving this document with OPENAI_API_KEY in ITS environment (see
+# README.md), exactly like smoke.sh next to it. You do NOT need the key in the shell you run this from
+# — the script speaks HTTP only. It never skips: if no deployment answers, or the one that does cannot
+# run a live agent, it fails non-zero rather than reporting a pass it did not measure.
 #
 # Usage:  BASE=http://localhost:8080 ./injection-smoke.sh    # 8080 is the rayspec-serve default
 set -euo pipefail
@@ -32,12 +34,34 @@ PASSWORD="a-long-enough-password"
 
 command -v jq >/dev/null || { echo "this smoke needs jq" >&2; exit 1; }
 
-# Self-skip without a provider key. This script never reads the key itself — it only speaks HTTP to a
-# deployment that holds one — but its absence is the reliable signal that no live agent can run here
-# (CI), and a live smoke that cannot run must not fail the run it is part of.
+# PRECONDITION: the SERVER answers. That is the one thing this script depends on and the one thing it
+# can actually observe — it speaks HTTP only and never reads a provider key itself.
+#
+# It used to self-skip, with `exit 0`, when OPENAI_API_KEY was unset in the INVOKING shell. That guard
+# read the wrong environment: the README's precondition is about the environment `rayspec-serve` was
+# started in, and a reader who satisfied it exactly — server holding the key from the repo `.env`,
+# live agents running, `smoke.sh` beside this one passing against the same boot — still got
+# "Skipping." and exit 0 from a prompt-injection REGRESSION. A regression that measured nothing must
+# never report success, and nothing in this repository runs these smokes automatically, so the "a live
+# smoke must not fail the run it is part of" rationale was defending a run that does not exist.
+#
+# There is no self-skip now. If the server cannot run a live agent the assertions below fail loudly and
+# non-zero, which is what `smoke.sh` next to this one already does.
+# curl's own diagnostic is CAPTURED rather than printed, so the failure reads as one block instead of
+# a bare `curl: (7) …` ahead of the sentence that explains it — and it is still shown, because
+# "connection refused" and "could not resolve host" are different problems for the reader.
+if ! CURL_SAID="$(curl -fsS -o /dev/null --max-time 10 "$BASE/health" 2>&1)"; then
+  echo "no deployment is answering at $BASE/health." >&2
+  echo "Start one first (see README.md) — this script measures a LIVE agent, so it needs the" >&2
+  echo "lead-qualifier document served with OPENAI_API_KEY in the SERVER's environment." >&2
+  [ -n "$CURL_SAID" ] && echo "  (curl said: $CURL_SAID)" >&2
+  exit 1
+fi
 if [ -z "${OPENAI_API_KEY:-}" ]; then
-  echo "OPENAI_API_KEY is not set — no live agent can run, so there is nothing to measure. Skipping."
-  exit 0
+  # Said out loud, and then ignored: your shell is not where the key has to be. This line exists so a
+  # failure below is read as "the server has no key" rather than "the script is broken".
+  echo "note: OPENAI_API_KEY is not set in THIS shell. That is fine — the key belongs to the" >&2
+  echo "      server's environment, not this one. Continuing; the assertions below measure it." >&2
 fi
 
 TMP="$(mktemp -d)"
