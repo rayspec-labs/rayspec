@@ -565,6 +565,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a changed index, and an operator reading only the table example may not recognise their own case. It
   is named first at all seven sites that ship the limit, and pinned by a test that measures the index
   shape reaching exactly that answer.
+- **A pack's `query` now runs over Postgres's extended protocol, so the SERVER refuses a string
+  carrying more than one command.** The door already refused transaction-control statements (`BEGIN`,
+  `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `START TRANSACTION`, `PREPARE TRANSACTION`, …), but that guard
+  reads the **first token**, and a statement with no bind values was sent in simple-query mode, which
+  runs **every** command in the string. Every refused verb was therefore reachable behind an innocent
+  one. Measured against a live server: `tx.query('SELECT 1; COMMIT')` inside a `transaction()`
+  callback ended the pin, and the two rows written around it **both survived** the callback's throw —
+  the wrapper's rollback found `25P01 there is no transaction in progress` with nothing left to undo,
+  so a pack could break the atomicity the method promises from inside it. On the pooled handle
+  `query('SELECT 1; BEGIN')` reached the wire and left one of the deployment's four HTTP connections
+  `idle in transaction` for the life of the process, which a pack retrying in a loop turns into pool
+  exhaustion for every other caller.
+  **Both halves now pass `{ simple: false }`**, so the statement goes over the extended protocol and
+  Postgres itself refuses a multi-command string at parse time — before any part of it runs, so
+  nothing lands and no connection is left inside a transaction. The refusal reaches a pack as the
+  same `PackTransactionError` the door already raises. **The contract has not changed**: `query` has
+  always been documented as running one parameterized statement. What changed is that the server now
+  holds it to that. A **parameterized** call already went over the extended protocol (the driver
+  selects it whenever bind values are present), so `query(sql, params)` was never affected; this
+  stops the no-parameter shape of the same method from being quietly weaker.
+  **Nothing legal is refused, and that is the half worth stating.** A `;` inside a string literal, an
+  `E''` escape string, a dollar-quoted body (tagged, untagged, or holding a foreign tag), a
+  non-ASCII dollar tag, a quoted identifier, a nested block comment or any comment is not a second
+  command, and neither is a trailing `;`, `;;`, trailing whitespace or a trailing comment. An
+  identifier carrying a `$…$` run (`a$b$c`) runs unquoted. The boundary is the one the server parses,
+  so there is no second grammar to keep in step with it.
+  **One behaviour inside a transaction is different, and a pack will notice.** Because the refusal is
+  now the server's, it *reaches the connection* — and a statement error on a pinned connection is
+  latched and re-raised when the callback returns. So a multi-command string inside `transaction(fn)`
+  **aborts that transaction**, even if the pack catches the refusal and returns normally. That is the
+  same rule the callback already had for every other failing statement, now covering this case too;
+  the error a pack receives is still `PackTransactionError`. On the pooled handle nothing changes:
+  the connection is unharmed and the next write commits.
+
 - **A gate now covers documented command paths.** Three findings in two releases had one cause:
   nothing in the repository checked that a command a document tells a reader to run does what the
   document says. `scripts/check-documented-commands.mjs` walks every shipped markdown file, extracts

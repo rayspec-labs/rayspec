@@ -41,6 +41,29 @@
  *       the callback aborts the whole call even when the pack CATCHES it and returns normally — the
  *       driver latches the first error on the pinned connection and re-raises it. A pack's own
  *       savepoint is no way around it, which is why `tx.query('SAVEPOINT …')` is refused outright.
+ *   (7) AND ONE STATEMENT MEANS ONE. The verb tripwire in (1b) reads the FIRST token, and `unsafe`
+ *       with no parameters USED to fall back to SIMPLE-QUERY mode, which executes every command in
+ *       the string — so every refused verb was reachable behind an innocent one. Both calls now go
+ *       over the EXTENDED protocol (`{ simple: false }`), where the SERVER refuses a multi-command
+ *       string at parse time. `query('SELECT 1; BEGIN')` on the pooled half is measured the way the
+ *       defect was found: the `idle in transaction` COUNT, not "the call threw". The counterproof
+ *       strands a connection on a throwaway pool.
+ *   (8) THE SAME ON THE PIN, measured the same way: `query('SELECT 1; COMMIT')` inside a callback,
+ *       read as the ROWS THAT SURVIVED the callback's throw. At HEAD the call threw too — after the
+ *       `COMMIT` had already ended the pin and both writes had landed, which the counterproof shows.
+ *   (9) THE ACCEPT CONTROL, which is the load-bearing half: a `;` inside a string literal, a
+ *       dollar-quoted body (tagged, untagged and holding a foreign tag), a quoted identifier and a
+ *       comment still RUNS on both halves, and so does a lone statement with a trailing `;`,
+ *       whitespace or comment — each read back by VALUE. It also carries the six shapes a
+ *       hand-written splitter got WRONG, as accept control: an `E''` escape, `a$b$c`, a non-ASCII
+ *       dollar tag, a trailing `;;` and a nested block comment are all SQL the server runs. And the
+ *       translation is pinned NARROW: an ordinary syntax error shares SQLSTATE 42601 and must not be
+ *       reported as a multi-command refusal.
+ *  (10) THE MIRROR, which is why the SERVER decides and not a scan of ours: the shapes a splitter
+ *       read as ONE command while the server ran TWO — a nested block comment, an `E''` escape, a
+ *       non-ASCII dollar tag — pinned as (7)/(8) are, by ROWS and CONNECTION COUNT. With them, the
+ *       aggravator: `SET standard_conforming_strings = off` is one command that passes the verb
+ *       tripwire and widens the `E''` shape to plain quotes, and it now buys nothing.
  *
  * DB ISOLATION: one whole throwaway DATABASE named with process.pid, as the neighbouring boot suites.
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
@@ -464,5 +487,339 @@ describe.skipIf(!baseUrl)('the pack database door', () => {
     });
     expect(decided).toBe('already recorded');
     expect(await observedHolders()).toEqual(before);
+  }, 60_000);
+
+  it('(7) the POOLED half refuses a multi-command string, and the connection is not stranded', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+
+    // The verb tripwire reads the FIRST token, so every transaction-control statement is reachable
+    // behind an innocent one — and `unsafe` with no parameters runs SIMPLE-QUERY mode, which executes
+    // every command in the string. Refused as a SECOND COMMAND, which needs no verb list.
+    await expect(door.query('SELECT 1; BEGIN')).rejects.toBeInstanceOf(PackTransactionError);
+    await expect(door.query('SELECT 1; BEGIN')).rejects.toThrow(/runs ONE statement/);
+    // MEASURED THE WAY THE DEFECT WAS FOUND: not "the call threw" — the pool's connection count.
+    expect(await idleInTransactionBackends()).toBe(0);
+
+    // COUNTERPROOF, on a throwaway pool of its own: WITHOUT the refusal the string reaches the wire,
+    // the server opens the transaction, and the driver's own `UNSAFE_TRANSACTION` refusal arrives
+    // only afterwards — so the connection goes back to the pool inside a transaction nothing commits.
+    // A pack retrying that call in a loop exhausts the pool the whole deployment shares.
+    const unguarded = makeDb(appDbUrl);
+    try {
+      await expect(unguarded.$client.unsafe('SELECT 1; BEGIN')).rejects.toThrow(
+        /UNSAFE_TRANSACTION/,
+      );
+      expect(await idleInTransactionBackends()).toBeGreaterThan(0);
+    } finally {
+      await unguarded.$client.end();
+    }
+    expect(await idleInTransactionBackends()).toBe(0);
+  }, 60_000);
+
+  it('(8) the PINNED half refuses one too, and nothing the callback wrote survives its throw', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+    const before = await observedHolders();
+
+    // The shape the defect was reported in: an innocent leading statement, then the `COMMIT` that
+    // ends the pin, then a write that is now autocommitted, then a throw that has nothing left to
+    // roll back. The refusal reaches the callback instead, so the whole callback rolls back.
+    let caught: unknown;
+    try {
+      await door.transaction(async (tx) => {
+        await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (40, 'pinned-a')");
+        await tx.query('SELECT 1; COMMIT');
+        await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (41, 'pinned-b')");
+        throw new Error('the callback abandons the ledger mid-write');
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(PackTransactionError);
+    expect((caught as Error).message).toMatch(/runs ONE statement/);
+    // MEASURED THE WAY THE DEFECT WAS FOUND: the SURVIVING ROWS, read from outside. "The call threw"
+    // is a weaker claim — at HEAD it threw too, and both rows survived anyway.
+    expect(await observedHolders()).toEqual(before);
+
+    // COUNTERPROOF, on a throwaway pool of its own: WITHOUT the refusal the `COMMIT` inside the
+    // string really does end the pin, so the write before it is committed, the write after it is
+    // autocommitted, and the throw rolls back a transaction that is already over (the server reports
+    // `25P01 there is no transaction in progress` for the wrapper's rollback). Both rows survive.
+    const unguarded = makeDb(appDbUrl);
+    try {
+      await unguarded.$client
+        .begin(async (tx) => {
+          await tx.unsafe("INSERT INTO pack_tx_ledger (id, holder) VALUES (40, 'pin-ended-a')");
+          await tx.unsafe('SELECT 1; COMMIT');
+          await tx.unsafe("INSERT INTO pack_tx_ledger (id, holder) VALUES (41, 'pin-ended-b')");
+          throw new Error('the callback abandons the ledger mid-write');
+        })
+        .catch(() => undefined);
+      const holders = await observedHolders();
+      expect(holders).toContain('pin-ended-a');
+      expect(holders).toContain('pin-ended-b');
+      await unguarded.$client.unsafe('DELETE FROM pack_tx_ledger WHERE id IN (40, 41)');
+    } finally {
+      await unguarded.$client.end();
+    }
+    expect(await observedHolders()).toEqual(before);
+  }, 60_000);
+
+  it('(9) THE ACCEPT CONTROL — what is not a second command still runs, on both halves', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+    const before = await observedHolders();
+
+    // THE LOAD-BEARING HALF of this guard. A `;` is structure only OUTSIDE a literal, a quoted
+    // identifier and a comment — every row below is correct SQL a pack is entitled to write, and a
+    // guard that refused one would be worse than the defect it closes, because the author would have
+    // a typed refusal and no way around it. Each runs on BOTH handles and its VALUE is read back, so
+    // "not refused" cannot pass as "accepted" for a string the server would have rejected.
+    const accepted: { what: string; sql: string; column: string; value: unknown }[] = [
+      { what: 'a `;` in a string literal', sql: "SELECT 'a;b' AS v", column: 'v', value: 'a;b' },
+      {
+        what: 'a `;` in a doubled-quote escape inside a literal',
+        sql: "SELECT 'a''b;c' AS v",
+        column: 'v',
+        value: "a'b;c",
+      },
+      {
+        what: 'a `;` in a tagged dollar-quoted body',
+        sql: 'SELECT $tag$a;b$tag$ AS v',
+        column: 'v',
+        value: 'a;b',
+      },
+      {
+        what: 'a `;` in an UNTAGGED dollar-quoted body',
+        sql: 'SELECT $$a;b$$ AS v',
+        column: 'v',
+        value: 'a;b',
+      },
+      {
+        what: 'a dollar-quoted body holding a different tag',
+        sql: 'SELECT $outer$a;$inner$b$outer$ AS v',
+        column: 'v',
+        value: 'a;$inner$b',
+      },
+      {
+        what: 'a `;` in a quoted identifier',
+        sql: 'SELECT 1 AS "a;b"',
+        column: 'a;b',
+        value: 1,
+      },
+      {
+        what: 'a `;` in a line comment',
+        sql: "SELECT 'x' AS v -- ; COMMIT\n",
+        column: 'v',
+        value: 'x',
+      },
+      {
+        what: 'a `;` in a block comment',
+        sql: "SELECT /* ; COMMIT */ 'x' AS v",
+        column: 'v',
+        value: 'x',
+      },
+      { what: 'one statement, trailing `;`', sql: "SELECT 'x' AS v;", column: 'v', value: 'x' },
+      {
+        what: 'one statement, trailing whitespace after the `;`',
+        sql: "SELECT 'x' AS v;  \n  ",
+        column: 'v',
+        value: 'x',
+      },
+      {
+        what: 'one statement, a line comment after the `;`',
+        sql: "SELECT 'x' AS v; -- done",
+        column: 'v',
+        value: 'x',
+      },
+      {
+        what: 'one statement, a block comment after the `;`',
+        sql: "SELECT 'x' AS v; /* done */",
+        column: 'v',
+        value: 'x',
+      },
+      // The four a hand-written splitter refused, kept as accept control BECAUSE they were the
+      // evidence that a parser of ours cannot be the authority. Every one is SQL the server runs.
+      { what: "an `E''` escape string", sql: "SELECT E'a\\'b' AS v", column: 'v', value: "a'b" },
+      { what: 'an identifier carrying `$…$`', sql: 'SELECT 1 AS a$b$c', column: 'a$b$c', value: 1 },
+      { what: 'its quoted form', sql: 'SELECT 1 AS "a$b$c"', column: 'a$b$c', value: 1 },
+      { what: 'a NON-ASCII dollar-quote tag', sql: 'SELECT $é$x$é$ AS v', column: 'v', value: 'x' },
+      { what: 'a trailing empty statement `;;`', sql: 'SELECT 1 AS v;;', column: 'v', value: 1 },
+      {
+        what: 'a NESTED block comment (Postgres nests them)',
+        sql: 'SELECT 1 /* /* nested */ */ AS v',
+        column: 'v',
+        value: 1,
+      },
+    ];
+
+    for (const c of accepted) {
+      const pooled = await door.query(c.sql);
+      expect([c.what, pooled[0]?.[c.column]]).toEqual([c.what, c.value]);
+      const pinned = await door.transaction(async (tx) => (await tx.query(c.sql))[0]?.[c.column]);
+      expect([c.what, pinned]).toEqual([c.what, c.value]);
+    }
+
+    // And where it actually matters — a WRITE carrying a `;` in its value, on both halves.
+    await door.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (50, 'semi;colon')");
+    await door.transaction(async (tx) => {
+      await tx.query(
+        'INSERT INTO pack_tx_ledger (id, holder) VALUES (51, $tag$dollar;quoted$tag$)',
+      );
+    });
+    expect(await observedHolders()).toEqual([...before, 'semi;colon', 'dollar;quoted']);
+    await door.query('DELETE FROM pack_tx_ledger WHERE id IN (50, 51)');
+    expect(await observedHolders()).toEqual(before);
+
+    // THE REFUSALS, on both halves, with the same typed error a pack already branches on. The last
+    // three are the MIRROR of the accept rows above: a hand-written splitter read each as ONE
+    // command while the server ran two, so they are the reason the server is the authority here.
+    const refused = [
+      'SELECT 1; COMMIT',
+      'SELECT 1; BEGIN',
+      'SELECT 1; SELECT 2',
+      `SELECT 1 /* /* */ ' */ ; COMMIT -- '`,
+      `SELECT E'\\'' ; COMMIT -- '`,
+      'SELECT $é$x$é$ AS v; SELECT 2',
+    ];
+    for (const sql of refused) {
+      await expect(door.query(sql)).rejects.toBeInstanceOf(PackTransactionError);
+      await expect(door.query(sql)).rejects.toThrow(/runs ONE statement/);
+    }
+    // The refusal is the SERVER's, translated — and the translation is narrow: an ordinary syntax
+    // error carries the same SQLSTATE (42601) and must NOT be reported as a multi-command refusal.
+    await expect(door.query('SELECT 1 FROM')).rejects.not.toBeInstanceOf(PackTransactionError);
+    await expect(door.query('SELECT nosuchcol FROM pack_tx_ledger')).rejects.toMatchObject({
+      code: '42703',
+    });
+    // ON THE PINNED HALF the refusal is the SERVER's, so it REACHES THE WIRE — and a statement error
+    // on a pinned connection is latched and re-raised when the callback returns, which is exactly
+    // the limit arm (6) pins. So the refusal aborts the transaction it was attempted in. That is a
+    // real consequence of letting the server decide rather than scanning the text, and it is pinned
+    // here rather than described: a scan-based guard could refuse before the wire and let the
+    // callback carry on, and this one cannot.
+    for (const sql of refused) {
+      let caught: unknown;
+      try {
+        await door.transaction(async (tx) => {
+          await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (52, 'before-refusal')");
+          await tx.query(sql);
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect([sql, caught instanceof PackTransactionError]).toEqual([sql, true]);
+      expect([sql, await observedHolders()]).toEqual([sql, before]);
+    }
+    // AND THE TYPED ERROR SURVIVES THE LATCH: a pack that CATCHES the refusal inside the callback and
+    // returns normally still has its call rejected — with the door's typed refusal, not a raw driver
+    // error, because the re-raise is translated too.
+    let swallowed: unknown;
+    try {
+      await door.transaction(async (tx) => {
+        try {
+          await tx.query('SELECT 1; COMMIT');
+        } catch {
+          // handled, as far as the pack is concerned
+        }
+        return 'the value the pack meant to return';
+      });
+    } catch (e) {
+      swallowed = e;
+    }
+    expect(swallowed).toBeInstanceOf(PackTransactionError);
+
+    // THE POOLED HALF IS UNHARMED, which is the half that has no pin to poison: the connection is not
+    // left in a transaction, and the next write through the same door commits.
+    expect(await idleInTransactionBackends()).toBe(0);
+    await door.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (52, 'after-the-refusal')");
+    expect(await observedHolders()).toContain('after-the-refusal');
+    await door.query('DELETE FROM pack_tx_ledger WHERE id = 52');
+    expect(await observedHolders()).toEqual(before);
+
+    // COUNTERPROOF that `{ simple: false }` is what does this, rather than something else on the
+    // way: the SAME string on a throwaway pool WITHOUT it runs both commands and lands the row.
+    const unguarded = makeDb(appDbUrl);
+    try {
+      await unguarded.$client.unsafe(
+        "SELECT 1 AS v; INSERT INTO pack_tx_ledger (id, holder) VALUES (53, 'ran-anyway')",
+      );
+      expect(await observedHolders()).toContain('ran-anyway');
+      await unguarded.$client.unsafe('DELETE FROM pack_tx_ledger WHERE id = 53');
+    } finally {
+      await unguarded.$client.end();
+    }
+    expect(await observedHolders()).toEqual(before);
+  }, 60_000);
+
+  it('(10) the shapes a text scan reads as ONE command stay closed — measured as state', async () => {
+    armsRan += 1;
+    const door = makePackServiceDatabase(db);
+
+    // Each of these was read as a SINGLE command by a literal-aware splitter while the server ran
+    // TWO. They are pinned the way (7) and (8) are — the ROWS and the CONNECTION COUNT, not the
+    // throw — because a scan-based guard threw on some of them too, after the damage.
+    const VECTORS: { what: string; commit: string; begin: string }[] = [
+      {
+        what: 'a NESTED block comment (Postgres nests them; a one-level scan closes at the first)',
+        commit: `SELECT 1 /* /* */ ' */ ; COMMIT -- '`,
+        begin: `SELECT 1 /* /* */ ' */ ; BEGIN -- '`,
+      },
+      {
+        what: "an `E''` escape (the server ends the literal at `\\'`; a scan reads `''` and stays in)",
+        commit: `SELECT E'\\'' ; COMMIT -- '`,
+        begin: `SELECT E'\\'' ; BEGIN -- '`,
+      },
+      {
+        what: 'a NON-ASCII dollar-quote tag (a legal tag an ASCII-only pattern cannot match)',
+        commit: 'SELECT $é$x$é$ AS v; COMMIT',
+        begin: 'SELECT $é$x$é$ AS v; BEGIN',
+      },
+    ];
+
+    for (const v of VECTORS) {
+      const before = await observedHolders();
+
+      // The pinned measurement: nothing the callback wrote may survive its throw.
+      let caught: unknown;
+      try {
+        await door.transaction(async (tx) => {
+          await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (60, 'pinned-a')");
+          await tx.query(v.commit);
+          await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (61, 'pinned-b')");
+          throw new Error('the callback abandons the ledger mid-write');
+        });
+      } catch (e) {
+        caught = e;
+      }
+      expect([v.what, caught instanceof PackTransactionError]).toEqual([v.what, true]);
+      expect([v.what, await observedHolders()]).toEqual([v.what, before]);
+
+      // The pooled measurement: no connection left inside a transaction.
+      await expect(door.query(v.begin)).rejects.toBeInstanceOf(PackTransactionError);
+      expect([v.what, await idleInTransactionBackends()]).toEqual([v.what, 0]);
+    }
+
+    // AND THE AGGRAVATOR IS CLOSED WITH THEM. `SET standard_conforming_strings = off` is ONE command
+    // whose first token is `SET`, so it passes the verb tripwire — and it makes a PLAIN quoted
+    // literal take backslash escapes, which is how a pack could widen the `E''` shape itself. It no
+    // longer buys anything, because the second command is refused whatever the literal rules are.
+    const before = await observedHolders();
+    let caught: unknown;
+    try {
+      await door.transaction(async (tx) => {
+        await tx.query('SET standard_conforming_strings = off');
+        await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (62, 'widened-a')");
+        await tx.query(`SELECT 'a\\'' ; COMMIT -- '`);
+        await tx.query("INSERT INTO pack_tx_ledger (id, holder) VALUES (63, 'widened-b')");
+        throw new Error('the callback abandons the ledger mid-write');
+      });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(PackTransactionError);
+    expect(await observedHolders()).toEqual(before);
+    expect(await idleInTransactionBackends()).toBe(0);
   }, 60_000);
 });
