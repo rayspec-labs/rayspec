@@ -86,6 +86,48 @@ function withDbName(url: string, name: string): string {
 }
 
 /** One scalar off the live database under test. */
+/** Run one statement for its EFFECT — the seeding half of `scalar`, on its own connection. */
+async function exec(url: string, sql: string): Promise<void> {
+  const client = postgres(url, { max: 1 });
+  try {
+    await client.unsafe(sql);
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * Register a fresh user, create an org and switch into it → an owner-role token plus the org id that
+ * IS the tenant of every request made with it. Two of these give the read below a foreign tenant to
+ * be wrong about, which is the only thing that makes its count falsifiable.
+ */
+async function registerCreateOrgSwitch(
+  booted: { app: { request: (path: string, init?: RequestInit) => Promise<Response> } },
+  email: string,
+  orgName: string,
+): Promise<{ token: string; orgId: string }> {
+  const reg = await booted.app.request('/v1/auth/register', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password: 'Str0ng-Passw0rd!' }),
+  });
+  if (reg.status !== 201) throw new Error(`register failed: ${reg.status} ${await reg.text()}`);
+  const t0 = ((await reg.json()) as { accessToken: string }).accessToken;
+  const orgRes = await booted.app.request('/v1/orgs', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${t0}` },
+    body: JSON.stringify({ name: orgName }),
+  });
+  if (orgRes.status !== 201) throw new Error(`org failed: ${orgRes.status} ${await orgRes.text()}`);
+  const orgId = ((await orgRes.json()) as { id: string }).id;
+  const sw = await booted.app.request(`/v1/orgs/${orgId}/switch`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${t0}` },
+  });
+  if (sw.status !== 200) throw new Error(`switch failed: ${sw.status} ${await sw.text()}`);
+  return { token: ((await sw.json()) as { accessToken: string }).accessToken, orgId };
+}
+
 async function scalar(url: string, sql: string): Promise<string> {
   const client = postgres(url, { max: 1 });
   try {
@@ -240,6 +282,63 @@ describe.skipIf(!baseUrl)('the BOOT applies an extension pack’s migration chai
               AND ccu.table_name = 'orgs'`,
       ),
     ).toBe('1');
+  }, 180_000);
+
+  /**
+   * (5) THE CHAIN AND THE ROUTE, COMPOSED — a contributed route READS a row this pack's own chain
+   * created, over HTTP, on a real boot.
+   *
+   * The arms above prove the chain APPLIES. `pack-route-auth-parity.db.test.ts` proves a contributed
+   * route is REACHABLE and refuses like a deployment route. Neither crossed the two: no shipped code
+   * read a pack-owned table from a contributed handler, so the fact that a handler had no door onto
+   * its own pack's tables had no red test anywhere — the pack's other route is deliberately
+   * database-free and its own comment says why.
+   *
+   * This arm is the crossing, and it is deliberately here rather than in the api-auth harness: that
+   * harness builds its schema by hand and is not the composition root, so it injects no factory and
+   * the route could only be observed FAIL-CLOSING. Here `assembleServer` is the production wiring —
+   * the pack chain really created the table, the composition root really built the door, and the
+   * request really goes through `requireAuth → resolveTenant → requirePermission`.
+   */
+  it('(5) a contributed route reads a row the pack’s own chain created, over HTTP', async () => {
+    armsRan += 1;
+    process.env.RAYSPEC_SPEC_PATH = PACK_DOC;
+    process.env.RAYSPEC_HANDLER_ROOT = PACK_ROOT;
+    server = await assembleServer(loadServerConfig());
+
+    // Two owner-role principals, each in its OWN org — which is the tenant the route will be scoped
+    // to. Registering twice is what gives the arm a foreign tenant to be wrong about.
+    const a = await registerCreateOrgSwitch(server, 'packdb-a@example.test', 'Pack DB A');
+    const b = await registerCreateOrgSwitch(server, 'packdb-b@example.test', 'Pack DB B');
+    expect(a.orgId).not.toBe(b.orgId);
+
+    // Rows straight into the table the PACK'S CHAIN created — two for A, one for B. The foreign row
+    // is what makes the count falsifiable: a route that dropped its tenant predicate answers 3 where
+    // a scoped one answers 2, and without it both readings look identical.
+    await exec(
+      appDbUrl,
+      `INSERT INTO fixture_pack_audit_events (tenant_id, actor, action, payload) VALUES
+         ('${a.orgId}'::uuid, 'boot', 'created', '{}'::jsonb),
+         ('${a.orgId}'::uuid, 'boot', 'updated', '{}'::jsonb),
+         ('${b.orgId}'::uuid, 'boot', 'created', '{}'::jsonb)`,
+    );
+
+    const readAs = async (token: string): Promise<{ status: number; body: unknown }> => {
+      const res = await server.app.request('/ext/fixture-pack/audit/count', {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      return { status: res.status, body: await res.json() };
+    };
+
+    // TWO, not three. The door does not rewrite a pack's SQL and is not a tenant filter — the same
+    // posture a service's door has — so this number is the pack discharging that obligation with
+    // `init.tenantId`, the one value a caller cannot influence.
+    expect(await readAs(a.token)).toEqual({ status: 200, body: { tenantId: a.orgId, events: 2 } });
+
+    // ACCEPT CONTROL, discriminating in the other direction: the second tenant sees its own single
+    // row through the SAME route. A handler answering a constant, or a door reading nothing at all,
+    // would satisfy the assertion above and fail this one.
+    expect(await readAs(b.token)).toEqual({ status: 200, body: { tenantId: b.orgId, events: 1 } });
   }, 180_000);
 
   it('(3) a SECOND boot on the same database re-applies nothing', async () => {
