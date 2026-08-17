@@ -90,6 +90,7 @@ export type PackErrorCode =
  | 'reserved_column_name'
  | 'reserved_query_keyword'
  | 'reserved_store_name'
+ | 'reserved_route_path'
  | 'frontend_route_collision'
  | 'frontend_dir_missing'
  | 'fk_cycle'

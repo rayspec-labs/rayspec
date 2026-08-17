@@ -121,6 +121,7 @@ import {
   DEFAULT_EVENT_BUS_RETENTION_HOURS,
   detectSpecKind,
   type FrontendSpec,
+  frontendMountPrefixes,
   parseAnySpec,
   parseProductSpec,
   parseSpec,
@@ -187,30 +188,23 @@ export const HEALTH_PATH = '/health';
 export const RECOVERY_SCOPE_PATH = '/recovery-scope';
 
 /**
- * The path prefixes THIS composition root registers on the assembled app, in the form the declared-
- * route registrar reserves them (bare prefix, the prefix itself, anything nested under it).
+ * The PLATFORM path prefixes THIS composition root registers on the assembled app, canonicalised to
+ * one trailing `/` — the form the declared-route registrar and the document's own lint rule both read
+ * their segments off.
  *
  * WHY THE ROOT SUPPLIES THESE. api-auth reserves `/v1/` and `/oidc/` — the surface it registers
- * itself — and must not hardcode paths it does not own. The readiness probes and the declared static
- * mounts are registered HERE, and registered AFTER the declared routes: Hono runs matching handlers in
- * registration order, so a declared route claiming `/health` WINS and the probe a deploy tool waits on
- * answers nothing for the rest of the process's life. Nothing caught that — `api[]` was checked
- * against `/v1/` and `/oidc/` only, and the lint rule that does know about `/health` guards the
- * FRONTEND mounts, not the routes.
+ * itself — and must not hardcode paths it does not own. The readiness probes are registered HERE, and
+ * registered AFTER the declared routes: Hono runs matching handlers in registration order, so a
+ * declared route claiming `/health` WINS and the probe a deploy tool waits on answers nothing for the
+ * rest of the process's life. Nothing caught that — `api[]` was checked against `/v1/` and `/oidc/`
+ * only, and the lint rule that does know about `/health` guards the FRONTEND mounts, not the routes.
  *
- * A frontend mount at the ROOT `/` is EXCLUDED, deliberately and for the same reason the lint rule
- * exempts it: `/` is a legitimate static catch-all that coexists with the whole API by registration
- * order and fall-through, so reserving it would reserve every path there is.
+ * The declared static mounts are registered here too, and reserved for the same reason — but they are
+ * the OPERATOR's paths, not the platform's, so they travel separately (@rayspec/spec
+ * `frontendMountPrefixes`) and the refusal names them apart.
  */
-export function platformPublicRoutePrefixes(
-  frontendMounts: readonly FrontendSpec[] = [],
-): readonly string[] {
-  const prefixes = [`${HEALTH_PATH}/`, `${RECOVERY_SCOPE_PATH}/`];
-  for (const mount of frontendMounts) {
-    if (mount.route === '/') continue;
-    prefixes.push(mount.route.endsWith('/') ? mount.route : `${mount.route}/`);
-  }
-  return prefixes;
+export function platformPublicRoutePrefixes(): readonly string[] {
+  return [`${HEALTH_PATH}/`, `${RECOVERY_SCOPE_PATH}/`];
 }
 
 /** The computed outcome of the live-executor-identity probe. */
@@ -3247,11 +3241,14 @@ async function deployDeclaredSpec(
           // ABSENT (not undefined) for a no-stream spec, keeping the engine shape exact.
           const engineWithBlob: DeclarativeEngine = {
             ...engine,
-            // The platform paths THIS root registers on the same app — the two readiness probes and
-            // the declared static mounts. They go on AFTER the declared routes, so without this a
-            // declared `/health` would win the match and the probe would answer nothing; api-auth
-            // does not own those paths, so the root that registers them is what names them.
-            reservedPathPrefixes: platformPublicRoutePrefixes(effectiveSpec.frontend ?? []),
+            // The platform paths THIS root registers on the same app — the two readiness probes —
+            // and, separately, the deployment's own declared static mounts. Both go on AFTER the
+            // declared routes, so without them a declared `/health` would win the match and the probe
+            // would answer nothing; api-auth does not own those paths, so the root that registers
+            // them is what names them. They travel apart because the refusal names them apart: one
+            // set is the platform's, the other is the operator's own `frontend[]`.
+            reservedPathPrefixes: platformPublicRoutePrefixes(),
+            frontendMountPrefixes: frontendMountPrefixes(effectiveSpec.frontend ?? []),
             ...(blobFactory ? { blobFactory } : {}),
             // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
             // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.

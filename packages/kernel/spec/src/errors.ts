@@ -89,6 +89,24 @@ import { z } from 'zod';
  *                               the platform's own table, and the boot registrar refuses to admit it
  *                               fail-closed (`@rayspec/db` composition, check 5), so the deployment
  *                               would never come up. Rename the store.
+ *  - `reserved_route_path`     — a declared `api[]` route can MATCH a path this deployment RESERVES —
+ *                               the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`), either
+ *                               readiness probe (`/health/`, `/recovery-scope/`), a declared non-root
+ *                               static frontend mount, or ANY path nested under one of those, whether
+ *                               or not something answers there today. That is the STRICT reading, and
+ *                               it is argued where it is implemented (`canMatchReserved`): the
+ *                               deployment owns those prefixes precisely so it can register more under
+ *                               them, and a route accepted today would otherwise begin shadowing the
+ *                               day it does, with nothing re-checking it. The
+ *                               platform registers all of those AFTER the declared routes and a
+ *                               router runs matching handlers in registration order, so the declared
+ *                               route would win the match and the platform path would answer nothing
+ *                               for the life of the process. Asked of the pattern the ROUTER
+ *                               registers, so a first-segment parameter (`/{id}`) and a missing
+ *                               leading slash (`health`) are refused too. A mount at the ROOT
+ *                               reserves nothing (it is a catch-all that coexists with the API by
+ *                               fall-through). Choose a path outside those prefixes, or move the
+ *                               mount that reserves this one.
  *  - `frontend_route_collision` — a declared static frontend mount's `route` collides with another
  *                               mount, with a declared `api[].path`, or with a reserved system prefix
  *                               (`/v1`, `/health`, `/oidc`) — the static mount would either shadow or be
@@ -194,6 +212,7 @@ export const SpecErrorCode = z.enum([
   'reserved_column_name',
   'reserved_query_keyword',
   'reserved_store_name',
+  'reserved_route_path',
   'frontend_route_collision',
   'frontend_dir_missing',
   'fk_cycle',

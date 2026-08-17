@@ -522,6 +522,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A declared route that claims a platform path is reported by `doctor`, `plan` and
+  `deploy --dry-run`, and a deploy that trips it is refused before any product DDL is committed.** An
+  `api[]` route may not claim the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`), either
+  readiness probe (`/health/`, `/recovery-scope/`) or a path under a declared non-root static frontend
+  mount: the platform registers all of those on the same app **after** the declared routes, and a
+  router runs matching handlers in registration order, so the declared route wins the match and the
+  platform path answers nothing for the life of the process. The boot always refused such a document.
+  The read-only floor did not — it reported it as fine, which is the opposite of what a floor is for,
+  since the rule is entirely static: it resolves nothing, opens no socket and reads no schema. It is
+  now a document finding under the new closed code **`reserved_route_path`**, reported at
+  `api[<i>].path` in the boot's own sentence (both come from one shared source, so the floor and the
+  boot cannot describe one document two ways). A mount at the **root** still reserves nothing — it is
+  a catch-all that coexists with the API by fall-through — and a merely similar path (`/healthy`
+  beside `/health`) is untouched.
+  **The question is asked of the pattern the router registers, not of the path as written.** A
+  declared `{param}` is registered as a router parameter and a missing leading slash is supplied by
+  the router, so `/{anything}`, `/{a}/{b}` and `health` all reach a platform path while reading like
+  ordinary declarations — measured, each of them answered a readiness probe or the auth surface with
+  the declared route's own 401. All are now refused, under the strict reading of the rule: a declared
+  pattern may not be **able** to match a reserved path or anything nested under it, decided once at
+  the document rather than re-opened the day a path is added beneath a reserved prefix. Ordinary
+  shapes are unaffected — `/notes/{id}`, `/notes/{id}/comments`, `/a/{b}` and a root `/` route are
+  accepted, and each was measured to leave every platform path answering as it does without them.
+  **The refusal names the reserved paths by whose they are.** A collision with a declared static mount
+  used to be reported as a collision with "a RESERVED platform prefix (… `/app/`)" — but `/app/` is
+  the operator's own `frontend[].route`, and moving the **mount** fixes the collision exactly as well
+  as moving the route. Platform prefixes and declared mounts are now listed separately, and the second
+  remedy is named.
+  **The second half is where the deploy stops.** Because the rule is now answered at the pipeline's
+  validate step, a boot that trips it is refused **before** the migrate step rather than while the app
+  was being assembled — which is after each migration has been committed in its own transaction. Such
+  a refusal used to leave the document's product tables standing, from a roll-out that never served a
+  request, and the operator's next move (edit the stores, redeploy) then met a second, confusing
+  drift refusal. It now applies none of the document's product DDL — the tables its stores would
+  materialize are not created. **What an operator sees changes for
+  a document that is wrong in more than one way:** the refusal is now the reserved path — the fault
+  that needs no database to diagnose and that the floor could have shown before deploying — where a
+  later roll-out fault (a handler module that is not on disk) used to be reported first, on an already
+  migrated schema. The remaining fault is reported by the same commands the moment the path is fixed.
+  Consumers branching on the closed error vocabulary should note the new member in both catalogues
+  (`@rayspec/spec`, `@rayspec/pack-sdk`). The boot's registrar keeps its fail-closed guard for a spec
+  assembled in code (the composed Product-YAML runtime), where nothing parses the document.
+
+- **`doctor --with-packs` answers the merged route surface, the way a boot does.** A pack's
+  `routePrefix` is checked for being an absolute path that is not `/` and carries no path parameter —
+  not against the reserved prefixes. So a pack could declare `routePrefix: /health/` and contribute
+  `GET /health/steal`, and while a boot refused the merged document, the one command whose purpose is
+  to answer pack questions reported it clean. `parseSpecWithPacks` now lints the **merged** document —
+  the deployment's sections concatenated with every loaded pack's fragments, which is what a boot
+  assembles — so a finding that exists only in the sum is reported by the floor as well: a pack route
+  under a reserved prefix, a pack route that is the same route as a deployment route once the router
+  has it, a pack cross-reference that dangles against the merged sections. This closes the class
+  rather than one rule of it: a rule added to the document lint is answered by both edges the day it
+  is written. The default `doctor` is unchanged — it resolves no pack, so it has no merged surface,
+  and it still says so in its own line.
+
 - **Every test that needs a database is named for it, and a gate keeps it that way.** `*.db.test.ts`
   is a convention, not a collector — none of the repository's vitest configs splits on it, and CI's
   lanes are split per package — so what it is for is the ad-hoc `--exclude` a maintainer runs to get

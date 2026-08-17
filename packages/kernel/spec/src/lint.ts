@@ -56,6 +56,7 @@ import {
 import {
   type ApiRouteSpec,
   type ColumnType,
+  type FrontendSpec,
   MAX_IDENTIFIER_LENGTH,
   type RaySpec,
   type ResponseProjection,
@@ -196,6 +197,234 @@ export const FTS_SEARCH_PARAM = '__search';
  * legitimate static catch-all that coexists with `/v1/*` via registration order + fall-through.
  */
 export const RESERVED_ROUTE_PREFIXES = ['/v1', '/health', '/oidc'] as const;
+
+/**
+ * Path prefixes a declared `api[]` route may never claim — the platform surface a running deployment
+ * registers on the SAME app, each written with one trailing `/` (the canonical form `isReservedApiPath`
+ * reads its segments off). `/v1/` is the auth/run surface and `/oidc/` the mounted OIDC provider (both
+ * registered by @rayspec/api-auth); `/health/` and `/recovery-scope/` are the readiness probes the
+ * composition root registers.
+ *
+ * Why claiming one is fatal rather than merely odd: the platform registers all four AFTER the declared
+ * routes, and a router runs matching handlers in registration order — so a declared route on one of
+ * them WINS the match and the platform path answers nothing for the life of the process.
+ *
+ * A KEEP-IN-SYNC mirror of what those two packages register (this package can import neither). The
+ * probe half is pinned against the composition root's own `platformPublicRoutePrefixes` by a parity
+ * test in @rayspec/server, so a renamed or added probe turns that test red rather than leaving this
+ * rule quietly blind to it.
+ *
+ * A DIFFERENT QUESTION FROM `RESERVED_ROUTE_PREFIXES` above, which answers what a static frontend MOUNT
+ * may claim (and what the static runtime declines). The two sets overlap without being the same one: a
+ * declared route is additionally refused under `/recovery-scope/` and under a mount's own prefix.
+ */
+export const RESERVED_API_PATH_PREFIXES = [
+  '/v1/',
+  '/oidc/',
+  '/health/',
+  '/recovery-scope/',
+] as const;
+
+/**
+ * What ONE deployment reserves, kept as TWO lists rather than one concatenation, because the refusal
+ * has to name them apart: the platform's prefixes are this software's, and a mount prefix is a line the
+ * operator wrote in their own document — telling them `/app/` is "a RESERVED platform prefix" when it
+ * is their `frontend[0].route` names the wrong party and hides one of the two remedies.
+ */
+export interface ReservedApiPaths {
+  /** The platform surface: `RESERVED_API_PATH_PREFIXES`, or the boot's own equivalent. */
+  readonly platform: readonly string[];
+  /** The declared non-root static frontend mounts, canonicalised to the trailing-slash form. */
+  readonly frontendMounts: readonly string[];
+}
+
+/**
+ * The declared static frontend mounts a route must not reach into, canonicalised to one trailing `/`.
+ * A non-root mount is served on the same app, so a declared route under it would shadow the mount.
+ *
+ * Root `/` is EXEMPT, for the reason the frontend rule exempts it: it is a legitimate catch-all that
+ * coexists with the whole API by registration order and a static miss falling through, so reserving it
+ * would reserve every path there is.
+ */
+export function frontendMountPrefixes(frontend: readonly FrontendSpec[] = []): readonly string[] {
+  const prefixes: string[] = [];
+  for (const mount of frontend) {
+    if (mount.route === '/') continue;
+    prefixes.push(mount.route.endsWith('/') ? mount.route : `${mount.route}/`);
+  }
+  return prefixes;
+}
+
+/** What ONE document reserves: the platform's prefixes plus the mounts the document itself declares. */
+export function reservedApiPathPrefixes(frontend: readonly FrontendSpec[] = []): ReservedApiPaths {
+  return {
+    platform: RESERVED_API_PATH_PREFIXES,
+    frontendMounts: frontendMountPrefixes(frontend),
+  };
+}
+
+/**
+ * One segment of a declared route path, classified by what it can MATCH rather than by what it says.
+ * A `param` stands for exactly one non-empty segment of a request path; a `wildcard` absorbs the whole
+ * remainder (zero segments included); a `literal` matches only itself.
+ */
+type RouteSegment =
+  | { readonly kind: 'literal'; readonly text: string }
+  | { readonly kind: 'param' }
+  | { readonly kind: 'wildcard' };
+
+/**
+ * The declared path as the ROUTER will hold it, split into segments.
+ *
+ * Two rewrites happen between the string an author writes and the pattern that matches requests, and
+ * both are applied here: `toHonoPath` turns `{param}` into `:param`, and the router treats a path with
+ * no leading `/` as though it had one (measured — a declared `health` answers `GET /health`). A
+ * comparison against the written string therefore reads a pattern that was never registered.
+ *
+ * Classification is deliberately GENEROUS about what counts as a parameter — a segment that merely
+ * CONTAINS a `{param}` span (`pre{id}post`) or starts with `:`, and a segment containing `*` at all —
+ * because every generous reading refuses more, and this rule is fail-closed.
+ */
+function routeSegments(path: string): readonly RouteSegment[] {
+  const rooted = path.startsWith('/') ? path : `/${path}`;
+  return rooted
+    .slice(1)
+    .split('/')
+    .map((raw): RouteSegment => {
+      if (raw.includes('*')) return { kind: 'wildcard' };
+      if (raw.startsWith(':') || normalizeRoutePath(raw).includes('{}')) return { kind: 'param' };
+      return { kind: 'literal', text: raw };
+    });
+}
+
+/** A canonical `/health/` prefix as the segments a request path has to open with: `['health']`. */
+function reservedSegments(prefix: string): readonly string[] {
+  return prefix.slice(1, -1).split('/');
+}
+
+/**
+ * CAN this declared pattern match the reserved path itself, or any path nested under it?
+ *
+ * THE STRICT READING, and it is a fork worth naming because the next person meets it. The looser
+ * reading asks whether the pattern shadows a path the platform registers TODAY — under it `/{a}/{b}`
+ * would be fine, since nothing answers at `/health/<x>`. This implements the strict one: a declared
+ * pattern may not be ABLE to match the reserved prefix or anything under it. The loose reading admits
+ * a route that starts shadowing the platform the day a path is added beneath a reserved prefix, with
+ * nothing re-checking the documents already deployed; the strict one is decided once, at the document,
+ * and stays decided. It is why `/{a}/health` is refused — it matches `/health/health`.
+ *
+ * The reserved target set is the bare prefix (`/health`) plus every path one or more NON-EMPTY segments
+ * deeper (`/health/x`, `/health/x/y`). The trailing-slash form `/health/` is deliberately NOT in it: it
+ * is a different path to the router, nothing answers there, and refusing it would refuse the harmless
+ * trailing-slash spelling of every reserved name.
+ */
+function canMatchReserved(pattern: readonly RouteSegment[], reserved: readonly string[]): boolean {
+  const wildcardAt = pattern.findIndex((s) => s.kind === 'wildcard');
+  // Without a wildcard the pattern matches paths of exactly its own length, so a pattern shorter than
+  // the prefix can never reach it. With one, the wildcard supplies every segment past its position.
+  if (wildcardAt === -1 && pattern.length < reserved.length) return false;
+  const fixed = wildcardAt === -1 ? pattern.length : wildcardAt;
+  for (let i = 0; i < fixed; i++) {
+    const segment = pattern[i] as RouteSegment;
+    if (segment.kind !== 'literal') continue; // a param matches any ONE non-empty segment
+    // Inside the prefix the literal has to BE the reserved segment; past it, it only has to be a
+    // segment a request path can actually carry — which the empty string is not.
+    if (i < reserved.length ? segment.text !== reserved[i] : segment.text === '') return false;
+  }
+  return true;
+}
+
+/**
+ * Is `path` claimed by anything this deployment reserves? Asked of the pattern the router registers,
+ * not of the string as written — see `routeSegments` and `canMatchReserved`.
+ *
+ * Segment-wise, like the two rules in this repository that already decided this question: the merged
+ * surface's `shadowedRouteRefusal` and the duplicate-route rule below both key on `normalizeRoutePath`
+ * rather than on the raw path, for the same reason — the router is what the document is checked against.
+ */
+export function isReservedApiPath(path: string, reserved: ReservedApiPaths): boolean {
+  const pattern = routeSegments(path);
+  return [...reserved.platform, ...reserved.frontendMounts].some((prefix) =>
+    canMatchReserved(pattern, reservedSegments(prefix)),
+  );
+}
+
+/**
+ * Does the pattern reach a reserved prefix through a PARAMETER or WILDCARD rather than through literal
+ * segments? Asked only to choose the refusal's words: a pattern whose first segment is a placeholder is
+ * not UNDER a reserved path, it can MATCH one, and those two facts need different remedies. A literal
+ * first segment can never reach a prefix it does not spell, so it is the placeholder at or before the
+ * prefix's length that does the reaching.
+ */
+export function reachesReservedByPlaceholder(path: string, reserved: ReservedApiPaths): boolean {
+  const pattern = routeSegments(path);
+  const longest = Math.max(
+    0,
+    ...[...reserved.platform, ...reserved.frontendMounts].map((p) => reservedSegments(p).length),
+  );
+  return pattern
+    .slice(0, longest)
+    .some((segment) => segment.kind === 'param' || segment.kind === 'wildcard');
+}
+
+/**
+ * The refusal a claimed platform path earns, as ONE sentence with ONE source. The boot's registrar
+ * (@rayspec/api-auth `registerDeclaredRoutes`) raises it prefixed with its own name and the rule below
+ * reports it as a document finding, so an author reading `doctor` and an operator reading a refused
+ * boot are told the same thing in the same words — a property of the wiring rather than a claim.
+ *
+ * The two lists are named apart because they belong to different people: a mount prefix comes out of
+ * the operator's own `frontend[]`, and a collision with one has TWO remedies — move the route, or move
+ * the mount that reserves it. (The sibling refusal for the same collision seen from the frontend side
+ * prescribes exactly the second.) A deployment with no mount is told about neither.
+ */
+export function reservedRoutePathRefusal(
+  method: string,
+  path: string,
+  reserved: ReservedApiPaths,
+  /**
+   * Whether the pattern reaches a reserved prefix through a PARAMETER or WILDCARD rather than through
+   * literal segments. The two cases need different words and a different remedy, and saying "is under
+   * a path this deployment reserves" of the first is simply false: `/{tenant}/notes` is under none of
+   * them — it can MATCH one, because the router fills `{tenant}` with whatever the request supplies,
+   * including `v1`. Telling that author to "choose a path outside them" names no path they can choose
+   * while keeping a leading parameter, so the refusal would be true-sounding and unactionable.
+   *
+   * REQUIRED, with no default. A default made this parameter optional at the call site, and the
+   * registrar — the only guard a spec assembled in CODE ever reaches — silently kept passing three
+   * arguments and answering the literal sentence for a leading-parameter route. The two edges then
+   * described one document two ways, which is the exact defect this parameter was added to close.
+   * A default cannot be forgotten loudly; its absence can (`TS2554: Expected 4 arguments, but got 3`).
+   */
+  viaPlaceholder: boolean,
+): string {
+  const mounts =
+    reserved.frontendMounts.length > 0
+      ? `; declared frontend mounts: ${reserved.frontendMounts.join(', ')}`
+      : '';
+  const reservedList = `(platform: ${reserved.platform.join(', ')}${mounts})`;
+  if (viaPlaceholder) {
+    return (
+      `route ${method} ${path} begins with a PARAMETER or WILDCARD, so the pattern the router ` +
+      `registers can match every path this deployment reserves ${reservedList} and everything ` +
+      'nested under them — the auth/run and OIDC surfaces, the readiness probes, and any declared ' +
+      'static frontend mount. Whether anything answers there today does not decide it: the ' +
+      'deployment owns those prefixes so it can register more under them, and a route that can ' +
+      'capture them would start shadowing silently. Give the route a LITERAL first segment ' +
+      '(`/notes/{id}` rather than `/{id}`).'
+    );
+  }
+  const remedy =
+    reserved.frontendMounts.length > 0
+      ? 'Choose a path outside them, or move the mount that reserves this one.'
+      : 'Choose a path outside them.';
+  return (
+    `route ${method} ${path} is under a path this deployment reserves ${reservedList} — a declared ` +
+    'route may not shadow the auth/run or OIDC surface, the readiness probes, or a declared static ' +
+    'frontend mount. ' +
+    remedy
+  );
+}
 
 /**
  * Find duplicate keys in a list, reporting each duplicate occurrence (by index) as a SpecError.
@@ -1407,6 +1636,44 @@ export function lintSpec(spec: RaySpec): SpecError[] {
         ),
       );
     }
+  });
+
+  // ---- api[] routes that claim a PLATFORM path (fail-closed) -----------------------------------
+  // The mirror image of arm (c) above, asked of the ROUTES rather than the mounts: a declared route may
+  // not claim the auth/run or OIDC surface, either readiness probe, or a path under a declared non-root
+  // static mount — it is registered on the SAME app, ahead of all of them, so it would win the match and
+  // leave the platform path answering nothing.
+  //
+  // The boot's registrar (@rayspec/api-auth `registerDeclaredRoutes`) already refuses exactly this and
+  // keeps doing so: it is the fail-closed guard for a spec assembled in CODE, which never passes through
+  // here. What this rule adds is WHEN the author is told. The rule is STATIC — it resolves nothing, opens
+  // no socket and reads no schema — so `doctor`, `plan` and `deploy --dry-run` can answer it, and the
+  // deploy pipeline refuses at its VALIDATE step rather than while assembling the app, which is after
+  // the migrate step has committed the document's product DDL. Both refusals use the SAME sentence
+  // (`reservedRoutePathRefusal`), so the floor and the boot cannot describe one document two ways.
+  //
+  // A route that EXACTLY equals a mount route is reported here AND by arm (b) above — one collision
+  // named from each side, at each offending node. That is the aggregating parser's contract, and an
+  // author fixing either node fixes both findings.
+  //
+  // The question is asked of the pattern the ROUTER registers, not of the string as written, and under
+  // the STRICT reading of what "under a reserved path" means — both decided in `canMatchReserved`,
+  // where the fork is argued.
+  const reservedRoutePrefixes = reservedApiPathPrefixes(spec.frontend ?? []);
+  spec.api.forEach((route, ri) => {
+    if (!isReservedApiPath(route.path, reservedRoutePrefixes)) return;
+    errors.push(
+      specError(
+        'reserved_route_path',
+        reservedRoutePathRefusal(
+          route.method,
+          route.path,
+          reservedRoutePrefixes,
+          reachesReservedByPlaceholder(route.path, reservedRoutePrefixes),
+        ),
+        `api[${ri}].path`,
+      ),
+    );
   });
 
   // ---- extensions[] DUPLICATE ids (cross-ref/merge resolution lands in `loadExtensions`) ----------------

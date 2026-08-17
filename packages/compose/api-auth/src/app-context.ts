@@ -264,11 +264,11 @@ export interface DeclarativeEngine {
    */
   playbackMaxStreamsPerUser?: number;
   /**
-   * ADDITIONAL reserved path prefixes a declared route may not shadow — the platform paths the
-   * COMPOSITION ROOT registers on this same app and that this package therefore does not own: its
-   * public readiness probes (`/health/`, `/recovery-scope/`) and the deployment's declared static
-   * frontend mount prefixes. Injected rather than hardcoded for the same reason `blobFactory` is: the
-   * root owns those paths, api-auth only has to refuse a declared route that would take one.
+   * ADDITIONAL reserved PLATFORM path prefixes a declared route may not shadow — the platform paths
+   * the COMPOSITION ROOT registers on this same app and that this package therefore does not own: its
+   * public readiness probes (`/health/`, `/recovery-scope/`). Injected rather than hardcoded for the
+   * same reason `blobFactory` is: the root owns those paths, api-auth only has to refuse a declared
+   * route that would take one.
    *
    * It matters because of REGISTRATION ORDER: the root registers the probes and the mounts AFTER the
    * declared routes, and Hono runs matching handlers in that order — so a declared `/health` wins the
@@ -276,6 +276,14 @@ export interface DeclarativeEngine {
    * are reserved (an auth-only app, or a unit suite that registers neither).
    */
   reservedPathPrefixes?: readonly string[];
+  /**
+   * The deployment's declared non-root static frontend mount prefixes, canonicalised to one trailing
+   * `/`. Reserved for exactly the reason above and refused by the same predicate — carried apart from
+   * the platform half because the refusal names them apart: `/app/` is the operator's own
+   * `frontend[].route`, not a platform prefix, and naming it as one hides that moving the MOUNT is an
+   * equally valid remedy. Absent ⇒ the deployment declares no static mount.
+   */
+  frontendMountPrefixes?: readonly string[];
 }
 
 /** The Hono app environment (Bindings = raw Node req/res for the OIDC mount; Variables below). */

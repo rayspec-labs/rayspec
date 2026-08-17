@@ -126,6 +126,105 @@ describe('deploy() — abort-on-fail control flow', () => {
     expect(target.applied).toEqual([]); // nothing downstream ran
   });
 
+  it('PRODUCT-YAML: a view route on a RESERVED path aborts at [validate], before MIGRATE', async () => {
+    // Issue #441's ordering guarantee, for the profile that never reaches `lintSpec`. A Product-YAML
+    // document is parsed by `parseProductSpec` and COMPOSED, so the lint rule that refuses a reserved
+    // route never runs on it, and `views[].route.path` is author-controlled. Before this check the
+    // only guard was the registrar inside `buildApp` — deploy step 5 ROLL OUT, after step 4 MIGRATE
+    // had already committed the product DDL. The `applied` assertion is the whole point: the refusal
+    // has to arrive while the database is still untouched, not merely arrive.
+    const target = recordingTarget();
+    const doc = (path: string): string =>
+      'version: "1.0"\nproduct:\n  id: p\n  name: P\n' +
+      'contracts:\n  note.response:\n    type: object\n    properties:\n      note_ref: { type: string }\n      note_text: { type: [string, "null"] }\n    required: [note_ref]\n' +
+      'stores:\n  - name: notes\n    columns:\n' +
+      '      - { name: note_ref, type: text }\n' +
+      '      - { name: note_text, type: text, nullable: true }\n' +
+      '    key: [note_ref]\n' +
+      'views:\n  - id: v\n    route:\n' +
+      `      method: GET\n      path: "${path}"\n` +
+      '    auth: bearer_tenant\n' +
+      '    params:\n      note_ref: { in: path, shape: safe_id }\n' +
+      '    source: { kind: store, ref: notes }\n' +
+      '    read:\n      mode: single\n' +
+      '      filter:\n        note_ref: { param: note_ref }\n' +
+      '      shape:\n        fields:\n' +
+      '          note_ref: { kind: param, param: note_ref }\n' +
+      '          note_text: { kind: column, column: note_text, type: string, default: "" }\n' +
+      '      absent:\n        fields:\n' +
+      '          note_ref: { kind: param, param: note_ref }\n' +
+      '          note_text: { kind: const, value: null }\n' +
+      '    absent_state: empty_200\n' +
+      '    response_contract: note.response\n';
+    // The store the view reads has to be a DECLARED store of the deployment, or the composer refuses
+    // at [roll out] before the reserved-path check is reached — which would make this test pass for
+    // the wrong reason.
+    const productRollout = {
+      tenantId: '00000000-0000-0000-0000-0000000000d5',
+      enqueuer: {
+        enqueueWorkflowRun: async () => ({ workflowRunId: 'never', deduped: false }),
+      },
+      stores: [
+        {
+          name: 'notes',
+          columns: [
+            { name: 'note_ref', type: 'text' as const },
+            { name: 'note_text', type: 'text' as const, nullable: true },
+          ],
+          key: ['note_ref'],
+        },
+      ],
+    };
+
+    const err = await deploy({
+      specSource: doc('/health/{note_ref}'),
+      migrations: [{ name: '0000.sql', sql: 'CREATE TABLE x ();' }],
+      target,
+      rollout: rollout({ productYaml: productRollout }),
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(DeployError);
+    expect((err as DeployError).step).toBe('validate');
+    // The refusal rides in `details` because the product view lint reports it as a `SpecError`, which
+    // is what puts the SAME sentence in front of `doctor` and `plan` as well.
+    const detail = ((err as DeployError).details ?? []) as { code?: string; message?: string }[];
+    expect(detail.some((d) => d.code === 'reserved_route_path')).toBe(true);
+    expect(detail.map((d) => d.message).join('\n')).toMatch(
+      /is under a path this deployment reserves/,
+    );
+    expect(target.applied, 'refused BEFORE any product DDL was committed').toEqual([]);
+
+    // A leading PARAMETER gets the placeholder sentence here too — the same words the floor uses.
+    const viaParam = await deploy({
+      specSource: doc('/{note_ref}/notes'),
+      migrations: [{ name: '0000.sql', sql: 'CREATE TABLE x ();' }],
+      target: recordingTarget(),
+      rollout: rollout({ productYaml: productRollout }),
+    }).catch((e) => e);
+    expect((viaParam as DeployError).step).toBe('validate');
+    const paramDetail = ((viaParam as DeployError).details ?? []) as { message?: string }[];
+    expect(paramDetail.map((d) => d.message).join('\n')).toMatch(
+      /begins with a PARAMETER or WILDCARD/,
+    );
+
+    // ACCEPT CONTROL: an ordinary route is NOT refused by this check, so the two arms above are not
+    // a guard that refuses everything — which would look identical to a correct one on both of them.
+    // Asserted at the STEP the check runs in rather than on a completed deploy: this unit harness
+    // supplies an empty `productTables`, so a product deploy that gets past VALIDATE crashes further
+    // down for reasons this test is not about. What must hold is that it gets past.
+    const okTarget = recordingTarget();
+    const okErr = await deploy({
+      specSource: doc('/notes/{note_ref}'),
+      migrations: [{ name: '0000.sql', sql: 'CREATE TABLE x ();' }],
+      target: okTarget,
+      rollout: rollout({ productYaml: productRollout }),
+    }).catch((e) => e);
+    const okStep = okErr instanceof DeployError ? okErr.step : undefined;
+    const okMessage = okErr instanceof Error ? okErr.message : '';
+    expect(okStep, 'an ordinary product route is not refused at VALIDATE').not.toBe('validate');
+    expect(okMessage).not.toMatch(/is under a path this deployment reserves/);
+    expect(okMessage).not.toMatch(/begins with a PARAMETER or WILDCARD/);
+  });
+
   it('PRODUCT-YAML (invalid): an invalid Product-YAML doc aborts at [validate] with its SpecError list', async () => {
     // An INVALID product doc surfaces the FULL product validation errors (not the mount rejection).
     // `status: available` is doc-valid now (wiredness moved to the deploy composition); the
