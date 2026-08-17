@@ -24,6 +24,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
+import { operatorSafeDbErrorStack } from '@rayspec/db';
 import type { FrontendSpec } from '@rayspec/spec';
 import { applyServeAgentTracing } from './agent-tracing.js';
 import { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
@@ -177,7 +178,10 @@ if (isProcessEntrypoint()) {
       // the message only, no stack. Anything else is genuinely unexpected: keep the stack.
       console.error(`[rayspec-serve] ${err.message}`);
     } else {
-      console.error('[rayspec-serve] boot failed:', err instanceof Error ? err.stack : err);
+      // The stack, redacted: a boot failure on a database write arrives wrapped by the ORM, whose
+      // stack BEGINS with the statement and every value it bound. The renderer replaces that header
+      // and keeps the frames; anything that is not a wrapped statement error passes through.
+      console.error('[rayspec-serve] boot failed:', operatorSafeDbErrorStack(err) ?? err);
     }
     process.exit(1);
   });

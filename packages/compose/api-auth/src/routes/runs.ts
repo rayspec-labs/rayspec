@@ -55,7 +55,7 @@ import type { OpenAPIHono } from '@hono/zod-openapi';
 import { ApiError, errorEnvelope } from '@rayspec/auth-core';
 import type { AgentSpec, ConvTurn, ErrorClass, RunResult, Usage } from '@rayspec/core';
 import { assertSpecValid, classifyUpstreamError, isErrorClass, NeutralEvent } from '@rayspec/core';
-import { forTenant, schema, type TenantDb } from '@rayspec/db';
+import { forTenant, operatorSafeDbErrorMessage, schema, type TenantDb } from '@rayspec/db';
 import {
   CANCELLED_CLASS,
   deleteEnqueuedRunHeader,
@@ -646,7 +646,12 @@ async function enqueueAgentRun(
       model: entry.spec.model,
     });
   } catch (err) {
-    console.error(`[api-auth] enqueue-time run header write failed runId=${runId}`, err);
+    // The rendered message, never the error object: the ORM's wrapper carries the statement and its
+    // bind values as enumerable own properties, so passing the object prints a run header's own data.
+    console.error(
+      `[api-auth] enqueue-time run header write failed runId=${runId}:`,
+      operatorSafeDbErrorMessage(err),
+    );
   }
   try {
     await deps.durableExecutor.enqueue(inp.tenantId, {
@@ -1118,7 +1123,12 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
         try {
           await deps.durableExecutor.cancel(runId);
         } catch (err) {
-          console.error(`[api-auth] durable cancel failed runId=${runId}`, err);
+          // Same renderer as every other database-adjacent log on this surface: a cancel that fails
+          // inside the durable engine can surface a wrapped statement error, values and all.
+          console.error(
+            `[api-auth] durable cancel failed runId=${runId}:`,
+            operatorSafeDbErrorMessage(err),
+          );
         }
       }
 

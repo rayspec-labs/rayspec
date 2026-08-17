@@ -51,6 +51,23 @@ export interface ObservedContext {
   readonly abandonedError?: string;
 }
 
+/**
+ * What a service READ BACK out of the run journal it had just written to — the observation that only
+ * exists because the journal door carries both verbs. `recalled` is how many of its own entries the
+ * last read returned and `recalledKeys` names them, so a suite can hold the read against what was
+ * recorded rather than against what the writer was called with. Absent on a deployment that bound no
+ * tenant, which has no journal door at all.
+ */
+export interface ObservedRecall {
+  /** How many entries the last bounded read returned for this service's own run. */
+  readonly recalled: number;
+  /** The `idempotencyKey` of each entry that read returned, oldest first. */
+  readonly recalledKeys: readonly string[];
+}
+
+/** What each service last read back out of the journal, keyed by service name. */
+export const recalls = new Map<string, ObservedRecall>();
+
 /** The one environment key this pack's services read, so a suite can prove `ctx.env` arrived. */
 export const ENV_MARKER_KEY = 'RAYSPEC_FIXTURE_PACK_MARKER';
 
@@ -81,4 +98,5 @@ export function reset(): void {
   events.length = 0;
   contexts.clear();
   ticks.clear();
+  recalls.clear();
 }

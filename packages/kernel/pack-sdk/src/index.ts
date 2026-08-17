@@ -30,7 +30,11 @@
  * function it exports. So a pack still imports ONE thing to build both halves — for the shapes this
  * package contracts, which is the `tool` kind and the `route` kind behind a `{kind:'handler'}` api
  * action. What it does NOT contract is named in `handler.ts` with the reason, so a pack author reads
- * a statement rather than discovering an absence.
+ * a statement rather than discovering an absence. A route's init also carries the two doors that make
+ * a route more than a one-shot JSON reply: `PackJournalReader`, the typed, tenant-scoped, bounded way
+ * back OUT of the run journal a pack's work is recorded in (`journal.ts`), and `PackSseResponder`,
+ * the injected constructor for an INCREMENTAL response — the deployment's own envelope builder, so a
+ * pack can stream frames without naming a runtime marker it does not own.
  *
  * A pack's SERVICE modules are the third surface, and they are typed HERE rather than against the
  * handler contract: a service is not called by the platform, it is BOOTED by it, so what it receives
@@ -51,7 +55,11 @@ export type {
   PackHandlerPrincipal,
   PackRouteHandler,
   PackRouteHandlerInit,
+  PackRouteResponse,
   PackSelectOptions,
+  PackSseFrame,
+  PackSseProducer,
+  PackSseResponder,
   PackStoreDb,
   PackStoreFilter,
   PackStoreRow,
@@ -62,6 +70,10 @@ export type {
 export { isSafeIdentifier, MAX_IDENTIFIER_LENGTH, SAFE_IDENTIFIER_RE } from './identifier.js';
 export type {
   PackJournalEntry,
+  PackJournalPage,
+  PackJournalQuery,
+  PackJournalReadEntry,
+  PackJournalReader,
   PackJournalStatus,
   PackJournalStepType,
   PackTokenUsage,
@@ -84,6 +96,7 @@ export type {
 } from './manifest.js';
 export type {
   PackDatabase,
+  PackJournal,
   PackJournalStep,
   PackJournalWriter,
   PackServiceContext,

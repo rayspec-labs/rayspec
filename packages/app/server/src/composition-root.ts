@@ -105,6 +105,7 @@ import {
   type ModuleImporter,
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
+  makeHandlerJournal,
   makeJournalSink,
   makeTurnDispatch,
   type PackServiceContext,
@@ -149,6 +150,7 @@ import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { makePackServiceDatabase } from './pack-service-db.js';
 import {
   deployProductYamlSpec,
+  driftInspectedColumns,
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
@@ -2404,8 +2406,10 @@ interface ExtensionServiceWiring {
  *  - `spec`     — always: the MERGED document, exactly as every other downstream step sees it.
  *  - `sections` — the claimed sections of THIS pack only. A pack is configured by its own grammar, not
  *                 by its neighbour's, so the union is filtered by the claiming pack id.
- *  - `journal`  — only when the deployment bound a tenant. The run journal is tenant-scoped through
- *                 the chokepoint, and a row nobody can attribute is not a record.
+ *  - `journal`  — only when the deployment bound a tenant. BOTH verbs or neither: the run journal is
+ *                 tenant-scoped through the chokepoint, a row nobody can attribute is not a record,
+ *                 and a read with no tenant to scope to is not a read. Both halves are built over
+ *                 the ONE `forTenant` handle below, so they cannot be scoped to different tenants.
  *  - `dispatch` — only when BOTH a tenant and a durable worker are wired, because a scheduled turn
  *                 needs a tenant to run under and an engine to run on. ABSENT is the fail-closed
  *                 answer a service reads, exactly as `init.enqueue` is absent on a worker-less deploy.
@@ -2428,30 +2432,37 @@ async function bootExtensionServices(
   // a rule somebody has to remember.
   const tenantId = wiring.tenantId;
   const tdb = tenantId ? forTenant(wiring.db, tenantId) : undefined;
-  const journal: PackServiceContext['journal'] = tdb
-    ? {
-        record: async (step) => {
-          // The run journal's own sink, so a service's step is priced, reconciled and shaped by the
-          // one writer every other step goes through — never a second INSERT with its own opinions.
-          // `replay: false`: a service records what it did, it does not read a replay cache.
-          await makeJournalSink(tdb, step.runId, PACK_SERVICE_JOURNAL_BACKEND, false).record({
-            type: step.type,
-            idempotencyKey: step.idempotencyKey,
-            inputHash: createHash('sha256')
-              .update(JSON.stringify(step.input ?? null))
-              .digest('hex'),
-            output: step.output,
-            usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-            costUsd: 0,
-            latencyMs: step.latencyMs ?? 0,
-            status: step.status,
-            // A service's work is not a model call and authenticated as nothing: the neutral
-            // vocabulary for exactly that, recorded truthfully rather than overclaiming a path.
-            authMode: 'unauthenticated',
-          });
-        },
-      }
-    : undefined;
+  // The READ half of the journal door, built over the SAME `forTenant` handle the writer below is —
+  // so "a service reads only its own tenant" is the chokepoint's property rather than a rule this
+  // wiring has to remember, and the two halves can never be scoped to different tenants.
+  const journalReader = tdb ? makeHandlerJournal(tdb) : undefined;
+  const journal: PackServiceContext['journal'] =
+    tdb && journalReader
+      ? {
+          read: (query) => journalReader.read(query),
+          record: async (step) => {
+            // The run journal's own sink, so a service's step is priced, reconciled and shaped by
+            // the one writer every other step goes through — never a second INSERT with its own
+            // opinions. `replay: false`: a service records what it did, it does not read a replay
+            // cache.
+            await makeJournalSink(tdb, step.runId, PACK_SERVICE_JOURNAL_BACKEND, false).record({
+              type: step.type,
+              idempotencyKey: step.idempotencyKey,
+              inputHash: createHash('sha256')
+                .update(JSON.stringify(step.input ?? null))
+                .digest('hex'),
+              output: step.output,
+              usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+              costUsd: 0,
+              latencyMs: step.latencyMs ?? 0,
+              status: step.status,
+              // A service's work is not a model call and authenticated as nothing: the neutral
+              // vocabulary for exactly that, recorded truthfully rather than overclaiming a path.
+              authMode: 'unauthenticated',
+            });
+          },
+        }
+      : undefined;
   const dispatch: TurnDispatch | undefined =
     tdb && tenantId && wiring.executor
       ? makeTurnDispatch({
@@ -2725,13 +2736,22 @@ async function deployDeclaredSpec(
     // vs the NEW spec FIRST (the SAME read-only detectDrift the mount path below uses — NO DDL) and ROUTE
     // through the SHARED planUpdateBoot instead of blindly re-applying the delta:
     //   - 'drifted'          → APPLY the reviewed delta (the NORMAL update — the delta closes the gap).
-    //   - 'present-matching' → the delta ALREADY landed on a PRIOR boot: MOUNT (zero migrations, loud
-    //                          log) so a LEFTOVER --apply-migration in a process-managed unit
-    //                          (systemd/docker `Restart=always`) MOUNTS instead of re-applying + crash-
-    //                          looping on a duplicate_column (42701). planUpdateBoot's live target-probe
-    //                          discriminates a genuine leftover (MOUNT) from an UNAPPLIED pure-subset
-    //                          removal (APPLY — the reviewed drop target still exists) and REFUSES an
-    //                          undeterminable destructive delta fail-closed — parity with product-boot.
+    //   - 'present-matching' → reached BOTH by a delta that landed and by one that never ran, so the
+    //                          classify does NOT decide: planUpdateBoot's live probe of the objects the
+    //                          DELTA names discriminates a genuine leftover (MOUNT — zero migrations,
+    //                          loud log, so a LEFTOVER --apply-migration in a process-managed unit
+    //                          (systemd/docker `Restart=always`) mounts instead of re-applying + crash-
+    //                          looping on a duplicate_column (42701)) from an UNAPPLIED delta (APPLY — a
+    //                          reviewed drop target still exists, or an object the delta CREATEs is
+    //                          absent), and REFUSES a half-landed or undeterminable delta fail-closed —
+    //                          parity with product-boot. The ONE shape it cannot decide is a delta that
+    //                          FREES a name and PUTS IT BACK (`DROP TABLE "t"` + `CREATE TABLE "t"`, or
+    //                          the same change in one multi-clause `ALTER TABLE`, or a rename-aside
+    //                          rebuild — `RENAME TO "t_old"` + `CREATE TABLE "t"` + `DROP TABLE "t_old"`,
+    //                          whose renamed-to name is missing in both states too; the `IF [NOT] EXISTS`
+    //                          spellings count the same): the schema holds that name in BOTH states, so
+    //                          it MOUNTS claiming nothing and the log says so — the one place this path
+    //                          can silently drop a reviewed change, and the reason the log is loud.
     //   - 'absent'           → REFUSE fail-closed (update mode evolves an EXISTING schema; a first boot
     //                          must materialize via the plain path — dropping --apply-migration).
     // `deploy()` stays BYTE-UNCHANGED throughout: when planUpdateBoot routes APPLY it GATES each migration
@@ -2747,6 +2767,9 @@ async function deployDeclaredSpec(
       specPath,
       (m) => console.warn(m),
       makeSchemaProbe(queryFn, 'public'),
+      // The columns the classify just above ACTUALLY introspected — the only ones a drift-clean reading
+      // may stand as evidence for (see planUpdateBoot). Built from the SAME stores detectDrift was given.
+      driftInspectedColumns(specStores),
     );
     migrations = plan.migrations;
     // A zero-store backend spec ('present-matching' by construction) keeps its 'auth-only' deployMode;

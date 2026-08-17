@@ -29,6 +29,7 @@ import {
   type StreamRouteHandler,
   type StreamRouteHandlerInit,
   type SttCapability,
+  sseResponse,
   type TriggerHandler,
   type TriggerHandlerInit,
   type TtsCapability,
@@ -36,6 +37,7 @@ import {
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime } from './handler-runtime.js';
+import { makeHandlerJournal } from './journal-reader.js';
 import { makeHandlerDb } from './store-facade.js';
 
 /**
@@ -126,6 +128,10 @@ export async function invokeRouteHandler(
   // TRANSACTIONAL handle, so `init.emit` is tenant-bound by construction and its flush lands inside
   // THIS request's transaction. Absent ⇒ init.emit is omitted (the handler fail-closes loudly).
   eventBus?: TenantEventBus,
+  // The OPTIONAL resume cursor the request carried (`Last-Event-ID`, else `?lastEventId=`), resolved
+  // by the api interpreter through the deployment's ONE resolver. Spread onto the init when present ⇒
+  // `init.resumeFrom` is ABSENT on a first request, which means "from the beginning".
+  resumeFrom?: string,
 ): Promise<unknown> {
   return tdb.transaction(async (txTdb) => {
     // The request-local emit buffer, bound to the TRANSACTIONAL handle. Built before the handler runs
@@ -133,6 +139,10 @@ export async function invokeRouteHandler(
     const bus = eventBus?.buffered(txTdb);
     const init = buildRouteHandlerInit(
       txTdb,
+      // The BASE handle for the journal reader. NOT the transactional one: a streaming response's
+      // producer runs after this transaction has committed, and a reader bound to `txTdb` would be
+      // dead exactly where a streamed replay needs it (see `makeHandlerJournal`).
+      tdb,
       productTables,
       params,
       blobFactory,
@@ -146,6 +156,7 @@ export async function invokeRouteHandler(
       stt,
       tts,
       bus?.emit,
+      resumeFrom,
     );
     const result = await getHandlerRuntime().invokeRoute(fn, init);
     // THE LAST STATEMENT BEFORE COMMIT. It runs only on the success path — a handler that threw
@@ -166,6 +177,10 @@ export async function invokeRouteHandler(
  */
 function buildRouteHandlerInit(
   boundTdb: TenantDb,
+  // The handle the JOURNAL READ door is built over — the BASE TenantDb on both postures, never the
+  // transactional one. The reader has to outlive the route transaction (a streaming producer runs
+  // after it commits), and it reads platform-written rows, so there is nothing uncommitted to miss.
+  journalTdb: TenantDb,
   productTables: ReadonlyMap<string, PgTable>,
   params: Readonly<Record<string, string>>,
   blobFactory?: BlobStoreFactory,
@@ -192,10 +207,21 @@ function buildRouteHandlerInit(
   // The tenant-bound event-bus emit, ALREADY built from the bound handle by the caller (which owns
   // the flush that pairs with it). Absent ⇒ init.emit omitted (the bus is not enabled).
   emit?: EmitEvent,
+  // The resume cursor the request carried, ALREADY resolved by the api interpreter. Absent ⇒
+  // init.resumeFrom omitted (a first request), which means "from the beginning".
+  resumeFrom?: string,
 ): RouteHandlerInit {
   return {
     tenantId: boundTdb.tenantId,
     db: makeHandlerDb(boundTdb, productTables, createdByActor),
+    // The run-journal READ door, tenant-bound by construction. Not spread: it is not a backend a
+    // deployment opts into — the journal exists for every deployment — so it is populated on every
+    // invocation and the contract can promise it without an absence to model.
+    journal: makeHandlerJournal(journalTdb),
+    // The incremental-response constructor. The engine's OWN `sseResponse`, injected rather than
+    // re-implemented, so a handler that may import no runtime still builds the one branded envelope
+    // the response discriminator keys on — and there is exactly one implementation of that brand.
+    sseResponse,
     // The tenant-bound blob handle, built from the run's server-derived tenant. Spread so the
     // field is ABSENT (not `undefined`) when no factory is injected — keeping the init shape exact.
     ...(blobFactory ? { blob: blobFactory(boundTdb.tenantId) } : {}),
@@ -219,6 +245,9 @@ function buildRouteHandlerInit(
     ...(body !== undefined ? { body: stripResponseBrand(body) } : {}),
     // The request headers (spread so ABSENT when the interpreter did not collect them).
     ...(headers !== undefined ? { headers } : {}),
+    // The resume cursor (spread so ABSENT on a first request — "from the beginning", never an empty
+    // read). UNTRUSTED CALLER DATA: an opaque position marker, never a tenant signal.
+    ...(resumeFrom !== undefined ? { resumeFrom } : {}),
     // The authenticated caller (spread so ABSENT when no principal was resolved — an older caller /
     // an invocation context with no authenticated principal; never fabricated). DATA — never a
     // tenant signal (the tenant stays server-derived).
@@ -275,6 +304,9 @@ export async function invokeRouteHandlerDetached(
   // OPTIONAL tenant event bus — see invokeRouteHandler. Threaded identically so this posture also
   // receives `init.emit`, with the ONE honest difference stated below.
   eventBus?: TenantEventBus,
+  // OPTIONAL resume cursor — see invokeRouteHandler. Threaded identically so this posture receives
+  // `init.resumeFrom` the same way the engine-tx posture does.
+  resumeFrom?: string,
 ): Promise<unknown> {
   // Same buffer, bound to the BASE handle: this posture holds no engine transaction (that is its
   // whole reason for existing), so the flush below is its own standalone statement rather than the
@@ -283,6 +315,9 @@ export async function invokeRouteHandlerDetached(
   // transactions — it committed them itself, before the flush ran.
   const bus = eventBus?.buffered(tdb);
   const init = buildRouteHandlerInit(
+    tdb,
+    // The same BASE handle for the journal reader. This posture holds no engine transaction, so the
+    // two arguments coincide here — the pair exists for the engine-tx posture, where they differ.
     tdb,
     productTables,
     params,
@@ -297,6 +332,7 @@ export async function invokeRouteHandlerDetached(
     stt,
     tts,
     bus?.emit,
+    resumeFrom,
   );
   const result = await getHandlerRuntime().invokeRoute(fn, init);
   // Only on the success path — a throwing handler's buffered events are never written (the buffer

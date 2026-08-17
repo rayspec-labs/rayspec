@@ -9,10 +9,11 @@
  * This suite drives the REAL loader over `packages/test/fixture-pack` — the built pack a deployment
  * document beside it references — and measures three things:
  *
- *   (A) THE PACK'S ROUTE LIES IN ITS OWN NAMESPACE, and the load says which pack contributed it. The
- *       route is an ordinary authenticated `{handler}` route: it goes onto the same app, behind the
- *       same chain, as a deployment-declared one. What is new is that the merge no longer drops the
- *       pack id — without that, a refusal could only print an index into a concatenated array.
+ *   (A) EVERY PACK ROUTE LIES IN ITS OWN NAMESPACE, and the load says which pack contributed it. Each
+ *       is an ordinary authenticated `{handler}` route — including the one that answers INCREMENTALLY,
+ *       which is the point of measuring all of them rather than the first: it goes onto the same app,
+ *       behind the same chain, as a deployment-declared one. What is new is that the merge no longer
+ *       drops the pack id — without that, a refusal could only print an index into a concatenated array.
  *   (B) A DEPLOYMENT ROUTE THAT REACHES THE ROUTER AS THAT PACK ROUTE IS REFUSED, naming BOTH parties.
  *       The two paths differ only in what the parameter is called, which is not part of a route's
  *       identity: the router matches on position, so one of the two would be dead.
@@ -45,17 +46,22 @@ async function loadFixturePack() {
 const deploymentRoute = (method: ApiRouteSpec['method'], path: string): ApiRouteSpec =>
   ({ method, path, action: { kind: 'store', store: 'notes', op: 'get' } }) as ApiRouteSpec;
 
-describe('the fixture pack’s contributed route — namespace + attribution', () => {
-  it('(A) contributes an authenticated route inside /ext/fixture-pack/, attributed to the pack', async () => {
+describe('the fixture pack’s contributed routes — namespace + attribution', () => {
+  it('(A) contributes authenticated routes inside /ext/fixture-pack/, attributed to the pack', async () => {
     const loaded = await loadFixturePack();
-    expect(loaded.api).toHaveLength(1);
-    const owned = loaded.apiOwners[0];
-    expect(owned?.packId).toBe(PACK_ID);
-    expect(owned?.prefix).toBe(`/ext/${PACK_ID}/`);
-    expect(owned?.route.path.startsWith(`/ext/${PACK_ID}/`)).toBe(true);
-    // An authenticated route: it dispatches through a pack handler, so it rides the same
-    // requireAuth → resolveTenant → requirePermission chain every declared route rides.
-    expect(owned?.route.action.kind).toBe('handler');
+    // BOTH contributed routes: the JSON one and the INCREMENTAL one. The count is asserted rather
+    // than a `length >= 1`, so a route that quietly stops being contributed fails here.
+    expect(loaded.api).toHaveLength(2);
+    expect(loaded.apiOwners).toHaveLength(2);
+    for (const owned of loaded.apiOwners) {
+      expect(owned.packId).toBe(PACK_ID);
+      expect(owned.prefix).toBe(`/ext/${PACK_ID}/`);
+      expect(owned.route.path.startsWith(`/ext/${PACK_ID}/`)).toBe(true);
+      // Authenticated routes: each dispatches through a pack handler, so each rides the same
+      // requireAuth → resolveTenant → requirePermission chain every declared route rides. The
+      // INCREMENTAL route is declared the same way — that is what makes its chain inherited.
+      expect(owned.route.action.kind).toBe('handler');
+    }
   });
 
   it('(B) a deployment route that differs only in the PARAMETER NAME is refused, naming both', async () => {
