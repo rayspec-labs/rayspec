@@ -358,13 +358,28 @@ export function isReservedApiPath(path: string, reserved: ReservedApiPaths): boo
  */
 export function reachesReservedByPlaceholder(path: string, reserved: ReservedApiPaths): boolean {
   const pattern = routeSegments(path);
-  const longest = Math.max(
-    0,
-    ...[...reserved.platform, ...reserved.frontendMounts].map((p) => reservedSegments(p).length),
+  // PER PREFIX, through the same matcher that decides the refusal, and only over the prefixes this
+  // path can ACTUALLY reach.
+  //
+  // One global depth over the whole set was wrong the moment the set stopped being uniform. A
+  // declared mount deeper than one segment (`frontend: [{ route: '/app/admin' }]`) made `longest` 2,
+  // and then `/health/{id}` — refused for being literally under `/health/`, and beginning with the
+  // literal `health` — was told it "begins with a PARAMETER or WILDCARD" and to give itself a literal
+  // first segment it already had. An unrelated `frontend[]` entry changed how an unrelated route's
+  // fault was described, and the remedy it named fixed nothing.
+  //
+  // TRUE only when EVERY prefix this path reaches is reached through a placeholder. If even one is
+  // matched literally then the route really is under something reserved, and the literal sentence is
+  // both true and actionable — which is the one an author can act on.
+  const matched = [...reserved.platform, ...reserved.frontendMounts]
+    .map((p) => reservedSegments(p))
+    .filter((segments) => canMatchReserved(pattern, segments));
+  if (matched.length === 0) return false;
+  return matched.every((segments) =>
+    pattern
+      .slice(0, segments.length)
+      .some((segment) => segment.kind === 'param' || segment.kind === 'wildcard'),
   );
-  return pattern
-    .slice(0, longest)
-    .some((segment) => segment.kind === 'param' || segment.kind === 'wildcard');
 }
 
 /**
