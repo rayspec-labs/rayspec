@@ -86,6 +86,7 @@ import {
   detectDrift,
   formatFindings,
   generateProductSql,
+  operatorSafeDbErrorMessage,
   scanMigrationSql,
 } from '@rayspec/db';
 import {
@@ -352,11 +353,16 @@ export async function deploy<App = unknown>(config: DeployConfig): Promise<Deplo
     try {
       await target.applyMigration(migration);
     } catch (e) {
+      // `applyMigration` is the RAW-SQL door — `$client.begin(tx => tx.unsafe(ddl))` — so `e` is the
+      // driver's own error, whose message on a coercion refusal is the offending value. Rendering it
+      // here rather than at a printer is the whole point: this line BAKES the text into
+      // `DeployError.message`, and both consumers (`serve.ts` and the CLI's `deploy`) print that
+      // message. A value that reaches this string cannot be withheld downstream by anyone.
       throw new DeployError(
         'migrate',
-        `migration '${migration.name}' failed to apply (${
-          e instanceof Error ? e.message : String(e)
-        }). No roll-out. Recovery is a new reviewed FORWARD migration.`,
+        `migration '${migration.name}' failed to apply (${operatorSafeDbErrorMessage(
+          e,
+        )}). No roll-out. Recovery is a new reviewed FORWARD migration.`,
       );
     }
   }

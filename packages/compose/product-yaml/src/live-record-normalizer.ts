@@ -27,7 +27,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { AgentSpec, Backend, RunResult } from '@rayspec/core';
-import { schema, type TenantDb } from '@rayspec/db';
+import { operatorSafeDbErrorMessage, schema, type TenantDb } from '@rayspec/db';
 import { runAgent } from '@rayspec/platform';
 import {
   type RecordNormalizeOutcome,
@@ -119,7 +119,9 @@ export function makeLiveRecordNormalizer(cfg: LiveRecordNormalizerConfig): Recor
           ...(cfg.requireNativeStructuredOutput ? { requireNativeStructuredOutput: true } : {}),
         });
       } catch (e) {
-        return { status: 'error', message: e instanceof Error ? e.message : String(e) };
+        // RENDERED, not raw — `runAgent` writes the run header before the model runs, so a database
+        // refusal on that write arrives here and this message is journaled. No-op otherwise.
+        return { status: 'error', message: operatorSafeDbErrorMessage(e) };
       }
       if (result.status !== 'completed') {
         return {

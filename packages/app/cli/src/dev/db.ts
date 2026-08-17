@@ -59,6 +59,19 @@ function redact(message: string): string {
  * `.code`; other paths nest the underlying error on `.cause`. Draw from all of those, de-duplicated,
  * so whichever layer holds the detail reaches the operator. The caller still runs the result through
  * `redact()`, so no connection string or password can leak.
+ *
+ * NOT ROUTED THROUGH `operatorSafeDbErrorMessage`, deliberately — and NOT because a connect failure
+ * has no SQLSTATE. Several do: `3D000` for a database that does not exist, `28P01` for a bad password
+ * or an unknown role, `22023` for a connection option the server rejects. Those are the server's own
+ * refusals, sent with a real code, and calling them socket errors would be wrong. What they have in
+ * common with an actual socket error is the thing that matters here: NO STATEMENT WAS EVER SENT, so
+ * there are no bound values and no `detail` about a row, and every value their messages quote came
+ * from the DSN or the connection options — `database "x" does not exist`, `password authentication
+ * failed for user "y"`. That is operator configuration, not a caller's data.
+ *
+ * The renderer agrees: given a failure carrying no statement it returns the message unchanged, so
+ * routing this through it would buy nothing and cost the reader the one fact they came for — WHICH
+ * database, WHICH user. The disclosure risk here is the DSN, which is what `redact()` covers.
  */
 export function describeConnectError(e: unknown): string {
   if (!(e instanceof Error)) return String(e);

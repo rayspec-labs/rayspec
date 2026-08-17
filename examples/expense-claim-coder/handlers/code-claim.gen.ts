@@ -43,6 +43,38 @@ function coerceRow(args: Record<string, unknown>): { ok: true; row: StoreRow } |
   return { ok: true, row };
 }
 
+/**
+ * The SQLSTATE of a DATABASE refusal ('unknown' when the shape says database but names no code), or
+ * undefined when this error is not one. Structural — the ORM wrapper and the driver error are both
+ * unexported classes, so an instanceof would fail silently on a version bump.
+ */
+function dbRefusalCode(err: unknown): string | undefined {
+  let cur = err as Record<string, unknown> | null | undefined;
+  let looksLikeDatabase = false;
+  let sqlstate: string | undefined;
+  for (let depth = 0; depth < 5 && cur !== null && cur !== undefined; depth++) {
+    // The ORM wrapper: its message embeds the statement AND every value it bound.
+    if (typeof cur.query === 'string' && (Array.isArray(cur.params) || Array.isArray(cur.parameters))) {
+      looksLikeDatabase = true;
+    }
+    // The driver's error: the wire fields Postgres sends back, copied onto the error verbatim.
+    const code = cur.code;
+    if (
+      typeof code === 'string' &&
+      /^[0-9A-Z]{5}$/.test(code) &&
+      (typeof cur.severity === 'string' ||
+        typeof cur.detail === 'string' ||
+        typeof cur.routine === 'string')
+    ) {
+      looksLikeDatabase = true;
+      if (sqlstate === undefined) sqlstate = code;
+    }
+    cur = cur.cause as Record<string, unknown> | null | undefined;
+  }
+  if (!looksLikeDatabase) return undefined;
+  return sqlstate ?? 'unknown';
+}
+
 interface ClampRecord {
   /** The bounded column. */
   column: string;
@@ -104,7 +136,19 @@ export const codeClaim: ToolHandler<Record<string, unknown>, PersistResult> = as
     if (updated.length === 0) return { status: 'failed', detail: 'no expense_claims row found for the given id.' };
     return { status: "coded", id, ...(clamped.length > 0 ? { clamped } : {}) };
   } catch (err) {
-    const detail = err instanceof Error ? `${err.name}: ${err.message}` : 'persist failed.';
+    // A DATABASE refusal is reported by its SQLSTATE, never quoted: Postgres echoes the offending
+    // value back inside the error (in `detail` on a constraint violation — for a CHECK, the whole
+    // failing row — and in the message itself on a coercion refusal), and this string is journaled
+    // and returned to the model. The withholding is said out loud so a reader does not take the
+    // short line for the whole story. Anything that is NOT a database refusal keeps its own words:
+    // this is a redactor for database failures, not a general message filter.
+    const sqlstate = dbRefusalCode(err);
+    const detail =
+      sqlstate !== undefined
+        ? `the database refused the write (SQLSTATE ${sqlstate}); its message is withheld here because a driver error echoes the offending value.`
+        : err instanceof Error
+          ? `${err.name}: ${err.message}`
+          : 'persist failed.';
     return { status: 'failed', detail };
   }
 };

@@ -59,7 +59,7 @@ import {
   OrgTombstonedError,
 } from '@rayspec/api-auth';
 import { mintInviteToken, normalizeEmail } from '@rayspec/auth-core';
-import { isUniqueViolation, makeDb } from '@rayspec/db';
+import { isUniqueViolation, makeDb, operatorSafeDbErrorMessage } from '@rayspec/db';
 import { applyMigrations } from './composition-root.js';
 
 /** The two secrets the provisioning path uses — resolved by `loadTenantProvisionSecrets`. */
@@ -416,13 +416,18 @@ export async function provisionTenant(
 
 /**
  * A driver rejection as ONE bounded line. The migrator's own message quotes the entire failing
- * statement — a whole migration file, comments included — so the database's actual complaint is
- * preferred when it is attached as the cause, and the result is capped: a message an operator has to
- * scroll past is not more informative than one they can read.
+ * statement — a whole migration file, comments included — so the result is capped: a message an
+ * operator has to scroll past is not more informative than one they can read.
+ *
+ * It reads the OPERATOR-SAFE rendering rather than the driver's own sentence. Reaching past the
+ * wrapper for the cause's `.message` was the earlier shape and it is exactly the disclosure this
+ * module's callers were routed away from: on a coercion refusal that sentence IS the offending value,
+ * and this one is baked into `TenantProvisionError.message`, where no printer downstream can withhold
+ * it. The rendering keeps what the cap was for — which statement failed, and why — and drops only the
+ * values.
  */
 function oneLine(err: unknown): string {
-  const cause = err instanceof Error && err.cause instanceof Error ? err.cause : undefined;
-  const text = (cause ?? (err instanceof Error ? err : undefined))?.message ?? String(err);
+  const text = operatorSafeDbErrorMessage(err);
   const flat = text.replace(/\s+/g, ' ').trim();
   return flat.length > 300 ? `${flat.slice(0, 300)}…` : flat;
 }

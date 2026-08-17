@@ -131,6 +131,7 @@ export {
 // operator naming WHAT failed and WHY, and never the values it bound.
 export {
   foreignKeyViolationConstraintName,
+  isDatabaseError,
   isForeignKeyViolation,
   isLockTimeout,
   isUniqueViolation,
