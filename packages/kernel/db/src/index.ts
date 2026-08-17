@@ -100,8 +100,10 @@ export {
   type DestructiveFinding,
   type DestructiveKind,
   formatFindings,
+  type MigrationStatement,
   type ScanResult,
   scanMigrationSql,
+  splitMigrationStatements,
 } from './migration-scan.js';
 export { migrationsDir } from './migrations.js';
 // The pack-migration chain scan — the ONE rule set `gate:pack-migrations` holds this repository's
