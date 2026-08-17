@@ -12,6 +12,7 @@ import {
   lintSpec,
   MAX_ROUTE_RATE_LIMIT_WINDOW_SECONDS,
   RESERVED_API_PATH_PREFIXES,
+  reservedApiPathPrefixes,
   reservedRoutePathRefusal,
 } from './lint.js';
 import { parseSpec } from './parse.js';
@@ -417,10 +418,42 @@ ${frontend}`;
       expect(found).toBeDefined();
       expect(found?.path).toBe('api[0].path');
       // The boot's wording, byte-shared through `reservedRoutePathRefusal`.
+      //
+      // WHAT THIS ASSERTION IS AND IS NOT. It is SELF-REFERENTIAL against the shared function: it pins
+      // that the lint rule USES `reservedRoutePathRefusal` rather than spelling a sentence of its own,
+      // which is what keeps the floor and the boot from describing one document two ways. It cannot
+      // catch a bad sentence — a wrong wording inside that function passes both sides of this equality.
+      // The sentence itself is pinned LITERALLY by the arm below.
       expect(found?.message).toBe(
-        reservedRoutePathRefusal('GET', claimed, RESERVED_API_PATH_PREFIXES),
+        reservedRoutePathRefusal('GET', claimed, reservedApiPathPrefixes()),
       );
     }
+  });
+
+  it('the refusal sentence itself, pinned literally (the shared-function equality cannot)', () => {
+    const platform = RESERVED_API_PATH_PREFIXES.join(', ');
+    // No mount: the deployment reserves only the platform's own paths, and there is one remedy.
+    const noMount = parseSpec(routeDoc('/health'));
+    expect(noMount.ok).toBe(false);
+    if (noMount.ok) return;
+    expect(noMount.errors.find((e) => e.code === 'reserved_route_path')?.message).toBe(
+      `route GET /health is under a path this deployment reserves (platform: ${platform}) — a ` +
+        'declared route may not shadow the auth/run or OIDC surface, the readiness probes, or a ' +
+        'declared static frontend mount. Choose a path outside them.',
+    );
+    // WITH a mount: `/app/` is named as the operator's own, not as a platform prefix, and the second
+    // remedy — moving the mount — is offered, because it fixes the collision exactly as well.
+    const withMount = parseSpec(
+      routeDoc('/app/notes', 'frontend:\n  - { route: /app, dir: web/dist }\n'),
+    );
+    expect(withMount.ok).toBe(false);
+    if (withMount.ok) return;
+    expect(withMount.errors.find((e) => e.code === 'reserved_route_path')?.message).toBe(
+      `route GET /app/notes is under a path this deployment reserves (platform: ${platform}; ` +
+        'declared frontend mounts: /app/) — a declared route may not shadow the auth/run or OIDC ' +
+        'surface, the readiness probes, or a declared static frontend mount. Choose a path outside ' +
+        'them, or move the mount that reserves this one.',
+    );
   });
 
   it('rejects a declared route nested under a declared NON-ROOT frontend mount', () => {
@@ -444,6 +477,49 @@ ${frontend}`;
     const res = parseSpec(routeDoc('/healthy'));
     if (!res.ok) throw new Error(`expected ok:\n${JSON.stringify(res.errors, null, 2)}`);
     expect(res.value.api).toHaveLength(1);
+  });
+
+  // ── The pattern the ROUTER registers, not the string as written ────────────────────────────────
+  // `register-declared-routes` registers `toHonoPath(route.path)` and the router supplies a missing
+  // leading slash, so a comparison against the written string reads a pattern that was never
+  // registered. Each REFUSED path below was measured against the real composition root before the
+  // rule saw it: it answered a platform probe with the declared route's 401 (or, for `/{a}/health`,
+  // can answer `/health/health` — the strict reading, argued at `canMatchReserved`). Each ACCEPTED
+  // path was measured too, and left `/health`, `/recovery-scope`, `/v1/…` and `/oidc/…` on their
+  // platform answers. `/notes/{id}` is this repository's own documented route shape: a rule that
+  // refuses it would be worse than the defect it closes.
+  it('refuses a pattern whose ROUTER FORM reaches a reserved path, however it is written', () => {
+    for (const claimed of [
+      '/{anything}',
+      '/*',
+      '/{a}/{b}',
+      '/{a}/{b}/{c}',
+      'health',
+      '/{a}/health',
+    ]) {
+      const res = parseSpec(routeDoc(claimed));
+      expect(res.ok, `expected '${claimed}' to be refused`).toBe(false);
+      if (res.ok) continue;
+      expect(res.errors.map((e) => e.code)).toContain('reserved_route_path');
+    }
+  });
+
+  it('accepts the ordinary shapes beside them — parameters, case, and the trailing slash', () => {
+    for (const claimed of [
+      '/notes/{id}',
+      '/notes/{id}/comments',
+      '/a/{b}',
+      'health/',
+      'HEALTH',
+      '/',
+    ]) {
+      const res = parseSpec(routeDoc(claimed));
+      if (!res.ok)
+        throw new Error(
+          `expected '${claimed}' to be accepted:\n${JSON.stringify(res.errors, null, 2)}`,
+        );
+      expect(res.value.api).toHaveLength(1);
+    }
   });
 
   it('accepts an agent action (api + trigger) whose persistTo maps to a compatible store', () => {

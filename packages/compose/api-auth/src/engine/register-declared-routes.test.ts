@@ -5,7 +5,7 @@
  * on a deploy-wiring mistake — never ships a route that 404s/500s/shadows at request time:
  *   - a `{agent}` route whose agent is absent from the injected registry (symmetric with the
  *     {store} branch's missing-product-table boot-fail);
- *   - a declared route under a RESERVED platform prefix (/v1/*, /oidc/*).
+ *   - a declared route under a reserved platform prefix (/v1/*, /oidc/*).
  *
  * No DB: the registrar throws while WIRING routes (before any handler runs), so a minimal app + a
  * minimal AppDeps cast is sufficient — the failure path never touches deps.db / the stores.
@@ -100,7 +100,7 @@ describe('registerDeclaredRoutes — reserved-namespace boot guard (no /v1/* or 
       action: { kind: 'agent', agent: 'ghost' },
     };
     expect(() => register(makeSpec({ api: [route] }), makeDeps(registry))).toThrow(
-      /RESERVED platform prefix/,
+      /is under a path this deployment reserves/,
     );
   });
 
@@ -111,7 +111,7 @@ describe('registerDeclaredRoutes — reserved-namespace boot guard (no /v1/* or 
       action: { kind: 'agent', agent: 'ghost' },
     };
     expect(() => register(makeSpec({ api: [route] }), makeDeps(registry))).toThrow(
-      /RESERVED platform prefix/,
+      /is under a path this deployment reserves/,
     );
   });
 
@@ -122,7 +122,7 @@ describe('registerDeclaredRoutes — reserved-namespace boot guard (no /v1/* or 
       action: { kind: 'agent', agent: 'ghost' },
     };
     expect(() => register(makeSpec({ api: [route] }), makeDeps(registry))).toThrow(
-      /RESERVED platform prefix/,
+      /is under a path this deployment reserves/,
     );
   });
 
@@ -139,13 +139,18 @@ describe('registerDeclaredRoutes — reserved-namespace boot guard (no /v1/* or 
 describe('registerDeclaredRoutes — the INJECTED reserved prefixes (paths api-auth does not own)', () => {
   const registry: AgentRegistry = new Map([['ghost', { spec: {} as never, backend: {} as never }]]);
 
-  const registerWithReserved = (path: string, reservedPathPrefixes: readonly string[]): void => {
+  const registerWithReserved = (
+    path: string,
+    reservedPathPrefixes: readonly string[],
+    frontendMountPrefixes: readonly string[] = [],
+  ): void => {
     const app = new OpenAPIHono<AppEnv>();
     const route: ApiRouteSpec = { method: 'GET', path, action: { kind: 'agent', agent: 'ghost' } };
     registerDeclaredRoutes(app, makeDeps(registry), {
       spec: makeSpec({ api: [route] }),
       productTables: emptyTables,
       reservedPathPrefixes,
+      frontendMountPrefixes,
     });
   };
 
@@ -154,20 +159,37 @@ describe('registerDeclaredRoutes — the INJECTED reserved prefixes (paths api-a
   // the composition root that registers them injects them here.
   it('aborts the boot for a declared route on an injected public probe path (/health)', () => {
     expect(() => registerWithReserved('/health', ['/health/', '/recovery-scope/'])).toThrow(
-      /RESERVED platform prefix/,
+      /is under a path this deployment reserves/,
     );
   });
 
   it('aborts for a route NESTED under an injected prefix (/recovery-scope/deep)', () => {
     expect(() =>
       registerWithReserved('/recovery-scope/deep', ['/health/', '/recovery-scope/']),
-    ).toThrow(/RESERVED platform prefix/);
+    ).toThrow(/is under a path this deployment reserves/);
   });
 
   it('aborts for a route under an injected FRONTEND mount prefix (the mount would be shadowed)', () => {
-    expect(() => registerWithReserved('/app/config', ['/app/'])).toThrow(
-      /RESERVED platform prefix/,
+    expect(() => registerWithReserved('/app/config', [], ['/app/'])).toThrow(
+      /is under a path this deployment reserves/,
     );
+  });
+
+  it('names a mount as the DEPLOYMENT’s own, not as a platform prefix, and offers both remedies', () => {
+    // `/app/` is `frontend[0].route` out of the operator's document. Calling it a platform prefix
+    // names the wrong party, and prescribing "choose another path" hides the equally valid remedy of
+    // moving the mount — which is what the sibling refusal, seen from the frontend side, prescribes.
+    expect(() => registerWithReserved('/app/config', [], ['/app/'])).toThrow(
+      /declared frontend mounts: \/app\/\) —/,
+    );
+    expect(() => registerWithReserved('/app/config', [], ['/app/'])).toThrow(
+      /or move the mount that reserves this one\.$/,
+    );
+    // A deployment with no mount is told about neither: one list, one remedy.
+    expect(() => registerWithReserved('/health', ['/health/'])).toThrow(
+      /Choose a path outside them\.$/,
+    );
+    expect(() => registerWithReserved('/health', ['/health/'])).not.toThrow(/frontend mounts:/);
   });
 
   it('names the injected prefix in the refusal, not just the two api-auth owns', () => {
@@ -180,6 +202,22 @@ describe('registerDeclaredRoutes — the INJECTED reserved prefixes (paths api-a
 
   it('no injected prefixes ⇒ byte-identical behaviour (only /v1/ and /oidc/ are reserved)', () => {
     expect(() => registerWithReserved('/health', [])).not.toThrow();
+  });
+
+  // The registrar is the guard for a spec assembled in CODE, which never passes through `lintSpec` —
+  // so it has to hold the SAME reading of the question, over the pattern the router registers rather
+  // than the string as written. Both were measured against the real composition root: `/{a}/{b}`
+  // answered `/v1/zzz` with the declared route's 401, and `/notes/{id}` left every platform path alone.
+  it('refuses a pattern whose ROUTER FORM reaches a reserved path, and accepts the ordinary shape', () => {
+    expect(() => registerWithReserved('/{a}/{b}', ['/health/', '/recovery-scope/'])).toThrow(
+      /is under a path this deployment reserves/,
+    );
+    expect(() => registerWithReserved('health', ['/health/', '/recovery-scope/'])).toThrow(
+      /is under a path this deployment reserves/,
+    );
+    expect(() =>
+      registerWithReserved('/notes/{id}', ['/health/', '/recovery-scope/']),
+    ).not.toThrow();
   });
 });
 

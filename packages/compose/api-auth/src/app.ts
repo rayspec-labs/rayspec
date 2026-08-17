@@ -258,13 +258,16 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
       ...(effectiveDeps.engine.playbackMaxStreamsPerUser !== undefined
         ? { playbackMaxStreamsPerUser: effectiveDeps.engine.playbackMaxStreamsPerUser }
         : {}),
-      // The platform paths the COMPOSITION ROOT registers on this same app — its readiness probes and
-      // the declared static frontend mounts. They are registered AFTER these declared routes, so a
-      // declared route claiming one would win the match and leave the platform path dead; api-auth
-      // does not own those paths, so the root names them and this pass refuses them. Spread so an
-      // auth-only / unit boot keeps exactly the two prefixes this package owns.
+      // The platform paths the COMPOSITION ROOT registers on this same app — its readiness probes —
+      // and the deployment's declared static frontend mounts. Both are registered AFTER these declared
+      // routes, so a declared route claiming one would win the match and leave the platform path dead;
+      // api-auth does not own those paths, so the root names them and this pass refuses them. Spread
+      // so an auth-only / unit boot keeps exactly the two prefixes this package owns.
       ...(effectiveDeps.engine.reservedPathPrefixes
         ? { reservedPathPrefixes: effectiveDeps.engine.reservedPathPrefixes }
+        : {}),
+      ...(effectiveDeps.engine.frontendMountPrefixes
+        ? { frontendMountPrefixes: effectiveDeps.engine.frontendMountPrefixes }
         : {}),
     });
   }

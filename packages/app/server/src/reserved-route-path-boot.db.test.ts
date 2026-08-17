@@ -5,8 +5,11 @@
  * A declared `api[]` route may not claim a path the platform registers itself (`/v1/`, `/oidc/`, the
  * two readiness probes, a declared static frontend mount). That is a fact about the DOCUMENT: it needs
  * no schema, no connection and no roll-out to decide. So it is decided at the document gate, before the
- * deploy pipeline reaches its migrate step — and a deployment refused for it is left with exactly the
- * schema it had, rather than the product tables of a roll-out that never served a request.
+ * deploy pipeline reaches its migrate step — and a deployment refused for it carries none of the
+ * document's PRODUCT DDL, rather than the tables of a roll-out that never served a request. (Not "no
+ * DDL at all": the platform's own migration chain runs earlier in the boot, so a refusal on a fresh
+ * database still leaves the platform tables. It is the product half this rule is about, and the arms
+ * below read exactly that — the presence of `notes`.)
  *
  * The harness is `mount-without-deploy.db.test.ts`'s (a whole throwaway DATABASE, env save/restore,
  * `loadServerConfig` + `assembleServer`, drop on teardown), and it runs against ONE database across the
@@ -191,7 +194,7 @@ describe('reserved-path refusal — no product DDL is committed', () => {
     async () => {
       armsRan++;
       const refused = await refusal(claimsHealthPath);
-      expect(refused.message).toMatch(/RESERVED platform prefix/);
+      expect(refused.message).toMatch(/is under a path this deployment reserves/);
       // The load-bearing reading: the catalog itself, not the exit code. A refusal raised while the
       // app was being assembled would already have committed this store's CREATE TABLE.
       expect(await tableExists('notes')).toBe(false);
@@ -226,7 +229,7 @@ describe('reserved-path refusal — no product DDL is committed', () => {
       // discover once it is rolling out — i.e. after the migrate step. The document-shape fault is
       // decided first, so that is the refusal an operator reads.
       const refused = await refusal(twoFaultsPath);
-      expect(refused.message).toMatch(/RESERVED platform prefix/);
+      expect(refused.message).toMatch(/is under a path this deployment reserves/);
       expect(refused.message).not.toMatch(/handler load failed/);
     },
     120_000,

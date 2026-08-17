@@ -14,6 +14,12 @@
  * ACCEPT CONTROL: the same fixtures with the route moved one character out of the reserved set
  * (`/healthy`) and the mount at the ROOT (which stays exempt and served) must still pass all three —
  * a rule that refused everything would satisfy the refusals above while breaking every real document.
+ *
+ * WHAT THESE ARMS DO AND DO NOT COVER. They drive two of the reserved prefixes — `/health/` and a
+ * declared `/app/` mount — and not `/v1/` or `/oidc/`. That is a COVERAGE gap rather than an unknown:
+ * the prefixes reach the rule through one list and one predicate, and a route under `/v1/` was
+ * measured end to end against the real composition root. What these arms are here for is the three
+ * COMMANDS answering the same document the same way, which is what the issue asked for.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -97,7 +103,7 @@ describe('the floor refuses a declared route that claims a platform path', () =>
     const found = r.errors.find((e) => e.code === 'reserved_route_path');
     expect(found).toBeDefined();
     expect(found?.path).toBe('api[0].path');
-    expect(found?.message).toContain('under a RESERVED platform prefix');
+    expect(found?.message).toContain('under a path this deployment reserves');
     expect(found?.message).toContain('/health/');
     expect(found?.message).toContain('GET /health');
   });
@@ -113,7 +119,7 @@ describe('the floor refuses a declared route that claims a platform path', () =>
     const r = await dryRun('claims-health.yaml');
     expect(r.ok).toBe(false);
     expect(r.errors.join('\n')).toContain('reserved_route_path at api[0].path');
-    expect(r.errors.join('\n')).toContain('under a RESERVED platform prefix');
+    expect(r.errors.join('\n')).toContain('under a path this deployment reserves');
   });
 });
 

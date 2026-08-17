@@ -58,6 +58,7 @@ import {
   type HttpMethod,
   isReservedApiPath,
   type RaySpec,
+  type ReservedApiPaths,
   reservedRoutePathRefusal,
   rewriteBraceParams,
   type StoreOp,
@@ -161,7 +162,7 @@ function registerOn2(
  * It is NOT the whole reserved set of a running deployment, and it deliberately does not try to be:
  * the readiness probes and the static frontend mounts are registered by the COMPOSITION ROOT, on the
  * same app, and this package does not own those paths and must not name them. The root injects them
- * through `DeclaredRoutesConfig.reservedPathPrefixes`.
+ * through `DeclaredRoutesConfig.reservedPathPrefixes` and `.frontendMountPrefixes`.
  *
  * The same set is carried, in the document's own terms, by @rayspec/spec's `RESERVED_API_PATH_PREFIXES`
  * — the STATIC rule the read-only floor and the deploy pipeline's VALIDATE step answer from. This
@@ -216,10 +217,9 @@ export interface DeclaredRoutesConfig {
    */
   playbackMaxStreamsPerUser?: number;
   /**
-   * ADDITIONAL reserved path prefixes, injected by the COMPOSITION ROOT — the platform paths this
-   * package does not own and must not hardcode: its public readiness probes (`/health/`,
-   * `/recovery-scope/`) and the deployment's declared static frontend mount prefixes. Each is matched
-   * as the bare prefix, the prefix itself, and anything nested under it, exactly like `/v1/`.
+   * ADDITIONAL reserved PLATFORM path prefixes, injected by the COMPOSITION ROOT — the platform paths
+   * this package does not own and must not hardcode: its public readiness probes (`/health/`,
+   * `/recovery-scope/`). Each is matched exactly like `/v1/`.
    *
    * They belong HERE rather than in the constant above because the root is what REGISTERS them, and it
    * registers them AFTER these declared routes — so a declared route claiming one of them wins the
@@ -227,6 +227,14 @@ export interface DeclaredRoutesConfig {
    * are reserved, which is what an auth-only app or a unit suite wants.
    */
   reservedPathPrefixes?: readonly string[];
+  /**
+   * The deployment's declared non-root static frontend mount prefixes, canonicalised to one trailing
+   * `/` (@rayspec/spec `frontendMountPrefixes`). Reserved for exactly the same reason and by the same
+   * predicate — but kept APART from the platform half because the refusal names them apart: a mount
+   * prefix is a line the operator wrote in their own document, and a collision with one is fixed by
+   * moving the route OR the mount. Absent ⇒ the deployment declares no static mount.
+   */
+  frontendMountPrefixes?: readonly string[];
 }
 
 /**
@@ -246,15 +254,18 @@ export function registerDeclaredRoutes(
   const { spec, productTables, handlers, blobFactory, mediaTokenService } = config;
   const storeByName = new Map(spec.stores.map((s) => [s.name, s]));
   // The reserved set for THIS pass: the two prefixes this package owns ⊕ the platform paths the
-  // composition root registers on the same app and injects here. Every prefix is matched the same way
-  // — the bare prefix, the prefix itself, and anything nested under it (`isReservedApiPath`) — so
-  // `/health/` covers `/health` and `/health/deep` while leaving `/healthy` alone.
+  // composition root registers on the same app and injects here ⊕ the deployment's static mounts.
+  // `isReservedApiPath` asks each of them of the pattern the ROUTER registers — so `/health/` covers
+  // `/health`, `/health/deep` and the `/{a}/{b}` that can reach them, while leaving `/healthy` alone.
   //
   // WHY THE INJECTED HALF EXISTS AT ALL. The platform registers its public probes AFTER the declared
   // routes, and Hono runs matching handlers in registration order: a declared route claiming `/health`
   // therefore WINS, and the probe a deploy tool waits on is dead for the life of the process. api-auth
   // does not own those paths, so the root that registers them is what names them.
-  const reservedPrefixes = [...RESERVED_PATH_PREFIXES, ...(config.reservedPathPrefixes ?? [])];
+  const reservedPrefixes: ReservedApiPaths = {
+    platform: [...RESERVED_PATH_PREFIXES, ...(config.reservedPathPrefixes ?? [])],
+    frontendMounts: config.frontendMountPrefixes ?? [],
+  };
   // The shared front of the chain — IDENTICAL to every auth/run route (server-derived tenant +
   // live-membership recheck), only the trailing requirePermission(perm) differs per route.
   // The throttle leads it, BEFORE requireAuth: the global `authenticate` has already run, so the tier
