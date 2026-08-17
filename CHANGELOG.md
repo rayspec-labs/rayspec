@@ -440,6 +440,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An extension pack whose entry module is present and does not load is now reported as refused,
+  under its own remedy, instead of as a pack that is not on this deployment.** A pack's entry module
+  is resolved `.js`-preferred, so an unbuilt pack resolves to its TypeScript source — which the
+  production importer refuses outright, because a deploy runtime loads compiled JavaScript only. That
+  refusal was reported as `extension_pack_unavailable`, whose opening sentence says the pack "is not
+  available on this deployment" and whose prescription is "deploy the pack" — sending an operator to
+  deploy what was already sitting there. (The verdict did carry the importer's own message, naming the
+  TypeScript source and the build, in the trailing `Load failure:` clause; what was wrong is the code
+  and the sentence that prescribes an action, not whether the build appeared anywhere.) Which of the
+  two codes an import failure gets is now read off the disk rather than off the error: **nothing at
+  the resolved entry** is `extension_pack_unavailable` (deploy the pack), an **entry that is there and
+  did not load** is `extension_pack_refused`. That class gets its own prescription rather than the
+  read-and-refused one, because two different faults reach it and neither is answered by a re-deploy
+  of the same artifact: the pack is not built, or it did not arrive with the dependencies its entry
+  imports (a `dist/` shipped without its `node_modules/`, which the bundled example README documents
+  as a shipping hazard). The `Load failure:` clause carries the importer's own words, which say which
+  of the two it is. Two of the shipped examples are exactly this shape, so
+  `rayspec plan examples/stream-backend/rayspec.yaml` and its `agent-pack-deployment` sibling now
+  answer with the code and the prescription that fit. A pack whose directory or entry file is
+  genuinely absent reports `extension_pack_unavailable` exactly as before, a pack that was read and
+  then refused (a version skew, a claim collision, a handler outside `handlers/`) keeps its unchanged
+  sentence, and a pack that loads is untouched. The reclassification reaches every path that resolves
+  packs (`plan`, `deploy --dry-run`, `doctor --with-packs`, and the boot), because all of them read
+  the one class the loader records. The error-code catalogues both packages publish
+  (`@rayspec/spec`, `@rayspec/pack-sdk`) and `docs/cli-reference.md` describe the split the same way.
+
+- **`rayspec deploy --dry-run` now composes a conversation-declaring product document instead of
+  failing on its own stub.** The dry-run composes against a rollout whose runtime-only instances are
+  inert, on the stated assumption that compose presence-checks them and never calls them. That is true
+  of every seam but one: the conversation turn responder is supplied as a FACTORY, and compose calls it
+  to read the bounded store-context read the responder declares and cross-reference it against the
+  composed stores. The stub factory threw on call, so **every** document declaring `conversation_input`
+  came back `ok:false` with `spec did not compose against the wired surface: dry-run: responder must not
+  be called` — an internal sentence about the checker, on a document that was fine
+  (`examples/support-intake-chat` is one). The stub is now an inert responder instance behind that
+  factory; `respond` still throws, because running a reply is what a dry-run must not do. It declares no
+  store-context read — the real one is read from the deployment's per-agent responder config, which a
+  dry-run never opens — and the verdict's `notProven` now says so rather than leaving it to inference.
+  A document that declares no conversation input is unaffected.
+
+- **Every document shipped under `examples/` is now held to the read-only floor by CI.** No gate
+  covered example documents, and this is the second release in which a shipped example broke without
+  anything going red. `pnpm gate:example-documents` (deterministic CI lane, after the build) runs
+  `doctor`, `plan` and `deploy --dry-run` through the built CLI over every document it finds by
+  **walking** `examples/` — the list is never kept in the gate, so a new or renamed example is covered
+  the moment it lands, and a walk that finds no document fails rather than passing quietly. Two
+  expectations are derived the same way: a `*.invalid.*` document is a negative fixture and must stay
+  refused (the gate's own accept control — if the floor stops refusing it, every green verdict beside
+  it is worthless), and a document referencing a pack whose entry is TypeScript source with no compiled
+  sibling must be answered `extension_pack_refused`, never `extension_pack_unavailable`. Repository
+  infrastructure only: no published package, API or runtime behavior changes.
+
 - **The destructive-migration scan no longer goes blind behind a dollar-quoted literal whose tag
   carries a digit.** A PostgreSQL dollar-quote tag follows unquoted-identifier rules except that it
   may not contain a `$`, so digits after the first character are legal (`$tag1$`). The scan matched

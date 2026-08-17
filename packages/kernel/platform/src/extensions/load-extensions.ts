@@ -182,30 +182,51 @@ export interface LoadedExtensions {
 }
 
 /**
+ * WHICH CLASS a load failure is, as the loader OBSERVED it — off the disk, never scraped back out of
+ * the error text. The distinction is load-bearing rather than cosmetic: the three prescribe three
+ * different actions, and the caller that re-reports this has no other way to tell them apart.
+ *
+ *  - `pack-absent`        — nothing is at the entry the resolution landed on (a missing pack
+ *                           directory, a missing entry file). The pack is not on this deployment:
+ *                           deploy it.
+ *  - `entry-did-not-load` — the entry file IS on disk and did not import. The pack is here, so the
+ *                           SAME artifact deployed again lands the same way; what it needs is a
+ *                           different one. Two causes reach this, and the importer's own message —
+ *                           carried verbatim into the report — says which: an UNBUILT pack, whose
+ *                           `.ts` entry the production importer rejects because a deploy runtime
+ *                           loads compiled JavaScript only, and a pack that arrived WITHOUT the
+ *                           dependencies its entry imports (a `dist/` shipped without its
+ *                           `node_modules/`). Neither is answered by "deploy the pack".
+ *  - `refused`            — the pack was read and then refused: a version skew against the exact
+ *                           pin, a claim collision, a handler outside `handlers/`, a malformed
+ *                           fragment. The artifact is intact and wrong; deploying it changes nothing.
+ *
+ * The path jail deliberately does NOT count as `pack-absent`: it fails on a `..`, an absolute path or
+ * a symlink escape in the declared `module`, which is a mis-declaration, and it passes cleanly for a
+ * directory that simply is not there (it is lexical — the missing pack surfaces at the entry import a
+ * step later).
+ */
+export type ExtensionLoadFailureClass = 'pack-absent' | 'entry-did-not-load' | 'refused';
+
+/**
  * A fail-closed extension-load error (every message names the offending pack id for the deploy log).
  * `packId` carries the same id as a FIELD, so a caller that has to re-report the failure in its own
  * vocabulary — the pack-aware parse turns it into a typed `SpecError` — can name the pack without
  * reading it back out of the message.
  *
- * `unresolved` separates the ONE failure that means the pack is not on this deployment (its entry
- * module did not import — a missing directory, a missing file, an unbuilt pack) from every failure
- * that happened AFTER the pack was found and read (a version skew, a claim collision, a handler
- * outside `handlers/`). The distinction is load-bearing rather than cosmetic: the two classes
- * prescribe opposite remedies — deploy the pack, versus fix the pack that is already deployed — and
- * the caller that re-reports this has no other way to tell them apart. The path jail deliberately
- * does NOT count as unresolved: it fails on a `..`, an absolute path or a symlink escape in the
- * declared `module`, which is a mis-declaration, and it passes cleanly for a directory that simply
- * is not there (it is lexical — the missing pack surfaces at the entry import a step later).
+ * `failure` carries the class above. It defaults to `refused`, which is what every throw site PAST
+ * the entry import is by construction; only the entry import itself chooses between the other two,
+ * and it chooses by asking the disk.
  */
 export class ExtensionLoadError extends Error {
   readonly packId: string | undefined;
-  /** True iff the pack could not be resolved on this deployment at all (its entry did not import). */
-  readonly unresolved: boolean;
-  constructor(message: string, packId?: string, unresolved = false) {
+  /** Which class this failure is (see `ExtensionLoadFailureClass`) — observed, never inferred. */
+  readonly failure: ExtensionLoadFailureClass;
+  constructor(message: string, packId?: string, failure: ExtensionLoadFailureClass = 'refused') {
     super(message);
     this.name = 'ExtensionLoadError';
     this.packId = packId;
-    this.unresolved = unresolved;
+    this.failure = failure;
   }
 }
 
@@ -279,13 +300,18 @@ export async function loadExtensions(
     try {
       mod = await importer(entryAbsolute);
     } catch (e) {
-      // The one UNRESOLVED failure: the pack's entry did not import, so the pack is not here.
+      // THE DISK ANSWERS THIS, not the error text. Nothing at the entry ⇒ the pack is not on this
+      // deployment. An entry file that IS there and did not import ⇒ the pack is here and the
+      // artifact is what is wrong (unbuilt, or shipped without the dependencies its entry imports);
+      // reporting that as "not available" would send an operator to deploy what they already
+      // deployed. Which of the two artifact faults it is stays the importer's message to tell — it
+      // rides along verbatim below, and is never branched on.
       throw new ExtensionLoadError(
         `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
           `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
           'a defineExtension(...) manifest (fail-closed).',
         ref.id,
-        true,
+        existsSync(entryAbsolute) ? 'entry-did-not-load' : 'pack-absent',
       );
     }
     const manifest = mod.default;

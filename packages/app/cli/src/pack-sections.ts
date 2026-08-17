@@ -214,10 +214,11 @@ function unresolvedClaim(key: string): SectionClaim {
  *
  * It says "nothing about the pack(s) was checked", not "their availability was not checked": an
  * unloaded pack is unchecked in EVERY respect the loader would have judged — that it is installed here,
- * and that the loader would accept it at all (a version pin that does not match its manifest, two packs
- * claiming one top-level key, a `module:` that escapes the deployment tree). Naming only availability
- * would read as an enumeration and leave a reader believing a reference the loader would REFUSE was
- * still held against the jail here. It was not.
+ * and that the loader would accept it at all (an entry module that is on disk and does not load — an
+ * unbuilt pack, or one missing the dependencies its entry imports — a version pin that does not match
+ * its manifest, two packs claiming one top-level key, a `module:` that escapes the deployment tree).
+ * Naming only availability would read as an enumeration and leave a reader believing a reference the
+ * loader would REFUSE was still held against the jail here. It was not.
  */
 function unresolvedLine(packIds: readonly string[], unresolved: readonly string[]): string {
   const named = packIds.length === 0 ? '' : ` (${packIds.join(', ')})`;

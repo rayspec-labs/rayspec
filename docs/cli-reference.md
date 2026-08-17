@@ -205,10 +205,12 @@ Validates either profile — it dispatches on the `product:` discriminant.
   What that leaves unchecked is the reason to reach for the flag. The packs
   themselves are never read, so **nothing** the loader would have said about them
   is said: a pack that is **not installed** is invisible, and so is one that is
-  here and the loader would **refuse** — a version pin that does not match its
-  manifest, two packs claiming one top-level key, a `module:` that escapes the
-  deployment tree. (With `--with-packs` both become one of the two errors
-  described below: `extension_pack_unavailable` and `extension_pack_refused`.)
+  here and the loader would **refuse** — an entry module that is on disk and did
+  not load (an **unbuilt** pack is the common one: a deploy runtime loads compiled
+  JavaScript only), a version pin that does not match its manifest, two packs
+  claiming one top-level key, a `module:` that escapes the deployment tree. (With
+  `--with-packs` both become one of the two errors described below:
+  `extension_pack_unavailable` and `extension_pack_refused`.)
   And because only a loaded pack can say which top-level keys are claimed, every
   top-level key the core grammar does not own is accepted **unexamined** rather
   than refused — on a pack-bearing document that includes a **mistyped** section
@@ -228,13 +230,19 @@ Validates either profile — it dispatches on the `product:` discriminant.
 
   Two of those codes are about the packs themselves, and they prescribe opposite
   actions: `extension_pack_unavailable` means the pack is **not on this
-  deployment** (install it, or drop it from `extensions[]` together with the
-  sections it claims), while `extension_pack_refused` means the pack **is** here
-  and was refused — a version pin that does not match its manifest, two packs
-  claiming one key, a `module:` that escapes the deployment tree — so deploying it
-  again changes nothing. A violation **inside** a claimed section is the pack's
-  own, reported at `<section>.<field>` with the same codes a core section's
-  violation carries.
+  deployment** — nothing is on disk at the entry the reference resolves to, so
+  install it, or drop it from `extensions[]` together with the sections it claims.
+  `extension_pack_refused` means the pack **is** here and was refused: an entry
+  module that is on disk and did not load — an **unbuilt** pack, whose TypeScript
+  entry the deploy runtime refuses (build it and point the reference at the built
+  directory), or one that arrived without the dependencies its entry imports (a
+  `dist/` shipped without its `node_modules/`; deploy the pack directory complete)
+  — a version pin that does not match its manifest, two packs claiming one key, a
+  `module:` that escapes the deployment tree. Deploying the **same** artifact again
+  changes nothing in any of those cases; the message names which part of it to fix,
+  and for an entry that did not load it carries the importer's own words. A
+  violation **inside** a claimed section is the pack's own, reported at
+  `<section>.<field>` with the same codes a core section's violation carries.
 
 - **Exit:** `0` if valid, `1` otherwise.
 
