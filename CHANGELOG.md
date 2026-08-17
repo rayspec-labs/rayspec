@@ -660,6 +660,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises `42P07` on its own `CREATE`). The `IF NOT EXISTS` spellings claim nothing, because such a name
   may predate the delta entirely — that delta still applies cleanly. Both states an ordinary deployment
   reaches keep the answers they had: never applied **applies**, fully applied **mounts**.
+  **And a rename is now read from its other end, where the name it renames away cannot decide it.** A
+  delta that gives a freed name straight back — `ALTER TABLE "a" RENAME TO "b"` + `CREATE TABLE "a"` +
+  `ALTER TABLE "a" RENAME TO "c"`, which is what a rename-and-recycle looks like — leaves `a` standing
+  after the second statement exactly as it stood before the first, so no reading of `a` separates the
+  two. `b` does separate them: it is absent before the delta (an unguarded rename cannot land on a name
+  that is already there) and standing after it, so its presence says the first rename ran and its
+  absence says it did not. Names that are **both** are now the ones a rename is measured by where its
+  old name cannot answer — both halves required, because a name the delta merely puts back (an index
+  redefinition) stands there either way, and a name the delta takes away again (a rebuild's aside) is
+  absent at both ends. Measured over every live schema those deltas can reach: the state after the
+  first statement used to **mount** — a delta two statements short called applied, and both of them
+  lost — and the state after the second routed to **apply**, which re-runs a rename onto a name that is
+  already there and leaves the boot dead rather than refused. The same reading gives a fully applied
+  `CREATE TABLE "t_new"` + `RENAME TO "t"` something to mount **on**: it used to reach the same verdict
+  on an empty pile, which meant a delta that had never run reached it too.
 - **A `CREATE TABLE` brings its columns into existence, and the boot now knows it.** The set of names a
   delta creates — the set whose *absence* proves nothing — held the table name alone, so
   `CREATE TABLE "stage" ("id" uuid, "tmp" text)` + `ALTER TABLE "stage" DROP COLUMN "tmp"` reported
