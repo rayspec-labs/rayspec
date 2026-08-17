@@ -183,7 +183,7 @@ export interface LoadedExtensions {
 
 /**
  * WHICH CLASS a load failure is, as the loader OBSERVED it — off the disk, never scraped back out of
- * the error text. The distinction is load-bearing rather than cosmetic: the three prescribe three
+ * the error text. The distinction is load-bearing rather than cosmetic: the four prescribe four
  * different actions, and the caller that re-reports this has no other way to tell them apart.
  *
  *  - `pack-absent`        — nothing is at the entry the resolution landed on (a missing pack
@@ -197,6 +197,13 @@ export interface LoadedExtensions {
  *                           loads compiled JavaScript only, and a pack that arrived WITHOUT the
  *                           dependencies its entry imports (a `dist/` shipped without its
  *                           `node_modules/`). Neither is answered by "deploy the pack".
+ *  - `pack-incomplete`    — the pack's ENTRY loaded, and a module its MANIFEST declares — a service,
+ *                           a claimed section's schema — did not. Three causes reach it: the module
+ *                           is ABSENT from the pack in every form, it is there but UNBUILT, or it is
+ *                           there and imports something that is not. Like `entry-did-not-load` this
+ *                           is an INCOMPLETE artifact rather than an intact wrong one, and for two
+ *                           of the three "deploying it again changes nothing" is false — which is
+ *                           why it is not `refused`, where it used to fall through.
  *  - `refused`            — the pack was read and then refused: a version skew against the exact
  *                           pin, a claim collision, a handler outside `handlers/`, a malformed
  *                           fragment. The artifact is intact and wrong; deploying it changes nothing.
@@ -206,7 +213,11 @@ export interface LoadedExtensions {
  * directory that simply is not there (it is lexical — the missing pack surfaces at the entry import a
  * step later).
  */
-export type ExtensionLoadFailureClass = 'pack-absent' | 'entry-did-not-load' | 'refused';
+export type ExtensionLoadFailureClass =
+  | 'pack-absent'
+  | 'entry-did-not-load'
+  | 'pack-incomplete'
+  | 'refused';
 
 /**
  * A fail-closed extension-load error (every message names the offending pack id for the deploy log).
@@ -263,8 +274,21 @@ export async function loadExtensions(
   // equality, so this is a list rather than a keyed map (see `routePrefixesOverlap`).
   const prefixOwners: { readonly packId: string; readonly prefix: string }[] = [];
 
-  // virtual rewritten absolute path → real pre-jailed pack-file absolute path (the importer's map).
-  const virtualToReal = new Map<string, string>();
+  // virtual rewritten absolute path → the real pre-jailed pack file, AND what it takes to say why a
+  // load failed. The path alone was enough to IMPORT; it is not enough to REFUSE well. When the real
+  // file is not there, the importer's own complaint is about the guessed path — for a `.ts` module
+  // never written, "compile it to JavaScript first", which sends an operator to build a file that
+  // does not exist. This is the fourth `resolvePackModule` site and the one the first sweep missed.
+  const virtualToReal = new Map<
+    string,
+    {
+      readonly real: string;
+      readonly candidates: readonly string[];
+      readonly what: string;
+      readonly moduleSpec: string;
+      readonly packId: string;
+    }
+  >();
 
   const seenIds = new Set<string>();
   for (const [refIndex, ref] of refs.entries()) {
@@ -306,12 +330,27 @@ export async function loadExtensions(
       // reporting that as "not available" would send an operator to deploy what they already
       // deployed. Which of the two artifact faults it is stays the importer's message to tell — it
       // rides along verbatim below, and is never branched on.
-      throw new ExtensionLoadError(
-        `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
-          `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
-          'a defineExtension(...) manifest (fail-closed).',
-        ref.id,
-        existsSync(entryAbsolute) ? 'entry-did-not-load' : 'pack-absent',
+      //
+      // AND WHEN NOTHING IS THERE, THE IMPORTER'S MESSAGE IS NOT THE ONE TO CARRY. The resolution
+      // above falls back to the declared `.ts` without asking whether anything is at it, so for an
+      // undeployed pack the production importer refuses on the EXTENSION of a path that was never
+      // written — "compile it first", inside a refusal whose own remedy is to deploy the pack. Say
+      // the absence instead, and name every path that was looked for.
+      throw (
+        absentModuleRefusal(
+          packModuleCandidates(packRoot, entryFile, ref.id),
+          'the pack entry',
+          entryFile,
+          ref.id,
+          'pack-absent',
+        ) ??
+        new ExtensionLoadError(
+          `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
+            `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
+            'a defineExtension(...) manifest (fail-closed).',
+          ref.id,
+          'entry-did-not-load',
+        )
       );
     }
     const manifest = mod.default;
@@ -412,7 +451,13 @@ export async function loadExtensions(
           ref.id,
         );
       }
-      virtualToReal.set(virtualAbsolute, realHandlerAbsolute);
+      virtualToReal.set(virtualAbsolute, {
+        real: realHandlerAbsolute,
+        candidates: packModuleCandidates(packRoot, h.module, `${ref.id}:${h.id}`, ref.id),
+        what: `the handler module for '${h.id}'`,
+        moduleSpec: h.module,
+        packId: ref.id,
+      });
       handlers.push({ ...h, module: virtualModule });
     }
     packHandlerRoots.push(packRoot);
@@ -507,8 +552,23 @@ export async function loadExtensions(
   // The multi-root importer: a rewritten virtual pack-handler path → the real pack file; otherwise the
   // default (a deployment's own handler, already jailed against the deployment root by the loader).
   const mergedImporter: ModuleImporter = async (absolutePath: string) => {
-    const real = virtualToReal.get(absolutePath);
-    return importer(real ?? absolutePath);
+    const mapped = virtualToReal.get(absolutePath);
+    if (mapped === undefined) return importer(absolutePath);
+    try {
+      return await importer(mapped.real);
+    } catch (e) {
+      // ONLY on the failure path, so what changes is which SENTENCE a failure gets and never whether
+      // a load is attempted — a pre-check would break every caller injecting an importer that resolves
+      // modules not on disk, which is the dev/test seam.
+      const absent = absentModuleRefusal(
+        mapped.candidates,
+        mapped.what,
+        mapped.moduleSpec,
+        mapped.packId,
+        'pack-incomplete',
+      );
+      throw absent ?? e;
+    }
   };
 
   return {
@@ -556,10 +616,24 @@ async function resolvePackService(
   try {
     mod = await importer(absolute);
   } catch (e) {
-    throw new ExtensionLoadError(
-      `extension '${packId}': failed to load the service module '${moduleSpec}' (${absolute}): ` +
-        `${e instanceof Error ? e.message : String(e)} (fail-closed).`,
-      packId,
+    // Same question as the pack entry, one level in: a service module the manifest names but the
+    // pack does not contain is an ABSENT module, and must not be reported as a file of the wrong
+    // kind. The class is `pack-incomplete` rather than `refused` — the pack is here, and one of the
+    // two causes (a directory deployed partially) IS answered by deploying it complete.
+    throw (
+      absentModuleRefusal(
+        packModuleCandidates(packRoot, moduleSpec, `${packId}:${moduleSpec}`, packId),
+        'the service module',
+        moduleSpec,
+        packId,
+        'pack-incomplete',
+      ) ??
+      new ExtensionLoadError(
+        `extension '${packId}': failed to load the service module '${moduleSpec}' (${absolute}): ` +
+          `${e instanceof Error ? e.message : String(e)} (fail-closed).`,
+        packId,
+        'pack-incomplete',
+      )
     );
   }
   const service = mod.default;
@@ -700,11 +774,22 @@ async function resolveSectionClaim(
   try {
     mod = await importer(schemaAbsolute);
   } catch (e) {
-    throw new ExtensionLoadError(
-      `extension '${packId}': failed to load the schema module '${schemaModule}' ` +
-        `(${schemaAbsolute}) for the claimed section '${key}': ` +
-        `${e instanceof Error ? e.message : String(e)} (fail-closed).`,
-      packId,
+    // The third and last module a manifest can name, and the same question about it.
+    throw (
+      absentModuleRefusal(
+        packModuleCandidates(packRoot, schemaModule, `${packId}:${key}`, packId),
+        `the schema module for the claimed section '${key}'`,
+        schemaModule,
+        packId,
+        'pack-incomplete',
+      ) ??
+      new ExtensionLoadError(
+        `extension '${packId}': failed to load the schema module '${schemaModule}' ` +
+          `(${schemaAbsolute}) for the claimed section '${key}': ` +
+          `${e instanceof Error ? e.message : String(e)} (fail-closed).`,
+        packId,
+        'pack-incomplete',
+      )
     );
   }
   const schema = mod.default;
@@ -798,6 +883,77 @@ function resolvePackModule(packRoot: string, moduleSpec: string, id: string, pac
     if (existsSync(compiledAbsolute)) return compiledAbsolute;
   }
   return jailModulePathFor(packRoot, moduleSpec, id, packId);
+}
+
+/**
+ * THE PATHS `resolvePackModule` WOULD HAVE TRIED, in the order it tries them.
+ *
+ * The resolution above is a PREFERENCE, not a lookup: when the declared module is a TypeScript-source
+ * path it prefers the compiled sibling IF that is on disk, and otherwise RETURNS THE DECLARED `.ts`
+ * WITHOUT ASKING WHETHER ANYTHING IS THERE. For a module that exists in one of the two forms that is
+ * exactly right. For a module that exists in NEITHER, the returned path is a guess — and the next
+ * thing that touches it is the production importer, which refuses on the EXTENSION before it opens
+ * the file. That is how a pack nobody deployed came to be told to compile a file that was never
+ * written: the `.ts` in the refusal is this function's fallback, not something observed on disk.
+ */
+function packModuleCandidates(
+  packRoot: string,
+  moduleSpec: string,
+  id: string,
+  packId = id,
+): readonly string[] {
+  const ext = typeScriptSourceExtensionOf(moduleSpec);
+  const candidates: string[] = [];
+  if (ext !== undefined) {
+    candidates.push(
+      jailModulePathFor(packRoot, `${moduleSpec.slice(0, -ext.length)}.js`, id, packId),
+    );
+  }
+  candidates.push(jailModulePathFor(packRoot, moduleSpec, id, packId));
+  return candidates;
+}
+
+/**
+ * THE REFUSAL FOR A MODULE THAT IS ON DISK IN NO FORM — asked only once a load has already FAILED.
+ *
+ * Every module a pack declares reaches its importer through `resolvePackModule`, whose fallback is a
+ * guess (see above). So when the load fails, "nothing is here" and "something is here and is the
+ * wrong kind of file" arrived as the SAME message — the importer's, which describes the EXTENSION of
+ * the guessed path. That is how a pack nobody deployed came to be told to compile a file that was
+ * never written, beside a refusal telling the same operator to deploy the pack.
+ *
+ * The disk is consulted ONLY on the failure path, never before the import. An injected importer — the
+ * dev/test seam, and every suite that fakes a pack — legitimately resolves modules that are not on
+ * disk at all, and a pre-flight existence check would refuse those before they were ever asked. What
+ * this changes is only which SENTENCE a failure gets, never whether a load is attempted.
+ *
+ * `failure` is the caller's, because the two callers are in genuinely different situations: for the
+ * pack ENTRY nothing of the pack is here at all (`pack-absent` — deploy it), while for a module a
+ * LOADED manifest declares, the pack IS here and arrived without part of itself (`pack-incomplete`,
+ * which deploying the same artifact again does not answer).
+ */
+function absentModuleRefusal(
+  candidates: readonly string[],
+  what: string,
+  moduleSpec: string,
+  packId: string,
+  failure: ExtensionLoadFailureClass,
+): ExtensionLoadError | undefined {
+  if (candidates.some((candidate) => existsSync(candidate))) return undefined;
+  const looked =
+    candidates.length === 1
+      ? `'${candidates[0]}'`
+      : `${candidates
+          .slice(0, -1)
+          .map((c) => `'${c}'`)
+          .join(', ')} nor '${candidates[candidates.length - 1]}'`;
+  return new ExtensionLoadError(
+    `extension '${packId}': ${what} ('${moduleSpec}') is not on disk. Neither ${looked} exists, so ` +
+      'nothing was loaded and no file was inspected — this is an absent module, not a module of the ' +
+      'wrong kind. Fail-closed.',
+    packId,
+    failure,
+  );
 }
 
 /**

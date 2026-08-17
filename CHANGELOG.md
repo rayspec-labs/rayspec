@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A gate over shipped scripts: a check that answers zero must have measured something.** Every
+  shipped `*.sh` is walked off the filesystem, classified by the precondition it actually depends on,
+  and run with that precondition deliberately unmet — a server script against a port *proven closed
+  first*, a database script against an unreachable DSN. Each must exit non-zero. It is a second gate
+  rather than an arm of the documented-command one: that gate walks markdown and judges a command
+  line, this walks scripts and judges an exit code.
+  Unmetting a precondition is itself a measurement, and both ways of getting it wrong are closed.
+  Merely unsetting `DATABASE_URL` does **not** unmet a database precondition — measured, both
+  database scripts fall back to a default DSN and exit 0 wherever a local Postgres answers. And a
+  script that **boots a server** while being probed fails the gate: the probe port is re-checked
+  after every run, so a script cannot supply the precondition it was denied.
+  The scanned count is printed beside the verdict and a walk that finds no scripts **fails** rather
+  than passes; every script found is either run or listed with its reason; and the scripts that need
+  a live model to run to completion are counted out loud, so that gap is visible rather than absent.
+  Its `--self-test` accept control requires **both** verdicts — red on a planted script that exits 0
+  having done nothing, green on one that correctly reports its failure — because a detector that
+  simply fails everything would otherwise satisfy it.
+
 - **`services` — an extension pack can run a long-lived service, and schedule agent turns from it.**
   A pack manifest may now declare `services: [{ module }]`. Each `module` is a module inside the pack
   whose default export is `{ name, boot(ctx), shutdown() }`, resolved through the same path jail — and
@@ -522,6 +540,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pack that is not deployed is no longer told to compile a file that does not exist.** The entry
+  a pack reference resolves to prefers a compiled `index.js` when one is on disk and otherwise falls
+  back to the declared `index.ts` — *without asking whether anything is at it*. For a pack that was
+  never deployed the path handed to the importer was therefore a guess, and the production importer,
+  which refuses on the module's **extension** before it opens anything, answered `is TypeScript
+  source ('.ts') … Compile it to JavaScript first`. That sentence arrived inside a refusal whose own
+  remedy is *"Deploy the pack"*, and beside documentation reading *"nothing is on disk at the entry
+  the reference resolves to, so install it"* — three statements about one event, disagreeing. The
+  disk is asked instead, and the refusal names the absence and every path that was looked for. It is
+  asked **only on the failure path**, so an injected importer — the dev/test seam, and every suite
+  that fakes a pack — still resolves modules that are not on disk.
+  **The class was swept past the entry, and the same defect was found three times more — at a declared service module, a claimed section schema, and a pack HANDLER module, whose guessed path is handed to the deploy handler loader rather than reported by this one.** A manifest also
+  declares *service* modules and, for every top-level section it claims, a *schema* module; both
+  resolve the same way, so both answered "compile it first" for a module the pack simply does not
+  contain. Both also fell through to the read-and-refused class, whose sentence — *"Deploying it
+  again changes nothing"* — is false when a pack arrived incomplete. They now carry their own class
+  and a remedy true of every case it covers: the module is absent, or unbuilt, or missing something
+  it imports, and the load failure below says which. Of the 24 operator-facing refusals this loader constructs,
+  these three are the only ones that interpolate an importer's words after a guessed path; the other
+  21 report something the loader itself observed, where "deploying it again changes nothing" holds.
 - **A declared route that claims a platform path is reported by `doctor`, `plan` and
   `deploy --dry-run`, and a deploy that trips it is refused before any product DDL is committed.** An
   `api[]` route may not claim the auth/run surface (`/v1/`), the OIDC mount (`/oidc/`), either

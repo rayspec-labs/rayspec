@@ -161,6 +161,12 @@ export async function parseSpecWithPacks(
  * complete this time, IS the fix. Asserting the refused sentence over that case would trade one wrong
  * remedy for another, so it gets its own: the same artifact lands the same way, and the load failure
  * carried below names which incompleteness it is.
+ *
+ * A PACK-INCOMPLETE FAILURE IS THE SAME ARGUMENT ONE LEVEL IN. The entry loaded, and a module the
+ * MANIFEST declares — a service, a claimed section's schema — is not on disk in any form. That is
+ * again an incomplete artifact rather than an intact wrong one, and again the "changes nothing"
+ * sentence is false for the half of it where the directory was deployed partially. It had been
+ * falling through to `refused` and saying exactly that, because nothing swept past the entry.
  */
 function packLoadFailure(
   e: ExtensionLoadError,
@@ -177,6 +183,25 @@ function packLoadFailure(
         'section it claims, so a document that declares one cannot be validated without it. Deploy ' +
         'the pack, or remove it from extensions[] together with the sections it claims. Load ' +
         `failure: ${reason}`,
+      path,
+    );
+  }
+  if (e.failure === 'pack-incomplete') {
+    return specError(
+      'extension_pack_refused',
+      // NAMES THE OPEN CASE RATHER THAN CLOSING THE SET. This branch is the fall-through for every
+      // way a declared module can fail to load, so an enumeration reading "either A, or B, or C"
+      // presents itself as exhaustive and is false the moment a fourth way exists. It does: a module
+      // present, built, importing nothing, and carrying a syntax error or a module-scope throw is
+      // none of absent, unbuilt or missing a dependency — and the sentence this one replaced was
+      // correct there. Splitting at "absent" vs "there and did not load" is a real dichotomy; what
+      // follows the dash is examples, not the list.
+      `${named} is present on this deployment but a MODULE ITS MANIFEST DECLARES did not load, so ` +
+        'the top-level sections it claims cannot be validated. The pack is here, so deploying the ' +
+        'same artifact again lands the same way: the module is absent from this pack, or it is ' +
+        'there and did not load — not built, missing something it imports, or broken. The load ' +
+        'failure below says which — and when it is absent, every path that was looked for. ' +
+        `Load failure: ${reason}`,
       path,
     );
   }
