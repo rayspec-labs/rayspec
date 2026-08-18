@@ -82,6 +82,7 @@ function effectiveReportsTo(
   return null;
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export function lintWorkforce(spec: RaySpec): SpecError[] {
   const workforce = spec.workforce;
   if (workforce === undefined) return [];
@@ -815,6 +816,7 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
  * The function stays because `lintSpecWarnings` composes it (lint.ts) and because the next
  * genuinely-heuristic workforce rule belongs here rather than in a new seam. Advisory means
  * "a heuristic that must never fail a deploy" — nothing in this section currently qualifies.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export function lintWorkforceWarnings(spec: RaySpec): SpecWarning[] {
   void spec;
