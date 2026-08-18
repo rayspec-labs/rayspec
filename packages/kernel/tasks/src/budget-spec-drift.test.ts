@@ -48,13 +48,13 @@ const MAXIMAL_DOCUMENT = {
     workforce: { usd: 40, turns: 100, window: 'daily' },
     task: { usd: 2.5, turns: 12 },
     subtree: { usd: 30, turns: 60 },
-    delegation: { maxDepth: 4, maxPerTask: 12 },
   },
   execution: {
     maxConcurrentWorkers: 6,
     maxTaskWallClock: '45m',
     maxReviewRounds: 2,
     onBudgetExhausted: 'block_and_escalate',
+    delegation: { maxDepth: 4, maxPerTask: 12 },
   },
   departments: [
     {
@@ -63,7 +63,8 @@ const MAXIMAL_DOCUMENT = {
       manager: 'mgr',
       mission: 'Own it.',
       members: ['dev'],
-      budgets: { usd: 15, turns: 40, window: 'daily', maxConcurrentWorkers: 2 },
+      budgets: { usd: 15, turns: 40, window: 'daily' },
+      execution: { maxConcurrentWorkers: 2 },
     },
   ],
   employees: [
