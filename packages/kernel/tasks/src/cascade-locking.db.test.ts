@@ -1,19 +1,33 @@
 /**
- * The cancel cascade's LOCK ORDER against real Postgres — the interleavings a single-threaded suite
- * never reaches, driven deterministically by parking one operation on a row lock a third session
- * holds:
+ * THE ENGINE'S LOCK RANKS against real Postgres — the interleavings a single-threaded suite never
+ * reaches, driven deterministically by parking one operation on a row lock a third session holds.
  *
- *   - root -> middle(working) -> leaf: the middle task's completing turn cascades DOWN into the
- *     leaf and fans IN to the root, while an operator cancel of the root cascades down into the
- *     same leaf. Locked in opposite orders these two wait on each other and Postgres kills one —
- *     the cascade 500s wholesale, or the turn dies and its dispatch reservation leaks. One
- *     documented root-first order makes them QUEUE instead;
- *   - a cancel racing the reserve pass's `planned -> queued` promotion completes (the subtree is
- *     locked before any transition, and a lost compare-and-swap retries) instead of throwing the
- *     whole cascade away.
+ * The declared order (apply-intents.ts's module header, restated at task-scheduler.ts:1127-1133 and
+ * docs/workforce-architecture.md:191-193) is four ranks, and this file covers all four:
+ *
+ *   1. INTRA-TASK, root-first: ancestors before the task, the task before its descendants, ties by
+ *      id. root -> middle(working) -> leaf: the middle task's completing turn cascades DOWN into the
+ *      leaf and fans IN to the root, while an operator cancel of the root cascades down into the
+ *      same leaf. Locked in opposite orders these two wait on each other and Postgres kills one —
+ *      the cascade 500s wholesale, or the turn dies and its dispatch reservation leaks. One
+ *      documented root-first order makes them QUEUE instead. (Plus: a cancel racing the reserve
+ *      pass's `planned -> queued` promotion completes instead of throwing the whole cascade away.)
+ *   2. `workforce_tasks` -> `workforce_budget_ledger`: BOTH halves of the task order before the
+ *      FIRST ledger row, so a cascading turn is never a tasks -> ledger -> tasks acquisition.
+ *   3. `workforce_runtime` -> `workforce_tasks`: the dispatcher's claim transaction establishes it
+ *      and every path touching both row types follows.
+ *   4. INTRA-LEDGER scope order: `task < root < department < workforce`, then scope id, then window.
+ *
+ * DEADLOCK ABSENCE IS ASSERTED, NOT INFERRED. Every race here settles both sides and checks the
+ * Postgres SQLSTATE: `40P01` (deadlock_detected) must never be raised. "Both promises resolved" is a
+ * weaker claim — it cannot distinguish "the rank held" from "the interleaving never formed" — so the
+ * arming step additionally proves each side really PARKED on a lock (`waitForBlocked`) before the
+ * holder lets go.
  */
+import { schema } from '@rayspec/db';
+import { eq } from 'drizzle-orm';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { applyTurnOutcome } from './apply-intents.js';
+import { applyTurnOutcome, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { authorizeTurn, releaseTurnReservation, workforceBudgetsSchema } from './budget.js';
 import { cancelTaskCascade } from './control.js';
@@ -38,6 +52,60 @@ if (requireDb && !hasDb) {
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 const RESULT = { status: 'completed', summary: 'Done.', confidence: 0.9 };
+
+/** `deadlock_detected` — what Postgres raises on the victim when it finds a lock cycle. */
+const DEADLOCK_SQLSTATE = '40P01';
+
+/**
+ * The SQLSTATE carried by `err` or a bounded `.cause`-chain ancestor.
+ *
+ * The driver (postgres.js) puts the code on a `PostgresError`; drizzle-orm then WRAPS that in a
+ * `DrizzleQueryError` that carries NO code of its own, so the code must be found by WALKING the
+ * cause chain — the same bounded, cycle-safe shape packages/kernel/db/src/pg-errors.ts uses for
+ * 23505/23503/55P03. Duplicated here rather than exported from @rayspec/db on purpose: this suite is
+ * the only consumer, and a new exported detector would be a production change in a test-only PR.
+ */
+function pgSqlState(err: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  let node: unknown = err;
+  for (let depth = 0; depth < 5 && node !== null && typeof node === 'object'; depth++) {
+    if (seen.has(node)) return undefined;
+    seen.add(node);
+    const code = (node as { code?: unknown }).code;
+    if (typeof code === 'string') return code;
+    node = (node as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
+/**
+ * Settle every side of a race and REFUSE `40P01` explicitly.
+ *
+ * This is the assertion the suite used to leave implicit. A deadlock victim rejects, so
+ * `await expect(p).resolves.*` does catch it — but only as "something threw", which reads in CI as a
+ * flake rather than as "the two sides took the shared rows in OPPOSITE orders and Postgres killed
+ * one". Naming the SQLSTATE makes the lock-rank regression self-describing, and it distinguishes a
+ * genuine no-deadlock from a run that got lucky on timing (the `waitForBlocked` arming is the other
+ * half of that: it proves both sides really parked before the holder released).
+ *
+ * Leaves the promises settled, so the caller's own `resolves` / value assertions run afterwards
+ * against already-settled promises and still report the underlying error for a NON-deadlock failure.
+ */
+async function expectNoDeadlock(sides: Readonly<Record<string, Promise<unknown>>>): Promise<void> {
+  const names = Object.keys(sides);
+  const results = await Promise.allSettled(Object.values(sides));
+  const victims = results.flatMap((result, i) =>
+    result.status === 'rejected' && pgSqlState(result.reason) === DEADLOCK_SQLSTATE
+      ? [`${names[i]}: ${String(result.reason)}`]
+      : [],
+  );
+  expect(
+    victims,
+    `Postgres raised SQLSTATE ${DEADLOCK_SQLSTATE} (deadlock detected): the sides of this race ` +
+      'acquired their shared rows in OPPOSITE orders and one was killed. That is the lock-rank ' +
+      'regression this suite exists to catch, not a flake.',
+  ).toEqual([]);
+}
 
 describe.skipIf(!hasDb)('cascade locking (db)', () => {
   let db: ReturnType<typeof makeTestDb>;
@@ -199,6 +267,34 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     };
   }
 
+  /**
+   * Hold the WORKFORCE RUNTIME row's lock on a separate session. The row must already exist — the
+   * `ensureWorkforceRuntime` upsert takes the existing row's lock on its conflict path, but with no
+   * row present it simply INSERTs and blocks on nothing.
+   */
+  async function holdRuntimeRow(workforceId: string): Promise<() => Promise<void>> {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let taken: () => void = () => {};
+    const acquired = new Promise<void>((resolve) => {
+      taken = resolve;
+    });
+    const session = holder.$client.begin(async (sql) => {
+      const rows =
+        await sql`SELECT id FROM workforce_runtime WHERE workforce_id = ${workforceId} FOR UPDATE`;
+      if (rows.length === 0) throw new Error(`no runtime row for ${workforceId} to hold`);
+      taken();
+      await held;
+    });
+    await acquired;
+    return async () => {
+      release();
+      await session;
+    };
+  }
+
   /** Materialize a task's canonical ledger scope rows without reserving anything. */
   async function materializeLedgerScopes(taskId: string, rootTaskId: string): Promise<void> {
     await tdb().transaction(async (tx) => {
@@ -237,6 +333,26 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
         department: null,
         estimateUsd: 0,
       });
+    });
+  }
+
+  /**
+   * A DENIED-CLAIM PARK transaction, shaped exactly like the dispatcher's `#parkDenied`
+   * (task-scheduler.ts:1259-1272): the runtime row first (`ensureWorkforceRuntime`), then the task
+   * rows root-first (`lockRootFirst`) — the second composite `runtime -> tasks` shape in the engine,
+   * beside `claimTurnFor`'s claim shape and the reaper's release shape (task-scheduler.ts:944-955).
+   * Both halves are the REAL engine primitives; only the composition lives here, exactly as
+   * `claimTurnFor` mirrors `#claimTurn`.
+   */
+  async function parkDeniedFor(taskId: string): Promise<TaskRecord> {
+    return tdb().transaction(async (tx) => {
+      const snapshot = (
+        (await tx
+          .select(schema.workforceTasks)
+          .where(eq(schema.workforceTasks.taskId, taskId))) as TaskRecord[]
+      )[0] as TaskRecord;
+      await ensureWorkforceRuntime(tx, 'wf');
+      return lockRootFirst(tx, snapshot);
     });
   }
 
@@ -279,6 +395,10 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     await release();
     // Locked in opposite orders these two wait on each other and Postgres kills one: the turn dies
     // (leaking its dispatch reservation) or the cancel 500s having changed nothing.
+    await expectNoDeadlock({
+      'the completing turn': completingTurn,
+      'the operator cancel': operatorCancel,
+    });
     await expect(completingTurn).resolves.toBeDefined();
     await expect(operatorCancel).resolves.toBeDefined();
 
@@ -314,6 +434,7 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     await waitForBlocked(2);
 
     await releaseLedger();
+    await expectNoDeadlock({ 'the descendant claim': claim, 'the cancelling turn': cancellingTurn });
     await expect(claim).resolves.toBeUndefined();
     await expect(cancellingTurn).resolves.toBeDefined();
 
@@ -372,6 +493,10 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     await waitForBlocked(2);
 
     await release();
+    await expectNoDeadlock({
+      'the failing turn': failingTurn,
+      'the operator cancel': operatorCancel,
+    });
     await expect(failingTurn).resolves.toBeDefined();
     await expect(operatorCancel).resolves.toBeDefined();
     expect(await statusOf(child)).toBe('failed');
@@ -405,12 +530,16 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     // The reserve pass promotes the leaf out from under the cascade's snapshot. Settled or parked —
     // both are fine; what matters is that it happens BEFORE the cascade reaches it.
     let promotionSettled = false;
-    const promotion = applyTransition(tdb(), {
+    // The RAW attempt is kept so the deadlock check can see its rejection: the `.catch` below
+    // deliberately swallows a lost compare-and-swap (both outcomes are fine here), and swallowing a
+    // 40P01 with it would hide exactly what this suite is for.
+    const promotionAttempt = applyTransition(tdb(), {
       taskId: leaf,
       expectedVersion: plannedVersion,
       to: 'queued',
       actor: 'scheduler',
-    })
+    });
+    const promotion = promotionAttempt
       .then(() => 'promoted')
       .catch(() => 'lost')
       .finally(() => {
@@ -422,6 +551,10 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     }
 
     await release();
+    await expectNoDeadlock({
+      'the cancel cascade': cancel,
+      'the reserve-pass promotion': promotionAttempt,
+    });
     // Before the subtree was locked root-first, the cascade applied the leaf's stale version here and
     // the whole cancel threw TaskVersionConflictError — a 500 that cancelled nothing below.
     const outcome = await cancel;
@@ -430,5 +563,132 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     expect(outcome.cancelled).toContain(leaf);
     expect(await statusOf(leaf)).toBe('cancelled');
     await promotion;
+  });
+
+  it('a claim and a denied-claim park QUEUE: the runtime row is taken before any task row', async () => {
+    // RANK 3, `workforce_runtime -> workforce_tasks`. A cycle here needs BOTH shared rows: the one
+    // runtime row of a workforce, and one task row. Two independent roots in the SAME workforce give
+    // exactly that, one task row per round.
+    const first = await createRootTask(tdb(), {
+      workforceId: 'wf',
+      title: 'First',
+      goal: 'Race the runtime row.',
+      owner: 'worker-a',
+      requestedBy: 'user',
+    });
+    const second = await createRootTask(tdb(), {
+      workforceId: 'wf',
+      title: 'Second',
+      goal: 'Race the runtime row the other way round.',
+      owner: 'worker-b',
+      requestedBy: 'user',
+    });
+    await driveTo(first.taskId, 'queued');
+    await driveTo(second.taskId, 'queued');
+    // The row must EXIST before a third session can hold it: an upsert with no row present INSERTs
+    // and blocks on nothing.
+    await ensureWorkforceRuntime(tdb(), 'wf');
+
+    /**
+     * One round: park `firstWaiter` on the held runtime row, park `secondWaiter` behind it, release.
+     *
+     * The arming is what makes the failure mode reachable at all. Both sides queue on the runtime
+     * row holding NO task row, so when the holder lets go they simply serialize. Had the SECOND
+     * waiter taken its task row first, it would be sitting on that row while waiting for the runtime
+     * row — and the first waiter, on acquiring the runtime row, would want the same task row.
+     * That is the cycle, and Postgres kills one of them with 40P01.
+     */
+    async function raceOnTheRuntimeRow(
+      label: string,
+      firstWaiter: () => Promise<unknown>,
+      secondWaiter: () => Promise<unknown>,
+    ): Promise<void> {
+      const releaseRuntime = await holdRuntimeRow('wf');
+      const a = firstWaiter();
+      await waitForBlocked(1);
+      const b = secondWaiter();
+      await waitForBlocked(2);
+      await releaseRuntime();
+      await expectNoDeadlock({ [`${label} (first waiter)`]: a, [`${label} (second waiter)`]: b });
+      await a;
+      await b;
+    }
+
+    // Round 1 puts the PARK shape second, round 2 puts the CLAIM shape second — so an inversion in
+    // EITHER composite shape closes the cycle in one of the two rounds.
+    await raceOnTheRuntimeRow(
+      'claim then park',
+      () => claimTurnFor(first.taskId, first.taskId),
+      () => parkDeniedFor(first.taskId),
+    );
+    await raceOnTheRuntimeRow(
+      'park then claim',
+      () => parkDeniedFor(second.taskId),
+      () => claimTurnFor(second.taskId, second.taskId),
+    );
+
+    // Both claims went through: the queue was a queue, not a casualty list.
+    expect(await statusOf(first.taskId)).toBe('working');
+    expect(await statusOf(second.taskId)).toBe('working');
+  });
+
+  it('an authorize and a reservation release QUEUE: ledger rows follow ONE canonical scope order', async () => {
+    // RANK 4, intra-ledger: `task < root < department < workforce`, then scope id, then window
+    // (budget.ts:195-200, sorted :246-251). Two sibling tasks under one root share the `root:` and
+    // `workforce:` rows and differ only in their own `task:` row — the shape where a walker going
+    // the other way closes a cycle against one going canonically.
+    //
+    // A GLOBAL inversion of SCOPE_RANK is harmless (every walker stays consistent), so the
+    // regression this guards is ONE walker disagreeing: `settleTurn` or `releaseTurnReservation`
+    // iterating `ledgerScopesFor(...)` in reverse, e.g. "release from the widest scope down".
+    const { root, middle, leaf } = await threeDeep();
+    await materializeLedgerScopes(leaf, root);
+    await materializeLedgerScopes(middle, root);
+
+    const releaseLedger = await holdLedgerRow('root', root);
+    // The authorize parks on `root:` holding `task:leaf` — canonical rank 0 taken, rank 1 wanted.
+    const authorize = authorizeTurn(tdb(), NO_BUDGETS, {
+      taskId: leaf,
+      rootTaskId: root,
+      workforceId: 'wf',
+      department: null,
+      estimateUsd: 0,
+    });
+    await waitForBlocked(1);
+    // The release parks behind it holding `task:middle`. Walking the scopes the other way, it would
+    // hold `workforce:` here instead — and the authorize, once past `root:`, wants exactly that.
+    const reservationRelease = tdb().transaction((tx) =>
+      releaseTurnReservation(tx, NO_BUDGETS, {
+        taskId: middle,
+        rootTaskId: root,
+        workforceId: 'wf',
+        department: null,
+        estimateUsd: 0,
+      }),
+    );
+    await waitForBlocked(2);
+
+    await releaseLedger();
+    await expectNoDeadlock({
+      'the authorize': authorize,
+      'the reservation release': reservationRelease,
+    });
+    await expect(authorize).resolves.toMatchObject({ allowed: true });
+    await reservationRelease;
+
+    // The authorize really ran under the contended row: a dispatched turn is a spent turn, counted
+    // on every scope it drew from.
+    const counted = (await db.$client.unsafe(
+      `SELECT scope_kind, settled_turns FROM workforce_budget_ledger
+         WHERE (scope_kind = 'task' AND scope_id = '${leaf}')
+            OR (scope_kind = 'root' AND scope_id = '${root}')
+            OR (scope_kind = 'workforce' AND scope_id = 'wf')
+         ORDER BY scope_kind;`,
+    )) as unknown as { scope_kind: string; settled_turns: number }[];
+    expect(counted.map((r) => [r.scope_kind, r.settled_turns])).toEqual([
+      ['root', 1],
+      ['task', 1],
+      ['workforce', 1],
+    ]);
   });
 });
