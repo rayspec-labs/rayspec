@@ -13,6 +13,68 @@ import { OPENAPI_POSTURE_NOTICE, runOpenapi } from './openapi.js';
 const here = dirname(fileURLToPath(import.meta.url));
 const ACCEPTANCE = resolve(here, '../../../../examples/expense-claim/expense-claim.product.yaml');
 
+/**
+ * THE POSTURE NOTICE, BYTE-PINNED — and pinned IDENTICAL to the OTHER copy of it in the tree.
+ *
+ * The MIRROR of the block in `packages/compose/api-auth/src/engine/emit-openapi.test.ts`, and
+ * deliberately duplicated rather than shared: CI splits the test lanes, so a pin that lived only in
+ * the other package would leave THIS lane silent while this package's own copy of the sentence was
+ * edited. Every other assertion on this constant is self-referential
+ * (`toContain(OPENAPI_POSTURE_NOTICE)`) or a substring probe (`toContain('NOT internet-facing')`),
+ * and both stay green while the words are softened.
+ *
+ * Why there are two copies at all — and why this test rather than a shared export — is written down
+ * above the constant in `emit-openapi.ts`; the short version is that `@rayspec/cli` has no
+ * dependency edge to `@rayspec/api-auth`, so the comparison is made over the SOURCE FILE instead of
+ * over an import.
+ */
+const REPO_ROOT = resolve(here, '../../../..');
+const OWN_COPY_REL = 'packages/app/cli/src/openapi.ts';
+const API_AUTH_COPY_REL = 'packages/compose/api-auth/src/engine/emit-openapi.ts';
+
+/** The exact text. Not derived from the source under test — that is the point of a byte-pin. */
+const PINNED_NOTICE =
+  'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, pre-external-hardening RaySpec deployment. The separate hardening layer (per-tenant sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put this behind a public address.';
+
+/** Lift the whole `export const OPENAPI_POSTURE_NOTICE = …;` declaration out of a source file. */
+function noticeDeclaration(rel: string): string {
+  const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
+  const match = /^export const OPENAPI_POSTURE_NOTICE =\n(?:.*\n)*?.*;\n/m.exec(src);
+  // The floor: a pattern that matched nothing must FAIL here, never return '' and compare equal to
+  // the other side's ''. Two files that both stopped declaring the constant is not agreement.
+  expect(
+    match,
+    `${rel} no longer declares OPENAPI_POSTURE_NOTICE in the pinned form`,
+  ).not.toBeNull();
+  const declaration = (match as RegExpExecArray)[0];
+  expect(declaration).toContain('OPENAPI_POSTURE_NOTICE');
+  expect(declaration.length).toBeGreaterThan(200);
+  return declaration;
+}
+
+/** Re-join the single-quoted segments of a declaration into the string it declares. */
+function declaredValue(declaration: string): string {
+  expect(declaration).not.toContain("\\'");
+  const segments = [...declaration.matchAll(/'([^'\\]*)'/g)].map((m) => m[1] as string);
+  expect(segments.length).toBeGreaterThan(0);
+  return segments.join('');
+}
+
+describe('OPENAPI_POSTURE_NOTICE — pinned, and pinned identical across both copies', () => {
+  it('is exactly the posture sentence, byte for byte', () => {
+    expect(OPENAPI_POSTURE_NOTICE).toBe(PINNED_NOTICE);
+  });
+
+  it('is declared byte-identically in @rayspec/cli and @rayspec/api-auth', () => {
+    expect(noticeDeclaration(OWN_COPY_REL)).toBe(noticeDeclaration(API_AUTH_COPY_REL));
+  });
+
+  it('both declarations on disk evaluate to the value this module exports', () => {
+    expect(declaredValue(noticeDeclaration(OWN_COPY_REL))).toBe(OPENAPI_POSTURE_NOTICE);
+    expect(declaredValue(noticeDeclaration(API_AUTH_COPY_REL))).toBe(OPENAPI_POSTURE_NOTICE);
+  });
+});
+
 let dir: string;
 let prevCwd: string;
 
