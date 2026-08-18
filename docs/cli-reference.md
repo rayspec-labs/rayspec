@@ -153,6 +153,35 @@ it dispatches on the `product:` discriminant.
 
 - **Exit:** `0` if valid, `1` otherwise.
 
+### The experimental-section banner (`doctor` and `plan`)
+
+A document that declares an **experimental** section — today that is `workforce:`
+and nothing else — parses only under `RAYSPEC_EXPERIMENTAL_WORKFORCE`. Without
+it, `doctor`, `plan` and `deploy` refuse the document with the typed code
+`experimental_section_disabled` (exit `1`).
+
+With the flag set, `doctor` and `plan` succeed **and** add an `experimental` key
+to the JSON result naming the enabled sections:
+
+```json
+{ "ok": true, "errors": [], "warnings": [], "experimental": ["workforce"] }
+```
+
+…and print a banner to **stderr**, never to stdout — the single-JSON-object
+contract above is unchanged, so a `| jq` pipeline is unaffected:
+
+```
+==================================================================
+  EXPERIMENTAL: this document declares 'workforce:'.
+  Enabled by RAYSPEC_EXPERIMENTAL_WORKFORCE. The section's grammar
+  and behavior may change without notice. Not a stability surface.
+==================================================================
+```
+
+What "not a stability surface" means precisely — what may change, what is
+enforced today, and every marking with the test that keeps it there — is in
+[workforce forward compatibility](./workforce-compatibility.md).
+
 ---
 
 ## `plan`
@@ -676,6 +705,14 @@ Against an existing organization, skip steps 1–2 entirely and set
 ---
 
 ## `workforce` — operate the durable task engine of a running deployment
+
+> **EXPERIMENTAL.** This command group operates the `workforce:` section, which is
+> not part of the frozen v1.0 surface. Authoring and boot require
+> `RAYSPEC_EXPERIMENTAL_WORKFORCE`; the commands, their flags and their JSON
+> output may change in any release, with no deprecation window. Every response
+> from the HTTP routes behind them also carries `X-Experimental: workforce`. See
+> [workforce forward compatibility](./workforce-compatibility.md) for what may
+> change, what is enforced today, and the test behind each statement.
 
 ```
 rayspec workforce status --workforce <id> [transport flags]

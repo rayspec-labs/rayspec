@@ -60,6 +60,9 @@ const EXPECTED_EXPOSE_HEADERS = [
   'x-result-truncated',
   'idempotency-replay',
   'retry-after',
+  // The `/v1/workforce/*` experimental marking. A marking a browser client cannot READ has not
+  // marked anything, so dropping it from app.ts's `exposeHeaders` must turn this red.
+  'x-experimental',
 ];
 
 /** Parse an `Access-Control-Allow-Headers` value into a lowercased Set of header names. */
