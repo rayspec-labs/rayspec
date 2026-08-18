@@ -19,8 +19,12 @@
  * receipt itself uses.
  *
  * The out-of-turn insert stays legal: the approval-timeout sweep re-issues an escalated request
- * with NO turn at all (approvals.ts), writes `turn_number = NULL`, and is unconstrained by the
- * partial predicate — its dedupe is the `status = 'pending'` compare-and-swap that claimed the row.
+ * with NO turn at all (approvals.ts), writes `turn_number = NULL`, and is deduped by the
+ * `status = 'pending'` compare-and-swap that claimed the row rather than by this key. The index is
+ * PARTIAL to declare that and to match the transition receipt's shape — not because it has to be:
+ * NULLs are DISTINCT for uniqueness in Postgres, so a total UNIQUE would admit those rows too. The
+ * turn-less tests below therefore pin that such rows stay legal; they do NOT discriminate a partial
+ * index from a total one, and nothing here should be read as evidence that they do.
  */
 import { schema } from '@rayspec/db';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -323,8 +327,9 @@ describe.skipIf(!hasDb)('the durable dedupe key beneath the turn receipt (db)', 
 
   it('the out-of-turn escalation re-issue is UNCONSTRAINED — two turn-less approvals on one task coexist', async () => {
     // The approval sweep re-issues an escalated request with no turn at all; its dedupe is the
-    // `status = 'pending'` compare-and-swap, not this key. A total (non-partial) UNIQUE would
-    // have broken the escalation chain.
+    // `status = 'pending'` compare-and-swap, not this key. This pins that turn-less rows stay
+    // LEGAL — it is NOT evidence for the partial predicate, and it must not be read as such: it
+    // passes under a total UNIQUE too, because Postgres treats NULLs as DISTINCT for uniqueness.
     const root = await newRoot();
     for (const question of ['Proceed?', 'Escalated: proceed?']) {
       await tdb().insert(schema.workforceApprovals, {

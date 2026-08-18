@@ -1028,8 +1028,12 @@ export const workforceReviews = pgTable(
      * duplicate it was added to prevent — and, being retro-fitted onto a populated column, could
      * fail at migration time on a database that already holds two rows of one round.
      * `turn_number` is an INPUT (`ApplyTurnInput.turnNumber`), so it is stable across replay; and
-     * because the column is NEW, every pre-existing row holds NULL and the partial predicate makes
-     * this index unfailable on a populated table.
+     * because the column is NEW, every pre-existing row holds NULL — and NULLs are DISTINCT for
+     * uniqueness — so this index constrains no existing row and cannot fail on a populated table.
+     * That unfailability comes from the KEY (new + all-NULL), not from the partial predicate: a
+     * total UNIQUE on the same column would create just as cleanly. The predicate is here to match
+     * `workforce_transitions_turn_receipt_idx`'s shape and to keep the index off the turn-less rows
+     * the approval sweep writes, which Postgres would admit under a total UNIQUE anyway.
      */
     uniqueIndex('workforce_reviews_turn_receipt_idx')
       .on(t.tenantId, t.taskId, t.turnNumber)

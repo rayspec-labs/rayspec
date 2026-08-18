@@ -314,9 +314,10 @@ async function openReview(
  * `openReview` above, under `workforce_approvals_turn_receipt_idx`.
  *
  * The sweep's escalation re-issue (approvals.ts) does NOT come through here: it opens a request
- * with no turn at all, writes `turn_number = NULL`, and is excluded by the index's partial
- * predicate — its dedupe is the `status = 'pending'` compare-and-swap that claimed the row it
- * escalates, and a total UNIQUE would have broken that chain.
+ * with no turn at all and writes `turn_number = NULL`, so this key does not dedupe it — its dedupe
+ * is the `status = 'pending'` compare-and-swap that claimed the row it escalates. The index's
+ * partial predicate declares that intent; it is not what makes those rows legal. NULLs are DISTINCT
+ * for uniqueness in Postgres, so a total UNIQUE would admit them too.
  */
 async function openApproval(
   tx: TenantDb,

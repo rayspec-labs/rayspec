@@ -10,10 +10,14 @@
 --
 -- SAFE ON A POPULATED DATABASE, WITH NO BACKFILL. Every added column is NULLABLE, so no existing
 -- row can violate it and no default has to be written; `DROP NOT NULL` never fails on data; and
--- because `turn_number` is NEW, every pre-existing review/approval row holds NULL, which the
--- partial predicate `WHERE turn_number IS NOT NULL` excludes — so the two UNIQUE indexes match
--- ZERO existing rows and CANNOT fail at migration time on a database that already holds duplicates.
--- That unfailability is a property of the key choice, not an accident (see below).
+-- because `turn_number` is a NEW column, every pre-existing review/approval row holds NULL — and
+-- NULLs are DISTINCT for uniqueness — so the two UNIQUE indexes constrain ZERO existing rows and
+-- CANNOT fail at migration time on a database that already holds duplicate review rounds. That
+-- unfailability is a property of the KEY CHOICE (new + all-NULL), not of the partial predicate: a
+-- total UNIQUE on the same new column would create just as cleanly. What the choice is measured
+-- against is `round`, which is `integer NOT NULL` and already populated — a UNIQUE on
+-- `(tenant_id, task_id, round)` genuinely CAN fail on an existing database, which is the second
+-- reason it is the wrong key (see below for the first).
 -- DESTRUCTIVE-SCAN: only ALTER COLUMN ... DROP NOT NULL / ADD COLUMN (nullable) / CREATE UNIQUE
 -- INDEX — no destructive statement, so the scan has no findings and needs no allowlist entry.
 -- Forward-only (D-013): rolling the binary back is safe — older releases never read the new columns,
@@ -36,10 +40,15 @@
 -- replay — the same fact, and the same partial-UNIQUE shape, as
 -- `workforce_transitions_turn_receipt_idx` in 0012.
 --
--- The index is PARTIAL for a second reason: the approval-timeout sweep re-issues an escalated
--- request with NO turn at all. Those rows carry `turn_number = NULL` and stay unconstrained — their
--- dedupe is the `status = 'pending'` compare-and-swap that claimed the row they escalate. A total
--- UNIQUE would have broken the escalation chain.
+-- Some rows carry NO turn at all: the approval-timeout sweep re-issues an escalated request outside
+-- any turn, writes `turn_number = NULL`, and is deduped by the `status = 'pending'` compare-and-swap
+-- that claimed the row it escalates rather than by this index. The index is PARTIAL to say that
+-- explicitly, to match `workforce_transitions_turn_receipt_idx`'s shape, and to keep the index off
+-- rows it can never constrain — NOT because a total UNIQUE would have refused them. It would not:
+-- Postgres treats NULLs as DISTINCT for uniqueness, so a total UNIQUE admits unlimited turn-less
+-- rows AND still refuses a duplicate `(task, turn)`. Partial and total are behaviourally identical
+-- for every row shape this schema can produce; partial is the honest declaration of intent, not a
+-- correctness requirement.
 --
 -- ─────────────────────────────────────────────────────────────────────────────────────────────
 -- 2. THE CLAIM LEASE — a liveness backstop for a turn the engine still calls live (B-013b).
