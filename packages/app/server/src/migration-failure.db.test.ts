@@ -64,8 +64,27 @@ const packageRoot = resolve(here, '..');
 
 /** The tag appended to the temp chain. Poisoned first, repaired later under the SAME tag. */
 const APPENDED_TAG = '9999_planted_failure';
-/** Strictly greater than 0012's `when` — the journal is strict-monotonic (shadow-dryrun.sh:97-108). */
-const APPENDED_WHEN = 1786661701294;
+/**
+ * Strictly greater than the LAST committed migration's `when` — DERIVED, never hard-coded.
+ *
+ * The journal is strict-monotonic (shadow-dryrun.sh:97-108) and drizzle applies only entries above
+ * the recorded high-water mark, so a plant whose `when` sorts BELOW the tail of the chain is treated
+ * as already applied and silently skipped — the migrator then resolves, nothing is planted, and
+ * every arm of this suite fails for a reason that has nothing to do with what it tests.
+ *
+ * This was originally `1786661701294` (0012's `when` + 1), correct while 0012 was the last
+ * migration. Migration 0013 landed with a later `when` and the constant went stale on the merge —
+ * the suite passed on both branches and failed only once they met. Deriving it from the committed
+ * journal makes the plant correct for 0014 and every migration after it.
+ */
+const APPENDED_WHEN =
+  Math.max(
+    ...(
+      JSON.parse(readFileSync(join(migrationsDir(), 'meta', '_journal.json'), 'utf8')) as {
+        entries: { when: number }[];
+      }
+    ).entries.map((e) => e.when),
+  ) + 1;
 
 /** The statement that cannot apply. A missing TYPE is deterministic, non-transient and unambiguous. */
 const POISON_SQL = `CREATE TABLE "planted_failure_landing" (

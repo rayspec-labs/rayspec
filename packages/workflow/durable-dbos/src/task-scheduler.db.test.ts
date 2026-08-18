@@ -860,6 +860,114 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     expect(await reservedUsd(root.taskId)).toBe(0);
   });
 
+  // ── the claim LEASE: the liveness backstop for a turn the engine still calls live ────────────
+  //
+  // The reaper's original oracle is a DBOS status query alone, so a worker whose process is up and
+  // whose workflow is PENDING but whose BODY is wedged reached neither release path — not
+  // `settleTurn` (the turn never finishes) nor the reaper (the engine says PENDING). It held its
+  // concurrency slot and its budget reservation forever, and the task/root ledger scopes never roll
+  // over, so the stranded estimate was PERMANENT. The claim now stamps `claim_expires_at`; an
+  // expired claim is reaped through the IDENTICAL path as a dead one — same requeue, same
+  // `#reservationOfClaim` amount, same window.
+
+  it('a WEDGED turn — DBOS still PENDING — is reaped once its claim lease expires, and its reservation goes back', async () => {
+    // The wedge: the first dispatch parks inside the handler and never returns. The engine has
+    // nothing to notice — the workflow is genuinely PENDING and genuinely alive.
+    let releaseWedged: () => void = () => {};
+    const wedged = new Promise<void>((resolve) => {
+      releaseWedged = resolve;
+    });
+    let dispatches = 0;
+    handlers.set('solo', async () => {
+      if (++dispatches === 1) await wedged;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.25 } });
+    const root = await newRoot('solo');
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'working');
+    expect(await reservedUsd(root.taskId)).toBe(0.25);
+
+    const claim = await db.$client.unsafe(
+      `SELECT turn_id FROM workforce_task_transitions WHERE task_id = '${root.taskId}' AND to_status = 'working';`,
+    );
+    const turnId = claim[0]?.turn_id as string;
+    // The DBOS oracle says LIVE — this is exactly the case the old reaper could never act on.
+    expect((await DBOS.getWorkflowStatus(turnId))?.status).toBe('PENDING');
+    expect((await scheduler.runSweep()).reaped).not.toContain(root.taskId);
+
+    // The claim stamped a lease. Step the sweep's clock past it (never a sleep).
+    const claimed = await taskRow(root.taskId);
+    const lease = new Date(claimed.claim_expires_at as string);
+    expect(Number.isNaN(lease.getTime())).toBe(false);
+    clockOverride = new Date(lease.getTime() + 1_000);
+
+    const swept = await scheduler.runSweep();
+    expect(swept.reaped).toContain(root.taskId);
+    const reaped = await taskRow(root.taskId);
+    expect(reaped.status).toBe('queued');
+    expect(reaped.status_reason).toBe('tool_error');
+    // Leaving `working` clears the lease — a stale expiry can never re-reap a queued row.
+    expect(reaped.claim_expires_at).toBeNull();
+    // The whole point: the money comes back, on both scopes the claim reserved against.
+    expect(await reservedUsd(root.taskId)).toBe(0);
+    const rootScope = await db.$client.unsafe(
+      `SELECT reserved_usd FROM workforce_budget_ledger WHERE scope_kind = 'root' AND scope_id = '${root.taskId}';`,
+    );
+    expect(Number(rootScope[0]?.reserved_usd)).toBe(0);
+    // A dispatched turn stays a spent turn: a lease reap gives back money, never a turn count.
+    const turns = await db.$client.unsafe(
+      `SELECT settled_turns FROM workforce_budget_ledger WHERE scope_kind = 'task' AND scope_id = '${root.taskId}';`,
+    );
+    expect(turns[0]?.settled_turns).toBe(1);
+    // The journal names WHY it re-queued — a lease expiry is not a dead workflow.
+    const queuedEvents = await db.$client.unsafe(
+      `SELECT data->>'queueReason' AS reason FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.queued' ORDER BY seq;`,
+    );
+    expect(queuedEvents.map((e) => e.reason)).toContain('turn_lease_expired');
+
+    clockOverride = null;
+    releaseWedged();
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
+    expect(await reservedUsd(root.taskId)).toBe(0);
+  }, 120_000);
+
+  it('a LIVE turn INSIDE its lease is never reaped, however many sweeps run', async () => {
+    // The conservatism guard. A lease that expires too eagerly kills healthy long-running turns,
+    // and that failure mode is worse than the disease — so the backstop must be inert for every
+    // turn that is merely SLOW rather than wedged.
+    let releaseLive: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseLive = resolve;
+    });
+    let dispatches = 0;
+    handlers.set('solo', async () => {
+      if (++dispatches === 1) await held;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.25 } });
+    const root = await newRoot('solo');
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'working');
+
+    for (let i = 0; i < 5; i++) {
+      expect((await scheduler.runSweep()).reaped).not.toContain(root.taskId);
+    }
+    const still = await taskRow(root.taskId);
+    expect(still.status).toBe('working');
+    expect(await reservedUsd(root.taskId)).toBe(0.25);
+    // Even a sweep one millisecond BEFORE the lease expires leaves it alone.
+    clockOverride = new Date(new Date(still.claim_expires_at as string).getTime() - 1);
+    expect((await scheduler.runSweep()).reaped).not.toContain(root.taskId);
+    expect((await taskRow(root.taskId)).status).toBe('working');
+
+    clockOverride = null;
+    releaseLive();
+    await pumpUntil(async () => (await taskRow(root.taskId)).status !== 'working');
+  }, 120_000);
+
   it('wall-clock and deadline ceilings enforce at the dispatch boundary: the pass parks, never kills', async () => {
     // The per-task wall clock: a re-queued task whose first claim started long ago, against a
     // 1-second ceiling — the next pass parks it blocked(deadline_exceeded) instead of dispatching.

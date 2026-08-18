@@ -119,7 +119,10 @@ export function buildWorkforceGoalIntake(deps: WorkforceGoalIntakeDeps): Workfor
             ...(input.priority !== undefined ? { priority: input.priority } : {}),
           });
           taskIds.push(task.taskId);
-          tasks.push({ taskId: task.taskId, owner: task.owner, title: task.title });
+          // The DECLARED title, not the row read-back: `createRootTask` stores exactly `step.title`
+          // (validated non-empty above), and the column is nullable only so erasure can scrub it —
+          // a task created one statement ago has nothing erased.
+          tasks.push({ taskId: task.taskId, owner: task.owner, title: step.title });
         }
         return tasks;
       });

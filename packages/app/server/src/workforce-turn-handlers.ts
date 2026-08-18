@@ -151,7 +151,10 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       const memory =
         deps.memoryProviderFor?.(tdb, recallScope) ??
         new TaskHistoryMemoryProvider(tdb, recallScope);
-      const recall = await memory.search({ text: ctx.task.goal });
+      // An erased goal (migration 0013 made the column nullable so `journalScrub` can scrub it)
+      // has nothing to recall AGAINST — an empty query scores every candidate at zero rather than
+      // recalling on the literal string "null".
+      const recall = await memory.search({ text: ctx.task.goal ?? '' });
 
       // THE TURN INPUT — pure assembly over verified facts. The scaffolding (facts.ts) computes
       // everything the runtime can answer before the model is invoked; a goal that cannot fit

@@ -286,7 +286,9 @@ describe('store-less workforce boot — the tenant-erasure seam is wired and rea
       delegatedTo: 'lead',
       resolvedOwner: 'lead',
       goal: 'Subject content in the delegated goal',
-      expectedOutput: 'Subject content in the expected output',
+      // NOT subject content — every production writer is the engine's own 'worker_result'
+      // literal, so the scrub deliberately keeps this column. Seeded only to satisfy NOT NULL.
+      expectedOutput: 'worker_result',
       depth: 1,
       status: 'completed',
     });

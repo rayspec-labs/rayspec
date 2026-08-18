@@ -30,6 +30,7 @@ import type { MemoryEntry, MemoryHit, MemoryQuery, WorkforceMemoryProvider } fro
 import { schema, type TenantDb } from '@rayspec/db';
 import type { TaskRecord } from '@rayspec/tasks';
 import { and, asc, desc, eq, gte, inArray, ne, or, type SQL } from 'drizzle-orm';
+import { ERASED_CONTENT } from './prompt.js';
 
 /** Recall's bounds: row scans, age window, hit text and hit count. */
 export const RECALL_SCAN_LIMIT = 200;
@@ -224,11 +225,14 @@ export class TaskHistoryMemoryProvider implements WorkforceMemoryProvider {
     for (const row of completedRows) {
       const completedAt = row.completedAt instanceof Date ? row.completedAt : scope.now;
       const ageMs = Math.max(scope.now.getTime() - completedAt.getTime(), 0);
-      const summary = resultSummary(row.result) ?? row.title;
+      // An erased tenant's rows keep their structure but lose their content (migration 0013):
+      // the RENDERED hit names that, and the match haystack carries nothing — an erased task
+      // recalls as itself, never as the string "null".
+      const summary = resultSummary(row.result) ?? row.title ?? ERASED_CONTENT;
       candidates.push({
         id: row.taskId,
         text: clampText(`[${row.taskId} · ${formatRecallAge(ageMs)}] ${summary}`),
-        haystack: `${row.title} ${row.goal} ${summary}`,
+        haystack: `${row.title ?? ''} ${row.goal ?? ''} ${summary}`,
         ageMs,
       });
     }

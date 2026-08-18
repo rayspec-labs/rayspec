@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A durable dedupe key beneath the turn receipt, and a claim LEASE that reaps a wedged turn**
+  (migration `0013_workforce_dedupe_lease_and_scrub`, additive and nullable throughout — see the
+  upgrade note below).
+  *The dedupe key.* A re-applied turn was already a clean no-op, but for reviews and approvals the
+  turn RECEIPT was the only thing making it one: `workforce_reviews` carried a **non-unique**
+  `(tenant_id, task_id, round)` index and `workforce_approvals` carried no uniqueness at all, while
+  children have had two layers since the engine landed (a deterministic primary key **and** the
+  delegation UNIQUE). Both tables now carry a nullable `turn_number` and a partial
+  `UNIQUE (tenant_id, task_id, turn_number) WHERE turn_number IS NOT NULL` — byte-shaped like the
+  transition receipt it backs up — and both insert sites absorb the conflict and converge on the row
+  the first application wrote, so a replay is a no-op rather than an error.
+  **Why `turn_number` and not `round`:** `round` is not an input to the turn, it is derived from the
+  number of review rows that already exist (`reviewRoundsUsed + 1`), so a second application of the
+  same turn computes a *different* round and a `(tenant_id, task_id, round)` UNIQUE would admit
+  exactly the duplicate it was added to prevent. `turn_number` is an input and is stable across
+  replay. It also makes the migration unfailable: the column is new, so every pre-existing row holds
+  NULL and the partial predicate matches none of them — a retro-fitted UNIQUE on the populated
+  `round` column could have failed at migration time on a database that already held duplicates.
+  The approval-timeout sweep's escalation re-issue opens a request with **no** turn, writes
+  `turn_number = NULL`, and stays unconstrained; its dedupe is the `status = 'pending'`
+  compare-and-swap that claimed the row it escalates.
+  *The lease.* The reaper's only liveness oracle was a durable-engine workflow-status query, which
+  has a blind spot: a worker whose process is up and whose turn workflow is genuinely `PENDING` but
+  whose body is WEDGED reaches neither release path — not the turn's final transaction, which it
+  never gets to, and not the reaper, which asked the engine and was told the workflow was alive. Such
+  a row held its `maxConcurrentWorkers` slot **and its budget reservation forever**, and because the
+  `task`/`root` ledger scopes are un-windowed the stranded estimate never rolled over: enough wedged
+  turns and a task is denied at a ceiling it has spent nothing against. Every claim now stamps
+  `workforce_tasks.claim_expires_at` in the same compare-and-swap that writes `working` (and every
+  transition out of `working` clears it, so a stale expiry is never readable on an unclaimed row),
+  a durable-engine recovery of its own claim renews it, and the sweep reaps an expired claim through
+  the **identical** path as a dead one — same re-queue, same release of exactly what the claim
+  reserved in the window it reserved it in — journaling
+  `queueReason: 'turn_lease_expired'` so an operator can tell "the workflow died" from "the worker
+  wedged".
+  **The default is 30 minutes and deliberately errs long.** The two failure modes are not
+  symmetric: a turn reaped while still healthy cannot corrupt anything (its final application is
+  refused over the successor's claim by the claim-ownership check, so the cost is duplicated work),
+  whereas the condition it fixes is unbounded. 30 minutes is anchored on the shipped examples' own
+  whole-TASK wall clocks — 30m and 45m — and a task is many turns, so a single turn that has run
+  that long has consumed the entire task ceiling the starter example declares. Deployments that need
+  a different window pass `turnLeaseMs` to the scheduler, the same convention as `reserveSchedule` /
+  `sweepSchedule` / `turnQueueConcurrency`; it is deliberately **not** a `budgets.execution` key,
+  because the declared-budgets schema is drift-locked to the authoring grammar and this is a
+  dispatcher safety net rather than per-workforce policy.
+  **The proof.** `turn-dedupe.db.test.ts` drives a replayed `request_review` and `request_approval`
+  turn WITH ITS RECEIPT DELETED — the transitions table is append-only by discipline, not by
+  constraint — and asserts exactly one row survives, the first one, while the row the replay would
+  have written carried `round = 2`; plus the raw `23505` refusal and the turn-less rows coexisting
+  under the partial predicate. `task-scheduler.db.test.ts` parks a handler on an unresolved promise
+  so the workflow stays genuinely `PENDING`, steps the sweep's clock past the lease, and asserts the
+  row returns to `queued` with `reserved_usd` back to 0 on both the task and root scopes and
+  `settled_turns` unchanged — and, separately, that a live turn INSIDE its lease survives every
+  sweep, including one taken a millisecond before expiry.
+
 - **The workforce reference orchestration: policy-aware turns, recall, an operator tree, and an
   end-to-end acceptance story** (all behind `RAYSPEC_EXPERIMENTAL_WORKFORCE`, exactly as before —
   a document without the section parses byte-identically, and one with it is still refused typed
@@ -62,6 +117,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`journalScrub` no longer destroys the workforce billing ledger it exists to preserve.**
+  `journalScrub: true` is the softer right-to-erasure posture: it erases raw subject content while
+  KEEPING every structural, idempotency and cost column, so billing reconciliation and exactly-once
+  integrity survive. The nine task-engine tables were not in the scrub set, so scrub mode
+  **hard-deleted all nine — `workforce_budget_ledger` included**, which is the workforce analogue of
+  exactly the cost columns the mode retains on `journal_steps`. The mode inverted its own purpose,
+  and on the one deployment shape whose only subject content is the task graph. PR #488 made scrub
+  reachable on a workforce deployment for the first time, so the path has real users.
+  Scrub mode now erases the workforce CONTENT and keeps the rows:
+  `workforce_tasks.title`/`.goal`/`.description`/`.result` set to NULL and `.artifacts` emptied;
+  `workforce_messages.body`; `workforce_approvals.question`/`.reason` and `.options`;
+  `workforce_reviews.reasons`/`.required_changes`; `workforce_delegations.goal`;
+  `workforce_task_signals.payload`. `workforce_budget_ledger`, `workforce_task_transitions` and
+  `workforce_runtime` are retained WHOLE — they hold no subject content, and a ledger retained
+  without the task rows its `scope_id` attributes spend to would be unreconcilable, which is why
+  "retain the ledger" means retaining the set rather than one table.
+  This is the change migration `0013` carries for erasure: five `text NOT NULL` columns —
+  `workforce_tasks.title`, `.goal`, `workforce_messages.body`, `workforce_approvals.question` and
+  `workforce_delegations.goal` — now accept NULL. Those five are the complete set of `text NOT NULL`
+  columns across the nine tables that carry CONTENT. `workforce_delegations.expected_output` looks
+  like a sixth and is not: every writer is the engine's own `'worker_result'` literal and no
+  production path reads it, so it is a structural constant the scrub keeps and the migration leaves
+  `NOT NULL`. The jsonb list columns go to their own
+  declared `'[]'`/`'{}'` rather than being made nullable, and the three already-nullable text columns
+  needed no change. **Nullable here means "erased", not "optional":** every write path still requires
+  all five, so a NULL has exactly one meaning, and every rendering surface — the turn input, the
+  operator snapshot, recall — names it as `[content erased]` rather than emitting an empty string.
+  The **default (full-delete) mode is byte-for-byte unchanged**, and `run_events` is still hard-
+  deleted in both modes, so the workforce journal's own event payloads go with it either way. Two
+  scope boundaries are stated rather than left to be discovered: the actor identifiers on the
+  retained rows (`owner`, `requested_by`, `approver`, `decided_by`, `reviewer`, `delegated_by`,
+  `delegated_to`, `resolved_owner`) survive a scrub as the accountability spine — a deployment that
+  needs those gone uses the full delete — and a scrubbed task row keeps its status and counters, so
+  an unfinished task of an erased tenant would resume against a NULL goal; halt the workforce before
+  scrubbing a tenant with live work.
+  **The proof.** `erase-tenant.db.test.ts` gains two scenarios on the existing real-DB seed: a scrub
+  leaves the ledger row with `reserved_usd`/`settled_usd`/`settled_turns` byte-identical to the seed
+  and every named content column NULL or empty while the structural columns are unchanged, and a
+  full erase still removes all nine tables and both workforce journal namespaces. Its scrub-report
+  map is pinned as a whole object, so a table silently leaving the scrub set — the exact way the
+  workforce half was lost — goes RED. The cross-tenant scenario now also asserts the second tenant's
+  workforce content is untouched, which an un-scoped scrub UPDATE would flip.
+
 - **Tenant data erasure is now wired on a workforce deployment — the one shape where it was
   unreachable.** The erasure control seam (`BootedServer.eraseTenantNow`, the operator's
   right-to-erasure entry point) was constructed only when the deployed document declared product
@@ -94,6 +192,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_events` row per namespace (agent-run, per-task, workforce control), so the post-erase read-back
   is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
   tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
+
+### Upgrade notes
+
+- **One migration: `0013_workforce_dedupe_lease_and_scrub`.** It is the single coordinated
+  persisted-shape change this release carries — three nullable columns
+  (`workforce_reviews.turn_number`, `workforce_approvals.turn_number`,
+  `workforce_tasks.claim_expires_at`), two partial UNIQUE indexes, and six `ALTER COLUMN … DROP NOT
+  NULL`. Nothing else in the schema moves.
+  **It cannot fail on a populated database and needs no backfill.** Every added column is nullable,
+  so no existing row can violate it and no default has to be written; `DROP NOT NULL` never fails on
+  data; and because `turn_number` is new, every pre-existing review and approval row holds NULL,
+  which the partial predicate `WHERE turn_number IS NOT NULL` excludes — so both UNIQUE indexes match
+  **zero** existing rows and cannot trip on a database that already holds duplicate review rounds.
+  The only lock taken is the brief `ACCESS EXCLUSIVE` of the `ALTER`s on nine small tables.
+  **Rolling the binary back is safe.** Older releases never read the new columns, and a relaxed NOT
+  NULL is a superset of what they wrote. Forward-only per the project's migration policy: there is
+  no down-migration, and none is claimed.
+  **No operator action is required.** The claim lease defaults to 30 minutes with no configuration;
+  `journalScrub` behaviour changes only for callers who pass `journalScrub: true` (the default
+  full-delete mode is byte-for-byte unchanged); and nothing about the existing turn receipt, the
+  dispatch law or the budget protocol changes shape.
 
 ## [1.8.0] - 2026-08-15
 

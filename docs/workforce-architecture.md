@@ -277,11 +277,53 @@ and both acceptance e2e tests land their SIGKILL at a park. The
 engine-level guards that make it all true: the workflow-id claim, the receipt idempotency, and the
 one-writer transition monopoly above.
 
+A crash is not the only way a turn stops making progress, and the durable engine's own status
+cannot see the other one. A worker whose process is up and whose turn workflow is genuinely PENDING
+but whose body is WEDGED — a hung socket, a deadlocked dependency — reaches neither release path:
+not the turn's final transaction, which it never gets to, and not the reaper, which asked the
+engine and was told the workflow was alive. Such a row held its `maxConcurrentWorkers` slot and its
+budget reservation indefinitely, and because the `task`/`root` ledger scopes are un-windowed the
+stranded estimate never rolled over. Every claim therefore now stamps a LEASE
+(`workforce_tasks.claim_expires_at`, written in the same compare-and-swap that takes the claim and
+cleared by every exit from `working`), and the sweep reaps an expired claim through the identical
+path as a dead one — same re-queue, same release of exactly what the claim reserved, in the window
+it reserved it in — journaling `queueReason: 'turn_lease_expired'` so the two diagnoses stay
+distinguishable. The default lease is 30 minutes and is deliberately far above any plausible
+healthy turn: the shipped examples' whole-TASK wall clocks are 30m and 45m, and a task is many
+turns. A turn reaped while still running cannot corrupt anything — its final application is
+refused over the successor's claim by the claim-ownership check — so the residual cost of an
+over-eager lease is duplicated work, which is why the default errs long rather than short.
+`packages/workflow/durable-dbos/src/task-scheduler.db.test.ts` proves both halves: a wedged
+PENDING turn is reaped with its reservation returned, and a live turn inside its lease survives
+every sweep.
+
+What the lease does **not** do, stated plainly: it releases the row and the money, not the
+operating-system resource. Nothing kills the wedged body — there is no safe way to interrupt
+arbitrary handler code mid-call — so the wedged execution keeps its slot on the turn queue until it
+returns, throws, or the process restarts. What the reap recovers is the task (dispatchable again),
+the workforce `maxConcurrentWorkers` slot (counted off `working` rows), and the budget reservation,
+which is the only one of the three that leaked permanently. A deployment whose workers wedge often
+wants a smaller turn-queue concurrency or a timeout inside the handler, not a shorter lease.
+
 ## Upgrade and rollback notes
 
 Read this before an upgrade or an emergency, and read the limitations as literally as the
-guarantees — three of the five entries below are constraints, not features, and each names the test
+guarantees — three of the six entries below are constraints, not features, and each names the test
 that would go red if the constraint silently changed.
+
+**This release carries ONE migration: `0013_workforce_dedupe_lease_and_scrub`.** It adds three
+NULLABLE columns (`workforce_reviews.turn_number`, `workforce_approvals.turn_number`,
+`workforce_tasks.claim_expires_at`), two PARTIAL unique indexes, and relaxes five `text NOT NULL`
+content columns to accept NULL so `journalScrub` can erase content while retaining the budget
+ledger. It cannot fail on a populated database and needs no backfill: a nullable column cannot be
+violated by an existing row, `DROP NOT NULL` never fails on data, and because `turn_number` is a new
+column every pre-existing row holds NULL — and NULLs are distinct for uniqueness — so both unique
+indexes constrain ZERO existing rows. (That last property comes from the key being new and all-NULL,
+not from the indexes being partial; a total unique index on the same column would create just as
+cleanly.) Rolling the binary back is safe: older releases never read the new columns, and a relaxed
+`NOT NULL` is a superset of what they wrote. No operator action is required.
+Pinned by the `0013` block in `packages/kernel/db/scripts/shadow-dryrun.sh` and by
+`gate:migrate-clean`'s zero-drift cross-check against `schema.ts`.
 
 **Migrations are forward-only.** There are no down-migration files, no `drizzle-kit drop` script,
 and no claim anywhere that a schema change can be reversed. Recovery from a bad migration is a
@@ -307,15 +349,32 @@ boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
 (`packages/kernel/tasks/src/approvals.ts:167-181`) — so every window that expired during the outage
 is due the moment you turn the flag back on, and the declared fates fire then.
 
-**The boot migrator is a SINGLE-RUNNER step.** It takes no advisory lock. On a fresh, empty
-database two boots that start together will both try to apply the chain, and one of them dies —
-observed as SQLSTATE 23505 on the migrator's very first statement (`CREATE SCHEMA IF NOT EXISTS
-"drizzle"`), every time, on the certification host. Nothing is corrupted and nothing is half-applied
-(the pending set is one transaction), the database ends fully migrated, and the loser's cost is a
-failed boot that a restart fixes — but do not read "safe to run repeatedly" as multi-replica boot
-safety. Run migrations from one runner. The behaviour is pinned by
-`boot-migrator-concurrency.db.test.ts`; the advisory-locked shape a future fix should mirror is
-`tenant-provision.ts`'s `pg_advisory_xact_lock`, exercised at `tenant-provision.db.test.ts:152-181`.
+**The boot migrator is a SINGLE-RUNNER step. Run migrations from one runner** — and do not read
+"safe to run repeatedly" as multi-replica boot safety. It takes no advisory lock.
+
+What is PINNED, and what to design against (`boot-migrator-concurrency.db.test.ts`):
+
+- **A runner that meets another's objects aborts cleanly and records nothing.** Staged
+  deterministically — `orgs` is `0000`'s first non-`IF NOT EXISTS` CREATE, so a runner arriving
+  second dies exactly there — the abort is SQLSTATE `42P07` (duplicate_table),
+  `drizzle.__drizzle_migrations` records **zero** rows, and `journal_steps` (created *before* `orgs`
+  in the same batch) does not exist afterwards. So the whole-batch rollback is observed rather than
+  inferred: there is no half-applied migration for an operator to reason about, and the next boot
+  re-applies from the top rather than resuming a fiction.
+- **Two concurrent runners: at least one applies the chain, AT MOST ONE fails**, any failure is a
+  clean duplicate-object abort from a known set (`42P07` / `42710` / `23505` / `40001` / `40P01`),
+  and the database ends fully migrated either way. Zero failures is a legitimate outcome, not an
+  anomaly — a sufficiently serialized pair sees the high-water mark and the second runner no-ops.
+  **Do not build alerting that expects a failure.**
+
+Observed but NOT pinned, and recorded as an observation rather than as behaviour: on the
+certification host the concurrent pair does produce a loser every time, with SQLSTATE `23505` raised
+from the migrator's first statement. That is one host's timing, not a contract — the assertion above
+admits five SQLSTATEs and zero-or-one losers precisely because the racy path is not deterministic.
+
+The loser's cost, when there is one, is a failed boot that a restart fixes. The advisory-locked
+shape a future fix should mirror is `tenant-provision.ts`'s `pg_advisory_xact_lock`, exercised at
+`tenant-provision.db.test.ts:152-181`.
 
 **A migration that cannot apply is fail-closed, and the failing tag takes one query to name.** The
 migrator throws, the process exits non-zero, the whole pending set rolls back, and

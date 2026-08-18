@@ -178,3 +178,6 @@ export {
   TERMINAL_STATUSES,
   type TerminalStatus,
 } from './status.js';
+// A sibling module ON PURPOSE — see turn-lease.ts: `apply-transition.ts` is the one path the
+// state-machine gate exempts from its status-write detector, and the exemption is per FILE.
+export { renewTurnLease } from './turn-lease.js';
