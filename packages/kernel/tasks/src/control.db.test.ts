@@ -20,6 +20,15 @@
  *      -> `cancelDescendants`. So skipping a root skips its WHOLE SUBTREE at every depth, and a
  *      halt can return having left live work running.
  *
+ *   3. THE SAME SHAPE AS A RACE (D-039). The scan's read takes no lock, so the branch it picks is
+ *      a hypothesis. A root read as LIVE and found TERMINAL under `lockRootFirst` hits the
+ *      cascade's terminal early return — which is BEFORE `cancelDescendants` — so the halt moved
+ *      on having done nothing for that subtree while having taken the branch that says it handled
+ *      it. Shape 2 covers "terminal before the scan"; this one covers "terminal after it", and no
+ *      test of shape 2 can catch it, because the halt takes the OTHER branch. The arms drive the
+ *      interleaving with real Postgres row locks and wait on Postgres' own wait graph rather than
+ *      on a sleep — a sleep would silently degrade into shape 2 on a slow host.
+ *
  * That second shape is reachable on the engine's own happy path, not a contrivance. A BUFFERED
  * CREATE (`applyTurnOutcome`'s `createdChildren`) makes a child deliberately NOT bound to the
  * parent's join — engine.db.test.ts's "a live buffered child does NOT wedge the parent's next
