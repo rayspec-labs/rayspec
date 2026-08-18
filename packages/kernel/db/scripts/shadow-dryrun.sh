@@ -390,10 +390,20 @@ assert_eq "9" \
 # A REAL write through the set: a task, its transition log, an idempotent signal, a ledger row and
 # the runtime row insert cleanly; a duplicate signal key REFUSES (the idempotent-delivery guard);
 # two receipt-less transition rows coexist (the partial WHERE leaves NULL turn_numbers alone).
+#
+# The seed covers ALL NINE workforce tables plus BOTH run_events namespaces on ONE org, because the
+# cascade claim is about the tenant's WHOLE task graph and a claim asserted on five of nine tables is
+# a claim about five of nine tables. The delegation/approval/review/message rows carry the same DDL
+# as the proven five, which is exactly why they were previously left unexercised — and exactly why a
+# row-level assertion costs four lines and closes the hole. The journal half matters more: run_events
+# holds workforce data under TWO run_id namespaces (`<taskId>` for task events, `workforce:<id>` for
+# control events, see packages/kernel/tasks/src/events.ts:97) and neither had ever been cascaded — the
+# only run_events row this script deleted was an agent-run stream (the `…e1` arm below, kept as is).
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000d2', 'TaskOrg', 'taskorg');
 INSERT INTO workforce_tasks (task_id, tenant_id, workforce_id, root_task_id, title, goal, owner, requested_by, status)
-VALUES ('t-root', '00000000-0000-0000-0000-0000000000d2', 'wf-a', 't-root', 'Root', 'Do the thing', 'user', 'user', 'planned');
+VALUES ('t-root', '00000000-0000-0000-0000-0000000000d2', 'wf-a', 't-root', 'Root', 'Do the thing', 'user', 'user', 'planned'),
+       ('t-child', '00000000-0000-0000-0000-0000000000d2', 'wf-a', 't-root', 'Child', 'Do the part', 'dev', 'lead', 'planned');
 INSERT INTO workforce_task_transitions (tenant_id, task_id, from_status, to_status, actor)
 VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'planned', 'queued', 'scheduler'),
        ('00000000-0000-0000-0000-0000000000d2', 't-root', 'queued', 'working', 'scheduler');
@@ -402,6 +412,21 @@ VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'manual_unblock', 'sig
 INSERT INTO workforce_budget_ledger (tenant_id, scope_kind, scope_id, window_start)
 VALUES ('00000000-0000-0000-0000-0000000000d2', 'task', 't-root', 'epoch'::timestamptz);
 INSERT INTO workforce_runtime (tenant_id, workforce_id) VALUES ('00000000-0000-0000-0000-0000000000d2', 'wf-a');
+INSERT INTO workforce_delegations (tenant_id, workforce_id, parent_task_id, child_task_id, delegated_by, delegated_to, resolved_owner, goal, expected_output, depth, status)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 'wf-a', 't-root', 't-child', 'lead', 'department:eng', 'dev', 'Do the part', 'A written answer', 1, 'accepted');
+INSERT INTO workforce_approvals (tenant_id, task_id, question, approver, status, on_timeout)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'Ship it?', 'user', 'pending', 'fail');
+INSERT INTO workforce_reviews (tenant_id, task_id, reviewer, round)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 't-child', 'lead', 1);
+INSERT INTO workforce_messages (tenant_id, task_id, sender, recipient, body)
+VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'dev', 'lead', 'Part one is done.');
+-- BOTH journal namespaces the task engine writes under: the per-task stream and the workforce
+-- control stream. `run_id` is plain text with no FK, so only the tenant FK can carry them away.
+INSERT INTO run_events (run_id, tenant_id, seq, type, data)
+VALUES ('t-root', '00000000-0000-0000-0000-0000000000d2', 0, 'workforce.task.created',
+        '{"v":1,"type":"workforce.task.created","taskId":"t-root"}'::jsonb),
+       ('workforce:wf-a', '00000000-0000-0000-0000-0000000000d2', 0, 'workforce.task.queued',
+        '{"v":1,"type":"workforce.task.queued","taskId":"t-root"}'::jsonb);
 SQL
 assert_eq "2" \
   "SELECT count(*) FROM workforce_task_transitions WHERE task_id='t-root';" \
@@ -409,13 +434,27 @@ assert_eq "2" \
 assert_eq "refused" \
   "WITH dup AS (INSERT INTO workforce_task_signals (tenant_id, task_id, kind, signal_key) VALUES ('00000000-0000-0000-0000-0000000000d2', 't-root', 'manual_unblock', 'sig-1') ON CONFLICT DO NOTHING RETURNING 1) SELECT CASE WHEN count(*) = 0 THEN 'refused' ELSE 'duplicated' END FROM dup;" \
   "0012 a duplicate signal key is refused, not duplicated"
-# FK CASCADE: deleting the org removes the whole graph — tasks, log, signals, ledger, runtime.
+# NON-VACUITY: every one of the nine tables and both journal namespaces carries a row BEFORE the
+# delete. Without this the nine zero-assertions below would be satisfied by a seed that never landed.
+assert_eq "11" \
+  "SELECT (SELECT count(*) FROM workforce_tasks) + (SELECT count(*) FROM workforce_task_transitions) + (SELECT count(*) FROM workforce_task_signals) + (SELECT count(*) FROM workforce_delegations) + (SELECT count(*) FROM workforce_approvals) + (SELECT count(*) FROM workforce_reviews) + (SELECT count(*) FROM workforce_messages) + (SELECT count(*) FROM workforce_budget_ledger) + (SELECT count(*) FROM workforce_runtime);" \
+  "all nine workforce tables carry seeded rows before the org delete"
+assert_eq "1|1" \
+  "SELECT (SELECT count(*) FROM run_events WHERE run_id='t-root') || '|' || (SELECT count(*) FROM run_events WHERE run_id LIKE 'workforce:%');" \
+  "both run_events namespaces (task + workforce control) carry a row before the org delete"
+# FK CASCADE: deleting the org removes the WHOLE graph — all nine tables and both journal namespaces.
 psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000d2';" >/dev/null
 assert_eq "0" "SELECT count(*) FROM workforce_tasks;" "workforce_tasks cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM workforce_task_transitions;" "workforce_task_transitions cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM workforce_task_signals;" "workforce_task_signals cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_delegations;" "workforce_delegations cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_approvals;" "workforce_approvals cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_reviews;" "workforce_reviews cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_messages;" "workforce_messages cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM workforce_budget_ledger;" "workforce_budget_ledger cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM workforce_runtime;" "workforce_runtime cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM run_events WHERE run_id='t-root';" "run_events TASK namespace cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM run_events WHERE run_id LIKE 'workforce:%';" "run_events WORKFORCE-CONTROL namespace cascaded away after org delete"
 
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
