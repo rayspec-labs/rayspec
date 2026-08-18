@@ -703,10 +703,24 @@ employee id cannot be one.
    like the approval door.
 
 **The enforcement is still correct** — it fails closed, and the journal records who overrode whom.
-What is missing is the binding that would make the intended path work. This is an open decision,
-tracked as **B-017g** in the program's backlog: add a binding, or record the limitation as a
-deliberate v1 boundary. Until it is decided, no document — this one included — may imply that the
-named-approver path works end to end.
+What is missing is the binding that would make the intended path work.
+
+**This is a decided boundary, not an open question.** A principal-to-employee binding is an
+identity-mapping feature with its own trust surface — who may claim to be an employee, and who
+authorises that claim — and it is deliberately **not** built in this release. So the honest reading
+of `onTimeout: 'escalate'` is: it re-routes the *accountability record* to the declared superior and
+it re-opens the decision window, and on an HTTP-only deployment the decision itself is taken by
+break-glass. No document may imply that the named-approver path works end to end.
+
+**The grammar does not yet say so, and that is a gap.** A document declaring `onTimeout: 'escalate'`
+is accepted today with one exception: the lint refuses a policy that escalates *and covers the
+orchestrator seat*, because the orchestrator reports to nobody and the runtime could not build the
+fate at all (`packages/kernel/spec/src/workforce-lint.ts:636` guards the fate,
+`packages/kernel/spec/src/workforce-lint.ts:643` raises it as an error). That is a **different**
+condition from the one on this page: it catches "there is no superior to name", not "the superior
+who *is* named cannot be matched by any authenticated principal". **No diagnostic covers the second
+today** — an author learns it from this page or from a 403 at 2am. A lint warning is scoped as a
+follow-up item; until it lands, this paragraph is the only warning.
 
 ### 7.3 Mid-turn crash safety is SIMULATED, not empirically proven
 
@@ -992,6 +1006,8 @@ packages/kernel/core/src/worker-selector.ts:53 | export interface WorkerSelector
 packages/kernel/core/src/cost-policy.ts:53 | export interface CostPolicy {
 packages/kernel/core/src/approval-provider.ts:45 | export interface ApprovalProvider {
 packages/kernel/spec/src/workforce-lint.ts:229 | if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
+packages/kernel/spec/src/workforce-lint.ts:636 | if (approval.onTimeout !== 'escalate') return;
+packages/kernel/spec/src/workforce-lint.ts:643 | 'invalid_orchestrator',
 packages/kernel/spec/src/workforce-lint.ts:690 | 'workforce_label_unheld',
 packages/kernel/spec/src/workforce-grammar.ts:87 | export const WorkforceLabel = SafeIdentifier;
 packages/kernel/spec/src/workforce-grammar.ts:129 | labels: z.array(WorkforceLabel).default([]),
