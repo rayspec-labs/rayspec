@@ -1,7 +1,7 @@
 /**
- * The three `examples/<slug>/dev-boot.mjs` wrappers own their shutdown: `SIGINT`/`SIGTERM` stop them.
+ * Every BOOT ENTRYPOINT under `examples/` owns its shutdown: `SIGINT`/`SIGTERM` stop it.
  *
- * Two arms, and they prove DIFFERENT amounts — read the second before trusting the first for all three:
+ * Two arms, and they prove DIFFERENT amounts — read the second before trusting the first for all of them:
  *
  *   (a) BOOT arm — spawns the REAL `examples/support-ticket-triage/dev-boot.mjs` as a subprocess against
  *       a throwaway DATABASE (the wrapper creates it itself), waits for `/health` 200 (the accept
@@ -10,12 +10,28 @@
  *       alive and answering `/health` — `@openai/agents-core`'s SIGINT/SIGTERM handler exits only
  *       `if (!hasOtherListenersForSignals(sig))` (`process.listeners(event).length > 1`) and
  *       `signal-exit` re-raises only when `process.listeners(sig).length` equals its own listener count,
- *       so with both loaded each defers to the other. This arm covers ONE of the three wrappers: it is
- *       the only one whose boot needs no model-provider key (the other two default to live executor
- *       modes and abort without `OPENAI_API_KEY`).
- *   (b) SOURCE arm — pins the shape in EVERY wrapper it finds by reading them; the set is read off the
- *       filesystem (`discoverWrappers`), so a wrapper added later is held from the day it lands. It
- *       asserts registration and wiring only; the behaviour behind that wiring is what arm (a) runs.
+ *       so with both loaded each defers to the other. This arm covers ONE entrypoint: it is the only one
+ *       whose boot needs no model-provider key (the two other wrappers default to live executor modes
+ *       and abort without `OPENAI_API_KEY`; `local-boot`'s is TypeScript and needs a TS runner).
+ *   (b) SOURCE arm — pins the shape in EVERY entrypoint it finds by reading them; the set is read off the
+ *       filesystem (`discoverBy`), so an example added later cannot escape a hand-maintained list.
+ *       It asserts registration and wiring only; the behaviour behind that wiring is what arm (a) runs.
+ *
+ * DISCOVERY IS BY ROLE, NOT BY FILENAME — and that is the whole reason this header changed. The set was
+ * once globbed as `examples/<slug>/dev-boot.mjs`, which silently excluded `examples/local-boot/serve.ts`:
+ * that entrypoint carries the identical boot-window fix and NOTHING would have gone red if it were
+ * reverted (measured — the reverted file passed this suite 5/5 before the rule was widened). A filename
+ * list fixes the one path it names and misses the next one, so the rule is now "a non-test source file
+ * directly under `examples/<slug>/` that names `@rayspec/server`", cross-checked against the narrower
+ * `assembleServer` call every entrypoint makes today. Both markers are deliberately INDEPENDENT of the
+ * signal wiring asserted below, so the property under test cannot also remove a file from the set.
+ *
+ * WHAT THAT DOES AND DOES NOT BUY, stated exactly. It closes the failure that happened: a different file
+ * name, a different language, or a different `@rayspec/server` entry point is now DISCOVERED, and a file
+ * that reaches for the package without calling `assembleServer` is NAMED by the marker-agreement arm
+ * rather than silently held or skipped. It does NOT make the set self-maintaining in general — the floor
+ * is a static `>= 4`, and a wrapper that boots without naming `@rayspec/server` at all is outside the
+ * rule and would still need this file changed. That case is uncovered, and saying so is the point.
  *
  * ONE BOUND NEITHER ARM COVERS — a property of the wiring, not a gap in the arms: the exit sits inside
  * `httpServer.close()`'s callback, and Node runs that callback only once every open connection has
@@ -25,7 +41,7 @@
  * A SECOND bound used to sit here and no longer does. The handler was registered only after `serve()`
  * returned, so a signal during the boot was answered by nobody: before the dependencies named above
  * installed theirs it killed the process, and from then until `serve()` returned it did NOTHING AT
- * ALL — a wrapper killed mid-boot hung until SIGKILL. Every wrapper now claims SIGINT/SIGTERM before
+ * ALL — a wrapper killed mid-boot hung until SIGKILL. Every entrypoint now claims SIGINT/SIGTERM before
  * its first awaited step, starting in a boot phase that aborts, and arm (b) asserts that ORDERING
  * rather than merely the registration. `packages/app/server/src/serve.ts` and
  * `packages/app/cli/src/deploy.ts` carry the same fix; `serve-boot-signal.test.ts` and
@@ -38,7 +54,7 @@
  * Arm (a) skips without DATABASE_URL; the ran-guard at the bottom hard-fails if a REQUIRED run skipped it.
  */
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,22 +65,78 @@ const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const EXAMPLES = resolve(here, '../../../../examples');
 
+/** The source extensions a boot entrypoint may be written in — `local-boot`'s is TypeScript. */
+const ENTRYPOINT_EXTENSIONS = ['.mjs', '.js', '.ts', '.mts', '.cjs'];
+/** A test file is never an entrypoint, and several of `local-boot`'s DO name both markers below. */
+const IS_TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]s$/;
 /**
- * Every dev-boot wrapper under examples/ — READ OFF THE FILESYSTEM, never typed out, so a wrapper
- * added later is held by arm (b) the moment it lands instead of escaping a list nobody updated.
- * The floor assertion in arm (b) is what keeps a glob that found nothing from passing vacuously.
+ * TWO markers, and the pair is the point — a single one is a rule whose blind spot nobody can see.
+ *
+ * `PACKAGE_MARKER` is the DISCOVERY rule: a file that reaches for `@rayspec/server` at all. That is
+ * the broader of the two and the one a future entrypoint is least able to avoid, because assembling
+ * a RaySpec server is what that package is for.
+ *
+ * `ASSEMBLE_MARKER` is the narrower CALL every entrypoint makes today. It is CROSS-CHECKED against
+ * the discovery set rather than used as the rule, so an entrypoint that boots through some other
+ * `@rayspec/server` export lands in the discovery set and is HELD, instead of being silently absent
+ * the way `local-boot/serve.ts` was under the old filename glob.
+ *
+ * Both are deliberately independent of the signal wiring arm (b) asserts, so deleting the property
+ * under test cannot also delete the file from the set being tested.
  */
-function discoverWrappers(): string[] {
-  return readdirSync(EXAMPLES, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => `${entry.name}/dev-boot.mjs`)
-    .filter((rel) => existsSync(resolve(EXAMPLES, rel)))
-    .sort();
-}
-const WRAPPERS = discoverWrappers();
+const PACKAGE_MARKER = '@rayspec/server';
+const ASSEMBLE_MARKER = 'assembleServer';
 
-/** The wrapper arm (a) boots: the only one whose boot demands no model-provider key. */
+/**
+ * Every non-test source file directly under `examples/<slug>/` whose source contains `marker`.
+ *
+ * Matching is over RAW SOURCE, comments included, and that asymmetry is deliberate: a file that only
+ * MENTIONS a marker in prose is pulled in and held to the shape assertions (loud, and easy to see),
+ * whereas stripping comments to be clever would risk dropping a real entrypoint (silent, and the
+ * exact failure mode this suite exists to close). Measured while proving the agreement arm red — a
+ * probe whose comment merely said "never calls assembleServer" joined the narrower set on that word
+ * alone. Both markers are matched the same way, so the two sets stay comparable.
+ */
+function discoverBy(marker: string): string[] {
+  const found: string[] = [];
+  for (const slug of readdirSync(EXAMPLES, { withFileTypes: true })) {
+    if (!slug.isDirectory()) continue;
+    for (const file of readdirSync(resolve(EXAMPLES, slug.name), { withFileTypes: true })) {
+      if (!file.isFile()) continue;
+      if (!ENTRYPOINT_EXTENSIONS.some((ext) => file.name.endsWith(ext))) continue;
+      if (IS_TEST_FILE.test(file.name)) continue;
+      const rel = `${slug.name}/${file.name}`;
+      if (!readFileSync(resolve(EXAMPLES, rel), 'utf8').includes(marker)) continue;
+      found.push(rel);
+    }
+  }
+  return found.sort();
+}
+
+/**
+ * Every BOOT ENTRYPOINT under examples/ — READ OFF THE FILESYSTEM BY ROLE, never typed out and never
+ * globbed by filename, so an example added later cannot escape a list nobody updated (or, as happened
+ * with `local-boot/serve.ts`, a glob nobody widened).
+ *
+ * THE EXACT BOUND, because a claim wider than its mechanism is what this whole suite is about: this
+ * holds every non-test source file directly under `examples/<slug>/` that names `@rayspec/server`.
+ * A future wrapper that boots WITHOUT reaching for that package at all is outside the rule and would
+ * still need this file changed — that case is not covered and is not claimed to be. What IS closed is
+ * the failure that actually happened: an entrypoint written in a different file name, or a different
+ * language, or calling a different function, is now discovered rather than skipped.
+ */
+const WRAPPERS = discoverBy(PACKAGE_MARKER);
+/** The narrower set, cross-checked against the one above so neither marker can drift alone. */
+const ASSEMBLE_SET = discoverBy(ASSEMBLE_MARKER);
+
+/** The entrypoint arm (a) boots: the only one whose boot demands no model-provider key. */
 const BOOTABLE_REL = 'support-ticket-triage/dev-boot.mjs';
+/**
+ * The TypeScript entrypoint the old `dev-boot.mjs` glob missed entirely. Named in the floor below so a
+ * rule that quietly stopped matching a `.ts` entrypoint is RED rather than merely narrower — the exact
+ * failure this widening exists to close.
+ */
+const TS_ENTRYPOINT_REL = 'local-boot/serve.ts';
 const BOOTABLE_WRAPPER = resolve(EXAMPLES, BOOTABLE_REL);
 
 const SUITE_DB = `rayspec_devboot_shutdown_${process.pid}`;
@@ -229,13 +301,27 @@ describe.skipIf(!baseUrl)('examples/*/dev-boot.mjs — a signal stops the wrappe
   }
 });
 
-describe('examples/*/dev-boot.mjs — every wrapper registers the same owning handler', () => {
-  // The floor under the discovery above: an EMPTY or truncated glob would collect zero `it`s below and
-  // this file would still read GREEN while pinning nothing. Three wrappers exist today; the boot arm's
-  // own wrapper must be among them, or arm (a) is signalling a path arm (b) never reads.
-  it('discovers every examples/<slug>/dev-boot.mjs on disk', () => {
-    expect(WRAPPERS.length).toBeGreaterThanOrEqual(3);
+describe('examples/* boot entrypoints — every one registers the same owning handler', () => {
+  // The floor under the discovery above: an EMPTY or truncated rule would collect zero `it`s below and
+  // this file would still read GREEN while pinning nothing. Four entrypoints exist today; the boot arm's
+  // own wrapper must be among them, or arm (a) is signalling a path arm (b) never reads — and so must
+  // the TypeScript one, which is what the previous filename glob dropped on the floor.
+  it('discovers every examples/<slug> boot entrypoint on disk', () => {
+    expect(WRAPPERS.length).toBeGreaterThanOrEqual(4);
     expect(WRAPPERS).toContain(BOOTABLE_REL);
+    expect(WRAPPERS).toContain(TS_ENTRYPOINT_REL);
+  });
+
+  /**
+   * The floor above is a static `>= 4`, which a future entrypoint cannot raise on its own — so the
+   * two markers are checked AGAINST EACH OTHER instead of trusting either alone. A file that reaches
+   * for `@rayspec/server` but never calls `assembleServer` is a boot path this suite's shape
+   * assertions were not written for: it must be NAMED here, not silently held or silently skipped.
+   */
+  it('the two discovery markers agree — neither can drift alone', () => {
+    expect(ASSEMBLE_SET).toEqual(WRAPPERS);
+    // …and neither set is empty, which is the reading a broken rule also produces.
+    expect(WRAPPERS.length).toBeGreaterThan(0);
   });
 
   for (const wrapper of WRAPPERS) {
@@ -245,19 +331,31 @@ describe('examples/*/dev-boot.mjs — every wrapper registers the same owning ha
       expect(src).toContain("process.on('SIGTERM', () => phase.handle('SIGTERM'));");
       // The registration must come BEFORE the boot, not after it — that is the whole point of the
       // `phase` indirection, and the ordering is the property, so assert the ordering.
-      expect(src.indexOf("process.on('SIGTERM'")).toBeLessThan(
-        src.indexOf('await assembleServer('),
-      );
+      //
+      // Anchored on `const server = await`, which every entrypoint writes, rather than on
+      // `await assembleServer(`: `local-boot/serve.ts` wraps the call as
+      // `await withBootTimeout(assembleServer(…), …)`, so the old anchor was ABSENT there and
+      // `indexOf` returned -1 — an ordering assertion that fails for the wrong reason. Anchoring on
+      // the bare `assembleServer(` instead would be worse: contract-intake and support-intake-chat
+      // both print it inside a header COMMENT above their registration, which would invert the test.
+      const assembleAt = src.indexOf('const server = await');
+      expect(
+        assembleAt,
+        'no `const server = await …` — the ordering anchor is gone',
+      ).toBeGreaterThan(-1);
+      expect(src.indexOf("process.on('SIGTERM'")).toBeLessThan(assembleAt);
       // …and the graceful close REPLACES the boot-phase abort rather than adding a second pair.
-      expect(src).toContain('phase.handle = (signal) => {');
+      // Matched by regex, not substring: the TypeScript entrypoint annotates the same assignment as
+      // `phase.handle = (signal: string): void => {`.
+      expect(src).toMatch(/phase\.handle = \(signal(?:: string)?\)(?:: void)? => \{/);
       expect(src.match(/process\.on\('SIGTERM'/g) ?? []).toHaveLength(1);
       expect(src).toContain('received during boot — aborting before the server listens.');
       expect(src).toContain('httpServer.close(async () => {');
       // server.close() drains the durable worker and ends the DB pool; skipping it would orphan both.
       expect(src).toContain('await server.close();');
       expect(src).toContain('process.exit(0);');
-      // No SIGHUP REGISTRATION (the wrapper's comment names the signal, so match the call): signal-exit
-      // is its only listener today and re-raises it — see the header.
+      // No SIGHUP REGISTRATION (the entrypoint's comment names the signal, so match the call):
+      // signal-exit is its only listener today and re-raises it — see the header.
       expect(src).not.toContain("process.on('SIGHUP'");
     });
   }
@@ -265,7 +363,7 @@ describe('examples/*/dev-boot.mjs — every wrapper registers the same owning ha
 
 // The un-skippable ran-guard: fail loudly if a REQUIRED (CI / RAYSPEC_REQUIRE_DB_TESTS) run SKIPPED
 // the arm that signals a real process (a lost DATABASE_URL would otherwise read GREEN).
-describe('examples/*/dev-boot.mjs — ran-guard', () => {
+describe('examples/* boot entrypoints — ran-guard', () => {
   it('the signal arm actually ran when the DB was required', () => {
     if (dbRequired) expect(signalTestsRan).toBe(2);
     else expect(true).toBe(true);
