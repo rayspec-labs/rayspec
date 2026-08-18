@@ -609,6 +609,35 @@ export async function serveDeployment(
   allowlistPath?: string,
   hostOverride?: string,
 ): Promise<void> {
+  // OWN THE TERMINATION SIGNALS FIRST — before anything that can await. Node's default action for
+  // SIGINT/SIGTERM is to terminate, so registering nothing looks safe; it is not. The dynamic
+  // `import('@rayspec/server')` below drags in `@openai/agents-core`'s trace provider and
+  // `signal-exit`, and each of those handlers acts ONLY when it is the sole listener — the provider
+  // exits only `if (!hasOtherListenersForSignals('SIGTERM'))`, signal-exit re-raises only when it is
+  // alone. With both loaded and no handler of ours, they defer to each other and the signal becomes a
+  // NO-OP. Measured: importing `@rayspec/server` alone takes `process.listeners('SIGTERM').length`
+  // from 0 to 2. Everything between that import and the registrations further down — the config load,
+  // the assemble, the whole committed migration chain, the product boot — was therefore unkillable by
+  // SIGTERM, which for a `deploy` under a process manager means a container that hangs until SIGKILL.
+  // (`packages/app/server/src/serve.ts` carries the same fix and the same evidence; the property is
+  // pinned by a test that signals a real mid-boot process.)
+  //
+  // Aborting mid-boot abruptly is safe as a PROPERTY: the drizzle pg-core dialect applies the whole
+  // pending migration set in ONE transaction, so a dropped connection rolls the entire batch back,
+  // and this process's sockets close with it. Exit 0 for the same reason the serving paths do — a
+  // signalled shutdown is a requested one. Both branches below REPLACE this handler rather than
+  // adding a second registration, so exactly one pair lives on the process.
+  const phase = {
+    handle: (signal: string): void => {
+      console.log(
+        `\n[rayspec deploy] ${signal} received during boot — aborting before the server listens.`,
+      );
+      process.exit(0);
+    },
+  };
+  process.on('SIGINT', () => phase.handle('SIGINT'));
+  process.on('SIGTERM', () => phase.handle('SIGTERM'));
+
   // RAYSPEC_SPEC_PATH is how loadServerConfig/assembleServer find the doc — set it from the positional
   // (the operator typed the path once). An explicit --port overrides the PORT env.
   process.env.RAYSPEC_SPEC_PATH = specPath;
@@ -723,18 +752,23 @@ export async function serveDeployment(
         port: staticConfig.port,
         prefix: '[rayspec deploy]',
       });
-      const shutdownStatic = (signal: string): void => {
+      // The boot phase is over: hand the ALREADY-REGISTERED handlers the graceful shutdown.
+      phase.handle = (signal: string): void => {
         console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
         httpStatic.close(async () => {
           await staticServer.close();
           process.exit(0);
         });
       };
-      process.on('SIGINT', () => shutdownStatic('SIGINT'));
-      process.on('SIGTERM', () => shutdownStatic('SIGTERM'));
       return;
     }
 
+    // A progress line BEFORE the (potentially slow) assemble, for the same reason rayspec-serve
+    // prints one: the banner appears only once the WHOLE boot succeeds, so without this a hang —
+    // an unreachable database, a stuck migration — is silent. It names the phases about to run.
+    console.log(
+      '[rayspec deploy] booting — loading config, connecting to the database, applying migrations…',
+    );
     const config = loadServerConfig();
     // Build the deployer-seam opts from the SAME shared builder rayspec-serve uses: the sanctioned
     // validating registrar (registerProductStores) for ANY spec, PLUS an env-driven agentBackendsFactory
@@ -761,15 +795,14 @@ export async function serveDeployment(
       prefix: '[rayspec deploy]',
     });
 
-    const shutdown = (signal: string): void => {
+    // As in the static branch: replace the boot-phase abort now that there is something to close.
+    phase.handle = (signal: string): void => {
       console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
       httpServer.close(async () => {
         await server.close();
         process.exit(0);
       });
     };
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
   } catch (err) {
     // DeployError is the roll-out gate's fail-closed signal — re-surface it actionably, pointing at the
     // sanctioned registration path (a verify-not-register failure means the product tables were not

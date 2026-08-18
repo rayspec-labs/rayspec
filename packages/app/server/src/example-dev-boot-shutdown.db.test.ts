@@ -17,17 +17,19 @@
  *       filesystem (`discoverWrappers`), so a wrapper added later is held from the day it lands. It
  *       asserts registration and wiring only; the behaviour behind that wiring is what arm (a) runs.
  *
- * TWO BOUNDS NEITHER ARM COVERS — properties of the wiring, not gaps in the arms:
- *   - The exit sits inside `httpServer.close()`'s callback, and Node runs that callback only once every
- *     open connection has ended. Arm (a) signals an IDLE server. With a request still in flight the
- *     wrapper stops accepting immediately but stays alive until that request finishes.
- *   - The handler is registered after `serve()` returns, so a signal during the boot is not the
- *     wrapper's to answer: before the dependencies named above install theirs it kills the process,
- *     and after that — until `serve()` returns — it does nothing at all and the boot completes.
- *   `packages/app/server/src/serve.ts` used to carry both from the same wiring; it no longer carries
- *   the second, because it installs its handlers as the first statement of `main()` and starts them
- *   in a boot phase that aborts (`serve-boot-signal.test.ts` signals a mid-boot process and asserts
- *   it is gone). These wrappers still carry it — closing it here means the same move in each.
+ * ONE BOUND NEITHER ARM COVERS — a property of the wiring, not a gap in the arms: the exit sits inside
+ * `httpServer.close()`'s callback, and Node runs that callback only once every open connection has
+ * ended. Arm (a) signals an IDLE server. With a request still in flight the wrapper stops accepting
+ * immediately but stays alive until that request finishes.
+ *
+ * A SECOND bound used to sit here and no longer does. The handler was registered only after `serve()`
+ * returned, so a signal during the boot was answered by nobody: before the dependencies named above
+ * installed theirs it killed the process, and from then until `serve()` returned it did NOTHING AT
+ * ALL — a wrapper killed mid-boot hung until SIGKILL. Every wrapper now claims SIGINT/SIGTERM before
+ * its first awaited step, starting in a boot phase that aborts, and arm (b) asserts that ORDERING
+ * rather than merely the registration. `packages/app/server/src/serve.ts` and
+ * `packages/app/cli/src/deploy.ts` carry the same fix; `serve-boot-signal.test.ts` and
+ * `deploy-boot-signal.test.ts` prove it functionally by signalling real mid-boot processes.
  *
  * `SIGHUP` is deliberately NOT wired: `signal-exit` registers for it and `@openai/agents-core` does not,
  * so signal-exit is its sole listener and re-raises it, which is why that signal already ends these
@@ -239,8 +241,17 @@ describe('examples/*/dev-boot.mjs — every wrapper registers the same owning ha
   for (const wrapper of WRAPPERS) {
     it(`${wrapper} closes the http server, awaits server.close() and exits 0`, () => {
       const src = readFileSync(resolve(EXAMPLES, wrapper), 'utf8');
-      expect(src).toContain("process.on('SIGINT', () => shutdown('SIGINT'));");
-      expect(src).toContain("process.on('SIGTERM', () => shutdown('SIGTERM'));");
+      expect(src).toContain("process.on('SIGINT', () => phase.handle('SIGINT'));");
+      expect(src).toContain("process.on('SIGTERM', () => phase.handle('SIGTERM'));");
+      // The registration must come BEFORE the boot, not after it — that is the whole point of the
+      // `phase` indirection, and the ordering is the property, so assert the ordering.
+      expect(src.indexOf("process.on('SIGTERM'")).toBeLessThan(
+        src.indexOf('await assembleServer('),
+      );
+      // …and the graceful close REPLACES the boot-phase abort rather than adding a second pair.
+      expect(src).toContain('phase.handle = (signal) => {');
+      expect(src.match(/process\.on\('SIGTERM'/g) ?? []).toHaveLength(1);
+      expect(src).toContain('received during boot — aborting before the server listens.');
       expect(src).toContain('httpServer.close(async () => {');
       // server.close() drains the durable worker and ends the DB pool; skipping it would orphan both.
       expect(src).toContain('await server.close();');

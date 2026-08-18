@@ -47,6 +47,26 @@ import postgres from 'postgres';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+// OWN THE TERMINATION SIGNALS FIRST — before any awaited boot step. Node's default action for
+// SIGINT/SIGTERM is to terminate, so registering nothing looks safe; it is not. The static imports
+// above already installed two handlers this wrapper does not own — @openai/agents-core's tracing
+// provider and signal-exit — and each acts ONLY when it is the sole listener, so with both loaded
+// they defer to each other and the signal becomes a NO-OP. Everything from module evaluation to the
+// `serve()` below was therefore unkillable by SIGTERM. The handler starts in a boot phase that
+// aborts, and is REPLACED (not re-registered) once there is something to close, so exactly one pair
+// lives on this process. NOT SIGHUP — signal-exit is its only listener there, so that signal already
+// stops this process; leaving it unlistened keeps it that way.
+const phase = {
+  handle: (signal) => {
+    console.log(
+      `\n[dev-boot] ${signal} received during boot — aborting before the server listens.`,
+    );
+    process.exit(0);
+  },
+};
+process.on('SIGINT', () => phase.handle('SIGINT'));
+process.on('SIGTERM', () => phase.handle('SIGTERM'));
+
 // 1. Boot config — a SHELL env value wins; otherwise a LOCAL default. NOT read from .env (a demo must
 //    never boot against the main dev DB), so we capture these BEFORE the .env load below.
 const DATABASE_URL =
@@ -165,23 +185,16 @@ const httpServer = serve(
 );
 
 // Graceful shutdown: stop accepting connections, drain the durable worker + end the DB pool, exit —
-// the same wiring `packages/app/server/src/serve.ts` gives the shipped entrypoint. This wrapper needs
-// its OWN handler: the two SIGINT/SIGTERM handlers its dependencies install (@openai/agents-core's
-// tracing provider and signal-exit) each act only when no OTHER listener is registered, so with both
-// loaded neither one ends the process. NOT SIGHUP — signal-exit is its only listener there, so that
-// signal already stops this process; leaving it unlistened keeps it that way.
-// TWO BOUNDS this handler does NOT remove. (1) The exit sits inside close()'s callback, which Node
-// runs only once every open connection has ended: the port refuses new connections the moment the
-// signal lands, but a request still in flight holds the exit until it finishes. (2) This registration
-// happens after the boot, so a signal DURING the boot is unhandled here — before the dependencies
-// above install theirs it kills the process outright, and from then until serve() returns it does
-// nothing at all. serve.ts carries both bounds, from the same wiring.
-const shutdown = (signal) => {
+// the same wiring `packages/app/server/src/serve.ts` gives the shipped entrypoint. The handlers are
+// already installed (top of this file, where the reason they are needed is spelled out); this hands
+// them the graceful close now that there is something to close.
+// ONE BOUND this does NOT remove: the exit sits inside close()'s callback, which Node runs only once
+// every open connection has ended — the port refuses new connections the moment the signal lands,
+// but a request still in flight holds the exit until it finishes.
+phase.handle = (signal) => {
   console.log(`\n[dev-boot] ${signal} received — shutting down…`);
   httpServer.close(async () => {
     await server.close();
     process.exit(0);
   });
 };
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
