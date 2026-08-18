@@ -117,6 +117,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The boot migrator is serialized, and a failed chain now names the pending migrations.**
+  `applyMigrations` took no advisory lock, so two runners against the same fresh database raced on
+  the migrator's own `CREATE SCHEMA/TABLE IF NOT EXISTS` bootstrap — a check-then-create window — and
+  the loser died on a duplicate-object error before it reached the chain at all. That is exactly what
+  a deploy script that fans out on a first bring-up produces, and on the certification host it
+  produced a loser on **every** run (SQLSTATE `23505`, from the migrator's very first statement).
+  `rayspec provision-tenant` already worked around it by taking the lock around its own call; the
+  boot did not, and neither does a second replica. The lock now lives in `applyMigrations` itself, on
+  a key `@rayspec/db` owns and exports beside `migrationsDir()` — so two concurrent boots both
+  succeed rather than costing one of them a restart. The command's outer wrapper is **gone**, and
+  must stay gone: two sessions of one process holding the same advisory key wait on each other.
+  It is a session-scoped `pg_advisory_lock` on a connection of its own, not a transaction-scoped one
+  on a pooled connection: the pooled shape holds the connection the migration itself needs, so it
+  deadlocks any handle whose pool is sized 1 (measured — pool 4 applies in ~540ms, pool 1 never
+  completes). The lock is released by closing that connection in a `finally`, and by the connection
+  dying, so a boot killed mid-migration never leaves the next one waiting.
+  This is **not** multi-replica upgrade safety and does not claim to be: it serializes runners that
+  take the same key, so a `drizzle-kit migrate` or a psql run beside it is unaffected, and a rolling
+  deploy whose two binaries expect different schemas is a separate problem. Run migrations from one
+  runner remains the advice; a fan-out just no longer costs a boot.
+  Separately, a failure is now diagnosable without a follow-up query. The migrator's error quotes the
+  failing STATEMENT and carries the Postgres cause but never the migration TAG, so `applyMigrations`
+  reads the pending tags *before* it applies anything — joining
+  `max(created_at)` in `drizzle.__drizzle_migrations` against `drizzle/meta/_journal.json` — and
+  rethrows a `MigrationChainError` naming them in chain order, stating that the batch is
+  all-or-nothing so the database is unchanged, and carrying the original error as `cause`. The whole
+  pending list ships rather than one file because the pending set is one transaction: narrowing it
+  further would mean applying migrations one at a time, which would trade away the whole-chain
+  atomicity that makes "the database is unchanged" true.
+  `boot-migrator-concurrency.db.test.ts` inverted with the contract — it used to pin the caveat, and
+  now pins both halves: two concurrent runners both succeed at pool size 1, and a runner that meets a
+  staged `orgs` table still aborts fail-closed with `42P07`, records nothing, leaves no partial DDL,
+  **and** names the pending tags.
+
 - **`journalScrub` no longer destroys the workforce billing ledger it exists to preserve.**
   `journalScrub: true` is the softer right-to-erasure posture: it erases raw subject content while
   KEEPING every structural, idempotency and cost column, so billing reconciliation and exactly-once

@@ -349,40 +349,52 @@ boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
 (`packages/kernel/tasks/src/approvals.ts:167-181`) — so every window that expired during the outage
 is due the moment you turn the flag back on, and the declared fates fire then.
 
-**The boot migrator is a SINGLE-RUNNER step. Run migrations from one runner** — and do not read
-"safe to run repeatedly" as multi-replica boot safety. It takes no advisory lock.
+**The boot migrator is SERIALIZED, so a fan-out on a first bring-up no longer costs a boot** — but
+do not read that as multi-replica *upgrade* safety. `applyMigrations` takes a Postgres advisory lock
+(`pg_advisory_lock`, session-scoped, on a connection of its own) around the whole apply, on a key
+`@rayspec/db` owns and every runner in this repo shares. It is the same lock
+`rayspec provision-tenant` used to take around its own call; that outer wrapper is gone, because two
+sessions of one process holding the same key would wait on each other.
 
 What is PINNED, and what to design against (`boot-migrator-concurrency.db.test.ts`):
 
-- **A runner that meets another's objects aborts cleanly and records nothing.** Staged
-  deterministically — `orgs` is `0000`'s first non-`IF NOT EXISTS` CREATE, so a runner arriving
-  second dies exactly there — the abort is SQLSTATE `42P07` (duplicate_table),
-  `drizzle.__drizzle_migrations` records **zero** rows, and `journal_steps` (created *before* `orgs`
-  in the same batch) does not exist afterwards. So the whole-batch rollback is observed rather than
-  inferred: there is no half-applied migration for an operator to reason about, and the next boot
-  re-applies from the top rather than resuming a fiction.
-- **Two concurrent runners: at least one applies the chain, AT MOST ONE fails**, any failure is a
-  clean duplicate-object abort from a known set (`42P07` / `42710` / `23505` / `40001` / `40P01`),
-  and the database ends fully migrated either way. Zero failures is a legitimate outcome, not an
-  anomaly — a sufficiently serialized pair sees the high-water mark and the second runner no-ops.
-  **Do not build alerting that expects a failure.**
+- **Two concurrent runners both succeed.** Zero rejections, not "at most one" — the database ends
+  fully migrated, structurally complete, with no duplicate bookkeeping rows, and the advisory lock is
+  released afterwards. This is the assertion that would have failed before the lock: the
+  certification host produced a loser on **every** run, always SQLSTATE `23505` raised from the
+  migrator's very first statement, `CREATE SCHEMA IF NOT EXISTS "drizzle"` — the check-then-create
+  window in its own bootstrap. Pinned at pool size **1**, which is also what pins that the lock does
+  not consume a pooled connection: a transaction-scoped lock on the pool would deadlock there.
+- **A runner that meets another's objects still aborts cleanly and records nothing.** The lock
+  removes the race; it does not make the migrator forgiving, and an operator who migrates by another
+  route (`drizzle-kit migrate`, psql) takes no lock at all. Staged deterministically — `orgs` is
+  `0000`'s first non-`IF NOT EXISTS` CREATE, so a runner arriving second dies exactly there — the
+  abort carries SQLSTATE `42P07` (duplicate_table), `drizzle.__drizzle_migrations` records **zero**
+  rows, and `journal_steps` (created *before* `orgs` in the same batch) does not exist afterwards. So
+  the whole-batch rollback is observed rather than inferred: there is no half-applied migration for
+  an operator to reason about, and the next boot re-applies from the top rather than resuming a
+  fiction.
 
-Observed but NOT pinned, and recorded as an observation rather than as behaviour: on the
-certification host the concurrent pair does produce a loser every time, with SQLSTATE `23505` raised
-from the migrator's first statement. That is one host's timing, not a contract — the assertion above
-admits five SQLSTATEs and zero-or-one losers precisely because the racy path is not deterministic.
+What the lock does NOT do: it is not a schema-migration protocol. A rolling deploy whose old and new
+binaries expect different schemas is unaffected by it, and nothing serializes this chain against a
+runner that does not take the same key. **Run migrations from one runner** remains the operational
+advice; what changed is that a deploy script that fans out on a first bring-up converges instead of
+losing a boot. The advisory-locked shape and its race arm are also exercised for
+`rayspec provision-tenant` in `tenant-provision.db.test.ts` (*"two concurrent runs against a FRESH,
+unmigrated database"*).
 
-The loser's cost, when there is one, is a failed boot that a restart fixes. The advisory-locked
-shape a future fix should mirror is `tenant-provision.ts`'s `pg_advisory_xact_lock`, exercised at
-`tenant-provision.db.test.ts:152-181`.
-
-**A migration that cannot apply is fail-closed, and the failing tag takes one query to name.** The
+**A migration that cannot apply is fail-closed, and the failure names the pending tags.** The
 migrator throws, the process exits non-zero, the whole pending set rolls back, and
 `drizzle.__drizzle_migrations` does not record the failed migration
-(`migration-failure.db.test.ts`). The error text quotes the failing STATEMENT verbatim and carries
-the Postgres cause (SQLSTATE + message) — but **not** the failing tag. To name it: read
-`SELECT max(created_at) FROM drizzle.__drizzle_migrations`, which is a journal `when`; the failing
-migration is the first entry in `drizzle/meta/_journal.json` after it.
+(`migration-failure.db.test.ts`). The migrator's own error text quotes the failing STATEMENT verbatim
+and carries the Postgres cause (SQLSTATE + message) — but **not** the failing tag. So
+`applyMigrations` computes the pending tags *before* it applies anything, by joining
+`SELECT max(created_at) FROM drizzle.__drizzle_migrations` (a journal `when`) against
+`drizzle/meta/_journal.json`, and rethrows a `MigrationChainError` naming them in chain order with
+the original error as its `cause`. The earliest listed tag is the first candidate; the whole list
+ships because the pending set is one transaction, so the failure belongs to the set rather than to
+one file. Reading a raw migrator error from `drizzle-kit migrate` or psql, run that same join by
+hand — it is the procedure the wrapper mechanized.
 
 **Upgrading a database whose rows predate the declaration marker.** The redeploy gate refuses to
 strand live work on a removed workforce, employee, department or team, and it decides "this
