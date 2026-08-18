@@ -230,13 +230,13 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
  * operator cancel aimed at the review task (control.ts:96 — engine.db.test.ts:970), the second
  * consecutive tool error that fails it outright (apply-intents.ts:1226 — engine.db.test.ts:994),
  * and the approval-timeout sweep failing a reviewer that had parked on its own approval
- * (approvals.ts:296 — structurally reachable through the same door; no test pins that one today).
+ * (approvals.ts:369 — structurally reachable through the same door; no test pins that one today).
  *
  * A CANCEL CASCADE FROM AN ANCESTOR IS NOT ONE OF THEM, and does not need to be.
  * `cancelDescendants` (apply-intents.ts:1361-1399) transitions descendants directly and never calls
  * `afterTaskTerminal`, so that route never enters this function at all — and the same cascade also
  * cancels the REVIEWED task (a non-terminal descendant of the same origin), so there is no park
- * left to release. `engine.db.test.ts:1067` asserts that property on that route in place of a
+ * left to release. `engine.db.test.ts:1069` asserts that property on that route in place of a
  * release that cannot happen.
  *
  * When the terminating task IS the bound review task and the review is still undecided, the
