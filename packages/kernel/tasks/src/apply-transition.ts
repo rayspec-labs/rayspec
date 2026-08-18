@@ -48,6 +48,13 @@ export interface ApplyTransitionInput {
   readonly turnNumber?: number;
   /** For `to: 'queued'` — what queued the task ('initial' or the absorbing signal kind). */
   readonly queueReason?: string;
+  /**
+   * For `to: 'working'` — the instant this claim's LEASE expires (`claim_expires_at`), written in
+   * the same compare-and-swap UPDATE as the status so the lease can never disagree with the claim
+   * it describes. Omitted (or on any other target) the column is set to NULL: leaving `working`
+   * always releases the lease, and a `working` row driven there outside a dispatch holds none.
+   */
+  readonly leaseUntil?: Date;
 }
 
 export async function applyTransition(
@@ -80,6 +87,12 @@ export async function applyTransition(
         ...(input.to === 'working'
           ? { startedAt: sql`coalesce(${schema.workforceTasks.startedAt}, now())` }
           : {}),
+        // THE CLAIM LEASE moves with the status, in this one statement: a claim stamps its expiry,
+        // and EVERY exit from `working` clears it — a stale expiry must never be readable on a row
+        // that holds no claim, or the reaper would re-reap a task it already re-queued. A `working`
+        // target with no lease (a test/operator drive, not a dispatch) writes NULL, which the reaper
+        // reads as "not a leased claim" and leaves alone.
+        claimExpiresAt: input.to === 'working' ? (input.leaseUntil ?? null) : null,
         ...(terminal ? { completedAt: sql`now()` } : {}),
       })
       .where(
@@ -161,4 +174,32 @@ export async function applyTransition(
     await appendTaskEvents(tx, input.taskId, events);
     return row;
   });
+}
+
+/**
+ * RENEW the lease on a claim this execution already holds — the ONLY write to `claim_expires_at`
+ * outside `applyTransition`, and it touches nothing else.
+ *
+ * A durable-engine recovery re-executes a turn body from the top and finds its own committed claim
+ * (`working`, stamped with this workflow's id) without taking a new transition — so it would
+ * otherwise inherit whatever remains of the ORIGINAL lease and could be reaped mid-flight through
+ * no fault of its own. Recovery is a legitimate fresh execution and gets a fresh window.
+ *
+ * Deliberately NOT a status write: it is scoped to the leaseholder (`task_id` + the current
+ * `working` status), so it can neither resurrect a terminal row nor extend a claim someone else
+ * has already taken over — an intervening reap moves the row out of `working` and this renew
+ * matches nothing.
+ */
+export async function renewTurnLease(
+  tdb: TenantDb,
+  taskId: string,
+  expiresAt: Date,
+): Promise<boolean> {
+  const rows = await tdb
+    .update(schema.workforceTasks, { claimExpiresAt: expiresAt })
+    .where(
+      and(eq(schema.workforceTasks.taskId, taskId), eq(schema.workforceTasks.status, 'working')),
+    )
+    .returning({ taskId: schema.workforceTasks.taskId });
+  return rows.length > 0;
 }

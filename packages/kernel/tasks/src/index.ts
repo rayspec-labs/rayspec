@@ -26,7 +26,12 @@ export {
   turnMessagesSchema,
   turnReviewPolicySchema,
 } from './apply-intents.js';
-export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
+export {
+  type ApplyTransitionInput,
+  applyTransition,
+  renewTurnLease,
+  type TaskRecord,
+} from './apply-transition.js';
 export {
   ApprovalAlreadyDecidedError,
   type ApprovalDecisionInput,

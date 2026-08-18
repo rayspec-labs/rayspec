@@ -76,6 +76,7 @@ import {
   type MergedChildResult,
   mergeChildResults,
   releaseTurnReservation,
+  renewTurnLease,
   resolveWorkforceBudgets,
   sweepApprovalTimeouts,
   type TaskRecord,
@@ -99,6 +100,37 @@ export const DEFAULT_TASK_RESERVE_SCHEDULE = '*/5 * * * * *';
 export const DEFAULT_TASK_SWEEP_SCHEDULE = '*/30 * * * * *';
 
 const DEFAULT_TURN_QUEUE_CONCURRENCY = 4;
+
+/**
+ * THE CLAIM LEASE — 30 minutes, and deliberately generous.
+ *
+ * The two failure modes are NOT symmetric, so the default is not a midpoint. Too eager kills a
+ * healthy long-running turn; too generous leaves a wedged worker holding its slot for the lease.
+ * But a mis-reaped healthy turn is NON-CORRUPTING: the original body's final `applyTurnOutcome`
+ * hits `assertClaimOwnership` and refuses over the successor's claim, so the cost is duplicated
+ * work, never a duplicated effect. The disease is UNBOUNDED: an un-windowed `task`/`root`
+ * reservation that nothing will ever release. Bounded-and-recoverable beats unbounded, so the
+ * default sits far above any plausible healthy turn rather than close to one.
+ *
+ * 30 minutes is anchored on the repo's own numbers: the shipped examples declare a whole-TASK wall
+ * clock of 30m (`examples/workforce-starter`) and 45m (`examples/workforce-maintainers`) — and a
+ * task is MANY turns. A single turn that has run for 30 minutes has consumed the entire task
+ * ceiling the shipped starter declares; at that point "wedged" is the reading the operator's own
+ * configuration already takes.
+ *
+ * Overridable per deployment via `TaskSchedulerDeps.turnLeaseMs`, the same convention as
+ * `reserveSchedule` / `sweepSchedule` / `turnQueueConcurrency`. Deliberately NOT a
+ * `budgets.execution` key: the declared-budgets schema is drift-locked to the SPEC grammar
+ * (budget-spec-drift.test.ts), so a budgets key would widen the authoring grammar — and this is a
+ * dispatcher safety net, not per-workforce policy.
+ *
+ * ONE ASSUMPTION, NAMED: the expiry is stamped from the CLAIMING process's clock and compared
+ * against the SWEEPING process's clock, so on a multi-worker deployment a skewed sweeper reaps
+ * early or late by the skew. That is the same single-node clock posture the reservation window
+ * already carries (`reservedAt` comes from the same `#now()`), and a generous default is what keeps
+ * plausible skew far inside the margin — a second reason not to tune this value down.
+ */
+export const DEFAULT_TURN_LEASE_MS = 1_800_000;
 
 /** The deterministic dispatch claim (see the header: version-salted, never reused). */
 export function taskTurnWorkflowId(taskId: string, turnNumber: number, version: number): string {
@@ -193,6 +225,12 @@ export interface TaskSchedulerDeps {
   readonly reserveSchedule?: string;
   readonly sweepSchedule?: string;
   readonly turnQueueConcurrency?: number;
+  /**
+   * How long a turn's claim stays valid before the sweep may reap it as wedged. Defaults to
+   * {@link DEFAULT_TURN_LEASE_MS} (30 minutes) — read its docblock before lowering it: a lease that
+   * expires inside a healthy turn's runtime turns every slow turn into duplicated work.
+   */
+  readonly turnLeaseMs?: number;
   /** Injectable clock for the sweep/window tests. */
   readonly now?: () => Date;
 }
@@ -301,6 +339,11 @@ export class DbosTaskScheduler {
 
   #now(): Date {
     return this.#deps.now ? this.#deps.now() : new Date();
+  }
+
+  /** When a claim taken NOW would expire — the lease stamped on the claim CAS and on a renewal. */
+  #leaseUntil(): Date {
+    return new Date(this.#now().getTime() + (this.#deps.turnLeaseMs ?? DEFAULT_TURN_LEASE_MS));
   }
 
   /**
@@ -870,14 +913,25 @@ export class DbosTaskScheduler {
   }
 
   /**
-   * The sweep: enforce every overdue approval's declared fate, then REAP dead turns. A claim that
-   * committed (`working`) whose workflow later died (an ERROR, a cancellation, an exceeded
-   * recovery bound) would otherwise hold its row — and a `maxConcurrentWorkers` slot, and every
-   * drain — forever. The reaper asks the ENGINE whether the claim's own workflow id is still live
-   * (PENDING/ENQUEUED); a dead one re-queues the task through the one door (handlers are
-   * effect-free and the receipt guards double application, so a fresh dispatch of the same turn is
-   * safe). A LIVE turn is never touched, however long it runs — nothing is killed mid-flight.
-   * Deterministic seam for tests.
+   * The sweep: enforce every overdue approval's declared fate, then REAP turns that are not making
+   * progress. A claim that committed (`working`) whose workflow later died (an ERROR, a
+   * cancellation, an exceeded recovery bound) would otherwise hold its row — and a
+   * `maxConcurrentWorkers` slot, and every drain — forever.
+   *
+   * TWO ORACLES, ONE MECHANISM. The reaper asks the ENGINE whether the claim's own workflow id is
+   * still live (PENDING/ENQUEUED) — and, because that question has a blind spot, it also asks the
+   * CLAIM whether its lease has expired. The blind spot is a worker whose process is up and whose
+   * workflow is genuinely PENDING but whose BODY is wedged: it reaches neither release path, and
+   * held its slot and its budget reservation permanently (the un-windowed `task`/`root` scopes never
+   * roll over). Either oracle re-queues the task through the one door — handlers are effect-free
+   * and the receipt guards double application, so a fresh dispatch of the same turn is safe, and a
+   * stale execution that later wakes up is refused by `assertClaimOwnership` rather than applying
+   * over its successor.
+   *
+   * A LIVE turn INSIDE ITS LEASE is never touched, however long it runs — nothing is killed
+   * mid-flight, and the lease default is deliberately far above any plausible healthy turn (see
+   * `DEFAULT_TURN_LEASE_MS`). A `working` row with NO lease (driven there outside a dispatch) is
+   * judged by the engine oracle alone. Deterministic seam for tests.
    *
    * A reap also RELEASES the dead claim's budget reservation, in the same transaction as the
    * re-queue: `settleTurn` is the only other release and it runs from the turn's final transaction,
@@ -936,7 +990,17 @@ export class DbosTaskScheduler {
         const status = await DBOS.getWorkflowStatus(turnId);
         const live =
           status !== null && (status.status === 'PENDING' || status.status === 'ENQUEUED');
-        if (live) continue;
+        // TWO REASONS, ONE MECHANISM. The engine's own status answers "is the workflow gone?"; the
+        // LEASE answers the question it cannot — "is this claim still making progress?" A body that
+        // wedges (a hung socket, a deadlocked dependency, a worker that stopped scheduling) leaves
+        // the workflow genuinely PENDING forever, and before the lease such a row held its slot and
+        // its reservation permanently, because the only other release runs from the turn's final
+        // transaction, which it never reaches. An unstamped `working` row (driven there outside a
+        // dispatch) carries no lease and is left alone — this backstop judges only leased claims.
+        const lease = task.claimExpiresAt;
+        const expired = lease !== null && lease.getTime() <= this.#now().getTime();
+        if (live && !expired) continue;
+        const reason = live ? 'turn_lease_expired' : 'turn_reaped';
         const reservation = await this.#reservationOfClaim(tdb, task.taskId, turnId);
         await tdb.transaction(async (tx) => {
           // Lock rank (see #claimTurn): runtime row, then the task row, then the ledger rows.
@@ -953,7 +1017,7 @@ export class DbosTaskScheduler {
             to: 'queued',
             reason: 'tool_error',
             actor: 'scheduler',
-            queueReason: 'turn_reaped',
+            queueReason: reason,
           });
           if (reservation !== null) {
             await releaseTurnReservation(
@@ -972,7 +1036,9 @@ export class DbosTaskScheduler {
         });
         reaped.push(task.taskId);
         this.#logger.warn(
-          `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is ${status?.status ?? 'absent'} — re-queued for a fresh dispatch.`,
+          reason === 'turn_lease_expired'
+            ? `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is still ${status?.status ?? 'absent'} but its claim lease expired at ${lease?.toISOString()} — the turn is wedged; re-queued for a fresh dispatch.`
+            : `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is ${status?.status ?? 'absent'} — re-queued for a fresh dispatch.`,
         );
       } catch (err) {
         if (!(err instanceof TaskVersionConflictError)) {
@@ -1184,7 +1250,11 @@ export class DbosTaskScheduler {
             .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
           if (claimRows[0]?.turnId !== myWorkflowId) return { kind: 'noop' as const };
           // Recovery of OUR claim: the reservation exists, the turn_started entry exists —
-          // re-run the handler and apply.
+          // re-run the handler and apply. RENEW THE LEASE first: this recovery is a fresh
+          // execution of the whole body and needs a whole window, not whatever remained of the
+          // original claim's — otherwise a recovery that lands late in the lease would be reaped
+          // mid-flight through no fault of its own.
+          await renewTurnLease(tx, task.taskId, this.#leaseUntil());
           return { kind: 'claimed' as const, task, budgets };
         }
         if (task.status !== 'queued') return { kind: 'noop' as const };
@@ -1195,6 +1265,9 @@ export class DbosTaskScheduler {
           to: 'working',
           actor: 'scheduler',
           turnId: myWorkflowId,
+          // The LEASE, stamped in the same compare-and-swap that takes the claim: the reaper's
+          // backstop for a body that wedges while the engine still reports the workflow PENDING.
+          leaseUntil: this.#leaseUntil(),
         });
 
         // ONE instant for the reservation: the window it lands in and the window a later release

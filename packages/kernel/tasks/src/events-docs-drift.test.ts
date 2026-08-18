@@ -41,9 +41,18 @@ describe('docs/workforce-events.md', () => {
     return line;
   };
 
-  it('locks queueReason to every value the engine emits (turn_yield/tool_error/turn_reaped/review_verdict)', () => {
+  it('locks queueReason to every value the engine emits (turn_yield/tool_error/turn_reaped/turn_lease_expired/review_verdict)', () => {
     const row = rowFor(read('docs/workforce-events.md'), 'workforce.task.queued');
-    for (const value of ['initial', 'turn_yield', 'tool_error', 'turn_reaped', 'review_verdict']) {
+    for (const value of [
+      'initial',
+      'turn_yield',
+      'tool_error',
+      'turn_reaped',
+      // The lease reap is a DISTINCT reason: same mechanism, different diagnosis. An operator
+      // reading the journal must be able to tell "the workflow died" from "the worker wedged".
+      'turn_lease_expired',
+      'review_verdict',
+    ]) {
       expect(row, `queued.queueReason omits '${value}'`).toContain(`\`${value}\``);
     }
   });
