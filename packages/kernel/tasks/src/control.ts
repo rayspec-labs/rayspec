@@ -287,14 +287,15 @@ async function cancelSubtreeUnderTerminalRoot(
  * the cascade transitions parked rows only. The halt event carries the affected count.
  *
  * The roots read is a DELIBERATE full scan: a halt that stopped at a page would leave the rest of
- * the workforce running, which is the one thing a halt may not do. Each root's cancellation runs
- * through `cancelTaskCascade`, so the halt inherits its root-first locking and its bounded retry —
- * a version race with the reserve pass no longer aborts a halt midway with nothing journaled.
+ * the workforce running, which is the one thing a halt may not do. Each LIVE root's cancellation
+ * runs through `cancelTaskCascade`, so the halt inherits its root-first locking and its bounded
+ * retry — a version race with the reserve pass no longer aborts a halt midway with nothing
+ * journaled.
  *
- * A root that is ALREADY TERMINAL is still visited, through `cancelSubtreeUnderTerminalRoot`: the
- * scan reads roots only, so skipping one skips its live descendants too, and "every non-terminal
- * task" is a claim about the WORKFORCE, not about its roots. The terminal root itself is left
- * exactly as it is.
+ * A root that is ALREADY TERMINAL is still visited, through `cancelSubtreeUnderTerminalRoot`,
+ * which takes the same locks in the same order and leaves the root row itself untouched: the scan
+ * reads roots only, so skipping one skips its live descendants too, and "every non-terminal task"
+ * is a claim about the WORKFORCE, not about its roots.
  */
 export async function haltWorkforce(
   tdb: TenantDb,
