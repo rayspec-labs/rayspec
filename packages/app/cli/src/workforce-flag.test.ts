@@ -121,6 +121,13 @@ describe('plan', () => {
 
 describe('deploy --dry-run', () => {
   it('rejects a workforce document with the typed code when the flag is unset', async () => {
+    // HERMETIC, like the `plan` siblings above. `runDeploy` takes no `env` argument (deploy.ts:256)
+    // — its dry-run path reads `process.env` directly (deploy.ts, `experimentalSpecOptionsFromEnv(
+    // process.env)`) — so the flag is stubbed OFF rather than passed in. Without this the arm reads
+    // the AMBIENT environment, and a developer with RAYSPEC_EXPERIMENTAL_WORKFORCE=1 exported gets a
+    // misleading `expected true to be false` against code that is working correctly. `vi.stubEnv` is
+    // already the local idiom (the paired accept arm below uses it); `afterEach` unstubs.
+    vi.stubEnv('RAYSPEC_EXPERIMENTAL_WORKFORCE', undefined);
     const outcome = await runDeploy(['--dry-run', 'workforce.yaml']);
     expect(outcome.kind).toBe('dry-run');
     if (outcome.kind !== 'dry-run') return;
