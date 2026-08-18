@@ -1166,7 +1166,10 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         verdict: 'accept',
         reasons: [],
         requiredChanges: [],
-        actor: 'user:ops',
+        // The review's OWN named reviewer, so the refusal under test is the PARK BINDING and not
+        // the decision-door authority gate (which would refuse an unrelated operator first and
+        // stop exercising the binding at all).
+        actor: 'user:qa',
       }),
     ).rejects.toBeInstanceOf(ReviewNotForParkError);
     const held = await db.$client.unsafe(
@@ -1225,13 +1228,14 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const review = (await db.$client.unsafe(
       `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
     )) as unknown as { id: string }[];
-    // The HUMAN verdict route decides first.
+    // The HUMAN verdict route decides first — as the reviewer the row names, which is who the
+    // decision door admits (the subject here is the LOST RACE, not the authority gate).
     await applyReviewVerdict(tdb(), NO_BUDGETS, {
       reviewId: (review[0] as { id: string }).id,
       verdict: 'accept',
       reasons: [],
       requiredChanges: [],
-      actor: 'user:qa-lead',
+      actor: 'user:qa',
     });
     // The dispatched reviewer's turn then lands — benign, recorded as superseded.
     await driveChildToWorking(reviewer.task_id);
