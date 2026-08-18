@@ -13,8 +13,13 @@ describe('mayDecide', () => {
     expect(ANY_AUTHENTICATED_DECIDER).toBe('user');
     for (const actor of [
       'user',
-      'user:6f1b0f6e-6d1c-4a4e-9a1f-1f0a0d5b0c11',
-      'api-key:2c7f9a10-1f27-4f0e-8f3a-9b3c2d4e5f60',
+      // ZERO-PADDED SYNTHETIC IDS, the same shape `test-support/test-db.ts` uses for its tenants.
+      // A realistic-looking random UUID here reads to a secret scanner as a credential — the
+      // `api-key:` half is literally the keyword `generic-api-key` looks for, and a high-entropy
+      // body next to it is the whole signature. These carry the identical actor SHAPE (the point of
+      // the row is the scheme prefix the peeler strips), with none of the entropy.
+      'user:00000000-0000-4000-8000-000000000001',
+      'api-key:00000000-0000-4000-8000-000000000002',
       'ops_lead',
       'scheduler',
     ]) {
@@ -36,7 +41,7 @@ describe('mayDecide', () => {
       'someone_else',
       'user:someone_else',
       'api-key:someone_else',
-      'user:6f1b0f6e-6d1c-4a4e-9a1f-1f0a0d5b0c11',
+      'user:00000000-0000-4000-8000-000000000001',
       'scheduler',
       'system',
     ]) {

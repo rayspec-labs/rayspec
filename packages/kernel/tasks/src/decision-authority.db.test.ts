@@ -211,7 +211,10 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
   });
 
   it("the 'user' sentinel keeps admitting ANY permitted principal (the shipped single-operator posture)", async () => {
-    for (const actor of ['user', 'user:0a2c9d3e-6a5b-4f11-9a2c-0f3e5d7b8c99', 'api-key:k1']) {
+    // Zero-padded synthetic ids (the `test-db.ts` tenant convention) — a realistic random UUID beside
+    // an `api-key:`/`user:` prefix is what a secret scanner is built to flag, and the shape is all
+    // this row needs.
+    for (const actor of ['user', 'user:00000000-0000-4000-8000-000000000001', 'api-key:k1']) {
       const { row } = await pendingApproval('user');
       const decided = await decideApproval(tdb(), {
         approvalId: row.id,
@@ -414,7 +417,7 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
       verdict: 'accept',
       reasons: [],
       requiredChanges: [],
-      actor: 'user:2a9f0d11-77c3-4a26-b3e1-1c9f0a2b3c4d',
+      actor: 'user:00000000-0000-4000-8000-000000000003',
     });
     expect(done.status).toBe('completed');
   });
