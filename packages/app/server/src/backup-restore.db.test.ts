@@ -736,12 +736,44 @@ describe.skipIf(!canRun)(
       )) as unknown as { status: string }[];
       expect(beforeSweep[0]?.status).toBe('working');
 
+      // The approval park is NOT overdue (its window is an hour). Read its state BEFORE the sweep so
+      // the control below compares against a measured value rather than an assumed one.
+      const approvalBefore = (await db.$client.unsafe(
+        `SELECT a.status AS approval_status, t.status, coalesce(t.status_reason,'') AS reason,
+                t.version
+           FROM workforce_approvals a JOIN workforce_tasks t ON t.task_id = a.task_id
+          WHERE a.task_id = '${ids.approvalPark}'`,
+      )) as unknown as {
+        approval_status: string;
+        status: string;
+        reason: string;
+        version: number;
+      }[];
+      expect(approvalBefore[0]?.approval_status).toBe('pending');
+
       const sweep = await sched.runSweep();
       expect(sweep.reaped).toEqual([ids.midTurn]);
-      // The approval park is NOT overdue (its window is an hour), so the same sweep must leave it
-      // alone — a sweep that failed every approval would also "pass" the line above.
+      // The same sweep must leave the not-yet-due approval ALONE — a sweep that timed out or
+      // escalated every approval would also satisfy the reap assertion above. Both the reported
+      // outcome AND the rows are checked: the outcome arrays could stay empty while a decision
+      // authority change resolved the approval by another door, so the row is the real control.
       expect(sweep.failed).toEqual([]);
       expect(sweep.escalated).toEqual([]);
+      const approvalAfter = (await db.$client.unsafe(
+        `SELECT a.status AS approval_status, t.status, coalesce(t.status_reason,'') AS reason,
+                t.version
+           FROM workforce_approvals a JOIN workforce_tasks t ON t.task_id = a.task_id
+          WHERE a.task_id = '${ids.approvalPark}'`,
+      )) as unknown as {
+        approval_status: string;
+        status: string;
+        reason: string;
+        version: number;
+      }[];
+      expect(approvalAfter).toEqual(approvalBefore);
+      expect(approvalAfter[0]?.approval_status).toBe('pending');
+      expect(approvalAfter[0]?.status).toBe('waiting_for_user');
+      expect(approvalAfter[0]?.reason).toBe('approval_pending');
 
       const after = (await db.$client.unsafe(
         `SELECT status, coalesce(status_reason,'') AS reason FROM workforce_tasks WHERE task_id = '${ids.midTurn}'`,
