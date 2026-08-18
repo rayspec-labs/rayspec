@@ -21,6 +21,12 @@
  * their declared size WHEN THEY DECLARE ONE, are LED BY A MANAGER, and hold neither their own lead
  * nor the orchestrator among their members · a workforce requires the durable worker that runs it.
  *
+ * ONE ADVISORY sits beside that set, in `lintWorkforceWarnings` at the foot of this file:
+ * `workforce_escalation_unreachable`, on every `onTimeout: 'escalate'` policy. It is the one rule
+ * here whose subject is a correct declaration rather than an incoherent one — the escalated row is
+ * addressed to an employee, and only break-glass can answer it — so it informs and never refuses.
+ * That function carries the full warning-versus-error argument.
+ *
  * A recurring shape in the structural rules: every one of them exists because some RUNTIME path
  * keys on the declaration, and a declaration the runtime reads differently than a reader does is
  * the defect. A team's lead is who `team:<id>` resolves to; a manager's authority is their own
@@ -35,7 +41,7 @@ import {
   RESERVED_WORKFORCE_SEGMENTS,
   validateSpec,
 } from '@rayspec/core';
-import { type SpecError, type SpecWarning, specError } from './errors.js';
+import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
 import type { RaySpec } from './grammar.js';
 import type { WorkforceBudgetWindowName, WorkforceEmployeeSpec } from './workforce-grammar.js';
 
@@ -800,23 +806,80 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
 }
 
 /**
- * The `workforce:` section raises NO advisories. It had exactly one —
- * `workforce_capability_unheld`, an unheld `requireWhen` label — and the pre-freeze grammar review
- * promoted it to the `workforce_label_unheld` ERROR in `lintWorkforce` above. Advisory treatment
- * rested on "the label may arrive later", which is false: holders are declared in the same
- * document, so a later arrival is a redeploy that re-runs this lint.
+ * The `workforce:` section's advisories. Exactly one, and the section's history is why the bar for
+ * being here is worth restating.
  *
- * Promoted for BOTH rule kinds, but what the refusal PREVENTS differs by document, so the emitted
- * message reports the dead CLAUSE and then names what remains live — computed from the declaration
- * (held siblings in the same array, and `confidenceBelow`), never assumed from the rule kind. See
- * the six-cell table at the rule itself. "The rule can never fire" describes only two of those six
- * cells and was the round-1 defect; "the rule is degraded" describes only four and was round 2.
+ * It previously had `workforce_capability_unheld` (an unheld `requireWhen` label) and the pre-freeze
+ * grammar review PROMOTED it to the `workforce_label_unheld` ERROR in `lintWorkforce` above, because
+ * its advisory premise — "the label may arrive later" — was false: holders are declared in the same
+ * document, so a later arrival is a redeploy that re-runs this lint. Advisory means "a heuristic
+ * that must never fail a deploy", and that rule was not a heuristic.
  *
- * The function stays because `lintSpecWarnings` composes it (lint.ts) and because the next
- * genuinely-heuristic workforce rule belongs here rather than in a new seam. Advisory means
- * "a heuristic that must never fail a deploy" — nothing in this section currently qualifies.
+ * ── `workforce_escalation_unreachable` — AND WHY THE PROMOTION ABOVE DOES NOT TRANSFER ──────────
+ *
+ * `onTimeout: 'escalate'` mints a row addressed to a superior who cannot answer at the HTTP door.
+ * The sweep re-issues the timed-out request with `approver: escalateTo` (@rayspec/tasks
+ * approvals.ts), an EMPLOYEE id — and the two namespaces meeting on that column are structurally
+ * disjoint: an authenticated principal is `user:<uuid>` / `api-key:<uuid>` (both id columns are
+ * Postgres `uuid`, so always hyphenated), while an employee id is a `SafeIdentifier`, which forbids
+ * `-`. `mayDecide` (@rayspec/tasks decision-authority.ts) matches the WHOLE remainder after a closed
+ * scheme prefix, so no principal string can ever satisfy one. That impossibility is EXECUTED rather
+ * than argued, in @rayspec/tasks decision-authority.test.ts, over runtime-minted uuids checked
+ * against this package's own `SAFE_IDENTIFIER_RE`.
+ *
+ * The only route left is break-glass — `override: true` plus the `workforce:override` permission —
+ * which owner/admin humans hold and an api-key never can (@rayspec/auth-core `API_KEY_GRANTABLE`,
+ * pinned in its own suite). So an api-key-only deployment cannot resolve an escalated approval at
+ * all, and every other deployment resolves it only by an administrative override.
+ *
+ * ADVISORY, on this file's own definition, and the contrast with the promotion is the argument:
+ * `workforce_label_unheld` was promoted because the clause could NEVER FIRE — the document was
+ * simply wrong. Here the declaration is CORRECT and the row IS decidable; what is narrower than an
+ * author would assume is the resolution PATH. Three consequences of erroring instead, each on its
+ * own sufficient:
+ *
+ *   1. it would make half a frozen closed enum unusable, which is a GRAMMAR change wearing a lint's
+ *      clothes. If `escalate` were genuinely unusable the honest act is to delete it from the enum;
+ *   2. it would force authors to remove declarations that a principal↔employee binding is intended
+ *      to support in a later release — churn against a decision meant to be revisited, not undone;
+ *   3. whether it bites at all depends on deployment posture (is a human owner/admin reachable?),
+ *      which this pass — pure over the document — cannot see. Erroring would fail every escalating
+ *      document including the ones whose operators can resolve them.
+ *
+ * THE MESSAGE OFFERS ONLY REMEDIES THAT EXIST. `lintSuppress` is deliberately not among them: it is
+ * scoped by node and no node's path covers `workforce.…`, so the code is excluded from
+ * `SuppressibleWarningCode` and an acknowledgement of it is refused at parse. Telling an author to
+ * suppress this would name a mechanism the grammar does not have.
  */
 export function lintWorkforceWarnings(spec: RaySpec): SpecWarning[] {
-  void spec;
-  return [];
+  const workforce = spec.workforce;
+  if (workforce === undefined) return [];
+  const warnings: SpecWarning[] = [];
+  const path = (suffix: string) => `workforce.${suffix}`;
+
+  // Per POLICY, not per document: the path is what sends the author to the line they wrote. The
+  // orchestrator-seat case is refused as an ERROR by `lintWorkforce` above and is a different
+  // statement (no target at all, vs a target no principal can be), so this rule does not special-
+  // case it — an errored document never reaches a warnings pass anyway.
+  workforce.approvalPolicies.forEach((approval, ai) => {
+    if (approval.onTimeout !== 'escalate') return;
+    warnings.push(
+      specWarning(
+        'workforce_escalation_unreachable',
+        `approval policy '${approval.id}' declares onTimeout: 'escalate'. On timeout the sweep ` +
+          "re-issues the request naming the requester's declared superior — an EMPLOYEE id — as " +
+          'its approver, and no principal an HTTP request can authenticate as is ever equal to ' +
+          "one: a principal is 'user:<uuid>' or 'api-key:<uuid>', and an employee id may not " +
+          'contain a hyphen. So an escalated approval is resolvable ONLY through break-glass ' +
+          '(override: true plus the workforce:override permission), which an owner or admin holds ' +
+          'and an api-key can never be granted — a deployment authenticated only by api-keys ' +
+          'cannot resolve one at all. This is a deliberate v1 boundary, not a defect: binding a ' +
+          "principal to an employee is not in this release. Declare onTimeout: 'fail' if no human " +
+          'owner or admin will be reachable to break the glass',
+        path(`approvalPolicies[${ai}].onTimeout`),
+      ),
+    );
+  });
+
+  return warnings;
 }

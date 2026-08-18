@@ -6,10 +6,10 @@
  * the validation table has exactly one failing case.
  */
 import { describe, expect, it } from 'vitest';
-import type { SpecErrorCode } from './errors.js';
+import { type SpecErrorCode, SuppressibleWarningCode } from './errors.js';
 import { exportJsonSchema } from './export.js';
 import { MAX_IDENTIFIER_LENGTH } from './identifier.js';
-import { lintSpecWarnings } from './lint.js';
+import { applyLintSuppressions, lintSpecWarnings } from './lint.js';
 import { type ParseSpecOptions, parseSpec } from './parse.js';
 import {
   MAX_DEPARTMENT_MISSION_LENGTH,
@@ -908,6 +908,123 @@ describe('workforce semantic lint — approval policies', () => {
 });
 
 /**
+ * B-017k / D-034 — `onTimeout: 'escalate'` IS AN ADVISORY, DELIBERATELY, AND NOT AN ERROR.
+ *
+ * What the author is not told without it: an escalated approval names a declared EMPLOYEE as its
+ * approver (`approvals.ts` — `approver: escalatedTo`), and no principal an HTTP request can
+ * authenticate as is ever equal to one. That disjointness is PROVED, not assumed, in @rayspec/tasks
+ * decision-authority.test.ts ('no authenticated HTTP principal can satisfy a NAMED employee
+ * approver'), over runtime-minted uuids against the grammar's own identifier rule. Break-glass is
+ * therefore the only route, and it is human-only — @rayspec/auth-core authz.test.ts pins that an
+ * api-key can never hold `workforce:override`, so an api-key-only deployment cannot resolve one.
+ *
+ * WHY A WARNING. The precedent one file over is `workforce_label_unheld`, promoted from advisory to
+ * ERROR this milestone — and the reason it was promoted does not transfer. That rule's advisory
+ * premise ('the label may arrive later') was FALSE: the clause could never fire at all. Here the
+ * declaration is correct and the row IS decidable, by any owner/admin human, through an attributed
+ * permission-gated route the journal records. The route is NARROWER than an author would assume,
+ * which is what an advisory is for. Three more reasons, each independently sufficient:
+ *
+ *   - an error would make half a frozen closed enum unusable, which is a GRAMMAR change wearing a
+ *     lint's clothes. If we believed `escalate` were unusable the honest act is to remove it from
+ *     the enum — and D-034 explicitly declined to change shape in M1;
+ *   - it would force authors to delete declarations a later release is meant to support (D-034
+ *     DEFERS the principal-to-employee binding, it does not abandon it);
+ *   - the consequence depends on deployment posture the document cannot see. With a human
+ *     owner/admin reachable, these resolve. That is the definition of a heuristic.
+ *
+ * AND IT CANNOT BE ACKNOWLEDGED AWAY — structurally, not by choice: `lintSuppress` exists only on
+ * agents/stores/api/triggers/handlers, and `applyLintSuppressions` matches by node path, so nothing
+ * can scope an acknowledgement over `workforce.…`. The code is therefore excluded from
+ * `SuppressibleWarningCode`, which keeps the grammar from accepting an acknowledgement it could
+ * never honour (the author would get a `stale_suppression` instead of silence).
+ */
+describe('workforce semantic lint — the escalation-reachability advisory', () => {
+  const warningsFor = (yaml: string) => {
+    const res = parseSpec(yaml, ON);
+    // THE DEFINING PROPERTY OF AN ADVISORY, asserted on every call rather than once: it never
+    // fails a parse. A rule that can reject is an error however it is filed.
+    expect(res.ok, 'an advisory must never fail a parse').toBe(true);
+    if (!res.ok) return [];
+    return lintSpecWarnings(res.value);
+  };
+
+  it("warns on an `onTimeout: 'escalate'` policy, at that policy's own path", () => {
+    const warnings = warningsFor(WORKFORCE_BASE);
+    expect(warnings.map((w) => w.code)).toEqual(['workforce_escalation_unreachable']);
+    expect(warnings[0]?.path).toBe('workforce.approvalPolicies[0].onTimeout');
+    // The message must carry the MECHANISM (why it is unreachable) and the REMEDY the author can
+    // actually apply — never `lintSuppress`, which cannot reach this path.
+    expect(warnings[0]?.message).toContain('public_statement');
+    expect(warnings[0]?.message).toContain('workforce:override');
+    expect(warnings[0]?.message).toContain("onTimeout: 'fail'");
+    expect(warnings[0]?.message).not.toContain('lintSuppress');
+  });
+
+  it("the SAME document with onTimeout: 'fail' raises nothing", () => {
+    expect(
+      warningsFor(WORKFORCE_BASE.replace('      onTimeout: escalate', '      onTimeout: fail')),
+    ).toEqual([]);
+  });
+
+  it('the finding is PER POLICY, so a second escalating rule gets its own path', () => {
+    const twoRules = `${WORKFORCE_BASE}    - id: prod_change
+      requireWhen: { labels: [production_change] }
+      approver: user
+      timeout: 24h
+      onTimeout: escalate
+`;
+    const warnings = warningsFor(twoRules);
+    expect(warnings.map((w) => w.path)).toEqual([
+      'workforce.approvalPolicies[0].onTimeout',
+      'workforce.approvalPolicies[1].onTimeout',
+    ]);
+    expect(warnings.map((w) => w.code)).toEqual([
+      'workforce_escalation_unreachable',
+      'workforce_escalation_unreachable',
+    ]);
+  });
+
+  it('the advisory does NOT shadow the orchestrator-seat ERROR — that one still refuses', () => {
+    // Both rules read `onTimeout: 'escalate'`, and the harder one must keep failing the parse: an
+    // escalation with no target at all is a bricked task, not a narrowed route.
+    expectRejection(
+      WORKFORCE_BASE.replace(
+        '      title: Lead\n      role: orchestrator\n',
+        '      title: Lead\n      role: orchestrator\n      labels: [public_statement]\n',
+      ),
+      'invalid_orchestrator',
+    );
+  });
+
+  it('the code is NOT acknowledgeable, because no node could ever scope the acknowledgement', () => {
+    // Structural, and checked at both ends. (1) The grammar refuses the code…
+    expect(SuppressibleWarningCode.options).not.toContain('workforce_escalation_unreachable');
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        '    instructions: Coordinate the workforce.\n',
+        '    instructions: Coordinate the workforce.\n    lintSuppress:\n      - code: workforce_escalation_unreachable\n        because: we have human admins\n',
+      ),
+      ON,
+    );
+    expect(res.ok, 'an unsuppressible code must not be accepted in lintSuppress').toBe(false);
+
+    // …(2) and even if it were accepted, suppression is scoped by NODE PATH, and a `workforce.…`
+    // finding lies under no node that may carry `lintSuppress`. This is the reason for (1): admitting
+    // the code would offer an acknowledgement that provably cannot silence anything.
+    const base = parseSpec(WORKFORCE_BASE, ON);
+    expect(base.ok).toBe(true);
+    if (!base.ok) return;
+    const finding = lintSpecWarnings(base.value);
+    const applied = applyLintSuppressions(base.value, finding);
+    expect(applied.suppressed).toEqual([]);
+    expect(applied.warnings.map((w) => w.path)).toEqual([
+      'workforce.approvalPolicies[0].onTimeout',
+    ]);
+  });
+});
+
+/**
  * THE UNHELD-LABEL RULE — an ERROR, not the advisory it was before the pre-freeze review.
  *
  * `requireWhen.labels` is matched for EXACT equality against `employees[].labels`
@@ -977,11 +1094,25 @@ describe('policy labels must be HELD by some declared employee', () => {
     expectRejection(doc, 'workforce_label_unheld');
   });
 
-  it('held labels raise nothing, and the section raises NO advisories at all', () => {
+  it('a held label raises NOTHING — the only advisory the base draws is the escalation one', () => {
+    // The base's approval policy declares `onTimeout: 'escalate'`, so it carries exactly one
+    // advisory (B-017k, pinned with its path in its own describe below). The point HERE is the
+    // label rule: a held label contributes nothing, and switching the timeout fate off leaves the
+    // section silent — which is the assertion this test used to make flat.
     const res = parseSpec(WORKFORCE_BASE, ON);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(lintSpecWarnings(res.value)).toEqual([]);
+    expect(lintSpecWarnings(res.value).map((w) => w.code)).toEqual([
+      'workforce_escalation_unreachable',
+    ]);
+
+    const noEscalation = parseSpec(
+      WORKFORCE_BASE.replace('      onTimeout: escalate', '      onTimeout: fail'),
+      ON,
+    );
+    expect(noEscalation.ok).toBe(true);
+    if (!noEscalation.ok) return;
+    expect(lintSpecWarnings(noEscalation.value)).toEqual([]);
   });
 
   /**

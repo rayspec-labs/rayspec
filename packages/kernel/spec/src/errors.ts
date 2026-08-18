@@ -349,6 +349,27 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               cron document including the ones that set it correctly. The org the
  *                               id names does NOT have to exist at boot — the scheduler starts and
  *                               skips each firing until it does — but the variable itself must be set.
+ *  - `workforce_escalation_unreachable` — an approval policy declares `onTimeout: 'escalate'`. When it
+ *                               times out the sweep re-issues the request naming the requester's
+ *                               declared superior — an EMPLOYEE id — as its approver (@rayspec/tasks
+ *                               approvals.ts), and the two namespaces that meet on that column are
+ *                               STRUCTURALLY DISJOINT: an authenticated principal is `user:<uuid>` or
+ *                               `api-key:<uuid>` (both id columns are Postgres `uuid`, always
+ *                               hyphenated) and an employee id is a `SafeIdentifier`, which forbids
+ *                               `-`. So a NAMED approver can never be matched at the HTTP door
+ *                               (@rayspec/tasks decision-authority.ts `mayDecide`), and the only route
+ *                               left is break-glass — `override: true` plus `workforce:override`,
+ *                               which owner/admin humans hold and an api-key can never be granted, so
+ *                               an api-key-only deployment cannot resolve one at all. ADVISORY, not an
+ *                               error, because the declaration is CORRECT and the row IS decidable:
+ *                               the resolution path is narrower than an author would assume, which is
+ *                               what an advisory is for. Erroring would make half a frozen closed enum
+ *                               unusable — a grammar change wearing a lint's clothes — and would force
+ *                               authors to delete declarations a principal↔employee binding is meant
+ *                               to support later. Whether it bites at all depends on deployment
+ *                               posture (is a human owner/admin reachable?), which the document cannot
+ *                               see. NOT SUPPRESSIBLE, structurally rather than by choice: see
+ *                               `SuppressibleWarningCode`.
  *  - `stale_suppression`      — a node's `lintSuppress` entry acknowledges an advisory code that no
  *                               longer fires on that node (`applyLintSuppressions`, lint.ts). The
  *                               acknowledgement has outlived its finding — the heuristic changed, or
@@ -365,20 +386,36 @@ export const SpecWarningCode = z.enum([
   'stream_playback_media_token',
   'agent_untrusted_field_precedence',
   'cron_tenant_required',
+  'workforce_escalation_unreachable',
   'stale_suppression',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 
 /**
- * The advisory codes a node's `lintSuppress` may acknowledge — every warning code EXCEPT
- * `stale_suppression`. Derived (never re-listed) so a new advisory code is suppressible by default
- * and the one exclusion stays visible here. `stale_suppression` is excluded because it reports on
- * the suppressions themselves: were it acknowledgeable, a rotted acknowledgement could be silenced
- * by one more acknowledgement, which is exactly the silent rot the code exists to prevent. Error
- * codes (`SpecErrorCode`) are structurally absent — a suppression can never name one, so
+ * The advisory codes a node's `lintSuppress` may acknowledge. Derived by EXCLUSION (never re-listed)
+ * so a new advisory code is suppressible by default and every exclusion has to justify itself here.
+ * Error codes (`SpecErrorCode`) are structurally absent — a suppression can never name one, so
  * suppressing an error is not expressible at all (advisories only, fail-closed at parse).
+ *
+ * THE RULE FOR EXCLUDING A CODE: exclude it when an acknowledgement of it could not do what an
+ * acknowledgement means. Two codes qualify, for two different reasons:
+ *
+ *  - `stale_suppression` reports on the suppressions themselves. Were it acknowledgeable, a rotted
+ *    acknowledgement could be silenced by one more acknowledgement — exactly the silent rot the code
+ *    exists to detect.
+ *  - `workforce_escalation_unreachable` fires on a `workforce.…` path, and suppression is scoped by
+ *    NODE (`applyLintSuppressions`, lint.ts): only agents/stores/api/triggers/handlers may carry
+ *    `lintSuppress`, and a finding is acknowledged only when its path lies UNDER the suppressing
+ *    node's. No node's path can ever contain `workforce.…`, so admitting this code would let an
+ *    author write an acknowledgement that silences nothing and returns as a `stale_suppression`.
+ *    Refusing it at the grammar is the honest shape: the document may not claim a review it cannot
+ *    record. (Giving the workforce section its own `lintSuppress` would be a grammar widening, and
+ *    the v1 surface is frozen.)
  */
-export const SuppressibleWarningCode = SpecWarningCode.exclude(['stale_suppression']);
+export const SuppressibleWarningCode = SpecWarningCode.exclude([
+  'stale_suppression',
+  'workforce_escalation_unreachable',
+]);
 export type SuppressibleWarningCode = z.infer<typeof SuppressibleWarningCode>;
 
 /** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */
