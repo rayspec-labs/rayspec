@@ -703,6 +703,11 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       () => {},
       () => {},
     );
+    // Declared out here so the `finally` can await it: if an assertion below throws, the releases
+    // in `finally` normally let the pause resolve — but on the one path where they do not (the
+    // drain timing out 60s later), an unhandled rejection would surface inside whatever test is
+    // running by then and be read as THAT test's failure. A settled handle keeps a failure here.
+    let pauseSettled: Promise<void> = Promise.resolve();
     try {
       await Promise.race([taken, hold]);
       const pass = await scheduler.runReservePass();
@@ -732,6 +737,10 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
         paused = true;
         return r;
       });
+      pauseSettled = pausePromise.then(
+        () => {},
+        () => {},
+      );
 
       await new Promise((r) => setTimeout(r, 500));
       expect(paused, 'the pause must not commit past a claim holding the runtime row').toBe(false);
@@ -767,6 +776,7 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       releaseHold();
       release();
       await holdSettled;
+      await pauseSettled;
       await side.end();
     }
   });
