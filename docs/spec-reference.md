@@ -2060,8 +2060,9 @@ a list, never a plural collection. Both wrong spellings are refused with the typ
 one-element list would mint a second legal spelling for one shape), and a plural `workforces:` key,
 with or without a singular sibling. Two literal `workforce:` keys in one document are refused one
 layer earlier, by YAML's own duplicate-key rule, as `yaml_parse_error`. The constraint is on
-AUTHORING only: storage is already keyed per workforce id (`workforce_runtime` rows are
-`(tenant, workforce_id)`), so relaxing it later would be a grammar change, not a migration.
+AUTHORING only: storage is already per-workforce — `workforce_runtime` carries a UNIQUE
+`(tenant_id, workforce_id)` and tasks carry a `workforce_id` — so relaxing this later would be a
+grammar change, not a migration.
 
 Ids everywhere in the section (`id`, employee, department and team ids) are safe identifiers
 (`[a-z_][a-z0-9_]*`): they land in URL path segments, in task-owner columns and in delegation target
@@ -2288,7 +2289,10 @@ parks in `waiting_for_user` for a human. A rule whose reviewer would review thei
 falls to the human instead — a submitter never decides their own work.
 
 `reviewPolicies[].maxReviewRounds` and `execution.maxReviewRounds` count the same thing at two
-scopes — this rule's cycles, and the workforce-wide ceiling.
+scopes, and the effective ceiling is the TIGHTER of the two: the engine takes
+`min(policy rounds, execution.maxReviewRounds)` when both are declared
+(`packages/kernel/tasks/src/intent-applier.ts:363-364`). The names now say that; the older bare
+`maxRounds` did not.
 
 ### `approvalPolicies`
 
