@@ -145,39 +145,6 @@ export class TenantProvisionError extends Error {
 export const OPERATOR_INVITE_DEFAULT_TTL_SECONDS = 60 * 60;
 
 /**
- * The advisory-lock the migration step serializes on. `0x72617973` is a namespace this project owns,
- * so the pair cannot collide with an unrelated application holding advisory locks on the same
- * database; slot 1 is the platform migration chain. Any pair works as long as every runner of this
- * command uses the SAME one, which is why it is a constant rather than a parameter.
- */
-const MIGRATION_LOCK_NAMESPACE = 0x7261_7973;
-const MIGRATION_LOCK_SLOT = 1;
-
-/**
- * Apply the committed chain with the whole step serialized by a Postgres ADVISORY LOCK.
- *
- * The migrator takes no lock of its own, and its first two statements — `CREATE SCHEMA IF NOT EXISTS
- * "drizzle"` and `CREATE TABLE IF NOT EXISTS "drizzle"."__drizzle_migrations"` — are not
- * concurrency-safe: `IF NOT EXISTS` checks the catalogue and then creates, so two runs started
- * together against a FRESH database both see nothing and the loser dies on a duplicate-object error
- * before it ever reaches the reservation. That is precisely the shape a deploy script produces when
- * it fans out on a first bring-up, and it is the one case where "safe to call unconditionally" would
- * otherwise be false. Serialized, the loser waits, then finds the chain applied and no-ops — which is
- * what the reservation below already does, one layer down.
- *
- * The lock is transaction-scoped and the transaction does nothing else, so it is released by the
- * COMMIT — and by the connection dying, so a killed run never leaves the next one waiting. The
- * migration itself runs on a different connection of the same pool: an advisory lock is a mutex
- * between runners, not a data lock, so it blocks the other command, never our own work.
- */
-async function migrateUnderLock(db: ReturnType<typeof makeDb>): Promise<void> {
-  await db.$client.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK_NAMESPACE}::int4, ${MIGRATION_LOCK_SLOT}::int4)`;
-    await applyMigrations(db);
-  });
-}
-
-/**
  * Write the minted token to `path`, creating it EXCLUSIVELY at mode 600.
  *
  * `wx` is the whole point: an existing path is an error, never an overwrite — the same never-clobber
@@ -251,8 +218,16 @@ export async function provisionTenant(
     // at an unexpected DATABASE_URL migrates that database. A failure here is reported as ITS OWN
     // code: the migrator's rejection is a multi-line query dump, and an operator handed one has no
     // way to tell that nothing was reserved.
+    //
+    // `applyMigrations` SERIALIZES the whole step on a Postgres advisory lock itself, which is what
+    // makes this command safe to call unconditionally from a deploy script that fans out on a first
+    // bring-up: the migrator's own `CREATE … IF NOT EXISTS` bootstrap is not concurrency-safe, so
+    // without the lock the loser would die on a duplicate-object error before it ever reached the
+    // reservation. This file used to take that lock around the call; it no longer does, and MUST NOT
+    // — `applyMigrations` acquires the same key (`@rayspec/db`'s `MIGRATION_LOCK_NAMESPACE`/`_SLOT`)
+    // on a connection of its own, so an outer holder in this process would be waiting on itself.
     try {
-      await migrateUnderLock(db);
+      await applyMigrations(db);
     } catch (err) {
       throw new TenantProvisionError(
         'MIGRATION_FAILED',
