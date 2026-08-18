@@ -29,6 +29,7 @@ export {
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
 export {
   ApprovalAlreadyDecidedError,
+  ApprovalApproverMismatchError,
   type ApprovalDecisionInput,
   ApprovalNotFoundError,
   type ApprovalRecord,
@@ -77,6 +78,11 @@ export {
   TASK_PRIORITIES,
   type TaskPriority,
 } from './create-task.js';
+export {
+  ANY_AUTHENTICATED_DECIDER,
+  isOpenDecider,
+  mayDecide,
+} from './decision-authority.js';
 export {
   TaskDependenciesInvalidError,
   TaskNotFoundError,
@@ -129,6 +135,7 @@ export {
   ReviewNotForParkError,
   ReviewNotFoundError,
   type ReviewRecord,
+  ReviewReviewerMismatchError,
   ReviewTaskStateError,
   type ReviewVerdictInput,
   reviewVerdictSchema,

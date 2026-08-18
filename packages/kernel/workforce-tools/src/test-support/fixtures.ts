@@ -19,7 +19,7 @@ export function fixtureConfig(): WorkforceConfig {
       role: 'orchestrator',
       department: null,
       reportsTo: null,
-      capabilities: [],
+      labels: [],
     },
     {
       id: 'mgr',
@@ -28,7 +28,7 @@ export function fixtureConfig(): WorkforceConfig {
       role: 'manager',
       department: 'eng',
       reportsTo: 'lead',
-      capabilities: [],
+      labels: [],
     },
     {
       id: 'dev',
@@ -37,7 +37,7 @@ export function fixtureConfig(): WorkforceConfig {
       role: 'worker',
       department: 'eng',
       reportsTo: 'mgr',
-      capabilities: ['production_change'],
+      labels: ['production_change'],
     },
     {
       id: 'qa',
@@ -46,7 +46,7 @@ export function fixtureConfig(): WorkforceConfig {
       role: 'reviewer',
       department: null,
       reportsTo: 'lead',
-      capabilities: [],
+      labels: [],
     },
     {
       id: 'copy',
@@ -55,7 +55,7 @@ export function fixtureConfig(): WorkforceConfig {
       role: 'worker',
       department: 'growth',
       reportsTo: 'cmo',
-      capabilities: ['public_statement'],
+      labels: ['public_statement'],
     },
     {
       id: 'cmo',
@@ -64,7 +64,7 @@ export function fixtureConfig(): WorkforceConfig {
       role: 'manager',
       department: 'growth',
       reportsTo: 'lead',
-      capabilities: ['public_statement'],
+      labels: ['public_statement'],
     },
   ];
   return {
@@ -82,15 +82,15 @@ export function fixtureConfig(): WorkforceConfig {
         id: 'eng_default',
         appliesTo: { department: 'eng' },
         reviewer: 'qa',
-        requireWhen: { confidenceBelow: 0.75, capabilities: ['production_change'] },
+        requireWhen: { confidenceBelow: 0.75, labels: ['production_change'] },
         onReject: 'rework',
         maxRounds: 2,
       },
     ],
-    approvals: [
+    approvalPolicies: [
       {
         id: 'public_statement',
-        capabilities: ['public_statement'],
+        labels: ['public_statement'],
         approver: 'user',
         timeoutMs: 72 * 3_600_000,
         onTimeout: 'escalate',

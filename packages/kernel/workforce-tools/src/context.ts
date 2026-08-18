@@ -121,7 +121,7 @@ export class ContextSectionOverflowError extends Error {
     super(
       `turn-input section '${section}' renders to ${rendered} bytes against a ${budget}-byte ` +
         'budget. This section is derived from the deployed document, so the fix is the document ' +
-        '(shorter missions, fewer capabilities), never a silent trim. Fail-closed.',
+        '(shorter missions, fewer labels), never a silent trim. Fail-closed.',
     );
     this.name = 'ContextSectionOverflowError';
     this.section = section;
@@ -262,12 +262,11 @@ function windowLabel(ms: number): string {
 
 function renderIdentity(input: TurnInputFacts): string {
   const { employee } = input;
-  const capabilities =
-    employee.capabilities.length > 0 ? employee.capabilities.join(', ') : 'none declared';
+  const labels = employee.labels.length > 0 ? employee.labels.join(', ') : 'none declared';
   return [
     SECTION_HEADERS.identity,
     `Employee: ${employee.id} — ${employee.title}. Role: ${employee.role}.`,
-    `Capabilities: ${capabilities}.`,
+    `Labels: ${labels}.`,
   ].join('\n');
 }
 
@@ -354,10 +353,8 @@ function renderPolicies(input: TurnInputFacts): string {
     lines.push('Review rules covering you (first match applies):');
     for (const rule of facts.reviewRules) {
       const triggers: string[] = [];
-      if (rule.firesOnCapabilities.length > 0) {
-        triggers.push(
-          `fires on every completion (you hold: ${rule.firesOnCapabilities.join(', ')})`,
-        );
+      if (rule.firesOnLabels.length > 0) {
+        triggers.push(`fires on every completion (you hold: ${rule.firesOnLabels.join(', ')})`);
       }
       if (rule.confidenceBelow !== null) {
         triggers.push(`fires on a submitted confidence below ${rule.confidenceBelow}`);
@@ -385,7 +382,7 @@ function renderPolicies(input: TurnInputFacts): string {
           `${facts.approvalRule.onTimeout}).`,
       );
     } else {
-      lines.push('Approval rule covering you: none declared for your capabilities.');
+      lines.push('Approval rule covering you: none declared for your labels.');
     }
   }
   return lines.join('\n');

@@ -26,6 +26,16 @@
  * from capabilities (a blob body, a transcript, a model output) that NO declared store route serves.
  * Folding it into `store:read` would retroactively widen every api-key already minted with that
  * scope, and an already-issued credential cannot be narrowed again.
+ *
+ * `workforce:override` is the BREAK-GLASS permission for the task engine's two human decision doors.
+ * An approval row's `approver` and a review row's `reviewer` are accountability facts the engine
+ * journals (and the approval timeout sweep MINTS one when it escalates a hung request to the
+ * requester's declared superior), so those rows are decidable only by the principal they name.
+ * This permission is what lets a deployment resolve one anyway when that principal is unavailable
+ * — never silently: the caller must ALSO ask for the override on the request, and the journal
+ * records who was overridden. It is a SEPARATE permission rather than a reuse of `store:write` on
+ * this codebase's reuse test: overriding a recorded decider is not a subset of writing product
+ * data, it is the deliberate contradiction of a claim the engine already published.
  */
 export type Permission =
   | 'agent:run'
@@ -33,6 +43,7 @@ export type Permission =
   | 'store:read'
   | 'store:write'
   | 'events:read'
+  | 'workforce:override'
   | 'org:read'
   | 'org:member:add'
   | 'org:member:change'
@@ -49,6 +60,7 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'store:read',
     'store:write',
     'events:read',
+    'workforce:override',
     'org:read',
     'org:member:add',
     'org:member:change',
@@ -63,6 +75,10 @@ export const ROLE_PERMISSIONS: Record<string, Permission[]> = {
     'store:read',
     'store:write',
     'events:read',
+    // Break-glass on a workforce decision is an ADMINISTRATIVE act, not an ordinary write: every
+    // role that can decide at all already holds `store:write`, so putting it here (and not on
+    // `member`) is the whole distinction the permission exists to draw.
+    'workforce:override',
     'org:read',
     'org:switch',
     'apikey:read',
@@ -95,6 +111,9 @@ const SENSITIVE = new Set<Permission>([
   // demoted principal must not write product data on a stale JWT claim (the same write-bypass
   // reasoning that makes the api-key/org-management ops sensitive). store:read stays claim-trusted.
   'store:write',
+  // Break-glass over a recorded approver/reviewer is the last thing that should ride an ~8-minute
+  // stale role claim: a principal demoted out of owner/admin must lose it immediately.
+  'workforce:override',
 ]);
 
 /** True if `permission` requires a live membership check (never trust the JWT claim). */
@@ -110,10 +129,16 @@ export function isSensitive(permission: Permission): boolean {
  *
  * What is DELIBERATELY ABSENT is the security boundary: the org-MANAGEMENT sensitive ops
  * (`apikey:mint`, `apikey:revoke`, `org:member:change`, `org:switch`) are NOT here, so an api-key can
- * never perform them regardless of scope. `store:write` IS here (the programmatic/agency consumer
- * model — a desktop app / automation POSTing rows authenticates via an org-scoped key); it is also
- * SENSITIVE, but for an api-key the KEY is the live credential, so requirePermission falls api-keys
- * through to authorize(), where this set ∩ scopes is the gate (no stale-claim recheck applies).
+ * never perform them regardless of scope. `workforce:override` is absent for the same class of
+ * reason: the override exists to record WHICH HUMAN contradicted a named human's recorded decision,
+ * and a machine credential is precisely the principal that must not be able to do that. An api-key
+ * still decides ordinary (`approver: 'user'`) rows through `store:write`, which is the path every
+ * shipped example takes; what it cannot do is resolve an approval the engine addressed to someone.
+ *
+ * `store:write` IS here (the programmatic/agency consumer model — a desktop app / automation
+ * POSTing rows authenticates via an org-scoped key); it is also SENSITIVE, but for an api-key the
+ * KEY is the live credential, so requirePermission falls api-keys through to authorize(), where
+ * this set ∩ scopes is the gate (no stale-claim recheck applies).
  *
  * Frozen so a caller cannot mutate the shared authority; `authorize()` reads it via `.includes`.
  */

@@ -36,6 +36,8 @@ const DOCUMENTED_WORKFORCE_CODES = new Set([
   'budget_widening',
   'reserved_workforce_id',
   'reserved_tool_name',
+  'workforce_label_unheld',
+  'multiple_workforces',
 ]);
 
 describe('the spec reference workforce section', () => {

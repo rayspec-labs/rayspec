@@ -15,8 +15,8 @@
  *   workforce tasks --tree [--root <task-id>] [--json]   render one whole subtree as text
  *   workforce task <id>                        one task
  *   workforce approvals list                   the pending inbox
- *   workforce approvals approve <id> [--reason]
- *   workforce approvals reject <id> --reason <text>
+ *   workforce approvals approve <id> [--reason] [--override]
+ *   workforce approvals reject <id> --reason <text> [--override]
  *   workforce cost [--window 24h] [--by employee|department]   settled/reserved roll-up
  *   workforce events <task-id>                 the task's journal replay (parsed SSE frames)
  *   workforce pause [--drain] --workforce <id>
@@ -327,7 +327,16 @@ async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
     return outcome('workforce approvals list', res, { approvals: res.body });
   }
   if (action === 'approve' || action === 'reject') {
-    const { values, positionals } = parse(rest, { reason: { type: 'string' } }, true);
+    // `--override` is the BREAK-GLASS ask. It carries no authority of its own: the route ANDs it
+    // with the `workforce:override` permission, and a credential without that permission gets the
+    // route's 403 verbatim (the CLI adds no local authorization logic — two implementations is one
+    // too many). Needed only for an approval the engine addressed to a NAMED approver, which is
+    // what the timeout sweep writes when it escalates to the requester's declared superior.
+    const { values, positionals } = parse(
+      rest,
+      { reason: { type: 'string' }, override: { type: 'boolean' } },
+      true,
+    );
     const approvalId = positionals[0];
     if (approvalId === undefined || positionals.length !== 1) {
       throw new WorkforceCliError(
@@ -347,6 +356,7 @@ async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
       {
         decision: action === 'approve' ? 'approve' : 'reject',
         ...(typeof values.reason === 'string' ? { reason: values.reason } : {}),
+        ...(values.override === true ? { override: true } : {}),
       },
     );
     return outcome(`workforce approvals ${action}`, res, { approval: res.body });

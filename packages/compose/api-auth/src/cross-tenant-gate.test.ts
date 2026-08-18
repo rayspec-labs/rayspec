@@ -1050,7 +1050,16 @@ describe('workforce cross-tenant gate: identical structures and identifiers (CI-
     await tdb.insert(schema.workforceReviews, {
       id: reviewId,
       taskId: reviewTaskId,
-      reviewer: TWIN.employees.reviewer,
+      // THE `'user'` SENTINEL, matching the approval row above — because the verb this row exists to
+      // exercise is the HUMAN verdict door (`POST /v1/workforce/reviews/:id/verdict`, driven by
+      // `callAs` as a user principal), and that door serves reviews addressed to the deployment's
+      // operator surface. A review naming a declared EMPLOYEE is answered by that employee's own
+      // dispatched turn instead, where the actor IS the employee id — so seeding one here and then
+      // deciding it over HTTP asserted a routing the engine does not perform. Nothing in this suite
+      // reads the `reviewer` column (it appeared only on this line), and `'user'` is byte-identical
+      // across both twins exactly as an employee id would be, so the identical-identifier property
+      // this file exists to prove is untouched.
+      reviewer: 'user',
       round: 1,
       verdict: null,
       reasons: [secret],

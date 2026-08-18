@@ -8,6 +8,13 @@
  *   2. VERSION CHECK FIRST   — before the full strict Zod parse, read `version` off the loaded
  *                             object. A missing/unsupported version -> one clean
  *                             `unsupported_version` SpecError, NOT a wall of strict-shape errors.
+ *  2b. EXPERIMENTAL GATE     — a `workforce:` key of any shape without the caller's opt-in -> one
+ *                             `experimental_section_disabled`. Raw-document, pre-shape, same
+ *                             two-phase reason as the version check.
+ *  2c. ZERO-OR-ONE WORKFORCE — `scanMultipleWorkforces` over the RAW object: a LIST under
+ *                             `workforce:` or a plural `workforces:` key -> one
+ *                             `multiple_workforces` naming the rule (D-010). After the gate so a
+ *                             non-opted-in caller still sees only the gate's refusal.
  *   3. RESERVED DOCUMENT KEY — `scanReservedDocumentKeys` over the RAW loaded object: a mapping key
  *                             named `__proto__` is refused HERE or nowhere, for two different
  *                             reasons. Where the shape parse validates keys, it skips this one BY
@@ -66,6 +73,42 @@ function issueToSpecErrors(issue: z.core.$ZodIssue): SpecError[] {
     );
   }
   return [specError('schema_violation', issue.message, base)];
+}
+
+/**
+ * D-010, raised as a NAMED rule: a document declares exactly zero or one workforce, and
+ * `workforce:` is a single mapping. Two author spellings reach for more than one and are refused
+ * here — a LIST under `workforce:`, and a plural `workforces:` key (with or without a singular
+ * sibling: an author who wrote only `workforces:` believed the plural form existed, and
+ * `unknown_field` does not tell them otherwise).
+ *
+ * A one-element list is refused too: accepting it would mint a second legal spelling for the one
+ * shape. Two literal `workforce:` keys and multi-document streams stay with `yaml_parse_error` —
+ * the `yaml` library refuses both before this code runs, and re-coding its refusal would mean
+ * pattern-matching a library error string; `workforce-parse.negative.test.ts` pins that behavior
+ * instead, so a future `yaml` upgrade that softened `uniqueKeys` fails loudly.
+ *
+ * The constraint is on AUTHORING only. Storage is already keyed per workforce id
+ * (`workforce_runtime` rows are `(tenant, workforce_id)`), so relaxing this later is a grammar
+ * change, not a migration.
+ */
+function scanMultipleWorkforces(doc: Record<string, unknown>): SpecError | null {
+  const found =
+    'workforces' in doc
+      ? { what: "'workforces' as a top-level key", path: 'workforces' }
+      : Array.isArray(doc.workforce)
+        ? { what: "a list under 'workforce:'", path: 'workforce' }
+        : null;
+  if (found === null) return null;
+  return specError(
+    'multiple_workforces',
+    "a RaySpec document declares exactly zero or one workforce, and 'workforce:' is a single " +
+      `mapping — not a list and not a plural collection. Found ${found.what}. Merge the ` +
+      "declarations into one 'workforce:' block, or split them across separate documents (each " +
+      'deployment runs one workforce). This is a limitation of the experimental release, not a ' +
+      'permanent one',
+    found.path,
+  );
 }
 
 /** The caller-decided options `parseSpec` accepts. */
@@ -157,6 +200,18 @@ export function parseSpec(
         ),
       ],
     };
+  }
+
+  // ---- 2c. EXACTLY ZERO OR ONE WORKFORCE (D-010) -----------------------------------------
+  // AFTER the gate: a two-workforce document without the opt-in still gets the ONE clean
+  // `experimental_section_disabled` refusal, preserving the two-phase discipline this module
+  // commits to above. BEFORE the strict shape parse: by the time Zod has run, a list is an
+  // anonymous "expected object, received array" and a plural key is an anonymous `unknown_field` —
+  // neither names the rule the author broke. Operates on the RAW document for the same reason the
+  // gate does.
+  const multipleWorkforces = scanMultipleWorkforces(doc);
+  if (multipleWorkforces !== null) {
+    return { ok: false, errors: [multipleWorkforces] };
   }
 
   // ---- 3. RESERVED DOCUMENT KEY (raw scan; short-circuit on any hit) --------------------

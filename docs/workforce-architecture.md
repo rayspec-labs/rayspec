@@ -172,9 +172,43 @@ task dies gets the review released rather than stranded, and a review task's own
 never policy-reviewed — review depth is structurally one.
 
 Approvals: `request_approval` parks the task at zero cost with the DECLARED window and fate
-bound at request time (the rule matched by the employee's capabilities). A decision carries the
+bound at request time (the approval policy matched by the employee's labels). A decision carries the
 VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
 for asserting an identity. The timeout sweep gives every hung approval its declared fate.
+
+**The engine keeps the authorization it writes.** An approval's `approver` and a review's
+`reviewer` are journaled as accountability facts, so the door compares them against the deciding
+principal rather than trusting `store:write` alone
+(`packages/kernel/tasks/src/decision-authority.ts`; matrix in `decision-authority.db.test.ts`):
+
+- `approver: user` — the deployment's human operator surface, and the only value the declared
+  grammar admits — is the OPEN sentinel: any permitted principal decides it, exactly as before.
+  This is the shipped single-operator posture and the regression guard pins it.
+- A row that NAMES a principal binds to it. The case that actually arises is the escalation: when
+  an `onTimeout: escalate` request times out, the sweep closes it and re-issues it to the
+  requester's DECLARED superior (`approver: <employeeId>`, journaled as
+  `workforce.approval.requested`). Only that principal may resolve it — the operator whose
+  inaction caused the escalation cannot. The refusal is a 403 naming who the row names, and it
+  writes nothing at all.
+- **Break-glass** keeps an unavailable decider from wedging a deployment, and takes two
+  independent things so it can never happen by accident: the request must ASK (`override: true`,
+  or `--override` on the CLI) and the principal must HOLD `workforce:override` (an `owner`/`admin`
+  permission, deliberately never grantable to an API key — the override exists to record which
+  *human* contradicted a named human). The journal then carries `overriddenApprover` /
+  `overriddenReviewer`, so the trail says what happened instead of leaving `decided_by` to
+  contradict the recorded decider silently.
+
+At the HTTP door this means an escalated approval is **always** reached through break-glass, not
+usually: a principal authenticates as `user:<id>` / `api-key:<id>` and a named approver is a
+declared employee id, so the two namespaces are structurally disjoint and the comparison cannot
+match. That is the deliberate fail-closed reading — open core carries no principal-to-employee
+binding, and the honest answer to "we cannot verify this caller is `ops_lead`" is to demand the
+override and record it. There is no second route for an approval: `decideApproval` has exactly one
+caller (the HTTP door), no tool decides an approval, and the escalation dispatches no turn — so an
+escalated approval ends either in a break-glass decision or, when its window expires, in the
+terminal `fail` fate the re-issued request carries. (A named *reviewer* is the different case: a
+review verdict does arrive through that reviewer's own dispatched turn, where the actor IS the
+employee id and `apply-intents.ts` already re-checks it.)
 
 ## Budget scopes
 
@@ -226,7 +260,7 @@ result to review (which is what a low number is for), but a turn that reports `0
 rule, and a `submit_result` with no confidence at all does not trip it (the rule keys on a present
 number below the threshold). This is the deliberate exception to "model output is never authority":
 the self-report is an INPUT to a declared rule, never a bypass of one — the reviewer, the max rounds
-and the reject→rework loop are all enforced regardless, and the `firesOnCapabilities` branch of the
+and the reject→rework loop are all enforced regardless, and the `firesOnLabels` branch of the
 same policy fires UNCONDITIONALLY on the declared labels, with no number to dodge.
 
 ## Crash safety

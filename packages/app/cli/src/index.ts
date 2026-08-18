@@ -236,8 +236,16 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                                                 --json for the machine shape)
                                   task <id>                     one task
                                   approvals list                the pending inbox
-                                  approvals approve <id> [--reason <text>]
-                                  approvals reject <id> --reason <text>
+                                  approvals approve <id> [--reason <text>] [--override]
+                                  approvals reject <id> --reason <text> [--override]
+                                                                --override is the BREAK-GLASS ask on
+                                                                an approval the engine addressed to a
+                                                                NAMED approver (what the timeout sweep
+                                                                writes when it escalates to the
+                                                                requester's superior). It carries no
+                                                                authority: the route ANDs it with the
+                                                                workforce:override permission and
+                                                                journals the override.
                                   cost [--window 24h|7d] [--by employee|department]
                                                                 settled/reserved roll-up (grouped
                                                                 server-side when --by is given)
