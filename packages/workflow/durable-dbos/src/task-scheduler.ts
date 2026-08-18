@@ -67,6 +67,7 @@ import type { Db } from '@rayspec/db';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
   type ApprovalSweepOutcome,
+  afterTaskTerminal,
   appendTaskEvents,
   applyBudgetExhausted,
   applyTransition,
@@ -890,6 +891,31 @@ export class DbosTaskScheduler {
    * A dependency's outcome is decided and it is not `completed`: fail the dependent with the typed
    * reason and journal what decided it. The alternative is the defect this replaces — a task in
    * `blocked(awaiting_dependency)` with nobody left who could ever wake it.
+   *
+   * TERMINAL HERE RUNS THE FAN-IN, like every other terminal-applying path, and the `lockRootFirst`
+   * that precedes it is not optional. This was the ONE path that applied a terminal status without
+   * `afterTaskTerminal`, and the two halves guard each other:
+   *
+   *   - Without `afterTaskTerminal`, a failed task's opening delegation row is never settled and its
+   *     parent's park is never answered. The sharpest case is a parent in `waiting_for_review`: that
+   *     park has NO signal-based exit (no wake set matches it, no sweep covers it), so its only
+   *     release is `releaseAbandonedReview`, which runs from `afterTaskTerminal` and nowhere else. A
+   *     reviewer failed here would strand its reviewed parent permanently.
+   *   - Without `lockRootFirst`, adding `afterTaskTerminal` would make this the FIRST caller to
+   *     break the precondition that function's own docstring states — that its parent lock is
+   *     already held because every caller took the root-first locks before its transition. Half the
+   *     fix would introduce exactly the lock-order hazard @rayspec/tasks' cascade-locking suite
+   *     exists to catch.
+   *
+   * CORRECT FOR TOMORROW, PROVABLY INERT TODAY, and the inertness is the honest half of the claim:
+   * `dependencies` is settable only through `createRootTaskInputSchema` (@rayspec/tasks
+   * create-task.ts:96) — the ROOT surface. `childTaskSpecSchema` (:106-118) is a strictObject with
+   * no such key, and `insertChildTask` hard-codes `dependencies: []` (:249), so no child can carry
+   * one and no `decided` verdict can reach this function for a child. A root has no parent and no
+   * opening delegation record, so `afterTaskTerminal` returns immediately and `lockRootFirst` locks
+   * the row the compare-and-swap was about to lock anyway. Nothing observable changes today. What
+   * changes is that the day a dependency becomes attachable to a child, this path already behaves
+   * like the other eight instead of silently stranding a park.
    */
   async #failOnDecidedDependency(
     tdb: TenantDb,
@@ -903,13 +929,15 @@ export class DbosTaskScheduler {
           payload: { taskId: task.taskId, dependencies: blockers },
         },
       ]);
-      await applyTransition(tx, {
-        taskId: task.taskId,
-        expectedVersion: task.version,
+      const locked = await lockRootFirst(tx, task);
+      const done = await applyTransition(tx, {
+        taskId: locked.taskId,
+        expectedVersion: locked.version,
         to: 'failed',
         reason: 'dependency_failed',
         actor: 'scheduler',
       });
+      await afterTaskTerminal(tx, done);
     });
     this.#logger.warn(
       `[workforce] task ${task.taskId} failed: dependency ${blockers
