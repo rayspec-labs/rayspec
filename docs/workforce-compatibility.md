@@ -15,8 +15,10 @@ Its shape, its validation rules, its event payloads, its HTTP surface and its CL
 may change in **any** release, including a patch release, and **no deprecation period is
 promised**. Nothing on this page walks that back.
 
-What *is* promised is that you will never meet the section by accident, and that the
-runtime tells you it is experimental at every surface you can read.
+What *is* promised is that you will never meet the section by accident, and that the five
+surfaces enumerated below each say so — each with a test that turns red if the marking is
+deleted. Surfaces that do **not** carry a marking are named too, rather than left for you
+to discover.
 
 ## The flag
 
@@ -52,6 +54,20 @@ has a right-hand column.
 | **HTTP** | every response from a `/v1/workforce/*` route carries `X-Experimental: workforce`, including the fail-closed `501` and an unauthenticated `401` | `packages/compose/api-auth/src/routes/workforce-experimental-header.db.test.ts` drives real requests through the app, with a negative control (a non-workforce route must not carry it) and a structural check that no route in the module sits outside the marked prefix; `cors.test.ts` pins the header into the CORS `exposeHeaders` list, without which a browser client could not read it |
 | **CLI** | `doctor` and `plan` over a document that declares the section print an unmissable banner to **stderr** — `EXPERIMENTAL: this document declares 'workforce:'` — while stdout stays exactly one JSON object carrying `"experimental": ["workforce"]`; the `rayspec workforce` group is marked in `docs/cli-reference.md` | `packages/app/cli/src/workforce-experimental-banner.test.ts` drives the real entry point, asserts the banner reaches stderr and only stderr, and pins the reference-doc note |
 | **Events** | `docs/workforce-events.md` states the vocabulary is experimental, and every event payload carries `v: 1` (`WORKFORCE_EVENT_VERSION`) so a later change is detectable | `packages/kernel/tasks/src/events-experimental-marking.test.ts` pins the paragraph and the version constant |
+
+### What is NOT marked
+
+Two surfaces carry no experimental marking today. They are listed because a table of five
+marked surfaces invites the reading that everything is marked, and that reading would be
+wrong:
+
+- **The `rayspec workforce` command output.** The group's JSON results (`status`, `tasks`,
+  `cost`, …) carry no experimental key — only `doctor` and `plan` do, and only they print
+  the banner. The command group is marked in `docs/cli-reference.md`, not at runtime.
+- **The server boot banner.** It reports the deployment posture and the wired seams; it
+  does not state that a booted `workforce:` section is experimental. The boot still refuses
+  the section outright without the flag, so nothing runs unannounced — but the banner of a
+  flag-enabled boot says nothing about stability.
 
 ## What may change without a major version
 
