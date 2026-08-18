@@ -54,7 +54,55 @@ function detectStaticBoot(): { specPath: string; frontend: readonly FrontendSpec
   return detectStaticProfile(resolve(raw));
 }
 
+/**
+ * THE BOOT WINDOW IS SIGNAL-DEAF UNLESS THIS ENTRYPOINT CLAIMS THE SIGNALS ITSELF.
+ *
+ * Node's default action for SIGINT/SIGTERM is to terminate — but only while NOTHING has registered a
+ * listener, and by the time `main()` runs, two transitive dependencies already have. Measured with a
+ * probe that imports exactly this file's top-level graph: `process.listeners('SIGTERM').length` goes
+ * 0 -> 2 the moment `composition-root.js` finishes evaluating, and the two listeners are
+ *
+ *   1. `@openai/agents-core`'s trace provider (dist/tracing/provider.mjs) — it flushes, then exits
+ *      ONLY `if (!hasOtherListenersForSignals('SIGTERM'))`, i.e. only when it is the sole listener;
+ *   2. `signal-exit`'s listener — it removes itself and re-raises the signal ONLY when it is the
+ *      sole listener.
+ *
+ * With both loaded and no handler of our own, each sees the other and defers, so the signal is a
+ * NO-OP: a boot that is signalled before it starts serving neither exits nor reports anything, and a
+ * pod killed mid-boot hangs until SIGKILL. (`example-dev-boot-shutdown.db.test.ts` records the same
+ * mutual deference from the other side, for the `examples/<slug>/dev-boot.mjs` wrappers.)
+ *
+ * So the handlers go in FIRST, ahead of every awaited boot step, and start in a boot phase that
+ * aborts. Aborting mid-boot is safe to do abruptly, and that is a property of the boot, not an
+ * assumption: the migration chain is applied by the drizzle pg-core dialect in ONE
+ * `session.transaction(...)` covering the whole pending set (composition-root.ts's `applyMigrations`
+ * docstring records the same, verified against the installed drizzle-orm 0.45.2), so a dropped
+ * connection rolls the entire batch back — there is no half-applied chain to leave behind, and the
+ * sockets this process owns close with it. Exit 0 for the same reason the serving path does: a
+ * signalled shutdown is a requested one, not a failure.
+ *
+ * SIGHUP is deliberately still unlistened: `signal-exit` is its ONLY listener, so it re-raises and
+ * the default kill already applies.
+ */
+function installTerminationHandlers(phase: { handle: (signal: string) => void }): void {
+  process.on('SIGINT', () => phase.handle('SIGINT'));
+  process.on('SIGTERM', () => phase.handle('SIGTERM'));
+}
+
 async function main(): Promise<void> {
+  // Registered before ANYTHING that can await — `loadLocalDotenvIfPresent()` included — so no shape
+  // of this entrypoint has an unprotected window. The handler is swapped for the graceful one below
+  // once there is an HTTP server and an assembled platform to close.
+  const phase = {
+    handle: (signal: string): void => {
+      console.log(
+        `\n[rayspec-serve] ${signal} received during boot — aborting before the server listens.`,
+      );
+      process.exit(0);
+    },
+  };
+  installTerminationHandlers(phase);
+
   loadLocalDotenvIfPresent();
 
   // Consult RAYSPEC_AGENT_TRACING, and refuse a value this boot cannot act on. Here, ahead of BOTH
@@ -93,15 +141,16 @@ async function main(): Promise<void> {
       port: staticConfig.port,
       prefix: '[rayspec-serve]',
     });
-    const shutdown = (signal: string) => {
+    // The boot phase is over: hand the ALREADY-REGISTERED handlers the graceful shutdown. Swapping
+    // the behaviour rather than adding a second registration is what keeps exactly one handler pair
+    // on this process for its whole life.
+    phase.handle = (signal: string) => {
       console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
       httpServer.close(async () => {
         await staticServer.close();
         process.exit(0);
       });
     };
-    process.on('SIGINT', () => shutdown('SIGINT'));
-    process.on('SIGTERM', () => shutdown('SIGTERM'));
     return;
   }
 
@@ -135,16 +184,16 @@ async function main(): Promise<void> {
     prefix: '[rayspec-serve]',
   });
 
-  // Graceful shutdown: stop accepting connections, end the DB pool, exit. Wired to SIGINT/SIGTERM.
-  const shutdown = (signal: string) => {
+  // Graceful shutdown: stop accepting connections, end the DB pool, exit. The SIGINT/SIGTERM
+  // handlers are already installed (top of `main()`); this replaces the boot-phase abort with the
+  // graceful close now that there is something to close.
+  phase.handle = (signal: string) => {
     console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
     httpServer.close(async () => {
       await server.close();
       process.exit(0);
     });
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 /**

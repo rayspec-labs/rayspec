@@ -24,7 +24,10 @@
  *   - The handler is registered after `serve()` returns, so a signal during the boot is not the
  *     wrapper's to answer: before the dependencies named above install theirs it kills the process,
  *     and after that — until `serve()` returns — it does nothing at all and the boot completes.
- *   `packages/app/server/src/serve.ts` carries both, from the same wiring.
+ *   `packages/app/server/src/serve.ts` used to carry both from the same wiring; it no longer carries
+ *   the second, because it installs its handlers as the first statement of `main()` and starts them
+ *   in a boot phase that aborts (`serve-boot-signal.test.ts` signals a mid-boot process and asserts
+ *   it is gone). These wrappers still carry it — closing it here means the same move in each.
  *
  * `SIGHUP` is deliberately NOT wired: `signal-exit` registers for it and `@openai/agents-core` does not,
  * so signal-exit is its sole listener and re-raises it, which is why that signal already ends these
