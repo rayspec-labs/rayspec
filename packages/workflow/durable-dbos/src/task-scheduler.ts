@@ -38,7 +38,11 @@
  * `maxConcurrentWorkers` (per workforce, per department) is enforced by the reserve pass simply
  * NOT DISPATCHING past the cap: a task at a saturated workforce stays `queued` — no transition,
  * no reservation, no journal event — and is picked up when a slot frees. The pass counts `working`
- * rows plus its own dispatches, so the cap holds WITHIN a pass.
+ * rows plus its own dispatches, so the cap holds WITHIN a pass — but only because those counts are
+ * read AFTER the candidate page and not before it. Read the other way round, a claim committing
+ * between the two statements is invisible to both (no longer `queued`, not yet counted `working`)
+ * and buys one dispatch past the cap; `runReservePass` carries the argument and the seam that pins
+ * it. "Within a pass" is therefore a property of that read order, not of the counting.
  *
  * ACROSS passes it can OVERSHOOT, and the honest statement is not "a bounded transient": a pass
  * counts `working` rows, and a task it dispatched is not `working` until its claim commits, so two
@@ -63,6 +67,7 @@ import type { Db } from '@rayspec/db';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
   type ApprovalSweepOutcome,
+  afterTaskTerminal,
   appendTaskEvents,
   applyBudgetExhausted,
   applyTransition,
@@ -233,6 +238,14 @@ export interface TaskSchedulerDeps {
   readonly turnLeaseMs?: number;
   /** Injectable clock for the sweep/window tests. */
   readonly now?: () => Date;
+  /**
+   * TEST-ONLY seam, left undefined in production. Awaited exactly once per reserve pass, at the ONE
+   * point that separates the pass's two reads: after the candidate page, before the concurrency
+   * counts the cap is enforced from. The ORDER of those two reads is what keeps the cap from being
+   * overshot within a pass (`runReservePass`), and the only way to prove an ordering deterministically
+   * is to commit a claim in between — which is what this lets a suite do.
+   */
+  readonly onPassReadBarrier?: () => Promise<void>;
 }
 
 export interface ReservePassOutcome {
@@ -462,36 +475,13 @@ export class DbosTaskScheduler {
     await this.#promotePlanned(tdb, outcome);
     await this.#wakeDependencySatisfied(tdb);
 
-    // The concurrency counts are aggregated IN the database: a LIMIT here would understate the
-    // caps it feeds, and materializing every working row to count them is the unbounded read.
-    const workingGroups = (await tdb
-      .select(schema.workforceTasks, {
-        workforceId: schema.workforceTasks.workforceId,
-        department: schema.workforceTasks.department,
-        count: sql<number>`count(*)::int`,
-      })
-      .where(eq(schema.workforceTasks.status, 'working'))
-      .groupBy(schema.workforceTasks.workforceId, schema.workforceTasks.department)) as Array<{
-      workforceId: string | null;
-      department: string | null;
-      count: number;
-    }>;
-
-    const workforceCount = new Map<string, number>();
-    const departmentCount = new Map<string, number>();
-    for (const g of workingGroups) {
-      const wf = g.workforceId ?? '';
-      workforceCount.set(wf, (workforceCount.get(wf) ?? 0) + g.count);
-      if (g.department !== null) {
-        departmentCount.set(`${wf}/${g.department}`, g.count);
-      }
-    }
+    // The counts that decide which SCOPES are excluded from the page. Being stale here can only
+    // change WHICH rows are paged, never how many are dispatched — the cap arithmetic below runs off
+    // its own, later read (see `#workingCounts`).
+    const exclusionCounts = await this.#workingCounts(tdb);
 
     const budgetsCache = new Map<string, { paused: boolean; budgets: WorkforceBudgets }>();
-    const skipped = await this.#undispatchableScopes(tdb, budgetsCache, {
-      workforceCount,
-      departmentCount,
-    });
+    const skipped = await this.#undispatchableScopes(tdb, budgetsCache, exclusionCounts);
     outcome.paused += skipped.pausedTasks;
     outcome.saturated += skipped.saturatedTasks;
 
@@ -521,6 +511,31 @@ export class DbosTaskScheduler {
       )
       .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
     if (candidates.length === 0) return outcome;
+
+    // TEST-ONLY seam (undefined in production): the one point where the pass's two reads are
+    // separated, so a suite can commit a claim exactly in between and prove the order below holds.
+    if (this.#deps.onPassReadBarrier !== undefined) await this.#deps.onPassReadBarrier();
+
+    // ── THE CAP'S COUNTS ARE READ *AFTER* THE PAGE, AND THAT ORDER IS LOAD-BEARING ──────────────
+    // These two statements are separate database snapshots, so a task whose claim commits between
+    // them is seen by exactly one of them — and WHICH one decides whether the cap holds.
+    //
+    // Counts first (the shape that shipped until this comment): a task X dispatched by an earlier
+    // pass, claiming in that window, is `queued` when the counts are taken (so not counted) and
+    // `working` when the page is taken (so not paged). Invisible to both — the loop below then
+    // starts one slot short and dispatches one task PAST `maxConcurrentWorkers`. Measured: with the
+    // window widened it reproduces every run, and it is what made the halt-drain suite flaky
+    // (task-scheduler.db.test.ts, `halt drains before it cancels`: 23 failures in 44 runs).
+    //
+    // Page first: an over-dispatch needs a task that is neither paged nor counted, i.e. its claim
+    // lands after the counts and before the page. With the page taken first that ordering does not
+    // exist. The remaining case — the claim landing between the page and the counts — puts X in
+    // BOTH, which double-counts one slot: an under-dispatch the next tick clears, never an
+    // overshoot. A task that LEAVES `working` in the same window has genuinely freed its slot.
+    //
+    // What this does NOT close is the across-passes overshoot the module header states, nor the
+    // multi-process one: a task this pass dispatches is not `working` until its claim commits.
+    const { workforceCount, departmentCount } = await this.#workingCounts(tdb);
 
     for (const task of candidates) {
       try {
@@ -605,6 +620,41 @@ export class DbosTaskScheduler {
       }
     }
     return outcome;
+  }
+
+  /**
+   * `working` rows per workforce and per (workforce, department), aggregated IN the database: a
+   * LIMIT here would understate the caps it feeds, and materializing every working row to count them
+   * is the unbounded read. Called TWICE per pass on purpose — once for the page's scope exclusions
+   * and once, AFTER the page, for the cap arithmetic — because those two uses tolerate staleness in
+   * opposite directions. `runReservePass` carries the argument for why the second one has to be the
+   * later read.
+   */
+  async #workingCounts(
+    tdb: TenantDb,
+  ): Promise<{ workforceCount: Map<string, number>; departmentCount: Map<string, number> }> {
+    const workingGroups = (await tdb
+      .select(schema.workforceTasks, {
+        workforceId: schema.workforceTasks.workforceId,
+        department: schema.workforceTasks.department,
+        count: sql<number>`count(*)::int`,
+      })
+      .where(eq(schema.workforceTasks.status, 'working'))
+      .groupBy(schema.workforceTasks.workforceId, schema.workforceTasks.department)) as Array<{
+      workforceId: string | null;
+      department: string | null;
+      count: number;
+    }>;
+    const workforceCount = new Map<string, number>();
+    const departmentCount = new Map<string, number>();
+    for (const g of workingGroups) {
+      const wf = g.workforceId ?? '';
+      workforceCount.set(wf, (workforceCount.get(wf) ?? 0) + g.count);
+      if (g.department !== null) {
+        departmentCount.set(`${wf}/${g.department}`, g.count);
+      }
+    }
+    return { workforceCount, departmentCount };
   }
 
   /**
@@ -884,6 +934,31 @@ export class DbosTaskScheduler {
    * A dependency's outcome is decided and it is not `completed`: fail the dependent with the typed
    * reason and journal what decided it. The alternative is the defect this replaces — a task in
    * `blocked(awaiting_dependency)` with nobody left who could ever wake it.
+   *
+   * TERMINAL HERE RUNS THE FAN-IN, like every other terminal-applying path, and the `lockRootFirst`
+   * that precedes it is not optional. This was the ONE path that applied a terminal status without
+   * `afterTaskTerminal`, and the two halves guard each other:
+   *
+   *   - Without `afterTaskTerminal`, a failed task's opening delegation row is never settled and its
+   *     parent's park is never answered. The sharpest case is a parent in `waiting_for_review`: that
+   *     park has NO signal-based exit (no wake set matches it, no sweep covers it), so its only
+   *     release is `releaseAbandonedReview`, which runs from `afterTaskTerminal` and nowhere else. A
+   *     reviewer failed here would strand its reviewed parent permanently.
+   *   - Without `lockRootFirst`, adding `afterTaskTerminal` would make this the FIRST caller to
+   *     break the precondition that function's own docstring states — that its parent lock is
+   *     already held because every caller took the root-first locks before its transition. Half the
+   *     fix would introduce exactly the lock-order hazard @rayspec/tasks' cascade-locking suite
+   *     exists to catch.
+   *
+   * CORRECT FOR TOMORROW, PROVABLY INERT TODAY, and the inertness is the honest half of the claim:
+   * `dependencies` is settable only through `createRootTaskInputSchema` (@rayspec/tasks
+   * create-task.ts:96) — the ROOT surface. `childTaskSpecSchema` (:106-118) is a strictObject with
+   * no such key, and `insertChildTask` hard-codes `dependencies: []` (:249), so no child can carry
+   * one and no `decided` verdict can reach this function for a child. A root has no parent and no
+   * opening delegation record, so `afterTaskTerminal` returns immediately and `lockRootFirst` locks
+   * the row the compare-and-swap was about to lock anyway. Nothing observable changes today. What
+   * changes is that the day a dependency becomes attachable to a child, this path already behaves
+   * like the other eight instead of silently stranding a park.
    */
   async #failOnDecidedDependency(
     tdb: TenantDb,
@@ -897,13 +972,15 @@ export class DbosTaskScheduler {
           payload: { taskId: task.taskId, dependencies: blockers },
         },
       ]);
-      await applyTransition(tx, {
-        taskId: task.taskId,
-        expectedVersion: task.version,
+      const locked = await lockRootFirst(tx, task);
+      const done = await applyTransition(tx, {
+        taskId: locked.taskId,
+        expectedVersion: locked.version,
         to: 'failed',
         reason: 'dependency_failed',
         actor: 'scheduler',
       });
+      await afterTaskTerminal(tx, done);
     });
     this.#logger.warn(
       `[workforce] task ${task.taskId} failed: dependency ${blockers
@@ -1197,6 +1274,23 @@ export class DbosTaskScheduler {
    * touches more than one of them must too, or a claim and a settle could wait on each other. The
    * ordering WITHIN `workforce_tasks` is the root-first subtree order (@rayspec/tasks
    * apply-intents.ts); the ordering within the ledger is the canonical scope order (budget.ts).
+   *
+   * WHERE EACH RANK IS ENFORCED, so a reader does not go looking for an enforcer that is not there:
+   *
+   *   - `workforce_tasks -> workforce_budget_ledger`, and the orders within each of those two, have
+   *     kernel-side enforcers — `lockRootFirst`/`lockDescendants` (task-locks.ts, apply-intents.ts)
+   *     and `ledgerScopesFor`'s canonical walk (budget.ts) — so a kernel mutation reddens
+   *     @rayspec/tasks' own cascade-locking suite.
+   *   - `workforce_runtime -> workforce_tasks` HAS NO KERNEL-SIDE ENFORCER, by construction. All
+   *     three composite runtime+tasks transactions live in THIS file (`#claimTurn`, `#parkDenied`,
+   *     and the reaper's reservation release), and the kernel deliberately keeps the two apart:
+   *     `control.ts` runs `pauseWorkforce`'s runtime write and `cancelTaskCascade`'s task writes in
+   *     SEPARATE transactions, which is precisely why a halt can never be half of a cycle. So this
+   *     rank is held by the three call sites above and by nothing else; the test that guards it
+   *     (@rayspec/tasks cascade-locking.db.test.ts, `a claim and a denied-claim park QUEUE`) mirrors
+   *     these shapes from the exported primitives rather than mutating a kernel enforcer, because
+   *     there is none to mutate. Adding a fourth composite runtime+tasks transaction anywhere means
+   *     taking the runtime row first, here, by hand.
    */
   async #claimTurn(
     tdb: TenantDb,

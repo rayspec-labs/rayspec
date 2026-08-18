@@ -222,9 +222,22 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
  *
  * A review park is answered by its VERDICT, which is why `waiting_for_review` appears in no wake
  * set: no signal kind matches it and no timeout sweep covers it. That is sound only while the
- * dispatched reviewer can still deliver one. It cannot once its task is terminal — and a review
- * task reaches a terminal status by routes no tool error can prevent: an operator cancel, a cancel
- * cascade from an ancestor, or the second consecutive tool error that fails it outright.
+ * dispatched reviewer can still deliver one, and it cannot once its own task is terminal.
+ *
+ * WHAT REACHES THIS BACKSTOP is a rule, not a list. `afterTaskTerminal` above is its only caller,
+ * and every call site of `afterTaskTerminal` hands it the task IT JUST TRANSITIONED — so the
+ * release fires exactly when the REVIEWER's own terminal is applied through one of those sites: an
+ * operator cancel aimed at the review task (control.ts:96 — engine.db.test.ts:970), the second
+ * consecutive tool error that fails it outright (apply-intents.ts:1226 — engine.db.test.ts:994),
+ * and the approval-timeout sweep failing a reviewer that had parked on its own approval
+ * (approvals.ts:369 — structurally reachable through the same door; no test pins that one today).
+ *
+ * A CANCEL CASCADE FROM AN ANCESTOR IS NOT ONE OF THEM, and does not need to be.
+ * `cancelDescendants` (apply-intents.ts:1361-1399) transitions descendants directly and never calls
+ * `afterTaskTerminal`, so that route never enters this function at all — and the same cascade also
+ * cancels the REVIEWED task (a non-terminal descendant of the same origin), so there is no park
+ * left to release. `engine.db.test.ts:1069` asserts that property on that route in place of a
+ * release that cannot happen.
  *
  * When the terminating task IS the bound review task and the review is still undecided, the
  * reviewed task is released to `waiting_for_user` — the same place a spent round budget leaves it,

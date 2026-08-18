@@ -340,16 +340,17 @@ describe.skipIf(!hasDb)(
      *      way through deploy and wired the dispatcher. This is the fact that makes the boot a LIVE
      *      workforce deployment rather than merely a process. It is read off the DATABASE rather than
      *      off a banner line so the suite is not coupled to boot copy other work is editing.
-     *   2. `GET /health` answering 200 — the process is listening. Measured, not assumed: a SIGTERM
-     *      sent after (1) but BEFORE (2) is not honoured at all. On the certification host that boot
-     *      ran on for a further 415 s without exiting, and only a second signal delivered after it was
-     *      listening ended it (then in 50 ms, exit 0). `serve.ts` registers its SIGINT/SIGTERM handlers
-     *      in the `main()` body at serve.ts:145-146 — AFTER the awaited assemble step at serve.ts:117
-     *      — so nothing runs them until `assembleServer` has resolved, and the whole boot window is
-     *      unprotected by any handler of serve.ts's own. WHAT ACTUALLY SWALLOWED THE SIGNAL IN THAT
-     *      WINDOW IS UNIDENTIFIED: absent a handler, Node's default action is to terminate, so
-     *      something in the boot installed one — do not read a culprit into this comment. The
-     *      BEHAVIOUR is reproducible and is recorded in the handback report as its own item.
+     *   2. `GET /health` answering 200 — the process is listening. This used to be load-bearing for a
+     *      reason that has since been FIXED, and the reason is worth keeping: a SIGTERM sent after (1)
+     *      but before (2) was not honoured at all (on the certification host that boot ran a further
+     *      415 s, and only a second signal after it was listening ended it, in 50 ms, exit 0). The
+     *      swallower was never DBOS: `@openai/agents-core`'s trace provider and `signal-exit` both
+     *      register SIGTERM handlers at import time, and each exits/re-raises ONLY when it is the sole
+     *      listener — so with both loaded and no handler of the entrypoint's own, the signal was a
+     *      no-op. `serve.ts` now installs its own handlers as the first statement of `main()`, ahead
+     *      of the awaited assemble, and `serve-boot-signal.test.ts` pins that directly by signalling a
+     *      mid-boot process. Waiting for (2) here is now belt-and-braces: this arm is about the
+     *      SERVING shutdown, so it should still signal a serving process.
      *
      * The SIGKILL fallback exists so a hang is reported as a failed assertion on the exit code rather
      * than as a suite that never returns, and so a stuck server is never left behind for the next arm.
