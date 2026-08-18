@@ -212,6 +212,13 @@ implementation that decides differently, and — for each property individually 
 that violates exactly that property, which must be reported as failed. The third arm is what makes
 the first two mean anything; a kit that passes everything proves nothing about what it passed.
 
+**Where the `CostPolicy` shipped-default arm lives.** Not in that file. `LedgerCostPolicy` sits in
+`@rayspec/tasks`, which `@rayspec/core` cannot import, and it is bound to a live tenant database
+handle — so both of its conforming arms in `seam-contracts.test.ts` are fixtures, and the
+shipped-default arm is `budget-seam-contract.db.test.ts`, which drives the same
+`costPolicyContract` against a real ledger under its own ran-guard. Four seams' defaults are covered
+in one file, the fifth in the other; the sentence above spans both.
+
 **What a green run does not say.** The kit checks STRUCTURAL obligations. It does not check whether a
 decision is good, and it cannot check the authority questions that need facts outside the seam: a
 strategy's owners are validated by `planRefusal`, and spend is validated by the durable ledger. The
