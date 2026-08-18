@@ -107,7 +107,12 @@ export async function cancelTaskCascade(
 
 /** How long a drain politely waits for in-flight turns before refusing (fail-loud, not forever). */
 const DEFAULT_DRAIN_TIMEOUT_MS = 60_000;
-const DRAIN_POLL_MS = 250;
+/**
+ * The drain's poll interval. EXPORTED so the suite that asserts "a quiet drain never sleeps" can
+ * recognise this wait by its own value rather than by a copied literal — a hard-coded `250` there
+ * would keep passing, testing nothing, the moment this number moved.
+ */
+export const DRAIN_POLL_MS = 250;
 
 export class WorkforceDrainTimeoutError extends Error {
   readonly workforceId: string;

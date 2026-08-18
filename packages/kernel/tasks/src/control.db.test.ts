@@ -8,20 +8,20 @@
  *     transactions, so a timing-out drain must never look like a rolled-back pause — an operator
  *     whose drain timed out has to be able to re-issue it, or wait, against a workforce that is
  *     still not reserving.
- *   - a drain over a GENUINELY QUIET workforce returns on its FIRST read and never sleeps. Proven
- *     deterministically rather than by a stopwatch: with `drainTimeoutMs: 0` the deadline is
- *     already past on entry, so a poll loop that slept, retried, or consulted the deadline before
- *     the count would reject. It resolves — which is only possible if the zero-work read short
- *     circuits before any wait. That is the load-independent statement of "no hang, no busy-wait";
- *     a wall-clock bound would only measure the host.
+ *   - a drain over a GENUINELY QUIET workforce returns on its FIRST read: it never sleeps and never
+ *     consults the deadline. Proven by two independent arms rather than by a stopwatch, because
+ *     neither is the whole claim — the poll interval is COUNTED (recognised by the constant the
+ *     drain itself exports, so the check cannot rot into a no-op when that number moves), and
+ *     `drainTimeoutMs: 0` puts the deadline in the past on entry so a loop that read it before the
+ *     count would reject. A wall-clock bound was rejected as the instrument: it measures the host.
  *
  * The dispatched-but-unclaimed half of the drain story (B-015e) lives where its enforcement does —
  * `@rayspec/durable-dbos` task-scheduler.db.test.ts, because the refusal is in the claim
  * transaction, which is the only writer of `status = 'working'`.
  */
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyTransition } from './apply-transition.js';
-import { pauseWorkforce, WorkforceDrainTimeoutError } from './control.js';
+import { DRAIN_POLL_MS, pauseWorkforce, WorkforceDrainTimeoutError } from './control.js';
 import { createRootTask } from './create-task.js';
 import { ensureWorkforceRuntime } from './runtime.js';
 import {
@@ -141,15 +141,41 @@ describe.skipIf(!hasDb)('pauseWorkforce drain (db)', () => {
       actor: 'scheduler',
     });
 
-    // `drainTimeoutMs: 0` puts the deadline in the past before the loop starts. A drain that
-    // slept, that polled twice, or that checked the deadline before the count would reject here.
-    const runtime = await pauseWorkforce(tdb(), {
-      workforceId: 'wf-quiet',
-      actor: 'operator',
-      drain: true,
-      drainTimeoutMs: 0,
-    });
+    // TWO INDEPENDENT ARMS, because neither alone is the whole claim.
+    //
+    // (a) NO SLEEP: the poll wait is recognised by its own exported interval — never a copied
+    //     literal, which would keep passing while testing nothing if the interval moved. Timers
+    //     are counted, not faked, so the real database round trips underneath stay real.
+    // (b) NO DEADLINE CONSULT: `drainTimeoutMs: 0` puts the deadline in the past before the loop
+    //     starts, so a loop that read it before the count would reject instead of resolving.
+    //
+    // (a) alone would miss a loop that waited out a deadline without sleeping; (b) alone would
+    // miss one that slept once and then found zero — a mutation that moves the sleep above the
+    // count is green against (b) and red against (a).
+    const polls: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: TimerHandler,
+      ms?: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms === DRAIN_POLL_MS) polls.push(ms);
+      return (realSetTimeout as (...a: unknown[]) => unknown)(fn, ms, ...rest);
+    }) as unknown as typeof globalThis.setTimeout);
 
+    let runtime: Awaited<ReturnType<typeof pauseWorkforce>>;
+    try {
+      runtime = await pauseWorkforce(tdb(), {
+        workforceId: 'wf-quiet',
+        actor: 'operator',
+        drain: true,
+        drainTimeoutMs: 0,
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(polls, 'a quiet drain must not wait out even one poll interval').toEqual([]);
     expect(runtime.paused).toBe(true);
     expect(await pausedFlag('wf-quiet')).toBe(true);
     // …and a quiet drain moved nothing: the queued task is still queued.
