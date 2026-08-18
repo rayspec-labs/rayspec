@@ -243,6 +243,34 @@ and both acceptance e2e tests land their SIGKILL at a park. The
 engine-level guards that make it all true: the workflow-id claim, the receipt idempotency, and the
 one-writer transition monopoly above.
 
+A crash is not the only way a turn stops making progress, and the durable engine's own status
+cannot see the other one. A worker whose process is up and whose turn workflow is genuinely PENDING
+but whose body is WEDGED — a hung socket, a deadlocked dependency — reaches neither release path:
+not the turn's final transaction, which it never gets to, and not the reaper, which asked the
+engine and was told the workflow was alive. Such a row held its `maxConcurrentWorkers` slot and its
+budget reservation indefinitely, and because the `task`/`root` ledger scopes are un-windowed the
+stranded estimate never rolled over. Every claim therefore now stamps a LEASE
+(`workforce_tasks.claim_expires_at`, written in the same compare-and-swap that takes the claim and
+cleared by every exit from `working`), and the sweep reaps an expired claim through the identical
+path as a dead one — same re-queue, same release of exactly what the claim reserved, in the window
+it reserved it in — journaling `queueReason: 'turn_lease_expired'` so the two diagnoses stay
+distinguishable. The default lease is 30 minutes and is deliberately far above any plausible
+healthy turn: the shipped examples' whole-TASK wall clocks are 30m and 45m, and a task is many
+turns. A turn reaped while still running cannot corrupt anything — its final application is
+refused over the successor's claim by the claim-ownership check — so the residual cost of an
+over-eager lease is duplicated work, which is why the default errs long rather than short.
+`packages/workflow/durable-dbos/src/task-scheduler.db.test.ts` proves both halves: a wedged
+PENDING turn is reaped with its reservation returned, and a live turn inside its lease survives
+every sweep.
+
+What the lease does **not** do, stated plainly: it releases the row and the money, not the
+operating-system resource. Nothing kills the wedged body — there is no safe way to interrupt
+arbitrary handler code mid-call — so the wedged execution keeps its slot on the turn queue until it
+returns, throws, or the process restarts. What the reap recovers is the task (dispatchable again),
+the workforce `maxConcurrentWorkers` slot (counted off `working` rows), and the budget reservation,
+which is the only one of the three that leaked permanently. A deployment whose workers wedge often
+wants a smaller turn-queue concurrency or a timeout inside the handler, not a shorter lease.
+
 ## Honest scope
 
 What the built-in orchestration deliberately does NOT include:
