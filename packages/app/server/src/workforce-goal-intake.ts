@@ -22,6 +22,7 @@
  */
 import type { WorkforceGoalIntake, WorkforceGoalOutcome } from '@rayspec/api-auth';
 import type { ExecutionPlan, OrchestrationStrategy } from '@rayspec/core';
+import { SEAM_MAX_PLAN_STEPS } from '@rayspec/core';
 import { type Db, forTenant } from '@rayspec/db';
 import type { WorkforceConfig } from '@rayspec/spec';
 import { createRootTask, MAX_TASK_DEPENDENCIES, MAX_TASK_TITLE_CHARS } from '@rayspec/tasks';
@@ -47,6 +48,16 @@ export interface WorkforceGoalIntakeDeps {
  */
 function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
   if (plan.steps.length === 0) return 'the plan carries no steps';
+  // A plan is created as sibling roots inside ONE transaction, so an unbounded plan is an unbounded
+  // write from a single submitted goal — the one way this seam can cost more than the goal that
+  // asked for it. The ceiling is checked FIRST so an oversized plan is refused before the per-step
+  // walk, and it is the seam kit's own constant so an out-of-tree strategy can self-check against
+  // the same number the intake enforces. Real decomposition past this width belongs to the
+  // orchestrator's own turns via `delegate_task`, where each new task passes the dispatch boundary
+  // and draws on its own budget.
+  if (plan.steps.length > SEAM_MAX_PLAN_STEPS) {
+    return `the plan carries ${plan.steps.length} steps (the bound is ${SEAM_MAX_PLAN_STEPS})`;
+  }
   for (const [index, step] of plan.steps.entries()) {
     const employee = config.employees.get(step.owner);
     if (!employee) {

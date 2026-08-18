@@ -87,6 +87,9 @@ const ROOTS = [
   'examples/stream-backend',
   'examples/agent-pack-deployment',
   'examples/local-boot',
+  // The out-of-tree extension-seam sample. It is exportable surface an integrator reads and copies,
+  // so it is scanned like every other shipped example rather than being silently exempt.
+  'examples/workforce-extension',
   'examples/live-workspace-events',
   'examples/notes-ui',
   'examples/agent-boot-backend',
