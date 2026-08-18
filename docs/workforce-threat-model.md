@@ -135,7 +135,7 @@ untrimmably** into the owning employee's turn input.
 | Cost-DoS by loop-minting roots | 429 before the intake runs | **PROVEN** — `packages/compose/api-auth/src/routes/workforce.test.ts`, `C5: rate-limits repeated goal submissions of the SAME workforce` |
 | Silent double-submit on a client retry | 400 naming the header | **PROVEN** — `packages/compose/api-auth/src/routes/workforce.test.ts`, `refuses a goal outside the strict schema, a reserved workforce id, and a read-only key` |
 | Forged `requestedBy` in the body | strict schema 400; the field is server-stamped | **PROVEN** — same test (strict-schema arm) |
-| **A plan with an unbounded NUMBER of steps** | **created** — one submitted goal becomes N sibling roots in one transaction | **NO MECHANISM, NO TEST.** `planRefusal` bounds each step's owner, department, title and dependency list; it does not bound `plan.steps.length`. See §7.4. |
+| A plan with an unbounded NUMBER of steps | refused typed, zero rows — one submitted goal cannot become an unbounded write | **PROVEN** — the ceiling is `packages/app/server/src/workforce-goal-intake.ts:58` against `packages/kernel/core/src/seam-contracts.ts:61`; driven by `packages/app/server/src/workforce-goal-intake.db.test.ts`, `refuses every over-reaching plan shape typed, with ZERO rows`, with the at-the-bound control `a plan AT the step bound is created — the bound refuses excess, not decomposition` so the fix is not a blanket refusal |
 
 **What else would produce the same reading.** The intake tests could pass because the *strategy* is
 a stub that never returns a hostile plan. They do not: each cell installs a scripted strategy that
@@ -195,7 +195,7 @@ seat's prompt.
 | Cross-tenant recall through an identical twin workforce | nothing leaks, and the empty result is *scoping* rather than luck (tenant B's provider returns the bait) | **PROVEN** — `packages/app/server/src/workforce-recall.db.test.ts`, `ADVERSARIAL: an identical twin workforce in another tenant leaks nothing` |
 | Cross-workforce recall inside one tenant; unbounded prompt growth | pinned and bounded | **PROVEN** — `packages/app/server/src/workforce-recall.db.test.ts`, `holds every bound: the age window, the hit cap, the text cap, and the workforce pin` |
 | Instruction injection through a prior turn's summary | flattened; cannot forge the boundary line | **PROVEN** — `packages/kernel/workforce-tools/src/context.test.ts`, `C1: an untrusted recall hit cannot forge the data-boundary line` |
-| **A replacement provider returning a very large hit list** | the byte budget still holds, but `renderRecall` re-measures the whole block per dropped hit, so the cost of holding it grows with the square of the hit count | **NO MECHANISM ON THIS TREE, NO TEST.** `renderRecall` (`packages/kernel/workforce-tools/src/context.ts:631`) caps bytes, not input count. The shipped provider caps itself at `packages/kernel/workforce-tools/src/memory.ts:39`, so no shipped configuration reaches it. See §7.4. |
+| A replacement provider returning a very large hit list | the input is capped **before** the byte-budget shrink loop, so the work is bounded by the ceiling rather than by what the provider returned | **PROVEN** — `packages/kernel/workforce-tools/src/context.ts:642` against `packages/kernel/core/src/seam-contracts.ts:92`, with its own loss marker (`packages/kernel/workforce-tools/src/context.ts:654`) kept distinct from the byte-budget marker because they are different losses. Driven by `packages/kernel/workforce-tools/src/context.test.ts`, `caps the hits it will render, whatever the provider returned, and says how many it dropped` (a 20 000-hit flood), with two controls: `a provider inside the ceiling is rendered whole, with no omission notice` and `the byte budget still applies INSIDE the ceiling, and both losses are reported` |
 
 ---
 
@@ -421,16 +421,28 @@ security story**, so it is stated per seam rather than in aggregate.
 | Seam | Production call site | Return value re-validated? |
 |---|---|---|
 | `OrchestrationStrategy` | **yes** — the goal intake | **yes** — `planRefusal` (`packages/app/server/src/workforce-goal-intake.ts:49`), except step count (§7.4) |
-| `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:182`) | **partly** — hits render as bounded, sanitized data (§3.3); malformed-hit rejection is pending (§7.1) |
+| `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:182`) | **partly** — hits render as bounded, sanitized data (§3.3) and the input count is capped (`packages/kernel/workforce-tools/src/context.ts:642`); a *malformed* hit is rejected only by a confinement nothing calls (§7.1) |
 | `ReviewPolicy` | **yes**, but hardcoded — no injection point | n/a |
-| `WorkerSelector` (`packages/kernel/core/src/worker-selector.ts:53`) | **NONE** | **NONE on this tree** (§7.1) |
-| `CostPolicy` (`packages/kernel/core/src/cost-policy.ts:53`) | **NONE** — the shipped `LedgerCostPolicy` (`packages/kernel/tasks/src/budget.ts:551`) is never instantiated outside tests; the scheduler calls the underlying `authorizeTurn` function directly | **NONE on this tree** (§7.1) |
-| `ApprovalProvider` (`packages/kernel/core/src/approval-provider.ts:45`) | **NONE** | **NONE on this tree** (§7.1) |
+| `WorkerSelector` (`packages/kernel/core/src/worker-selector.ts:53`) | **NONE** | a confinement exists and **nothing calls it** (§7.1) |
+| `CostPolicy` (`packages/kernel/core/src/cost-policy.ts:53`) | **NONE** — see below; the scheduler calls the underlying `authorizeTurn` function directly | a confinement exists and **nothing calls it** (§7.1) |
+| `ApprovalProvider` (`packages/kernel/core/src/approval-provider.ts:45`) | **NONE** | a confinement exists and **nothing calls it** (§7.1) |
 
-**How the wiring claims were established** — by probe, not by reading the interfaces. A repo-wide
-grep for each interface name and for each shipped default class (`CapabilityMatchSelector`,
-`UnroutedApprovalProvider`, `LedgerCostPolicy`) finds no non-test instantiation of any of the three;
-the only file that constructs them is `packages/kernel/core/src/strategy-defaults.test.ts`.
+**How the wiring claims were established** — by probe, not by reading the interfaces, and the probe
+is now also a **tripwire that runs every build**: `packages/kernel/core/src/seam-wiring.test.ts`
+scans production sources and asserts `WorkerSelector has NO production reference outside its own
+module`, the same for `ApprovalProvider`, and — separately, because the shape differs —
+`CostPolicy is IMPLEMENTED in the task engine and never constructed`. It `TEETH:` -tests itself by
+planting a wiring and confirming detection, and it **fails closed on an empty scan**.
+
+**`LedgerCostPolicy` is constructed nowhere at all** — not in production and not in a test.
+`grep` for `new LedgerCostPolicy` across `packages/` and `examples/` returns **zero** hits; the class
+is declared at `packages/kernel/tasks/src/budget.ts:551`, re-exported a second time from
+`packages/kernel/tasks/src/index.ts:46`, and instantiated by nothing.
+`packages/kernel/core/src/strategy-defaults.test.ts` does **not** import `cost-policy.js` and has no
+`LedgerCostPolicy` arm; it exercises the *other* defaults. An earlier draft of this page said the
+class was "never instantiated outside tests", which is literally true and misleading — it implies a
+test instantiates it. Nothing does. The correction runs in the direction that **strengthens** §7.1:
+the class is entirely dead code.
 
 **Injection points are narrower than the interfaces suggest.** `orchestrationStrategy` reaches the
 composition only through the `buildServer` options object
@@ -446,12 +458,15 @@ the composition root at all; reaching it means an embedder composing the turn ha
 | A strategy naming an undeclared owner, a foreign department, or a forward dependency | refused before the first insert, zero rows | **PROVEN** — `packages/app/server/src/workforce-goal-intake.db.test.ts`, `refuses an invalid plan typed, with ZERO rows` |
 | A seam asserting a tenant identity | **structurally impossible** — no seam type carries a tenant field; tenant is injected into the callee by trusted composition code and never read back from a return value | **PROVEN by construction**, checked against the three interface definitions cited above. |
 | A memory provider injecting instructions | rendered as bounded, sanitized data | **PROVEN** — §3.3's C1 arm |
-| A selector returning a non-candidate; a cost policy allowing what the baseline denied; an approval provider answering its own question | **nothing happens**, because nothing calls those seams | **NO MECHANISM ON THIS TREE, NO TEST.** See §7.1. |
-| A strategy returning an unbounded plan | created | **NO MECHANISM, NO TEST** — §7.4. |
+| A selector returning a non-candidate; a cost policy allowing what the baseline denied; an approval provider answering its own question | each is refused **by a confinement wrapper that no production code calls** — so on a running deployment nothing happens, because nothing calls those seams either | **The refusal is tested; the wiring does not exist.** `packages/kernel/core/src/seam-confinement.test.ts` drives each over-reach against the wrapper and observes the refusal. Read §7.1 before counting this as a control. |
+| A strategy returning an unbounded plan | refused typed, zero rows | **PROVEN** — §3.1 |
 
 `packages/kernel/core/src/strategy-defaults.test.ts` covers the **shipped defaults' honesty** (that
-each default does what its docstring says, including refusing rather than guessing). It does **not**
-drive a hostile out-of-tree implementation; on this tree nothing does.
+each default does what its docstring says, including refusing rather than guessing).
+`packages/kernel/core/src/seam-contracts.ts` is a **conformance kit an out-of-tree implementer runs
+against their own implementation** — `workerSelectorContract(selector)` and friends — not a dispatch
+path this runtime executes. Neither drives a hostile implementation through a production call site,
+because for three of the seams no such call site exists.
 
 ---
 
@@ -650,19 +665,33 @@ oracle non-vacuous, where it previously asserted `0 === 0`.
 
 These are not footnotes. A reviewer who reads only this section has the honest picture.
 
-### 7.1 Three seams have no production call site — and therefore no enforced confinement
+### 7.1 Three seams have no production call site — so their confinements are LANDED BUT UNCALLED
 
-`WorkerSelector`, `CostPolicy` and `ApprovalProvider` are **not called anywhere in production
-code** (established by probe — see §3.9). On this tree they also have **no return-value
-re-validation**: nothing checks that a selector's answer is inside the candidate set it was given,
-that a cost policy did not allow what the baseline denied, or that an approval provider did not
-answer its own question.
+`WorkerSelector`, `CostPolicy` and `ApprovalProvider` are **not called anywhere in production code**.
+That is not an inference from reading the interfaces; it is asserted every build by a tree-scanning
+tripwire that fails closed on an empty scan and self-tests by planting a wiring
+(`packages/kernel/core/src/seam-wiring.test.ts`, `WorkerSelector has NO production reference outside
+its own module` and its two siblings). `LedgerCostPolicy` is constructed nowhere at all (§3.9).
 
-A change adding those confinements is **open as PR #497 and is not merged**. Everything it contains
-is therefore **pending**, and this page counts none of it as a defence of the current tree. When it
-lands, the honest reading of it will still be: **the confinements for these three seams are enforced
-by code nothing calls, because nothing calls those seams either.** They are a contract written down
-in advance, not a control operating today.
+**Return-value confinements now exist** — `confineWorkerSelector`, `confineCostPolicy`,
+`confineApprovalProvider` and `confineMemoryProvider` in
+`packages/kernel/core/src/seam-confinement.ts` — and each rebuilds the return value field by field
+rather than trusting the shape it was handed. They are tested against deliberately over-reaching
+implementations (`packages/kernel/core/src/seam-confinement.test.ts`).
+
+**And nothing calls them.** A repo-wide search for the four wrapper names across `packages/` and
+`examples/`, excluding tests and their own module, returns **two hits, both prose inside docblocks**
+— no invocation. So the accurate description is **landed but uncalled**, not "protected":
+
+> **The confinements for these three seams are enforced by code nothing calls, because nothing calls
+> those seams either.** They are a contract written down in advance and proven against hostile
+> fixtures — not a control operating on a running deployment.
+
+The consequence for a reviewer is unchanged by their landing: **if any of these three seams is wired
+in a future change, the wiring change is the security review.** What has improved is that the
+confinement it must call now exists and is tested, so wiring it correctly is a small deliberate act
+rather than a design task — and the tripwire above will go red the moment the wiring appears, which
+is exactly when someone should look.
 
 The consequence for a reviewer: if any of these three seams is wired in a future change, the wiring
 change is the security review, and it must land its confinement in the same commit.
@@ -741,30 +770,41 @@ Both end-to-end process kills in this repository land at a **park**, never insid
 The vision permits this. It must never be reported as an empirical mid-turn crash test, and this
 page does not.
 
-### 7.4 Two unbounded inputs behind seams that are wired
+### 7.4 Two unbounded inputs behind the wired seams — both now CLOSED
 
-Both are resource-exhaustion, not privilege escalation, and both are reachable **only** through an
-installed out-of-tree implementation, not from the environment:
+Recorded here rather than deleted, because the shape is the useful part: both were
+resource-exhaustion reachable only through an installed out-of-tree implementation, neither was a
+privilege escalation, and both were found by driving the seam rather than by reading it.
 
-1. **A plan has no step ceiling.** `planRefusal`
-   (`packages/app/server/src/workforce-goal-intake.ts:49`) bounds each step and not the number of
-   steps, and the plan is created as sibling roots inside one transaction
-   (`packages/app/server/src/workforce-goal-intake.ts:115`) — so one submitted goal can become an
-   unbounded write. **NO MECHANISM, NO TEST** on this tree. A ceiling is pending in PR #497.
-2. **Recall rendering is quadratic in the hit count a provider returns.** `renderRecall`
-   (`packages/kernel/workforce-tools/src/context.ts:631`) re-measures the whole block once per
-   dropped hit. The byte budget always holds; the *cost* of holding it grows with the square of the
-   input. The shipped provider caps itself at
-   `packages/kernel/workforce-tools/src/memory.ts:39`, so **no shipped configuration reaches it**.
-   **NO MECHANISM, NO TEST** on this tree. An input cap is pending in PR #497.
+1. **A plan had no step ceiling** — one submitted goal could become an unbounded write, since the
+   plan is created as sibling roots inside one transaction
+   (`packages/app/server/src/workforce-goal-intake.ts:115`). **Closed:**
+   `packages/app/server/src/workforce-goal-intake.ts:58` bounds `plan.steps.length` against
+   `packages/kernel/core/src/seam-contracts.ts:61`, with a test at the bound so the fix refuses
+   excess rather than decomposition (§3.1).
+2. **Recall rendering was quadratic in the hit count a provider returned.** The byte budget always
+   held; the *cost* of holding it grew with the square of the input. **Closed:**
+   `packages/kernel/workforce-tools/src/context.ts:642` caps the input before the shrink loop, under
+   its own marker (§3.3). The shipped provider still self-caps well inside the ceiling
+   (`packages/kernel/workforce-tools/src/memory.ts:39`), so no shipped configuration ever reached
+   either version.
+
+**Both were recorded on this page as NO MECHANISM, NO TEST while that was true, and both statements
+were false within a day of being written.** That is the shelf life of an absence claim, and it is
+why §7.5's last bullet exists.
 
 ### 7.5 Smaller gaps, named rather than omitted
 
-- **`planRefusal`'s title-length and dependency-count branches have no test cell.** The merged
-  matrix at `packages/app/server/src/workforce-goal-intake.db.test.ts` (`refuses an invalid plan
-  typed, with ZERO rows`) covers four shapes: undeclared owner, foreign department, forward
-  dependency, empty plan. The code also refuses an out-of-bounds title and an over-count dependency
-  list; nothing drives those.
+- **~~`planRefusal` has untested branches.~~ CLOSED.** An earlier draft recorded that the title-length
+  and dependency-count branches had no test cell — and **under-enumerated its own gap**, because the
+  empty-goal branch (`packages/app/server/src/workforce-goal-intake.ts:66` is the department check
+  one line below it) was untested and unnamed. All three are now driven:
+  `packages/app/server/src/workforce-goal-intake.db.test.ts`, `refuses every over-reaching plan shape
+  typed, with ZERO rows` carries a cell for an over-bound title, an empty title, an empty goal and an
+  over-count dependency list, each asserting zero rows. Kept as a struck-through entry rather than
+  deleted: a gap statement that missed a member of the very set it was enumerating is the program's
+  own recorded failure mode — *probing proves only what you thought to probe* — and the correction is
+  worth more visible than tidy.
 - **Whether a model treats a message or a recall hit as an instruction is not enforceable here.**
   The runtime controls placement (below the data-boundary line) and shape (no forged headers). It
   does not control the model.
@@ -789,6 +829,15 @@ installed out-of-tree implementation, not from the environment:
   is stable is not thereby a citation that is *apt*, and only reading the enclosing function or
   docblock settles which. Every citation in this page whose recorded text also occurs elsewhere in
   its own file was re-checked that way.
+- **An absence claim has a SHELF LIFE, and this page has already outlived two of its own.** §7.4's
+  two gaps were recorded as **NO MECHANISM, NO TEST** — true when written, false within a day, once
+  the change that closed them merged. The direction of that error is the point: a page whose whole
+  discipline is *no sentence claims more than its evidence* must not ship claiming **less** than the
+  tree either, because a reader who finds one understatement cannot tell which direction any other
+  claim errs in. Understating corrodes the same credibility overstating does. **Every NO TEST /
+  NO MECHANISM statement here must be re-verified against the current tip immediately before this
+  page ships — not against the tree its author started from.** The citation guard cannot do this
+  for you: it checks that cited lines still say what they said, and an absence has no line to cite.
 
 ---
 
@@ -836,18 +885,35 @@ either way. That is a documented choice, not an oversight, and it is why the ban
 matters more than the default.
 
 The same warning appears in `README.md`, `SECURITY.md`, `docs/ARCHITECTURE.md`,
-`docs/cli-reference.md`, `docs/v1-posture.md`, the server package README, every shipped example, the
-`deployments/` sample, `docker-compose.yml`, and the generated OpenAPI description. **No drift test
-cross-checks those prose copies against `banner.ts`** — only the banner's own two constants are
-pinned. **NO TEST** for the prose copies.
+`docs/cli-reference.md`, `docs/v1-posture.md`, the server package README, the `deployments/` sample,
+`docker-compose.yml`, and the generated OpenAPI description.
+
+**In the examples it is not universal, and the exact set matters.** Fourteen of eighteen example
+directories carry it. **Four carry no posture warning in any phrasing** — `examples/acme-notes`,
+`examples/acme-notes-backend`, `examples/agent-boot-backend` and `examples/local-boot` — because
+none of them has a README or PRD to carry one: they are spec fixtures, a generated backend, a bare
+`.yaml`, and a test harness respectively. A reader may reasonably judge that those four are not
+user-facing surfaces; that is an argument for the boundary, not for the sentence. An earlier draft
+of this page said the warning appears in "every shipped example", which is **false as written**, so
+it is stated by count and by name here instead.
+
+One further caveat that only a phrasing-aware search finds: `examples/notes-ui` carries the warning
+in **different words** ("LOCAL, trusted posture", "not internet-facing without the separate
+external-exposure hardening layer") rather than the shared blockquote. It is covered, but it is a
+live instance of exactly the drift the next paragraph admits to.
+
+**No drift test cross-checks any of those prose copies against `banner.ts`** — only the banner's own
+two constants are pinned. **NO TEST** for the prose copies.
 
 ---
 
 ## 10. What changed since the trust-surface inventory
 
 The inventory (`planning/inventories/B-016-threat-surface-inventory.md`, §4) was a snapshot taken
-before thirteen PRs landed. It was the input to this page, not its replacement; every claim in it
-was re-derived. The material changes:
+before fourteen PRs landed. It was the input to this page, not its replacement; every claim in it
+was re-derived. **Its prose mostly survived; its line numbers largely did not** — which is the
+ordinary fate of a `file:line` in a moving tree, and the reason this page ships a guard rather than
+a promise. The material changes:
 
 | Inventory finding | Status on this tree |
 |---|---|
@@ -856,8 +922,8 @@ was re-derived. The material changes:
 | **F-3** the posture banner is unpinned and absent from the static boot | **closed** — §9 |
 | **F-4** tool precedence is inverted relative to its rationale | **closed** — natives win structurally, §6.4 |
 | **F-5** config text renders unsanitized | **closed** — §6.2 |
-| **F-6** the posture warning is missing from four examples, `deployments/`, compose and OpenAPI | **closed** — §9 |
-| **F-7** the unwired seams have no return-value re-validation | **OPEN on this tree.** Pending in PR #497. §7.1 |
+| **F-6** the posture warning is missing from four examples, `deployments/`, compose and OpenAPI | **PARTIAL.** `deployments/`, `docker-compose.yml` and the generated OpenAPI are closed; **four examples still carry no warning** — the same count B-016 reported, though a different reading of which four are user-facing. §9 names them. |
+| **F-7** the unwired seams have no return-value re-validation | **closed as written, but read §7.1.** Confinements exist and are tested against hostile fixtures; **nothing calls them**, because nothing calls the seams. A tripwire now asserts that absence every build. |
 | **F-8** `requestedBy` skips the neutralizer | **closed** — §6.2 |
 | `employees[].capabilities` | renamed to `labels`, `SafeIdentifier`-constrained, and the unheld-label rule is now a lint **error** — §5 |
 | erasure is not wired for a store-less workforce | **closed** — §6.5 |
@@ -891,7 +957,9 @@ packages/kernel/workforce-tools/src/context.ts:521 | sanitizeUntrusted(task.requ
 packages/kernel/workforce-tools/src/context.ts:533 | throw new GoalExceedsContextBudgetError(
 packages/kernel/workforce-tools/src/context.ts:615 | sanitizeUntrusted(m.body)
 packages/kernel/workforce-tools/src/context.ts:631 | function renderRecall(recall: readonly MemoryHit[]): string | null {
+packages/kernel/workforce-tools/src/context.ts:642 | const capped = recall.slice(0, SEAM_MAX_MEMORY_HITS);
 packages/kernel/workforce-tools/src/context.ts:652 | sanitizeUntrusted(hit.text)
+packages/kernel/workforce-tools/src/context.ts:654 | omitted: hit ceiling
 packages/kernel/workforce-tools/src/context.ts:676 | sanitizeConfig(input.employee.id)
 packages/kernel/workforce-tools/src/context.ts:709 | throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
 packages/kernel/workforce-tools/src/toolset.ts:73 | export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): void {
@@ -952,6 +1020,7 @@ packages/kernel/tasks/src/intent-applier.ts:114 | export const turnIntentSchema 
 packages/kernel/tasks/src/create-task.ts:106 | export const childTaskSpecSchema = z.strictObject({
 packages/kernel/tasks/src/create-task.ts:246 | requestedBy: parent.owner,
 packages/kernel/tasks/src/budget.ts:551 | export class LedgerCostPolicy implements CostPolicy {
+packages/kernel/tasks/src/index.ts:46 | LedgerCostPolicy,
 packages/compose/api-auth/src/routes/workforce.ts:94 | function actorFrom(c: Context<AppEnv>): string {
 packages/compose/api-auth/src/routes/workforce.ts:119 | async function breakGlassAuthorized(
 packages/compose/api-auth/src/routes/workforce.ts:125 | await enforcePermission(deps, c, 'workforce:override');
@@ -967,6 +1036,7 @@ packages/compose/api-auth/src/routes/workforce.ts:953 | requestedBy: actorFrom(c
 packages/compose/api-auth/src/http/middleware.ts:150 | const serverOrg = principal?.orgId;
 packages/compose/api-auth/src/http/middleware.ts:174 | if (serverOrg) c.set('tenantId', serverOrg);
 packages/app/server/src/workforce-goal-intake.ts:49 | function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
+packages/app/server/src/workforce-goal-intake.ts:58 | if (plan.steps.length > SEAM_MAX_PLAN_STEPS) {
 packages/app/server/src/workforce-goal-intake.ts:62 | const employee = config.employees.get(step.owner);
 packages/app/server/src/workforce-goal-intake.ts:66 | if (step.department !== null && step.department !== employee.department) {
 packages/app/server/src/workforce-goal-intake.ts:97 | if (input.tenantId !== deps.tenantId) return { outcome: 'not_found' };
@@ -1006,6 +1076,8 @@ packages/kernel/core/src/workforce-ids.ts:80 | export function isReservedWorkfor
 packages/kernel/core/src/worker-selector.ts:53 | export interface WorkerSelector {
 packages/kernel/core/src/cost-policy.ts:53 | export interface CostPolicy {
 packages/kernel/core/src/approval-provider.ts:45 | export interface ApprovalProvider {
+packages/kernel/core/src/seam-contracts.ts:61 | export const SEAM_MAX_PLAN_STEPS = 64;
+packages/kernel/core/src/seam-contracts.ts:92 | export const SEAM_MAX_MEMORY_HITS = 64;
 packages/kernel/spec/src/workforce-lint.ts:229 | if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
 packages/kernel/spec/src/workforce-lint.ts:636 | if (approval.onTimeout !== 'escalate') return;
 packages/kernel/spec/src/workforce-lint.ts:643 | 'invalid_orchestrator',
@@ -1062,6 +1134,9 @@ packages/kernel/workforce-tools/src/context.test.ts | C1: an untrusted recall hi
 packages/kernel/workforce-tools/src/context.test.ts | C1: a forged `## N.` header in a DEPARTMENT MISSION cannot reach column 0
 packages/kernel/workforce-tools/src/context.test.ts | C1: `requestedBy` cannot forge a section header from section 4
 packages/kernel/workforce-tools/src/context.test.ts | C1: a delegated goal/title with raw line breaks cannot forge structure either
+packages/kernel/workforce-tools/src/context.test.ts | caps the hits it will render, whatever the provider returned, and says how many it dropped
+packages/kernel/workforce-tools/src/context.test.ts | a provider inside the ceiling is rendered whole, with no omission notice
+packages/kernel/workforce-tools/src/context.test.ts | the byte budget still applies INSIDE the ceiling, and both losses are reported
 packages/kernel/workforce-tools/src/toolset-semantics.test.ts | send_message accepts declared employees and the user, refusing anything else
 packages/kernel/workforce-tools/src/toolset-semantics.test.ts | submit_review takes its reviewId from the SNAPSHOT
 packages/kernel/workforce-tools/src/toolset-semantics.test.ts | a REVIEW task carries no request_review
@@ -1078,7 +1153,15 @@ packages/kernel/workforce-tools/src/role-privilege.test.ts | the toolset is a fu
 packages/kernel/workforce-tools/src/role-privilege.test.ts | every tool a role carries sets inputSchema, and it IS the schema the model was shown
 packages/kernel/auth-core/src/authz.test.ts | an api-key can NEVER break the glass on a named approver/reviewer, however it is scoped
 packages/kernel/core/src/strategy-defaults.test.ts | CapabilityMatchSelector
+packages/kernel/core/src/seam-wiring.test.ts | WorkerSelector has NO production reference outside its own module
+packages/kernel/core/src/seam-wiring.test.ts | ApprovalProvider has NO production reference outside its own module
+packages/kernel/core/src/seam-wiring.test.ts | CostPolicy is IMPLEMENTED in the task engine and never constructed
+packages/kernel/core/src/seam-wiring.test.ts | reads a non-empty set of production sources — an empty scan fails CLOSED
+packages/kernel/core/src/seam-wiring.test.ts | TEETH: a planted wiring is detected, and a comment that merely names a seam is not
+packages/kernel/core/src/seam-confinement.test.ts | REFUSES a selection naming someone outside the candidate set
 packages/app/server/src/workforce-goal-intake.db.test.ts | refuses an invalid plan typed, with ZERO rows
+packages/app/server/src/workforce-goal-intake.db.test.ts | refuses every over-reaching plan shape typed, with ZERO rows
+packages/app/server/src/workforce-goal-intake.db.test.ts | a plan AT the step bound is created — the bound refuses excess, not decomposition
 packages/app/server/src/workforce-goal-intake.db.test.ts | reconciles tenant and workforce BEFORE the strategy runs
 packages/app/server/src/workforce-recall.db.test.ts | ADVERSARIAL: an identical twin workforce in another tenant leaks nothing
 packages/app/server/src/workforce-recall.db.test.ts | holds every bound: the age window, the hit cap, the text cap, and the workforce pin
