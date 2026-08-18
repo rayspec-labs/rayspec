@@ -389,7 +389,9 @@ jobs:
 
       # DB migration gates: the destructive-SQL scan, then the "scan -> shadow-DB dry-run" apply, then
       # the from-clean-DB bootstrap oracle (applies the full committed chain via `drizzle-kit migrate`
-      # and asserts the live schema == schema.ts with zero drift).
+      # and asserts the live schema == schema.ts with zero drift), then the upgrade oracle (the other
+      # half of the bar: the three gates above all bootstrap from an EMPTY database, so none of them
+      # exercises the incremental apply a released deployment actually performs).
       - name: Migration destructive-scan gate
         run: pnpm gate:migrations
 
@@ -398,6 +400,9 @@ jobs:
 
       - name: Migration from-clean-DB gate
         run: pnpm gate:migrate-clean
+
+      - name: Migration upgrade-from-released gate
+        run: pnpm gate:migrate-upgrade
 
       # ── DB test subset — the 10 Postgres-backed packages (9 platform + the local-boot example) ────
       # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run

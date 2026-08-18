@@ -31,8 +31,9 @@ import {
 const BASE = 'http://127.0.0.1:8080';
 
 // The banner reads the two control seams as PRESENCE signals only (never calls them): `runCleanupNow`
-// is undefined for a boot that launches no durable worker, `eraseTenantNow` for one with no product
-// stores. Presence stubs stand in for both.
+// is undefined for a boot that launches no durable worker; `eraseTenantNow` is optional on the type,
+// so a hand-assembled `BootedServer` can arrive without one even though every `assembleServer` boot
+// wires it. Presence stubs stand in for both.
 const CLEANUP_SEAM = {} as NonNullable<BootedServer['runCleanupNow']>;
 const ERASE_SEAM = {} as NonNullable<BootedServer['eraseTenantNow']>;
 
@@ -104,7 +105,7 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     expect(banner).not.toContain('Tenant data erasure:   DRY-RUN');
   });
 
-  it('states the seam is unwired — not a gate posture — when neither stores nor a workforce were declared', () => {
+  it('states the seam is unwired — not a gate posture — when the server carries none', () => {
     const banner = bootBanner(
       booted({ housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: true } }),
       BASE,
@@ -113,11 +114,45 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     expect(banner).not.toContain('Tenant data erasure:   ARMED');
     // the line still NAMES the variable, so the block names all three on every boot it prints
     expect(banner).toContain('RAYSPEC_ERASURE_ENABLED');
-    // It says the seam is unwired, NOT that there is nothing to erase: a workforce boot holds a whole
-    // task graph with no store, so a "nothing to act on" claim here would be false the moment the
-    // wiring condition widened past product stores. Both halves of the reason are named.
-    expect(banner).toContain('no product stores and no workforce');
-    expect(banner).not.toContain('there is nothing for RAYSPEC_ERASURE_ENABLED to act on');
+  });
+});
+
+/**
+ * The unwired line's CONTENT, guarded separately from its presence.
+ *
+ * This line has twice been written as a claim about the deployment — first that a boot with no product
+ * stores had nothing to erase, then that it had declared neither stores nor a workforce — and both
+ * became false as the wiring widened. The seam is now wired on every boot `assembleServer` produces
+ * (proven on a store-less workforce boot in `workforce-erasure-boot.db.test.ts` and on both auth-only
+ * shapes in `auth-only-erasure-boot.db.test.ts`), so the only honest thing this line can report is
+ * what the server it was handed observably carries. These arms pin that: it may say the seam is
+ * absent, and it may not explain that absence by describing a document it cannot see.
+ */
+describe('bootBanner — the unwired erasure line describes the server, not the document', () => {
+  const unwired = (): string =>
+    bootBanner(
+      booted({ housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: false } }),
+      BASE,
+    )
+      .split('\n')
+      .filter((l) => l.includes('Tenant data erasure:'))
+      .join('\n');
+
+  it('names the missing seam and the variable that would arm one', () => {
+    const line = unwired();
+    expect(line).toContain('NOT WIRED');
+    expect(line).toContain('no erasure seam');
+    expect(line).toContain('RAYSPEC_ERASURE_ENABLED');
+  });
+
+  it('makes no claim about declared stores, a declared workforce, or what the database holds', () => {
+    const line = unwired();
+    // The two document facts the line used to explain itself with, and could not see.
+    expect(line).not.toMatch(/stores/i);
+    expect(line).not.toMatch(/workforce/i);
+    // The claim underneath both: that there is no tenant data here. The line may say the SEAM is
+    // missing (it can see that); it may not say there is nothing to erase or to act on.
+    expect(line).not.toMatch(/nothing\b[^.]*\b(erase|act on)/i);
   });
 });
 
