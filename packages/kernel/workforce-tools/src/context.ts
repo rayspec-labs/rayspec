@@ -123,7 +123,7 @@ export class ContextSectionOverflowError extends Error {
     super(
       `turn-input section '${section}' renders to ${rendered} bytes against a ${budget}-byte ` +
         'budget. This section is derived from the deployed document, so the fix is the document ' +
-        '(shorter missions, fewer capabilities), never a silent trim. Fail-closed.',
+        '(shorter missions, fewer labels), never a silent trim. Fail-closed.',
     );
     this.name = 'ContextSectionOverflowError';
     this.section = section;
@@ -292,15 +292,17 @@ function windowLabel(ms: number): string {
 
 function renderIdentity(input: TurnInputFacts): string {
   const { employee } = input;
-  const capabilities =
-    employee.capabilities.length > 0
-      ? employee.capabilities.map(sanitizeConfig).join(', ')
-      : 'none declared';
+  // MERGE NOTE (labels rename x config sanitization): the field is `labels` and the line is
+  // `Labels:` — and every one of them still goes through `sanitizeConfig`. The rename moved the
+  // value, not its trust level: a label is still deployer-authored text interpolated into a line
+  // above the data-boundary line, so a raw break in one still forges a header.
+  const labels =
+    employee.labels.length > 0 ? employee.labels.map(sanitizeConfig).join(', ') : 'none declared';
   return [
     SECTION_HEADERS.identity,
     `Employee: ${sanitizeConfig(employee.id)} — ${sanitizeConfig(employee.title)}. ` +
       `Role: ${sanitizeConfig(employee.role)}.`,
-    `Capabilities: ${capabilities}.`,
+    `Labels: ${labels}.`,
   ].join('\n');
 }
 
@@ -393,11 +395,10 @@ function renderPolicies(input: TurnInputFacts): string {
     lines.push('Review rules covering you (first match applies):');
     for (const rule of facts.reviewRules) {
       const triggers: string[] = [];
-      if (rule.firesOnCapabilities.length > 0) {
+      if (rule.firesOnLabels.length > 0) {
+        // `firesOnLabels` (was `firesOnCapabilities`) — renamed, still sanitized: see renderIdentity.
         triggers.push(
-          `fires on every completion (you hold: ${rule.firesOnCapabilities
-            .map(sanitizeConfig)
-            .join(', ')})`,
+          `fires on every completion (you hold: ${rule.firesOnLabels.map(sanitizeConfig).join(', ')})`,
         );
       }
       if (rule.confidenceBelow !== null) {
@@ -427,7 +428,7 @@ function renderPolicies(input: TurnInputFacts): string {
           `${sanitizeConfig(facts.approvalRule.onTimeout)}).`,
       );
     } else {
-      lines.push('Approval rule covering you: none declared for your capabilities.');
+      lines.push('Approval rule covering you: none declared for your labels.');
     }
   }
   return lines.join('\n');

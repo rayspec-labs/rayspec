@@ -185,6 +185,29 @@ import { z } from 'zod';
  *                               NATIVE workforce tool. Natives are injected by role at dispatch and
  *                               always win; a colliding declared tool would be silently shadowed,
  *                               so it is refused up front.
+ *  - `workforce_label_unheld` — a review or approval rule's `requireWhen.labels` names a policy
+ *                               label NO declared employee holds, so THAT CLAUSE can never fire:
+ *                               labels match by exact equality against `employees[].labels` and
+ *                               every holder is declared in the SAME document, so the only way one
+ *                               arrives is a redeploy, which re-runs this lint. Every such entry is
+ *                               refused — it is a typo either way — but what it COSTS varies, and
+ *                               the message says which case the author is in rather than asserting
+ *                               one for all. `labels` is an ARRAY matched with `.some()`, so a
+ *                               held sibling means only that entry is dead and the rule is intact;
+ *                               with no held sibling a review rule falls back to its
+ *                               `confidenceBelow` heuristic if it declares one, else it can no
+ *                               longer demand review, and an approval rule stops covering any seat
+ *                               (its `request_approval` then runs on the default window, since the
+ *                               tool is offered by role rather than by rule). Advisory until the
+ *                               pre-freeze review, on the false premise that a label may arrive
+ *                               later.
+ *  - `multiple_workforces`    — the document spells `workforce:` as a LIST, or carries a plural
+ *                               `workforces:` key. Exactly zero or one workforce may be declared
+ *                               (D-010) and `workforce:` is a single mapping. Raised on the RAW
+ *                               document before the shape parse, so the author gets the named rule
+ *                               instead of a generic `unknown_field` / "expected object, received
+ *                               array". Two literal `workforce:` keys stay `yaml_parse_error` —
+ *                               YAML's own uniqueness refusal, not re-coded here.
  */
 export const SpecErrorCode = z.enum([
   'yaml_parse_error',
@@ -226,6 +249,8 @@ export const SpecErrorCode = z.enum([
   'budget_widening',
   'reserved_workforce_id',
   'reserved_tool_name',
+  'workforce_label_unheld',
+  'multiple_workforces',
 ]);
 export type SpecErrorCode = z.infer<typeof SpecErrorCode>;
 
@@ -341,12 +366,6 @@ export const SpecWarningCode = z.enum([
   'agent_untrusted_field_precedence',
   'cron_tenant_required',
   'stale_suppression',
-  /**
-   * A `requireWhen.capabilities` label no declared employee holds. Capabilities are OPAQUE policy
-   * labels, so a rule guarding a label nobody carries yet is legal (it may arrive later) — but it
-   * can also be a typo that silently never fires, so it warns.
-   */
-  'workforce_capability_unheld',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 
