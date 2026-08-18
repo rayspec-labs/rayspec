@@ -416,6 +416,36 @@ export const SuppressibleWarningCode = SpecWarningCode.exclude([
   'stale_suppression',
   'workforce_escalation_unreachable',
 ]);
+
+/** Every warning code an author may NOT acknowledge — derived, so it can never disagree above. */
+export type ExcludedWarningCode = Exclude<SpecWarningCode, SuppressibleWarningCode>;
+
+/**
+ * WHY each excluded code is excluded, in the author's terms — the text `grammar.ts` refuses a bad
+ * `lintSuppress` entry with. Keyed on `ExcludedWarningCode`, so a THIRD exclusion added above is a
+ * COMPILE error here rather than an author-facing message that quietly omits it: the rule this
+ * codebase keeps relearning is that a curated list drifts and a derived one cannot.
+ *
+ * The phrasing is deliberately the author's situation, not the maintainer's taxonomy. Someone who
+ * wrote the entry needs to know why THEIR code is refused; being told about a different code's
+ * rationale reads as the tool not having understood them.
+ */
+const EXCLUDED_WARNING_REASON: Readonly<Record<ExcludedWarningCode, string>> = {
+  stale_suppression:
+    'it reports on suppressions themselves, so acknowledging it would let a rotted ' +
+    'acknowledgement be silenced by one more acknowledgement',
+  workforce_escalation_unreachable:
+    'it reports on a `workforce.…` path, and a suppression only covers findings under the NODE ' +
+    'that carries it (agents/stores/api/triggers/handlers) — no node path can reach the ' +
+    'workforce section, so the entry would silence nothing and come back as stale_suppression',
+};
+
+/** The excluded codes with their reasons, rendered once for the parse refusal. */
+export const EXCLUDED_WARNING_RATIONALE: string = (
+  Object.keys(EXCLUDED_WARNING_REASON) as ExcludedWarningCode[]
+)
+  .map((code) => `\`${code}\` (${EXCLUDED_WARNING_REASON[code]})`)
+  .join('; ');
 export type SuppressibleWarningCode = z.infer<typeof SuppressibleWarningCode>;
 
 /** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */
