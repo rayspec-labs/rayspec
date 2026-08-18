@@ -222,14 +222,80 @@ export interface HaltWorkforceOutcome {
 }
 
 /**
+ * Cancel the live subtree beneath a root that has ALREADY reached a terminal status, without
+ * touching the root itself.
+ *
+ * A terminal root does not imply a terminated subtree. A buffered create (`createdChildren`) is
+ * deliberately not bound to its parent's join, so a parent can complete with that child still
+ * running; `applyBudgetExhausted` already branches on "a root that has already ended" while
+ * handling a LIVE descendant's denial; and `#failOnDecidedDependency` (task-scheduler.ts)
+ * terminates a task outside any fan-in. The halt's root scan reads ROOTS ONLY, so skipping such a
+ * root skips its whole subtree at every depth — and a halt that returns having left live work
+ * running is the one thing a halt may not do.
+ *
+ * The ROOT ROW IS NOT WRITTEN. It is already terminal, `applyTransition` is the single status
+ * writer, and every terminal row of `ALLOWED_TRANSITIONS` is all-false — re-terminalising it is a
+ * write the state machine must refuse, not one this function should attempt. `cancelTaskCascade`
+ * cannot serve this case for the same reason: it returns early on a terminal target by design, and
+ * relaxing that would change cancellation semantics for every caller of the public cancel verb.
+ *
+ * SAME LOCKS, SAME ORDER as `cancelTaskCascade`, on a strict subset of its rows: `lockRootFirst`
+ * (one row here — a root's `ancestryPath` is empty) then `lockDescendants` inside
+ * `cancelDescendants`, shallowest first, ties by task id. No ledger row is touched, so the
+ * tasks -> ledger rank cannot be inverted. The retry mirrors the cascade's for the same reason it
+ * exists there.
+ *
+ * WHAT THE ROOT LOCK IS FOR, stated precisely because it is NOT what it looks like. It is not
+ * protecting a re-read: terminal is absorbing (every terminal row of `ALLOWED_TRANSITIONS` is
+ * all-false), so a terminal snapshot is already a terminal row — the same reasoning
+ * `lockDescendants` states for skipping terminal descendants. It is protecting the ORDER. Every
+ * other operation on this subtree holds the root before it touches a descendant, so a transaction
+ * that locked descendants WITHOUT the root would hold a different row set from everything it can
+ * race, which is how a cycle opens. Taking it makes this path's acquisition a prefix of
+ * `cancelTaskCascade`'s, not a new order. The terminality re-check below is fail-closed defence on
+ * top of that, and is unreachable while the state machine holds.
+ */
+async function cancelSubtreeUnderTerminalRoot(
+  tdb: TenantDb,
+  input: { readonly root: TaskRecord; readonly actor: string },
+): Promise<CancelCascadeOutcome> {
+  for (let attempt = 1; attempt <= CASCADE_RETRIES; attempt++) {
+    try {
+      return await tdb.transaction(async (tx) => {
+        const locked = await lockRootFirst(tx, input.root);
+        if (!isTaskStatus(locked.status)) {
+          throw new TaskRowCorruptError(locked.taskId, `status '${locked.status}'`);
+        }
+        // Unreachable while the state machine holds (terminal is absorbing), so this is defence,
+        // not a race handler: if a row ever did leave a terminal status, the live case is the
+        // caller's other branch and this function must write nothing rather than guess.
+        if (!isTerminalStatus(locked.status)) return { cancelled: [], signalled: [] };
+        return await cancelDescendants(tx, locked, input.actor);
+      });
+    } catch (err) {
+      if (err instanceof TaskVersionConflictError && attempt < CASCADE_RETRIES) continue;
+      throw err;
+    }
+  }
+  // Unreachable: the loop either returns or rethrows on its final attempt.
+  throw new TaskVersionConflictError(input.root.taskId, -1, -1);
+}
+
+/**
  * Pause with drain, then cancel every non-terminal task ROOT-FIRST (cascades cannot race their
  * parents). Drained first, never killed mid-turn: with the drain complete nothing is `working`, so
  * the cascade transitions parked rows only. The halt event carries the affected count.
  *
  * The roots read is a DELIBERATE full scan: a halt that stopped at a page would leave the rest of
- * the workforce running, which is the one thing a halt may not do. Each root's cancellation runs
- * through `cancelTaskCascade`, so the halt inherits its root-first locking and its bounded retry —
- * a version race with the reserve pass no longer aborts a halt midway with nothing journaled.
+ * the workforce running, which is the one thing a halt may not do. Each LIVE root's cancellation
+ * runs through `cancelTaskCascade`, so the halt inherits its root-first locking and its bounded
+ * retry — a version race with the reserve pass no longer aborts a halt midway with nothing
+ * journaled.
+ *
+ * A root that is ALREADY TERMINAL is still visited, through `cancelSubtreeUnderTerminalRoot`,
+ * which takes the same locks in the same order and leaves the root row itself untouched: the scan
+ * reads roots only, so skipping one skips its live descendants too, and "every non-terminal task"
+ * is a claim about the WORKFORCE, not about its roots.
  */
 export async function haltWorkforce(
   tdb: TenantDb,
@@ -256,12 +322,14 @@ export async function haltWorkforce(
     )) as TaskRecord[];
   const outcome: { cancelled: string[]; signalled: string[] } = { cancelled: [], signalled: [] };
   for (const root of roots) {
-    if (!isTaskStatus(root.status) || isTerminalStatus(root.status)) continue;
-    const cascade = await cancelTaskCascade(tdb, {
-      taskId: root.taskId,
-      actor: input.actor,
-      reason: input.reason,
-    });
+    if (!isTaskStatus(root.status)) continue;
+    const cascade = isTerminalStatus(root.status)
+      ? await cancelSubtreeUnderTerminalRoot(tdb, { root, actor: input.actor })
+      : await cancelTaskCascade(tdb, {
+          taskId: root.taskId,
+          actor: input.actor,
+          reason: input.reason,
+        });
     outcome.cancelled.push(...cascade.cancelled);
     outcome.signalled.push(...cascade.signalled);
   }

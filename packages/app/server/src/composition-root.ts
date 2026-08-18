@@ -398,10 +398,15 @@ export interface BootedServer {
    * `forTenant` chokepoint; blobs via the tenant-bound `BlobStore.deleteTenant`). The actual hard-delete
    * is OPERATOR-GATED fail-closed: it deletes only when `RAYSPEC_ERASURE_ENABLED === 'true'` (resolved at
    * boot) AND `dryRun` is not set; otherwise it returns a DRY-RUN preview (counts, ZERO deletes). Returns
-   * the structured result so an operator previews before / verifies after. Wired when the spec declares
-   * product stores OR a workforce — the two shapes that put tenant data in the database; undefined for a
-   * boot that declares neither. NOT internet-facing by itself — an operator/ops wrapper triggers it
-   * (pre-hardening; a tenant self-service erasure route is a later, hardening-adjacent decision).
+   * the structured result so an operator previews before / verifies after. Wired on EVERY boot
+   * `assembleServer` produces, because every one of them mounts the agent-run surface
+   * (`packages/compose/api-auth/src/app.ts:214`) and so accumulates that tenant's run header, journal
+   * steps, raw transcript and event journal — what the document declares changes what else there is to
+   * erase, never whether there is anything. It stays OPTIONAL on this type so an embedder that
+   * assembles a `BootedServer` by hand is not forced to supply one, and so the boot banner can still
+   * report the absence rather than assume it. NOT internet-facing by itself — an operator/ops wrapper
+   * triggers it (pre-hardening; a tenant self-service erasure route is a later, hardening-adjacent
+   * decision).
    *
    * `journalScrub: true` selects the softer content-erasure posture: the raw run-journal payload columns
    * (`journal_steps.output`, `conversation_items.payload`) are NULLed while the billing/exactly-once
@@ -2202,7 +2207,9 @@ export async function assembleServer(
   let fireCronNow: BootedServer['fireCronNow'];
   // M1 control seam: the on-demand cleanup delegate (undefined for an auth-only / no durable-worker boot).
   let runCleanupNow: BootedServer['runCleanupNow'];
-  // the erasure control seam: the on-demand tenant data-erasure delegate (undefined for an auth-only / no-product boot).
+  // the erasure control seam: the on-demand tenant data-erasure delegate. Every branch below assigns
+  // it — the two deploy paths propagate the one their composition built, and the no-document branch
+  // builds its own — because every boot mounts the agent-run surface and so holds erasable run history.
   let eraseTenantNow: BootedServer['eraseTenantNow'];
 
   // Dispatch the injected spec by its PROFILE through the unified `parseAnySpec` — a product-profile
@@ -2280,6 +2287,30 @@ export async function assembleServer(
   } else {
     // Auth-only boot (the platform main line). No engine, no declared routes, no durable worker.
     app = createAuthApp(baseDeps);
+    // …but the agent-run surface IS mounted — `createAuthApp` registers it unconditionally
+    // (`packages/compose/api-auth/src/app.ts:214`), and `serve.ts` calls this document-free shape the
+    // default — so this boot accumulates its tenants' `runs`, `journal_steps`, `conversation_items`
+    // and `run_events` exactly like the deploy paths do, and needs the same operator erasure seam.
+    // There is no product half here at all: no document means no declared stores, and no blob backend
+    // either (one is built only for a document that declares a stream route — `deployDeclaredSpec`,
+    // line 2643 below), so this passes an EMPTY product table map and an empty store list and
+    // `eraseTenant` runs its core half alone. Wiring it does NOT arm it — `config.erasureEnabled` still
+    // decides, and unset means every call is a counts-only preview
+    // (`auth-only-erasure-boot.db.test.ts` arm 7).
+    eraseTenantNow = (
+      tenantId: string,
+      eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
+    ): Promise<EraseResult> =>
+      eraseTenant({
+        db,
+        tenantId,
+        productTables: new Map(),
+        audit: baseDeps.auditStore,
+        enabled: config.erasureEnabled,
+        dryRun: eraseOpts?.dryRun ?? false,
+        journalScrub: eraseOpts?.journalScrub ?? false,
+        stores: [],
+      });
   }
 
   // The deployed spec's declared static frontend mounts. Only a backend-profile (`rayspec`) doc carries
@@ -3507,36 +3538,47 @@ async function deployDeclaredSpec(
   // (pre-hardening). The gate is OPERATOR-only (config.erasureEnabled); unset ⇒ every call is a DRY-RUN
   // preview (counts, ZERO deletes).
   //
-  // WHAT MAKES THE SEAM REACHABLE. Product stores are one source of tenant data; a DECLARED WORKFORCE is
-  // another, and it carries no store at all. Both shipped workforce examples declare zero `stores:`, while
-  // their databases hold that tenant's task titles/goals/descriptions/results, message bodies, approval
-  // questions and reasons, review reasons, delegation goals — and the whole `run_events` journal under
-  // both workforce namespaces (`run_id = <taskId>` and `run_id = workforce:<id>`). A store-only condition
-  // would leave every such deployment with NO way to erase a tenant, so the seam is wired for either.
-  // `eraseTenant` itself needs no change: its core half is derived from `CORE_TENANT_SCOPED_TABLES`,
-  // which already carries the nine task-engine tables and the journal, and every delete is the same
-  // `forTenant` tenant-scoped one. The store-less case simply passes an EMPTY productTables map, which
-  // erases zero product rows and reports `tables: {}` — the core half does the work.
-  let eraseTenantNow: BootedServer['eraseTenantNow'];
-  if (specStores.length > 0 || effectiveSpec.workforce !== undefined) {
-    eraseTenantNow = (
-      tenantId: string,
-      eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
-    ): Promise<EraseResult> =>
-      eraseTenant({
-        db,
-        tenantId,
-        productTables,
-        // The blob handle is built bound to the TARGET tenant; eraseTenant calls deleteTenant(tenantId)
-        // with the SAME id (the bound-tenant equality holds). Absent when no blob backend was wired.
-        ...(blobFactory ? { blob: blobFactory(tenantId) } : {}),
-        audit: baseDeps.auditStore,
-        enabled: config.erasureEnabled,
-        dryRun: eraseOpts?.dryRun ?? false,
-        journalScrub: eraseOpts?.journalScrub ?? false,
-        stores: specStores,
-      });
-  }
+  // WHY IT IS WIRED UNCONDITIONALLY. It used to be built only for a document that declared product
+  // `stores:`, then also for one that declared a `workforce:` — each widening chased the shape whose
+  // data had just been noticed. The shape underneath all of them is simpler: `createAuthApp` registers
+  // the agent-run surface on EVERY boot (`packages/compose/api-auth/src/app.ts:214`), so
+  // `POST /v1/agents/:id/runs` is mounted whether the document declares a store, a workforce, only
+  // `agents:`, or nothing at all — and every run through it writes that tenant's `runs` header, its
+  // `journal_steps` (raw model output), its `conversation_items` (the raw PII transcript) and its
+  // `run_events` journal. A deployment therefore holds erasable subject content regardless of what its
+  // document declares, and nothing in production code deletes an `orgs` row, so the cascade on those
+  // tables is a net nobody pulls. Any condition here is a shape this seam is missing from.
+  //
+  // `eraseTenant` needs nothing from the document to do the core half: it is derived from
+  // `CORE_TENANT_SCOPED_TABLES`, which carries the run-history tables, the workflow journal and the nine
+  // task-engine tables, and every delete is the same `forTenant` tenant-scoped one. The store list
+  // contributes ONLY the FK-safe ordering of the PRODUCT half; empty, that half erases zero rows and
+  // reports `tables: {}` while the core half does the work.
+  //
+  // WIRING IT IS NOT ARMING IT. A defined seam erases nothing: the destructive act stays gated on
+  // `config.erasureEnabled` — `RAYSPEC_ERASURE_ENABLED` resolved at THIS composition root, never a spec
+  // flag — and an unset gate makes every call a DRY-RUN preview (counts, ZERO deletes) with
+  // `dryRunReason:'gate-disabled'`. That is asserted on ground truth for this shape in
+  // `auth-only-erasure-boot.db.test.ts` arm 4 and for a store-less workforce in
+  // `workforce-erasure-boot.db.test.ts` arm 4. NOT mounted on the public app either — the operator
+  // triggers it out of band.
+  const eraseTenantNow: BootedServer['eraseTenantNow'] = (
+    tenantId: string,
+    eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
+  ): Promise<EraseResult> =>
+    eraseTenant({
+      db,
+      tenantId,
+      productTables,
+      // The blob handle is built bound to the TARGET tenant; eraseTenant calls deleteTenant(tenantId)
+      // with the SAME id (the bound-tenant equality holds). Absent when no blob backend was wired.
+      ...(blobFactory ? { blob: blobFactory(tenantId) } : {}),
+      audit: baseDeps.auditStore,
+      enabled: config.erasureEnabled,
+      dryRun: eraseOpts?.dryRun ?? false,
+      journalScrub: eraseOpts?.journalScrub ?? false,
+      stores: specStores,
+    });
 
   return {
     app: result.app,
@@ -3577,6 +3619,7 @@ async function deployDeclaredSpec(
     ...(durableExecutorIdentity ? { durableExecutorIdentity } : {}),
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
-    ...(eraseTenantNow ? { eraseTenantNow } : {}),
+    // Unconditional, unlike its siblings above: this seam is built for every document shape.
+    eraseTenantNow,
   };
 }

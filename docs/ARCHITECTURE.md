@@ -348,7 +348,11 @@ generated from the spec with the tenancy and data-lifecycle columns injected
 automatically, and every migration is diffed against the current schema and passed
 through a safety gate (a destructive change is blocked unless explicitly allowed)
 before it is applied — including a from-clean-database check that the whole
-migration chain bootstraps an empty database correctly.
+migration chain bootstraps an empty database correctly, and an upgrade check that
+materializes the released chain, puts real rows in it, and applies the newer
+migrations to that populated database: no migration silently skipped or
+re-applied, every pre-existing row byte-identical afterwards, and zero structural
+drift from the schema.
 
 A booted deploy applies this generated schema in one direction only: it materializes a
 store on a clean database and mounts it when the live schema already matches. It is
