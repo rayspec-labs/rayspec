@@ -19,16 +19,23 @@ import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
-import { type Db, forTenant, generateProductSql, schema } from '@rayspec/db';
+import {
+  CORE_TENANT_SCOPED_TABLES,
+  type Db,
+  forTenant,
+  generateProductSql,
+  schema,
+} from '@rayspec/db';
 // The product-tenancy GATE machinery is gate-only — imported from /testing (off the main surface).
 import { assertProductTenancy, buildProductTables, makeDbWithSchema } from '@rayspec/db/testing';
 import { isRunCancelled, runAgent } from '@rayspec/platform';
 import { parseSpec, type StoreSpec } from '@rayspec/spec';
-import { eq } from 'drizzle-orm';
+import { WORKFORCE_EVENT_VERSION, workforceControlStreamId } from '@rayspec/tasks';
+import { eq, getTableName } from 'drizzle-orm';
 import { exportJWK, generateKeyPair } from 'jose';
 import Provider from 'oidc-provider';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { AppEnv } from './app-context.js';
+import type { AppEnv, WorkforceGoalIntake } from './app-context.js';
 import { mountOidc } from './oidc/mount.js';
 import { DrizzleOidcAdapter } from './stores/oidc-store.js';
 import { createHarness, type Harness, jsonRequest } from './test-support/harness.js';
@@ -772,5 +779,738 @@ describe('generated product-table tenancy gate (CI-BLOCKING)', () => {
     expect(() => forTenant(pdb, TENANT_A).select(notebooks as never)).toThrow(
       /not registered in TENANT_SCOPED_TABLES/,
     );
+  });
+});
+
+/**
+ * WORKFORCE cross-tenant gate — CI-BLOCKING (OC-004's acceptance criterion; B-016 finding F-1).
+ *
+ * The gate above covers the run-journal core, the OAuth/OIDC store and the GENERATED PRODUCT
+ * tables. It never touched the nine `workforce_*` tables, which are CORE-platform schema and so are
+ * never one of the product loop's iterated tuples. This block closes that: two orgs deployed from
+ * ONE declaration — same `workforceId`, same department ids, same team, same employee ids, same
+ * titles/goals/questions, same signal key, same ledger scope tuple — seeded across all nine tables
+ * plus BOTH workforce `run_events` namespaces, then proven completely isolated.
+ *
+ * WHY THE TASK IDS DIFFER BY ONE CHARACTER (read this before "fixing" it).
+ * The strongest form of the twin proof — the SAME `task_id` in two tenants — is not a test this
+ * suite declines to write; it is a row Postgres refuses to store. Every one of the nine tables
+ * carries a GLOBAL single-column primary key, not a `(tenant_id, id)` compound:
+ * `workforce_tasks.task_id text PRIMARY KEY` and eight `id uuid PRIMARY KEY`
+ * (drizzle/0012_workforce_task_engine.sql:55,73,86,104,114,127,142,153,166). The first test below
+ * PINS that refusal with a real attempted insert, so the id suffix is evidence, not a compromise.
+ *
+ * That fact moves the leak rather than removing it, and both halves are covered here:
+ *   - an ID-KEYED read cannot return the wrong row for the same id (the id is globally unique), but
+ *     without its tenant predicate it DOES return tenant B's row when tenant A asks for B's id —
+ *     the same silent cross-tenant read, reached by a foreign id instead of a colliding one;
+ *   - a LIST/AGGREGATE read (`/tasks`, `/approvals`, `/reviews`, `/cost`, `/:wf/status`) carries no
+ *     id at all, so a missing predicate there returns EVERY tenant's rows. The identical workforce
+ *     id, department id and employee ids are what make that leak legible: an unscoped count doubles
+ *     and an unscoped sum adds B's numbers to A's, against the very same group keys.
+ * Where the schema's unique key IS tenant-scoped the identifiers here are byte-identical, including
+ * the one that genuinely collides: the workforce control stream's `run_id`
+ * (`workforce:twin-wf`, tasks/src/events.ts:96-98) exists at the SAME `seq` in both tenants, since
+ * `run_events` is unique on `(tenant_id, run_id, seq)`.
+ *
+ * Isolation here is APPLICATION-LEVEL: predicate injection at the `TenantDb` chokepoint
+ * (kernel/db/src/tenant-db.ts:148-161), not Postgres RLS. The CI tripwire that would otherwise
+ * catch a dropped `.where()` (`scripts/check-tenant-chokepoint.mjs`) is a regex scan with
+ * documented blind spots — multi-hop aliases, getters, computed access — and excludes all test
+ * code. This block is the durable backstop, and a RED here makes CI RED.
+ */
+describe('workforce cross-tenant gate: identical structures and identifiers (CI-BLOCKING)', () => {
+  /**
+   * ONE declaration, deployed into BOTH tenants. Byte-identity is by CONSTRUCTION (a single frozen
+   * object read twice), never by two hand-copied literals that could drift apart unnoticed.
+   */
+  const TWIN = Object.freeze({
+    workforceId: 'twin-wf',
+    department: 'eng',
+    /**
+     * Teams are DECLARATION-only: no `workforce_*` column stores a team id, so a team reaches the
+     * rows through its lead and members — which ARE the seeded owners, senders and reviewers below.
+     */
+    team: Object.freeze({
+      id: 'release_crew',
+      lead: 'coordinator',
+      members: Object.freeze(['builder', 'reviewer']),
+    }),
+    employees: Object.freeze({
+      coordinator: 'coordinator',
+      builder: 'builder',
+      reviewer: 'reviewer',
+    }),
+    rootTitle: 'Ship the twin release',
+    rootGoal: 'Cut the release both tenants asked for.',
+    childTitle: 'Build the artifact',
+    approvalTitle: 'Awaiting the go-ahead',
+    reviewTitle: 'Awaiting the reviewer',
+    goal: 'Do the declared work.',
+    question: 'Ship it?',
+    delegationGoal: 'Build the artifact.',
+    expectedOutput: 'A signed build.',
+    signalKey: 'twin-operator-signal',
+    /** A fixed bucket so the ledger's `(scope_kind, scope_id, window_start)` is byte-identical. */
+    windowStart: new Date('2026-08-01T00:00:00.000Z'),
+    budgets: Object.freeze({
+      workforce: { usd: 10 },
+      execution: { estimateUsdPerTurn: 0.5 },
+    }),
+  });
+
+  /** The nine tables, DERIVED from the registry rather than hand-listed — a tenth is covered too. */
+  const WORKFORCE_TABLES = CORE_TENANT_SCOPED_TABLES.filter((t) =>
+    getTableName(t).startsWith('workforce_'),
+  );
+
+  /** Rows this seed writes per tenant, per table. The read assertions are exact, never `>= 1`. */
+  const EXPECTED_ROWS: Readonly<Record<string, number>> = Object.freeze({
+    workforce_tasks: 4,
+    workforce_task_transitions: 2,
+    workforce_task_signals: 1,
+    workforce_delegations: 1,
+    workforce_approvals: 1,
+    workforce_reviews: 1,
+    workforce_messages: 1,
+    workforce_budget_ledger: 2,
+    workforce_runtime: 1,
+  });
+
+  /** The per-tenant marker. A leak of ANY shape puts the other tenant's literal in the response. */
+  const secretOf = (mark: 'a' | 'b') => (mark === 'a' ? 'SECRET_FROM_A' : 'SECRET_FROM_B');
+
+  interface Twin {
+    orgId: string;
+    token: string;
+    mark: 'a' | 'b';
+    rootTaskId: string;
+    childTaskId: string;
+    approvalTaskId: string;
+    reviewTaskId: string;
+    approvalId: string;
+    reviewId: string;
+  }
+
+  let hw: Harness;
+  let kicks = 0;
+  let goalSubmissions: Array<Parameters<WorkforceGoalIntake['submitGoal']>[0]> = [];
+  let a: Twin;
+  let b: Twin;
+
+  /** Register → create org → switch, exactly as the principals above and routes/workforce.test.ts. */
+  async function principal(email: string, orgName: string) {
+    const reg = await jsonRequest(hw.app, 'POST', '/v1/auth/register', {
+      body: { email, password: 'a-long-enough-password' },
+    });
+    const t0 = (await reg.json()).accessToken as string;
+    const orgRes = await jsonRequest(hw.app, 'POST', '/v1/orgs', {
+      body: { name: orgName },
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    const orgId = (await orgRes.json()).id as string;
+    const switchRes = await jsonRequest(hw.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+      headers: { authorization: `Bearer ${t0}` },
+    });
+    return { orgId, token: (await switchRes.json()).accessToken as string };
+  }
+
+  /**
+   * Seed one tenant from TWIN. EVERY identifier the schema lets two tenants share is shared; the
+   * only per-tenant bytes are the id suffix (the global PK forbids sharing) and the secret marker
+   * plus its cost numbers, which exist so a leak is legible rather than merely countable.
+   */
+  async function seedTwin(orgId: string, token: string, mark: 'a' | 'b'): Promise<Twin> {
+    const tdb = forTenant(hw.db, orgId);
+    const secret = secretOf(mark);
+    const rootTaskId = `twin-task-root-${mark}`;
+    const childTaskId = `twin-task-child-${mark}`;
+    const approvalTaskId = `twin-task-approval-${mark}`;
+    const reviewTaskId = `twin-task-review-${mark}`;
+    const approvalId = `00000000-0000-4000-8000-00000000000${mark === 'a' ? '1' : '2'}`;
+    const reviewId = `00000000-0000-4000-8000-00000000001${mark === 'a' ? '1' : '2'}`;
+    const settledUsd = mark === 'a' ? '1.25' : '99.75';
+    const settledTurns = mark === 'a' ? 1 : 7;
+
+    await tdb.insert(schema.workforceRuntime, {
+      workforceId: TWIN.workforceId,
+      paused: false,
+      budgets: TWIN.budgets,
+      lastEventSeq: 2,
+    });
+
+    const task = (over: Record<string, unknown>) => ({
+      workforceId: TWIN.workforceId,
+      parentTaskId: null,
+      ancestryPath: [],
+      goal: TWIN.rootGoal,
+      // The ONLY per-tenant string on the row — everything a declaration names is shared.
+      description: secret,
+      requestedBy: 'user',
+      department: TWIN.department,
+      priority: 'normal',
+      dependencies: [],
+      costUsd: settledUsd,
+      turnsUsed: settledTurns,
+      lastEventSeq: 1,
+      ...over,
+    });
+    await tdb.insert(schema.workforceTasks, [
+      task({
+        taskId: rootTaskId,
+        rootTaskId,
+        title: TWIN.rootTitle,
+        owner: TWIN.team.lead,
+        // An OPERATOR-unblockable park, so A's own `manual_unblock`/`budget_raised` really wakes it.
+        status: 'blocked',
+        statusReason: 'budget_exhausted',
+      }),
+      task({
+        taskId: childTaskId,
+        parentTaskId: rootTaskId,
+        rootTaskId,
+        ancestryPath: [rootTaskId],
+        title: TWIN.childTitle,
+        owner: TWIN.employees.builder,
+        status: 'queued',
+        queuedAt: new Date(),
+      }),
+      task({
+        taskId: approvalTaskId,
+        rootTaskId: approvalTaskId,
+        title: TWIN.approvalTitle,
+        owner: TWIN.employees.builder,
+        status: 'waiting_for_user',
+        statusReason: 'approval_pending',
+      }),
+      task({
+        taskId: reviewTaskId,
+        rootTaskId: reviewTaskId,
+        title: TWIN.reviewTitle,
+        owner: TWIN.employees.builder,
+        status: 'waiting_for_review',
+        statusReason: 'review_pending',
+      }),
+    ]);
+
+    // `turn_number: 1` is byte-identical in both tenants — the partial UNIQUE is tenant-scoped.
+    await tdb.insert(schema.workforceTaskTransitions, [
+      {
+        taskId: rootTaskId,
+        fromStatus: 'planned',
+        toStatus: 'queued',
+        actor: 'scheduler',
+        turnId: null,
+        turnNumber: null,
+      },
+      {
+        taskId: rootTaskId,
+        fromStatus: 'queued',
+        toStatus: 'blocked',
+        statusReason: 'budget_exhausted',
+        actor: TWIN.team.lead,
+        turnId: 'twin-turn-1',
+        turnNumber: 1,
+      },
+    ]);
+
+    // The signal key is byte-identical: UNIQUE is `(tenant_id, task_id, signal_key)`.
+    await tdb.insert(schema.workforceTaskSignals, {
+      taskId: rootTaskId,
+      kind: 'budget_raised',
+      signalKey: TWIN.signalKey,
+      payload: { note: secret },
+    });
+
+    await tdb.insert(schema.workforceDelegations, {
+      workforceId: TWIN.workforceId,
+      parentTaskId: rootTaskId,
+      childTaskId,
+      delegatedBy: TWIN.team.lead,
+      delegatedTo: TWIN.employees.builder,
+      resolvedOwner: TWIN.employees.builder,
+      goal: TWIN.delegationGoal,
+      expectedOutput: TWIN.expectedOutput,
+      depth: 1,
+      status: 'accepted',
+    });
+
+    await tdb.insert(schema.workforceApprovals, {
+      id: approvalId,
+      taskId: approvalTaskId,
+      question: TWIN.question,
+      options: [],
+      approver: 'user',
+      status: 'pending',
+      onTimeout: 'fail',
+      timeoutAt: new Date(Date.now() + 3_600_000),
+      reason: secret,
+    });
+
+    await tdb.insert(schema.workforceReviews, {
+      id: reviewId,
+      taskId: reviewTaskId,
+      reviewer: TWIN.employees.reviewer,
+      round: 1,
+      verdict: null,
+      reasons: [secret],
+      requiredChanges: [],
+    });
+
+    await tdb.insert(schema.workforceMessages, {
+      taskId: rootTaskId,
+      sender: TWIN.team.lead,
+      recipient: TWIN.employees.builder,
+      body: secret,
+    });
+
+    // Byte-identical `(scope_kind, scope_id, window_start)` in BOTH tenants; only the money differs,
+    // so an unscoped aggregate reads as A's number PLUS B's rather than merely as a bigger count.
+    await tdb.insert(schema.workforceBudgetLedger, [
+      {
+        scopeKind: 'department',
+        scopeId: TWIN.department,
+        windowStart: TWIN.windowStart,
+        reservedUsd: '0',
+        settledUsd,
+        settledTurns,
+      },
+      {
+        scopeKind: 'workforce',
+        scopeId: TWIN.workforceId,
+        windowStart: TWIN.windowStart,
+        reservedUsd: '0',
+        settledUsd,
+        settledTurns,
+      },
+    ]);
+
+    // BOTH workforce run_events namespaces. The control stream's run_id is BYTE-IDENTICAL across
+    // the two tenants at the SAME seq — `run_events` is unique on `(tenant_id, run_id, seq)`.
+    await tdb.insert(schema.runEvents, [
+      {
+        runId: rootTaskId,
+        seq: '1',
+        type: 'workforce.task.created',
+        data: {
+          v: WORKFORCE_EVENT_VERSION,
+          type: 'workforce.task.created',
+          taskId: rootTaskId,
+          title: TWIN.rootTitle,
+          owner: TWIN.team.lead,
+          note: secret,
+        },
+      },
+      {
+        runId: workforceControlStreamId(TWIN.workforceId),
+        seq: '1',
+        type: 'workforce.control.paused',
+        data: {
+          v: WORKFORCE_EVENT_VERSION,
+          type: 'workforce.control.paused',
+          workforceId: TWIN.workforceId,
+          note: secret,
+        },
+      },
+      {
+        runId: workforceControlStreamId(TWIN.workforceId),
+        seq: '2',
+        type: 'workforce.control.resumed',
+        data: {
+          v: WORKFORCE_EVENT_VERSION,
+          type: 'workforce.control.resumed',
+          workforceId: TWIN.workforceId,
+          note: secret,
+        },
+      },
+    ]);
+
+    return {
+      orgId,
+      token,
+      mark,
+      rootTaskId,
+      childTaskId,
+      approvalTaskId,
+      reviewTaskId,
+      approvalId,
+      reviewId,
+    };
+  }
+
+  /**
+   * A full snapshot of one tenant's workforce rows, read with RAW SQL rather than through the
+   * chokepoint. Deliberate: an unchanged-after assertion read through the very predicate under test
+   * would move in lockstep with a broken predicate and pass vacuously.
+   */
+  const SNAPSHOT_TABLES: ReadonlyArray<readonly [string, string]> = [
+    ['workforce_tasks', 'task_id'],
+    ['workforce_task_transitions', 'id'],
+    ['workforce_task_signals', 'id'],
+    ['workforce_delegations', 'id'],
+    ['workforce_approvals', 'id'],
+    ['workforce_reviews', 'id'],
+    ['workforce_messages', 'id'],
+    ['workforce_budget_ledger', 'id'],
+    ['workforce_runtime', 'id'],
+    ['run_events', 'run_id, seq'],
+  ];
+
+  async function snapshotOf(tenantId: string): Promise<string> {
+    const out: Record<string, unknown[]> = {};
+    for (const [table, order] of SNAPSHOT_TABLES) {
+      const rows = await hw.db.$client.unsafe(
+        `SELECT * FROM ${table} WHERE tenant_id = $1 ORDER BY ${order}`,
+        [tenantId] as never[],
+      );
+      out[table] = rows as unknown as unknown[];
+    }
+    return JSON.stringify(out);
+  }
+
+  /** Issue a request as one twin and return the status plus the RAW body text (leak-scannable). */
+  async function callAs(
+    who: Twin,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; text: string }> {
+    const res = await jsonRequest(hw.app, method, path, {
+      ...(body !== undefined ? { body } : {}),
+      headers: { authorization: `Bearer ${who.token}` },
+    });
+    return { status: res.status, text: await res.text() };
+  }
+
+  beforeAll(async () => {
+    hw = await createHarness({
+      schema: 'rayspec_test_workforce_xtenant',
+      // Both seams must be wired or the whole surface fail-closes 501 (routes/workforce.ts:201-219)
+      // and every assertion below would pass vacuously against a stub answer.
+      workforce: {
+        kick: () => {
+          kicks++;
+        },
+      },
+      workforceGoalIntake: {
+        submitGoal: (input) => {
+          goalSubmissions.push(input);
+          return Promise.resolve({ outcome: 'created', tasks: [] });
+        },
+      },
+    });
+  });
+  beforeEach(async () => {
+    await hw.reset();
+    kicks = 0;
+    goalSubmissions = [];
+    const pa = await principal('twin-a@example.test', 'Org Twin A');
+    const pb = await principal('twin-b@example.test', 'Org Twin B');
+    a = await seedTwin(pa.orgId, pa.token, 'a');
+    b = await seedTwin(pb.orgId, pb.token, 'b');
+  });
+  afterAll(async () => {
+    await hw.close();
+  });
+
+  it('the iterated table set IS the nine workforce tables (non-vacuity, and drift-proof)', () => {
+    expect(WORKFORCE_TABLES.map(getTableName).sort()).toEqual(Object.keys(EXPECTED_ROWS).sort());
+    expect(WORKFORCE_TABLES.length).toBe(9);
+  });
+
+  /**
+   * Assert the driver refused with SQLSTATE 23505 (unique_violation). Matched on the CODE, walking
+   * the cause chain: Drizzle wraps the driver error, and its own message is only `Failed query: …`,
+   * so a message regex would pass on any failure at all — including one that is not a collision.
+   */
+  async function expectUniqueViolation(run: () => Promise<unknown>, label: string): Promise<void> {
+    let caught: unknown;
+    try {
+      await run();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught, label).toBeDefined();
+    const codes: string[] = [];
+    for (let e = caught; e !== undefined && e !== null; e = (e as { cause?: unknown }).cause) {
+      const code = (e as { code?: unknown }).code;
+      if (typeof code === 'string') codes.push(code);
+    }
+    expect(codes, label).toContain('23505');
+  }
+
+  it('POSTGRES ITSELF refuses a byte-identical task id / approval id in a second tenant', async () => {
+    // Why the ids above differ by one character. `workforce_tasks.task_id` is a GLOBAL text primary
+    // key and the other eight tables carry a global uuid one, so a cross-tenant id COLLISION is not
+    // a case this suite chose not to construct — it is a row the database will not store. That is a
+    // stronger guarantee than any application predicate, and it is pinned here rather than assumed.
+    const tdbB = forTenant(hw.db, b.orgId);
+    await expectUniqueViolation(
+      () =>
+        tdbB.insert(schema.workforceTasks, {
+          taskId: a.rootTaskId, // tenant A's id, offered under tenant B
+          workforceId: TWIN.workforceId,
+          rootTaskId: a.rootTaskId,
+          title: TWIN.rootTitle,
+          goal: TWIN.rootGoal,
+          owner: TWIN.team.lead,
+          requestedBy: 'user',
+          status: 'planned',
+        }),
+      'workforce_tasks.task_id',
+    );
+    await expectUniqueViolation(
+      () =>
+        tdbB.insert(schema.workforceApprovals, {
+          id: a.approvalId, // tenant A's approval id, offered under tenant B
+          taskId: b.approvalTaskId,
+          question: TWIN.question,
+          approver: 'user',
+          status: 'pending',
+          onTimeout: 'fail',
+        }),
+      'workforce_approvals.id',
+    );
+
+    // The refused rows changed nothing: A still owns its id, B still owns its own.
+    const owner = await hw.db.$client.unsafe(
+      `SELECT tenant_id FROM workforce_tasks WHERE task_id = '${a.rootTaskId}';`,
+    );
+    expect((owner[0] as { tenant_id: string }).tenant_id).toBe(a.orgId);
+    expect(owner.length).toBe(1);
+  });
+
+  it('every one of the nine tables, read through the tenant handle, returns ONLY the caller’s rows', async () => {
+    for (const table of WORKFORCE_TABLES) {
+      const name = getTableName(table);
+      const aRows = (await forTenant(hw.db, a.orgId).select(table).all()) as Array<{
+        tenantId: string;
+      }>;
+      const bRows = (await forTenant(hw.db, b.orgId).select(table).all()) as Array<{
+        tenantId: string;
+      }>;
+      // Exact counts, both directions: neither tenant sees a row too few or a row too many.
+      expect(aRows.length, name).toBe(EXPECTED_ROWS[name]);
+      expect(bRows.length, name).toBe(EXPECTED_ROWS[name]);
+      expect(aRows.every((r) => r.tenantId === a.orgId), name).toBe(true);
+      expect(bRows.every((r) => r.tenantId === b.orgId), name).toBe(true);
+      // …and the identical structures did not smuggle the other tenant's bytes in.
+      expect(JSON.stringify(aRows), name).not.toContain('SECRET_FROM_B');
+      expect(JSON.stringify(bRows), name).not.toContain('SECRET_FROM_A');
+    }
+  });
+
+  it('both workforce run_events namespaces are partitioned — including the IDENTICAL control run_id', async () => {
+    const controlStream = workforceControlStreamId(TWIN.workforceId);
+    expect(controlStream).toBe('workforce:twin-wf');
+    // Byte-identical run_id at byte-identical seq in BOTH tenants — the one colliding identifier
+    // the schema admits, since run_events is unique on (tenant_id, run_id, seq).
+    const both = await hw.db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${controlStream}' AND seq = 1;`,
+    );
+    expect((both[0] as { c: number }).c).toBe(2);
+
+    for (const [who, other] of [
+      [a, b],
+      [b, a],
+    ] as const) {
+      const rows = (await forTenant(hw.db, who.orgId).select(schema.runEvents).all()) as Array<{
+        runId: string;
+      }>;
+      expect(rows.length).toBe(3); // one task-stream row + two control-stream rows
+      expect(rows.filter((r) => r.runId === controlStream).length).toBe(2);
+      expect(rows.some((r) => r.runId === who.rootTaskId)).toBe(true);
+      expect(rows.some((r) => r.runId === other.rootTaskId)).toBe(false);
+      expect(JSON.stringify(rows)).not.toContain(secretOf(other.mark));
+    }
+  });
+
+  it('every /v1/workforce read route returns ONLY tenant A’s rows, and never a byte of B', async () => {
+    const wf = TWIN.workforceId;
+    const reads: Array<readonly [string, string]> = [
+      ['status', `/v1/workforce/${wf}/status`],
+      ['tasks', '/v1/workforce/tasks'],
+      ['tasks?workforceId', `/v1/workforce/tasks?workforceId=${wf}`],
+      ['tasks?owner', `/v1/workforce/tasks?owner=${TWIN.team.lead}`],
+      ['task-by-id', `/v1/workforce/tasks/${a.rootTaskId}`],
+      ['tree', `/v1/workforce/tasks/${a.rootTaskId}/tree`],
+      ['events', `/v1/workforce/tasks/${a.rootTaskId}/events`],
+      ['approvals', '/v1/workforce/approvals'],
+      ['reviews', '/v1/workforce/reviews'],
+      ['cost', '/v1/workforce/cost'],
+      ['cost?by=department', '/v1/workforce/cost?by=department'],
+      ['cost?by=employee', '/v1/workforce/cost?by=employee'],
+    ];
+    for (const [label, path] of reads) {
+      const res = await callAs(a, 'GET', path);
+      expect(res.status, label).toBe(200);
+      // The blunt instrument first: no response on this surface may carry the other tenant's bytes.
+      expect(res.text, label).not.toContain('SECRET_FROM_B');
+      expect(res.text, label).not.toContain(`-${b.mark}"`); // no `twin-task-*-b` id, either
+    }
+
+    // Now the STRUCTURAL assertions, which are what an identical-identifier seed is FOR: every one
+    // of these groups on a key both tenants share, so an unscoped read doubles or sums into it.
+    const status = JSON.parse((await callAs(a, 'GET', `/v1/workforce/${wf}/status`)).text);
+    expect(status).toMatchObject({
+      workforceId: wf,
+      paused: false,
+      queueDepth: 1,
+      tasks: { blocked: 1, queued: 1, waiting_for_user: 1, waiting_for_review: 1 },
+    });
+
+    const tasks = JSON.parse((await callAs(a, 'GET', '/v1/workforce/tasks')).text) as Array<{
+      taskId: string;
+    }>;
+    expect(tasks.map((t) => t.taskId).sort()).toEqual(
+      [a.rootTaskId, a.childTaskId, a.approvalTaskId, a.reviewTaskId].sort(),
+    );
+
+    const tree = JSON.parse(
+      (await callAs(a, 'GET', `/v1/workforce/tasks/${a.rootTaskId}/tree`)).text,
+    ) as { rootTaskId: string; tasks: Array<{ taskId: string }> };
+    expect(tree.rootTaskId).toBe(a.rootTaskId);
+    expect(tree.tasks.map((t) => t.taskId).sort()).toEqual([a.childTaskId, a.rootTaskId].sort());
+
+    const approvals = JSON.parse((await callAs(a, 'GET', '/v1/workforce/approvals')).text) as Array<{
+      id: string;
+    }>;
+    expect(approvals.map((r) => r.id)).toEqual([a.approvalId]);
+
+    const reviews = JSON.parse((await callAs(a, 'GET', '/v1/workforce/reviews')).text) as Array<{
+      id: string;
+    }>;
+    expect(reviews.map((r) => r.id)).toEqual([a.reviewId]);
+
+    // The cost roll-ups are the sharpest: BOTH tenants hold `(department, eng, <window>)` and
+    // `(workforce, twin-wf, <window>)`, and both own tasks with the SAME owner ids. A dropped
+    // predicate here does not merely list more rows — it reports A's spend as A's plus B's.
+    const cost = JSON.parse((await callAs(a, 'GET', '/v1/workforce/cost')).text) as {
+      scopes: Array<{ scopeKind: string; scopeId: string; settledUsd: string }>;
+    };
+    expect(cost.scopes).toHaveLength(2);
+    expect(cost.scopes.map((s) => Number(s.settledUsd))).toEqual([1.25, 1.25]);
+
+    const byDept = JSON.parse((await callAs(a, 'GET', '/v1/workforce/cost?by=department')).text);
+    expect(byDept.groups).toEqual([
+      { id: TWIN.department, settledUsd: 1.25, reservedUsd: 0, settledTurns: 1 },
+    ]);
+
+    const byEmp = JSON.parse((await callAs(a, 'GET', '/v1/workforce/cost?by=employee')).text) as {
+      groups: Array<{ id: string; tasks: number; settledUsd: number }>;
+    };
+    expect(byEmp.groups.map((g) => [g.id, g.tasks, g.settledUsd])).toEqual([
+      [TWIN.employees.builder, 3, 3.75],
+      [TWIN.team.lead, 1, 1.25],
+    ]);
+
+    const events = await callAs(a, 'GET', `/v1/workforce/tasks/${a.rootTaskId}/events`);
+    expect(events.text).toContain('event: workforce.task.created');
+    expect(events.text).toContain('SECRET_FROM_A');
+  });
+
+  it('tenant B’s ids read as A are a uniform 404 — never B’s row, and never a 500', async () => {
+    const foreign: Array<readonly [string, string, string, unknown?]> = [
+      ['task-by-id', 'GET', `/v1/workforce/tasks/${b.rootTaskId}`],
+      ['tree', 'GET', `/v1/workforce/tasks/${b.rootTaskId}/tree`],
+      ['events', 'GET', `/v1/workforce/tasks/${b.rootTaskId}/events`],
+      ['child-by-id', 'GET', `/v1/workforce/tasks/${b.childTaskId}`],
+      ['approval-task', 'GET', `/v1/workforce/tasks/${b.approvalTaskId}`],
+      ['review-task', 'GET', `/v1/workforce/tasks/${b.reviewTaskId}`],
+      ['signal', 'POST', `/v1/workforce/tasks/${b.rootTaskId}/signal`, { kind: 'budget_raised' }],
+      ['cancel', 'POST', `/v1/workforce/tasks/${b.rootTaskId}/cancel`, {}],
+      ['decide', 'POST', `/v1/workforce/approvals/${b.approvalId}/decide`, { decision: 'approve' }],
+      ['verdict', 'POST', `/v1/workforce/reviews/${b.reviewId}/verdict`, { verdict: 'accept' }],
+    ];
+    for (const [label, method, path, body] of foreign) {
+      const res = await callAs(a, method, path, body);
+      // A uniform 404 — not a 403 (which would confirm the row exists), and above all not a 500,
+      // which is what a predicate-less query that then trips over a foreign row looks like.
+      expect(res.status, label).toBe(404);
+      expect(res.status, label).toBeLessThan(500);
+      expect(res.text, label).not.toContain('SECRET_FROM_B');
+      expect(res.text, label).not.toContain(TWIN.rootTitle);
+    }
+    // A workforce id BOTH tenants declare is not a back door either: A's control reads answer for
+    // A's runtime row alone, and A's task-scoped filter never widens past A.
+    const scoped = JSON.parse(
+      (await callAs(a, 'GET', `/v1/workforce/tasks?workforceId=${TWIN.workforceId}`)).text,
+    ) as Array<{ taskId: string }>;
+    expect(scoped).toHaveLength(4);
+    expect(scoped.every((t) => t.taskId.endsWith('-a'))).toBe(true);
+  });
+
+  it('A’s whole READ sweep leaves every one of B’s rows byte-identical (a read must not mutate)', async () => {
+    const before = await snapshotOf(b.orgId);
+    for (const path of [
+      `/v1/workforce/${TWIN.workforceId}/status`,
+      '/v1/workforce/tasks',
+      '/v1/workforce/approvals',
+      '/v1/workforce/reviews',
+      '/v1/workforce/cost',
+      '/v1/workforce/cost?by=department',
+      '/v1/workforce/cost?by=employee',
+      `/v1/workforce/tasks/${a.rootTaskId}`,
+      `/v1/workforce/tasks/${a.rootTaskId}/tree`,
+      `/v1/workforce/tasks/${a.rootTaskId}/events`,
+      // …including the foreign-id reads, whose 404 must also be side-effect free.
+      `/v1/workforce/tasks/${b.rootTaskId}`,
+      `/v1/workforce/tasks/${b.rootTaskId}/tree`,
+      `/v1/workforce/tasks/${b.rootTaskId}/events`,
+    ]) {
+      await callAs(a, 'GET', path);
+    }
+    expect(await snapshotOf(b.orgId)).toBe(before);
+  });
+
+  it('A’s MUTATING verbs — signal, decide, verdict, goals, pause, resume, cancel, halt — touch no row of B’s', async () => {
+    const before = await snapshotOf(b.orgId);
+    const wf = TWIN.workforceId;
+
+    // Each of these is A acting on A's OWN rows, under identifiers B holds byte-identically.
+    const signal = await callAs(a, 'POST', `/v1/workforce/tasks/${a.rootTaskId}/signal`, {
+      kind: 'budget_raised',
+      signalKey: 'twin-operator-signal-2',
+    });
+    expect(signal.status).toBe(202);
+    expect(JSON.parse(signal.text)).toEqual({ delivered: true, woke: true });
+
+    const decide = await callAs(a, 'POST', `/v1/workforce/approvals/${a.approvalId}/decide`, {
+      decision: 'approve',
+    });
+    expect(decide.status).toBe(200);
+    expect(JSON.parse(decide.text).decidedBy).toMatch(/^user:/);
+
+    const verdict = await callAs(a, 'POST', `/v1/workforce/reviews/${a.reviewId}/verdict`, {
+      verdict: 'accept',
+    });
+    expect(verdict.status).toBe(200);
+    expect(JSON.parse(verdict.text)).toMatchObject({ taskStatus: 'completed' });
+
+    const goals = await callAs(a, 'POST', `/v1/workforce/${wf}/goals`, { goal: 'Ship the twin.' });
+    expect(goals.status).toBe(202);
+    // The intake seam receives the SERVER-derived tenant — never the shared workforce id, which is
+    // the only tenant-shaped thing the client supplied and is identical in both tenants.
+    expect(goalSubmissions).toHaveLength(1);
+    expect(goalSubmissions[0]?.tenantId).toBe(a.orgId);
+    expect(goalSubmissions[0]?.workforceId).toBe(wf);
+
+    expect((await callAs(a, 'POST', `/v1/workforce/${wf}/pause`, {})).status).toBe(200);
+    expect((await callAs(a, 'POST', `/v1/workforce/${wf}/resume`)).status).toBe(200);
+    expect((await callAs(a, 'POST', `/v1/workforce/tasks/${a.rootTaskId}/cancel`, {})).status).toBe(
+      202,
+    );
+    expect((await callAs(a, 'POST', `/v1/workforce/${wf}/halt`, { reason: 'twin gate' })).status).toBe(
+      200,
+    );
+    expect(kicks).toBeGreaterThan(0); // the dispatcher seam is live — the verbs are not no-ops
+
+    // A's own rows moved (the verbs really ran); B's did not move by a single byte, even though
+    // pause/resume/halt were addressed to a workforce id B declares under the very same spelling.
+    const aPaused = await hw.db.$client.unsafe(
+      `SELECT halt_reason FROM workforce_runtime WHERE tenant_id = '${a.orgId}';`,
+    );
+    expect((aPaused[0] as { halt_reason: string | null }).halt_reason).toBe('twin gate');
+    expect(await snapshotOf(b.orgId)).toBe(before);
   });
 });
