@@ -313,6 +313,92 @@ unset aborts the boot (`composition-root.ts:2957-2963`, pinned at
 `serve-workforce-flag.db.test.ts`). A deploy that declares a workforce and comes up has therefore
 stamped it.
 
+## Backup and restore
+
+**The core ships no backup tool** — no scheduler, no snapshot command, no continuous WAL archiving,
+and no point-in-time recovery. `packages/compose/api-auth/src/engine/deploy.ts` says so at the
+deploy boundary ("Backup/PITR is deferred"), and nothing in this repo emits or reads a dump. What a
+self-hoster runs is stock Postgres.
+
+What this page can promise is narrower, and it is tested: the shipped schema and the shipped engine
+survive one `pg_dump`/`pg_restore` round trip **byte-for-byte**, and the restored database
+**resumes**. `backup-restore.db.test.ts` is that proof end to end, against a database holding a
+`queued` task, a turn in flight, three parks (an approval wait, a review wait, and the structural
+`awaiting_children` one), the three terminal shapes, and their transitions, signals, delegations,
+approvals, reviews, messages, ledger rows and journal entries in **both** `run_events` namespaces.
+
+### The two commands
+
+```bash
+# BACK UP — against a LIVE deployment. pg_dump reads inside one repeatable-read snapshot, so a turn
+# that commits while the dump runs is either wholly in it or wholly out of it, never half of each.
+# That is Postgres's guarantee, not one this repo adds.
+pg_dump -Fc -d "$DATABASE_URL" -f "workforce-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+# RESTORE — into a database that does not exist yet. Never on top of the live one.
+psql "$ADMIN_DATABASE_URL" -c 'CREATE DATABASE rayspec_restored'
+pg_restore --exit-on-error --no-owner --no-privileges \
+  -d "postgres://…@…/rayspec_restored" workforce-….dump
+```
+
+Then point `DATABASE_URL` at the restored database and boot normally. **`--exit-on-error` is not
+optional polish:** without it `pg_restore` prints errors and still exits 0, and a half-restored task
+graph is exactly the failure this section exists to prevent. `--no-owner --no-privileges` let the
+restore land under whatever role the new host uses instead of failing on a role that does not exist
+there.
+
+### The two values that decide whether the restore is usable
+
+Every row surviving is the easy half, and it is not the half that goes wrong. Two counters decide
+whether the restored graph can be *worked*, and both compare equal to "the table has the right
+number of rows":
+
+- **`workforce_tasks.version`** — the optimistic CAS token `applyTransition` compare-and-swaps on.
+  Lose it and every row is present while no parked task can ever be claimed again.
+- **`workforce_tasks.last_event_seq` and `workforce_runtime.last_event_seq`** — the journal sequence
+  HEADs. Allocation rides the owning row's own counter (`events.ts`), and `run_events` carries
+  `UNIQUE(tenant_id, run_id, seq)` (`0004_run_events.sql`). A restore that reset a counter would not
+  fail at restore time; it would fail on the very next append, as a duplicate key, in the last place
+  an operator would look.
+
+`backup-restore.db.test.ts` asserts both on their own terms rather than leaving a row-count
+comparison to imply them, and it carries the negative arms that give those assertions teeth: a
+restore with the version reset, a restore with a journal head lost (which reds with SQLSTATE `23505`
+on `run_events_tenant_run_seq_idx`), and a restore missing one table's rows.
+
+### What the restore does, and what it does not carry
+
+| | |
+|---|---|
+| **All nine `workforce_*` tables and both `run_events` namespaces** | Byte-identical — the oracle is an md5 over the ordered full row text, not a count. |
+| **The applied-migration ledger** (`drizzle.__drizzle_migrations`) | Travels with the dump, so the restored deployment's boot migrator is a no-op rather than an attempt to re-apply the whole chain. |
+| **A `queued` task** | Dispatches on the restored database through the shipped reserve pass. |
+| **A park** | Stays parked, at the version it was parked at. The structural `awaiting_children` park has no operator exit at all, and it does not acquire one across a restore. |
+| **A terminal task** | Untouched, whole-row. |
+| **A turn IN FLIGHT at dump time** | Comes back as a `working` row whose workflow no longer exists — see below. It is re-queued, not stranded. |
+| **The DBOS system database** | **NOT in the dump.** It is a separate database (`executor.ts`), so a dump of the application database does not contain it, and the restored deployment starts with an empty one. |
+| **Secrets** | Not in the database at all. Restoring under freshly minted secrets has consequences for copied API keys and issued tokens — see [Restore and key rotation](./ARCHITECTURE.md#restore-and-key-rotation). |
+
+**Why the missing DBOS system database is safe, and what it costs.** A claim is an application row,
+so it travels; the workflow behind it does not. On the restored deployment the sweep asks the engine
+whether the claim's workflow id is still live, finds it absent, and treats absent the same as dead:
+it re-queues the task through the one status door and releases the claim's budget reservation in the
+same transaction (`task-scheduler.ts`, `runSweep`). A fresh dispatch of the same turn is safe because
+turn handlers are effect-free and the receipt guards double application — the same property that
+makes crash recovery safe. The cost is one repeated turn's model spend, and the reap is journaled:
+the re-queue carries `queueReason: turn_reaped`, so an operator can see afterwards which tasks the
+restore re-ran rather than resumed. `backup-restore.db.test.ts` seeds exactly this shape — a claim
+minted with the shipped `taskTurnWorkflowId` — and asserts the reap, the reason, and that the same
+sweep leaves a not-yet-due approval alone.
+
+**Restoring is not a rollback.** The dump carries the schema it was taken at, and the boot migrator
+described above then applies whatever is still pending — forward, because there are no
+down-migrations to apply. So restoring an older dump under a newer deployment moves the schema
+*towards* that deployment and never backwards. It also does not soften the redeploy gate: the
+restored rows are live work, and `assertWorkforceSpecCompatible` reads them at the next boot and
+refuses a document that would strand any of them (`workforce-boot.ts`, pinned at
+`workforce-boot.db.test.ts`).
+
 ## Honest scope
 
 What the built-in orchestration deliberately does NOT include:
