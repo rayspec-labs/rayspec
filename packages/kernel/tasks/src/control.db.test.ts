@@ -474,11 +474,13 @@ describe.skipIf(!hasDb)('operator control (db)', () => {
     }
 
     it('CANCELS a structural park in the re-routed subtree — never dissolves it', async () => {
-      // §4.10: a structural park (`blocked(awaiting_children)`) may not be RELEASED while the child
-      // it waits on is still live — a wake, an unblock, or any transition back to `queued` erases
-      // the exit and orphans the child. Cancelling it is the park's own sanctioned lever
-      // (signals.ts: "CANCEL THE CHILD. Its terminal status satisfies the park through the park's
-      // own path"), and `cancelled` is terminal, not a release.
+      // THE STRUCTURAL-PARK RULE: a `blocked(awaiting_children)` park may not be RELEASED while the
+      // child it waits on is still live — a wake, an operator unblock, or any transition back to
+      // `queued` erases the exit and orphans the child (signals.ts's `STRUCTURAL_PARKS`, and the
+      // reason `NOT_OPERATOR_UNBLOCKABLE` exists). Cancelling it is the park's own sanctioned lever
+      // — "CANCEL THE CHILD. Its terminal status satisfies the park through the park's own path" —
+      // and `cancelled` is terminal, not a release. This arm holds the cascade to that difference
+      // on the re-routed path.
       //
       // `threeDeepQuiet` drives the middle out of its park to `queued` so its arms exercise an
       // ordinary parked row; this one leaves the park STANDING with a live leaf under it, so the
