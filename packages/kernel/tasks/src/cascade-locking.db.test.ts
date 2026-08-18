@@ -434,7 +434,10 @@ describe.skipIf(!hasDb)('cascade locking (db)', () => {
     await waitForBlocked(2);
 
     await releaseLedger();
-    await expectNoDeadlock({ 'the descendant claim': claim, 'the cancelling turn': cancellingTurn });
+    await expectNoDeadlock({
+      'the descendant claim': claim,
+      'the cancelling turn': cancellingTurn,
+    });
     await expect(claim).resolves.toBeUndefined();
     await expect(cancellingTurn).resolves.toBeDefined();
 
