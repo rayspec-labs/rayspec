@@ -113,6 +113,110 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
     await expect(assertWorkforceSpecCompatible(tdb(), withoutDev)).rejects.toThrow(task.taskId);
   });
 
+  // ── the DEPARTMENT branch of the redeploy gate (B-015 clause 3) ──────────────────────────────
+  //
+  // The gate strands live work on four kinds of departed declaration — workforce, employee,
+  // department, team — and until these arms the DEPARTMENT one was the only kind never removed by
+  // any test. That is not an oversight anyone could see from the suite: the employee arm above
+  // looks like it covers the neighbourhood, but it deliberately RE-DECLARES `eng`
+  // (`departments: [{ ...DECLARED.departments[0], members: [] }]`) so that its refusal is
+  // attributable to the employee alone. The consequence is that
+  // `if (task.department !== null && !departments.has(task.department))` had no arm at all: delete
+  // those three lines and this file stayed green.
+  //
+  // WHY THE MESSAGE IS ASSERTED, not just the error class. All four kinds throw the SAME
+  // `WorkforceSpecChangeError` with the same `taskIds`, so "it refused" is satisfied by any of
+  // them. A document that drops `eng` while ALSO dropping the employees that named it would refuse
+  // on the employee branch and look identical from outside. The arm therefore keeps `dev` and `mgr`
+  // declared — merely without their `department` field — and asserts the refusal names
+  // `department 'eng'` and does NOT name `employee 'dev'`.
+  describe('a departed DEPARTMENT strands the live work that names it', () => {
+    /** `DECLARED` minus the department, with every employee KEPT and merely un-departmented. */
+    function withoutEngineering(): WorkforceSpec {
+      const doc = JSON.parse(JSON.stringify(DECLARED)) as {
+        departments: unknown[];
+        employees: Array<Record<string, unknown>>;
+      };
+      doc.departments = [];
+      for (const employee of doc.employees) delete employee.department;
+      return WorkforceSpec.parse(doc);
+    }
+
+    it('refuses, names the DEPARTMENT (not the employee), and lists the stranded task', async () => {
+      const task = await createRootTask(tdb(), {
+        workforceId: 'helpdesk',
+        title: 'Live work',
+        goal: 'G',
+        owner: 'dev',
+        requestedBy: 'user',
+        department: 'eng',
+      });
+      const withoutDept = withoutEngineering();
+      // The premise this arm rests on, checked rather than assumed: `dev` is still declared, so the
+      // employee branch cannot be what refuses below.
+      expect(withoutDept.employees.map((e) => e.id)).toContain('dev');
+      expect(withoutDept.departments).toEqual([]);
+
+      // The error is CAPTURED rather than asserted through `rejects.not.…`: a negative matcher on
+      // a promise that RESOLVED would pass for the wrong reason, which is the exact failure this
+      // arm exists to rule out elsewhere.
+      const err = await assertWorkforceSpecCompatible(tdb(), withoutDept).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err, 'removing a department under live work must not deploy').toBeInstanceOf(
+        WorkforceSpecChangeError,
+      );
+      expect((err as WorkforceSpecChangeError).taskIds).toEqual([task.taskId]);
+      const message = (err as Error).message;
+      expect(message).toMatch(/department 'eng'/);
+      // DISCRIMINATION: this refusal is the department branch and nothing else. All four departed-
+      // declaration kinds throw the same class with the same task ids, so without this the arm is
+      // green even if the employee branch is what fired.
+      expect(
+        message,
+        'the refusal named the EMPLOYEE — this arm is then proving the employee branch, which the ' +
+          'suite already covers, and the department branch stays unproven',
+      ).not.toMatch(/employee 'dev'/);
+      // …and restoring the declaration makes the same live row deployable again.
+      await expect(assertWorkforceSpecCompatible(tdb(), DECLARED)).resolves.toBeUndefined();
+    });
+
+    it('a task carrying NO department is never stranded by removing every department', async () => {
+      // The `task.department !== null` half of the clause. `createRootTask` leaves the column NULL
+      // when the caller declares no department, and a NULL is not a departed declaration — it is
+      // the ordinary shape of work that was never departmentalised.
+      await createRootTask(tdb(), {
+        workforceId: 'helpdesk',
+        title: 'Departmentless live work',
+        goal: 'G',
+        owner: 'lead',
+        requestedBy: 'user',
+      });
+      await expect(
+        assertWorkforceSpecCompatible(tdb(), withoutEngineering()),
+      ).resolves.toBeUndefined();
+    });
+
+    it('a TERMINAL task’s departed department does not block the redeploy', async () => {
+      // The gate reads live rows only — the same rule the employee arm proves one branch over.
+      const done = await createRootTask(tdb(), {
+        workforceId: 'helpdesk',
+        title: 'Finished departmental work',
+        goal: 'G',
+        owner: 'dev',
+        requestedBy: 'user',
+        department: 'eng',
+      });
+      await db.$client.unsafe(
+        `UPDATE workforce_tasks SET status = 'completed' WHERE task_id = '${done.taskId}';`,
+      );
+      await expect(
+        assertWorkforceSpecCompatible(tdb(), withoutEngineering()),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe('a declaration is a fact on the row — the marker, and what it does and does not gate', () => {
     async function liveTask(workforceId: string) {
       return createRootTask(tdb(), {
