@@ -916,7 +916,14 @@ export const workforceDelegations = pgTable(
     resolvedOwner: text('resolved_owner').notNull(),
     /** NULLABLE ONLY SO ERASURE CAN SCRUB IT — the hand-off intent is subject content. */
     goal: text('goal'),
-    expectedOutput: text('expected_output'),
+    /**
+     * NOT content, and deliberately still NOT NULL. Every writer is the engine's own literal
+     * (`'worker_result'`, apply-intents.ts) — nothing model-, requester- or caller-authored reaches
+     * it, and no production path reads it. It is a structural constant, so `journalScrub` leaves it
+     * alone like every other structural column. If a delegating tool is ever allowed to supply it,
+     * it becomes content that day and gets its own migration alongside the validation it needs.
+     */
+    expectedOutput: text('expected_output').notNull(),
     depth: integer('depth').notNull(),
     status: text('status').notNull(),
     rejectionReason: text('rejection_reason'),

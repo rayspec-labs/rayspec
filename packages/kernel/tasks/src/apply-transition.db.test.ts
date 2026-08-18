@@ -17,7 +17,7 @@
  * task with `parentTaskId` set; there is no path back into a terminal row.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { applyTransition, renewTurnLease } from './apply-transition.js';
+import { applyTransition } from './apply-transition.js';
 import { createRootTask } from './create-task.js';
 import { TaskNotFoundError, TaskVersionConflictError } from './errors.js';
 import { deliverSignal, SIGNAL_KINDS } from './signals.js';
@@ -36,6 +36,7 @@ import {
   TENANT_A,
   TENANT_B,
 } from './test-support/test-db.js';
+import { renewTurnLease } from './turn-lease.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';

@@ -128,18 +128,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Scrub mode now erases the workforce CONTENT and keeps the rows:
   `workforce_tasks.title`/`.goal`/`.description`/`.result` set to NULL and `.artifacts` emptied;
   `workforce_messages.body`; `workforce_approvals.question`/`.reason` and `.options`;
-  `workforce_reviews.reasons`/`.required_changes`; `workforce_delegations.goal`/`.expected_output`;
+  `workforce_reviews.reasons`/`.required_changes`; `workforce_delegations.goal`;
   `workforce_task_signals.payload`. `workforce_budget_ledger`, `workforce_task_transitions` and
   `workforce_runtime` are retained WHOLE — they hold no subject content, and a ledger retained
   without the task rows its `scope_id` attributes spend to would be unreconcilable, which is why
   "retain the ledger" means retaining the set rather than one table.
-  This is the change migration `0013` carries for erasure: six `text NOT NULL` columns —
-  `workforce_tasks.title`, `.goal`, `workforce_messages.body`, `workforce_approvals.question`,
-  `workforce_delegations.goal` and `.expected_output` — now accept NULL, which is the complete set of
-  `text NOT NULL` content columns across the nine tables. The jsonb list columns go to their own
+  This is the change migration `0013` carries for erasure: five `text NOT NULL` columns —
+  `workforce_tasks.title`, `.goal`, `workforce_messages.body`, `workforce_approvals.question` and
+  `workforce_delegations.goal` — now accept NULL. Those five are the complete set of `text NOT NULL`
+  columns across the nine tables that carry CONTENT. `workforce_delegations.expected_output` looks
+  like a sixth and is not: every writer is the engine's own `'worker_result'` literal and no
+  production path reads it, so it is a structural constant the scrub keeps and the migration leaves
+  `NOT NULL`. The jsonb list columns go to their own
   declared `'[]'`/`'{}'` rather than being made nullable, and the three already-nullable text columns
   needed no change. **Nullable here means "erased", not "optional":** every write path still requires
-  all six, so a NULL has exactly one meaning, and every rendering surface — the turn input, the
+  all five, so a NULL has exactly one meaning, and every rendering surface — the turn input, the
   operator snapshot, recall — names it as `[content erased]` rather than emitting an empty string.
   The **default (full-delete) mode is byte-for-byte unchanged**, and `run_events` is still hard-
   deleted in both modes, so the workforce journal's own event payloads go with it either way. Two

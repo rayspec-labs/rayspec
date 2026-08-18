@@ -183,7 +183,7 @@ export interface EraseTenantOpts {
    *
    * THE TASK ENGINE: `workforce_tasks.title/goal/description/result` NULLed and `.artifacts`
    * emptied; `workforce_messages.body`; `workforce_approvals.question/reason` and `.options`;
-   * `workforce_reviews.reasons/required_changes`; `workforce_delegations.goal/expected_output`;
+   * `workforce_reviews.reasons/required_changes`; `workforce_delegations.goal`;
    * `workforce_task_signals.payload`. `workforce_budget_ledger`, `workforce_task_transitions` and
    * `workforce_runtime` are RETAINED WHOLE — they hold no subject content, and the ledger is the
    * workforce analogue of exactly the cost columns this mode exists to keep. Before this, the
@@ -383,8 +383,10 @@ function journalScrubTargets(
       table: schema.conversationItems as PgTable,
       set: { payload: null },
     },
-    // The task engine's content columns. `title`/`goal`/`body`/`question`/`expectedOutput` are the
-    // six columns migration 0013 relaxed from `text NOT NULL` for exactly this write; the jsonb
+    // The task engine's content columns. `title`/`goal`/`body`/`question` and the delegation
+    // `goal` are the FIVE columns migration 0013 relaxed from `text NOT NULL` for exactly this
+    // write. `expected_output` is deliberately absent: every writer is the engine's own
+    // `'worker_result'` literal, so it is a structural constant this mode keeps. The jsonb
     // lists go to their OWN declared empty value rather than being made nullable on a released
     // schema.
     {
@@ -410,7 +412,7 @@ function journalScrubTargets(
     {
       name: 'workforce_delegations',
       table: schema.workforceDelegations as PgTable,
-      set: { goal: null, expectedOutput: null },
+      set: { goal: null },
     },
     {
       name: 'workforce_task_signals',

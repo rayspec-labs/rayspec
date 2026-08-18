@@ -472,12 +472,18 @@ assert_eq "1" \
 assert_eq "YES" \
   "SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='workforce_tasks' AND column_name='claim_expires_at';" \
   "0013 workforce_tasks.claim_expires_at exists and is nullable"
-# THE SIX SCRUBBABLE CONTENT COLUMNS accept NULL, so journalScrub can erase the content while the
+# THE FIVE SCRUBBABLE CONTENT COLUMNS accept NULL, so journalScrub can erase the content while the
 # budget ledger and every structural column are retained. A regression to NOT NULL would make the
 # scrub throw instead of erasing.
-assert_eq "YES|YES|YES|YES|YES|YES" \
-  "SELECT string_agg(is_nullable, '|' ORDER BY table_name, column_name) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='workforce_approvals' AND column_name='question') OR (table_name='workforce_delegations' AND column_name IN ('goal','expected_output')) OR (table_name='workforce_messages' AND column_name='body') OR (table_name='workforce_tasks' AND column_name IN ('title','goal')));" \
-  "0013 the six scrubbable content columns are nullable"
+assert_eq "YES|YES|YES|YES|YES" \
+  "SELECT string_agg(is_nullable, '|' ORDER BY table_name, column_name) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='workforce_approvals' AND column_name='question') OR (table_name='workforce_delegations' AND column_name='goal') OR (table_name='workforce_messages' AND column_name='body') OR (table_name='workforce_tasks' AND column_name IN ('title','goal')));" \
+  "0013 the five scrubbable content columns are nullable"
+# expected_output is a STRUCTURAL constant (every writer is the engine's own 'worker_result'
+# literal), so it is deliberately NOT in the scrub set and deliberately still NOT NULL. Pinned so a
+# later change cannot quietly relax it and start erasing a column the scrub posture says it keeps.
+assert_eq "NO" \
+  "SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='workforce_delegations' AND column_name='expected_output';" \
+  "0013 workforce_delegations.expected_output is NOT scrubbable — still NOT NULL"
 # A REAL write through the new keys: one (task, turn) review/approval each, a duplicate REFUSED even
 # under a DIFFERENT round (the exact shape a replay presents — a (tenant, task, round) UNIQUE would
 # have admitted it), and two turn-LESS rows coexisting under the partial predicate.

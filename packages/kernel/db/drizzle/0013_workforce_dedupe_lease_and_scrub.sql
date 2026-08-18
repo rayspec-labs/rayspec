@@ -4,7 +4,7 @@
 --
 -- REVIEWED: generated with `drizzle-kit generate` against the 0012 snapshot and read
 -- statement-by-statement before committing (the mandated generate → read the SQL diff → correct
--- discipline). The generated diff was CLEAN — exactly the six nullability relaxations, the three
+-- discipline). The generated diff was CLEAN — exactly the five nullability relaxations, the three
 -- new nullable columns and the two partial UNIQUEs below, nothing else — so it is committed as
 -- generated, with this header added and the journal tag renamed to a descriptive one.
 --
@@ -65,25 +65,28 @@
 -- release of what the claim actually reserved, in the window it reserved it in.
 --
 -- ─────────────────────────────────────────────────────────────────────────────────────────────
--- 3. SIX NULLABILITY RELAXATIONS so `journalScrub` stops destroying the ledger (B-018c / D-030 i).
+-- 3. FIVE NULLABILITY RELAXATIONS so `journalScrub` stops destroying the ledger (B-018c / D-030 i).
 -- ─────────────────────────────────────────────────────────────────────────────────────────────
 -- `journalScrub: true` is the softer erasure posture: it NULLs raw subject content while KEEPING
 -- every structural, idempotency and cost column, so billing reconciliation survives. The workforce
 -- tables were not in the scrub set, so scrub mode hard-deleted all nine — `workforce_budget_ledger`
 -- included, which is the workforce analogue of exactly the cost columns scrub exists to retain. The
--- mode inverted its own purpose. Scrubbing the CONTENT instead requires these six `text NOT NULL`
--- columns to accept NULL; they are the COMPLETE set of `text NOT NULL` content columns across the
--- nine tables. Everything else the scrub erases needed no schema change (`description`, `result` and
+-- mode inverted its own purpose. Scrubbing the CONTENT instead requires these five `text NOT NULL`
+-- columns to accept NULL; they are the COMPLETE set of `text NOT NULL` columns across the nine
+-- tables that carry CONTENT. `workforce_delegations.expected_output` looks like a sixth and is NOT
+-- one: every writer is the engine's own `'worker_result'` literal and no production path reads it,
+-- so it is a structural constant this mode KEEPS, and the migration deliberately leaves it
+-- `NOT NULL`. Everything else the scrub erases needed no schema change (`description`, `result` and
 -- `reason` are already nullable; the jsonb list columns are emptied to their own declared `'[]'` /
 -- `'{}'` rather than gratuitously made nullable on a released schema).
 --
--- NULLABLE HERE MEANS "ERASED", NOT "OPTIONAL". Every write path still requires all six — the task
--- creation schema refuses an absent or empty title/goal, `request_approval` refuses an empty
--- question, a hand-off refuses an empty goal/expected output. A NULL in one of these columns has
--- exactly one meaning: this tenant's content was scrubbed while its ledger and structure were kept.
+-- NULLABLE HERE MEANS "ERASED", NOT "OPTIONAL". Every write path still requires all five — task
+-- creation refuses an absent or empty title/goal (`create-task.ts`), `request_approval` refuses an
+-- empty question and a hand-off an empty goal (`workforce-tools` toolset), and a message refuses an
+-- empty body. A NULL in one of these columns has exactly one meaning: this tenant's content was
+-- scrubbed while its ledger and every structural column were kept.
 ALTER TABLE "workforce_approvals" ALTER COLUMN "question" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "workforce_delegations" ALTER COLUMN "goal" DROP NOT NULL;--> statement-breakpoint
-ALTER TABLE "workforce_delegations" ALTER COLUMN "expected_output" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "workforce_messages" ALTER COLUMN "body" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "workforce_tasks" ALTER COLUMN "title" DROP NOT NULL;--> statement-breakpoint
 ALTER TABLE "workforce_tasks" ALTER COLUMN "goal" DROP NOT NULL;--> statement-breakpoint

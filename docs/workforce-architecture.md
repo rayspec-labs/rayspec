@@ -279,7 +279,7 @@ that would go red if the constraint silently changed.
 
 **This release carries ONE migration: `0013_workforce_dedupe_lease_and_scrub`.** It adds three
 NULLABLE columns (`workforce_reviews.turn_number`, `workforce_approvals.turn_number`,
-`workforce_tasks.claim_expires_at`), two PARTIAL unique indexes, and relaxes six `text NOT NULL`
+`workforce_tasks.claim_expires_at`), two PARTIAL unique indexes, and relaxes five `text NOT NULL`
 content columns to accept NULL so `journalScrub` can erase content while retaining the budget
 ledger. It cannot fail on a populated database and needs no backfill: a nullable column cannot be
 violated by an existing row, `DROP NOT NULL` never fails on data, and because `turn_number` is a new
@@ -315,19 +315,31 @@ boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
 (`packages/kernel/tasks/src/approvals.ts:167-181`) — so every window that expired during the outage
 is due the moment you turn the flag back on, and the declared fates fire then.
 
-**The boot migrator is a SINGLE-RUNNER step.** It takes no advisory lock. On a fresh, empty
-database two boots that start together both try to apply the chain, and one of them MAY die: on the
-certification host it does, every time, with SQLSTATE 23505 on the migrator's very first statement
-(`CREATE SCHEMA IF NOT EXISTS "drizzle"`). A sufficiently serialized pair is an equally legitimate
-outcome, where the second boot reads the high-water mark and no-ops — so do not build alerting that
-expects a failure. What is PINNED is the weaker, portable shape, and it is the shape to design
-against: at least one boot applies the chain, AT MOST ONE fails, any failure is a clean
-duplicate-object abort in a known SQLSTATE set (`42P07` / `42710` / `23505` / `40001` / `40P01`),
-and the database ends fully migrated either way (`boot-migrator-concurrency.db.test.ts`). Nothing is
-corrupted and nothing is half-applied (the pending set is one transaction); the loser's cost, when
-there is one, is a failed boot that a restart fixes. Do not read "safe to run repeatedly" as
-multi-replica boot safety: run migrations from one runner. The advisory-locked shape a future fix
-should mirror is `tenant-provision.ts`'s `pg_advisory_xact_lock`, exercised at
+**The boot migrator is a SINGLE-RUNNER step. Run migrations from one runner** — and do not read
+"safe to run repeatedly" as multi-replica boot safety. It takes no advisory lock.
+
+What is PINNED, and what to design against (`boot-migrator-concurrency.db.test.ts`):
+
+- **A runner that meets another's objects aborts cleanly and records nothing.** Staged
+  deterministically — `orgs` is `0000`'s first non-`IF NOT EXISTS` CREATE, so a runner arriving
+  second dies exactly there — the abort is SQLSTATE `42P07` (duplicate_table),
+  `drizzle.__drizzle_migrations` records **zero** rows, and `journal_steps` (created *before* `orgs`
+  in the same batch) does not exist afterwards. So the whole-batch rollback is observed rather than
+  inferred: there is no half-applied migration for an operator to reason about, and the next boot
+  re-applies from the top rather than resuming a fiction.
+- **Two concurrent runners: at least one applies the chain, AT MOST ONE fails**, any failure is a
+  clean duplicate-object abort from a known set (`42P07` / `42710` / `23505` / `40001` / `40P01`),
+  and the database ends fully migrated either way. Zero failures is a legitimate outcome, not an
+  anomaly — a sufficiently serialized pair sees the high-water mark and the second runner no-ops.
+  **Do not build alerting that expects a failure.**
+
+Observed but NOT pinned, and recorded as an observation rather than as behaviour: on the
+certification host the concurrent pair does produce a loser every time, with SQLSTATE `23505` raised
+from the migrator's first statement. That is one host's timing, not a contract — the assertion above
+admits five SQLSTATEs and zero-or-one losers precisely because the racy path is not deterministic.
+
+The loser's cost, when there is one, is a failed boot that a restart fixes. The advisory-locked
+shape a future fix should mirror is `tenant-provision.ts`'s `pg_advisory_xact_lock`, exercised at
 `tenant-provision.db.test.ts:152-181`.
 
 **A migration that cannot apply is fail-closed, and the failing tag takes one query to name.** The

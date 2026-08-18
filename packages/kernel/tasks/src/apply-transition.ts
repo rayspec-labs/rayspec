@@ -175,31 +175,3 @@ export async function applyTransition(
     return row;
   });
 }
-
-/**
- * RENEW the lease on a claim this execution already holds — the ONLY write to `claim_expires_at`
- * outside `applyTransition`, and it touches nothing else.
- *
- * A durable-engine recovery re-executes a turn body from the top and finds its own committed claim
- * (`working`, stamped with this workflow's id) without taking a new transition — so it would
- * otherwise inherit whatever remains of the ORIGINAL lease and could be reaped mid-flight through
- * no fault of its own. Recovery is a legitimate fresh execution and gets a fresh window.
- *
- * Deliberately NOT a status write: it is scoped to the leaseholder (`task_id` + the current
- * `working` status), so it can neither resurrect a terminal row nor extend a claim someone else
- * has already taken over — an intervening reap moves the row out of `working` and this renew
- * matches nothing.
- */
-export async function renewTurnLease(
-  tdb: TenantDb,
-  taskId: string,
-  expiresAt: Date,
-): Promise<boolean> {
-  const rows = await tdb
-    .update(schema.workforceTasks, { claimExpiresAt: expiresAt })
-    .where(
-      and(eq(schema.workforceTasks.taskId, taskId), eq(schema.workforceTasks.status, 'working')),
-    )
-    .returning({ taskId: schema.workforceTasks.taskId });
-  return rows.length > 0;
-}

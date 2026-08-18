@@ -1,5 +1,5 @@
 {
-  "id": "2a7bd0d7-b9f6-4726-baf5-b02b60df422c",
+  "id": "0e99a172-2344-4272-9c0c-94efd8f15158",
   "prevId": "65cfc638-4f4e-4b29-9faf-76aa58525b14",
   "version": "7",
   "dialect": "postgresql",
@@ -2683,7 +2683,7 @@
           "name": "expected_output",
           "type": "text",
           "primaryKey": false,
-          "notNull": false
+          "notNull": true
         },
         "depth": {
           "name": "depth",

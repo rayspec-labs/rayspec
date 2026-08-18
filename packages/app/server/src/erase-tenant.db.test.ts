@@ -1115,7 +1115,10 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       expect(after.review?.verdict).toBe('accept');
       expect(after.review?.round).toBe(1);
       expect(after.delegation?.goal).toBeNull();
-      expect(after.delegation?.expected_output).toBeNull();
+      // Structural, not content: every writer is the engine's `'worker_result'` literal, so the
+      // scrub must leave it EXACTLY as seeded. A regression that adds it back to the scrub set
+      // goes red here rather than silently erasing a column the posture says it keeps.
+      expect(after.delegation?.expected_output).toBe(`${T1}-raw-delegation-expected-output`);
       expect(after.delegation?.depth).toBe(1);
       expect(after.signal?.payload).toEqual({});
       expect(after.signal?.signal_key).toBe(`child:${T1}-s0`);

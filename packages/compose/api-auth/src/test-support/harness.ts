@@ -294,7 +294,7 @@ function buildFullSchemaSql(SCHEMA: string): string {
     tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
     workforce_id text, parent_task_id text NOT NULL, child_task_id text NOT NULL,
     delegated_by text NOT NULL, delegated_to text NOT NULL, resolved_owner text NOT NULL,
-    goal text, expected_output text, depth integer NOT NULL,
+    goal text, expected_output text NOT NULL, depth integer NOT NULL,
     status text NOT NULL, rejection_reason text,
     created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
   );
