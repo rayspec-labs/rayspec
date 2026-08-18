@@ -203,8 +203,12 @@ usually: a principal authenticates as `user:<id>` / `api-key:<id>` and a named a
 declared employee id, so the two namespaces are structurally disjoint and the comparison cannot
 match. That is the deliberate fail-closed reading — open core carries no principal-to-employee
 binding, and the honest answer to "we cannot verify this caller is `ops_lead`" is to demand the
-override and record it. The named superior's own judgment still reaches the engine the way the
-engine was built to carry it: through their dispatched turn, where the actor IS the employee id.
+override and record it. There is no second route for an approval: `decideApproval` has exactly one
+caller (the HTTP door), no tool decides an approval, and the escalation dispatches no turn — so an
+escalated approval ends either in a break-glass decision or, when its window expires, in the
+terminal `fail` fate the re-issued request carries. (A named *reviewer* is the different case: a
+review verdict does arrive through that reviewer's own dispatched turn, where the actor IS the
+employee id and `apply-intents.ts` already re-checks it.)
 
 ## Budget scopes
 

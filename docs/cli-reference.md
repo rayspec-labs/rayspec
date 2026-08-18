@@ -727,9 +727,14 @@ fail-closed at every step:
   credential authenticates as `user:<id>` or `api-key:<id>`; a named approver is
   a *declared employee id*, and the two namespaces are structurally disjoint, so
   the comparison can never match. An escalated approval is therefore resolved
-  through `--override` — **always, not as a fallback** — and the named
-  superior's own judgment reaches the engine, if at all, through their
-  dispatched turn rather than through this command. Binding a principal to an
+  through `--override` — **always, not as a fallback**. There is no other route:
+  no tool decides an approval, and the escalation dispatches no turn, so nothing
+  is coming that would let the named superior answer it themselves.
+
+  An escalated approval has exactly **two** outcomes. Either someone breaks the
+  glass, or its window expires and the sweep applies the terminal `fail` fate the
+  re-issued request carries — **failing the task**. Waiting is not a third
+  outcome; it is the second one, arriving on a timer. Binding a principal to an
   employee is a separate, unbuilt design decision; until it exists, treat
   `--override` as the documented route for every escalated approval and read the
   journal to see who took it.
