@@ -16,12 +16,15 @@
  * so a delete can only ever touch THIS tenant's rows.
  *
  * OPT-IN JOURNAL-SCRUB MODE (`journalScrub: true`). A softer right-to-erasure posture that erases the raw
- * run-journal CONTENT while preserving the operational/billing LEDGER: instead of row-deleting the two
- * tenant-scoped tables that hold raw subject content — `journal_steps.output` and `conversation_items.payload`
- * — it NULLs just that raw payload column and KEEPS the row (and every structural / idempotency / cost
- * column). Every other table (product stores, blobs, and the remaining core tables) still hard-deletes as
- * in the default mode. See {@link EraseTenantOpts.journalScrub} for the exact columns, the empty-replay
- * trade, and the honest scope boundary.
+ * CONTENT while preserving the operational/billing LEDGER: instead of row-deleting the tenant-scoped
+ * tables that hold raw subject content — the run journal's `journal_steps.output` and
+ * `conversation_items.payload`, and the task engine's task titles/goals/results, message bodies,
+ * approval questions and reasons, review reasons, delegation goals and signal payloads — it erases
+ * just those content columns and KEEPS the rows (and every structural / idempotency / cost column,
+ * `workforce_budget_ledger` included). Every other table (product stores, blobs, `run_events`, and
+ * the remaining core tables) still hard-deletes as in the default mode. See
+ * {@link EraseTenantOpts.journalScrub} for the exact columns, the empty-replay trade, and the honest
+ * scope boundary.
  *
  * WHAT IT DOES NOT ERASE (by design — these are a SEPARATE path / out of scope):
  * the GLOBAL `users` / `memberships` TOMBSTONES — reaped by the GDPR purge (`runScheduledCleanup`),
@@ -167,30 +170,52 @@ export interface EraseTenantOpts {
   /** Force a preview even when the gate is on (count only, ZERO deletes). Default false. */
   readonly dryRun?: boolean;
   /**
-   * OPT-IN journal-scrub mode (default `false` = the full hard-delete). When `true`, the two
-   * tenant-scoped tables that carry RAW subject content — `journal_steps.output` (the raw model/tool
-   * output jsonb) and `conversation_items.payload` (the raw re-derived transcript jsonb) — are SCRUBBED
-   * (that one payload column set to NULL) INSTEAD of row-deleted, so the run-journal LEDGER survives:
-   * every structural, idempotency (`idempotency_key` + the unique `(tenant_id, run_id, idempotency_key)`
-   * index) and cost column (`cost_usd`/`billed_cost_usd`/`provider_cost_usd`/`cost_drift`) is retained
-   * for billing reconciliation + exactly-once integrity, while the raw payload PII is erased. Every
-   * OTHER table — the product stores, the blobs, and the remaining core tables (`runs`, `run_events`,
-   * `idempotency_keys`, and the workflow journal) — still hard-deletes exactly as in the default mode.
+   * OPT-IN journal-scrub mode (default `false` = the full hard-delete). When `true`, every
+   * tenant-scoped table that carries RAW subject content is SCRUBBED (its content columns set to
+   * NULL, or to their own declared empty value) INSTEAD of row-deleted, so the operational LEDGER
+   * survives.
+   *
+   * THE RUN JOURNAL: `journal_steps.output` (the raw model/tool output jsonb) and
+   * `conversation_items.payload` (the raw re-derived transcript jsonb) are NULLed. Every structural,
+   * idempotency (`idempotency_key` + the unique `(tenant_id, run_id, idempotency_key)` index) and
+   * cost column (`cost_usd`/`billed_cost_usd`/`provider_cost_usd`/`cost_drift`) is retained for
+   * billing reconciliation + exactly-once integrity.
+   *
+   * THE TASK ENGINE: `workforce_tasks.title/goal/description/result` NULLed and `.artifacts`
+   * emptied; `workforce_messages.body`; `workforce_approvals.question/reason` and `.options`;
+   * `workforce_reviews.reasons/required_changes`; `workforce_delegations.goal/expected_output`;
+   * `workforce_task_signals.payload`. `workforce_budget_ledger`, `workforce_task_transitions` and
+   * `workforce_runtime` are RETAINED WHOLE — they hold no subject content, and the ledger is the
+   * workforce analogue of exactly the cost columns this mode exists to keep. Before this, the
+   * workforce set was absent from the scrub list, so scrub mode hard-deleted all nine tables
+   * INCLUDING the budget ledger: the mode inverted its own purpose on the one deployment shape
+   * (a store-less workforce) whose only subject content is the task graph.
+   *
+   * Every OTHER table — the product stores, the blobs, and the remaining core tables (`runs`,
+   * `run_events`, `idempotency_keys`, and the workflow journal) — still hard-deletes exactly as in
+   * the default mode.
    *
    * TRADE (documented, intended): a scrubbed `status='ok'` step is STILL a replay-cache hit (its
    * idempotency row + index survive), so a later replay of that step returns `output: null` (an EMPTY
    * result) rather than re-executing — exactly-once is preserved and the caller sees an empty replay.
-   * Keeping the row IS the point: erase the content, keep the guarantee.
+   * Keeping the row IS the point: erase the content, keep the guarantee. The workforce equivalent:
+   * a scrubbed task row keeps its status, version and turn counters, so an unfinished task of an
+   * erased tenant would resume against a NULL goal. That is accepted — erasure is terminal for the
+   * tenant — but an operator scrubbing a tenant with live work should halt the workforce first.
    *
-   * SCOPE (honest): scrub mode NULLs ONLY the two RAW-payload columns named above and KEEPS their rows;
-   * everything else — the product stores, the blobs, and EVERY other core table, INCLUDING `run_events`
-   * (and its already-neutralized `data` event frames, not raw file bytes) — is still HARD-DELETED, in
-   * scrub mode exactly as in the default mode (`run_events` is not in the scrub set, so a scrub still
-   * removes it — it is NOT retained for the full-delete mode). The one subtlety: because
-   * `conversation_items` is SCRUBBED (row kept) rather than deleted, its DEPRECATED legacy flat
-   * `content`/`name` columns (written only by pre-payload rows) SURVIVE a scrub — they sit on the retained
-   * row, and only the full-delete mode (which removes the whole row) clears them. A deploy that needs
-   * those legacy columns gone too uses the full delete.
+   * SCOPE (honest): scrub mode erases the CONTENT columns named above and KEEPS their rows;
+   * everything else is still HARD-DELETED, in scrub mode exactly as in the default mode. Three
+   * consequences worth naming rather than leaving to be discovered:
+   *   - `run_events` is NOT in the scrub set, so a scrub still removes it whole — including both
+   *     workforce journal namespaces (`run_id = <taskId>` and `run_id = workforce:<id>`), which is
+   *     where the task engine's own event payloads live.
+   *   - the ACTOR identifiers on the retained workforce rows survive as the accountability spine:
+   *     `workforce_tasks.owner`/`.requested_by`, `workforce_approvals.approver`/`.decided_by`,
+   *     `workforce_reviews.reviewer`, `workforce_delegations.delegated_by`/`.delegated_to`/
+   *     `.resolved_owner`. A deploy that needs those gone uses the full delete.
+   *   - because `conversation_items` is SCRUBBED (row kept) rather than deleted, its DEPRECATED
+   *     legacy flat `content`/`name` columns (written only by pre-payload rows) SURVIVE a scrub —
+   *     they sit on the retained row, and only the full-delete mode clears them.
    */
   readonly journalScrub?: boolean;
   /**
@@ -316,12 +341,12 @@ async function scopedDeleteReturningCount(tdb: TenantDb, table: PgTable): Promis
 async function scopedScrubReturningCount(
   tdb: TenantDb,
   table: PgTable,
-  set: Record<string, null>,
+  set: Record<string, unknown>,
 ): Promise<number> {
   const rows = await (
     tdb.update as unknown as (
       t: PgTable,
-      s: Record<string, null>,
+      s: Record<string, unknown>,
     ) => { where: () => { returning: () => Promise<unknown[]> } }
   )(table, set)
     .where()
@@ -330,15 +355,26 @@ async function scopedScrubReturningCount(
 }
 
 /**
- * The run-journal RAW-PAYLOAD scrub targets (the two tenant-scoped tables that carry raw, un-hashed
- * subject content): `journal_steps.output` and `conversation_items.payload`. Returns the
- * (name, table, column→NULL) triples to scrub when `journalScrub` is on; an EMPTY list otherwise, so a
- * default (full-delete) erasure is byte-for-byte the old behaviour. The keys are the drizzle property
- * names (`output`/`payload`) — the SET maps each to NULL, leaving every other column intact.
+ * The RAW-CONTENT scrub targets: every tenant-scoped table whose row is KEPT while its subject
+ * content is erased in place. Returns the (name, table, column→empty) triples to scrub when
+ * `journalScrub` is on; an EMPTY list otherwise, so a default (full-delete) erasure is byte-for-byte
+ * the old behaviour. Keys are the drizzle property names; the SET maps each to NULL (or to the
+ * column's own declared empty value for the `NOT NULL` jsonb lists), leaving every other column —
+ * ids, statuses, timestamps, counters, costs, versions — intact.
+ *
+ * THE RUN JOURNAL: `journal_steps.output` (the raw model/tool output) and
+ * `conversation_items.payload` (the raw re-derived transcript).
+ *
+ * THE TASK ENGINE: the workforce tables were originally absent from this list, so scrub mode
+ * HARD-DELETED all nine — including `workforce_budget_ledger`, the workforce analogue of exactly the
+ * cost columns scrub exists to retain. The mode inverted its own purpose on the one deployment shape
+ * whose ONLY subject content is the task graph. It now scrubs the content and keeps the rows, so the
+ * ledger survives WITH the task rows its `scope_id` attributes spend to — a ledger without them
+ * would be unreconcilable, which is why "retain the ledger" means retaining the set, not one table.
  */
 function journalScrubTargets(
   journalScrub: boolean,
-): { name: string; table: PgTable; set: Record<string, null> }[] {
+): { name: string; table: PgTable; set: Record<string, unknown> }[] {
   if (!journalScrub) return [];
   return [
     { name: 'journal_steps', table: schema.journalSteps as PgTable, set: { output: null } },
@@ -347,7 +383,55 @@ function journalScrubTargets(
       table: schema.conversationItems as PgTable,
       set: { payload: null },
     },
+    // The task engine's content columns. `title`/`goal`/`body`/`question`/`expectedOutput` are the
+    // six columns migration 0013 relaxed from `text NOT NULL` for exactly this write; the jsonb
+    // lists go to their OWN declared empty value rather than being made nullable on a released
+    // schema.
+    {
+      name: 'workforce_tasks',
+      table: schema.workforceTasks as PgTable,
+      set: { title: null, goal: null, description: null, result: null, artifacts: [] },
+    },
+    {
+      name: 'workforce_messages',
+      table: schema.workforceMessages as PgTable,
+      set: { body: null },
+    },
+    {
+      name: 'workforce_approvals',
+      table: schema.workforceApprovals as PgTable,
+      set: { question: null, reason: null, options: [] },
+    },
+    {
+      name: 'workforce_reviews',
+      table: schema.workforceReviews as PgTable,
+      set: { reasons: [], requiredChanges: [] },
+    },
+    {
+      name: 'workforce_delegations',
+      table: schema.workforceDelegations as PgTable,
+      set: { goal: null, expectedOutput: null },
+    },
+    {
+      name: 'workforce_task_signals',
+      table: schema.workforceTaskSignals as PgTable,
+      set: { payload: {} },
+    },
   ];
+}
+
+/**
+ * Tables RETAINED WHOLE in scrub mode: neither deleted nor scrubbed, because they carry no subject
+ * content at all — only the structure the retained ledger is reconciled against.
+ *
+ * `workforce_budget_ledger` is the reason scrub mode changed: it IS the workforce cost ledger.
+ * `workforce_task_transitions` is the audit spine (from/to/reason/actor/turn), and
+ * `workforce_runtime` holds the declared ceiling configuration — an operator's own declaration, not
+ * the subject's data. Empty in the default mode, so a full erase still removes all three.
+ */
+function scrubRetainedTables(journalScrub: boolean): string[] {
+  if (!journalScrub) return [];
+  return ['workforce_budget_ledger', 'workforce_task_transitions', 'workforce_runtime'];
 }
 
 /**
@@ -383,8 +467,9 @@ export async function eraseTenant(opts: EraseTenantOpts): Promise<EraseResult> {
   // row-deleted, so they are removed from the core DELETE order; every other core table still
   // hard-deletes. In the default mode `scrubTargets` is empty and `coreDeleteOrder === coreOrder`.
   const scrubTargets = journalScrubTargets(journalScrub);
-  const scrubNames = new Set(scrubTargets.map((s) => s.name));
-  const coreDeleteOrder = coreOrder.filter((c) => !scrubNames.has(c.name));
+  const retainedNames = new Set(scrubRetainedTables(journalScrub));
+  const keptNames = new Set([...scrubTargets.map((s) => s.name), ...retainedNames]);
+  const coreDeleteOrder = coreOrder.filter((c) => !keptNames.has(c.name));
   const actuallyDelete = enabled && !dryRun;
   const mode: EraseResult['mode'] = actuallyDelete ? 'deleted' : 'dry-run';
   const dryRunReason: EraseDryRunReason | undefined = actuallyDelete
