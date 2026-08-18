@@ -4,8 +4,8 @@
  * persistence onto the runtime row. Uses the task engine's own test schema helpers — the gate
  * reads exactly the rows the engine writes.
  */
-import { parseSpec, WorkforceSpec } from '@rayspec/spec';
-import { createRootTask, resolveWorkforceBudgets } from '@rayspec/tasks';
+import { deriveWorkforceBudgets, parseSpec, WorkforceSpec } from '@rayspec/spec';
+import { createRootTask, ensureWorkforceRuntime, resolveWorkforceBudgets } from '@rayspec/tasks';
 import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -228,6 +228,60 @@ describe.skipIf(!hasDb)('workforce boot wiring (db)', () => {
         requestedBy: 'user',
       });
       await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
+    });
+
+    /**
+     * THE TRANSITIONAL WINDOW, stated as behaviour rather than as a comment (module header, :45-49).
+     *
+     * A workforce declared by a boot that ran BEFORE the marker existed carries a runtime row with
+     * REAL budgets and NO `declaredAt`. That row is byte-indistinguishable from the one the scheduler
+     * creates for an engine-only deployment, so the gate cannot tell "declared, then removed" from
+     * "never declared" — and a removal in that window is not caught. Real for any database whose rows
+     * predate the marker.
+     *
+     * WHY THIS IS PINNED AND NOT BACKFILLED. A backfill could only ever stamp rows the CURRENT
+     * document declares — and `ensureDeclaredWorkforceRuntime` already stamps exactly those, on every
+     * declaring boot, which is what the second arm shows. Stamping any OTHER row would not be a
+     * backfill but a fabrication: for a row this document does not declare, no boot has the evidence
+     * to say which of the two histories produced it, and guessing "declared" would make a legitimate
+     * engine-only deployment refuse to boot over tasks nobody ever declared — the exact false positive
+     * `releaseDepartedWorkforceDeclarations` exists to prevent. So the window is irreducible at boot
+     * time; it belongs in the upgrade notes (docs/workforce-architecture.md → "Upgrade and rollback
+     * notes"), and these two arms are what would go red if someone changed it by accident.
+     */
+    it('PRE-MARKER WINDOW: an unmarked runtime row lets a removal through — the documented limitation', async () => {
+      // Exactly what the pre-marker code wrote: the derived ceilings, and nothing else.
+      await ensureWorkforceRuntime(tdb(), 'helpdesk', {
+        ...(deriveWorkforceBudgets(DECLARED) as Readonly<Record<string, unknown>>),
+      });
+      const task = await liveTask('helpdesk');
+      expect(await markerOf('helpdesk')).toBeNull();
+
+      // The removal ESCAPES. This is the limitation, not an aspiration — and the arm below is what
+      // makes it a bounded one.
+      await expect(assertWorkforceSpecCompatible(tdb(), undefined)).resolves.toBeUndefined();
+      // …and the live task really is live, so the pass is not an artefact of an empty scan.
+      const rows = (await db.$client.unsafe(
+        `SELECT status FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+      )) as unknown as { status: string }[];
+      expect(rows[0]?.status).toBe('planned');
+    });
+
+    it('the window CLOSES at the next declaring boot: the same removal then refuses', async () => {
+      await ensureWorkforceRuntime(tdb(), 'helpdesk', {
+        ...(deriveWorkforceBudgets(DECLARED) as Readonly<Record<string, unknown>>),
+      });
+      const task = await liveTask('helpdesk');
+      expect(await markerOf('helpdesk')).toBeNull();
+
+      // One boot that still declares the workforce — the only backfill that is sound, and the one
+      // the shipped code already performs on every declaring boot.
+      await ensureDeclaredWorkforceRuntime(tdb(), DECLARED);
+      expect(await markerOf('helpdesk')).not.toBeNull();
+
+      const refusal = assertWorkforceSpecCompatible(tdb(), undefined);
+      await expect(refusal).rejects.toBeInstanceOf(WorkforceSpecChangeError);
+      await expect(refusal).rejects.toMatchObject({ taskIds: [task.taskId] });
     });
   });
 

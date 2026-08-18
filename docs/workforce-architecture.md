@@ -271,6 +271,95 @@ the workforce `maxConcurrentWorkers` slot (counted off `working` rows), and the 
 which is the only one of the three that leaked permanently. A deployment whose workers wedge often
 wants a smaller turn-queue concurrency or a timeout inside the handler, not a shorter lease.
 
+## Upgrade and rollback notes
+
+Read this before an upgrade or an emergency, and read the limitations as literally as the
+guarantees — three of the six entries below are constraints, not features, and each names the test
+that would go red if the constraint silently changed.
+
+**This release carries ONE migration: `0013_workforce_dedupe_lease_and_scrub`.** It adds three
+NULLABLE columns (`workforce_reviews.turn_number`, `workforce_approvals.turn_number`,
+`workforce_tasks.claim_expires_at`), two PARTIAL unique indexes, and relaxes six `text NOT NULL`
+content columns to accept NULL so `journalScrub` can erase content while retaining the budget
+ledger. It cannot fail on a populated database and needs no backfill: a nullable column cannot be
+violated by an existing row, `DROP NOT NULL` never fails on data, and because `turn_number` is a new
+column every pre-existing row holds NULL — and NULLs are distinct for uniqueness — so both unique
+indexes constrain ZERO existing rows. (That last property comes from the key being new and all-NULL,
+not from the indexes being partial; a total unique index on the same column would create just as
+cleanly.) Rolling the binary back is safe: older releases never read the new columns, and a relaxed
+`NOT NULL` is a superset of what they wrote. No operator action is required.
+Pinned by the `0013` block in `packages/kernel/db/scripts/shadow-dryrun.sh` and by
+`gate:migrate-clean`'s zero-drift cross-check against `schema.ts`.
+
+**Migrations are forward-only.** There are no down-migration files, no `drizzle-kit drop` script,
+and no claim anywhere that a schema change can be reversed. Recovery from a bad migration is a
+reviewed FORWARD migration. The chain is applied by the real programmatic migrator at every boot and
+is idempotent, so repeated boots are safe (`mount-without-deploy.db.test.ts:258-282`,
+`boot-migrator-concurrency.db.test.ts`).
+
+**The emergency lever is the feature flag, and it preserves your data.** Unset
+`RAYSPEC_EXPERIMENTAL_WORKFORCE` and the next boot refuses the whole `workforce:` section with the
+typed code `experimental_section_disabled` — no authoring, no dispatch. It does **not** touch a
+single durable row: the flag is read in one place and enforced at the spec parse only, and nothing
+in the task engine consults it. `serve-workforce-flag.db.test.ts` proves this end to end against a
+database holding live work — a flag-ON deployment writes tasks in seven distinct (status, reason)
+shapes, transitions, signals, approvals, reviews, messages, delegations, ledger rows and journal
+entries in both `run_events` namespaces; the flag-OFF boot refuses; every one of the nine tables and
+both namespaces is then **byte-identical** (an md5 over the ordered full row text, not just a count);
+and re-enabling the flag lets a parked task resume on the exact CAS version it was parked at.
+
+What the lever does NOT do: it does not remove the tables, it does not stop time on deadlines or
+approval timeouts, and it is not a schema rollback. Nothing sweeps while the deployment refuses to
+boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
+`sweepApprovalTimeouts` selects `pending` approvals on `lt(timeoutAt, now)`
+(`packages/kernel/tasks/src/approvals.ts:167-181`) — so every window that expired during the outage
+is due the moment you turn the flag back on, and the declared fates fire then.
+
+**The boot migrator is a SINGLE-RUNNER step.** It takes no advisory lock. On a fresh, empty
+database two boots that start together both try to apply the chain, and one of them MAY die: on the
+certification host it does, every time, with SQLSTATE 23505 on the migrator's very first statement
+(`CREATE SCHEMA IF NOT EXISTS "drizzle"`). A sufficiently serialized pair is an equally legitimate
+outcome, where the second boot reads the high-water mark and no-ops — so do not build alerting that
+expects a failure. What is PINNED is the weaker, portable shape, and it is the shape to design
+against: at least one boot applies the chain, AT MOST ONE fails, any failure is a clean
+duplicate-object abort in a known SQLSTATE set (`42P07` / `42710` / `23505` / `40001` / `40P01`),
+and the database ends fully migrated either way (`boot-migrator-concurrency.db.test.ts`). Nothing is
+corrupted and nothing is half-applied (the pending set is one transaction); the loser's cost, when
+there is one, is a failed boot that a restart fixes. Do not read "safe to run repeatedly" as
+multi-replica boot safety: run migrations from one runner. The advisory-locked shape a future fix
+should mirror is `tenant-provision.ts`'s `pg_advisory_xact_lock`, exercised at
+`tenant-provision.db.test.ts:152-181`.
+
+**A migration that cannot apply is fail-closed, and the failing tag takes one query to name.** The
+migrator throws, the process exits non-zero, the whole pending set rolls back, and
+`drizzle.__drizzle_migrations` does not record the failed migration
+(`migration-failure.db.test.ts`). The error text quotes the failing STATEMENT verbatim and carries
+the Postgres cause (SQLSTATE + message) — but **not** the failing tag. To name it: read
+`SELECT max(created_at) FROM drizzle.__drizzle_migrations`, which is a journal `when`; the failing
+migration is the first entry in `drizzle/meta/_journal.json` after it.
+
+**Upgrading a database whose rows predate the declaration marker.** The redeploy gate refuses to
+strand live work on a removed workforce, employee, department or team, and it decides "this
+workforce was declared" from `workforce_runtime.budgets.declaredAt`, which only a declaring boot
+writes. A workforce declared by a boot that ran **before** that marker existed carries none, so a
+removal or rename made between that boot and the next declaring boot is **not** caught. There is no
+safe backfill: for a runtime row the current document does not declare, no boot can tell "declared,
+then removed" from "the engine created it under `/v1/workforce`", and guessing would make a
+legitimate engine-only deployment refuse to boot over tasks nobody declared. The window closes by
+itself on the next boot that still declares the workforce, and both halves are pinned in
+`workforce-boot.db.test.ts` ("PRE-MARKER WINDOW…" and "the window CLOSES at the next declaring
+boot…").
+
+So the upgrade order is: **boot once with the workforce still fully declared**, then make removals in
+a later deploy. That one boot is enough, and it cannot quietly not-happen: the stamp needs a durable
+worker and a task tenant, and BOTH of those are themselves refusals rather than conditions — a
+`workforce:` section without `deployment.durableWorker: true` is rejected at the parse with a typed
+`schema_violation` (`workforce-lint.ts:670-676`, pinned at
+`workforce-parse.negative.test.ts:606-611`), and a declared workforce with `RAYSPEC_CRON_TENANT_ID`
+unset aborts the boot (`composition-root.ts:2957-2963`, pinned at
+`serve-workforce-flag.db.test.ts`). A deploy that declares a workforce and comes up has therefore
+stamped it.
+
 ## Honest scope
 
 What the built-in orchestration deliberately does NOT include:
