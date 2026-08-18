@@ -213,8 +213,9 @@ describe('grammar strictness under workforce:', () => {
 });
 
 /**
- * BOUNDED CONTEXT (vision invariant §4.8). These three free-text fields render into the turn frame,
- * which is byte-bounded per section (`@rayspec/workforce-tools` context.ts: identity 1 024 B,
+ * BOUNDED CONTEXT — the deterministic bounded-context invariant, asserted at the declaration. These
+ * three free-text fields render into the turn frame, which is byte-bounded per section
+ * (`@rayspec/workforce-tools` context.ts: identity 1 024 B,
  * roleFrame 4 096 B, whole input 65 536 B). Unbounded, an oversized `mission` VALIDATES CLEAN and
  * then throws `ContextSectionOverflowError` at every dispatch for that department's seats — a late
  * failure the author never saw at `doctor`. The cap moves the refusal to validation, typed.

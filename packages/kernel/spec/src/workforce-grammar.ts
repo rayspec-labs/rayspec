@@ -59,8 +59,9 @@ export const WorkforceBudgetWindow = z.enum(['hourly', 'daily', 'weekly', 'month
 export type WorkforceBudgetWindowName = z.infer<typeof WorkforceBudgetWindow>;
 
 /**
- * BOUNDED CONTEXT (invariant §4.8) — the caps on the three free-text fields that render into the
- * turn frame. The frame is byte-bounded per section (`@rayspec/workforce-tools` context.ts:
+ * BOUNDED CONTEXT — the deterministic bounded-context invariant, applied at the declaration: these
+ * are the caps on the three free-text fields that render into the turn frame, which is
+ * byte-bounded per section (`@rayspec/workforce-tools` context.ts:
  * identity 1 024 B, roleFrame 4 096 B, whole input 65 536 B) and the mandatory sections REFUSE
  * typed rather than truncating. Unbounded here, an oversized `mission` parses clean at `doctor` and
  * then throws `ContextSectionOverflowError` at every dispatch for that department's seats — a late

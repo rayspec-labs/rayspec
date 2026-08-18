@@ -2094,8 +2094,8 @@ nothing is silently truncated. All tiers are optional; an absent tier means no c
 ```yaml
 budgets:
   workforce:
-    usd: 25            # whole-workforce ceiling per calendar window
-    turns: 500         # … and/or a turn ceiling for the same window
+    usd: 25            # whole-workforce ceiling per calendar window — REQUIRED when this tier is present
+    turns: 500         # optional turn ceiling for the same window
     window: daily      # hourly | daily | weekly | monthly (default: daily), UTC calendar windows
   task:
     usd: 2.5           # per-task ceiling …
@@ -2160,11 +2160,12 @@ departments:
       maxConcurrentWorkers: 2
 ```
 
-`mission` is capped at **2000 characters** and `name` at **200**: both render into the turn-input
-role frame, which is byte-bounded, so an oversized value is a typed refusal at validation instead
-of a `ContextSectionOverflowError` at every dispatch. The cap bounds one field; a workforce with
-many departments can still outgrow the section, and that remains a dispatch-time typed error
-naming the same fix (shorter missions).
+`mission` is capped at **2000 characters**: it renders into the turn-input role frame, which is
+byte-bounded, so an oversized mission is a typed refusal at validation instead of a
+`ContextSectionOverflowError` at every dispatch. A department's `name` renders into the same line
+but carries **no maximum length today** — the cap bounds `mission` only. And a cap on one field is
+not a promise that the section fits: a workforce with many departments can still outgrow the role
+frame, which remains a dispatch-time typed error naming the same fix (shorter missions).
 
 A department resolves delegation addressed to it (`department:eng`) onto its `manager`, who
 answers FOR the department and is therefore never inside its own `members`
