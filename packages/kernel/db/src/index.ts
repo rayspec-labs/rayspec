@@ -103,7 +103,11 @@ export {
   type ScanResult,
   scanMigrationSql,
 } from './migration-scan.js';
-export { migrationsDir } from './migrations.js';
+export {
+  MIGRATION_LOCK_NAMESPACE,
+  MIGRATION_LOCK_SLOT,
+  migrationsDir,
+} from './migrations.js';
 // The ONE shared Postgres-error-shape detectors (the 23505 cause-chain walk + the constraint-name
 // reader). Request-path/capability code maps a UNIQUE violation to a typed conflict through these.
 export {
