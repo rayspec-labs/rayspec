@@ -41,6 +41,43 @@ import { resolveResponseProjection } from './store-projection.js';
 import { CONTROL_KEYS } from './store-query.js';
 import { createBodySchema, NUMERIC_WIRE_RE, updateBodySchema } from './store-validation.js';
 
+/**
+ * THE POSTURE NOTICE both OpenAPI documents carry in `info.description`.
+ *
+ * Two documents describe this runtime and they are built by different code: the one written to a
+ * file by `rayspec openapi` (`@rayspec/cli` `openapi.ts`), and the one THIS module builds, which
+ * `createAuthApp` serves at `GET /v1/openapi.json` (`app.ts`, registered on the engine path). The
+ * served one travels furthest: the generated artifact requires someone to have run the CLI, while
+ * this one is handed to any client of a running deployment that asks — and the read is PUBLIC, so
+ * it is handed over without a credential (`declared-routes.test.ts`, 'the openapi.json read is
+ * PUBLIC'). A consumer holding only that response — a client generator, an API console, a
+ * downstream integrator — has no other copy of this server's posture: not the README, not
+ * SECURITY.md, and not the boot banner, which says the same thing at runtime (`@rayspec/server`
+ * `banner.ts`, the `bootBanner` title line) but only to whoever watched the process start. A
+ * description assembled only from `metadata.description` therefore reached the one audience with no
+ * other copy of the warning, and reached it silently.
+ *
+ * ONE literal, deliberately, and it lives HERE rather than in the CLI: `@rayspec/cli` depends on
+ * `@rayspec/server`, which depends on `@rayspec/api-auth`, so this package is the only one of the
+ * two owners the other can reach without inverting the dependency graph. Do NOT "simplify" this
+ * back into a second inlined literal in the CLI — two copies of a posture statement that can drift
+ * apart is the exact defect shape this program has been bitten by repeatedly, and a softened copy
+ * in the artifact with the widest reach is the worst version of it.
+ *
+ * Appended, never substituted: a declared description is the product's own and survives whole.
+ * `emit-openapi.test.ts` pins both spec branches (declared description, and the branch that used to
+ * emit no `description` key at all), and `declared-routes.test.ts` pins the notice on the SERVED
+ * response body rather than on the builder's return value.
+ *
+ * Unconditional by construction: no env var, request header, query parameter or flag is read on the
+ * way to emitting it, so there is no supported way to serve this document without the notice.
+ */
+export const OPENAPI_POSTURE_NOTICE =
+  'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, ' +
+  'pre-external-hardening RaySpec deployment. The separate hardening layer (per-tenant sandbox, ' +
+  'RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put ' +
+  'this behind a public address.';
+
 /** A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency). */
 export interface OpenApiDocument {
   openapi: '3.1.0';
@@ -938,7 +975,14 @@ export function buildDeclaredRoutesOpenApi(spec: RaySpec): OpenApiDocument {
     info: {
       title: spec.metadata.name,
       version: spec.version,
-      ...(spec.metadata.description ? { description: spec.metadata.description } : {}),
+      // The posture notice is UNCONDITIONAL — it was the branch with NO declared description that
+      // emitted no `description` key at all, so the document carrying the least context was also
+      // the one carrying no warning. The declared text, when there is one, comes first and survives
+      // whole. Still product-agnostic: the notice is a fixed platform string, derived from no
+      // product name, store or column, so the emission stays a pure function of the spec.
+      description: spec.metadata.description
+        ? `${spec.metadata.description}\n\n${OPENAPI_POSTURE_NOTICE}`
+        : OPENAPI_POSTURE_NOTICE,
     },
     paths,
   };

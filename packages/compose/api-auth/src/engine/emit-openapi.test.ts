@@ -16,7 +16,11 @@ import { lintSpec, RaySpec, RESERVED_QUERY_KEYWORDS } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import { bindRouteParams } from '../routes/runs.js';
-import { buildDeclaredRoutesOpenApi, type OpenApiDocument } from './emit-openapi.js';
+import {
+  buildDeclaredRoutesOpenApi,
+  OPENAPI_POSTURE_NOTICE,
+  type OpenApiDocument,
+} from './emit-openapi.js';
 import { buildListQuery, CONTROL_KEYS } from './store-query.js';
 import { NUMERIC_WIRE_RE } from './store-validation.js';
 
@@ -113,6 +117,48 @@ describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
     expect(doc.info.title).toBe('empty-backend');
     expect(doc.info.version).toBe('1.0');
     expect(doc.paths).toEqual({});
+  });
+
+  /**
+   * THE POSTURE NOTICE on the SERVED document.
+   *
+   * `createAuthApp` serves this document at `GET /v1/openapi.json` (`app.ts:243-246`) as a PUBLIC,
+   * unauthenticated read (`declared-routes.test.ts`, 'the openapi.json read is PUBLIC'). It is
+   * therefore the copy an integrator actually fetches: the generated artifact requires someone to
+   * have run `rayspec openapi`, while this one is handed to every client of a running deployment
+   * that asks for it. A consumer holding only this response has no other copy of the posture
+   * statement — not the README, not SECURITY.md, not the boot banner.
+   *
+   * Both arms exist because the description was a CONDITIONAL field: it was emitted only when the
+   * spec declared one, so the document carrying the LEAST context was also the one carrying no
+   * warning at all.
+   *
+   * These are the unit arms. The arm that pins the property this item is actually about — that the
+   * notice survives to the HTTP response body — is in `declared-routes.test.ts`, which reads
+   * `info.description` off a real `GET /v1/openapi.json`. Asserting a constant against itself here
+   * would prove nothing about what is served, so each arm also checks the raw substring.
+   */
+  it('the served document states the LOCAL / NOT-internet-facing posture, keeping the declared description', () => {
+    // `richSpec()` declares `description: 'a four-kind backend'`.
+    const doc = buildDeclaredRoutesOpenApi(richSpec());
+    // The declared text SURVIVES — the notice is APPENDED, never a replacement. A posture warning
+    // that ate the product's own description would trade away the thing it is meant to add.
+    expect(doc.info.description).toContain('a four-kind backend');
+    expect(doc.info.description).toContain(OPENAPI_POSTURE_NOTICE);
+    // Against the raw bytes too: `toContain(CONSTANT)` alone would still pass if the constant were
+    // ever emptied, and an empty string is a substring of everything.
+    expect(doc.info.description).toContain('NOT internet-facing');
+    expect(OPENAPI_POSTURE_NOTICE).toContain('NOT internet-facing');
+  });
+
+  it('states the posture even when the spec declares NO description', () => {
+    // The discrimination control for the arm above: `emptySpec()` is the branch that used to emit
+    // no `description` key at all.
+    const doc = buildDeclaredRoutesOpenApi(emptySpec());
+    // Asserted against the literal as WELL as the constant: `toBe(CONSTANT)` alone passes with both
+    // sides `undefined`, which is exactly the pre-fix state this arm exists to refuse.
+    expect(doc.info.description).toContain('NOT internet-facing');
+    expect(doc.info.description).toBe(OPENAPI_POSTURE_NOTICE);
   });
 
   it('emits every declared route under its declared path + lowercase method', () => {
