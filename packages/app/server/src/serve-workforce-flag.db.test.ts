@@ -18,11 +18,13 @@
  * first would also pass against an entrypoint that refuses every boot.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
- * THE SECOND SUITE IN THIS FILE — the D-013 EMERGENCY PATH, on a database that holds live work.
+ * THE SECOND SUITE IN THIS FILE — THE EMERGENCY DISABLE, on a database that holds live work.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * Everything above refuses against an EMPTY database, which proves the refusal and says nothing at
- * all about the promise the refusal is made in service of. D-013 makes migrations forward-only and
- * names exactly one emergency lever: unset `RAYSPEC_EXPERIMENTAL_WORKFORCE`, the boot refuses
+ * all about the promise the refusal is made in service of. Migrations are forward-only — there are no
+ * down-migration files and no rollback claim anywhere (`docs/workforce-architecture.md` → "Upgrade
+ * and rollback notes") — so the runtime has exactly ONE emergency lever, and this is it: unset
+ * `RAYSPEC_EXPERIMENTAL_WORKFORCE`, the boot refuses
  * workforce authoring and dispatch, and the durable rows are PRESERVED UNTOUCHED. The flag is read
  * in exactly one place (`packages/kernel/spec/src/experimental.ts:9`) and enforced in exactly one
  * (`packages/kernel/spec/src/parse.ts:152`); nothing in `@rayspec/tasks` consults it — so nothing in
@@ -168,7 +170,7 @@ describe.skipIf(!hasDb)('rayspec-serve — the experimental workforce opt-in (db
 });
 
 // ───────────────────────────────────────────────────────────────────────────────────────────────
-// D-013 emergency path: flag-off preserves the durable rows
+// The emergency disable: flag-off preserves the durable rows
 // ───────────────────────────────────────────────────────────────────────────────────────────────
 
 const PRESERVE_DB = `rayspec_flag_off_preserve_${process.pid}`;
@@ -257,7 +259,7 @@ function withDbName(url: string, name: string): string {
 }
 
 describe.skipIf(!hasDb)(
-  'rayspec-serve — the D-013 emergency path preserves live workforce rows (db)',
+  'rayspec-serve — the emergency disable preserves live workforce rows (db)',
   () => {
     let dbUrl = '';
     let db: ReturnType<typeof makeDb> | undefined;
@@ -622,8 +624,8 @@ describe.skipIf(!hasDb)(
       // full row text of every column, so a rewritten timestamp or a re-numbered seq fails it.
       const after = await census();
       expect(after).toEqual(liveCensus);
-      // Stated separately as well, because "no table was truncated" is the sentence D-013 makes and
-      // a reader should not have to derive it from a deep-equal.
+      // Stated separately as well, because "no table was truncated" is the sentence the emergency
+      // lever actually promises, and a reader should not have to derive it from a deep-equal.
       for (const table of WORKFORCE_TABLES) {
         expect(after.counts[table], `${table} lost rows across the flag-off boot`).toBe(
           (liveCensus as Census).counts[table],

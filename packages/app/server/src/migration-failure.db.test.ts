@@ -21,7 +21,8 @@
  * unguarded delegation, so a future `try/catch` that swallowed a migrator error would break this
  * suite's premise loudly rather than silently making it a test of nothing.
  *
- * THE FOUR-PART ORACLE (§5 W-7 of the B-018 inventory):
+ * THE FOUR-PART ORACLE — "fail-closed" and "diagnosable" spelled out as four separate facts, because
+ * a migrator can satisfy any three of them and still leave an operator stuck:
  *   1. it THROWS — not a resolved promise, not a warning;
  *   2. the error names the failing STATEMENT verbatim and carries the Postgres cause (SQLSTATE +
  *      message), so the failure is describable from the error alone;
