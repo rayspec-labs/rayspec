@@ -265,7 +265,10 @@ function sanitizeUntrusted(text: string | null): string {
  *
  * This does NOT make config text untrusted. Its CONTENT is still authority \u2014 a declared review rule
  * still routes a completion regardless of what a turn submits. What it can no longer do is choose
- * where in the document it appears. (`context.test.ts` \u2014 the four config-forgery arms.)
+ * where in the document it appears. (`context.test.ts` \u2014 every arm whose name begins `C1: a forged`.
+ * Named by shape rather than counted: an arm added for a new config value must not have to remember
+ * to bump a number here, and the `labels` pair was outside the neutralizer with zero signal for
+ * exactly one merge because nothing enumerated the call sites.)
  */
 const sanitizeConfig = sanitizeUntrusted;
 

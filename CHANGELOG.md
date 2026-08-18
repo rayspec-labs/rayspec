@@ -142,6 +142,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The boot migrator is serialized, and a failed chain now names the pending migrations.**
+  `applyMigrations` took no advisory lock, so two runners against the same fresh database raced on
+  the migrator's own `CREATE SCHEMA/TABLE IF NOT EXISTS` bootstrap — a check-then-create window — and
+  the loser died on a duplicate-object error before it reached the chain at all. That is exactly what
+  a deploy script that fans out on a first bring-up produces, and on the certification host it
+  produced a loser on **every** run (SQLSTATE `23505`, from the migrator's very first statement).
+  `rayspec provision-tenant` already worked around it by taking the lock around its own call; the
+  boot did not, and neither does a second replica. The lock now lives in `applyMigrations` itself, on
+  a key `@rayspec/db` owns and exports beside `migrationsDir()` — so two concurrent boots both
+  succeed rather than costing one of them a restart. The command's outer wrapper is **gone**, and
+  must stay gone: two sessions of one process holding the same advisory key wait on each other.
+  It is a session-scoped `pg_advisory_lock` on a connection of its own, not a transaction-scoped one
+  on a pooled connection: the pooled shape holds the connection the migration itself needs, so it
+  deadlocks any handle whose pool is sized 1 (measured — pool 4 applies in ~540ms, pool 1 never
+  completes). The lock is released by closing that connection in a `finally`, and by the connection
+  dying, so a boot killed mid-migration never leaves the next one waiting.
+  This is **not** multi-replica upgrade safety and does not claim to be: it serializes runners that
+  take the same key, so a `drizzle-kit migrate` or a psql run beside it is unaffected, and a rolling
+  deploy whose two binaries expect different schemas is a separate problem. Run migrations from one
+  runner remains the advice; a fan-out just no longer costs a boot.
+  Separately, a failure is now diagnosable without a follow-up query. The migrator's error quotes the
+  failing STATEMENT and carries the Postgres cause but never the migration TAG, so `applyMigrations`
+  reads the pending tags *before* it applies anything — joining
+  `max(created_at)` in `drizzle.__drizzle_migrations` against `drizzle/meta/_journal.json` — and
+  rethrows a `MigrationChainError` naming them in chain order, stating that the batch is
+  all-or-nothing so the database is unchanged, and carrying the original error as `cause`. The whole
+  pending list ships rather than one file because the pending set is one transaction: narrowing it
+  further would mean applying migrations one at a time, which would trade away the whole-chain
+  atomicity that makes "the database is unchanged" true.
+  `boot-migrator-concurrency.db.test.ts` inverted with the contract — it used to pin the caveat, and
+  now pins both halves: two concurrent runners both succeed at pool size 1, and a runner that meets a
+  staged `orgs` table still aborts fail-closed with `42P07`, records nothing, leaves no partial DDL,
+  **and** names the pending tags.
+
 - **Tenant data erasure is now wired on every boot, not on the shapes whose data had been noticed.**
   The seam was widened twice — first to product `stores:`, then also to a declared `workforce:` — and
   each widening chased the deployment whose content had just been found. One shape was still short:
@@ -166,6 +200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defined; the gate-off call previews the four run-history tables at their seeded counts and leaves
   every row in place; the same boot restarted with the gate armed erases them to zero; and a second
   tenant's rows are untouched throughout.
+
 - **`journalScrub` no longer destroys the workforce billing ledger it exists to preserve.**
   `journalScrub: true` is the softer right-to-erasure posture: it erases raw subject content while
   KEEPING every structural, idempotency and cost column, so billing reconciliation and exactly-once
@@ -242,6 +277,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_events` row per namespace (agent-run, per-task, workforce control), so the post-erase read-back
   is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
   tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
+
+### Documentation
+
+- **`docs/workforce-architecture.md` no longer cites code by line number — six of its twelve
+  line-numbered citations pointed at the wrong thing.** The page's own contract is that every
+  guarantee names the mechanism that enforces it, and a stale pointer is that contract failing
+  quietly: the line still exists and still holds code, so a reader who checks the range sees nothing
+  wrong. The misses were near-misses, which is what makes them expensive — one pointed at
+  `decideApproval`'s journal write while the sentence was about the approval **sweep**; one was
+  attributed to "inside `runSweep`" while pointing 84 lines *above* where `runSweep` is declared;
+  one landed on the `confidenceBelow` commentary instead of the `durableWorker` refusal 118 lines
+  below it; one landed on an unrelated reserved-employee-id test. A fifth was correct until the
+  advisory-lock change above edited the cited file and moved it — self-inflicted rot, in the same
+  branch that fixed the other four, which is the case nobody looks for.
+  Every citation is now a file plus the SYMBOL, function or test title to look for, and each of the
+  fourteen new anchors was checked to resolve to exactly one place in the file it names. Nothing
+  re-verifies this page per commit — `gate:no-archaeology` and `gate:skill-drift` do not read it,
+  and an injected `task-scheduler.db.test.ts:99999` is caught by neither — so the numbers were claims
+  with no mechanism behind them. The page now says so in its preamble, so the convention survives the
+  next editor. The one exception kept is a citation into a released migration file, which is never
+  edited and therefore cannot rot.
 
 ### Upgrade notes
 
