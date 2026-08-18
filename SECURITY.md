@@ -115,6 +115,11 @@ to provide (for example: a way to bypass the tenant predicate, to read secrets,
 to escape the tool-dispatch trust boundary, or to make the server boot without a
 required secret).
 
+For the experimental `workforce:` task engine, the surface-by-surface statement
+of what is claimed — and, just as importantly, what is **not** claimed and which
+defences have **no test** — is
+[Workforce threat model](./docs/workforce-threat-model.md).
+
 The absence of the separate hardening layer above is **documented, deliberate
 scope**, not a vulnerability — a core deployment exposed to untrusted
 multi-tenant public traffic without that layer is a deployment mistake, not a
