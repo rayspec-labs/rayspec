@@ -176,6 +176,34 @@ bound at request time (the rule matched by the employee's capabilities). A decis
 VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
 for asserting an identity. The timeout sweep gives every hung approval its declared fate.
 
+**The engine keeps the authorization it writes.** An approval's `approver` and a review's
+`reviewer` are journaled as accountability facts, so the door compares them against the deciding
+principal rather than trusting `store:write` alone
+(`packages/kernel/tasks/src/decision-authority.ts`; matrix in `decision-authority.db.test.ts`):
+
+- `approver: user` — the deployment's human operator surface, and the only value the declared
+  grammar admits — is the OPEN sentinel: any permitted principal decides it, exactly as before.
+  This is the shipped single-operator posture and the regression guard pins it.
+- A row that NAMES a principal binds to it. The case that actually arises is the escalation: when
+  an `onTimeout: escalate` request times out, the sweep closes it and re-issues it to the
+  requester's DECLARED superior (`approver: <employeeId>`, journaled as
+  `workforce.approval.requested`). Only that principal may resolve it — the operator whose
+  inaction caused the escalation cannot. The refusal is a 403 naming who the row names, and it
+  writes nothing at all.
+- **Break-glass** keeps an unavailable decider from wedging a deployment, and takes two
+  independent things so it can never happen by accident: the request must ASK (`override: true`,
+  or `--override` on the CLI) and the principal must HOLD `workforce:override` (an `owner`/`admin`
+  permission, deliberately never grantable to an API key — the override exists to record which
+  *human* contradicted a named human). The journal then carries `overriddenApprover` /
+  `overriddenReviewer`, so the trail says what happened instead of leaving `decided_by` to
+  contradict the recorded decider silently.
+
+A deployment whose principals are not named by any row — the usual case, since principal ids are
+opaque and employee ids are declared identifiers — reaches an escalated approval through
+break-glass. That is the deliberate fail-closed reading: open core carries no principal-to-employee
+binding, and the honest answer to "we cannot verify this caller is `ops_lead`" is to demand the
+override and record it.
+
 ## Budget scopes
 
 Ceilings live in a reservation ledger keyed `(scope, calendar window)` with four scope kinds in
