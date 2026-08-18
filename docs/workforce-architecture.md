@@ -198,11 +198,13 @@ principal rather than trusting `store:write` alone
   `overriddenReviewer`, so the trail says what happened instead of leaving `decided_by` to
   contradict the recorded decider silently.
 
-A deployment whose principals are not named by any row — the usual case, since principal ids are
-opaque and employee ids are declared identifiers — reaches an escalated approval through
-break-glass. That is the deliberate fail-closed reading: open core carries no principal-to-employee
+At the HTTP door this means an escalated approval is **always** reached through break-glass, not
+usually: a principal authenticates as `user:<id>` / `api-key:<id>` and a named approver is a
+declared employee id, so the two namespaces are structurally disjoint and the comparison cannot
+match. That is the deliberate fail-closed reading — open core carries no principal-to-employee
 binding, and the honest answer to "we cannot verify this caller is `ops_lead`" is to demand the
-override and record it.
+override and record it. The named superior's own judgment still reaches the engine the way the
+engine was built to carry it: through their dispatched turn, where the actor IS the employee id.
 
 ## Budget scopes
 

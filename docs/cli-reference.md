@@ -717,16 +717,31 @@ fail-closed at every step:
 - **Who may decide an approval.** An approval row records *who* it asked, and
   the engine keeps that. The shipped `approver: user` — the deployment's human
   operator surface, the only value the declared grammar admits — is decidable
-  by any `store:write` principal, exactly as before. A row addressed to a
-  **named** principal is not: the timeout sweep writes one when it escalates a
-  hung request up the requester's reporting line, and only that principal may
-  resolve it. `--override` is the **break-glass** ask for when that principal is
-  unavailable; it carries no authority on its own — the route ANDs it with the
+  by any `store:write` principal, exactly as before, and that is the path every
+  shipped example takes. A row addressed to a **named** principal is not: the
+  timeout sweep writes one when it escalates a hung request up the requester's
+  reporting line, and only that principal may resolve it.
+
+  **What that means at this command, stated plainly: you cannot be that
+  principal.** Open core carries no principal-to-employee binding. A CLI
+  credential authenticates as `user:<id>` or `api-key:<id>`; a named approver is
+  a *declared employee id*, and the two namespaces are structurally disjoint, so
+  the comparison can never match. An escalated approval is therefore resolved
+  through `--override` — **always, not as a fallback** — and the named
+  superior's own judgment reaches the engine, if at all, through their
+  dispatched turn rather than through this command. Binding a principal to an
+  employee is a separate, unbuilt design decision; until it exists, treat
+  `--override` as the documented route for every escalated approval and read the
+  journal to see who took it.
+
+  `--override` carries no authority on its own — the route ANDs it with the
   **`workforce:override`** permission (an `owner`/`admin` role; deliberately
   *not* grantable to an API key, because the override exists to record which
-  *human* contradicted a named human's recorded decision) and journals the
-  override on `workforce.approval.decided`. Asking without the permission is a
-  403 naming it, never a silent ordinary decision.
+  *human* contradicted a named human's recorded decision, which means an
+  API-key-only deployment cannot resolve an escalated approval at all) and
+  journals the override on `workforce.approval.decided` as `overriddenApprover`.
+  Asking without the permission is a 403 naming it, never a silent ordinary
+  decision.
 - **Tenant selection**: the server derives the tenant from the credential. An
   API key is already bound to its organization, so `--tenant` /
   `RAYSPEC_TENANT_ID` beside a key is refused as unverifiable rather than

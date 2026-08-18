@@ -132,10 +132,13 @@ export function isSensitive(permission: Permission): boolean {
  * never perform them regardless of scope. `workforce:override` is absent for the same class of
  * reason: the override exists to record WHICH HUMAN contradicted a named human's recorded decision,
  * and a machine credential is precisely the principal that must not be able to do that. An api-key
- * still decides ordinary (`approver: 'user'`) rows through `store:write`. `store:write` IS here (the programmatic/agency consumer
- * model — a desktop app / automation POSTing rows authenticates via an org-scoped key); it is also
- * SENSITIVE, but for an api-key the KEY is the live credential, so requirePermission falls api-keys
- * through to authorize(), where this set ∩ scopes is the gate (no stale-claim recheck applies).
+ * still decides ordinary (`approver: 'user'`) rows through `store:write`, which is the path every
+ * shipped example takes; what it cannot do is resolve an approval the engine addressed to someone.
+ *
+ * `store:write` IS here (the programmatic/agency consumer model — a desktop app / automation
+ * POSTing rows authenticates via an org-scoped key); it is also SENSITIVE, but for an api-key the
+ * KEY is the live credential, so requirePermission falls api-keys through to authorize(), where
+ * this set ∩ scopes is the gate (no stale-claim recheck applies).
  *
  * Frozen so a caller cannot mutate the shared authority; `authorize()` reads it via `.includes`.
  */
