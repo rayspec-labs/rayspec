@@ -107,7 +107,12 @@ export async function cancelTaskCascade(
 
 /** How long a drain politely waits for in-flight turns before refusing (fail-loud, not forever). */
 const DEFAULT_DRAIN_TIMEOUT_MS = 60_000;
-const DRAIN_POLL_MS = 250;
+/**
+ * The drain's poll interval. EXPORTED so the suite that asserts "a quiet drain never sleeps" can
+ * recognise this wait by its own value rather than by a copied literal — a hard-coded `250` there
+ * would keep passing, testing nothing, the moment this number moved.
+ */
+export const DRAIN_POLL_MS = 250;
 
 export class WorkforceDrainTimeoutError extends Error {
   readonly workforceId: string;
@@ -149,6 +154,22 @@ export interface PauseWorkforceInput {
  * Stop reserving for this workforce. The flag write and the control event commit together; the
  * optional drain then POLLS (outside any transaction — a held transaction would block the very
  * turns it waits for) until no task is `working`.
+ *
+ * WHY COUNTING `working` ROWS IS A COMPLETE ANSWER, and where that completeness is enforced.
+ * A turn is dispatched without touching the task row (the dispatcher's dispatch law: the workflow
+ * id IS the claim), so a dispatched-but-unclaimed turn is still `queued` and this count cannot see
+ * it. On its own that would make the drain a race — it could return while a turn was about to
+ * start. What closes it is the ORDER THE FLAG WRITE ABOVE IMPOSES: the claim transaction
+ * (@rayspec/durable-dbos task-scheduler.ts `#claimTurn`) takes THIS workforce's `workforce_runtime`
+ * row lock — through `ensureWorkforceRuntime`, whose upsert is a real write for exactly this kind
+ * of reason — in the same transaction as its `queued -> working` compare-and-swap, and re-reads
+ * `paused` there. The transaction above writes that same row and COMMITS BEFORE THE FIRST POLL, so
+ * every claim either commits ahead of it (and is `working` by the time the loop below runs its
+ * first count) or refuses. There is no third ordering; `#claimTurn` carries the full argument.
+ *
+ * The consequence for a reader of this function: the loop below is the whole drain, and it is
+ * complete — but only while that claim-side refusal exists. Removing it turns this back into a
+ * race, silently.
  */
 export async function pauseWorkforce(
   tdb: TenantDb,

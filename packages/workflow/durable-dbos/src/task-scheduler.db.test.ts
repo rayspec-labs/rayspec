@@ -147,6 +147,37 @@ async function pumpUntil(predicate: () => Promise<boolean>, ms = 20_000): Promis
   throw new Error(`condition not reached within ${ms}ms`);
 }
 
+/**
+ * Wait for a condition WITHOUT running passes. `pumpUntil`'s pass is the wrong instrument when the
+ * thing being waited for is a dispatch already in flight: another pass would mint a second dispatch
+ * for the same row and the wait would start measuring the engine's dedup instead of the property.
+ */
+async function waitUntil(predicate: () => Promise<boolean>, ms = 20_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`condition not reached within ${ms}ms`);
+}
+
+/**
+ * Wait until a dispatched turn workflow has SETTLED at the engine, and return its terminal status.
+ * This is what keeps a "the task is still queued" assertion from being vacuous: without it, the
+ * same reading is produced by a claim that simply had not run yet.
+ */
+async function settleWorkflow(workflowId: string, ms = 30_000): Promise<string> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const status = await DBOS.getWorkflowStatus(workflowId);
+    if (status !== null && status.status !== 'PENDING' && status.status !== 'ENQUEUED') {
+      return status.status;
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`workflow ${workflowId} did not settle within ${ms}ms`);
+}
+
 async function newRoot(owner: string, over: Record<string, unknown> = {}) {
   return createRootTask(tdb(), {
     workforceId: 'wf',
@@ -515,6 +546,239 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       );
       return (rows[0] as { c: number }).c === 2;
     });
+  });
+
+  it('B-015e: a turn dispatched while a drain was returning can NEVER claim — the pause binds AT THE CLAIM', async () => {
+    /**
+     * THE DRAIN BLIND SPOT, reproduced deterministically rather than raced for.
+     *
+     * A dispatch writes NOTHING to the task row (the dispatch law: the workflow id IS the claim),
+     * so a dispatched-but-unclaimed task is still `queued` — and the drain counts only `working`
+     * rows. A pass that resolved its scopes BEFORE an operator's pause committed still holds
+     * `paused: false` in `budgetsCache`, so it dispatches anyway, and the drain reads zero and
+     * reports the workforce quiet while a turn is about to start.
+     *
+     * `onPassReadBarrier` fires after the candidate page and before the dispatch loop, which is
+     * exactly the window: the pause + FULL drain commits there, so everything below is a statement
+     * about a drain that has ALREADY RETURNED.
+     *
+     * The closure is a REFUSAL, not a wait: `#claimTurn` re-reads `paused` off the runtime row it
+     * already locks (`ensureWorkforceRuntime` is an ON CONFLICT DO UPDATE — a real write, so a real
+     * row lock) inside the same transaction as the `queued -> working` CAS. Waiting would have been
+     * the wrong shape: it lets a turn dispatched microseconds before the pause burn a whole turn's
+     * budget, which is precisely what `a paused workforce accrues ZERO cost` above forbids.
+     */
+    handlers.set('after-drain', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    const root = await newRoot('after-drain');
+    // Promote by hand: the pass under test must be the FIRST that ever sees this row queued.
+    const queued = await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+
+    let barrierCalls = 0;
+    let drainReturned = false;
+    passReadBarrier = async () => {
+      barrierCalls += 1;
+      if (barrierCalls > 1) return;
+      await pauseWorkforce(tdb(), {
+        workforceId: 'wf',
+        actor: 'operator',
+        drain: true,
+        drainTimeoutMs: 20_000,
+      });
+      drainReturned = true;
+    };
+
+    const pass = await scheduler.runReservePass();
+
+    // NOT VACUOUS, three ways: the barrier fired, the drain RETURNED, and the pass really did
+    // dispatch into a workforce that was already paused by then.
+    expect(barrierCalls, 'the pass must await its read barrier exactly once').toBe(1);
+    expect(drainReturned, 'the drain must have returned before the dispatch loop ran').toBe(true);
+    expect(pass.dispatched.map((d) => d.taskId)).toEqual([root.taskId]);
+    const runtime = await db.$client.unsafe(
+      "SELECT paused FROM workforce_runtime WHERE workforce_id = 'wf';",
+    );
+    expect(runtime[0]).toMatchObject({ paused: true });
+
+    // Let the dispatched workflow reach its own end, so "still queued" cannot mean "not yet".
+    const settled = await settleWorkflow(taskTurnWorkflowId(root.taskId, 1, queued.version));
+    expect(settled).toBe('SUCCESS');
+
+    // THE PROPERTY: the drain told the operator this workforce was quiet, and it STAYED quiet.
+    const row = await taskRow(root.taskId);
+    expect(row.status, 'a turn dispatched before the pause must not claim after it').toBe('queued');
+    expect(row.version, 'a refused claim is a QUEUE, not a state: no transition').toBe(
+      queued.version,
+    );
+    const working = await db.$client.unsafe(
+      "SELECT count(*)::int AS c FROM workforce_tasks WHERE status = 'working';",
+    );
+    expect(working[0]?.c, 'nothing may be working after a completed drain').toBe(0);
+    // …and it accrued nothing, which is the reason refusing beats waiting for it.
+    const started = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.turn_started';`,
+    );
+    expect(started[0]?.c).toBe(0);
+    const ledger = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_budget_ledger WHERE scope_id = '${root.taskId}';`,
+    );
+    expect(ledger[0]?.c).toBe(0);
+
+    // A REFUSAL IS A DEFERRAL, NOT A LOSS: the refused attempt consumed its deterministic dispatch
+    // id, `#resolveDispatchId` salts past the corpse, and the same task finishes after a resume.
+    await resumeWorkforce(tdb(), { workforceId: 'wf', actor: 'operator' });
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
+  });
+
+  it('B-015e: a claim already holding the runtime row cannot be overtaken — the pause serializes BEHIND it', async () => {
+    /**
+     * The other half of the closure, and the half that makes it a closure rather than a narrowing.
+     *
+     * `#claimTurn` takes the workforce_runtime row's lock (`ensureWorkforceRuntime`) in the SAME
+     * transaction as the `queued -> working` CAS, and `pauseWorkforce` writes that same row in a
+     * transaction that commits BEFORE its drain ever polls. Two transactions writing one row have a
+     * total order on it, so there are exactly two orderings and no third:
+     *
+     *   1. the claim takes the row first — the pause BLOCKS until the claim commits, so the
+     *      `working` row is visible before the drain's first poll (THIS test);
+     *   2. the pause takes it first — the claim re-reads `paused = true` and refuses (the test
+     *      above).
+     *
+     * This one pins (1) by wedging the claim BETWEEN its two locks: a side connection holds the
+     * TASK row, so the claim sits holding the runtime row and waiting for the task row — the exact
+     * instant at which a pause would have to overtake it, held open for as long as we like.
+     *
+     * Ordering, not timing: nothing here is a stopwatch, and load can only make the blocked halves
+     * block longer. It passes before the B-015e fix as well as after — it is the guard on the
+     * premise the fix's completeness argument rests on, so a later change that moved
+     * `ensureWorkforceRuntime` below the compare-and-swap reddens it.
+     */
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    handlers.set('wedged', async () => {
+      await gate;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf');
+    const root = await newRoot('wedged');
+    await applyTransition(tdb(), {
+      taskId: root.taskId,
+      expectedVersion: root.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+
+    // A SIDE pool, not the suite's: the blocked claim and the blocked pause each hold a suite
+    // connection for the duration, and starving that pool would look like the property failing.
+    const side = postgres(appBaseUrl, {
+      max: 2,
+      connection: { search_path: `${APP_SCHEMA}, public` },
+    });
+    let releaseHold: () => void = () => {};
+    let holdTaken: () => void = () => {};
+    const taken = new Promise<void>((r) => {
+      holdTaken = r;
+    });
+    const holdReleased = new Promise<void>((r) => {
+      releaseHold = r;
+    });
+    const hold = side.begin(async (sql) => {
+      await sql.unsafe(
+        `SELECT task_id FROM workforce_tasks WHERE task_id = '${root.taskId}' FOR UPDATE`,
+      );
+      holdTaken();
+      await holdReleased;
+    });
+    const holdSettled = hold.then(
+      () => {},
+      () => {},
+    );
+    // Declared out here so the `finally` can await it: if an assertion below throws, the releases
+    // in `finally` normally let the pause resolve — but on the one path where they do not (the
+    // drain timing out 60s later), an unhandled rejection would surface inside whatever test is
+    // running by then and be read as THAT test's failure. A settled handle keeps a failure here.
+    let pauseSettled: Promise<void> = Promise.resolve();
+    try {
+      await Promise.race([taken, hold]);
+      const pass = await scheduler.runReservePass();
+      expect(pass.dispatched.map((d) => d.taskId)).toEqual([root.taskId]);
+
+      // Wait until the claim is GENUINELY wedged holding the runtime row — probed, never assumed.
+      // A NOWAIT lock attempt on that row raises 55P03 exactly while another session holds it.
+      await waitUntil(async () => {
+        try {
+          await side.unsafe(
+            "SELECT workforce_id FROM workforce_runtime WHERE workforce_id = 'wf' FOR UPDATE NOWAIT",
+          );
+          return false;
+        } catch (err) {
+          return (err as { code?: string }).code === '55P03';
+        }
+      });
+
+      // NOW the operator pauses. The flag write cannot commit past the claim's row lock.
+      let paused = false;
+      const pausePromise = pauseWorkforce(tdb(), {
+        workforceId: 'wf',
+        actor: 'operator',
+        drain: true,
+        drainTimeoutMs: 60_000,
+      }).then((r) => {
+        paused = true;
+        return r;
+      });
+      pauseSettled = pausePromise.then(
+        () => {},
+        () => {},
+      );
+
+      await new Promise((r) => setTimeout(r, 500));
+      expect(paused, 'the pause must not commit past a claim holding the runtime row').toBe(false);
+      const unpaused = await db.$client.unsafe(
+        "SELECT paused FROM workforce_runtime WHERE workforce_id = 'wf';",
+      );
+      expect(unpaused[0]).toMatchObject({ paused: false });
+
+      // Let the claim finish. It commits `working` FIRST; only then may the pause commit.
+      releaseHold();
+      await holdSettled;
+      await waitUntil(async () => {
+        const r = await db.$client.unsafe(
+          "SELECT paused FROM workforce_runtime WHERE workforce_id = 'wf';",
+        );
+        return (r[0] as { paused: boolean }).paused === true;
+      });
+
+      // THE PROPERTY: at the instant the pause became visible, the turn was ALREADY `working` — so
+      // the drain's first poll cannot read a quiet workforce, and it waits.
+      expect(
+        (await taskRow(root.taskId)).status,
+        'the pause committed only after the claim did, so the drain sees the turn',
+      ).toBe('working');
+      await new Promise((r) => setTimeout(r, 300));
+      expect(paused, 'the drain must still be waiting on the turn it did not miss').toBe(false);
+
+      release();
+      await pausePromise;
+      expect(paused).toBe(true);
+      expect((await taskRow(root.taskId)).status).toBe('completed');
+    } finally {
+      releaseHold();
+      release();
+      await holdSettled;
+      await pauseSettled;
+      await side.end();
+    }
   });
 
   it('halt drains before it cancels: the in-flight turn ends on its own terms, the parked rest cancels', async () => {

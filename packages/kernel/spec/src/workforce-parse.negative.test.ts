@@ -6,10 +6,10 @@
  * the validation table has exactly one failing case.
  */
 import { describe, expect, it } from 'vitest';
-import type { SpecErrorCode } from './errors.js';
+import { type SpecErrorCode, SuppressibleWarningCode } from './errors.js';
 import { exportJsonSchema } from './export.js';
 import { MAX_IDENTIFIER_LENGTH } from './identifier.js';
-import { lintSpecWarnings } from './lint.js';
+import { applyLintSuppressions, lintSpecWarnings } from './lint.js';
 import { type ParseSpecOptions, parseSpec } from './parse.js';
 import {
   MAX_DEPARTMENT_MISSION_LENGTH,
@@ -908,6 +908,123 @@ describe('workforce semantic lint — approval policies', () => {
 });
 
 /**
+ * B-017k / D-034 — `onTimeout: 'escalate'` IS AN ADVISORY, DELIBERATELY, AND NOT AN ERROR.
+ *
+ * What the author is not told without it: an escalated approval names a declared EMPLOYEE as its
+ * approver (`approvals.ts` — `approver: escalatedTo`), and no principal an HTTP request can
+ * authenticate as is ever equal to one. That disjointness is PROVED, not assumed, in @rayspec/tasks
+ * decision-authority.test.ts ('no authenticated HTTP principal can satisfy a NAMED employee
+ * approver'), over runtime-minted uuids against the grammar's own identifier rule. Break-glass is
+ * therefore the only route, and it is human-only — @rayspec/auth-core authz.test.ts pins that an
+ * api-key can never hold `workforce:override`, so an api-key-only deployment cannot resolve one.
+ *
+ * WHY A WARNING. The precedent one file over is `workforce_label_unheld`, promoted from advisory to
+ * ERROR this milestone — and the reason it was promoted does not transfer. That rule's advisory
+ * premise ('the label may arrive later') was FALSE: the clause could never fire at all. Here the
+ * declaration is correct and the row IS decidable, by any owner/admin human, through an attributed
+ * permission-gated route the journal records. The route is NARROWER than an author would assume,
+ * which is what an advisory is for. Three more reasons, each independently sufficient:
+ *
+ *   - an error would make half a frozen closed enum unusable, which is a GRAMMAR change wearing a
+ *     lint's clothes. If we believed `escalate` were unusable the honest act is to remove it from
+ *     the enum — and D-034 explicitly declined to change shape in M1;
+ *   - it would force authors to delete declarations a later release is meant to support (D-034
+ *     DEFERS the principal-to-employee binding, it does not abandon it);
+ *   - the consequence depends on deployment posture the document cannot see. With a human
+ *     owner/admin reachable, these resolve. That is the definition of a heuristic.
+ *
+ * AND IT CANNOT BE ACKNOWLEDGED AWAY — structurally, not by choice: `lintSuppress` exists only on
+ * agents/stores/api/triggers/handlers, and `applyLintSuppressions` matches by node path, so nothing
+ * can scope an acknowledgement over `workforce.…`. The code is therefore excluded from
+ * `SuppressibleWarningCode`, which keeps the grammar from accepting an acknowledgement it could
+ * never honour (the author would get a `stale_suppression` instead of silence).
+ */
+describe('workforce semantic lint — the escalation-reachability advisory', () => {
+  const warningsFor = (yaml: string) => {
+    const res = parseSpec(yaml, ON);
+    // THE DEFINING PROPERTY OF AN ADVISORY, asserted on every call rather than once: it never
+    // fails a parse. A rule that can reject is an error however it is filed.
+    expect(res.ok, 'an advisory must never fail a parse').toBe(true);
+    if (!res.ok) return [];
+    return lintSpecWarnings(res.value);
+  };
+
+  it("warns on an `onTimeout: 'escalate'` policy, at that policy's own path", () => {
+    const warnings = warningsFor(WORKFORCE_BASE);
+    expect(warnings.map((w) => w.code)).toEqual(['workforce_escalation_unreachable']);
+    expect(warnings[0]?.path).toBe('workforce.approvalPolicies[0].onTimeout');
+    // The message must carry the MECHANISM (why it is unreachable) and the REMEDY the author can
+    // actually apply — never `lintSuppress`, which cannot reach this path.
+    expect(warnings[0]?.message).toContain('public_statement');
+    expect(warnings[0]?.message).toContain('workforce:override');
+    expect(warnings[0]?.message).toContain("onTimeout: 'fail'");
+    expect(warnings[0]?.message).not.toContain('lintSuppress');
+  });
+
+  it("the SAME document with onTimeout: 'fail' raises nothing", () => {
+    expect(
+      warningsFor(WORKFORCE_BASE.replace('      onTimeout: escalate', '      onTimeout: fail')),
+    ).toEqual([]);
+  });
+
+  it('the finding is PER POLICY, so a second escalating rule gets its own path', () => {
+    const twoRules = `${WORKFORCE_BASE}    - id: prod_change
+      requireWhen: { labels: [production_change] }
+      approver: user
+      timeout: 24h
+      onTimeout: escalate
+`;
+    const warnings = warningsFor(twoRules);
+    expect(warnings.map((w) => w.path)).toEqual([
+      'workforce.approvalPolicies[0].onTimeout',
+      'workforce.approvalPolicies[1].onTimeout',
+    ]);
+    expect(warnings.map((w) => w.code)).toEqual([
+      'workforce_escalation_unreachable',
+      'workforce_escalation_unreachable',
+    ]);
+  });
+
+  it('the advisory does NOT shadow the orchestrator-seat ERROR — that one still refuses', () => {
+    // Both rules read `onTimeout: 'escalate'`, and the harder one must keep failing the parse: an
+    // escalation with no target at all is a bricked task, not a narrowed route.
+    expectRejection(
+      WORKFORCE_BASE.replace(
+        '      title: Lead\n      role: orchestrator\n',
+        '      title: Lead\n      role: orchestrator\n      labels: [public_statement]\n',
+      ),
+      'invalid_orchestrator',
+    );
+  });
+
+  it('the code is NOT acknowledgeable, because no node could ever scope the acknowledgement', () => {
+    // Structural, and checked at both ends. (1) The grammar refuses the code…
+    expect(SuppressibleWarningCode.options).not.toContain('workforce_escalation_unreachable');
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        '    instructions: Coordinate the workforce.\n',
+        '    instructions: Coordinate the workforce.\n    lintSuppress:\n      - code: workforce_escalation_unreachable\n        because: we have human admins\n',
+      ),
+      ON,
+    );
+    expect(res.ok, 'an unsuppressible code must not be accepted in lintSuppress').toBe(false);
+
+    // …(2) and even if it were accepted, suppression is scoped by NODE PATH, and a `workforce.…`
+    // finding lies under no node that may carry `lintSuppress`. This is the reason for (1): admitting
+    // the code would offer an acknowledgement that provably cannot silence anything.
+    const base = parseSpec(WORKFORCE_BASE, ON);
+    expect(base.ok).toBe(true);
+    if (!base.ok) return;
+    const finding = lintSpecWarnings(base.value);
+    const applied = applyLintSuppressions(base.value, finding);
+    expect(applied.suppressed).toEqual([]);
+    expect(applied.warnings.map((w) => w.path)).toEqual([
+      'workforce.approvalPolicies[0].onTimeout',
+    ]);
+  });
+});
+
+/**
  * THE UNHELD-LABEL RULE — an ERROR, not the advisory it was before the pre-freeze review.
  *
  * `requireWhen.labels` is matched for EXACT equality against `employees[].labels`
@@ -977,11 +1094,25 @@ describe('policy labels must be HELD by some declared employee', () => {
     expectRejection(doc, 'workforce_label_unheld');
   });
 
-  it('held labels raise nothing, and the section raises NO advisories at all', () => {
+  it('a held label raises NOTHING — the only advisory the base draws is the escalation one', () => {
+    // The base's approval policy declares `onTimeout: 'escalate'`, so it carries exactly one
+    // advisory (B-017k, pinned with its path in its own describe below). The point HERE is the
+    // label rule: a held label contributes nothing, and switching the timeout fate off leaves the
+    // section silent — which is the assertion this test used to make flat.
     const res = parseSpec(WORKFORCE_BASE, ON);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(lintSpecWarnings(res.value)).toEqual([]);
+    expect(lintSpecWarnings(res.value).map((w) => w.code)).toEqual([
+      'workforce_escalation_unreachable',
+    ]);
+
+    const noEscalation = parseSpec(
+      WORKFORCE_BASE.replace('      onTimeout: escalate', '      onTimeout: fail'),
+      ON,
+    );
+    expect(noEscalation.ok).toBe(true);
+    if (!noEscalation.ok) return;
+    expect(lintSpecWarnings(noEscalation.value)).toEqual([]);
   });
 
   /**
@@ -1390,3 +1521,330 @@ describe('exactly zero or one workforce (D-010)', () => {
     expect(parseSpec(WORKFORCE_BASE, ON).ok).toBe(true);
   });
 });
+
+// ╔═════════════════════════════════════════════════════════════════════════════════════════════╗
+// ║ B-011 — UNKNOWN-KEY FAIL-CLOSED, PROVEN AT EVERY `.strict()` LEVEL              (block start) ║
+// ╚═════════════════════════════════════════════════════════════════════════════════════════════╝
+/**
+ * THE STRICTNESS SURFACE, PROVEN LEVEL BY LEVEL — and guarded against growing an unproven level.
+ *
+ * The grammar is fail-closed at 17 authored levels (19 `.strict()` calls: the two "at least one of"
+ * unions each contribute a second strict VARIANT for the one authored path). Before this block only
+ * 6 of the 17 had a test written to prove strictness, and a further 4 were proven only INCIDENTALLY
+ * — by arms in `pre-freeze renames:` above, which exist to prove a RENAME. Those arms are exactly
+ * the kind a reader deletes as obsolete once the experimental window closes, and deleting them
+ * would silently remove the only unknown-key proof for `budgets`, `departments[].budgets`,
+ * `approvalPolicies[].requireWhen` and `reviewPolicies[].requireWhen`. The remaining 7 levels had no
+ * proof at all.
+ *
+ * So the coverage here is EXPLICIT and SELF-DESCRIBING: one named arm per level, driven off a table
+ * that states the level, the injection and the exact refusal — no level's proof depends on a test
+ * written for an unrelated reason.
+ *
+ * WHY A STRUCTURAL GUARD AND NOT JUST A LIST. A hand-curated list is checked once, when it is
+ * written; a guard is checked on every run. `strictLevelsFromSchema()` walks the REAL `WorkforceSpec`
+ * node graph and recovers the set of strict object levels from Zod itself, and the guard below
+ * asserts that set equals the table's. Add an 18th `.strict()` level to the grammar without adding a
+ * row here and this suite goes red — which is the property that makes the coverage durable rather
+ * than merely correct today. A second, cruder guard counts the `.strict()` calls in the grammar
+ * SOURCE, so even a level added behind a construct the walker cannot traverse still trips a test.
+ *
+ * THE REFUSAL SHAPE IS NOT UNIFORM, and this asserts what actually happens rather than forcing one
+ * shape onto both. 15 levels are strict OBJECTS and answer with a per-key `unknown_field` at
+ * `<level>.<key>`. Two levels (`reviewPolicies[].appliesTo`, `reviewPolicies[].requireWhen`) are
+ * `z.union`s of strict variants, and a union answers with ITS OWN message at the union node rather
+ * than descending — so the code is `schema_violation` and the path is the level itself. Fail-closed
+ * holds identically; the path is just coarser. (The union spelling is deliberate and load-bearing:
+ * it is what makes the exported JSON Schema state the at-least-one rule as `anyOf` — see the
+ * `WorkforceReviewAppliesTo` comment in workforce-grammar.ts.)
+ */
+
+/**
+ * The base every arm below injects into. `WORKFORCE_BASE` declares 16 of the 17 levels; only
+ * `budgets.subtree` is absent, so it is added HERE rather than in the shared base — ~100 other arms
+ * depend on that base's exact text. A sanity arm proves this one still parses clean, so every
+ * rejection below isolates exactly one injected key.
+ */
+const STRICT_BASE = WORKFORCE_BASE.replace(
+  '    task: { usd: 2.5, turns: 12 }\n',
+  '    task: { usd: 2.5, turns: 12 }\n    subtree: { usd: 20 }\n',
+);
+
+/** The unknown key every injection adds — one key, one level, nothing else. */
+const UNKNOWN_KEY = 'zzz';
+
+interface StrictLevel {
+  /** The authored path, spelled exactly as `strictLevelsFromSchema()` names it. */
+  readonly level: string;
+  /** Inject exactly ONE unknown key at this level. */
+  readonly inject: (yaml: string) => string;
+  /** The typed code the refusal carries. */
+  readonly code: SpecErrorCode;
+  /** The exact path the refusal is reported at (array levels resolve to index 0). */
+  readonly path: string;
+}
+
+/** Add `zzz: 1` to a FLOW mapping, e.g. `{ usd: 10 }` -> `{ usd: 10, zzz: 1 }`. */
+const inFlow = (needle: string, replacement: string) => (yaml: string) =>
+  yaml.replace(needle, replacement);
+/** Add a `zzz: 1` LINE after an anchor line, at the anchor's own indentation. */
+const afterLine = (anchor: string, indent: string) => (yaml: string) =>
+  yaml.replace(anchor, `${anchor}${indent}${UNKNOWN_KEY}: 1\n`);
+
+/**
+ * All 17 levels. Every `code`/`path` here was read off a real `parseSpec` run, never predicted.
+ * Keep this table sorted the way `strictLevelsFromSchema()` sorts, so the guard's diff is readable.
+ */
+const STRICT_LEVELS: readonly StrictLevel[] = [
+  {
+    level: 'workforce',
+    inject: afterLine('  name: Helpdesk\n', '  '),
+    code: 'unknown_field',
+    path: 'workforce.zzz',
+  },
+  {
+    level: 'workforce.approvalPolicies[]',
+    inject: afterLine('      onTimeout: escalate\n', '      '),
+    code: 'unknown_field',
+    path: 'workforce.approvalPolicies[0].zzz',
+  },
+  {
+    level: 'workforce.approvalPolicies[].requireWhen',
+    inject: inFlow(
+      'requireWhen: { labels: [public_statement] }',
+      'requireWhen: { labels: [public_statement], zzz: 1 }',
+    ),
+    code: 'unknown_field',
+    path: 'workforce.approvalPolicies[0].requireWhen.zzz',
+  },
+  {
+    level: 'workforce.budgets',
+    inject: afterLine('  budgets:\n', '    '),
+    code: 'unknown_field',
+    path: 'workforce.budgets.zzz',
+  },
+  {
+    level: 'workforce.budgets.subtree',
+    inject: inFlow('subtree: { usd: 20 }', 'subtree: { usd: 20, zzz: 1 }'),
+    code: 'unknown_field',
+    path: 'workforce.budgets.subtree.zzz',
+  },
+  {
+    level: 'workforce.budgets.task',
+    inject: inFlow('task: { usd: 2.5, turns: 12 }', 'task: { usd: 2.5, turns: 12, zzz: 1 }'),
+    code: 'unknown_field',
+    path: 'workforce.budgets.task.zzz',
+  },
+  {
+    level: 'workforce.budgets.workforce',
+    inject: inFlow('workforce: { usd: 40 }', 'workforce: { usd: 40, zzz: 1 }'),
+    code: 'unknown_field',
+    path: 'workforce.budgets.workforce.zzz',
+  },
+  {
+    level: 'workforce.departments[]',
+    inject: afterLine('      members: [dev]\n', '      '),
+    code: 'unknown_field',
+    path: 'workforce.departments[0].zzz',
+  },
+  {
+    level: 'workforce.departments[].budgets',
+    inject: inFlow('budgets: { usd: 10 }', 'budgets: { usd: 10, zzz: 1 }'),
+    code: 'unknown_field',
+    path: 'workforce.departments[0].budgets.zzz',
+  },
+  {
+    level: 'workforce.departments[].execution',
+    inject: inFlow(
+      'execution: { maxConcurrentWorkers: 2 }',
+      'execution: { maxConcurrentWorkers: 2, zzz: 1 }',
+    ),
+    code: 'unknown_field',
+    path: 'workforce.departments[0].execution.zzz',
+  },
+  {
+    level: 'workforce.employees[]',
+    inject: afterLine('      role: orchestrator\n', '      '),
+    code: 'unknown_field',
+    path: 'workforce.employees[0].zzz',
+  },
+  {
+    // The 2-space indent disambiguates the workforce-level block from `departments[].execution`,
+    // which is a FLOW mapping six spaces in.
+    level: 'workforce.execution',
+    inject: afterLine('\n  execution:\n', '    '),
+    code: 'unknown_field',
+    path: 'workforce.execution.zzz',
+  },
+  {
+    level: 'workforce.execution.delegation',
+    inject: inFlow(
+      'delegation: { maxDepth: 4, maxPerTask: 12 }',
+      'delegation: { maxDepth: 4, maxPerTask: 12, zzz: 1 }',
+    ),
+    code: 'unknown_field',
+    path: 'workforce.execution.delegation.zzz',
+  },
+  {
+    // Six spaces: the policy's own `maxReviewRounds`, not `execution.maxReviewRounds` (four).
+    level: 'workforce.reviewPolicies[]',
+    inject: afterLine('      maxReviewRounds: 2\n', '      '),
+    code: 'unknown_field',
+    path: 'workforce.reviewPolicies[0].zzz',
+  },
+  {
+    // A UNION level: refused at the union node with its own message, not per-key. See the header.
+    level: 'workforce.reviewPolicies[].appliesTo',
+    inject: inFlow(
+      'appliesTo: { department: engineering }',
+      'appliesTo: { department: engineering, zzz: 1 }',
+    ),
+    code: 'schema_violation',
+    path: 'workforce.reviewPolicies[0].appliesTo',
+  },
+  {
+    // The other UNION level — the one the pre-freeze rename arm above documents at length.
+    level: 'workforce.reviewPolicies[].requireWhen',
+    inject: inFlow(
+      'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
+      'requireWhen: { confidenceBelow: 0.75, labels: [production_change], zzz: 1 }',
+    ),
+    code: 'schema_violation',
+    path: 'workforce.reviewPolicies[0].requireWhen',
+  },
+  {
+    level: 'workforce.teams[]',
+    inject: afterLine('      maxSize: 3\n', '      '),
+    code: 'unknown_field',
+    path: 'workforce.teams[0].zzz',
+  },
+];
+
+/**
+ * The two `z.union`s of strict variants each spend a SECOND `.strict()` call on one authored path
+ * (`WorkforceReviewAppliesTo`, `WorkforceReviewRequireWhen`), which is why the grammar's call count
+ * exceeds its level count by exactly two.
+ */
+const EXTRA_UNION_VARIANTS = 2;
+
+/** A structural view of a Zod node — only the fields the walk needs, so no `any` is required. */
+interface ZodNodeDef {
+  readonly type: string;
+  readonly shape?: Readonly<Record<string, ZodNode>>;
+  readonly catchall?: ZodNode;
+  readonly element?: ZodNode;
+  readonly options?: readonly ZodNode[];
+  readonly innerType?: ZodNode;
+  readonly in?: ZodNode;
+  readonly out?: ZodNode;
+}
+interface ZodNode {
+  readonly _zod?: { readonly def?: ZodNodeDef };
+}
+
+/**
+ * Walk the REAL schema graph and return every strict object level, sorted, named with the authored
+ * path spelling (`departments[].budgets`). Zod 4 encodes `.strict()` as a `never` catchall, so this
+ * reads the grammar's own strictness rather than a copy of it. Both variants of a union map to the
+ * SAME authored path, which is exactly why 19 `.strict()` calls are 17 levels.
+ */
+function strictLevelsFromSchema(): string[] {
+  const found = new Set<string>();
+  const visit = (node: ZodNode | undefined, path: string): void => {
+    const def = node?._zod?.def;
+    if (def === undefined) return;
+    switch (def.type) {
+      case 'object': {
+        if (def.catchall?._zod?.def?.type === 'never') found.add(path);
+        for (const [key, child] of Object.entries(def.shape ?? {})) visit(child, `${path}.${key}`);
+        return;
+      }
+      case 'array':
+        visit(def.element, `${path}[]`);
+        return;
+      case 'union':
+        // BOTH variants of an "at least one of" union map to the ONE authored path — which is why
+        // 19 `.strict()` calls are 17 levels.
+        for (const option of def.options ?? []) visit(option, path);
+        return;
+      case 'optional':
+      case 'nullable':
+      case 'default':
+      case 'prefault':
+      case 'nonoptional':
+      case 'readonly':
+      case 'catch':
+        visit(def.innerType, path);
+        return;
+      case 'pipe':
+        visit(def.in, path);
+        visit(def.out, path);
+        return;
+      default:
+        return;
+    }
+  };
+  visit(WorkforceSpec as unknown as ZodNode, 'workforce');
+  return [...found].sort();
+}
+
+describe('unknown-key fail-closed is proven at EVERY strict level (B-011)', () => {
+  it('the injection base parses clean (so each rejection isolates ONE unknown key)', () => {
+    const res = parseSpec(STRICT_BASE, ON);
+    expect(res.ok).toBe(true);
+    // …and it really does declare the one level the shared base omits, or the subtree arm would be
+    // injecting into nothing.
+    if (res.ok) expect(res.value.workforce?.budgets?.subtree).toEqual({ usd: 20 });
+  });
+
+  it.each(STRICT_LEVELS)('rejects an unknown key at $level', ({ inject, code, path }) => {
+    const yaml = inject(STRICT_BASE);
+    // A `.replace` whose anchor has rotted silently returns the input, and the arm would then be
+    // asserting against the clean base. Fail on the ROT, with the rot named.
+    expect(yaml, 'the injection anchor no longer matches STRICT_BASE').not.toBe(STRICT_BASE);
+    const res = parseSpec(yaml, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toContainEqual(expect.objectContaining({ code, path }));
+  });
+
+  it('THE GUARD: the table covers every strict level the schema actually declares', () => {
+    // Walks the real WorkforceSpec rather than trusting the table. An 18th `.strict()` level added
+    // to the grammar without a row above fails HERE, naming the level — so a new level cannot land
+    // unproven.
+    expect(strictLevelsFromSchema()).toEqual(STRICT_LEVELS.map((l) => l.level).sort());
+  });
+
+  it('THE GUARD (source): every `.strict()` call in the grammar belongs to a covered level', async () => {
+    // The walk above can only see levels it can reach. This cruder check counts the calls in the
+    // grammar SOURCE, so a level added behind a construct the walk does not traverse still trips a
+    // test. Doc-comment prose mentioning `.strict()` is excluded.
+    const { readFileSync } = await import('node:fs');
+    const source = readFileSync(new URL('./workforce-grammar.ts', import.meta.url), 'utf8');
+    const calls = source
+      .split('\n')
+      .filter((line) => line.includes('.strict()') && !line.trimStart().startsWith('*')).length;
+    expect(
+      calls,
+      'the grammar gained or lost a `.strict()` call — add/remove its row in STRICT_LEVELS',
+    ).toBe(STRICT_LEVELS.length + EXTRA_UNION_VARIANTS);
+  });
+
+  it('the four levels that were only proven INCIDENTALLY now have their own arms', () => {
+    // Named explicitly so a future reader deleting the `pre-freeze renames:` block above can see
+    // that these four are no longer relying on it. This is a documentation assertion: it fails if
+    // someone removes one of the rows it names.
+    const covered = new Set(STRICT_LEVELS.map((l) => l.level));
+    for (const level of [
+      'workforce.budgets',
+      'workforce.departments[].budgets',
+      'workforce.approvalPolicies[].requireWhen',
+      'workforce.reviewPolicies[].requireWhen',
+    ]) {
+      expect(covered.has(level), `${level} lost its explicit strictness arm`).toBe(true);
+    }
+  });
+});
+// ╔═════════════════════════════════════════════════════════════════════════════════════════════╗
+// ║ B-011 — UNKNOWN-KEY FAIL-CLOSED                                                  (block end) ║
+// ╚═════════════════════════════════════════════════════════════════════════════════════════════╝

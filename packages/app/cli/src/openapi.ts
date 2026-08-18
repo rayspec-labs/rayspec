@@ -33,6 +33,19 @@ import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
  * Appended, never substituted: a declared description is the product's own and survives whole
  * (`openapi.test.ts` pins both — the declared text and the notice — and the no-description branch,
  * which is the one that used to emit no `description` key at all).
+ *
+ * THIS IS THE SECOND COPY of the sentence. The first is
+ * `packages/compose/api-auth/src/engine/emit-openapi.ts`, which carries it on the document a running
+ * deployment SERVES; that file's note explains why the two are not one export (no DIRECT dependency
+ * edge from this package to that one — it is reachable only transitively through `@rayspec/server`,
+ * and importing it here is `ERR_MODULE_NOT_FOUND` — plus this module is loaded by every `rayspec`
+ * invocation, so its import graph is kept small on purpose).
+ *
+ * The two are held byte-identical by `openapi.test.ts` here and by `emit-openapi.test.ts` there,
+ * both reading the other file off disk. The pin HERE is the load-bearing one for THIS copy: turbo
+ * declares no `inputs` for `test`, and api-auth does not depend on this package, so softening the
+ * literal below moves `cli#test`'s hash while `api-auth#test` keeps its cached PASS. See the
+ * measured hashes in that file's note.
  */
 export const OPENAPI_POSTURE_NOTICE =
   'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, ' +

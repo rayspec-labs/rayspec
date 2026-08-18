@@ -83,6 +83,28 @@ frontend:
   - { route: /, dir: web/dist, spa: true }
 `;
 
+/**
+ * A document declaring the EXPERIMENTAL `workforce:` section — the fail-closed opt-in arms below.
+ * Deliberately minimal: one agent, one orchestrator seat, nothing that adds a boot demand of its
+ * own beyond the agent's backend credential, so the accept arm's demand list stays legible.
+ */
+const WORKFORCE_SPEC = `version: '1.0'
+metadata: { name: check-env-workforce }
+deployment:
+  durableWorker: true
+agents:
+  - { id: a1, name: a1, backend: openai, model: m, instructions: hi }
+workforce:
+  id: helpdesk
+  name: Helpdesk
+  orchestrator: lead
+  employees:
+    - id: lead
+      agent: a1
+      title: Lead
+      role: orchestrator
+`;
+
 let root = '';
 
 beforeAll(() => {
@@ -91,6 +113,7 @@ beforeAll(() => {
   writeFileSync(join(root, 'compound.rayspec.yaml'), COMPOUND_SPEC, 'utf8');
   writeFileSync(join(root, 'openai-only.rayspec.yaml'), OPENAI_ONLY_SPEC, 'utf8');
   writeFileSync(join(root, 'frontend-only.rayspec.yaml'), FRONTEND_ONLY_SPEC, 'utf8');
+  writeFileSync(join(root, 'workforce.rayspec.yaml'), WORKFORCE_SPEC, 'utf8');
 });
 
 afterAll(() => {
@@ -233,6 +256,57 @@ maybeDescribe('rayspec deploy --check-env — the demands, through the built CLI
       RAYSPEC_SKIP_DOTENV: '0',
     });
     expect((JSON.parse(loaded.out).searchedDotenv as string[]).length).toBeGreaterThan(0);
+  });
+
+  // ── The EXPERIMENTAL workforce opt-in, on a path an operator actually runs before shipping ──
+  //
+  // `--check-env` reaches the gate through `checkBootEnv` -> `parseSpec(specText,
+  // experimentalSpecOptionsFromEnv(env))` (@rayspec/server boot-env-demands.ts), i.e. the SAME
+  // derivation doctor/plan/deploy/serve use — but nothing proved it: this file contained no
+  // occurrence of "workforce" or "experimental" at all, and none of the suites that mention
+  // RAYSPEC_EXPERIMENTAL_WORKFORCE drove `--check-env`.
+  //
+  // The environment here is the harness's, built EXPLICITLY and never inherited, so the flag-unset
+  // arm is hermetic by construction: no ambient export in a developer's shell can reach the child.
+  //
+  // The two arms DISCRIMINATE. Both exit 1 — for entirely different reasons — so asserting the exit
+  // code alone would pass against a `--check-env` that refused every document. The refusal stops AT
+  // the parse (profile `unknown`, the typed code, and NO demands enumerated); the accept walks PAST
+  // it and answers the real question (profile `rayspec`, no spec errors, the demands this document
+  // actually raises).
+  it('refuses a workforce document with the ONE typed code when the flag is unset', async () => {
+    const { code, out, err } = await checkEnv(['--check-env', './workforce.rayspec.yaml']);
+    expect(code, `--- stdout ---\n${out}\n--- stderr ---\n${err}`).toBe(1);
+    const verdict = JSON.parse(out);
+    expect(verdict.ok).toBe(false);
+    expect(verdict.mode).toBe('check-env');
+    // The document never became a known profile, because it never parsed.
+    expect(verdict.profile).toBe('unknown');
+    const errors = (verdict.errors as string[]).join('\n');
+    expect(errors).toContain('experimental_section_disabled');
+    expect(errors).toContain('at workforce');
+    // Ordering, not just outcome: it stopped at the PARSE, so it enumerated no demand at all.
+    expect(verdict.required).toEqual([]);
+    expect(verdict.missing).toEqual([]);
+  });
+
+  it('walks PAST the parse under the flag and answers the real demands — the accept control', async () => {
+    const { code, out, err } = await checkEnv(['--check-env', './workforce.rayspec.yaml'], {
+      RAYSPEC_EXPERIMENTAL_WORKFORCE: '1',
+    });
+    // Still exit 1 — but now because the ENVIRONMENT is unmet, not because the document was refused.
+    expect(code, `--- stdout ---\n${out}\n--- stderr ---\n${err}`).toBe(1);
+    const verdict = JSON.parse(out);
+    expect(verdict.profile).toBe('rayspec');
+    expect(verdict.errors).toEqual([]);
+    // It got far enough to enumerate this document's real boot demands, including the declared
+    // agent's backend credential.
+    expect(verdict.missing).toEqual([
+      'DATABASE_URL',
+      'RAYSPEC_JWT_SIGNING_KEY',
+      'RAYSPEC_API_KEY_PEPPER',
+      'OPENAI_API_KEY',
+    ]);
   });
 });
 

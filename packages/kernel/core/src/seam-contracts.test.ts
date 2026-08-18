@@ -11,6 +11,17 @@
  * implementation that violates exactly that property, and the kit must report it as failed. A
  * conformance kit that passes everything proves nothing about the things it passed.
  *
+ * ONE ARM OF (A) IS NOT IN THIS FILE, and it is not optional to know that. `CostPolicy`'s shipped
+ * default is `LedgerCostPolicy` in `@rayspec/tasks`, which `@rayspec/core` cannot import — the
+ * dependency runs the other way — and which is bound to a live `TenantDb` besides. Both of its arms
+ * here are therefore `InMemoryFixtureCostPolicy`, i.e. two instances of (B). The (A) arm for that
+ * seam lives in `budget-seam-contract.db.test.ts` in the package that owns the class, drives the
+ * SAME `costPolicyContract` exported below against a real ledger, and carries its own ran-guard so a
+ * lost `DATABASE_URL` cannot make it vanish quietly. Until that suite existed the shipped policy had
+ * never met this kit at all: a `LedgerCostPolicy.authorize` returning `{ ok: true }` left all 244
+ * other tests in `@rayspec/tasks` green. Read "the shipped default of every seam" as spanning both
+ * files, never as a property of this one.
+ *
  * The kit itself is framework-free (`seam-contracts.ts` imports no test runner) because the
  * out-of-tree sample under examples/workforce-extension runs this same suite from its own package.
  */
@@ -545,6 +556,11 @@ describe('ApprovalProvider contract', () => {
   });
 });
 
+/**
+ * BOTH conforming arms below are FIXTURES — this is the one seam whose (A) arm cannot live here.
+ * The shipped `LedgerCostPolicy` needs `@rayspec/tasks` and a live `TenantDb`; it meets this same
+ * `costPolicyContract` in `budget-seam-contract.db.test.ts`. See the file header.
+ */
 describe('CostPolicy contract', () => {
   it('an in-memory fixture conforms', async () => {
     expectConforms(await costPolicyContract(new InMemoryFixtureCostPolicy(100)));
