@@ -115,15 +115,15 @@ untrimmably** into the owning employee's turn input.
    is in **bytes**, deliberately: a character cap would admit a multibyte goal that then bricks
    every dispatch against a byte-denominated turn-input budget.
 5. **Tenant and workforce reconciliation before the strategy runs**
-   (`packages/app/server/src/workforce-goal-intake.ts:86` and
-   `packages/app/server/src/workforce-goal-intake.ts:87`) — both return the uniform `not_found`.
+   (`packages/app/server/src/workforce-goal-intake.ts:97` and
+   `packages/app/server/src/workforce-goal-intake.ts:98`) — both return the uniform `not_found`.
 6. **`planRefusal` re-validates the returned plan against the declared workforce**
-   (`packages/app/server/src/workforce-goal-intake.ts:48`) — undeclared owner
-   (`packages/app/server/src/workforce-goal-intake.ts:51`), a department the owner does not belong
-   to (`packages/app/server/src/workforce-goal-intake.ts:55`), a non-prior dependency index, a
+   (`packages/app/server/src/workforce-goal-intake.ts:49`) — undeclared owner
+   (`packages/app/server/src/workforce-goal-intake.ts:62`), a department the owner does not belong
+   to (`packages/app/server/src/workforce-goal-intake.ts:66`), a non-prior dependency index, a
    title outside the row bounds — called at
-   `packages/app/server/src/workforce-goal-intake.ts:95`, **before** the transaction at
-   `packages/app/server/src/workforce-goal-intake.ts:104`, so a refused plan writes zero rows.
+   `packages/app/server/src/workforce-goal-intake.ts:106`, **before** the transaction at
+   `packages/app/server/src/workforce-goal-intake.ts:115`, so a refused plan writes zero rows.
 7. `requestedBy` is stamped from the verified principal
    (`packages/compose/api-auth/src/routes/workforce.ts:953`), never read from the body.
 
@@ -188,7 +188,7 @@ seat's prompt.
   `packages/kernel/workforce-tools/src/memory.ts:38`, hit count
   `packages/kernel/workforce-tools/src/memory.ts:39`.
 - Hit text passes the neutralizer at render:
-  `packages/kernel/workforce-tools/src/context.ts:641`.
+  `packages/kernel/workforce-tools/src/context.ts:652`.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -420,7 +420,7 @@ security story**, so it is stated per seam rather than in aggregate.
 
 | Seam | Production call site | Return value re-validated? |
 |---|---|---|
-| `OrchestrationStrategy` | **yes** — the goal intake | **yes** — `planRefusal` (`packages/app/server/src/workforce-goal-intake.ts:48`), except step count (§7.4) |
+| `OrchestrationStrategy` | **yes** — the goal intake | **yes** — `planRefusal` (`packages/app/server/src/workforce-goal-intake.ts:49`), except step count (§7.4) |
 | `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:182`) | **partly** — hits render as bounded, sanitized data (§3.3); malformed-hit rejection is pending (§7.1) |
 | `ReviewPolicy` | **yes**, but hardcoded — no injection point | n/a |
 | `WorkerSelector` (`packages/kernel/core/src/worker-selector.ts:53`) | **NONE** | **NONE on this tree** (§7.1) |
@@ -572,7 +572,7 @@ the boundary the value came from (`packages/kernel/workforce-tools/src/context.t
 a claim that config is untrusted: its *content* is still authority. What it can no longer do is
 choose where in the document it appears — and sections 1–3 are where a forged header is most
 persuasive, because everything above the data-boundary line reads as the platform speaking. Applied
-to line 1 itself (`packages/kernel/workforce-tools/src/context.ts:664`), to labels
+to line 1 itself (`packages/kernel/workforce-tools/src/context.ts:676`), to labels
 (`packages/kernel/workforce-tools/src/context.ts:304`), and to every other config string in
 sections 1–3. `requestedBy` is neutralized too
 (`packages/kernel/workforce-tools/src/context.ts:521`) even though it is server-derived today,
@@ -592,7 +592,7 @@ mandatory budgets plus guidance fit the ceiling (`packages/kernel/workforce-tool
 against `packages/kernel/workforce-tools/src/context.ts:68`), and the creation-surface byte cap plus
 section 4's fixed overhead fit the task budget
 (`packages/kernel/workforce-tools/src/context.ts:112`). The one place the drop loop could fail open
-is closed typed (`packages/kernel/workforce-tools/src/context.ts:697`).
+is closed typed (`packages/kernel/workforce-tools/src/context.ts:709`).
 **PROVEN** — `packages/kernel/workforce-tools/src/context.test.ts`, `NEVER trims the goal: an
 oversized goal is a typed refusal`.
 
@@ -692,7 +692,7 @@ employee id cannot be one.
    door, not a fallback.** The "the named superior decides it" path the escalation fate advertises
    is unreachable end to end.
 2. `decideApproval` has exactly one production caller, the HTTP route
-   (`packages/compose/api-auth/src/routes/workforce.ts:814`). There is no in-engine approval
+   (`packages/compose/api-auth/src/routes/workforce.ts:816`). There is no in-engine approval
    decision path. So consequence 1 has no exception.
 3. **An api-key-only deployment cannot resolve an escalated approval at all.**
    `workforce:override` is not api-key-grantable by design, so a machine credential can decide every
@@ -747,9 +747,9 @@ Both are resource-exhaustion, not privilege escalation, and both are reachable *
 installed out-of-tree implementation, not from the environment:
 
 1. **A plan has no step ceiling.** `planRefusal`
-   (`packages/app/server/src/workforce-goal-intake.ts:48`) bounds each step and not the number of
+   (`packages/app/server/src/workforce-goal-intake.ts:49`) bounds each step and not the number of
    steps, and the plan is created as sibling roots inside one transaction
-   (`packages/app/server/src/workforce-goal-intake.ts:104`) — so one submitted goal can become an
+   (`packages/app/server/src/workforce-goal-intake.ts:115`) — so one submitted goal can become an
    unbounded write. **NO MECHANISM, NO TEST** on this tree. A ceiling is pending in PR #497.
 2. **Recall rendering is quadratic in the hit count a provider returns.** `renderRecall`
    (`packages/kernel/workforce-tools/src/context.ts:631`) re-measures the whole block once per
@@ -891,9 +891,9 @@ packages/kernel/workforce-tools/src/context.ts:521 | sanitizeUntrusted(task.requ
 packages/kernel/workforce-tools/src/context.ts:533 | throw new GoalExceedsContextBudgetError(
 packages/kernel/workforce-tools/src/context.ts:615 | sanitizeUntrusted(m.body)
 packages/kernel/workforce-tools/src/context.ts:631 | function renderRecall(recall: readonly MemoryHit[]): string | null {
-packages/kernel/workforce-tools/src/context.ts:641 | sanitizeUntrusted(hit.text)
-packages/kernel/workforce-tools/src/context.ts:664 | sanitizeConfig(input.employee.id)
-packages/kernel/workforce-tools/src/context.ts:697 | throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
+packages/kernel/workforce-tools/src/context.ts:652 | sanitizeUntrusted(hit.text)
+packages/kernel/workforce-tools/src/context.ts:676 | sanitizeConfig(input.employee.id)
+packages/kernel/workforce-tools/src/context.ts:709 | throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
 packages/kernel/workforce-tools/src/toolset.ts:73 | export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): void {
 packages/kernel/workforce-tools/src/toolset.ts:151 | body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
 packages/kernel/workforce-tools/src/toolset.ts:166 | const parseEnding = <T>(schema: z.ZodType<T>, args: unknown): T => {
@@ -958,6 +958,7 @@ packages/compose/api-auth/src/routes/workforce.ts:125 | await enforcePermission(
 packages/compose/api-auth/src/routes/workforce.ts:167 | kind: operatorSignalKindSchema,
 packages/compose/api-auth/src/routes/workforce.ts:204 | refine(withinGoalBytes
 packages/compose/api-auth/src/routes/workforce.ts:814 | const override = await breakGlassAuthorized(deps, c, body.override);
+packages/compose/api-auth/src/routes/workforce.ts:816 | const approval = await decideApproval(tdb, {
 packages/compose/api-auth/src/routes/workforce.ts:820 | decidedBy: actorFrom(c),
 packages/compose/api-auth/src/routes/workforce.ts:895 | overrideNamedReviewer: override,
 packages/compose/api-auth/src/routes/workforce.ts:929 | if (c.req.header('Idempotency-Key') !== undefined) {
@@ -965,13 +966,13 @@ packages/compose/api-auth/src/routes/workforce.ts:941 | const { allowed, retryAf
 packages/compose/api-auth/src/routes/workforce.ts:953 | requestedBy: actorFrom(c),
 packages/compose/api-auth/src/http/middleware.ts:150 | const serverOrg = principal?.orgId;
 packages/compose/api-auth/src/http/middleware.ts:174 | if (serverOrg) c.set('tenantId', serverOrg);
-packages/app/server/src/workforce-goal-intake.ts:48 | function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
-packages/app/server/src/workforce-goal-intake.ts:51 | const employee = config.employees.get(step.owner);
-packages/app/server/src/workforce-goal-intake.ts:55 | if (step.department !== null && step.department !== employee.department) {
-packages/app/server/src/workforce-goal-intake.ts:86 | if (input.tenantId !== deps.tenantId) return { outcome: 'not_found' };
-packages/app/server/src/workforce-goal-intake.ts:87 | if (input.workforceId !== deps.config.id) return { outcome: 'not_found' };
-packages/app/server/src/workforce-goal-intake.ts:95 | const refusal = planRefusal(plan, deps.config);
-packages/app/server/src/workforce-goal-intake.ts:104 | const created = await tdb.transaction(async (tx) => {
+packages/app/server/src/workforce-goal-intake.ts:49 | function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
+packages/app/server/src/workforce-goal-intake.ts:62 | const employee = config.employees.get(step.owner);
+packages/app/server/src/workforce-goal-intake.ts:66 | if (step.department !== null && step.department !== employee.department) {
+packages/app/server/src/workforce-goal-intake.ts:97 | if (input.tenantId !== deps.tenantId) return { outcome: 'not_found' };
+packages/app/server/src/workforce-goal-intake.ts:98 | if (input.workforceId !== deps.config.id) return { outcome: 'not_found' };
+packages/app/server/src/workforce-goal-intake.ts:106 | const refusal = planRefusal(plan, deps.config);
+packages/app/server/src/workforce-goal-intake.ts:115 | const created = await tdb.transaction(async (tx) => {
 packages/app/server/src/workforce-turn-handlers.ts:104 | export function composeTurnTools(
 packages/app/server/src/workforce-turn-handlers.ts:108 | return [...agentTools, ...nativeTools];
 packages/app/server/src/workforce-turn-handlers.ts:157 | assertNoReservedCollisions(agentTools);
