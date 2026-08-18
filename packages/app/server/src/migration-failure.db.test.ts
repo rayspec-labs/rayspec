@@ -9,17 +9,18 @@
  * nothing ever handed the PLATFORM migrator a migration that cannot apply and asked what happens.
  * The chain-apply fail-closed property rested on shell semantics (`set -euo pipefail`,
  * `ON_ERROR_STOP=1`) that were never driven red, and on drizzle's whole-batch transaction, which was
- * verified doc-first (`composition-root.ts:1620-1636`) and never observed.
+ * verified doc-first (the `applyMigrations` docstring in `composition-root.ts`) and never observed.
  *
- * WHY THIS DRIVES `migrate()` AND NOT `applyMigrations()`. `applyMigrations` is one line —
- * `await migrate(db, { migrationsFolder: migrationsDir() })` — and `migrationsDir()` takes no
- * argument, so the only way to point the SHIPPED wrapper at a poisoned chain is to poison the
- * committed one. The arms below therefore call the SAME migrator, the same journal reader and the
- * same `drizzle.__drizzle_migrations` bookkeeping table, with ONE argument changed: a temp COPY of
- * the committed chain with one migration appended. The equivalence is not asserted by prose — the
- * first arm reads `composition-root.ts` and pins that `applyMigrations`'s body is exactly that
- * unguarded delegation, so a future `try/catch` that swallowed a migrator error would break this
- * suite's premise loudly rather than silently making it a test of nothing.
+ * WHY THIS DRIVES `migrate()` AND NOT `applyMigrations()`. `applyMigrations` hands the migrator
+ * `migrationsFolder: migrationsDir()`, and `migrationsDir()` takes no argument, so the only way to
+ * point the SHIPPED wrapper at a poisoned chain is to poison the committed one. The arms below
+ * therefore call the SAME migrator, the same journal reader and the same
+ * `drizzle.__drizzle_migrations` bookkeeping table, with ONE argument changed: a temp COPY of the
+ * committed chain with one migration appended. The equivalence is not asserted by prose — the first
+ * arm reads `composition-root.ts` and pins that the wrapper still makes exactly ONE `migrate()` call
+ * over that folder, with no per-migration loop, so a future change that split the batch (and with it
+ * the whole-chain atomicity arms 3 and 5 rest on) would break this suite's premise loudly rather
+ * than silently making it a test of nothing.
  *
  * THE FOUR-PART ORACLE — "fail-closed" and "diagnosable" spelled out as four separate facts, because
  * a migrator can satisfy any three of them and still leave an operator stuck:
@@ -32,14 +33,20 @@
  *      (`serve.ts:167-183` turns any escaping boot error into `process.exit(1)`; this arm proves the
  *      rejection actually escapes rather than being swallowed by drizzle or postgres-js.)
  *
- * The FAILING TAG is the one thing the migrator does NOT put in the message, and arm 3 pins that gap
- * rather than glossing it: the tag is recovered deterministically by joining the bookkeeping table's
- * high-water mark against `meta/_journal.json`, and this suite implements and asserts that recovery
- * so an operator has a procedure rather than a hope. Making the wrapper name the tag itself is a
- * `composition-root.ts` change and is filed as follow-up work.
+ * The FAILING TAG is the one thing the migrator does NOT put in the message, and arm 4 pins that —
+ * still, because it is still true of `migrate()` itself. It is recovered deterministically by
+ * joining the bookkeeping table's high-water mark against `meta/_journal.json`, and this suite
+ * implements and asserts that recovery so an operator reading a RAW migrator error (`drizzle-kit
+ * migrate`, psql) has a procedure rather than a hope. Since B-019f the SHIPPED wrapper runs that
+ * same join itself, BEFORE the apply, and rethrows a `MigrationChainError` naming the pending tags —
+ * so a boot log needs no recovery step. That half is proven end to end in
+ * `boot-migrator-concurrency.db.test.ts`, which is the only place the shipped wrapper can be made to
+ * fail over the COMMITTED chain (by staging a conflicting `orgs` table).
  *
- * ANTI-VACUITY. Arm 5 REPAIRS the same appended tag and asserts the bookkeeping table goes 13 → 14.
- * Without it, arm 3's "still 13" would also pass against a migrator that records nothing at all.
+ * ANTI-VACUITY. Arm 5 REPAIRS the same appended tag and asserts the bookkeeping table gains exactly
+ * one row. Without it, arm 3's "the count did not move" would also pass against a migrator that
+ * records nothing at all. Both are written against the committed journal's length rather than a
+ * literal, so appending migration 0014 does not silently retire the check.
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
@@ -119,7 +126,7 @@ interface JournalEntry {
 
 /**
  * A temp COPY of the committed chain with one extra migration appended to `meta/_journal.json`.
- * Everything else — the 13 committed .sql files, their order, the journal format — is byte-identical
+ * Everything else — every committed .sql file, their order, the journal format — is byte-identical
  * to what `migrationsDir()` returns, so the only variable under test is the appended migration.
  */
 function chainWithAppended(sql: string): string {
@@ -198,17 +205,25 @@ describe.skipIf(!baseUrl)('a planted broken migration is fail-closed and diagnos
     return (rows[0]?.c ?? 0) > 0;
   }
 
-  it('the shipped wrapper is an UNGUARDED delegation to the same migrator these arms drive', () => {
-    // The premise of every arm below. If `applyMigrations` ever grows a try/catch, or stops being a
-    // straight `migrate(db, { migrationsFolder: … })`, then driving `migrate()` here would no longer
-    // measure the shipped path — and this arm says so before the others report a green.
+  it('the shipped wrapper drives the SAME migrator, over the SAME folder, in ONE batch', () => {
+    // The premise of every arm below, and the reason it is not simply "the body is one line": since
+    // B-019f `applyMigrations` DOES wrap the call — an advisory lock around it and a
+    // `MigrationChainError` rethrow — and neither of those changes what the migrator is handed.
+    // What these arms depend on is narrower and is what is asserted: the same `migrate()`, the same
+    // `migrationsFolder: migrationsDir()`, called EXACTLY ONCE, so the whole pending set is still one
+    // all-or-nothing batch. A wrapper that applied migrations one at a time (a loop, a second call)
+    // would trade away that atomicity, and arm 3's "records nothing / rolls back completely" would
+    // silently become a test of something else. This arm says so before the others report a green.
     const src = readFileSync(join(here, 'composition-root.ts'), 'utf8');
     const body =
       /export async function applyMigrations\(db: Db\): Promise<void> \{([\s\S]*?)\n\}/.exec(src);
     expect(body, 'applyMigrations was renamed or reshaped — re-derive this suite').not.toBeNull();
-    expect((body?.[1] ?? '').trim()).toBe(
-      'await migrate(db, { migrationsFolder: migrationsDir() });',
-    );
+    const source = body?.[1] ?? '';
+    const calls = source.match(/\bmigrate\(/g) ?? [];
+    expect(calls, 'the wrapper no longer calls the migrator exactly once').toHaveLength(1);
+    expect(source).toContain('await migrate(db, { migrationsFolder: migrationsDir() });');
+    // …and it is not a per-migration apply wearing a one-call disguise.
+    expect(source).not.toMatch(/\bfor\s*\(|\bwhile\s*\(|\.forEach\(/);
     armsRan += 1;
   });
 
@@ -252,7 +267,7 @@ describe.skipIf(!baseUrl)('a planted broken migration is fail-closed and diagnos
     expect(after).toEqual(before);
     // …and there is no half-applied migration either: the statement BEFORE the poison was a plain
     // CREATE TABLE, and it is gone too. That is the whole-batch transaction observed rather than
-    // read off the drizzle source (composition-root.ts:1620-1636).
+    // read off the drizzle source (the `applyMigrations` docstring in composition-root.ts).
     expect(await tableExists('planted_failure_landing')).toBe(false);
     armsRan += 1;
   }, 180_000);
@@ -272,10 +287,15 @@ describe.skipIf(!baseUrl)('a planted broken migration is fail-closed and diagnos
     const failing = poisonedJournal.find((e) => e.when > Number(highWater));
     expect(failing?.tag).toBe(APPENDED_TAG);
 
-    // PINNED GAP: the migrator's own message names the statement but NOT the tag, so the recovery
-    // above is REQUIRED rather than a convenience. If a drizzle upgrade (or a wrapper in
-    // `applyMigrations`) starts naming the tag, this assertion goes red — flip it deliberately then,
-    // and drop the recovery step from the upgrade notes.
+    // PINNED, and no longer a gap in the shipped path: the MIGRATOR's own message names the
+    // statement but NOT the tag. That is a fact about drizzle 0.45.2 and it is why
+    // `applyMigrations` has to compute the pending tags itself and rethrow a `MigrationChainError`
+    // naming them (B-019f; the end-to-end proof is `boot-migrator-concurrency.db.test.ts`, the arm
+    // that stages a conflicting `orgs` and reads the tags off the rejection). This assertion stays
+    // because the wrapper's work is only justified while the underlying message lacks the tag — if a
+    // drizzle upgrade starts naming it, this goes red, and the wrapper's rationale should be
+    // revisited rather than the assertion relaxed. The recovery procedure below remains the route
+    // for anyone reading a raw migrator error (`drizzle-kit migrate`, psql) rather than a boot log.
     const poisoned = chainWithAppended(POISON_SQL);
     tempDirs.push(poisoned);
     let message = '';
