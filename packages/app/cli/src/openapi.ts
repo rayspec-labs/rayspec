@@ -20,6 +20,26 @@ import { detectSpecKind, parseProductSpec, SPEC_VERSION, type SpecError } from '
 import { emitProductViewsOpenApi, type ViewsOpenApiDocument } from '@rayspec/views-runtime';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
+/**
+ * THE POSTURE NOTICE the emitted document carries in `info.description`.
+ *
+ * This artifact travels further than any other statement of this server's posture: a client
+ * generator, an API console or a downstream integrator may hold the OpenAPI document and nothing
+ * else — not this repository's README, not SECURITY.md, not the boot banner that says the same
+ * thing at runtime (`@rayspec/server` banner.ts `POSTURE_WARNING_LINES`). A description assembled
+ * only from `product.description` therefore reached the one audience with no other copy of the
+ * warning, and reached it silently.
+ *
+ * Appended, never substituted: a declared description is the product's own and survives whole
+ * (`openapi.test.ts` pins both — the declared text and the notice — and the no-description branch,
+ * which is the one that used to emit no `description` key at all).
+ */
+export const OPENAPI_POSTURE_NOTICE =
+  'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, ' +
+  'pre-external-hardening RaySpec deployment. The separate hardening layer (per-tenant sandbox, ' +
+  'RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put ' +
+  'this behind a public address.';
+
 /** The `openapi` JSON result. */
 export interface OpenapiResult {
   readonly ok: boolean;
@@ -69,7 +89,12 @@ export async function runOpenapi(positionals: readonly string[]): Promise<Openap
     info: {
       title: `${spec.product.name} — views`,
       version: SPEC_VERSION,
-      ...(spec.product.description ? { description: spec.product.description } : {}),
+      // The posture notice is UNCONDITIONAL — it is the branch with no declared description that
+      // used to emit no description at all, and a consumer holding only this artifact has no other
+      // copy of the warning. The declared text, when there is one, comes first and survives whole.
+      description: spec.product.description
+        ? `${spec.product.description}\n\n${OPENAPI_POSTURE_NOTICE}`
+        : OPENAPI_POSTURE_NOTICE,
     },
   });
   return { ok: true, openapi };

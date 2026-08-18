@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runOpenapi } from './openapi.js';
+import { OPENAPI_POSTURE_NOTICE, runOpenapi } from './openapi.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ACCEPTANCE = resolve(here, '../../../../examples/expense-claim/expense-claim.product.yaml');
@@ -44,6 +44,45 @@ describe('rayspec openapi', () => {
       // A components object is always present (schemas may be inlined per-response).
       expect(doc.components).toHaveProperty('schemas');
     });
+  });
+
+  /**
+   * THE POSTURE NOTICE. The emitted document is the one artifact a client generator, an API-console
+   * user or a downstream integrator may hold WITHOUT ever seeing this repository's README, its
+   * SECURITY.md, or the boot banner — so it is the one place where a missing posture statement
+   * reaches an audience that has no other copy. Both arms below exist because the description is a
+   * conditional field: it was present only when the product declared one, so the doc that carried
+   * the LEAST context was also the one that carried no warning at all.
+   */
+  it('the generated document states the LOCAL / NOT-internet-facing posture, keeping the declared description', async () => {
+    writeFileSync(
+      join(dir, 'described.product.yaml'),
+      'version: "1.0"\nproduct: { id: d, name: Described, description: "Claims, described." }\n',
+      'utf8',
+    );
+    const r = await runOpenapi(['described.product.yaml']);
+    expect(r.ok).toBe(true);
+    // The declared text SURVIVES — the notice is appended, never a replacement. A posture warning
+    // that ate the product's own description would be traded for the thing it is meant to add.
+    expect(r.openapi?.info.description).toContain('Claims, described.');
+    expect(r.openapi?.info.description).toContain(OPENAPI_POSTURE_NOTICE);
+    expect(OPENAPI_POSTURE_NOTICE).toContain('NOT internet-facing');
+  });
+
+  it('states the posture even when the product declares NO description', async () => {
+    // The discrimination control for the arm above: this used to be the branch that emitted no
+    // `description` key at all.
+    writeFileSync(
+      join(dir, 'plain.product.yaml'),
+      'version: "1.0"\nproduct: { id: p, name: Plain }\n',
+      'utf8',
+    );
+    const r = await runOpenapi(['plain.product.yaml']);
+    expect(r.ok).toBe(true);
+    // Asserted against the literal as well as the constant: `toBe(CONSTANT)` alone would pass with
+    // both sides undefined, which is exactly the state this arm exists to refuse.
+    expect(r.openapi?.info.description).toContain('NOT internet-facing');
+    expect(r.openapi?.info.description).toBe(OPENAPI_POSTURE_NOTICE);
   });
 
   it('emits a valid (empty-paths) document for a product doc with no views', async () => {
