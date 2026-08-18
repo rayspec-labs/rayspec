@@ -106,15 +106,18 @@ export function bootBanner(server: BootedServer, base: string): string {
       "    GDPR tombstone purge:  DRY-RUN — counts what it would delete, deletes nothing (set RAYSPEC_GDPR_PURGE_ENABLED to exactly 'true' to arm)",
     );
   }
-  // `eraseTenantNow` is undefined for a boot that declares NEITHER product stores NOR a workforce, so
-  // there is no seam for the gate to arm and a gate posture would be misleading here. What this line
-  // must NOT do is claim the database holds nothing to erase: a declared workforce puts a tenant's whole
-  // task graph and its journal in the database with no product store in sight, and that shape wires the
-  // seam — so it never reaches this branch. State the WIRING, and name both halves of what would change
-  // it; the database's contents are not something this line can speak for.
+  // The unwired branch is a FAIL-SAFE, not a shape this boot path produces: `assembleServer` wires
+  // `eraseTenantNow` on all three of its outcomes — the product deploy (`product-boot.ts:2978`), the
+  // backend-profile deploy (`composition-root.ts:3438`) and the no-document auth-only boot
+  // (`composition-root.ts:2173`) — because every one of them mounts the agent-run surface and so holds
+  // erasable run history. It stays here because this line reports what the booted server OBSERVABLY
+  // carries: `bootBanner` takes a `BootedServer`, whose `eraseTenantNow` is optional, so an embedder
+  // that assembles one by hand can still hand this function a server with no seam, and silence would be
+  // the worse answer. So it states the WIRING and nothing about the database — what a boot holds is not
+  // something this line can speak for.
   if (server.eraseTenantNow === undefined) {
     lines.push(
-      '    Tenant data erasure:   NOT WIRED — this boot declared no product stores and no workforce, so RAYSPEC_ERASURE_ENABLED has no erasure seam to arm here',
+      '    Tenant data erasure:   NOT WIRED — this server carries no erasure seam, so RAYSPEC_ERASURE_ENABLED has nothing to arm here',
     );
   } else if (erasureEnabled) {
     lines.push(
