@@ -390,14 +390,15 @@ export interface BootedServer {
    */
   runCleanupNow?: () => Promise<CleanupResult>;
   /**
-   * the erasure control seam — ERASE a tenant's product data + blobs ON DEMAND (GDPR right-to-erasure), through
-   * the platform-generic `eraseTenant` (product rows via the `forTenant` chokepoint; blobs via the
-   * tenant-bound `BlobStore.deleteTenant`). The actual hard-delete is OPERATOR-GATED fail-closed: it
-   * deletes only when `RAYSPEC_ERASURE_ENABLED === 'true'` (resolved at boot) AND `dryRun` is not set;
-   * otherwise it returns a DRY-RUN preview (counts, ZERO deletes). Returns the structured result so an
-   * operator previews before / verifies after. Undefined for an auth-only / no-product boot (a spec with
-   * zero product stores). NOT internet-facing by itself — an operator/ops wrapper triggers it (pre-hardening;
-   * a tenant self-service erasure route is a later, hardening-adjacent decision).
+   * the erasure control seam — ERASE a tenant's product data + core run-journal/task-engine rows + blobs
+   * ON DEMAND (GDPR right-to-erasure), through the platform-generic `eraseTenant` (rows via the
+   * `forTenant` chokepoint; blobs via the tenant-bound `BlobStore.deleteTenant`). The actual hard-delete
+   * is OPERATOR-GATED fail-closed: it deletes only when `RAYSPEC_ERASURE_ENABLED === 'true'` (resolved at
+   * boot) AND `dryRun` is not set; otherwise it returns a DRY-RUN preview (counts, ZERO deletes). Returns
+   * the structured result so an operator previews before / verifies after. Wired when the spec declares
+   * product stores OR a workforce — the two shapes that put tenant data in the database; undefined for a
+   * boot that declares neither. NOT internet-facing by itself — an operator/ops wrapper triggers it
+   * (pre-hardening; a tenant self-service erasure route is a later, hardening-adjacent decision).
    *
    * `journalScrub: true` selects the softer content-erasure posture: the raw run-journal payload columns
    * (`journal_steps.output`, `conversation_items.payload`) are NULLed while the billing/exactly-once
@@ -3375,12 +3376,22 @@ async function deployDeclaredSpec(
   // ── wire the on-demand tenant DATA-ERASURE control seam ──────────────────────────────────────
   // Threads the deployed product tables + stores (for FK-safe ordering), the wired blob backend (built
   // per-target-tenant via blobFactory), the out-of-band AuditStore, and the resolved operator gate into
-  // the platform-generic `eraseTenant`. Present only when the spec declares product stores (an
-  // auth-only / store-less deploy has nothing to erase → the seam stays undefined). NOT mounted on the
-  // public app — the operator triggers it (pre-hardening). The gate is OPERATOR-only (config.erasureEnabled);
-  // unset ⇒ every call is a DRY-RUN preview (counts, ZERO deletes).
+  // the platform-generic `eraseTenant`. NOT mounted on the public app — the operator triggers it
+  // (pre-hardening). The gate is OPERATOR-only (config.erasureEnabled); unset ⇒ every call is a DRY-RUN
+  // preview (counts, ZERO deletes).
+  //
+  // WHAT MAKES THE SEAM REACHABLE. Product stores are one source of tenant data; a DECLARED WORKFORCE is
+  // another, and it carries no store at all. Both shipped workforce examples declare zero `stores:`, while
+  // their databases hold that tenant's task titles/goals/descriptions/results, message bodies, approval
+  // questions and reasons, review reasons, delegation goals — and the whole `run_events` journal under
+  // both workforce namespaces (`run_id = <taskId>` and `run_id = workforce:<id>`). A store-only condition
+  // would leave every such deployment with NO way to erase a tenant, so the seam is wired for either.
+  // `eraseTenant` itself needs no change: its core half is derived from `CORE_TENANT_SCOPED_TABLES`,
+  // which already carries the nine task-engine tables and the journal, and every delete is the same
+  // `forTenant` tenant-scoped one. The store-less case simply passes an EMPTY productTables map, which
+  // erases zero product rows and reports `tables: {}` — the core half does the work.
   let eraseTenantNow: BootedServer['eraseTenantNow'];
-  if (specStores.length > 0) {
+  if (specStores.length > 0 || effectiveSpec.workforce !== undefined) {
     eraseTenantNow = (
       tenantId: string,
       eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },

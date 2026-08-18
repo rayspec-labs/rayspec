@@ -15,8 +15,14 @@
  *   6. GATE OFF (default): a non-dryRun call performs ZERO deletes (gate-disabled dry-run semantics).
  *   7. NO BLOB BACKEND: erasure still deletes rows; reports blobs:'no-backend'.
  *   8. CORE-TABLE ERASURE: the platform CORE tenant-scoped run-journal/conversation tables
- *      (runs/journal_steps/conversation_items/run_events/idempotency_keys) are erased for T1 too, and
- *      T2's core rows stay FULLY INTACT (cross-tenant isolation on the core tables, not just product).
+ *      (runs/journal_steps/conversation_items/run_events/idempotency_keys), the tenant event bus, AND
+ *      the nine TASK-ENGINE tables are erased for T1 too, and T2's core rows stay FULLY INTACT
+ *      (cross-tenant isolation on the core tables, not just product). Every one of those tables is
+ *      seeded with a REAL row, so the assertion is a transition from a known non-zero count to 0 — an
+ *      enumeration that silently matched nothing cannot pass it. The `run_events` half is asserted per
+ *      NAMESPACE: the agent-run stream, the per-task stream (`run_id = <taskId>`) and the workforce
+ *      control stream (`run_id = workforce:<id>`) are all seeded and all read back at 0 for T1 while
+ *      T2's survive.
  *   9. AUDIT-REQUIRED: an enabled (real) erasure with NO audit store ABORTS (zero deletes).
  *  10. JOURNAL-SCRUB: `journalScrub:true` NULLs the raw payloads (`journal_steps.output`,
  *      `conversation_items.payload`) while KEEPING the rows + every idempotency/cost column (the unique
@@ -55,6 +61,14 @@ const T1 = '00000000-0000-0000-0000-0000000000a1';
 const T2 = '00000000-0000-0000-0000-0000000000b2';
 // A well-formed UUID that is NOT an existing org (the fail-closed existence probe must abort on it).
 const T_ABSENT = '00000000-0000-0000-0000-0000000000ff';
+
+// The two WORKFORCE-SHAPED `run_events` namespaces (@rayspec/tasks writes exactly these): per-task
+// events under `run_id = <taskId>`, workforce control events under `run_id = workforce:<workforceId>`.
+// Both share the table with the agent-run streams, and the erasure delete carries NO `run_id`
+// predicate — it is `WHERE tenant_id` only — so all three namespaces must go together.
+const taskIdFor = (tenantId: string): string => `${tenantId}-t0`;
+const workforceIdFor = (tenantId: string): string => `${tenantId}-wf`;
+const controlStreamFor = (tenantId: string): string => `workforce:${workforceIdFor(tenantId)}`;
 
 // Two product stores with a product→product FK (parent `documents` ← child `revisions`), ON DELETE
 // RESTRICT so a WRONG (parent-first) delete order would raise an FK violation — the FK-order proof is
@@ -202,6 +216,21 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     // line), so the coverage is proven rather than merely reported.
     'tenant_events',
     'tenant_event_streams',
+    // The nine TASK-ENGINE tables. They hold the tenant's whole task graph — titles, goals,
+    // descriptions, results and artifacts, message bodies, approval questions/decisions/reasons,
+    // review reasons and required changes, delegation goals and expected outputs — and they are the
+    // ONLY subject content on a workforce deployment, which declares no product store at all. ALL NINE
+    // ARE SEEDED below, so `coreRowCount` and the post-erase readback loop assert on real rows: a
+    // delete that silently matched nothing would go RED here rather than reporting a truthful 0.
+    'workforce_tasks',
+    'workforce_task_transitions',
+    'workforce_task_signals',
+    'workforce_delegations',
+    'workforce_approvals',
+    'workforce_reviews',
+    'workforce_messages',
+    'workforce_budget_ledger',
+    'workforce_runtime',
   ] as const;
   type CoreName = (typeof CORE_NAMES)[number];
   const coreTable: Record<CoreName, never> = {
@@ -216,6 +245,15 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     workflow_artifacts: schema.workflowArtifacts as never,
     tenant_events: schema.tenantEvents as never,
     tenant_event_streams: schema.tenantEventStreams as never,
+    workforce_tasks: schema.workforceTasks as never,
+    workforce_task_transitions: schema.workforceTaskTransitions as never,
+    workforce_task_signals: schema.workforceTaskSignals as never,
+    workforce_delegations: schema.workforceDelegations as never,
+    workforce_approvals: schema.workforceApprovals as never,
+    workforce_reviews: schema.workforceReviews as never,
+    workforce_messages: schema.workforceMessages as never,
+    workforce_budget_ledger: schema.workforceBudgetLedger as never,
+    workforce_runtime: schema.workforceRuntime as never,
   };
   async function coreRowCount(tenantId: string, name: CoreName): Promise<number> {
     return (await forTenant(db, tenantId).select(coreTable[name]).all()).length;
@@ -248,12 +286,25 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
   }
   /**
    * Seed a deterministic set of CORE rows for one tenant: `runs`=1, `journal_steps`=2, `conversation_items`
-   * =2, `run_events`=1, `idempotency_keys`=1. run_id is the GLOBAL PK on `runs`, so it is tenant-prefixed
+   * =2, `run_events`=3, `idempotency_keys`=1, the event bus=2+1, and ONE row in each of the nine
+   * task-engine tables. run_id is the GLOBAL PK on `runs`, so it is tenant-prefixed
    * to stay unique across tenants. Returns the expected per-table counts (for the erase-result assertion).
+   *
+   * The three `run_events` rows are one per NAMESPACE that shares the journal: the agent-run stream
+   * (`<tenant>-r0`), the per-task stream (`<tenant>-t0`) and the workforce control stream
+   * (`workforce:<tenant>-wf`). Seeding all three is what makes the journal half of the erasure
+   * assertion real — the delete has no `run_id` predicate, so a namespace it failed to remove would
+   * survive silently against a fixture that only ever held agent-run rows.
+   *
+   * The nine task-engine rows carry DISTINCTIVE, tenant-stamped free text in every subject-content
+   * column (titles, goals, descriptions, results, message bodies, approval questions and reasons,
+   * review reasons, delegation goals) so the rows are unmistakably this tenant's data rather than
+   * structural filler.
    */
   async function seedCore(tenantId: string): Promise<Record<CoreName, number>> {
     const tdb = forTenant(db, tenantId);
     const runId = `${tenantId}-r0`;
+    const taskId = taskIdFor(tenantId);
     await tdb.insert(schema.runs as never, {
       runId,
       backend: 'openai',
@@ -298,12 +349,23 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       { runId, seq: '0', role: 'user', payload: { text: `${tenantId}-raw-user-msg` } },
       { runId, seq: '1', role: 'assistant', payload: { text: `${tenantId}-raw-assistant-msg` } },
     ]);
-    await tdb.insert(schema.runEvents as never, {
-      runId,
-      seq: '0',
-      type: 'run_started',
-      data: {},
-    });
+    // All THREE journal namespaces (see the docblock): the agent-run stream, plus the two
+    // workforce-shaped streams the task engine writes.
+    await tdb.insert(schema.runEvents as never, [
+      { runId, seq: '0', type: 'run_started', data: {} },
+      {
+        runId: taskId,
+        seq: '1',
+        type: 'workforce.task.completed',
+        data: { v: 1, type: 'workforce.task.completed', result: `${tenantId}-raw-task-result` },
+      },
+      {
+        runId: controlStreamFor(tenantId),
+        seq: '1',
+        type: 'workforce.budget.settled',
+        data: { v: 1, type: 'workforce.budget.settled' },
+      },
+    ]);
     await tdb.insert(schema.idempotencyKeys as never, {
       scope: 'test',
       idemKey: `${tenantId}-ik0`,
@@ -316,17 +378,94 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       { seq: 2, topic: 'note.updated', payload: { text: `${tenantId}-raw-event-2` } },
     ]);
     await tdb.insert(schema.tenantEventStreams as never, { lastSeq: 2, truncatedThrough: 0 });
+
+    // ── the TASK-ENGINE rows — one per table, every subject-content column carrying real text ──
+    await tdb.insert(schema.workforceTasks as never, {
+      taskId,
+      workforceId: workforceIdFor(tenantId),
+      rootTaskId: taskId,
+      title: `${tenantId}-raw-task-title`,
+      goal: `${tenantId}-raw-task-goal`,
+      description: `${tenantId}-raw-task-description`,
+      owner: 'worker',
+      requestedBy: 'user',
+      department: 'eng',
+      status: 'completed',
+      result: { text: `${tenantId}-raw-task-result` },
+      artifacts: [{ kind: 'text', value: `${tenantId}-raw-task-artifact` }],
+    });
+    await tdb.insert(schema.workforceTaskTransitions as never, {
+      taskId,
+      fromStatus: 'working',
+      toStatus: 'completed',
+      statusReason: `${tenantId}-raw-status-reason`,
+      actor: 'worker',
+    });
+    await tdb.insert(schema.workforceTaskSignals as never, {
+      taskId,
+      kind: 'child_completed',
+      signalKey: `child:${tenantId}-s0`,
+      payload: { note: `${tenantId}-raw-signal-payload` },
+    });
+    await tdb.insert(schema.workforceDelegations as never, {
+      workforceId: workforceIdFor(tenantId),
+      parentTaskId: taskId,
+      childTaskId: `${tenantId}-t0-child`,
+      delegatedBy: 'lead',
+      delegatedTo: 'worker',
+      resolvedOwner: 'worker',
+      goal: `${tenantId}-raw-delegation-goal`,
+      expectedOutput: `${tenantId}-raw-delegation-expected-output`,
+      depth: 1,
+      status: 'completed',
+    });
+    await tdb.insert(schema.workforceApprovals as never, {
+      taskId,
+      question: `${tenantId}-raw-approval-question`,
+      approver: 'user',
+      status: 'approved',
+      decision: 'approve',
+      decidedBy: `${tenantId}-raw-decided-by`,
+      reason: `${tenantId}-raw-approval-reason`,
+      onTimeout: 'fail',
+    });
+    await tdb.insert(schema.workforceReviews as never, {
+      taskId,
+      reviewer: 'lead',
+      round: 1,
+      verdict: 'accept',
+      reasons: [`${tenantId}-raw-review-reason`],
+      requiredChanges: [`${tenantId}-raw-required-change`],
+    });
+    await tdb.insert(schema.workforceMessages as never, {
+      taskId,
+      sender: 'lead',
+      recipient: 'worker',
+      body: `${tenantId}-raw-message-body`,
+    });
+    await tdb.insert(schema.workforceBudgetLedger as never, {
+      scopeKind: 'task',
+      scopeId: taskId,
+      windowStart: new Date(0),
+      reservedUsd: '0.5000',
+      settledUsd: '0.2500',
+      settledTurns: 1,
+    });
+    await tdb.insert(schema.workforceRuntime as never, {
+      workforceId: workforceIdFor(tenantId),
+      budgets: { workforce: { usd: 40 } },
+    });
     return {
       runs: 1,
       journal_steps: 2,
       conversation_items: 2,
-      run_events: 1,
+      // one row per journal NAMESPACE: agent-run, per-task, workforce control.
+      run_events: 3,
       idempotency_keys: 1,
-      // invites — not seeded here, so the erase reports them at 0 (still covered by tenant erasure;
-      // coreTotalRows is 10 = 1 + 2 + 2 + 1 + 1 + 2 + 1).
+      // invites — not seeded here, so the erase reports them at 0 (still covered by tenant erasure).
       invites: 0,
       // workflow journal tables — not seeded here, so the erase reports them at 0 (they are still
-      // covered by tenant erasure; coreTotalRows is 10 = 1 + 2 + 2 + 1 + 1 + 2 + 1).
+      // covered by tenant erasure).
       workflow_runs: 0,
       workflow_node_states: 0,
       workflow_artifacts: 0,
@@ -334,18 +473,34 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       // event stream is asserted on real rows.
       tenant_events: 2,
       tenant_event_streams: 1,
-      // the task-engine tables — not seeded here, so the erase reports them at 0 (they are still
-      // covered by tenant erasure, derived from CORE_TENANT_SCOPED_TABLES like the rest).
-      workforce_tasks: 0,
-      workforce_task_transitions: 0,
-      workforce_task_signals: 0,
-      workforce_delegations: 0,
-      workforce_approvals: 0,
-      workforce_reviews: 0,
-      workforce_messages: 0,
-      workforce_budget_ledger: 0,
-      workforce_runtime: 0,
+      // the task-engine tables — ALL NINE seeded with a real row, so `res.coreTables` carries the
+      // seeded counts rather than a self-satisfying 0 and a delete that matched nothing goes RED.
+      workforce_tasks: 1,
+      workforce_task_transitions: 1,
+      workforce_task_signals: 1,
+      workforce_delegations: 1,
+      workforce_approvals: 1,
+      workforce_reviews: 1,
+      workforce_messages: 1,
+      workforce_budget_ledger: 1,
+      workforce_runtime: 1,
     };
+  }
+
+  /** CORE_TOTAL = 1+2+2+3+1 + 2+1 (bus) + 9 (one per task-engine table) — the seed's whole core half. */
+  const CORE_TOTAL = 21;
+
+  /**
+   * Ground truth for the JOURNAL half of the erasure criterion: the rows in the two WORKFORCE-shaped
+   * `run_events` namespaces for one tenant. Read with raw SQL rather than through the chokepoint so the
+   * assertion is over what is actually in the table, independent of the delete path under test.
+   */
+  async function workforceJournalCount(tenantId: string): Promise<number> {
+    const rows = (await db.$client.unsafe(
+      "SELECT count(*)::int AS n FROM run_events WHERE tenant_id = $1 AND (run_id = $2 OR run_id LIKE 'workforce:%')",
+      [tenantId, taskIdFor(tenantId)],
+    )) as unknown as { n: number }[];
+    return rows[0].n;
   }
 
   // A fresh, known seed before EACH scenario (each scenario mutates the DB).
@@ -550,6 +705,13 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       // Seed the CORE run-journal/conversation rows on TOP of the product seed (beforeEach) for BOTH tenants.
       const t1Core = await seedCore(T1);
       const t2Core = await seedCore(T2);
+      // The seed is REAL on both sides — asserted BEFORE the erase so every "0 afterwards" below is a
+      // transition and not a fixture that was empty all along.
+      expect(await workforceJournalCount(T1)).toBe(2);
+      expect(await workforceJournalCount(T2)).toBe(2);
+      for (const name of CORE_NAMES) {
+        if (name.startsWith('workforce_')) expect(await coreRowCount(T1, name)).toBe(1);
+      }
 
       const res = await eraseTenant({
         db,
@@ -563,28 +725,32 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       expect(res.mode).toBe('deleted');
       // The core-table counts are reported DISTINCTLY from the product `tables`.
       expect(res.coreTables).toEqual(t1Core);
-      expect(res.coreTotalRows).toBe(10); // 1 + 2 + 2 + 1 + 1 + 2 (events) + 1 (event counter)
+      expect(res.coreTotalRows).toBe(CORE_TOTAL);
       // Product counts are unchanged (the product half stays its own dimension).
       expect(res.tables).toEqual({ revisions: 3, documents: 2 });
       expect(res.totalRows).toBe(5);
 
-      // T1 — every core table is now EMPTY.
+      // T1 — every core table is now EMPTY. The loop covers all nine task-engine tables, and because
+      // each was seeded with a real row above, a delete that silently matched nothing is RED here.
       for (const name of CORE_NAMES) expect(await coreRowCount(T1, name)).toBe(0);
+      // The JOURNAL half, on ground truth: BOTH workforce namespaces (`run_id = <taskId>` and
+      // `run_id LIKE 'workforce:%'`) are gone for T1. The erasure delete carries no `run_id`
+      // predicate, and this is what proves the consequence rather than assuming it.
+      expect(await workforceJournalCount(T1)).toBe(0);
 
       // T2 — every core table is FULLY INTACT (cross-tenant isolation on the CORE tables too; an
       // un-scoped core delete would make this RED).
-      expect(await coreRowCount(T2, 'runs')).toBe(t2Core.runs);
-      expect(await coreRowCount(T2, 'journal_steps')).toBe(t2Core.journal_steps);
-      expect(await coreRowCount(T2, 'conversation_items')).toBe(t2Core.conversation_items);
-      expect(await coreRowCount(T2, 'run_events')).toBe(t2Core.run_events);
-      expect(await coreRowCount(T2, 'idempotency_keys')).toBe(t2Core.idempotency_keys);
+      for (const name of CORE_NAMES) expect(await coreRowCount(T2, name)).toBe(t2Core[name]);
+      // …including T2's workforce-shaped journal rows, which a `run_id`-keyed (rather than
+      // tenant-keyed) delete would have taken along with T1's.
+      expect(await workforceJournalCount(T2)).toBe(2);
 
       // The audit meta records the core counts distinctly from the product counts.
       const rows = await audit.readForTenant(T1);
       const erasure = rows.find((r) => r.event === 'tenant_data_erased');
       const meta = erasure?.meta as { coreTables: Record<string, number>; coreTotalRows: number };
       expect(meta.coreTables).toEqual(t1Core);
-      expect(meta.coreTotalRows).toBe(10);
+      expect(meta.coreTotalRows).toBe(CORE_TOTAL);
       scenariosRan++;
     },
   );
@@ -710,7 +876,7 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
     '11. journalScrub — FOREIGN tenant payloads FULLY INTACT (cross-tenant isolation on the scrub)',
     async () => {
       await seedCore(T1);
-      await seedCore(T2);
+      const t2Core = await seedCore(T2);
 
       await eraseTenant({
         db,
@@ -735,10 +901,10 @@ describe('eraseTenant — tenant-scoped product+blob hard-delete (real DB + fs b
       const t2c = await convRows(T2);
       expect(t2c.length).toBe(2);
       expect(t2c.every((r) => r.payload !== null)).toBe(true);
-      // T2's whole ledger + core rows survive untouched (the scrub of T1 deleted none of T2's rows).
-      expect(await coreRowCount(T2, 'runs')).toBe(1);
-      expect(await coreRowCount(T2, 'journal_steps')).toBe(2);
-      expect(await coreRowCount(T2, 'run_events')).toBe(1);
+      // T2's whole ledger + core rows survive untouched (the scrub of T1 deleted none of T2's rows) —
+      // including its task graph, which scrub mode HARD-DELETES for the erased tenant.
+      for (const name of CORE_NAMES) expect(await coreRowCount(T2, name)).toBe(t2Core[name]);
+      expect(await workforceJournalCount(T2)).toBe(2);
       scenariosRan++;
     },
   );

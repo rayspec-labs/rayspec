@@ -60,6 +60,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `turn_ended` journal payload gains only the optional `classification` field, documented in
   the vocabulary's first published statement.
 
+### Fixed
+
+- **Tenant data erasure is now wired on a workforce deployment — the one shape where it was
+  unreachable.** The erasure control seam (`BootedServer.eraseTenantNow`, the operator's
+  right-to-erasure entry point) was constructed only when the deployed document declared product
+  `stores:`. Both shipped workforce examples declare **zero** stores, so a workforce deployment came
+  up with the seam `undefined` and a boot banner reading *"NOT WIRED — this boot deployed no product
+  stores, so there is nothing for `RAYSPEC_ERASURE_ENABLED` to act on"* — while its database held,
+  per tenant, the whole task graph: task titles, goals, descriptions, results and artifacts,
+  inter-agent message bodies, approval questions, decisions and free-text reasons, review reasons and
+  required changes, delegation goals and expected outputs, and the entire `run_events` journal under
+  both workforce namespaces (`run_id = <taskId>` and `run_id = workforce:<id>`). No shipped operator
+  command could erase any of it; nothing in production code deletes an `orgs` row either, so those
+  tables' `ON DELETE CASCADE` was a net nobody pulled.
+  The seam is now wired when the document declares product stores **or** a workforce. Nothing about
+  the erasure mechanism changed and there is no migration: `eraseTenant` already derives its core half
+  from `CORE_TENANT_SCOPED_TABLES`, which has carried all nine task-engine tables and `run_events`
+  since the engine landed, and every delete is still the same `forTenant`-scoped
+  `DELETE ... WHERE tenant_id` with no `run_id` predicate — so both workforce journal namespaces go
+  with it. A store-less deploy simply passes an empty product-table map and erases zero product rows.
+  The operator gate is untouched and still fail-closed: without `RAYSPEC_ERASURE_ENABLED` set to
+  exactly `true`, every call is a DRY-RUN preview that deletes nothing, and a real erasure still
+  refuses to run without an audit store.
+  The banner's unwired line no longer claims there is nothing to erase — it states that the boot
+  declared neither stores nor a workforce, which is a fact about the wiring rather than a claim about
+  what the database holds.
+  **The proof.** `workforce-erasure-boot.db.test.ts` boots the real composition root on a store-less
+  workforce document against a real database and asserts the seam is defined, that the banner reports
+  the resolved gate posture rather than `NOT WIRED`, and that a gate-off call previews **non-zero**
+  counts for all nine task-engine tables while mutating nothing. `erase-tenant.db.test.ts`'s workforce
+  coverage stopped being vacuous: its core seed now writes a real row into each of the nine and one
+  `run_events` row per namespace (agent-run, per-task, workforce control), so the post-erase read-back
+  is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
+  tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
+
 ## [1.8.0] - 2026-08-15
 
 ### Added
