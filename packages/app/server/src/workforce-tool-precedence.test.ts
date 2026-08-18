@@ -7,7 +7,8 @@
  * lint at parse (`packages/kernel/spec/src/workforce-lint.ts`) and `assertNoReservedCollisions` at
  * composition (`workforce-turn-handlers.ts`, called before the tools are handed to `runAgent`) —
  * and both are tested (`toolset-semantics.test.ts:381`/`:404`,
- * `workforce-parse.negative.test.ts:423`/`:434`).
+ * `workforce-parse.negative.test.ts:590`/`:601` — the exact and the bridged spelling, each expecting
+ * a `reserved_tool_name` rejection).
  *
  * What was NOT true is the fallback those doors are written against. `makeDispatchTool` indexes its
  * tool list into `new Map(deps.tools.map(t => [t.spec.name, t]))` (packages/kernel/platform/src/
