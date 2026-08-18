@@ -111,7 +111,7 @@ export function buildWorkforceSchemaSql(schema: string): string {
     tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
     workforce_id text, parent_task_id text, root_task_id text NOT NULL,
     ancestry_path jsonb NOT NULL DEFAULT '[]'::jsonb,
-    title text NOT NULL, goal text NOT NULL, description text,
+    title text, goal text, description text,
     owner text NOT NULL, requested_by text NOT NULL, department text,
     status text NOT NULL, status_reason text, priority text NOT NULL DEFAULT 'normal',
     dependencies jsonb NOT NULL DEFAULT '[]'::jsonb, join_policy jsonb,
@@ -120,6 +120,7 @@ export function buildWorkforceSchemaSql(schema: string): string {
     turns_used integer NOT NULL DEFAULT 0, last_event_seq integer NOT NULL DEFAULT 0,
     deadline_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
     queued_at timestamptz, started_at timestamptz, completed_at timestamptz,
+    claim_expires_at timestamptz,
     version integer NOT NULL DEFAULT 1
   );
   CREATE INDEX IF NOT EXISTS workforce_tasks_tenant_status_priority_queued_idx
@@ -151,7 +152,7 @@ export function buildWorkforceSchemaSql(schema: string): string {
     tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
     workforce_id text, parent_task_id text NOT NULL, child_task_id text NOT NULL,
     delegated_by text NOT NULL, delegated_to text NOT NULL, resolved_owner text NOT NULL,
-    goal text NOT NULL, expected_output text NOT NULL, depth integer NOT NULL,
+    goal text, expected_output text NOT NULL, depth integer NOT NULL,
     status text NOT NULL, rejection_reason text,
     created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
   );
@@ -161,26 +162,32 @@ export function buildWorkforceSchemaSql(schema: string): string {
   CREATE TABLE IF NOT EXISTS ${schema}.workforce_approvals (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
-    task_id text NOT NULL, question text NOT NULL,
+    task_id text NOT NULL, question text,
     options jsonb NOT NULL DEFAULT '[]'::jsonb, approver text NOT NULL,
     status text NOT NULL, decision text, decided_by text, reason text,
-    timeout_at timestamptz, on_timeout text NOT NULL, escalate_to text,
+    timeout_at timestamptz, on_timeout text NOT NULL, escalate_to text, turn_number integer,
     created_at timestamptz NOT NULL DEFAULT now(), decided_at timestamptz
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS workforce_approvals_turn_receipt_idx
+    ON ${schema}.workforce_approvals (tenant_id, task_id, turn_number)
+    WHERE turn_number IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS ${schema}.workforce_reviews (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
     task_id text NOT NULL, reviewer text NOT NULL, round integer NOT NULL,
     verdict text, reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
-    required_changes jsonb NOT NULL DEFAULT '[]'::jsonb,
+    required_changes jsonb NOT NULL DEFAULT '[]'::jsonb, turn_number integer,
     created_at timestamptz NOT NULL DEFAULT now(), decided_at timestamptz
   );
+  CREATE UNIQUE INDEX IF NOT EXISTS workforce_reviews_turn_receipt_idx
+    ON ${schema}.workforce_reviews (tenant_id, task_id, turn_number)
+    WHERE turn_number IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS ${schema}.workforce_messages (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id uuid NOT NULL REFERENCES ${schema}.orgs(id) ON DELETE CASCADE,
-    task_id text NOT NULL, sender text NOT NULL, recipient text NOT NULL, body text NOT NULL,
+    task_id text NOT NULL, sender text NOT NULL, recipient text NOT NULL, body text,
     created_at timestamptz NOT NULL DEFAULT now()
   );
 

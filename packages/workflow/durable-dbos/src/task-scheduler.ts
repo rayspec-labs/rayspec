@@ -38,7 +38,11 @@
  * `maxConcurrentWorkers` (per workforce, per department) is enforced by the reserve pass simply
  * NOT DISPATCHING past the cap: a task at a saturated workforce stays `queued` — no transition,
  * no reservation, no journal event — and is picked up when a slot frees. The pass counts `working`
- * rows plus its own dispatches, so the cap holds WITHIN a pass.
+ * rows plus its own dispatches, so the cap holds WITHIN a pass — but only because those counts are
+ * read AFTER the candidate page and not before it. Read the other way round, a claim committing
+ * between the two statements is invisible to both (no longer `queued`, not yet counted `working`)
+ * and buys one dispatch past the cap; `runReservePass` carries the argument and the seam that pins
+ * it. "Within a pass" is therefore a property of that read order, not of the counting.
  *
  * ACROSS passes it can OVERSHOOT, and the honest statement is not "a bounded transient": a pass
  * counts `working` rows, and a task it dispatched is not `working` until its claim commits, so two
@@ -63,6 +67,7 @@ import type { Db } from '@rayspec/db';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
   type ApprovalSweepOutcome,
+  afterTaskTerminal,
   appendTaskEvents,
   applyBudgetExhausted,
   applyTransition,
@@ -76,6 +81,7 @@ import {
   type MergedChildResult,
   mergeChildResults,
   releaseTurnReservation,
+  renewTurnLease,
   resolveWorkforceBudgets,
   sweepApprovalTimeouts,
   type TaskRecord,
@@ -99,6 +105,37 @@ export const DEFAULT_TASK_RESERVE_SCHEDULE = '*/5 * * * * *';
 export const DEFAULT_TASK_SWEEP_SCHEDULE = '*/30 * * * * *';
 
 const DEFAULT_TURN_QUEUE_CONCURRENCY = 4;
+
+/**
+ * THE CLAIM LEASE — 30 minutes, and deliberately generous.
+ *
+ * The two failure modes are NOT symmetric, so the default is not a midpoint. Too eager kills a
+ * healthy long-running turn; too generous leaves a wedged worker holding its slot for the lease.
+ * But a mis-reaped healthy turn is NON-CORRUPTING: the original body's final `applyTurnOutcome`
+ * hits `assertClaimOwnership` and refuses over the successor's claim, so the cost is duplicated
+ * work, never a duplicated effect. The disease is UNBOUNDED: an un-windowed `task`/`root`
+ * reservation that nothing will ever release. Bounded-and-recoverable beats unbounded, so the
+ * default sits far above any plausible healthy turn rather than close to one.
+ *
+ * 30 minutes is anchored on the repo's own numbers: the shipped examples declare a whole-TASK wall
+ * clock of 30m (`examples/workforce-starter`) and 45m (`examples/workforce-maintainers`) — and a
+ * task is MANY turns. A single turn that has run for 30 minutes has consumed the entire task
+ * ceiling the shipped starter declares; at that point "wedged" is the reading the operator's own
+ * configuration already takes.
+ *
+ * Overridable per deployment via `TaskSchedulerDeps.turnLeaseMs`, the same convention as
+ * `reserveSchedule` / `sweepSchedule` / `turnQueueConcurrency`. Deliberately NOT a
+ * `budgets.execution` key: the declared-budgets schema is drift-locked to the SPEC grammar
+ * (budget-spec-drift.test.ts), so a budgets key would widen the authoring grammar — and this is a
+ * dispatcher safety net, not per-workforce policy.
+ *
+ * ONE ASSUMPTION, NAMED: the expiry is stamped from the CLAIMING process's clock and compared
+ * against the SWEEPING process's clock, so on a multi-worker deployment a skewed sweeper reaps
+ * early or late by the skew. That is the same single-node clock posture the reservation window
+ * already carries (`reservedAt` comes from the same `#now()`), and a generous default is what keeps
+ * plausible skew far inside the margin — a second reason not to tune this value down.
+ */
+export const DEFAULT_TURN_LEASE_MS = 1_800_000;
 
 /** The deterministic dispatch claim (see the header: version-salted, never reused). */
 export function taskTurnWorkflowId(taskId: string, turnNumber: number, version: number): string {
@@ -193,8 +230,22 @@ export interface TaskSchedulerDeps {
   readonly reserveSchedule?: string;
   readonly sweepSchedule?: string;
   readonly turnQueueConcurrency?: number;
+  /**
+   * How long a turn's claim stays valid before the sweep may reap it as wedged. Defaults to
+   * {@link DEFAULT_TURN_LEASE_MS} (30 minutes) — read its docblock before lowering it: a lease that
+   * expires inside a healthy turn's runtime turns every slow turn into duplicated work.
+   */
+  readonly turnLeaseMs?: number;
   /** Injectable clock for the sweep/window tests. */
   readonly now?: () => Date;
+  /**
+   * TEST-ONLY seam, left undefined in production. Awaited exactly once per reserve pass, at the ONE
+   * point that separates the pass's two reads: after the candidate page, before the concurrency
+   * counts the cap is enforced from. The ORDER of those two reads is what keeps the cap from being
+   * overshot within a pass (`runReservePass`), and the only way to prove an ordering deterministically
+   * is to commit a claim in between — which is what this lets a suite do.
+   */
+  readonly onPassReadBarrier?: () => Promise<void>;
 }
 
 export interface ReservePassOutcome {
@@ -301,6 +352,11 @@ export class DbosTaskScheduler {
 
   #now(): Date {
     return this.#deps.now ? this.#deps.now() : new Date();
+  }
+
+  /** When a claim taken NOW would expire — the lease stamped on the claim CAS and on a renewal. */
+  #leaseUntil(): Date {
+    return new Date(this.#now().getTime() + (this.#deps.turnLeaseMs ?? DEFAULT_TURN_LEASE_MS));
   }
 
   /**
@@ -419,36 +475,13 @@ export class DbosTaskScheduler {
     await this.#promotePlanned(tdb, outcome);
     await this.#wakeDependencySatisfied(tdb);
 
-    // The concurrency counts are aggregated IN the database: a LIMIT here would understate the
-    // caps it feeds, and materializing every working row to count them is the unbounded read.
-    const workingGroups = (await tdb
-      .select(schema.workforceTasks, {
-        workforceId: schema.workforceTasks.workforceId,
-        department: schema.workforceTasks.department,
-        count: sql<number>`count(*)::int`,
-      })
-      .where(eq(schema.workforceTasks.status, 'working'))
-      .groupBy(schema.workforceTasks.workforceId, schema.workforceTasks.department)) as Array<{
-      workforceId: string | null;
-      department: string | null;
-      count: number;
-    }>;
-
-    const workforceCount = new Map<string, number>();
-    const departmentCount = new Map<string, number>();
-    for (const g of workingGroups) {
-      const wf = g.workforceId ?? '';
-      workforceCount.set(wf, (workforceCount.get(wf) ?? 0) + g.count);
-      if (g.department !== null) {
-        departmentCount.set(`${wf}/${g.department}`, g.count);
-      }
-    }
+    // The counts that decide which SCOPES are excluded from the page. Being stale here can only
+    // change WHICH rows are paged, never how many are dispatched — the cap arithmetic below runs off
+    // its own, later read (see `#workingCounts`).
+    const exclusionCounts = await this.#workingCounts(tdb);
 
     const budgetsCache = new Map<string, { paused: boolean; budgets: WorkforceBudgets }>();
-    const skipped = await this.#undispatchableScopes(tdb, budgetsCache, {
-      workforceCount,
-      departmentCount,
-    });
+    const skipped = await this.#undispatchableScopes(tdb, budgetsCache, exclusionCounts);
     outcome.paused += skipped.pausedTasks;
     outcome.saturated += skipped.saturatedTasks;
 
@@ -478,6 +511,31 @@ export class DbosTaskScheduler {
       )
       .limit(RESERVE_SCAN_LIMIT)) as TaskRecord[];
     if (candidates.length === 0) return outcome;
+
+    // TEST-ONLY seam (undefined in production): the one point where the pass's two reads are
+    // separated, so a suite can commit a claim exactly in between and prove the order below holds.
+    if (this.#deps.onPassReadBarrier !== undefined) await this.#deps.onPassReadBarrier();
+
+    // ── THE CAP'S COUNTS ARE READ *AFTER* THE PAGE, AND THAT ORDER IS LOAD-BEARING ──────────────
+    // These two statements are separate database snapshots, so a task whose claim commits between
+    // them is seen by exactly one of them — and WHICH one decides whether the cap holds.
+    //
+    // Counts first (the shape that shipped until this comment): a task X dispatched by an earlier
+    // pass, claiming in that window, is `queued` when the counts are taken (so not counted) and
+    // `working` when the page is taken (so not paged). Invisible to both — the loop below then
+    // starts one slot short and dispatches one task PAST `maxConcurrentWorkers`. Measured: with the
+    // window widened it reproduces every run, and it is what made the halt-drain suite flaky
+    // (task-scheduler.db.test.ts, `halt drains before it cancels`: 23 failures in 44 runs).
+    //
+    // Page first: an over-dispatch needs a task that is neither paged nor counted, i.e. its claim
+    // lands after the counts and before the page. With the page taken first that ordering does not
+    // exist. The remaining case — the claim landing between the page and the counts — puts X in
+    // BOTH, which double-counts one slot: an under-dispatch the next tick clears, never an
+    // overshoot. A task that LEAVES `working` in the same window has genuinely freed its slot.
+    //
+    // What this does NOT close is the across-passes overshoot the module header states, nor the
+    // multi-process one: a task this pass dispatches is not `working` until its claim commits.
+    const { workforceCount, departmentCount } = await this.#workingCounts(tdb);
 
     for (const task of candidates) {
       try {
@@ -562,6 +620,41 @@ export class DbosTaskScheduler {
       }
     }
     return outcome;
+  }
+
+  /**
+   * `working` rows per workforce and per (workforce, department), aggregated IN the database: a
+   * LIMIT here would understate the caps it feeds, and materializing every working row to count them
+   * is the unbounded read. Called TWICE per pass on purpose — once for the page's scope exclusions
+   * and once, AFTER the page, for the cap arithmetic — because those two uses tolerate staleness in
+   * opposite directions. `runReservePass` carries the argument for why the second one has to be the
+   * later read.
+   */
+  async #workingCounts(
+    tdb: TenantDb,
+  ): Promise<{ workforceCount: Map<string, number>; departmentCount: Map<string, number> }> {
+    const workingGroups = (await tdb
+      .select(schema.workforceTasks, {
+        workforceId: schema.workforceTasks.workforceId,
+        department: schema.workforceTasks.department,
+        count: sql<number>`count(*)::int`,
+      })
+      .where(eq(schema.workforceTasks.status, 'working'))
+      .groupBy(schema.workforceTasks.workforceId, schema.workforceTasks.department)) as Array<{
+      workforceId: string | null;
+      department: string | null;
+      count: number;
+    }>;
+    const workforceCount = new Map<string, number>();
+    const departmentCount = new Map<string, number>();
+    for (const g of workingGroups) {
+      const wf = g.workforceId ?? '';
+      workforceCount.set(wf, (workforceCount.get(wf) ?? 0) + g.count);
+      if (g.department !== null) {
+        departmentCount.set(`${wf}/${g.department}`, g.count);
+      }
+    }
+    return { workforceCount, departmentCount };
   }
 
   /**
@@ -841,6 +934,31 @@ export class DbosTaskScheduler {
    * A dependency's outcome is decided and it is not `completed`: fail the dependent with the typed
    * reason and journal what decided it. The alternative is the defect this replaces — a task in
    * `blocked(awaiting_dependency)` with nobody left who could ever wake it.
+   *
+   * TERMINAL HERE RUNS THE FAN-IN, like every other terminal-applying path, and the `lockRootFirst`
+   * that precedes it is not optional. This was the ONE path that applied a terminal status without
+   * `afterTaskTerminal`, and the two halves guard each other:
+   *
+   *   - Without `afterTaskTerminal`, a failed task's opening delegation row is never settled and its
+   *     parent's park is never answered. The sharpest case is a parent in `waiting_for_review`: that
+   *     park has NO signal-based exit (no wake set matches it, no sweep covers it), so its only
+   *     release is `releaseAbandonedReview`, which runs from `afterTaskTerminal` and nowhere else. A
+   *     reviewer failed here would strand its reviewed parent permanently.
+   *   - Without `lockRootFirst`, adding `afterTaskTerminal` would make this the FIRST caller to
+   *     break the precondition that function's own docstring states — that its parent lock is
+   *     already held because every caller took the root-first locks before its transition. Half the
+   *     fix would introduce exactly the lock-order hazard @rayspec/tasks' cascade-locking suite
+   *     exists to catch.
+   *
+   * CORRECT FOR TOMORROW, PROVABLY INERT TODAY, and the inertness is the honest half of the claim:
+   * `dependencies` is settable only through `createRootTaskInputSchema` (@rayspec/tasks
+   * create-task.ts:96) — the ROOT surface. `childTaskSpecSchema` (:106-118) is a strictObject with
+   * no such key, and `insertChildTask` hard-codes `dependencies: []` (:249), so no child can carry
+   * one and no `decided` verdict can reach this function for a child. A root has no parent and no
+   * opening delegation record, so `afterTaskTerminal` returns immediately and `lockRootFirst` locks
+   * the row the compare-and-swap was about to lock anyway. Nothing observable changes today. What
+   * changes is that the day a dependency becomes attachable to a child, this path already behaves
+   * like the other eight instead of silently stranding a park.
    */
   async #failOnDecidedDependency(
     tdb: TenantDb,
@@ -854,13 +972,15 @@ export class DbosTaskScheduler {
           payload: { taskId: task.taskId, dependencies: blockers },
         },
       ]);
-      await applyTransition(tx, {
-        taskId: task.taskId,
-        expectedVersion: task.version,
+      const locked = await lockRootFirst(tx, task);
+      const done = await applyTransition(tx, {
+        taskId: locked.taskId,
+        expectedVersion: locked.version,
         to: 'failed',
         reason: 'dependency_failed',
         actor: 'scheduler',
       });
+      await afterTaskTerminal(tx, done);
     });
     this.#logger.warn(
       `[workforce] task ${task.taskId} failed: dependency ${blockers
@@ -870,14 +990,25 @@ export class DbosTaskScheduler {
   }
 
   /**
-   * The sweep: enforce every overdue approval's declared fate, then REAP dead turns. A claim that
-   * committed (`working`) whose workflow later died (an ERROR, a cancellation, an exceeded
-   * recovery bound) would otherwise hold its row — and a `maxConcurrentWorkers` slot, and every
-   * drain — forever. The reaper asks the ENGINE whether the claim's own workflow id is still live
-   * (PENDING/ENQUEUED); a dead one re-queues the task through the one door (handlers are
-   * effect-free and the receipt guards double application, so a fresh dispatch of the same turn is
-   * safe). A LIVE turn is never touched, however long it runs — nothing is killed mid-flight.
-   * Deterministic seam for tests.
+   * The sweep: enforce every overdue approval's declared fate, then REAP turns that are not making
+   * progress. A claim that committed (`working`) whose workflow later died (an ERROR, a
+   * cancellation, an exceeded recovery bound) would otherwise hold its row — and a
+   * `maxConcurrentWorkers` slot, and every drain — forever.
+   *
+   * TWO ORACLES, ONE MECHANISM. The reaper asks the ENGINE whether the claim's own workflow id is
+   * still live (PENDING/ENQUEUED) — and, because that question has a blind spot, it also asks the
+   * CLAIM whether its lease has expired. The blind spot is a worker whose process is up and whose
+   * workflow is genuinely PENDING but whose BODY is wedged: it reaches neither release path, and
+   * held its slot and its budget reservation permanently (the un-windowed `task`/`root` scopes never
+   * roll over). Either oracle re-queues the task through the one door — handlers are effect-free
+   * and the receipt guards double application, so a fresh dispatch of the same turn is safe, and a
+   * stale execution that later wakes up is refused by `assertClaimOwnership` rather than applying
+   * over its successor.
+   *
+   * A LIVE turn INSIDE ITS LEASE is never touched, however long it runs — nothing is killed
+   * mid-flight, and the lease default is deliberately far above any plausible healthy turn (see
+   * `DEFAULT_TURN_LEASE_MS`). A `working` row with NO lease (driven there outside a dispatch) is
+   * judged by the engine oracle alone. Deterministic seam for tests.
    *
    * A reap also RELEASES the dead claim's budget reservation, in the same transaction as the
    * re-queue: `settleTurn` is the only other release and it runs from the turn's final transaction,
@@ -936,7 +1067,17 @@ export class DbosTaskScheduler {
         const status = await DBOS.getWorkflowStatus(turnId);
         const live =
           status !== null && (status.status === 'PENDING' || status.status === 'ENQUEUED');
-        if (live) continue;
+        // TWO REASONS, ONE MECHANISM. The engine's own status answers "is the workflow gone?"; the
+        // LEASE answers the question it cannot — "is this claim still making progress?" A body that
+        // wedges (a hung socket, a deadlocked dependency, a worker that stopped scheduling) leaves
+        // the workflow genuinely PENDING forever, and before the lease such a row held its slot and
+        // its reservation permanently, because the only other release runs from the turn's final
+        // transaction, which it never reaches. An unstamped `working` row (driven there outside a
+        // dispatch) carries no lease and is left alone — this backstop judges only leased claims.
+        const lease = task.claimExpiresAt;
+        const expired = lease !== null && lease.getTime() <= this.#now().getTime();
+        if (live && !expired) continue;
+        const reason = live ? 'turn_lease_expired' : 'turn_reaped';
         const reservation = await this.#reservationOfClaim(tdb, task.taskId, turnId);
         await tdb.transaction(async (tx) => {
           // Lock rank (see #claimTurn): runtime row, then the task row, then the ledger rows.
@@ -953,7 +1094,7 @@ export class DbosTaskScheduler {
             to: 'queued',
             reason: 'tool_error',
             actor: 'scheduler',
-            queueReason: 'turn_reaped',
+            queueReason: reason,
           });
           if (reservation !== null) {
             await releaseTurnReservation(
@@ -972,7 +1113,9 @@ export class DbosTaskScheduler {
         });
         reaped.push(task.taskId);
         this.#logger.warn(
-          `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is ${status?.status ?? 'absent'} — re-queued for a fresh dispatch.`,
+          reason === 'turn_lease_expired'
+            ? `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is still ${status?.status ?? 'absent'} but its claim lease expired at ${lease?.toISOString()} — the turn is wedged; re-queued for a fresh dispatch.`
+            : `[workforce] reaped task ${task.taskId}: its turn workflow ${turnId} is ${status?.status ?? 'absent'} — re-queued for a fresh dispatch.`,
         );
       } catch (err) {
         if (!(err instanceof TaskVersionConflictError)) {
@@ -1131,6 +1274,23 @@ export class DbosTaskScheduler {
    * touches more than one of them must too, or a claim and a settle could wait on each other. The
    * ordering WITHIN `workforce_tasks` is the root-first subtree order (@rayspec/tasks
    * apply-intents.ts); the ordering within the ledger is the canonical scope order (budget.ts).
+   *
+   * WHERE EACH RANK IS ENFORCED, so a reader does not go looking for an enforcer that is not there:
+   *
+   *   - `workforce_tasks -> workforce_budget_ledger`, and the orders within each of those two, have
+   *     kernel-side enforcers — `lockRootFirst`/`lockDescendants` (task-locks.ts, apply-intents.ts)
+   *     and `ledgerScopesFor`'s canonical walk (budget.ts) — so a kernel mutation reddens
+   *     @rayspec/tasks' own cascade-locking suite.
+   *   - `workforce_runtime -> workforce_tasks` HAS NO KERNEL-SIDE ENFORCER, by construction. All
+   *     three composite runtime+tasks transactions live in THIS file (`#claimTurn`, `#parkDenied`,
+   *     and the reaper's reservation release), and the kernel deliberately keeps the two apart:
+   *     `control.ts` runs `pauseWorkforce`'s runtime write and `cancelTaskCascade`'s task writes in
+   *     SEPARATE transactions, which is precisely why a halt can never be half of a cycle. So this
+   *     rank is held by the three call sites above and by nothing else; the test that guards it
+   *     (@rayspec/tasks cascade-locking.db.test.ts, `a claim and a denied-claim park QUEUE`) mirrors
+   *     these shapes from the exported primitives rather than mutating a kernel enforcer, because
+   *     there is none to mutate. Adding a fourth composite runtime+tasks transaction anywhere means
+   *     taking the runtime row first, here, by hand.
    */
   async #claimTurn(
     tdb: TenantDb,
@@ -1184,7 +1344,11 @@ export class DbosTaskScheduler {
             .limit(1)) as (typeof schema.workforceTaskTransitions.$inferSelect)[];
           if (claimRows[0]?.turnId !== myWorkflowId) return { kind: 'noop' as const };
           // Recovery of OUR claim: the reservation exists, the turn_started entry exists —
-          // re-run the handler and apply.
+          // re-run the handler and apply. RENEW THE LEASE first: this recovery is a fresh
+          // execution of the whole body and needs a whole window, not whatever remained of the
+          // original claim's — otherwise a recovery that lands late in the lease would be reaped
+          // mid-flight through no fault of its own.
+          await renewTurnLease(tx, task.taskId, this.#leaseUntil());
           return { kind: 'claimed' as const, task, budgets };
         }
         if (task.status !== 'queued') return { kind: 'noop' as const };
@@ -1195,6 +1359,9 @@ export class DbosTaskScheduler {
           to: 'working',
           actor: 'scheduler',
           turnId: myWorkflowId,
+          // The LEASE, stamped in the same compare-and-swap that takes the claim: the reaper's
+          // backstop for a body that wedges while the engine still reports the workflow PENDING.
+          leaseUntil: this.#leaseUntil(),
         });
 
         // ONE instant for the reservation: the window it lands in and the window a later release

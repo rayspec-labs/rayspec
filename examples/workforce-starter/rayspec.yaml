@@ -72,13 +72,13 @@ workforce:
     task:
       usd: 2.5
       turns: 20
-    delegation:
-      maxDepth: 3
-      maxPerTask: 4
   execution:
     maxConcurrentWorkers: 4
     maxTaskWallClock: 30m
     maxReviewRounds: 2
+    delegation:
+      maxDepth: 3
+      maxPerTask: 4
   departments:
     - id: eng
       name: Engineering
@@ -107,7 +107,7 @@ workforce:
       department: growth
       reportsTo: lead
       role: manager
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: principal_eng
       agent: principal_agent
       title: Principal Engineer
@@ -126,7 +126,7 @@ workforce:
       department: growth
       reportsTo: mgr_growth
       role: worker
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: qa
       agent: qa_agent
       title: Quality Reviewer
@@ -145,11 +145,11 @@ workforce:
       requireWhen:
         confidenceBelow: 0.8
       onReject: rework
-      maxRounds: 2
-  approvals:
+      maxReviewRounds: 2
+  approvalPolicies:
     - id: public_statement_signoff
       requireWhen:
-        capabilities: [public_statement]
+        labels: [public_statement]
       approver: user
       timeout: 2h
       onTimeout: fail

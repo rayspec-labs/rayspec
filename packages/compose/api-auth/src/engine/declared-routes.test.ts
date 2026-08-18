@@ -33,6 +33,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
+import { OPENAPI_POSTURE_NOTICE } from './emit-openapi.js';
 import { STORE_LIST_LIMIT } from './store-routes.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
@@ -691,6 +692,28 @@ describeDb('declared routes — OpenAPI doc-emission at GET /v1/openapi.json', (
     const agentOp = doc.paths['/notebooks/{id}/summarize'].post;
     const agentProps = agentOp.requestBody.content['application/json'].schema.properties;
     expect(Object.keys(agentProps)).toContain('input');
+  });
+
+  it('the SERVED payload carries the LOCAL / NOT-internet-facing posture notice', async () => {
+    // The arm that pins B-017h. The builder-level arms live in `emit-openapi.test.ts`; this one
+    // reads the notice off bytes that crossed the HTTP boundary, because the property the item is
+    // about is what an integrator RECEIVES. A document built with the notice but served from a
+    // differently-built or stale object would pass the unit arms and fail here.
+    //
+    // No Authorization header — deliberately the same unauthenticated fetch the arm below pins as
+    // public. That is what makes this response the copy with the widest reach and the least
+    // surrounding context: whoever holds it may hold no other statement of this server's posture.
+    const res = await jsonRequest(h.app, 'GET', '/v1/openapi.json', {});
+    expect(res.status).toBe(200);
+    const doc = await res.json();
+    // Asserted on the RAW substring, not only on the imported constant: comparing the constant to
+    // itself would pass even if the served document never carried it.
+    expect(doc.info.description).toContain('NOT internet-facing');
+    expect(doc.info.description).toContain(OPENAPI_POSTURE_NOTICE);
+    // Unconditional: this throwaway spec's metadata is what it is, and the notice is present
+    // regardless of whether a description was declared (both spec branches are covered by the unit
+    // arms). Nothing in the request can suppress it — there is no query param, header or env read.
+    expect(typeof doc.info.description).toBe('string');
   });
 
   it('the openapi.json read is PUBLIC (no auth required) and lists the agent route params', async () => {

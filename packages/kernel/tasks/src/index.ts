@@ -29,6 +29,7 @@ export {
 export { type ApplyTransitionInput, applyTransition, type TaskRecord } from './apply-transition.js';
 export {
   ApprovalAlreadyDecidedError,
+  ApprovalApproverMismatchError,
   type ApprovalDecisionInput,
   ApprovalNotFoundError,
   type ApprovalRecord,
@@ -77,6 +78,11 @@ export {
   TASK_PRIORITIES,
   type TaskPriority,
 } from './create-task.js';
+export {
+  ANY_AUTHENTICATED_DECIDER,
+  isOpenDecider,
+  mayDecide,
+} from './decision-authority.js';
 export {
   TaskDependenciesInvalidError,
   TaskNotFoundError,
@@ -129,6 +135,7 @@ export {
   ReviewNotForParkError,
   ReviewNotFoundError,
   type ReviewRecord,
+  ReviewReviewerMismatchError,
   ReviewTaskStateError,
   type ReviewVerdictInput,
   reviewVerdictSchema,
@@ -171,3 +178,6 @@ export {
   TERMINAL_STATUSES,
   type TerminalStatus,
 } from './status.js';
+// A sibling module ON PURPOSE — see turn-lease.ts: `apply-transition.ts` is the one path the
+// state-machine gate exempts from its status-write detector, and the exemption is per FILE.
+export { renewTurnLease } from './turn-lease.js';

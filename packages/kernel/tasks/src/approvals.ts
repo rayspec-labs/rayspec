@@ -6,12 +6,20 @@
  * approval its DECLARED fate (`fail` or `escalate`), because silent indefinite waiting is a
  * defect, not a default. Both paths compare-and-swap on `status = 'pending'`, so two racing
  * deciders (or a decider racing the sweep) admit exactly one winner.
+ *
+ * THE ROW'S `approver` BINDS ITS DECIDER (decision-authority.ts). `'user'` is the open sentinel —
+ * the deployment's human operator surface, what every shipped example declares — and stays open to
+ * any permitted principal. A row that NAMES someone is the escalation case the sweep below mints:
+ * `approver: escalateTo`, journaled as an accountability fact. Deciding that row as anyone else is
+ * refused, unless the caller carries an AUTHORIZED break-glass override, which the journal then
+ * records (`overriddenApprover`) so the trail stays honest about what happened.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, asc, eq, isNotNull, lt } from 'drizzle-orm';
 import { z } from 'zod';
 import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
+import { mayDecide } from './decision-authority.js';
 import { TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { deliverSignal } from './signals.js';
@@ -41,12 +49,44 @@ export class ApprovalAlreadyDecidedError extends Error {
   }
 }
 
+/**
+ * A decision this approval NAMED someone else to make. The row's `approver` is an accountability
+ * fact the engine journaled; resolving it as anyone else would let `decided_by` contradict the
+ * trail, so it is refused unless a caller carries an authorized break-glass override.
+ */
+export class ApprovalApproverMismatchError extends Error {
+  readonly approvalId: string;
+  /** Who the row names. */
+  readonly approver: string;
+  /** Who tried. */
+  readonly actor: string;
+  constructor(approvalId: string, approver: string, actor: string) {
+    super(
+      `approval '${approvalId}' names '${approver}' as its approver — '${actor}' is not that ` +
+        'principal, and the engine journaled that name as an accountability fact. Decide it as ' +
+        'the named approver, or break the glass with the override permission (the journal ' +
+        'records the override). Fail-closed.',
+    );
+    this.name = 'ApprovalApproverMismatchError';
+    this.approvalId = approvalId;
+    this.approver = approver;
+    this.actor = actor;
+  }
+}
+
 export const approvalDecisionSchema = z.strictObject({
   decision: z.enum(['approve', 'reject']),
   reason: z.string().min(1).optional(),
+  /**
+   * BREAK-GLASS INTENT — never break-glass AUTHORITY. A door that admits this field must AND it
+   * with a server-side permission check before passing `overrideNamedApprover` down; the flag says
+   * only that the caller ASKED, which is what makes the override deliberate rather than a silent
+   * side effect of holding a role.
+   */
+  override: z.boolean().default(false),
 });
 
-export type ApprovalDecisionInput = z.output<typeof approvalDecisionSchema> & {
+export type ApprovalDecisionInput = Omit<z.output<typeof approvalDecisionSchema>, 'override'> & {
   readonly approvalId: string;
   /**
    * The VERIFIED deciding principal — server-derived by the caller from its authenticated
@@ -54,17 +94,46 @@ export type ApprovalDecisionInput = z.output<typeof approvalDecisionSchema> & {
    * loop accountability artifact).
    */
   readonly decidedBy: string;
+  /**
+   * The caller has VERIFIED that this principal may override a named approver (an authorization
+   * decision the caller owns — the kernel is deliberately roster- and permission-free). Set only
+   * where a request both asked for the override and passed the permission gate. The override lands
+   * in the journal as `overriddenApprover`.
+   */
+  readonly overrideNamedApprover?: boolean;
 };
 
 /**
  * Resolve one pending approval and wake its task. The row update, the journal event and the wake
  * signal commit together; the signal key (`approval:<id>`) makes a re-sent decision a no-op.
+ *
+ * PROTOCOL. The authority gate runs FIRST, on a plain read, so a refusal writes NOTHING — no CAS,
+ * no journal-counter UPDATE, no signal. It cannot be the race arbiter and does not try to be: the
+ * `status = 'pending'` compare-and-swap below is still the only thing that admits one winner (two
+ * authorized racers both read `pending`, both CAS, and the loser lands in the same
+ * already-decided branch as before). `approver` is written once at insert and never updated, so
+ * reading it outside the CAS is sound.
  */
 export async function decideApproval(
   tdb: TenantDb,
   input: ApprovalDecisionInput,
 ): Promise<ApprovalRecord> {
   return tdb.transaction(async (tx) => {
+    const claim = (await tx
+      .select(schema.workforceApprovals)
+      .where(eq(schema.workforceApprovals.id, input.approvalId))) as ApprovalRecord[];
+    const named = claim[0];
+    // A tenant-scoped miss is the uniform not-found; an already-resolved row is the conflict. Both
+    // answer BEFORE the authority gate, so the gate never becomes an oracle for a row's state that
+    // the caller could not otherwise read.
+    if (!named) throw new ApprovalNotFoundError(input.approvalId);
+    if (named.status !== 'pending') {
+      throw new ApprovalAlreadyDecidedError(input.approvalId, named.status);
+    }
+    const overrode = !mayDecide(named.approver, input.decidedBy);
+    if (overrode && input.overrideNamedApprover !== true) {
+      throw new ApprovalApproverMismatchError(input.approvalId, named.approver, input.decidedBy);
+    }
     const updated = (await tx
       .update(schema.workforceApprovals, {
         status: input.decision === 'approve' ? 'approved' : 'rejected',
@@ -98,6 +167,10 @@ export async function decideApproval(
           decision: input.decision,
           decidedBy: input.decidedBy,
           reason: input.reason ?? null,
+          // PRESENT ONLY ON A BREAK-GLASS DECISION. An audit trail that can be contradicted by the
+          // next write is worse than no claim, so the one case where `decided_by` does NOT match
+          // the recorded approver says so, in the journal, naming who was overridden.
+          ...(overrode ? { overriddenApprover: approval.approver } : {}),
         },
       },
     ]);

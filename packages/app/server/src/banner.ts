@@ -11,6 +11,36 @@ import type { BootedServer, StaticBootedServer } from './composition-root.js';
 const RULE = '─'.repeat(86);
 
 /**
+ * THE POSTURE HEADLINE — the fragment BOTH banners carry in their title line.
+ *
+ * It is a named constant rather than two inlined literals because it used to be two inlined
+ * literals in one banner and nothing at all in the other: `staticBootBanner` shipped with no
+ * posture statement, though a static boot binds through the same host/port path and honours the
+ * same non-loopback `RAYSPEC_HOST` opt-in. `banner.test.ts` asserts this constant against its own
+ * shipped bytes, so a rewording is an explicit edit there and never a silent one here.
+ */
+export const NOT_INTERNET_FACING = 'NOT internet-facing';
+
+/**
+ * THE POSTURE WARNING — the two-line block BOTH banners print, verbatim and unconditionally.
+ *
+ * One literal, two call sites: the full-platform boot and the static-profile boot state the SAME
+ * posture in the SAME bytes, so neither can drift into a softer sentence while the other keeps the
+ * hard one. The block reads the same on a static boot for a reason worth stating rather than
+ * assuming: the external-hardening suite is the gate before external exposure of THIS SERVER, and
+ * it is unbuilt for every profile — a boot that opens no database has less to lose, not more
+ * protection in front of it.
+ *
+ * Unconditional by construction: no branch, no env var, no verbosity flag reads it. `banner.test.ts`
+ * pins the bytes of both constants and both banners, and asserts neither banner names a suppression
+ * variable — so the warning cannot be deleted, softened, or made opt-out without a RED.
+ */
+export const POSTURE_WARNING_LINES: readonly string[] = Object.freeze([
+  '  The external-hardening suite (RLS / KMS-wrapped DEKs / per-tenant sandbox / DPoP) is the gate before external',
+  '  exposure and is NOT built yet. Do not place this server behind a public address.',
+]);
+
+/**
  * Build the base URL for the ACTUAL bound address — the banner must never claim `127.0.0.1` while the
  * server is actually listening on another interface. Pass the listener's real `address`/`port` (from
  * `@hono/node-server`'s listen callback). An IPv6 literal is bracketed so the URL stays well-formed
@@ -27,13 +57,10 @@ export function bootBanner(server: BootedServer, base: string): string {
   lines.push('');
   lines.push(RULE);
   lines.push(
-    '  RaySpec server — LOCAL / single-node / pre-external-hardening — NOT internet-facing',
+    `  RaySpec server — LOCAL / single-node / pre-external-hardening — ${NOT_INTERNET_FACING}`,
   );
   lines.push(RULE);
-  lines.push(
-    '  The external-hardening suite (RLS / KMS-wrapped DEKs / per-tenant sandbox / DPoP) is the gate before external',
-  );
-  lines.push('  exposure and is NOT built yet. Do not place this server behind a public address.');
+  lines.push(...POSTURE_WARNING_LINES);
   lines.push(RULE);
   lines.push(`  Base URL:     ${base}`);
   lines.push(`  OIDC issuer:  ${server.issuer}`);
@@ -195,12 +222,17 @@ export function staticBootBanner(server: StaticBootedServer, base: string): stri
   const lines: string[] = [];
   lines.push('');
   lines.push(RULE);
-  lines.push('  RaySpec server — STATIC PROFILE (frontend-only) — no database, no auth surface');
+  lines.push(`  RaySpec server — STATIC PROFILE (frontend-only) — ${NOT_INTERNET_FACING}`);
   lines.push(RULE);
   lines.push(
     '  This boot serves ONLY the declared static frontend(s). No auth/OIDC/runs/API route is mounted,',
   );
   lines.push('  and no database, JWT signing key, or api-key pepper is required.');
+  // The SAME posture block the full boot prints. Opening no database and mounting no auth surface
+  // is a smaller blast radius, not a hardened one: this boot still binds a TCP host/port and still
+  // has nothing external in front of it. The title says which profile; the block says where it may
+  // be placed, and both banners say it in the same bytes (`banner.test.ts`).
+  lines.push(...POSTURE_WARNING_LINES);
   lines.push(RULE);
   lines.push(`  Base URL:     ${base}`);
   lines.push('');

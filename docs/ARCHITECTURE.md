@@ -297,6 +297,11 @@ service additionally needs.
 
 ### Restore and key rotation
 
+This section is about what a **restore does to credentials**. The commands themselves — the
+`pg_dump`/`pg_restore` pair a self-hoster runs, what the dump does and does not carry, and what a
+restored deployment resumes — are in
+[Workforce architecture → Backup and restore](./workforce-architecture.md#backup-and-restore).
+
 The boot secrets live in the environment, never in the database — which has a sharp
 operational consequence when you **restore a database dump under different secrets**.
 A full dump restores the rows whole — orgs, users, memberships, the argon2id password

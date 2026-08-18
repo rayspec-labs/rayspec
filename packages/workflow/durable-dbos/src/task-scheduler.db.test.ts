@@ -80,6 +80,13 @@ let deadWorkflow: () => Promise<void>;
  */
 let clockOverride: Date | null = null;
 
+/**
+ * The scheduler's per-pass read barrier, armed per test (same shape as `clockOverride`). Left `null`
+ * everywhere except the mid-pass-claim suite, which is the only place that needs to commit a write
+ * INSIDE a pass, between its two reads.
+ */
+let passReadBarrier: (() => Promise<void>) | null = null;
+
 /** owner -> handler; workers resolve by prefix so fan-out specs need no per-test registration. */
 const handlers = new Map<string, TaskTurnHandler>();
 const workerHandler: TaskTurnHandler = async (ctx) => ({
@@ -183,6 +190,9 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       reserveSchedule: NEVER,
       sweepSchedule: NEVER,
       now: () => clockOverride ?? new Date(),
+      onPassReadBarrier: async () => {
+        await passReadBarrier?.();
+      },
     });
     executor.attachPreLaunchHook(() => scheduler.registerScheduledWorkflows());
     executor.attachPreLaunchHook(() => {
@@ -202,6 +212,7 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
   beforeEach(async () => {
     handlers.clear();
     clockOverride = null;
+    passReadBarrier = null;
     await db.$client.unsafe(
       'TRUNCATE workforce_tasks, workforce_task_transitions, workforce_task_signals, workforce_delegations, workforce_approvals, workforce_reviews, workforce_messages, workforce_budget_ledger, workforce_runtime, run_events, idempotency_keys CASCADE',
     );
@@ -364,6 +375,80 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
       );
       return (rows[0] as { c: number }).c === 3;
     }, 30_000);
+  });
+
+  it('a claim that commits MID-PASS cannot buy a dispatch past maxConcurrentWorkers', async () => {
+    /**
+     * The pass takes its candidate page and its concurrency counts in TWO database snapshots, and
+     * which one comes first decides whether the cap holds.
+     *
+     * A task whose claim commits between them is `queued` for one read and `working` for the other.
+     * Counts first: it is not counted (still queued then) AND not paged (already working by then) —
+     * invisible to both, so the loop starts a slot short and dispatches one task PAST the cap. That
+     * is the shape that made `halt drains before it cancels` flaky (23 failures in 44 runs on a
+     * loaded host, both failure texts — 'working' and 'completed' where 'cancelled' was expected —
+     * traced to the same over-dispatch). Page first, as it is now: the same claim lands in BOTH
+     * reads, which double-counts one slot — an under-dispatch the next tick clears.
+     *
+     * `onPassReadBarrier` is the seam that makes that deterministic instead of a race: it is awaited
+     * exactly once per pass, between the two reads, and this test commits the claim there. Moving
+     * the counts read back above the barrier (either above the page or above the barrier alone)
+     * REDs this case — verified both ways.
+     */
+    handlers.set('mid-pass', async () => ({
+      intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+    }));
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { maxConcurrentWorkers: 1 } });
+    const first = await newRoot('mid-pass');
+    const second = await newRoot('mid-pass');
+    // Promote by hand rather than with a pass: the pass under test must be the FIRST one that ever
+    // sees these two rows queued, with nothing yet dispatched or working.
+    for (const task of [first, second]) {
+      await applyTransition(tdb(), {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+    }
+
+    let barrierCalls = 0;
+    passReadBarrier = async () => {
+      barrierCalls += 1;
+      if (barrierCalls > 1) return; // one claim only, however many passes run
+      const row = await taskRow(first.taskId);
+      expect(row.status, 'the barrier must fire while `first` is still queued').toBe('queued');
+      await applyTransition(tdb(), {
+        taskId: first.taskId,
+        expectedVersion: Number(row.version),
+        to: 'working',
+        actor: 'scheduler',
+        turnId: 'mid-pass-claim',
+      });
+    };
+
+    const pass = await scheduler.runReservePass();
+
+    // Not vacuous: the barrier really fired, so a claim really did commit inside this pass.
+    expect(barrierCalls, 'the pass must await its read barrier exactly once').toBe(1);
+    expect((await taskRow(first.taskId)).status).toBe('working');
+    // THE PROPERTY: one slot, one worker. The cap declines BOTH candidates — `first` because it is
+    // already the one running, `second` because the slot is taken.
+    expect(pass.dispatched, 'no dispatch may go past maxConcurrentWorkers: 1').toEqual([]);
+    expect(pass.saturated).toBe(2);
+
+    // …and a declined candidate is a QUEUE, not a state: no transition, no reservation, no event.
+    const secondRow = await taskRow(second.taskId);
+    expect(secondRow.status).toBe('queued');
+    expect(secondRow.version).toBe(second.version + 1); // the hand promotion above, nothing since
+    const ledger = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_budget_ledger WHERE scope_id = '${second.taskId}';`,
+    );
+    expect(ledger[0]?.c).toBe(0);
+    const started = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${second.taskId}' AND type = 'workforce.task.turn_started';`,
+    );
+    expect(started[0]?.c).toBe(0);
   });
 
   it('a denied dispatch parks blocked(budget_exhausted) with no leaked reservation; budget_raised resumes it', async () => {
@@ -859,6 +944,114 @@ describe.skipIf(!hasDb)('DBOS task dispatcher — exactly-once turns over the sh
     await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
     expect(await reservedUsd(root.taskId)).toBe(0);
   });
+
+  // ── the claim LEASE: the liveness backstop for a turn the engine still calls live ────────────
+  //
+  // The reaper's original oracle is a DBOS status query alone, so a worker whose process is up and
+  // whose workflow is PENDING but whose BODY is wedged reached neither release path — not
+  // `settleTurn` (the turn never finishes) nor the reaper (the engine says PENDING). It held its
+  // concurrency slot and its budget reservation forever, and the task/root ledger scopes never roll
+  // over, so the stranded estimate was PERMANENT. The claim now stamps `claim_expires_at`; an
+  // expired claim is reaped through the IDENTICAL path as a dead one — same requeue, same
+  // `#reservationOfClaim` amount, same window.
+
+  it('a WEDGED turn — DBOS still PENDING — is reaped once its claim lease expires, and its reservation goes back', async () => {
+    // The wedge: the first dispatch parks inside the handler and never returns. The engine has
+    // nothing to notice — the workflow is genuinely PENDING and genuinely alive.
+    let releaseWedged: () => void = () => {};
+    const wedged = new Promise<void>((resolve) => {
+      releaseWedged = resolve;
+    });
+    let dispatches = 0;
+    handlers.set('solo', async () => {
+      if (++dispatches === 1) await wedged;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.25 } });
+    const root = await newRoot('solo');
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'working');
+    expect(await reservedUsd(root.taskId)).toBe(0.25);
+
+    const claim = await db.$client.unsafe(
+      `SELECT turn_id FROM workforce_task_transitions WHERE task_id = '${root.taskId}' AND to_status = 'working';`,
+    );
+    const turnId = claim[0]?.turn_id as string;
+    // The DBOS oracle says LIVE — this is exactly the case the old reaper could never act on.
+    expect((await DBOS.getWorkflowStatus(turnId))?.status).toBe('PENDING');
+    expect((await scheduler.runSweep()).reaped).not.toContain(root.taskId);
+
+    // The claim stamped a lease. Step the sweep's clock past it (never a sleep).
+    const claimed = await taskRow(root.taskId);
+    const lease = new Date(claimed.claim_expires_at as string);
+    expect(Number.isNaN(lease.getTime())).toBe(false);
+    clockOverride = new Date(lease.getTime() + 1_000);
+
+    const swept = await scheduler.runSweep();
+    expect(swept.reaped).toContain(root.taskId);
+    const reaped = await taskRow(root.taskId);
+    expect(reaped.status).toBe('queued');
+    expect(reaped.status_reason).toBe('tool_error');
+    // Leaving `working` clears the lease — a stale expiry can never re-reap a queued row.
+    expect(reaped.claim_expires_at).toBeNull();
+    // The whole point: the money comes back, on both scopes the claim reserved against.
+    expect(await reservedUsd(root.taskId)).toBe(0);
+    const rootScope = await db.$client.unsafe(
+      `SELECT reserved_usd FROM workforce_budget_ledger WHERE scope_kind = 'root' AND scope_id = '${root.taskId}';`,
+    );
+    expect(Number(rootScope[0]?.reserved_usd)).toBe(0);
+    // A dispatched turn stays a spent turn: a lease reap gives back money, never a turn count.
+    const turns = await db.$client.unsafe(
+      `SELECT settled_turns FROM workforce_budget_ledger WHERE scope_kind = 'task' AND scope_id = '${root.taskId}';`,
+    );
+    expect(turns[0]?.settled_turns).toBe(1);
+    // The journal names WHY it re-queued — a lease expiry is not a dead workflow.
+    const queuedEvents = await db.$client.unsafe(
+      `SELECT data->>'queueReason' AS reason FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.queued' ORDER BY seq;`,
+    );
+    expect(queuedEvents.map((e) => e.reason)).toContain('turn_lease_expired');
+
+    clockOverride = null;
+    releaseWedged();
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'completed');
+    expect(await reservedUsd(root.taskId)).toBe(0);
+  }, 120_000);
+
+  it('a LIVE turn INSIDE its lease is never reaped, however many sweeps run', async () => {
+    // The conservatism guard. A lease that expires too eagerly kills healthy long-running turns,
+    // and that failure mode is worse than the disease — so the backstop must be inert for every
+    // turn that is merely SLOW rather than wedged.
+    let releaseLive: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      releaseLive = resolve;
+    });
+    let dispatches = 0;
+    handlers.set('solo', async () => {
+      if (++dispatches === 1) await held;
+      return {
+        intent: { kind: 'complete', result: { status: 'completed', summary: 'ok', confidence: 1 } },
+      };
+    });
+    await ensureWorkforceRuntime(tdb(), 'wf', { execution: { estimateUsdPerTurn: 0.25 } });
+    const root = await newRoot('solo');
+    await pumpUntil(async () => (await taskRow(root.taskId)).status === 'working');
+
+    for (let i = 0; i < 5; i++) {
+      expect((await scheduler.runSweep()).reaped).not.toContain(root.taskId);
+    }
+    const still = await taskRow(root.taskId);
+    expect(still.status).toBe('working');
+    expect(await reservedUsd(root.taskId)).toBe(0.25);
+    // Even a sweep one millisecond BEFORE the lease expires leaves it alone.
+    clockOverride = new Date(new Date(still.claim_expires_at as string).getTime() - 1);
+    expect((await scheduler.runSweep()).reaped).not.toContain(root.taskId);
+    expect((await taskRow(root.taskId)).status).toBe('working');
+
+    clockOverride = null;
+    releaseLive();
+    await pumpUntil(async () => (await taskRow(root.taskId)).status !== 'working');
+  }, 120_000);
 
   it('wall-clock and deadline ceilings enforce at the dispatch boundary: the pass parks, never kills', async () => {
     // The per-task wall clock: a re-queued task whose first claim started long ago, against a

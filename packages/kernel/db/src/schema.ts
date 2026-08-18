@@ -754,9 +754,14 @@ export const workforceTasks = pgTable(
     rootTaskId: text('root_task_id').notNull(),
     /** Materialized ancestor task ids, root-first. Immutable; serves depth and cycle checks. */
     ancestryPath: jsonb('ancestry_path').notNull().default(sql`'[]'::jsonb`),
-    title: text('title').notNull(),
-    /** The instruction the owner receives. DATA, never instructions to the platform. */
-    goal: text('goal').notNull(),
+    /**
+     * NULLABLE ONLY SO ERASURE CAN SCRUB IT. Every write path requires it (`createTask`'s schema
+     * refuses an absent or empty title), so a NULL here means exactly one thing: this tenant's
+     * content was erased by `journalScrub` while its structural + ledger columns were retained.
+     */
+    title: text('title'),
+    /** The instruction the owner receives. DATA, never instructions. Nullable for the same reason. */
+    goal: text('goal'),
     description: text('description'),
     /** The owner handler/employee id, or 'user' for a human-owned task. */
     owner: text('owner').notNull(),
@@ -785,6 +790,22 @@ export const workforceTasks = pgTable(
     queuedAt: timestamp('queued_at', { withTimezone: true }),
     startedAt: timestamp('started_at', { withTimezone: true }),
     completedAt: timestamp('completed_at', { withTimezone: true }),
+    /**
+     * THE CLAIM LEASE — the liveness backstop for a turn the durable engine still calls live.
+     *
+     * Set by `applyTransition` in the SAME compare-and-swap UPDATE that writes `working` (so it can
+     * never disagree with the claim it describes) and cleared by every transition OUT of `working`
+     * (so a stale expiry can never be read off a row that holds no claim). NULL means "no claim" —
+     * on every status but `working`, and on a `working` row driven there outside a dispatch.
+     *
+     * The reaper's original oracle was a DBOS workflow-status query alone, which cannot see a
+     * worker whose process is up and whose workflow is PENDING but whose BODY is wedged: it reaches
+     * neither release path (`settleTurn` needs the turn to finish; the reaper thought it alive), so
+     * it held its concurrency slot and its budget reservation forever — and the `task`/`root`
+     * ledger scopes never roll over, so the stranded estimate was permanent. An expired lease is
+     * reaped through the IDENTICAL path as a dead claim.
+     */
+    claimExpiresAt: timestamp('claim_expires_at', { withTimezone: true }),
     /** Optimistic-concurrency token; every applyTransition presents the expected value. */
     version: integer('version').notNull().default(1),
   },
@@ -893,7 +914,15 @@ export const workforceDelegations = pgTable(
     delegatedBy: text('delegated_by').notNull(),
     delegatedTo: text('delegated_to').notNull(),
     resolvedOwner: text('resolved_owner').notNull(),
-    goal: text('goal').notNull(),
+    /** NULLABLE ONLY SO ERASURE CAN SCRUB IT — the hand-off intent is subject content. */
+    goal: text('goal'),
+    /**
+     * NOT content, and deliberately still NOT NULL. Every writer is the engine's own literal
+     * (`'worker_result'`, apply-intents.ts) — nothing model-, requester- or caller-authored reaches
+     * it, and no production path reads it. It is a structural constant, so `journalScrub` leaves it
+     * alone like every other structural column. If a delegating tool is ever allowed to supply it,
+     * it becomes content that day and gets its own migration alongside the validation it needs.
+     */
     expectedOutput: text('expected_output').notNull(),
     depth: integer('depth').notNull(),
     status: text('status').notNull(),
@@ -927,8 +956,11 @@ export const workforceApprovals = pgTable(
       .notNull()
       .references(() => orgs.id, { onDelete: 'cascade' }),
     taskId: text('task_id').notNull(),
-    /** The typed question the human decides. DATA on read, never instructions. */
-    question: text('question').notNull(),
+    /**
+     * The typed question the human decides. DATA on read, never instructions. NULLABLE ONLY SO
+     * ERASURE CAN SCRUB IT — `request_approval` refuses an absent or empty question at plan time.
+     */
+    question: text('question'),
     options: jsonb('options').notNull().default(sql`'[]'::jsonb`),
     /** Who may decide: 'user' or a named approver id. */
     approver: text('approver').notNull(),
@@ -940,6 +972,12 @@ export const workforceApprovals = pgTable(
     timeoutAt: timestamp('timeout_at', { withTimezone: true }),
     onTimeout: text('on_timeout').notNull(),
     escalateTo: text('escalate_to'),
+    /**
+     * The turn whose application opened this request — the DURABLE DEDUPE KEY beneath the receipt.
+     * NULL for a request no turn opened: the timeout sweep's escalation re-issue, whose own dedupe
+     * is the `status = 'pending'` compare-and-swap that claimed the row it escalates.
+     */
+    turnNumber: integer('turn_number'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
   },
@@ -947,6 +985,12 @@ export const workforceApprovals = pgTable(
     index('workforce_approvals_tenant_status_idx').on(t.tenantId, t.status),
     // The timeout sweep's due scan (`status = pending AND timeout_at < now()`).
     index('workforce_approvals_tenant_timeout_idx').on(t.tenantId, t.timeoutAt),
+    // ONE approval per (task, turn) — the second layer beneath the transition receipt, keyed on the
+    // same fact and with the same partial shape. See the review index below for why `round`-shaped
+    // keys do not work and `turn_number` does.
+    uniqueIndex('workforce_approvals_turn_receipt_idx')
+      .on(t.tenantId, t.taskId, t.turnNumber)
+      .where(sql`${t.turnNumber} is not null`),
   ],
 );
 
@@ -970,10 +1014,38 @@ export const workforceReviews = pgTable(
     verdict: text('verdict'),
     reasons: jsonb('reasons').notNull().default(sql`'[]'::jsonb`),
     requiredChanges: jsonb('required_changes').notNull().default(sql`'[]'::jsonb`),
+    /**
+     * The turn whose application opened this review — the DURABLE DEDUPE KEY beneath the receipt.
+     * NULL for a row no turn opened (none today; the column stays open for one, exactly as
+     * `workforce_task_transitions.turn_number` does).
+     */
+    turnNumber: integer('turn_number'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
   },
-  (t) => [index('workforce_reviews_tenant_task_idx').on(t.tenantId, t.taskId, t.round)],
+  (t) => [
+    index('workforce_reviews_tenant_task_idx').on(t.tenantId, t.taskId, t.round),
+    /**
+     * ONE review per (task, turn) — the second layer beneath the transition receipt.
+     *
+     * WHY `turn_number` AND NOT `round`. `round` is not an input to the turn: it is DERIVED from
+     * the number of review rows that already exist (`reviewRoundsUsed = reviewRows.length`,
+     * `round = reviewRoundsUsed + 1`). A second application of the SAME turn therefore computes a
+     * DIFFERENT round, so a UNIQUE on `(tenant_id, task_id, round)` would admit exactly the
+     * duplicate it was added to prevent — and, being retro-fitted onto a populated column, could
+     * fail at migration time on a database that already holds two rows of one round.
+     * `turn_number` is an INPUT (`ApplyTurnInput.turnNumber`), so it is stable across replay; and
+     * because the column is NEW, every pre-existing row holds NULL — and NULLs are DISTINCT for
+     * uniqueness — so this index constrains no existing row and cannot fail on a populated table.
+     * That unfailability comes from the KEY (new + all-NULL), not from the partial predicate: a
+     * total UNIQUE on the same column would create just as cleanly. The predicate is here to match
+     * `workforce_transitions_turn_receipt_idx`'s shape and to keep the index off the turn-less rows
+     * the approval sweep writes, which Postgres would admit under a total UNIQUE anyway.
+     */
+    uniqueIndex('workforce_reviews_turn_receipt_idx')
+      .on(t.tenantId, t.taskId, t.turnNumber)
+      .where(sql`${t.turnNumber} is not null`),
+  ],
 );
 
 /**
@@ -990,7 +1062,8 @@ export const workforceMessages = pgTable(
     taskId: text('task_id').notNull(),
     sender: text('sender').notNull(),
     recipient: text('recipient').notNull(),
-    body: text('body').notNull(),
+    /** NULLABLE ONLY SO ERASURE CAN SCRUB IT — the body is untrusted subject content end to end. */
+    body: text('body'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

@@ -992,8 +992,10 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
   });
 
   it('a review child that FAILS on its second consecutive tool error releases the reviewed task', async () => {
-    // The SECOND of the three routes named at task-locks.ts:219-235 by which a dispatched reviewer
-    // reaches terminal without a verdict. Unlike the operator cancel above, nobody chose this: the
+    // The SECOND of the routes into the backstop named at task-locks.ts (an operator cancel of the
+    // reviewer, this one, and the approval-timeout sweep — the "cancel cascade from an ancestor"
+    // that comment used to list is NOT one, see the case below and the comment's own note).
+    // Unlike the operator cancel above, nobody chose this: the
     // reviewer simply misbehaved twice and the engine failed it. `waiting_for_review` has no
     // signal-based exit (it appears in no `WAKES` park and no sweep covers it), so if the backstop
     // did not fire here the reviewed task would sit parked forever with its result unread.
@@ -1065,13 +1067,15 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
   });
 
   it('a cancel cascade from an ancestor leaves no task parked on a review it can never receive', async () => {
-    // The THIRD route named at task-locks.ts:219-235 — and the one that behaves differently from
-    // what that comment implies. The cascade reaches the reviewed task itself (it is a non-terminal
+    // The route task-locks.ts USED to name as a third way into the backstop, and does not any more,
+    // because it is not one. The cascade reaches the reviewed task itself (it is a non-terminal
     // descendant of the origin, taken shallowest-first), so the reviewed task is CANCELLED rather
     // than released: the park is gone because the task is gone. `releaseAbandonedReview` is not
-    // reached at all, and cannot be — `cancelDescendants` (apply-intents.ts:1361-1399) transitions
-    // descendants directly and never calls `afterTaskTerminal`, and by the time the reviewer is
-    // cancelled its parent is already terminal.
+    // reached at all, and cannot be — the binding reason is that `cancelDescendants`
+    // (apply-intents.ts:1361-1399) transitions descendants directly and never calls
+    // `afterTaskTerminal`, which is the backstop's ONLY caller, so this route never enters its call
+    // graph. (That the reviewer's parent is already terminal by then is also true, but it is the
+    // second guard, not the one that decides.)
     //
     // What is asserted is therefore the PROPERTY the backstop exists for, on this route: after an
     // ancestor cascade nothing is left in `waiting_for_review`, and no verdict is invented.
@@ -1162,7 +1166,10 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         verdict: 'accept',
         reasons: [],
         requiredChanges: [],
-        actor: 'user:ops',
+        // The review's OWN named reviewer, so the refusal under test is the PARK BINDING and not
+        // the decision-door authority gate (which would refuse an unrelated operator first and
+        // stop exercising the binding at all).
+        actor: 'user:qa',
       }),
     ).rejects.toBeInstanceOf(ReviewNotForParkError);
     const held = await db.$client.unsafe(
@@ -1221,13 +1228,14 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const review = (await db.$client.unsafe(
       `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
     )) as unknown as { id: string }[];
-    // The HUMAN verdict route decides first.
+    // The HUMAN verdict route decides first — as the reviewer the row names, which is who the
+    // decision door admits (the subject here is the LOST RACE, not the authority gate).
     await applyReviewVerdict(tdb(), NO_BUDGETS, {
       reviewId: (review[0] as { id: string }).id,
       verdict: 'accept',
       reasons: [],
       requiredChanges: [],
-      actor: 'user:qa-lead',
+      actor: 'user:qa',
     });
     // The dispatched reviewer's turn then lands — benign, recorded as superseded.
     await driveChildToWorking(reviewer.task_id);

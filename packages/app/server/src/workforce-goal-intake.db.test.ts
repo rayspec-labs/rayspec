@@ -5,11 +5,33 @@
  */
 
 import type { ExecutionPlan, OrchestrationInput, OrchestrationStrategy } from '@rayspec/core';
+import {
+  SEAM_MAX_PLAN_STEPS,
+  SEAM_MAX_STEP_DEPENDENCIES,
+  SEAM_MAX_STEP_TITLE_CHARS,
+} from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
+import { MAX_TASK_DEPENDENCIES, MAX_TASK_TITLE_CHARS } from '@rayspec/tasks';
 import { makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildWorkforceGoalIntake } from './workforce-goal-intake.js';
+
+/**
+ * The seam contract kit tells an out-of-tree strategy author what title length is acceptable; the
+ * task row is what actually refuses one. The two constants live in packages that cannot import each
+ * other, so this pin is what keeps the kit from blessing a plan the engine would then reject. It is
+ * here rather than in @rayspec/core because this is the only package that can see both.
+ */
+describe('the seam kit and the engine agree on the row bounds', () => {
+  it('the contract kit’s step-title ceiling IS the engine’s task-title row bound', () => {
+    expect(SEAM_MAX_STEP_TITLE_CHARS).toBe(MAX_TASK_TITLE_CHARS);
+  });
+
+  it('the contract kit’s dependency ceiling IS the engine’s task-dependency row bound', () => {
+    expect(SEAM_MAX_STEP_DEPENDENCIES).toBe(MAX_TASK_DEPENDENCIES);
+  });
+});
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -202,6 +224,111 @@ describe.skipIf(!hasDb)('the goal intake (db)', () => {
       expect(result.detail).toContain("strategy 'scripted'");
     }
     expect(await taskRows()).toHaveLength(0); // every refusal preceded the first insert
+  });
+
+  /**
+   * THE ADVERSARIAL MATRIX. The strategy is out-of-tree code, so every cell here is a plan a hostile
+   * or merely broken implementation could return, enumerated so coverage is visible rather than
+   * trusted. Each cell must be a typed refusal that leaves ZERO rows — the refusal runs before the
+   * first insert and the whole plan is one transaction, so a half-born plan is not a possible
+   * outcome to begin with.
+   */
+  it('refuses every over-reaching plan shape typed, with ZERO rows', async () => {
+    const step = (over: Partial<ExecutionPlan['steps'][number]> = {}) => ({
+      title: 'A',
+      goal: 'a',
+      owner: 'dev',
+      department: null,
+      dependsOn: [],
+      ...over,
+    });
+    const cases: Array<{ label: string; plan: ExecutionPlan; detail: string }> = [
+      {
+        label: 'a step that depends on ITSELF',
+        plan: { steps: [step({ dependsOn: [0] })] },
+        detail: 'depends on index 0, which is not a PRIOR step',
+      },
+      {
+        label: 'a FRACTIONAL dependency index',
+        plan: { steps: [step(), step({ dependsOn: [0.5] })] },
+        detail: 'depends on index 0.5, which is not a PRIOR step',
+      },
+      {
+        label: 'a NEGATIVE dependency index',
+        plan: { steps: [step(), step({ dependsOn: [-1] })] },
+        detail: 'depends on index -1, which is not a PRIOR step',
+      },
+      {
+        label: 'more dependencies than a row can carry',
+        plan: {
+          steps: [step(), step({ dependsOn: Array.from({ length: 101 }, () => 0) })],
+        },
+        detail: `declares 101 dependencies (the row bound is ${MAX_TASK_DEPENDENCIES})`,
+      },
+      {
+        label: 'a title one character past the row bound',
+        plan: { steps: [step({ title: 'T'.repeat(MAX_TASK_TITLE_CHARS + 1) })] },
+        detail: `outside 1..${MAX_TASK_TITLE_CHARS} characters`,
+      },
+      {
+        label: 'an EMPTY title',
+        plan: { steps: [step({ title: '' })] },
+        detail: `outside 1..${MAX_TASK_TITLE_CHARS} characters`,
+      },
+      { label: 'an EMPTY goal', plan: { steps: [step({ goal: '' })] }, detail: 'empty goal' },
+      {
+        label: 'a step booking a department its owner does not belong to',
+        plan: { steps: [step({ owner: 'lead', department: 'eng' })] },
+        detail: "books department 'eng'",
+      },
+      {
+        label: 'a step naming an owner the workforce does not declare',
+        plan: { steps: [step({ owner: 'ghost' })] },
+        detail: "owner 'ghost'",
+      },
+      {
+        label: 'an UNBOUNDED plan — one goal cannot become an unbounded write',
+        plan: {
+          steps: Array.from({ length: SEAM_MAX_PLAN_STEPS + 1 }, (_v, i) =>
+            step({ title: `T${i}`, goal: `g${i}` }),
+          ),
+        },
+        detail: `carries ${SEAM_MAX_PLAN_STEPS + 1} steps (the bound is ${SEAM_MAX_PLAN_STEPS})`,
+      },
+    ];
+    for (const { label, plan, detail } of cases) {
+      const result = await intakeWith(scripted(plan).strategy).submitGoal({
+        tenantId: TENANT,
+        workforceId: 'intake_wf',
+        goal: 'g',
+        requestedBy: 'user:u1',
+      });
+      expect(result.outcome, label).toBe('invalid_plan');
+      if (result.outcome !== 'invalid_plan') throw new Error('unreachable');
+      expect(result.detail, label).toContain(detail);
+      expect(result.detail, label).toContain("strategy 'scripted'");
+      expect(await taskRows(), label).toHaveLength(0);
+    }
+  });
+
+  it('a plan AT the step bound is created — the bound refuses excess, not decomposition', async () => {
+    const plan: ExecutionPlan = {
+      steps: Array.from({ length: SEAM_MAX_PLAN_STEPS }, (_v, i) => ({
+        title: `T${i}`,
+        goal: `g${i}`,
+        owner: 'dev',
+        department: null,
+        dependsOn: [],
+      })),
+    };
+    const result = await intakeWith(scripted(plan).strategy).submitGoal({
+      tenantId: TENANT,
+      workforceId: 'intake_wf',
+      goal: 'g',
+      requestedBy: 'user:u1',
+    });
+    expect(result.outcome).toBe('created');
+    expect(await taskRows()).toHaveLength(SEAM_MAX_PLAN_STEPS);
   });
 
   it('reconciles tenant and workforce BEFORE the strategy runs: a foreign pair is not_found and plans nothing', async () => {

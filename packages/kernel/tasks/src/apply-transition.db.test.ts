@@ -36,6 +36,7 @@ import {
   TENANT_A,
   TENANT_B,
 } from './test-support/test-db.js';
+import { renewTurnLease } from './turn-lease.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -331,6 +332,95 @@ describe.skipIf(!hasDb)('applyTransition (db)', () => {
         before,
       );
     }
+  });
+
+  it('the claim LEASE is stamped by the entry into working and cleared by every exit from it', async () => {
+    // The lease lives in the SAME compare-and-swap UPDATE that writes the status and stamps
+    // started_at, so it can never disagree with the claim it describes and no second writer exists.
+    const task = await seedTask();
+    const queued = await applyTransition(forTenant(db, TENANT_A), {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    expect(queued.claimExpiresAt).toBeNull();
+
+    const leaseUntil = new Date(Date.now() + 1_800_000);
+    const working = await applyTransition(forTenant(db, TENANT_A), {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'wf-task-turn:x:1:2',
+      leaseUntil,
+    });
+    expect(working.claimExpiresAt?.toISOString()).toBe(leaseUntil.toISOString());
+
+    // Any exit from `working` clears it — a stale expiry must never be readable on a row that
+    // holds no claim.
+    const done = await applyTransition(forTenant(db, TENANT_A), {
+      taskId: task.taskId,
+      expectedVersion: working.version,
+      to: 'completed',
+      actor: 'user',
+    });
+    expect(done.claimExpiresAt).toBeNull();
+  });
+
+  it('renewTurnLease extends only a LIVE claim — it matches nothing once the row leaves working', async () => {
+    // The production call site is the durable engine's recovery of its OWN claim, which no test in
+    // this repo executes (whole-body recovery is simulated by the receipt/reaper suites, never
+    // driven). So the function's own guarantees are asserted here directly: it moves the lease on a
+    // `working` row, and — because it is scoped to `status = 'working'` — it can neither resurrect a
+    // terminal row nor extend a claim a reap has already taken away.
+    const task = await seedTask();
+    const tdb = forTenant(db, TENANT_A);
+    const queued = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const first = new Date(Date.now() + 60_000);
+    const working = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'wf-task-turn:x:1:2',
+      leaseUntil: first,
+    });
+    expect(working.claimExpiresAt?.toISOString()).toBe(first.toISOString());
+
+    const renewed = new Date(Date.now() + 1_800_000);
+    expect(await renewTurnLease(tdb, task.taskId, renewed)).toBe(true);
+    const afterRenew = await db.$client.unsafe(
+      `SELECT claim_expires_at, status, version FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(new Date(afterRenew[0]?.claim_expires_at as string).toISOString()).toBe(
+      renewed.toISOString(),
+    );
+    // A renewal is NOT a transition: the status and the compare-and-swap token do not move, so it
+    // can never be mistaken for one or invalidate a concurrent holder's expected version.
+    expect(afterRenew[0]?.status).toBe('working');
+    expect(afterRenew[0]?.version).toBe(working.version);
+
+    // The reap takes the row out of `working`; a late renewal from the superseded execution now
+    // matches nothing and leaves the lease cleared.
+    await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: working.version,
+      to: 'queued',
+      reason: 'tool_error',
+      actor: 'scheduler',
+      queueReason: 'turn_lease_expired',
+    });
+    expect(await renewTurnLease(tdb, task.taskId, new Date(Date.now() + 1_800_000))).toBe(false);
+    const afterReap = await db.$client.unsafe(
+      `SELECT claim_expires_at FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(afterReap[0]?.claim_expires_at).toBeNull();
   });
 
   it('the tenant predicate holds: tenant B cannot see or transition tenant A task', async () => {

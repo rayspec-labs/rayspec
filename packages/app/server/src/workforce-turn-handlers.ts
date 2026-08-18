@@ -31,7 +31,7 @@
  */
 
 import type { AgentRegistry } from '@rayspec/api-auth';
-import type { AgentSpec, Backend, WorkforceMemoryProvider } from '@rayspec/core';
+import type { AgentSpec, Backend, NeutralTool, WorkforceMemoryProvider } from '@rayspec/core';
 import { type Db, forTenant, type TenantDb } from '@rayspec/db';
 import type {
   ResolveTurnHandler,
@@ -76,6 +76,36 @@ export interface WorkforceTurnHandlerDeps {
 /** A typed `fail` outcome — the engine's requeue/fail machinery reads the message. */
 function failTurn(message: string): TaskTurnHandlerOutcome {
   return { intent: { kind: 'fail', message } };
+}
+
+/**
+ * THE TOOL LIST ONE TURN OFFERS: the employee's DECLARED agent tools first, the runtime's NATIVE
+ * role toolset LAST. The order IS the precedence rule, not presentation.
+ *
+ * `makeDispatchTool` indexes its list into `new Map(deps.tools.map(t => [t.spec.name, t]))`
+ * (packages/kernel/platform/src/dispatch.ts) and a later entry OVERWRITES an earlier one — so
+ * whichever side is spread last WINS a name collision. Natives spread last therefore win, which is
+ * what `RESERVED_WORKFORCE_TOOL_NAMES`' rationale (@rayspec/core workforce-ids.ts) says happens and
+ * what the two refusal doors above and at parse exist to make unreachable in the first place.
+ * Spread the other way round — which is how this composition passed its list until the ordering was
+ * corrected — those doors are the ONLY barrier; spread this way they are the second one, and a
+ * collision that somehow reached dispatch would still resolve to the runtime's own tool rather than
+ * to the agent pack's.
+ *
+ * The one visible consequence beyond precedence: this array is also the model-facing tool LIST
+ * (run-core hands the backend `{...spec, tools: tools.map(t => t.spec)}`), so declared tools are now
+ * presented before the natives. Nothing keys on that order — dispatch is by name, and the
+ * cross-backend toolset parity gate shapes `buildRoleToolset`'s output, not this concatenation.
+ *
+ * Proven in `workforce-tool-precedence.test.ts` with BOTH refusal doors deliberately stepped around
+ * (and the doors themselves re-asserted there on the same input), and the composition's own use of
+ * it in `workforce-turn-validation.db.test.ts`.
+ */
+export function composeTurnTools(
+  nativeTools: readonly NeutralTool[],
+  agentTools: readonly NeutralTool[],
+): NeutralTool[] {
+  return [...agentTools, ...nativeTools];
 }
 
 /**
@@ -151,7 +181,10 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       const memory =
         deps.memoryProviderFor?.(tdb, recallScope) ??
         new TaskHistoryMemoryProvider(tdb, recallScope);
-      const recall = await memory.search({ text: ctx.task.goal });
+      // An erased goal (migration 0013 made the column nullable so `journalScrub` can scrub it)
+      // has nothing to recall AGAINST — an empty query scores every candidate at zero rather than
+      // recalling on the literal string "null".
+      const recall = await memory.search({ text: ctx.task.goal ?? '' });
 
       // THE TURN INPUT — pure assembly over verified facts. The scaffolding (facts.ts) computes
       // everything the runtime can answer before the model is invoked; a goal that cannot fit
@@ -179,7 +212,9 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       };
       const backend = deps.backendForEmployee?.(employee) ?? entry.backend;
       const result = await runAgent(tdb, backend, spec, {
-        tools: [...nativeTools, ...agentTools],
+        // Natives LAST — see composeTurnTools: the dispatcher's by-name Map is last-wins, so this is
+        // where "natives win, always" is made structurally true rather than only asserted above.
+        tools: composeTurnTools(nativeTools, agentTools),
       });
 
       const collected = collector.finish();
