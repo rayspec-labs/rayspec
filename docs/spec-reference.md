@@ -2333,6 +2333,20 @@ hung approval always has an enforced fate: the timeout sweep applies `onTimeout`
 `escalate` up the requester's reporting edge — which is why an `escalate` rule covering the
 orchestrator seat, who reports to no one, is refused).
 
+> **`onTimeout: escalate` reaches a narrower audience than it reads — `doctor` says so.**
+> An escalated request is re-issued naming the requester's superior, a declared **employee id**,
+> as its approver. An authenticated principal is `user:<uuid>` or `api-key:<uuid>`, and an
+> employee id may not contain a hyphen, so the two namespaces cannot meet: no named approver is
+> ever matched at the decision door. The remaining route is break-glass — `override: true` plus
+> the `workforce:override` permission — which an **owner or admin holds and an api-key can never
+> be granted**, so a deployment authenticated only by api-keys cannot resolve an escalated
+> approval at all. This is a deliberate v1 boundary (binding a principal to an employee is not in
+> this release), so it is a **`workforce_escalation_unreachable` advisory**, never a refusal:
+> `doctor` reports it on every escalating policy and the deploy proceeds. Declare
+> `onTimeout: fail` if no human owner or admin will be reachable. The advisory is **not**
+> acknowledgeable through `lintSuppress` — that field is scoped to `agents`/`stores`/`api`/
+> `triggers`/`handlers` nodes and cannot cover a `workforce.…` path.
+
 ### A worked example
 
 The worked example below is the workforce block of `examples/workforce-starter/rayspec.yaml`,

@@ -39,7 +39,7 @@ import {
 import { z } from 'zod';
 import { MAX_IDENTIFIER_LENGTH, SafeIdentifier } from './identifier.js';
 import { WorkforceSpec } from './workforce-grammar.js';
-import { SuppressibleWarningCode } from './errors.js';
+import { EXCLUDED_WARNING_RATIONALE, SuppressibleWarningCode } from './errors.js';
 
 /** The supported spec major.minor. Parsed FIRST (two-phase) so an unknown major fails cleanly. */
 export const SPEC_VERSION = '1.0' as const;
@@ -138,9 +138,18 @@ export type DeploymentSpec = z.infer<typeof DeploymentSpec>;
  * skim past a warning channel that never clears.
  *
  *  - `code`    — the advisory being acknowledged, drawn from `SuppressibleWarningCode`: the closed
- *                warning vocabulary MINUS `stale_suppression` (the rot detector may not acknowledge
- *                itself). An ERROR code is structurally out of the enum, so suppressing an error is
- *                not expressible — advisories only, rejected at parse.
+ *                warning vocabulary MINUS the codes an acknowledgement could not actually act on.
+ *                THE RULE, not the list (errors.ts holds the list and the per-code rationale): a
+ *                code is excluded when acknowledging it would not do what an acknowledgement means.
+ *                Two qualify today — `stale_suppression`, because the rot detector may not
+ *                acknowledge itself, and `workforce_escalation_unreachable`, because it reports on
+ *                a `workforce.…` path and suppression is scoped to the NODE carrying the list, so
+ *                no node's path can ever cover it and the entry would silence nothing. An ERROR
+ *                code is structurally out of the enum, so suppressing an error is not expressible
+ *                at all — advisories only, rejected at parse.
+ *                The refusal message below is DERIVED from the enum and is guarded to name every
+ *                excluded code (lint-suppress.test.ts), so a third exclusion cannot land with an
+ *                author-facing message that silently omits it.
  *  - `because` — the recorded justification. REQUIRED and non-empty (whitespace-only is rejected):
  *                a suppression without a reason is rejected at parse, fail-closed — the whole value
  *                of the entry is the audit trail it leaves.
@@ -163,10 +172,15 @@ export type DeploymentSpec = z.infer<typeof DeploymentSpec>;
 export const LintSuppression = z
   .object({
     code: z.enum(SuppressibleWarningCode.options, {
+      // The author reads THIS at 2am, so it names their actual case rather than a rationale that
+      // happens to be true of some other code. Both halves are derived from the enums — the
+      // permitted list and the excluded list — and a test asserts every excluded code is named
+      // here, so this message cannot drift behind a future exclusion.
       error:
         'lintSuppress `code` must name a suppressible advisory code (' +
-        `${SuppressibleWarningCode.options.join(', ')}) — an error cannot be suppressed, and ` +
-        'stale_suppression cannot acknowledge itself',
+        `${SuppressibleWarningCode.options.join(', ')}). An error code cannot be suppressed at ` +
+        'all, and these advisories are deliberately excluded because acknowledging them could ' +
+        `not do what an acknowledgement means: ${EXCLUDED_WARNING_RATIONALE}`,
     }),
     because: z
       .string()
