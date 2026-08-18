@@ -10,6 +10,9 @@
  *  - bindRouteParams prepends a deterministic, trusted block — and is a NO-OP with no params.
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ApiError } from '@rayspec/auth-core';
 import { buildProductTables } from '@rayspec/db/testing';
 import { lintSpec, RaySpec, RESERVED_QUERY_KEYWORDS } from '@rayspec/spec';
@@ -109,6 +112,101 @@ function richSpec(): RaySpec {
     ],
   });
 }
+
+/**
+ * THE POSTURE NOTICE, BYTE-PINNED — and pinned IDENTICAL to the second copy of it in the tree.
+ *
+ * Until this block existed, every assertion on `OPENAPI_POSTURE_NOTICE` anywhere was either
+ * self-referential (`toContain(OPENAPI_POSTURE_NOTICE)`) or a substring probe
+ * (`toContain('NOT internet-facing')`). Both stay GREEN while the sentence is softened, so the one
+ * statement of this deployment's posture that travels to a stranger holding nothing else was
+ * editable without a single test noticing. Two independent halves close that:
+ *
+ *   (1) the VALUE is written out below and compared with `toBe`, so the words themselves are the
+ *       thing under test rather than a variable compared to itself;
+ *   (2) the OTHER copy — `packages/app/cli/src/openapi.ts` — is read off disk and its declaration
+ *       compared BYTE FOR BYTE with this one. `packages/app/cli/src/openapi.test.ts` carries the
+ *       mirror of this pair, so each package's OWN suite goes red when its OWN copy drifts.
+ *
+ * WHY THE MIRROR IS REQUIRED — the BUILD CACHE, not CI's lanes. Both packages run in the same lane
+ * (`ci.yml` excludes each from lane 1, includes each in lane 2), so a lane argument would be false.
+ * `turbo.json` declares no `inputs` for `test`: a task's hash covers its own package plus its
+ * dependencies, and this package does not depend on `@rayspec/cli`. So THIS arm reads a file outside
+ * its own input set, and an edit to that file does not move this task's hash. Measured with
+ * `turbo run test --dry-run=json`:
+ *
+ *     SOFTEN THE CLI COPY   api-auth#test  6c934bfb -> 6c934bfb   UNCHANGED (cached PASS replays)
+ *                           cli#test       e3a679e0 -> 09a325ae   MOVED
+ *
+ * The arm below is therefore the SECOND line of defence for that direction, never the first: the
+ * mirror in `openapi.test.ts` is the one whose own hash moves. In the other direction an edit here
+ * moves both hashes (`cli#test` inherits it through `^build`), so this arm is first-line for its own
+ * package's copy.
+ *
+ * Source-level, deliberately: `@rayspec/cli` cannot import this package (measured — see the
+ * corrected note above the constant in `emit-openapi.ts`), so the comparison reads the file rather
+ * than the export. That is the same instrument `seam-wiring.test.ts` uses for the same reason.
+ */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../..');
+const CLI_COPY_REL = 'packages/app/cli/src/openapi.ts';
+const OWN_COPY_REL = 'packages/compose/api-auth/src/engine/emit-openapi.ts';
+
+/** The exact text. Not derived from the source under test — that is the point of a byte-pin. */
+const PINNED_NOTICE =
+  'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, pre-external-hardening RaySpec deployment. The separate hardening layer (per-tenant sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put this behind a public address.';
+
+/**
+ * Lift the whole `export const OPENAPI_POSTURE_NOTICE = …;` declaration out of a source file, so the
+ * comparison is over the DECLARATION as written (every segment, every line break) and not merely
+ * over a value one of the two files happens to compute.
+ */
+function noticeDeclaration(rel: string): string {
+  const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
+  const match = /^export const OPENAPI_POSTURE_NOTICE =\n(?:.*\n)*?.*;\n/m.exec(src);
+  // The floor: a pattern that matched nothing must FAIL here, never return '' and compare equal to
+  // the other side's ''. Two files that both stopped declaring the constant is not agreement.
+  expect(
+    match,
+    `${rel} no longer declares OPENAPI_POSTURE_NOTICE in the pinned form`,
+  ).not.toBeNull();
+  const declaration = (match as RegExpExecArray)[0];
+  expect(declaration).toContain('OPENAPI_POSTURE_NOTICE');
+  expect(declaration.length).toBeGreaterThan(200);
+  return declaration;
+}
+
+/**
+ * Re-join the single-quoted segments of a declaration into the string it declares. Neither copy uses
+ * an escape (asserted), so a plain concatenation is exact — and if a future edit introduces one, the
+ * reconstruction stops matching the export and this goes red rather than silently reading less.
+ */
+function declaredValue(declaration: string): string {
+  expect(declaration).not.toContain("\\'");
+  const segments = [...declaration.matchAll(/'([^'\\]*)'/g)].map((m) => m[1] as string);
+  expect(segments.length).toBeGreaterThan(0);
+  return segments.join('');
+}
+
+describe('OPENAPI_POSTURE_NOTICE — pinned, and pinned identical across both copies', () => {
+  it('is exactly the posture sentence, byte for byte', () => {
+    expect(OPENAPI_POSTURE_NOTICE).toBe(PINNED_NOTICE);
+  });
+
+  it('is declared byte-identically in @rayspec/api-auth and @rayspec/cli', () => {
+    // The two files are separate packages with no dependency edge between them, so nothing but this
+    // assertion holds their copies together. `emit-openapi.ts` used to claim in prose that only ONE
+    // literal existed; it did not, and the corrected note there names this test instead.
+    expect(noticeDeclaration(CLI_COPY_REL)).toBe(noticeDeclaration(OWN_COPY_REL));
+  });
+
+  it('both declarations on disk evaluate to the value this module exports', () => {
+    // Ties the two arms above together: the byte-pin is on the EXPORT, the identity pin is on the
+    // SOURCE. Rebuilding the value from the source segments closes the loop, so a file edited
+    // without the export moving — or an export re-pointed at some other literal — is red too.
+    expect(declaredValue(noticeDeclaration(OWN_COPY_REL))).toBe(OPENAPI_POSTURE_NOTICE);
+    expect(declaredValue(noticeDeclaration(CLI_COPY_REL))).toBe(OPENAPI_POSTURE_NOTICE);
+  });
+});
 
 describe('buildDeclaredRoutesOpenApi — product-agnostic emission', () => {
   it('a product-EMPTY spec emits a valid document with an EMPTY paths object', () => {
