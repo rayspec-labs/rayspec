@@ -267,8 +267,11 @@ both namespaces is then **byte-identical** (an md5 over the ordered full row tex
 and re-enabling the flag lets a parked task resume on the exact CAS version it was parked at.
 
 What the lever does NOT do: it does not remove the tables, it does not stop time on deadlines or
-approval timeouts (nothing sweeps while the deployment refuses to boot — the fates simply fire when
-you turn it back on), and it is not a schema rollback.
+approval timeouts, and it is not a schema rollback. Nothing sweeps while the deployment refuses to
+boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
+`sweepApprovalTimeouts` selects `pending` approvals on `lt(timeoutAt, now)`
+(`packages/kernel/tasks/src/approvals.ts:167-181`) — so every window that expired during the outage
+is due the moment you turn the flag back on, and the declared fates fire then.
 
 **The boot migrator is a SINGLE-RUNNER step.** It takes no advisory lock. On a fresh, empty
 database two boots that start together will both try to apply the chain, and one of them dies —
@@ -301,9 +304,14 @@ itself on the next boot that still declares the workforce, and both halves are p
 boot…").
 
 So the upgrade order is: **boot once with the workforce still fully declared**, then make removals in
-a later deploy. One caveat rides along — the marker is stamped only on a boot that has BOTH a durable
-worker and `RAYSPEC_CRON_TENANT_ID` set, so a deployment that declares a workforce without
-`deployment.durableWorker` never marks it and stays in the window indefinitely.
+a later deploy. That one boot is enough, and it cannot quietly not-happen: the stamp needs a durable
+worker and a task tenant, and BOTH of those are themselves refusals rather than conditions — a
+`workforce:` section without `deployment.durableWorker: true` is rejected at the parse with a typed
+`schema_violation` (`workforce-lint.ts:670-676`, pinned at
+`workforce-parse.negative.test.ts:606-611`), and a declared workforce with `RAYSPEC_CRON_TENANT_ID`
+unset aborts the boot (`composition-root.ts:2957-2963`, pinned at
+`serve-workforce-flag.db.test.ts`). A deploy that declares a workforce and comes up has therefore
+stamped it.
 
 ## Honest scope
 

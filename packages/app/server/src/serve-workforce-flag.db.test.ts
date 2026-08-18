@@ -341,9 +341,13 @@ describe.skipIf(!hasDb)(
      *   2. `GET /health` answering 200 — the process is listening. Measured, not assumed: a SIGTERM
      *      sent after (1) but BEFORE (2) is not honoured at all. On the certification host that boot
      *      ran on for a further 415 s without exiting, and only a second signal delivered after it was
-     *      listening ended it (then in 50 ms, exit 0). serve.ts registers its SIGINT/SIGTERM handlers
-     *      inside the listen callback (serve.ts:127-147), so the boot window has no handler of its
-     *      own — an operational note in its own right, recorded in the handback report.
+     *      listening ended it (then in 50 ms, exit 0). `serve.ts` registers its SIGINT/SIGTERM handlers
+     *      in the `main()` body at serve.ts:145-146 — AFTER the awaited assemble step at serve.ts:117
+     *      — so nothing runs them until `assembleServer` has resolved, and the whole boot window is
+     *      unprotected by any handler of serve.ts's own. WHAT ACTUALLY SWALLOWED THE SIGNAL IN THAT
+     *      WINDOW IS UNIDENTIFIED: absent a handler, Node's default action is to terminate, so
+     *      something in the boot installed one — do not read a culprit into this comment. The
+     *      BEHAVIOUR is reproducible and is recorded in the handback report as its own item.
      *
      * The SIGKILL fallback exists so a hang is reported as a failed assertion on the exit code rather
      * than as a suite that never returns, and so a stuck server is never left behind for the next arm.
@@ -572,8 +576,9 @@ describe.skipIf(!hasDb)(
       ]);
 
       liveCensus = await census();
-      // ANTI-VACUITY. A census of thirteen zeroes would compare equal after the flag-off boot and
-      // prove nothing whatsoever, so every table and BOTH journal namespaces must carry rows first.
+      // ANTI-VACUITY. A census of eleven zeroes (the nine tables plus the two journal namespaces)
+      // would compare equal after the flag-off boot and prove nothing whatsoever, so every table and
+      // BOTH journal namespaces must carry rows first.
       for (const [key, count] of Object.entries(liveCensus.counts)) {
         expect(
           count,
