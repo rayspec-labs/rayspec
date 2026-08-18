@@ -332,17 +332,25 @@ remainder (`packages/kernel/tasks/src/decision-authority.ts:64`), so the
 **Break-glass takes two independent things, and neither alone does anything**
 (`packages/compose/api-auth/src/routes/workforce.ts:119`):
 
-1. the request must **ask** — `override: true` on the strict body
-   (`packages/kernel/tasks/src/approvals.ts:77`), which is intent and never authority;
+1. the request must **ask** — `override: true`, a field on the strict body
+   (`packages/kernel/tasks/src/approvals.ts:86`, inside the schema at
+   `packages/kernel/tasks/src/approvals.ts:77`), which is intent and never authority;
 2. the principal must **hold** `workforce:override`
    (`packages/kernel/auth-core/src/authz.ts:46`), checked through the same permission gate the
    route's `store:write` middleware used (`packages/compose/api-auth/src/routes/workforce.ts:125`),
    and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:814`) so
    an unauthorized ask is a named 403 rather than a silent downgrade.
 
-The permission is **owner/admin only**, **SENSITIVE** — so it re-checks live membership rather than
-riding a stale role claim (`packages/kernel/auth-core/src/authz.ts:116`) — and is **not**
-api-key-grantable. The override lands in the journal
+The permission is **owner/admin only** — granted in the owner table
+(`packages/kernel/auth-core/src/authz.ts:63`) and the admin table
+(`packages/kernel/auth-core/src/authz.ts:81`), and in no other role — and **SENSITIVE**, so it
+re-checks live membership rather than riding a stale role claim
+(`packages/kernel/auth-core/src/authz.ts:116`). It is **not** api-key-grantable; that is an absence,
+which no line can cite, so it is pinned by assertion instead — and not merely by the set membership:
+`packages/kernel/auth-core/src/authz.test.ts`, `an api-key can NEVER break the glass on a named
+approver/reviewer, however it is scoped` drives `authorize()` with a key that holds the scope
+explicitly, and again with a key holding **every** scope, and observes the refusal both times.
+The override lands in the journal
 (`packages/kernel/tasks/src/approvals.ts:173`; the review twin at
 `packages/kernel/tasks/src/reviews.ts:268`), present *only* when an override actually happened.
 
@@ -428,9 +436,10 @@ the only file that constructs them is `packages/kernel/core/src/strategy-default
 composition only through the `buildServer` options object
 (`packages/app/server/src/composition-root.ts:3348`), and that option is explicitly **not**
 reachable from the environment-derived options
-(`packages/app/server/src/composition-root.ts:1902`) — so a production entrypoint always runs the
-shipped default. `memoryProviderFor` is not passed by the composition root at all; reaching it
-means an embedder composing the turn handlers itself.
+(`packages/app/server/src/composition-root.ts:1911`) — so a production entrypoint always runs the
+shipped default. The turn-handler seam beside it carries the same posture, stated in its own
+docblock (`packages/app/server/src/composition-root.ts:1902`). `memoryProviderFor` is not passed by
+the composition root at all; reaching it means an embedder composing the turn handlers itself.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -757,6 +766,16 @@ installed out-of-tree implementation, not from the environment:
   — and that battery found one of them missing (a title renamed in the prose alone went green,
   because only the appendix copy was checked), which is why arm 6 exists.
 
+  **The residual class is the near miss, and this page shipped one before a manual audit caught
+  it.** An earlier draft cited `packages/app/server/src/composition-root.ts:1902` for the claim that
+  the *orchestration strategy* option is unreachable from the environment. That line is the
+  **turn-handler** option's docblock; the strategy's own is
+  `packages/app/server/src/composition-root.ts:1911`. Same file, adjacent block, and both contain
+  the phrase the ledger recorded — so the guard passed it, correctly and uselessly. A citation that
+  is stable is not thereby a citation that is *apt*, and only reading the enclosing function or
+  docblock settles which. Every citation in this page whose recorded text also occurs elsewhere in
+  its own file was re-checked that way.
+
 ---
 
 ## 8. Non-goals — what this release does not provide
@@ -889,6 +908,7 @@ packages/kernel/workforce-tools/src/resolve-target.ts:116 | if (target.kind === 
 packages/kernel/workforce-tools/src/resolve-target.ts:126 | if (ownDepartment?.members.includes(resolved.owner)) return;
 packages/kernel/workforce-tools/src/collector.ts:35 | export const MALFORMED_TURN_ENDING
 packages/kernel/tasks/src/approvals.ts:77 | export const approvalDecisionSchema = z.strictObject({
+packages/kernel/tasks/src/approvals.ts:86 | override: z.boolean().default(false),
 packages/kernel/tasks/src/approvals.ts:133 | const overrode = !mayDecide(named.approver, input.decidedBy);
 packages/kernel/tasks/src/approvals.ts:135 | throw new ApprovalApproverMismatchError(input.approvalId, named.approver, input.decidedBy);
 packages/kernel/tasks/src/approvals.ts:148 | eq(schema.workforceApprovals.status, 'pending'),
@@ -951,7 +971,8 @@ packages/app/server/src/banner.ts:38 | export const POSTURE_WARNING_LINES: reado
 packages/app/server/src/banner.ts:60 | LOCAL / single-node / pre-external-hardening
 packages/app/server/src/banner.ts:222 | STATIC PROFILE (frontend-only)
 packages/app/server/src/banner.ts:232 | lines.push(...POSTURE_WARNING_LINES);
-packages/app/server/src/composition-root.ts:1902 | NOT reachable from
+packages/app/server/src/composition-root.ts:1902 | NOT reachable from `assembleOptsFromEnv`, so a
+packages/app/server/src/composition-root.ts:1911 | `assembleOptsFromEnv`, so a production entrypoint always runs the shipped default
 packages/app/server/src/composition-root.ts:3348 | strategy: opts.orchestrationStrategy ?? new SingleTaskPlanStrategy(),
 packages/app/server/src/composition-root.ts:3394 | if (specStores.length > 0 || effectiveSpec.workforce !== undefined) {
 packages/kernel/platform/src/dispatch.ts:226 | const byName = new Map(deps.tools.map((t) => [t.spec.name, t]));
@@ -977,6 +998,8 @@ packages/kernel/spec/src/workforce-grammar.ts:129 | labels: z.array(WorkforceLab
 packages/kernel/spec/src/workforce-grammar.ts:211 | const PolicyLabels = z.array(WorkforceLabel).min(1);
 packages/kernel/spec/src/identifier.ts:19 | export const SAFE_IDENTIFIER_RE = /^[a-z_][a-z0-9_]*$/;
 packages/kernel/auth-core/src/authz.ts:46 | 'workforce:override'
+packages/kernel/auth-core/src/authz.ts:63 | 'workforce:override',
+packages/kernel/auth-core/src/authz.ts:81 | 'workforce:override',
 packages/kernel/auth-core/src/authz.ts:116 | 'workforce:override',
 ```
 
@@ -1036,6 +1059,7 @@ packages/kernel/workforce-tools/src/toolset-semantics.test.ts | a manager reache
 packages/kernel/workforce-tools/src/toolset-semantics.test.ts | the led-team grant exists exactly where the task IS that team
 packages/kernel/workforce-tools/src/role-privilege.test.ts | the toolset is a function of the TASK owner alone — two roles never blend
 packages/kernel/workforce-tools/src/role-privilege.test.ts | every tool a role carries sets inputSchema, and it IS the schema the model was shown
+packages/kernel/auth-core/src/authz.test.ts | an api-key can NEVER break the glass on a named approver/reviewer, however it is scoped
 packages/kernel/core/src/strategy-defaults.test.ts | CapabilityMatchSelector
 packages/app/server/src/workforce-goal-intake.db.test.ts | refuses an invalid plan typed, with ZERO rows
 packages/app/server/src/workforce-goal-intake.db.test.ts | reconciles tenant and workforce BEFORE the strategy runs
