@@ -62,6 +62,8 @@
  * @rayspec/durable-dbos task-scheduler.db.test.ts, because the refusal is in the claim
  * transaction, which is the only writer of `status = 'working'`.
  */
+import { schema } from '@rayspec/db';
+import { eq } from 'drizzle-orm';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyTurnOutcome } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
@@ -296,6 +298,175 @@ describe.skipIf(!hasDb)('operator control (db)', () => {
 
       // An operator reads this number. A halt that cancelled two tasks and journaled `0` is its own
       // defect even once the rows are right.
+      expect(await haltedEventCount()).toBe(2);
+    });
+
+    // ───────────────────────────────────────────────────────────────────────────────────────────
+    // D-039 — the RACING form of the same skip: a root that goes terminal DURING the halt.
+    //
+    // The arms above drive the STATIC case (terminal before the scan). The scan's read is
+    // unlocked, so the branch it takes can be stale by the time the cascade holds the row: a root
+    // read as LIVE and found TERMINAL under `lockRootFirst` hits `cancelTaskCascade`'s terminal
+    // early return, which is before `cancelDescendants` — so the halt returns having done nothing
+    // for that subtree, and (unlike the static case) having taken the branch that says it did.
+    //
+    // The interleaving below is built from REAL POSTGRES ROW LOCKS — no mock, no injected seam,
+    // no patched clock. `terminalizeRootUnderHeldLock` locks the root row `FOR UPDATE` and parks;
+    // the halt is started but NOT awaited, reads the still-committed live row (READ COMMITTED
+    // never shows another transaction's uncommitted write), takes the live branch, and blocks in
+    // `lockRootFirst`. Only once it is DEMONSTRABLY blocked (`waitForBlockedRowLock`, which reads
+    // Postgres' own wait graph) does the holder apply the terminal transition and commit. The
+    // blocked `FOR UPDATE` then re-reads the updated tuple and sees `failed`.
+    //
+    // The transition is applied through `applyTransition` with `blocked -> failed
+    // (dependency_failed)` — the exact pair `#failOnDecidedDependency` writes — so the row this
+    // race produces is one the state machine produced, not one a test hand-wrote.
+    // ───────────────────────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Hold the root's row lock, then terminalize it ON COMMAND without releasing it in between.
+     *
+     * The lock is taken FIRST and the transition applied LATER, deliberately in that order: a
+     * transition appends journal events, and the event append takes the tenant's sequence-counter
+     * row lock. Doing it up front would have this transaction holding that counter while the halt
+     * still needs it for its own `workforce.control.paused` append — the halt would block on the
+     * COUNTER instead of on the task row, which is not the interleaving under test (and would
+     * deadlock against the gate). By the time `commit()` runs, the halt is already past its pause
+     * and blocked on the task row, holding no counter.
+     */
+    function terminalizeRootUnderHeldLock(rootId: string): {
+      /** Resolves once the root row is locked and the holder is parked on the gate. */
+      readonly locked: Promise<void>;
+      /** Apply the terminal transition and commit — the halt's blocked lock wait then resolves. */
+      readonly commit: () => void;
+      /** Resolves when the holding transaction has committed; carries the version it wrote. */
+      readonly done: Promise<number>;
+    } {
+      let openGate!: () => void;
+      let announceLocked!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      const locked = new Promise<void>((resolve) => {
+        announceLocked = resolve;
+      });
+      const done = tdb().transaction(async (tx) => {
+        const rows = (await tx
+          .select(schema.workforceTasks)
+          .where(eq(schema.workforceTasks.taskId, rootId))
+          .for('update')) as TaskRecord[];
+        const held = rows[0] as TaskRecord;
+        announceLocked();
+        await gate;
+        const failed = await applyTransition(tx, {
+          taskId: rootId,
+          expectedVersion: held.version,
+          to: 'failed',
+          reason: 'dependency_failed',
+          actor: 'scheduler',
+        });
+        return failed.version;
+      });
+      return { locked, commit: () => openGate(), done };
+    }
+
+    /**
+     * Block until Postgres' OWN wait graph shows a backend waiting for a `workforce_tasks` row
+     * lock. Not a sleep: a sleep would make this arm pass for the wrong reason on a slow host (the
+     * holder commits before the halt ever reads, which is the STATIC case the arms above already
+     * cover). This suite runs with `fileParallelism: false` and CI's lane 2 runs
+     * `turbo --concurrency=1`, so the only `FOR UPDATE` on that table in flight is the halt's.
+     */
+    async function waitForBlockedRowLock(): Promise<void> {
+      for (let attempt = 1; attempt <= 2_000; attempt++) {
+        const rows = await db.$client.unsafe(
+          `SELECT count(*)::int AS c FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND state = 'active'
+               AND wait_event_type = 'Lock'
+               AND cardinality(pg_blocking_pids(pid)) > 0
+               AND query ILIKE '%workforce_tasks%'
+               AND query ILIKE '%for update%';`,
+        );
+        if ((rows[0] as { c: number }).c > 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      throw new Error(
+        'the halt never blocked on the held root-row lock — the interleaving this arm exists to ' +
+          'drive did not happen, so any verdict it reports would be about a different execution',
+      );
+    }
+
+    it('cancels the live subtree beneath a root that goes terminal DURING the halt', async () => {
+      const { root, middle, leaf } = await threeDeepQuiet();
+      const holder = terminalizeRootUnderHeldLock(root);
+      await holder.locked;
+
+      // STARTED, not awaited: the scan reads `blocked` (live), then blocks in `lockRootFirst`.
+      const halting = halt();
+      await waitForBlockedRowLock();
+      holder.commit();
+      await holder.done;
+      const outcome = await halting;
+
+      expect(
+        { middle: (await rowOf(middle)).status, leaf: (await rowOf(leaf)).status },
+        'the halt returned with live work still running: it read the root as LIVE, found it ' +
+          'TERMINAL under the lock, and took the cascade early return that never reaches ' +
+          '`cancelDescendants` — the subtree is reachable ONLY through its root',
+      ).toEqual({ middle: 'cancelled', leaf: 'cancelled' });
+      expect((await rowOf(middle)).status_reason).toBe('cancelled_by_parent');
+      expect((await rowOf(leaf)).status_reason).toBe('cancelled_by_parent');
+      expect(outcome.cancelled).toEqual(expect.arrayContaining([middle, leaf]));
+      expect(outcome.signalled).toEqual([]);
+      // The whole contract, stated as the operator reads it.
+      const stillLive = await db.$client.unsafe(
+        "SELECT count(*)::int AS c FROM workforce_tasks WHERE workforce_id = 'wf' AND status NOT IN ('completed', 'failed', 'cancelled');",
+      );
+      expect(
+        (stillLive[0] as { c: number }).c,
+        'a halt that leaves ANY non-terminal task in the workforce did not halt the workforce',
+      ).toBe(0);
+    });
+
+    it('leaves the RACING root itself untouched — the re-route writes only descendants', async () => {
+      const { root } = await threeDeepQuiet();
+      const holder = terminalizeRootUnderHeldLock(root);
+      await holder.locked;
+      const halting = halt();
+      await waitForBlockedRowLock();
+      holder.commit();
+      const versionAfterFailure = await holder.done;
+      await halting;
+
+      // `applyTransition` is the single status writer and the three terminal rows of
+      // ALLOWED_TRANSITIONS are all-false, so re-terminalising the root is a write the state
+      // machine must refuse. The VERSION is the load-bearing half: a stray write that happened to
+      // land on the same status would still bump it.
+      expect(await rowOf(root)).toEqual({
+        status: 'failed',
+        status_reason: 'dependency_failed',
+        version: versionAfterFailure,
+      });
+      const cancelled = await db.$client.unsafe(
+        `SELECT count(*)::int AS c FROM workforce_task_transitions WHERE task_id = '${root}' AND to_status = 'cancelled';`,
+      );
+      expect((cancelled[0] as { c: number }).c).toBe(0);
+    });
+
+    it('counts the re-routed subtree in the halt event, not zero', async () => {
+      const { root } = await threeDeepQuiet();
+      const holder = terminalizeRootUnderHeldLock(root);
+      await holder.locked;
+      const halting = halt();
+      await waitForBlockedRowLock();
+      holder.commit();
+      await holder.done;
+      await halting;
+
+      // An operator reads this number. A halt that skipped a subtree and journaled `0` reports
+      // "nothing was running" about a workforce that was.
       expect(await haltedEventCount()).toBe(2);
     });
 
