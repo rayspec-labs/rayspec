@@ -819,7 +819,7 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
  *
  * `onTimeout: 'escalate'` mints a row addressed to a superior who cannot answer at the HTTP door.
  * The sweep re-issues the timed-out request with `approver: escalateTo` (@rayspec/tasks
- * approvals.ts), an EMPLOYEE id — and the two namespaces meeting on that column are structurally
+ * approvals.ts), an EMPLOYEE id — and the two namespaces that meet on that column are structurally
  * disjoint: an authenticated principal is `user:<uuid>` / `api-key:<uuid>` (both id columns are
  * Postgres `uuid`, so always hyphenated), while an employee id is a `SafeIdentifier`, which forbids
  * `-`. `mayDecide` (@rayspec/tasks decision-authority.ts) matches the WHOLE remainder after a closed
