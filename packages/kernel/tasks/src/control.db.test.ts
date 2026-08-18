@@ -465,6 +465,78 @@ describe.skipIf(!hasDb)('operator control (db)', () => {
       expect((cancelled[0] as { c: number }).c).toBe(0);
     });
 
+    /** Every status a task LEFT a `blocked` park for, oldest first — the dissolution ledger. */
+    async function outOfParkTransitions(taskId: string): Promise<string[]> {
+      const rows = (await db.$client.unsafe(
+        `SELECT to_status FROM workforce_task_transitions WHERE task_id = '${taskId}' AND from_status = 'blocked' ORDER BY created_at, id;`,
+      )) as unknown as { to_status: string }[];
+      return rows.map((r) => r.to_status);
+    }
+
+    it('CANCELS a structural park in the re-routed subtree — never dissolves it', async () => {
+      // §4.10: a structural park (`blocked(awaiting_children)`) may not be RELEASED while the child
+      // it waits on is still live — a wake, an unblock, or any transition back to `queued` erases
+      // the exit and orphans the child. Cancelling it is the park's own sanctioned lever
+      // (signals.ts: "CANCEL THE CHILD. Its terminal status satisfies the park through the park's
+      // own path"), and `cancelled` is terminal, not a release.
+      //
+      // `threeDeepQuiet` drives the middle out of its park to `queued` so its arms exercise an
+      // ordinary parked row; this one leaves the park STANDING with a live leaf under it, so the
+      // re-route's cascade meets a real structural park on the racing path.
+      const { root, middle, leaf } = await threeDeepQuiet();
+      // Back into the park the fan-out opened: `queued -> blocked(awaiting_children)` is the same
+      // pair `applyTurnOutcome`'s fan-out writes, through the single status writer.
+      await applyTransition(tdb(), {
+        taskId: middle,
+        expectedVersion: (await rowOf(middle)).version,
+        to: 'blocked',
+        reason: 'awaiting_children',
+        actor: 'scheduler',
+      });
+      expect(await rowOf(middle)).toMatchObject({
+        status: 'blocked',
+        status_reason: 'awaiting_children',
+      });
+      // The BASELINE. `threeDeepQuiet` itself takes the middle out of a park on its way to a quiet
+      // tree, so the transition log already carries a `blocked -> queued` that has nothing to do
+      // with the halt. Counting them here is what makes the assertion below about THIS window.
+      const parkExitsBefore = (await outOfParkTransitions(middle)).length;
+
+      const holder = terminalizeRootUnderHeldLock(root);
+      await holder.locked;
+      const halting = halt();
+      await waitForBlockedRowLock();
+      holder.commit();
+      await holder.done;
+      await halting;
+
+      expect({
+        middle: (await rowOf(middle)).status,
+        middleReason: (await rowOf(middle)).status_reason,
+        leaf: (await rowOf(leaf)).status,
+      }).toEqual({
+        middle: 'cancelled',
+        middleReason: 'cancelled_by_parent',
+        leaf: 'cancelled',
+      });
+      // THE DISSOLUTION CHECK, and it is the load-bearing half: across the halt the park left
+      // `blocked` exactly once, straight to a TERMINAL status. A cascade that woke it would have
+      // written `blocked -> queued` here, and the row's FINAL status alone could not tell the two
+      // apart — a woken-then-cancelled park ends `cancelled` too.
+      const parkExits = (await outOfParkTransitions(middle)).slice(parkExitsBefore);
+      expect(
+        parkExits,
+        'the halt released a structural park instead of cancelling it — the exit the park was ' +
+          'waiting for is erased and its live child is orphaned',
+      ).toEqual(['cancelled']);
+      // …and no wake was delivered to it either: a park dissolved by a signal that a later absorb
+      // consumes would leave the transition log above looking innocent.
+      const signals = await db.$client.unsafe(
+        `SELECT count(*)::int AS c FROM workforce_task_signals WHERE task_id = '${middle}' AND kind <> 'cancel';`,
+      );
+      expect((signals[0] as { c: number }).c).toBe(0);
+    });
+
     it('counts the re-routed subtree in the halt event, not zero', async () => {
       const { root } = await threeDeepQuiet();
       const holder = terminalizeRootUnderHeldLock(root);
