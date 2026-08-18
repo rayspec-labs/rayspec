@@ -24,9 +24,18 @@ export function isReservedWorkforceSegment(workforceId: string): boolean {
 
 /**
  * The native workforce tool names — runtime-provided, injected by role at dispatch, and therefore
- * NOT declarable as ordinary tools by an agent a workforce employee runs. A declared tool carrying
- * one of these names would be silently shadowed by the native at dispatch (natives win, always), so
- * spec validation refuses the collision up front and the dispatch layer re-asserts it fail-closed.
+ * NOT declarable as ordinary tools by an agent a workforce employee runs.
+ *
+ * TWO REFUSAL DOORS, AND THE FALLBACK BEHIND THEM. A declared tool carrying one of these names is
+ * refused twice: spec validation rejects it at author time (@rayspec/spec workforce-lint.ts), and
+ * the dispatch-time composition re-asserts it fail-closed (`assertNoReservedCollisions`, called by
+ * @rayspec/server workforce-turn-handlers.ts before the tool list reaches `runAgent`). Behind both,
+ * natives win: that composition spreads the natives LAST (`composeTurnTools`, same file) and the
+ * dispatcher indexes its list into a by-name Map where a later entry overwrites an earlier one
+ * (@rayspec/platform dispatch.ts), so a collision that somehow reached dispatch would resolve to the
+ * runtime's tool and not the pack's. That fallback is a SECOND barrier, never the first — the doors
+ * are what the reserved set is for, and neither may be relaxed because the other exists.
+ *
  * The set is FROZEN alongside the toolset vocabulary; adding a name later is an additive
  * validation tightening and belongs in a release note.
  */
