@@ -96,7 +96,7 @@ describe('the event vocabulary’s exports are marked @experimental', () => {
     expect(unmarked, `events.ts exports without ${TAG}`).toEqual([]);
   });
 
-  it('the tag SHIPS in the emitted dist/events.d.ts', () => {
+  it('the tag SHIPS on EVERY export of dist/events.d.ts, per symbol', () => {
     const declPath = resolve(here, '../dist/events.d.ts');
     if (!existsSync(declPath)) {
       throw new Error(
@@ -105,12 +105,21 @@ describe('the event vocabulary’s exports are marked @experimental', () => {
           'nothing about what an installed package hands an IDE.',
       );
     }
-    const sourceCount = (
-      readRepo('packages/kernel/tasks/src/events.ts').match(/@experimental/g) ?? []
-    ).length;
-    const declCount = (readFileSync(declPath, 'utf8').match(/@experimental/g) ?? []).length;
-    expect(sourceCount).toBeGreaterThan(0);
-    expect(declCount).toBeGreaterThanOrEqual(sourceCount);
+    // PER SYMBOL, not a count comparison — a count stays green if `tsc` drops the tag from one
+    // symbol while another gains a second one. See the spec package's twin assertion.
+    const declared = exportsWithLeadingDoc(readFileSync(declPath, 'utf8'));
+    expect(declared.length, 'no exports parsed out of events.d.ts').toBeGreaterThan(0);
+    const unmarked = declared.filter((e) => !e.doc.includes(TAG)).map((e) => e.name);
+    expect(unmarked, `events.d.ts exports without ${TAG}`).toEqual([]);
+
+    // …and the two scans reached the SAME symbols, so an export missing from the declarations
+    // cannot pass by simply not being walked.
+    const sourceNames = exportsWithLeadingDoc(readRepo('packages/kernel/tasks/src/events.ts')).map(
+      (e) => e.name,
+    );
+    expect([...new Set(declared.map((e) => e.name))].sort()).toEqual(
+      [...new Set(sourceNames)].sort(),
+    );
   });
 });
 

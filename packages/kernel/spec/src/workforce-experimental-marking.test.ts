@@ -172,13 +172,23 @@ describe('every exported symbol of the workforce contract surface is marked @exp
       expect(unmarked, `${moduleName}.ts exports without ${TAG}`).toEqual([]);
     });
 
-    it(`${moduleName}.d.ts — the tag SHIPS in the emitted declarations`, () => {
-      const sourceCount = (readPkg(`src/${moduleName}.ts`).match(/@experimental/g) ?? []).length;
-      const declCount = (readDeclarations(moduleName).match(/@experimental/g) ?? []).length;
-      expect(sourceCount).toBeGreaterThan(0);
-      // `tsc` carries leading doc comments into the declaration file. A drop here means the tag
-      // exists in the repo and NOT in what npm ships — the failure this assertion exists for.
-      expect(declCount).toBeGreaterThanOrEqual(sourceCount);
+    it(`${moduleName}.d.ts — the tag SHIPS on EVERY export, per symbol`, () => {
+      // PER SYMBOL, not a count comparison. A count says only that the file holds at least as
+      // many tags as the source; it stays green if `tsc` drops the tag from symbol A and some
+      // later edit adds a second tag to symbol B. The declaration file is what npm ships and
+      // what an IDE reads, so it gets the same per-export assertion the source gets.
+      const declared = exportsWithLeadingDoc(readDeclarations(moduleName));
+      expect(declared.length, `no exports parsed out of ${moduleName}.d.ts`).toBeGreaterThan(0);
+      const unmarked = declared.filter((e) => !e.doc.includes(TAG)).map((e) => e.name);
+      expect(unmarked, `${moduleName}.d.ts exports without ${TAG}`).toEqual([]);
+
+      // …and the two scans reached the SAME symbols. Without this the per-export check above
+      // would still pass if `tsc` emitted a subset — every export it DID emit carrying the tag,
+      // while a symbol the source exports went missing from the walk entirely.
+      const sourceNames = exportsWithLeadingDoc(readPkg(`src/${moduleName}.ts`)).map((e) => e.name);
+      expect([...new Set(declared.map((e) => e.name))].sort()).toEqual(
+        [...new Set(sourceNames)].sort(),
+      );
     });
   }
 });

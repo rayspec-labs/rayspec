@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { main } from './index.js';
+import { experimentalBannerText, main } from './index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const readRepo = (rel: string): string => readFileSync(resolve(here, `../../../../${rel}`), 'utf8');
@@ -188,12 +188,43 @@ describe('docs/cli-reference.md tells the same operator the same thing', () => {
     expect(section).toContain('workforce-compatibility.md');
   });
 
-  it('the doctor/plan pages document the stderr banner those commands actually print', () => {
+  it('the doctor/plan pages quote the banner VERBATIM, built from the emitter itself', () => {
     const page = readRepo('docs/cli-reference.md');
-    expect(page).toContain(BANNER_HEADLINE);
+    // Not a hand-copied quote: the expected text comes from the function that writes it. The
+    // page's fence had already drifted on the `’` in "section's" — invisible to a reader and
+    // invisible to any test while the doc held its own copy of the words.
+    expect(page).toContain(experimentalBannerText(['workforce']));
     // Documented as STDERR, because the whole point is that stdout stays parseable.
     const at = page.indexOf(BANNER_HEADLINE);
     expect(page.slice(Math.max(0, at - 600), at + 600)).toContain('stderr');
+  });
+});
+
+describe('the surfaces the compatibility page says are UNMARKED really are', () => {
+  /**
+   * The page promises to name every unmarked surface. That promise is only worth something if a
+   * surface silently GAINING a marking forces the page to be updated — otherwise the list rots
+   * into a lie by omission, which is the failure mode the list exists to prevent. So: pin the
+   * absence. If `deploy` ever starts announcing the section, this goes red and points at the page.
+   */
+  it('`deploy` announces nothing — no `experimental` field, no banner call on its branch', () => {
+    const index = readRepo('packages/app/cli/src/index.ts');
+    const deployBranch = index.slice(
+      index.indexOf("case 'deploy': {"),
+      index.indexOf("case 'tenant': {"),
+    );
+    expect(deployBranch.length, "the CLI's deploy branch moved or was renamed").toBeGreaterThan(0);
+    expect(deployBranch).not.toContain('emitExperimentalBanner');
+    expect(readRepo('packages/app/cli/src/deploy.ts')).not.toContain('experimental:');
+  });
+
+  it('the page names `deploy` among them, and counts THREE', () => {
+    const page = readRepo('docs/workforce-compatibility.md');
+    const at = page.indexOf('### What is NOT marked');
+    expect(at, 'the unmarked-surfaces section moved or was reworded').toBeGreaterThan(-1);
+    const section = page.slice(at, page.indexOf('\n## ', at));
+    expect(section).toContain('Three surfaces carry no experimental marking');
+    expect(section).toContain('`rayspec deploy`');
   });
 });
 

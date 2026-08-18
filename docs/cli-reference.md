@@ -173,7 +173,7 @@ contract above is unchanged, so a `| jq` pipeline is unaffected:
 ```
 ==================================================================
   EXPERIMENTAL: this document declares 'workforce:'.
-  Enabled by RAYSPEC_EXPERIMENTAL_WORKFORCE. The section's grammar
+  Enabled by RAYSPEC_EXPERIMENTAL_WORKFORCE. The section’s grammar
   and behavior may change without notice. Not a stability surface.
 ==================================================================
 ```

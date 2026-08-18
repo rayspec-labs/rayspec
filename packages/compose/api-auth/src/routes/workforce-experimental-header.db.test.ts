@@ -119,8 +119,25 @@ describe('/v1/workforce/* carries the experimental marking on the wire', () => {
 describe('nothing registered in workforce.ts escapes the marked prefix', () => {
   it('every route path in the module sits under /v1/workforce/', () => {
     const source = readRepo('packages/compose/api-auth/src/routes/workforce.ts');
-    const paths = [...source.matchAll(/^\s{4}'(\/v1\/[^']+)',$/gm)].map((m) => m[1] as string);
+    // Anchored on the REGISTRATION (`app.get(` / `app.post(` / …) and the first string literal
+    // that follows it — not on a literal's indentation. The earlier form required exactly four
+    // leading spaces, so a reformat, a nested registration, or a `biome` line-width change would
+    // have made the scan silently find fewer routes while still passing. It also skips `app.use(`,
+    // whose path IS the glob under test rather than a route subject to it.
+    // Two steps rather than one clever regex: find each registration, then take the FIRST string
+    // literal after it. A single pattern spanning both is a backtracking trap — the first draft of
+    // this test used one and silently captured the argument list instead of the path.
+    const registrations = [...source.matchAll(/\bapp\.(?:get|post|put|patch|delete|on)\s*\(/g)];
+    const paths = registrations.map((m) => {
+      const after = source.slice((m.index as number) + m[0].length);
+      const literal = /^[^'"`]*?'([^']+)'/.exec(after);
+      if (literal === null) throw new Error(`no path literal follows ${m[0]} at ${m.index}`);
+      return literal[1] as string;
+    });
     expect(paths.length, 'no route path literals parsed out of workforce.ts').toBeGreaterThan(0);
+    // Every path found must LOOK like a route, so a scan that drifted onto some other literal
+    // fails here rather than reporting a clean sweep over the wrong strings.
+    expect(paths.filter((p) => !p.startsWith('/v1/'))).toEqual([]);
     const escaped = paths.filter((p) => !p.startsWith('/v1/workforce/'));
     expect(escaped, 'route(s) outside the prefix the experimental middleware globs').toEqual([]);
   });

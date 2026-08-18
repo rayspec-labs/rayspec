@@ -250,8 +250,8 @@ describe('— security headers still applied (inv.8)', () => {
   });
 });
 
-describe('— expose-headers: the pagination/replay/retry response headers are readable cross-origin', () => {
-  it('an allowlisted response exposes X-Request-Id + X-Next-Cursor + X-Result-Truncated + Idempotency-Replay + Retry-After (fail-the-fix)', async () => {
+describe('— expose-headers: the pagination/replay/retry headers and the experimental marking are readable cross-origin', () => {
+  it('an allowlisted response exposes X-Request-Id + X-Next-Cursor + X-Result-Truncated + Idempotency-Replay + Retry-After + X-Experimental (fail-the-fix)', async () => {
     // Drive the REAL createAuthApp (not the synthetic mirror), so this pins app.ts directly: dropping any
     // one of the exposed headers from app.ts's `exposeHeaders` makes the set assertion below RED.
     // hono/cors sets `Access-Control-Expose-Headers` on the actual response (before the OPTIONS branch),
