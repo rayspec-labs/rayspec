@@ -106,9 +106,9 @@ untrimmably** into the owning employee's turn input.
    `packages/compose/api-auth/src/http/middleware.ts:150` reads `principal?.orgId` and
    `packages/compose/api-auth/src/http/middleware.ts:174` sets it as the request tenant.
 2. **A supplied `Idempotency-Key` is refused, not ignored**
-   (`packages/compose/api-auth/src/routes/workforce.ts:929`). This route mints a fresh billed root
+   (`packages/compose/api-auth/src/routes/workforce.ts:965`). This route mints a fresh billed root
    per call; silently dropping the header would be a lost-write trap.
-3. **Rate limit before the body read** (`packages/compose/api-auth/src/routes/workforce.ts:941`),
+3. **Rate limit before the body read** (`packages/compose/api-auth/src/routes/workforce.ts:977`),
    keyed `(tenant, workforce)` — the cost-DoS bound on loop-minting billed roots.
 4. **Strict body, byte-capped goal**
    (`packages/compose/api-auth/src/routes/workforce.ts:204`, `refine(withinGoalBytes, …)`). The cap
@@ -125,7 +125,7 @@ untrimmably** into the owning employee's turn input.
    `packages/app/server/src/workforce-goal-intake.ts:106`, **before** the transaction at
    `packages/app/server/src/workforce-goal-intake.ts:115`, so a refused plan writes zero rows.
 7. `requestedBy` is stamped from the verified principal
-   (`packages/compose/api-auth/src/routes/workforce.ts:953`), never read from the body.
+   (`packages/compose/api-auth/src/routes/workforce.ts:989`), never read from the body.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -338,7 +338,7 @@ remainder (`packages/kernel/tasks/src/decision-authority.ts:64`), so the
 2. the principal must **hold** `workforce:override`
    (`packages/kernel/auth-core/src/authz.ts:46`), checked through the same permission gate the
    route's `store:write` middleware used (`packages/compose/api-auth/src/routes/workforce.ts:125`),
-   and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:814`) so
+   and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:850`) so
    an unauthorized ask is a named 403 rather than a silent downgrade.
 
 The permission is **owner/admin only** — granted in the owner table
@@ -486,7 +486,7 @@ against the deployed declaration, and re-checked by the kernel:
 | message recipient | `packages/kernel/workforce-tools/src/toolset.ts:691` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
 | approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:519`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
 | tenant | server-derived (`packages/compose/api-auth/src/http/middleware.ts:150`) | `packages/app/server/src/workforce-goal-intake.db.test.ts`, `reconciles tenant and workforce BEFORE the strategy runs` |
-| `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:953`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:246`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
+| `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:989`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:246`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
 
 **No privilege inheritance.** The toolset is keyed on the **task owner** alone and indexed by that
 employee's declared role; nothing in the call chain carries a parent's role, agent, or tool list.
@@ -502,18 +502,18 @@ The document is trusted for its **content** and untrusted for its **shape** (§6
 Two changes since the earlier inventory matter here:
 
 - **`capabilities` is now `labels`**, and a label is a `SafeIdentifier`
-  (`packages/kernel/spec/src/workforce-grammar.ts:87`, applied at
-  `packages/kernel/spec/src/workforce-grammar.ts:129` and
-  `packages/kernel/spec/src/workforce-grammar.ts:211`) — the same
+  (`packages/kernel/spec/src/workforce-grammar.ts:95`, applied at
+  `packages/kernel/spec/src/workforce-grammar.ts:146` and
+  `packages/kernel/spec/src/workforce-grammar.ts:236`) — the same
   `/^[a-z_][a-z0-9_]*$/` shape every other identifier carries
   (`packages/kernel/spec/src/identifier.ts:19`). Labels are opaque tokens matched for equality,
   never interpreted.
 - **A rule guarding a label no employee holds is now a lint ERROR, not a warning**
-  (`packages/kernel/spec/src/workforce-lint.ts:696`). A clause that can never fire is a typo that
+  (`packages/kernel/spec/src/workforce-lint.ts:697`). A clause that can never fire is a typo that
   silently disables a control, and refusing the document is the fail-closed reading.
 
 **A declared agent tool may not carry a native tool's name** — refused at parse
-(`packages/kernel/spec/src/workforce-lint.ts:235`) and again at dispatch composition
+(`packages/kernel/spec/src/workforce-lint.ts:236`) and again at dispatch composition
 (`packages/kernel/workforce-tools/src/toolset.ts:73`, called at
 `packages/app/server/src/workforce-turn-handlers.ts:157`), both through one shared predicate that
 normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:80`, over the set at
@@ -621,8 +621,8 @@ and the final application stays receipt-idempotent (§7.3).
 `actorFrom` (`packages/compose/api-auth/src/routes/workforce.ts:94`) reads the authenticated
 principal and returns `user:<id>` / `api-key:<id>`, with a closed sentinel rather than a guessable
 identity; `requireAuth()` runs before every caller. It is the sole source of `actor` / `decidedBy`
-on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:820`,
-`packages/compose/api-auth/src/routes/workforce.ts:895`, and the signal/cancel/pause/resume/halt
+on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:856`,
+`packages/compose/api-auth/src/routes/workforce.ts:931`, and the signal/cancel/pause/resume/halt
 routes). The client cannot even *attempt* the assertion: every mutating body is a `z.strictObject`,
 so a body carrying `decidedBy` is a 400, not a silently ignored field. Tenant is derived the same
 way (`packages/compose/api-auth/src/http/middleware.ts:174`).
@@ -741,7 +741,7 @@ employee id cannot be one.
    door, not a fallback.** The "the named superior decides it" path the escalation fate advertises
    is unreachable end to end.
 2. `decideApproval` has exactly one production caller, the HTTP route
-   (`packages/compose/api-auth/src/routes/workforce.ts:816`). There is no in-engine approval
+   (`packages/compose/api-auth/src/routes/workforce.ts:852`). There is no in-engine approval
    decision path. So consequence 1 has no exception.
 3. **An api-key-only deployment cannot resolve an escalated approval at all.**
    `workforce:override` is not api-key-grantable by design, so a machine credential can decide every
@@ -764,14 +764,14 @@ break-glass. No document may imply that the named-approver path works end to end
 **The grammar does not yet say so, and that is a gap.** A document declaring `onTimeout: 'escalate'`
 is accepted today with one exception: the lint refuses a policy that escalates *and covers the
 orchestrator seat*, because the orchestrator reports to nobody and the runtime could not build the
-fate at all (`packages/kernel/spec/src/workforce-lint.ts:642` guards the fate,
-`packages/kernel/spec/src/workforce-lint.ts:649` raises it as an error). That is a **different**
+fate at all (`packages/kernel/spec/src/workforce-lint.ts:643` guards the fate,
+`packages/kernel/spec/src/workforce-lint.ts:650` raises it as an error). That is a **different**
 condition from the one on this page: it catches "there is no superior to name", not "the superior
 who *is* named cannot be matched by any authenticated principal".
 
 **The second condition now HAS a diagnostic** (B-017k). `doctor` raises the
 `workforce_escalation_unreachable` **advisory** on every escalating policy, at that policy's own
-path (`packages/kernel/spec/src/workforce-lint.ts:868`), so an author learns this at authoring time
+path (`packages/kernel/spec/src/workforce-lint.ts:871`), so an author learns this at authoring time
 rather than from a 403 at 2am. Three things it deliberately is not, because each would overstate it:
 
 - it is a **warning, not an error**. The declaration is correct and the row *is* decidable — by an
@@ -1061,13 +1061,13 @@ packages/compose/api-auth/src/routes/workforce.ts:119 | async function breakGlas
 packages/compose/api-auth/src/routes/workforce.ts:125 | await enforcePermission(deps, c, 'workforce:override');
 packages/compose/api-auth/src/routes/workforce.ts:167 | kind: operatorSignalKindSchema,
 packages/compose/api-auth/src/routes/workforce.ts:204 | refine(withinGoalBytes
-packages/compose/api-auth/src/routes/workforce.ts:814 | const override = await breakGlassAuthorized(deps, c, body.override);
-packages/compose/api-auth/src/routes/workforce.ts:816 | const approval = await decideApproval(tdb, {
-packages/compose/api-auth/src/routes/workforce.ts:820 | decidedBy: actorFrom(c),
-packages/compose/api-auth/src/routes/workforce.ts:895 | overrideNamedReviewer: override,
-packages/compose/api-auth/src/routes/workforce.ts:929 | if (c.req.header('Idempotency-Key') !== undefined) {
-packages/compose/api-auth/src/routes/workforce.ts:941 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
-packages/compose/api-auth/src/routes/workforce.ts:953 | requestedBy: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:850 | const override = await breakGlassAuthorized(deps, c, body.override);
+packages/compose/api-auth/src/routes/workforce.ts:852 | const approval = await decideApproval(tdb, {
+packages/compose/api-auth/src/routes/workforce.ts:856 | decidedBy: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:931 | overrideNamedReviewer: override,
+packages/compose/api-auth/src/routes/workforce.ts:965 | if (c.req.header('Idempotency-Key') !== undefined) {
+packages/compose/api-auth/src/routes/workforce.ts:977 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
+packages/compose/api-auth/src/routes/workforce.ts:989 | requestedBy: actorFrom(c),
 packages/compose/api-auth/src/http/middleware.ts:150 | const serverOrg = principal?.orgId;
 packages/compose/api-auth/src/http/middleware.ts:174 | if (serverOrg) c.set('tenantId', serverOrg);
 packages/app/server/src/workforce-goal-intake.ts:49 | function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
@@ -1115,15 +1115,15 @@ packages/kernel/core/src/cost-policy.ts:53 | export interface CostPolicy {
 packages/kernel/core/src/approval-provider.ts:45 | export interface ApprovalProvider {
 packages/kernel/core/src/seam-contracts.ts:61 | export const SEAM_MAX_PLAN_STEPS = 64;
 packages/kernel/core/src/seam-contracts.ts:92 | export const SEAM_MAX_MEMORY_HITS = 64;
-packages/kernel/spec/src/workforce-lint.ts:235 | if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
-packages/kernel/spec/src/workforce-lint.ts:642 | if (approval.onTimeout !== 'escalate') return;
-packages/kernel/spec/src/workforce-lint.ts:649 | 'invalid_orchestrator',
-packages/kernel/spec/src/workforce-lint.ts:696 | 'workforce_label_unheld',
-packages/kernel/spec/src/workforce-lint.ts:868 | 'workforce_escalation_unreachable',
+packages/kernel/spec/src/workforce-lint.ts:236 | if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
+packages/kernel/spec/src/workforce-lint.ts:643 | if (approval.onTimeout !== 'escalate') return;
+packages/kernel/spec/src/workforce-lint.ts:650 | 'invalid_orchestrator',
+packages/kernel/spec/src/workforce-lint.ts:697 | 'workforce_label_unheld',
+packages/kernel/spec/src/workforce-lint.ts:871 | 'workforce_escalation_unreachable',
 packages/kernel/spec/src/errors.ts:417 | 'workforce_escalation_unreachable',
-packages/kernel/spec/src/workforce-grammar.ts:87 | export const WorkforceLabel = SafeIdentifier;
-packages/kernel/spec/src/workforce-grammar.ts:129 | labels: z.array(WorkforceLabel).default([]),
-packages/kernel/spec/src/workforce-grammar.ts:211 | const PolicyLabels = z.array(WorkforceLabel).min(1);
+packages/kernel/spec/src/workforce-grammar.ts:95 | export const WorkforceLabel = SafeIdentifier;
+packages/kernel/spec/src/workforce-grammar.ts:146 | labels: z.array(WorkforceLabel).default([]),
+packages/kernel/spec/src/workforce-grammar.ts:236 | const PolicyLabels = z.array(WorkforceLabel).min(1);
 packages/kernel/spec/src/identifier.ts:19 | export const SAFE_IDENTIFIER_RE = /^[a-z_][a-z0-9_]*$/;
 packages/kernel/auth-core/src/authz.ts:46 | 'workforce:override'
 packages/kernel/auth-core/src/authz.ts:63 | 'workforce:override',
