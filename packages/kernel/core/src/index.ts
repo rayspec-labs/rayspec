@@ -10,6 +10,8 @@ export * from './neutral.js';
 export * from './orchestration-strategy.js';
 export * from './pricing.js';
 export * from './review-policy.js';
+export * from './seam-confinement.js';
+export * from './seam-contracts.js';
 export * from './text-utils.js';
 export * from './worker-selector.js';
 export * from './workforce-ids.js';
