@@ -1,4 +1,13 @@
 # RaySpec — local Postgres.
+#
+# LOCAL DEVELOPMENT ONLY / trusted posture / NOT internet-facing. This file ships a hard-coded
+# throwaway superuser (rayspec/rayspec) and PUBLISHES the port on the host — `ports:` binds every
+# interface unless you write `127.0.0.1:5433:5432` yourself, so on a machine with a routable address
+# this is an open database. It is for a developer laptop and CI. The separate hardening layer
+# (per-tenant sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built
+# yet — never run this compose file on a host reachable from the internet, and never point a
+# deployment that matters at a database it created.
+#
 # Two databases on one server:
 #   - rayspec      : the main DB (run journal, conversation store, db-spike entities)
 #   - rayspec_shadow: a SEPARATE throwaway DB Atlas uses for migration dry-runs.

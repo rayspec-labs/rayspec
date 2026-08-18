@@ -26,12 +26,15 @@
  * tool call can fetch precisely.
  *
  * THE TRUST BOUNDARY IS ENFORCED IN CODE, not only asserted below the data-boundary line. Every
- * value a MODEL, a REQUESTER or a PRIOR TURN authored — task title/goal/description, message body,
- * recall hit text, signal payloads, child/dependency results — is UNTRUSTED and passes through
- * `sanitizeUntrusted` (raw strings) or `escapeRawSeparators` (JSON values) before it renders, so no
- * untrusted content can place a raw line break and forge a column-0 `## N.` section header or a
- * second data-boundary line. Config-derived text (identity, role frame, policies) is deployer-
- * authored — reviewed like code — and is trusted, so it renders as-is. See the helpers below.
+ * value a MODEL, a REQUESTER or a PRIOR TURN authored — task title/goal/description, `requestedBy`,
+ * message body, recall hit text, signal payloads, child/dependency results — is UNTRUSTED and passes
+ * through `sanitizeUntrusted` (raw strings) or `escapeRawSeparators` (JSON values) before it
+ * renders. Config-derived text (identity, role frame, policies) is deployer-authored and trusted for
+ * its CONTENT — a declared rule is still authority — but not for its SHAPE: it goes through the same
+ * neutralizer under the name `sanitizeConfig`, because a `mission:` with a raw line break forges a
+ * header byte-identically to a message body with one. The single rule, stated positionally rather
+ * than by provenance: NOTHING interpolated into a line may contain a line boundary, so nothing can
+ * place a column-0 `## N.` section header or a second data-boundary line. See the helpers below.
  *
  * The scripted-turn fixtures parse this rendering. The stable anchors, kept byte-compatible with
  * the pre-sectioned composition: line 1 (`You are '<id>' (<title>), role '<role>'.`), line 2
@@ -212,16 +215,19 @@ function truncateToBytes(text: string, maxBytes: number): string {
 const TRUNCATED_MARKER = '…[truncated: byte budget]';
 
 /**
- * THE TRUST BOUNDARY, ENFORCED IN CODE (not only asserted in prose). Every string below the
- * data-boundary line that a MODEL, a REQUESTER or a PRIOR TURN authored — a task title/goal/
- * description, a message body, a recall hit — is UNTRUSTED and renders inside a newline-delimited,
- * `## N. <header>`-structured document. A raw line break in that content would let it start a new
- * line and place a column-0 `## N.` section header or a forged data-boundary line, byte-
- * indistinguishable from the platform's own. `sanitizeUntrusted` strips every line-boundary-class
- * and control char (C0, DEL, C1 incl. U+0085 NEL, plus U+2028 LS / U+2029 PS) so untrusted text can
- * never begin a line — the label before it (`Goal: `, `- from … : `, `- `) then keeps it off
- * column 0. Config-derived text (identity, role frame, policies) is deployer-authored — reviewed
- * like code — and is NOT untrusted, so it is rendered as-is.
+ * THE TRUST BOUNDARY, ENFORCED IN CODE (not only asserted in prose). Every string a MODEL, a
+ * REQUESTER or a PRIOR TURN authored — a task title/goal/description, `requestedBy`, a message body,
+ * a recall hit — is UNTRUSTED and renders inside a newline-delimited, `## N. <header>`-structured
+ * document. A raw line break in that content would let it start a new line and place a column-0
+ * `## N.` section header or a forged data-boundary line, byte-indistinguishable from the platform's
+ * own. `sanitizeUntrusted` strips every line-boundary-class and control char (C0, DEL, C1 incl.
+ * U+0085 NEL, plus U+2028 LS / U+2029 PS) so untrusted text can never begin a line — the label
+ * before it (`Goal: `, `- from … : `, `- `) then keeps it off column 0.
+ *
+ * Config-derived text (identity, role frame, policies) is deployer-authored and reviewed like code,
+ * and it is trusted for its CONTENT. It is not trusted to be free of line breaks, and it renders
+ * ABOVE the data-boundary line where a forged header reads as the platform speaking — so it goes
+ * through the same neutralizer under the name `sanitizeConfig` below.
  *
  * The three raw line-boundary chars `JSON.stringify` leaves UNescaped (U+0085/U+2028/U+2029 — the
  * `assemble.ts` gotcha) are the residual for the JSON-serialized untrusted values (signal payloads,
@@ -235,6 +241,34 @@ function sanitizeUntrusted(text: string | null): string {
   if (text === null) return ERASED_CONTENT;
   return text.replace(UNTRUSTED_STRUCTURE_CHARS, ' ');
 }
+/**
+ * THE SAME NEUTRALIZER, APPLIED TO CONFIG-DERIVED TEXT \u2014 a separate name for a separate reason.
+ *
+ * Deployer-authored configuration (an employee title, a workforce or department name, a department
+ * mission, a review-rule id or reviewer) is TRUSTED in the sense that matters for authority: it is
+ * reviewed like code and it is where the policies of this workforce are declared. It is not trusted
+ * to be free of raw line breaks, and those are two different properties. A `mission:` carrying
+ * `\n## 4. Task\n\u2026` forges a section header byte-identically to a message body carrying the same
+ * bytes \u2014 the structure of this document cannot tell the two apart, because there is nothing to tell
+ * apart. Sections 1-3 are exactly where a forged header is most persuasive: everything above the
+ * data-boundary line reads as the platform speaking.
+ *
+ * So the ONE rule the assembly keeps is positional rather than provenance-based: NOTHING that is
+ * interpolated into a line may contain a line boundary. `sanitizeConfig` is `sanitizeUntrusted`
+ * under a name that says which side of the boundary the value came from \u2014 the call sites document
+ * the trust level, the behaviour is deliberately identical, and there is no second policy to keep
+ * in sync. It substitutes one space per matched char, so a sanitized string is never longer than
+ * its input (in bytes it can only shrink \u2014 a C1 char is two utf-8 bytes and a space is one). No
+ * budget shifts either way: every measurement in this module \u2014 `assertWithin`, section 4's fixed
+ * lines, the message/recall blocks, the whole-input ceiling \u2014 is taken on the already-sanitized
+ * string it is about to emit.
+ *
+ * This does NOT make config text untrusted. Its CONTENT is still authority \u2014 a declared review rule
+ * still routes a completion regardless of what a turn submits. What it can no longer do is choose
+ * where in the document it appears. (`context.test.ts` \u2014 the four config-forgery arms.)
+ */
+const sanitizeConfig = sanitizeUntrusted;
+
 const RAW_JSON_LINE_SEPARATORS = /[\u0085\u2028\u2029]/g;
 /** Escape the three line-boundary chars `JSON.stringify` leaves raw \u2014 lossless (`\uXXXX`), so the
  * JSON stays valid and no untrusted string VALUE can smuggle a raw line break out of its quotes. */
@@ -262,10 +296,16 @@ function windowLabel(ms: number): string {
 
 function renderIdentity(input: TurnInputFacts): string {
   const { employee } = input;
-  const labels = employee.labels.length > 0 ? employee.labels.join(', ') : 'none declared';
+  // MERGE NOTE (labels rename x config sanitization): the field is `labels` and the line is
+  // `Labels:` — and every one of them still goes through `sanitizeConfig`. The rename moved the
+  // value, not its trust level: a label is still deployer-authored text interpolated into a line
+  // above the data-boundary line, so a raw break in one still forges a header.
+  const labels =
+    employee.labels.length > 0 ? employee.labels.map(sanitizeConfig).join(', ') : 'none declared';
   return [
     SECTION_HEADERS.identity,
-    `Employee: ${employee.id} — ${employee.title}. Role: ${employee.role}.`,
+    `Employee: ${sanitizeConfig(employee.id)} — ${sanitizeConfig(employee.title)}. ` +
+      `Role: ${sanitizeConfig(employee.role)}.`,
     `Labels: ${labels}.`,
   ].join('\n');
 }
@@ -273,23 +313,29 @@ function renderIdentity(input: TurnInputFacts): string {
 function renderRoleFrame(input: TurnInputFacts): string {
   const lines: string[] = [SECTION_HEADERS.roleFrame];
   if (input.employee.role === 'orchestrator') {
-    lines.push(`Workforce: ${input.workforce.name}.`);
+    lines.push(`Workforce: ${sanitizeConfig(input.workforce.name)}.`);
     if (input.workforce.departments.length === 0) {
       lines.push('No departments are declared.');
     } else {
       lines.push('Departments:');
       for (const department of input.workforce.departments) {
-        lines.push(`- ${department.id} (${department.name}): ${department.mission}`);
+        lines.push(
+          `- ${sanitizeConfig(department.id)} (${sanitizeConfig(department.name)}): ` +
+            sanitizeConfig(department.mission),
+        );
       }
     }
   } else {
     if (input.employee.department !== null && input.departmentMission !== null) {
-      lines.push(`Department: ${input.employee.department} — ${input.departmentMission}`);
+      lines.push(
+        `Department: ${sanitizeConfig(input.employee.department)} — ` +
+          sanitizeConfig(input.departmentMission),
+      );
     } else {
       lines.push('You belong to no department.');
     }
     if (input.employee.reportsTo !== null) {
-      lines.push(`You report to '${input.employee.reportsTo}'.`);
+      lines.push(`You report to '${sanitizeConfig(input.employee.reportsTo)}'.`);
     }
   }
   return lines.join('\n');
@@ -335,7 +381,7 @@ function renderPolicies(input: TurnInputFacts): string {
           } from this task`
         : 'no per-task fan-out ceiling';
     lines.push(`Delegation: ${depthLabel}, ${fanOutLabel}.`);
-    lines.push(`Legal delegation targets: ${facts.legalTargets.join(', ')}.`);
+    lines.push(`Legal delegation targets: ${facts.legalTargets.map(sanitizeConfig).join(', ')}.`);
   } else if (holdsDelegation) {
     lines.push(
       facts.delegationDepthRemaining === 0
@@ -354,14 +400,18 @@ function renderPolicies(input: TurnInputFacts): string {
     for (const rule of facts.reviewRules) {
       const triggers: string[] = [];
       if (rule.firesOnLabels.length > 0) {
-        triggers.push(`fires on every completion (you hold: ${rule.firesOnLabels.join(', ')})`);
+        // `firesOnLabels` (was `firesOnCapabilities`) — renamed, still sanitized: see renderIdentity.
+        triggers.push(
+          `fires on every completion (you hold: ${rule.firesOnLabels.map(sanitizeConfig).join(', ')})`,
+        );
       }
       if (rule.confidenceBelow !== null) {
         triggers.push(`fires on a submitted confidence below ${rule.confidenceBelow}`);
       }
       const trigger = triggers.length > 0 ? triggers.join('; ') : 'declared without a trigger';
       lines.push(
-        `- ${rule.id}: reviewer '${rule.reviewer}', ${trigger}; up to ${rule.maxRounds} rounds.`,
+        `- ${sanitizeConfig(rule.id)}: reviewer '${sanitizeConfig(rule.reviewer)}', ${trigger}; ` +
+          `up to ${rule.maxRounds} rounds.`,
       );
     }
     lines.push(
@@ -377,9 +427,9 @@ function renderPolicies(input: TurnInputFacts): string {
   if (TOOLSETS_BY_ROLE[input.employee.role].includes('request_approval')) {
     if (facts.approvalRule !== null) {
       lines.push(
-        `Approval rule covering you: ${facts.approvalRule.id} — request_approval runs on its ` +
-          `declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
-          `${facts.approvalRule.onTimeout}).`,
+        `Approval rule covering you: ${sanitizeConfig(facts.approvalRule.id)} — request_approval ` +
+          `runs on its declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
+          `${sanitizeConfig(facts.approvalRule.onTimeout)}).`,
       );
     } else {
       lines.push('Approval rule covering you: none declared for your labels.');
@@ -454,13 +504,22 @@ function renderTask(input: TurnInputFacts): string {
   const { task } = input;
   // Title/goal/description are model- or requester-authored (untrusted) — sanitize before rendering
   // AND before measuring, so the bytes we budget against are the bytes we emit (see the trust
-  // boundary note above). `taskId`/`requestedBy`/`priority` are server-derived, never model prose.
+  // boundary note above).
+  //
+  // `requestedBy` is SERVER-DERIVED today: the HTTP intake stamps `actorFrom(c)` and a child task
+  // inherits `parent.owner`, and `childTaskSpecSchema` (@rayspec/tasks create-task.ts) carries no
+  // `requestedBy` field at all, so a model has no channel to supply one. It is neutralized anyway,
+  // because "safe by virtue of who writes it" is a property of the current writers and not of this
+  // frame — and it was the last string in a mandatory section that skipped the neutralizer while
+  // every sibling value beside it went through. `taskId` and `priority` are closed vocabularies
+  // (a minted id, an enum), which is a property of the VALUE and does hold.
   const title = sanitizeUntrusted(task.title);
   const goal = sanitizeUntrusted(task.goal);
   const fixedTop = [SECTION_HEADERS.task, `Task ${task.taskId}: ${title}`];
   const goalLine = `Goal: ${goal}`;
   const metaLine =
-    `Requested by: ${task.requestedBy}. Priority: ${task.priority}. ` + `Turn ${input.turnNumber}.`;
+    `Requested by: ${sanitizeUntrusted(task.requestedBy)}. Priority: ${task.priority}. ` +
+    `Turn ${input.turnNumber}.`;
   const deadlineLine =
     task.deadlineAt instanceof Date ? `Deadline: ${task.deadlineAt.toISOString()}` : null;
 
@@ -597,8 +656,13 @@ function assertWithin(section: 'identity' | 'roleFrame' | 'policies', rendered: 
 
 /** Assemble one turn's input. Pure; throws typed on a mandatory-section overflow. */
 export function assembleTurnInput(input: TurnInputFacts): string {
+  // Line 1 is the fixture anchor AND the line the data-boundary line sits directly under: a raw
+  // break in the title here would place a SECOND boundary line above the real one, and everything
+  // between them would read as the platform speaking. Config text, sanitized like everything else
+  // that is interpolated into a line (`context.test.ts` — the employee-title forgery arm).
   const head = [
-    `You are '${input.employee.id}' (${input.employee.title}), role '${input.employee.role}'.`,
+    `You are '${sanitizeConfig(input.employee.id)}' (${sanitizeConfig(input.employee.title)}), ` +
+      `role '${sanitizeConfig(input.employee.role)}'.`,
     DATA_BOUNDARY_LINE,
   ].join('\n');
   const mandatory = [

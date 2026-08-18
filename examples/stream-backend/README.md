@@ -5,6 +5,10 @@ This is a tiny, **synthetic** backend that is the platform's **own** forcing fun
 those ship as product code in their own repos. A tiny synthetic fixture staying in `examples/` keeps
 the platform itself product-free while still proving the mechanism end-to-end.
 
+> **LOCAL / trusted posture / NOT internet-facing** — the separate hardening layer (per-tenant
+> sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure. Never put this behind a
+> public address.
+
 ## The stream surface is an extension PACK
 
 The deployment `rayspec.yaml` is **THIN** — `version` + `metadata` + ONE `extensions[]` ref. The

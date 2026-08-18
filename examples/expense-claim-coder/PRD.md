@@ -6,6 +6,10 @@
 > sibling `rayspec.yaml` (+ `holes/` + `handlers/`) is the corresponding backend config: the
 > validated spec, the codegen holes, and the generated handlers.
 
+> **LOCAL / trusted posture / NOT internet-facing** — the separate hardening layer (per-tenant
+> sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure. Never put this behind a
+> public address.
+
 ## What we want
 
 We run a multi-tenant back-office product for finance teams. Employees submit **expense claims** as

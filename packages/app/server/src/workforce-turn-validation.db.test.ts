@@ -19,6 +19,7 @@
  */
 import type { AgentRegistry, AgentRegistryEntry } from '@rayspec/api-auth';
 import type { Backend } from '@rayspec/core';
+import { RESERVED_WORKFORCE_TOOL_NAMES } from '@rayspec/core';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
 import type { TaskRecord } from '@rayspec/tasks';
 import {
@@ -546,5 +547,68 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     expect(leadRendered).toContain(
       'Legal delegation targets: department:eng, team:fix_team, employee:mgr, employee:dev, employee:qa.',
     );
+  });
+
+  /**
+   * TOOL PRECEDENCE, measured on the REAL composition. `workforce-tool-precedence.test.ts` proves
+   * what the ordering DOES (the dispatcher's by-name Map is last-wins, so the tail wins a name
+   * collision, so a declared tool cannot shadow a native); this arm proves the composition actually
+   * BUILDS that ordering, which is the half a correct-but-uncalled helper would leave open.
+   *
+   * The instrument is the spec the backend receives: run-core hands it
+   * `{...spec, tools: tools.map(t => t.spec)}`, so `spec.tools` IS the composed list, in order.
+   */
+  it('the composition offers the DECLARED agent tools first and the NATIVE toolset last', async () => {
+    const seen: string[][] = [];
+    const backend = makeScriptedBackend('openai', (spec) => {
+      seen.push((spec.tools ?? []).map((t) => t.name));
+      return [{ name: 'submit_result', args: { status: 'completed', confidence: 0.9 } }];
+    });
+    // A declared tool that collides with NOTHING: the refusal doors stay shut and unexercised, so
+    // what this measures is the ordinary composition, not a refusal path.
+    const declared = {
+      spec: {
+        name: 'lookup_ticket',
+        description: 'Declared pack tool.',
+        parameters: { type: 'object' as const },
+      },
+      handler: () => ({ ok: true }),
+      timeoutMs: 1_000,
+      idempotent: true,
+    };
+    const registry = new Map([
+      [
+        'a',
+        {
+          spec: { name: 'a', instructions: 'Do the work.', model: 'model-x', input: '', tools: [] },
+          backend,
+          tools: [declared],
+        },
+      ],
+    ]) as unknown as AgentRegistry;
+    const resolve = buildWorkforceTurnHandlers({
+      db,
+      tenantId: TENANT,
+      config,
+      registry: () => registry,
+      backendForEmployee: () => backend,
+    });
+    const task = await workingTaskFor('dev');
+    const handler = resolve('dev');
+    if (!handler) throw new Error('no handler');
+    await handler({ task, childResults: null, signals: [], messages: [] });
+
+    const offered = seen[0] as string[];
+    // The declared tool is present (precedence is not suppression) and it is FIRST.
+    expect(offered[0]).toBe('lookup_ticket');
+    // Every native the worker seat carries is present, and every one of them sits AFTER it — which
+    // is the property: the natives are the tail the dispatcher's last-wins Map resolves to.
+    const nativeNames = offered.filter((n) => RESERVED_WORKFORCE_TOOL_NAMES.has(n));
+    expect(nativeNames.length).toBeGreaterThan(0);
+    for (const native of nativeNames) {
+      expect(offered.indexOf(native)).toBeGreaterThan(offered.indexOf('lookup_ticket'));
+    }
+    // Nothing was dropped by the reordering: declared + native = the whole offered list.
+    expect(nativeNames.length + 1).toBe(offered.length);
   });
 });
