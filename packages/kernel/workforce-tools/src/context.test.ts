@@ -4,7 +4,7 @@
  * 4), the goal-never-trimmed refusal, the fixture anchors the scripted-turn harnesses parse, and
  * every defined ordering rule. All pure — no database, no clock.
  */
-import type { MemoryHit } from '@rayspec/core';
+import { type MemoryHit, SEAM_MAX_MEMORY_HITS } from '@rayspec/core';
 import type { MergedChildResult } from '@rayspec/tasks';
 import { describe, expect, it } from 'vitest';
 import {
@@ -490,5 +490,39 @@ describe('assembleTurnInput', () => {
     expect(rendered).toContain('- user_reply: {"text":"WAKE-reply-requeued"}');
     // And the older signal's loss is announced, never silent.
     expect(rendered).toMatch(/\[…\d+ earlier signals omitted: byte budget\]/);
+  });
+});
+
+/**
+ * The recall section is filled by the `WorkforceMemoryProvider` seam — out-of-tree code. The byte
+ * budget always held (the rendered block was never oversized), but the LOOP that enforces it
+ * re-measures the whole block once per dropped hit, so its cost grew with the square of the hit
+ * count a provider returned. Measured on this checkout before the input cap existed: 1 000 hits
+ * rendered in 0.2 ms, 5 000 in 1.2 s, and 20 000 in 30.8 s of CPU inside a pure function. Capping
+ * the INPUT bounds that at a constant for any provider, and the loss is announced rather than
+ * silent. The shipped provider's own ceiling is `RECALL_MAX_HITS` = 10, so nothing shipped changes.
+ */
+describe('recall from an over-reaching memory provider', () => {
+  it('caps the hits it will render, whatever the provider returned, and says how many it dropped', () => {
+    const flood = Array.from({ length: 20_000 }, (_v, i) => hit(`h${i}`, 'x', 1));
+    const rendered = assembleTurnInput(inputFor({ recall: flood }));
+    expect(rendered.split('\n').filter((l) => l === '- x')).toHaveLength(SEAM_MAX_MEMORY_HITS);
+    expect(rendered).toContain(`[…${20_000 - SEAM_MAX_MEMORY_HITS} omitted: hit ceiling]`);
+  });
+
+  it('a provider inside the ceiling is rendered whole, with no omission notice', () => {
+    const hits = Array.from({ length: SEAM_MAX_MEMORY_HITS }, (_v, i) => hit(`h${i}`, 'x', 1));
+    const rendered = assembleTurnInput(inputFor({ recall: hits }));
+    expect(rendered.split('\n').filter((l) => l === '- x')).toHaveLength(SEAM_MAX_MEMORY_HITS);
+    expect(rendered).not.toContain('omitted: hit ceiling');
+  });
+
+  it('the byte budget still applies INSIDE the ceiling, and both losses are reported', () => {
+    // Each hit is far too wide for the recall budget, so the byte-budget loop still trims — and the
+    // two omission counts stay distinguishable, because they are different losses.
+    const wide = Array.from({ length: 100 }, (_v, i) => hit(`h${i}`, 'w'.repeat(200), 1));
+    const rendered = assembleTurnInput(inputFor({ recall: wide }));
+    expect(rendered).toMatch(/\[…\d+ omitted: byte budget\]/);
+    expect(rendered).toContain(`[…${100 - SEAM_MAX_MEMORY_HITS} omitted: hit ceiling]`);
   });
 });

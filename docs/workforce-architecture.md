@@ -538,5 +538,7 @@ are exactly the enforced ones named above.
   every validation rule.
 - **[Workforce events](./workforce-events.md)** — the journal vocabulary, versioned.
 - **[Workforce tools](./workforce-tools.md)** — the role toolsets and the result contract.
+- **[Workforce extension seams](./workforce-extension-seams.md)** — the five replaceable interfaces,
+  what each may decide, and what refuses an implementation that reaches past it.
 - **[CLI reference → workforce](./cli-reference.md#workforce--operate-the-durable-task-engine-of-a-running-deployment)**
   — the operator console.
