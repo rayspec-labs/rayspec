@@ -14,7 +14,7 @@
  *       whose boot needs no model-provider key (the two other wrappers default to live executor modes
  *       and abort without `OPENAI_API_KEY`; `local-boot`'s is TypeScript and needs a TS runner).
  *   (b) SOURCE arm — pins the shape in EVERY entrypoint it finds by reading them; the set is read off the
- *       filesystem (`discoverBootEntrypoints`), so an example added later is held from the day it lands.
+ *       filesystem (`discoverBy`), so an example added later cannot escape a hand-maintained list.
  *       It asserts registration and wiring only; the behaviour behind that wiring is what arm (a) runs.
  *
  * DISCOVERY IS BY ROLE, NOT BY FILENAME — and that is the whole reason this header changed. The set was
@@ -22,9 +22,16 @@
  * that entrypoint carries the identical boot-window fix and NOTHING would have gone red if it were
  * reverted (measured — the reverted file passed this suite 5/5 before the rule was widened). A filename
  * list fixes the one path it names and misses the next one, so the rule is now "a non-test source file
- * directly under `examples/<slug>/` whose source names `assembleServer`" — the marker that the file boots
- * a RaySpec server. It is deliberately INDEPENDENT of the signal wiring asserted below, so the property
- * under test cannot also be the thing that removes a file from the set.
+ * directly under `examples/<slug>/` that names `@rayspec/server`", cross-checked against the narrower
+ * `assembleServer` call every entrypoint makes today. Both markers are deliberately INDEPENDENT of the
+ * signal wiring asserted below, so the property under test cannot also remove a file from the set.
+ *
+ * WHAT THAT DOES AND DOES NOT BUY, stated exactly. It closes the failure that happened: a different file
+ * name, a different language, or a different `@rayspec/server` entry point is now DISCOVERED, and a file
+ * that reaches for the package without calling `assembleServer` is NAMED by the marker-agreement arm
+ * rather than silently held or skipped. It does NOT make the set self-maintaining in general — the floor
+ * is a static `>= 4`, and a wrapper that boots without naming `@rayspec/server` at all is outside the
+ * rule and would still need this file changed. That case is uncovered, and saying so is the point.
  *
  * ONE BOUND NEITHER ARM COVERS — a property of the wiring, not a gap in the arms: the exit sits inside
  * `httpServer.close()`'s callback, and Node runs that callback only once every open connection has
@@ -60,23 +67,37 @@ const EXAMPLES = resolve(here, '../../../../examples');
 
 /** The source extensions a boot entrypoint may be written in — `local-boot`'s is TypeScript. */
 const ENTRYPOINT_EXTENSIONS = ['.mjs', '.js', '.ts', '.mts', '.cjs'];
-/** A test file is never an entrypoint, and three of `local-boot`'s DO name `assembleServer`. */
+/** A test file is never an entrypoint, and several of `local-boot`'s DO name both markers below. */
 const IS_TEST_FILE = /\.(?:test|spec)\.[cm]?[jt]s$/;
 /**
- * The marker that says "this file boots a RaySpec server". Chosen because it is what every entrypoint
- * calls and what nothing else under `examples/<slug>/` calls — and, critically, because it is NOT part
- * of the signal wiring arm (b) asserts, so deleting the property under test cannot also delete the file
- * from the set being tested.
+ * TWO markers, and the pair is the point — a single one is a rule whose blind spot nobody can see.
+ *
+ * `PACKAGE_MARKER` is the DISCOVERY rule: a file that reaches for `@rayspec/server` at all. That is
+ * the broader of the two and the one a future entrypoint is least able to avoid, because assembling
+ * a RaySpec server is what that package is for.
+ *
+ * `ASSEMBLE_MARKER` is the narrower CALL every entrypoint makes today. It is CROSS-CHECKED against
+ * the discovery set rather than used as the rule, so an entrypoint that boots through some other
+ * `@rayspec/server` export lands in the discovery set and is HELD, instead of being silently absent
+ * the way `local-boot/serve.ts` was under the old filename glob.
+ *
+ * Both are deliberately independent of the signal wiring arm (b) asserts, so deleting the property
+ * under test cannot also delete the file from the set being tested.
  */
-const BOOT_MARKER = 'assembleServer';
+const PACKAGE_MARKER = '@rayspec/server';
+const ASSEMBLE_MARKER = 'assembleServer';
 
 /**
- * Every BOOT ENTRYPOINT under examples/ — READ OFF THE FILESYSTEM BY ROLE, never typed out and never
- * globbed by filename, so an example added later is held by arm (b) the moment it lands instead of
- * escaping a list nobody updated (or, as happened with `local-boot/serve.ts`, a glob nobody widened).
- * The floor assertion in arm (b) is what keeps a rule that found nothing from passing vacuously.
+ * Every non-test source file directly under `examples/<slug>/` whose source contains `marker`.
+ *
+ * Matching is over RAW SOURCE, comments included, and that asymmetry is deliberate: a file that only
+ * MENTIONS a marker in prose is pulled in and held to the shape assertions (loud, and easy to see),
+ * whereas stripping comments to be clever would risk dropping a real entrypoint (silent, and the
+ * exact failure mode this suite exists to close). Measured while proving the agreement arm red — a
+ * probe whose comment merely said "never calls assembleServer" joined the narrower set on that word
+ * alone. Both markers are matched the same way, so the two sets stay comparable.
  */
-function discoverBootEntrypoints(): string[] {
+function discoverBy(marker: string): string[] {
   const found: string[] = [];
   for (const slug of readdirSync(EXAMPLES, { withFileTypes: true })) {
     if (!slug.isDirectory()) continue;
@@ -85,13 +106,28 @@ function discoverBootEntrypoints(): string[] {
       if (!ENTRYPOINT_EXTENSIONS.some((ext) => file.name.endsWith(ext))) continue;
       if (IS_TEST_FILE.test(file.name)) continue;
       const rel = `${slug.name}/${file.name}`;
-      if (!readFileSync(resolve(EXAMPLES, rel), 'utf8').includes(BOOT_MARKER)) continue;
+      if (!readFileSync(resolve(EXAMPLES, rel), 'utf8').includes(marker)) continue;
       found.push(rel);
     }
   }
   return found.sort();
 }
-const WRAPPERS = discoverBootEntrypoints();
+
+/**
+ * Every BOOT ENTRYPOINT under examples/ — READ OFF THE FILESYSTEM BY ROLE, never typed out and never
+ * globbed by filename, so an example added later cannot escape a list nobody updated (or, as happened
+ * with `local-boot/serve.ts`, a glob nobody widened).
+ *
+ * THE EXACT BOUND, because a claim wider than its mechanism is what this whole suite is about: this
+ * holds every non-test source file directly under `examples/<slug>/` that names `@rayspec/server`.
+ * A future wrapper that boots WITHOUT reaching for that package at all is outside the rule and would
+ * still need this file changed — that case is not covered and is not claimed to be. What IS closed is
+ * the failure that actually happened: an entrypoint written in a different file name, or a different
+ * language, or calling a different function, is now discovered rather than skipped.
+ */
+const WRAPPERS = discoverBy(PACKAGE_MARKER);
+/** The narrower set, cross-checked against the one above so neither marker can drift alone. */
+const ASSEMBLE_SET = discoverBy(ASSEMBLE_MARKER);
 
 /** The entrypoint arm (a) boots: the only one whose boot demands no model-provider key. */
 const BOOTABLE_REL = 'support-ticket-triage/dev-boot.mjs';
@@ -274,6 +310,18 @@ describe('examples/* boot entrypoints — every one registers the same owning ha
     expect(WRAPPERS.length).toBeGreaterThanOrEqual(4);
     expect(WRAPPERS).toContain(BOOTABLE_REL);
     expect(WRAPPERS).toContain(TS_ENTRYPOINT_REL);
+  });
+
+  /**
+   * The floor above is a static `>= 4`, which a future entrypoint cannot raise on its own — so the
+   * two markers are checked AGAINST EACH OTHER instead of trusting either alone. A file that reaches
+   * for `@rayspec/server` but never calls `assembleServer` is a boot path this suite's shape
+   * assertions were not written for: it must be NAMED here, not silently held or silently skipped.
+   */
+  it('the two discovery markers agree — neither can drift alone', () => {
+    expect(ASSEMBLE_SET).toEqual(WRAPPERS);
+    // …and neither set is empty, which is the reading a broken rule also produces.
+    expect(WRAPPERS.length).toBeGreaterThan(0);
   });
 
   for (const wrapper of WRAPPERS) {
