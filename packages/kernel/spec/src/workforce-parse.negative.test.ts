@@ -916,18 +916,24 @@ describe('workforce semantic lint — approval policies', () => {
  * unheld label acquires a holder is a redeploy, which re-runs this lint. The old advisory's premise
  * ("the label may arrive later") was false for exactly that reason.
  *
- * SCOPE OF THE CLAIM, stated precisely because the base fixture below is the shape that disproves
- * the loose version. The dead thing is the CLAUSE, not always the rule:
+ * THE REFUSAL IS UNIFORM; THE CONSEQUENCE IS NOT. Every unheld entry is refused — it is a typo
+ * either way — but the message must state what remains LIVE, and that is a property of the
+ * declaration, not of the label. Two inputs decide it, and both were got wrong once:
  *
- *   - an approval policy's `requireWhen` is `{ labels }` alone, so the rule dies with the clause
- *     and work that should park for a human silently would not — the un-gating case;
- *   - a review policy naming only `labels` dies the same way;
- *   - a review policy that ALSO names `confidenceBelow` — which is what `WORKFORCE_BASE` declares,
- *     and what the first test below mutates — STILL FIRES, because the two selectors are OR'd. It
- *     is refused anyway, and the reason is not "it cannot fire": the labels branch is the
- *     unconditional ENFORCEMENT branch while `confidenceBelow` matches a number the submitting turn
- *     wrote, so the typo silently downgrades a control to a heuristic a turn can dodge. That is a
- *     policy judgement, and the emitted message states it rather than claiming the rule is dead.
+ *   1. SIBLING LABELS. `requireWhen.labels` is an ARRAY, matched with `.some()`, so one unheld
+ *      entry beside a HELD one kills that entry and nothing else — the rule keeps firing
+ *      unconditionally. (Round-2 defect: the message claimed the rule was degraded. No fixture in
+ *      the repo had a multi-entry selector array, so nothing could catch it — hence the mixed-array
+ *      cases below.)
+ *   2. `confidenceBelow`, review policies only. The selectors are OR'd, so a rule declaring it
+ *      still fires — through the branch matching a number the SUBMITTING TURN wrote, a heuristic
+ *      rather than the unconditional control the label was. (Round-1 defect: the message claimed
+ *      "the rule can never fire", which `WORKFORCE_BASE` itself disproves.)
+ *
+ * THE INPUT SPACE IS SIX CELLS — {approval, review+confidenceBelow, review labels-only} × {a
+ * sibling is held, none is} — and each is exercised below. Enumerating the space and then covering
+ * every cell is the discipline this block exists to hold: both defects were cases nobody listed,
+ * so nobody probed them.
  */
 describe('policy labels must be HELD by some declared employee', () => {
   it('a typo in a review policy label is a typed ERROR at its exact path', () => {
@@ -976,6 +982,110 @@ describe('policy labels must be HELD by some declared employee', () => {
     expect(res.ok).toBe(true);
     if (!res.ok) return;
     expect(lintSpecWarnings(res.value)).toEqual([]);
+  });
+
+  /**
+   * THE SIX CELLS. The refusal is asserted for every one; the CONSEQUENCE clause is asserted too,
+   * because the consequence is the half that has been wrong twice and no assertion covered it.
+   * `dev` holds `production_change` and `public_statement` in the base, so `ghost_label` is the
+   * unheld entry and its array position decides whether a held sibling exists.
+   */
+  const consequenceOf = (yaml: string, pathSuffix: string): string => {
+    const res = parseSpec(yaml, ON);
+    expect(res.ok, 'an unheld label must be refused in EVERY cell').toBe(false);
+    if (res.ok) return '';
+    const err = res.errors.find(
+      (e) => e.code === 'workforce_label_unheld' && e.path?.endsWith(pathSuffix),
+    );
+    expect(err, `no workforce_label_unheld at …${pathSuffix}`).toBeDefined();
+    return err?.message ?? '';
+  };
+  const REVIEW_WHEN = 'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }';
+  const APPROVAL_WHEN = 'requireWhen: { labels: [public_statement] }';
+
+  it('cells 1-2 — a review policy WITH confidenceBelow, sibling held vs not', () => {
+    // 1. sibling HELD: the rule is untouched, so the message must not claim any degradation.
+    const held = consequenceOf(
+      WORKFORCE_BASE.replace(
+        REVIEW_WHEN,
+        'requireWhen: { confidenceBelow: 0.75, labels: [production_change, ghost_label] }',
+      ),
+      'reviewPolicies[0].requireWhen.labels[1]',
+    );
+    expect(held).toMatch(/only this entry is dead/);
+    expect(held).not.toMatch(/no longer demand review|only its confidenceBelow/);
+
+    // 2. NO sibling held: the enforcement branch is gone and only the heuristic remains.
+    const alone = consequenceOf(
+      WORKFORCE_BASE.replace(
+        REVIEW_WHEN,
+        'requireWhen: { confidenceBelow: 0.75, labels: [ghost_label] }',
+      ),
+      'reviewPolicies[0].requireWhen.labels[0]',
+    );
+    expect(alone).toMatch(/only its confidenceBelow heuristic/);
+    expect(alone).not.toMatch(/only this entry is dead/);
+  });
+
+  it('cells 3-4 — a review policy with labels ONLY, sibling held vs not', () => {
+    // 3. sibling HELD: still a working, unconditional control.
+    const held = consequenceOf(
+      WORKFORCE_BASE.replace(
+        REVIEW_WHEN,
+        'requireWhen: { labels: [production_change, ghost_label] }',
+      ),
+      'reviewPolicies[0].requireWhen.labels[1]',
+    );
+    expect(held).toMatch(/only this entry is dead/);
+    expect(held).not.toMatch(/no longer demand review/);
+
+    // 4. NO sibling held, and no confidenceBelow: the rule really is dead, and may say so.
+    const alone = consequenceOf(
+      WORKFORCE_BASE.replace(REVIEW_WHEN, 'requireWhen: { labels: [ghost_label] }'),
+      'reviewPolicies[0].requireWhen.labels[0]',
+    );
+    expect(alone).toMatch(/no longer demand review at all/);
+  });
+
+  it('cells 5-6 — an approval policy, sibling held vs not', () => {
+    // 5. sibling HELD: the gate still covers every seat holding the other label.
+    const held = consequenceOf(
+      WORKFORCE_BASE.replace(
+        APPROVAL_WHEN,
+        'requireWhen: { labels: [public_statement, ghost_label] }',
+      ),
+      'approvalPolicies[0].requireWhen.labels[1]',
+    );
+    expect(held).toMatch(/only this entry is dead/);
+    expect(held).not.toMatch(/covers no seat/);
+
+    // 6. NO sibling held: the policy covers nobody. The message must NOT claim work can no longer
+    // park — `request_approval` is offered by ROLE (workforce-tools roles.ts) and the handler
+    // falls back to a 72h/fail window, so the seat still parks; the DECLARED window is what is lost.
+    const alone = consequenceOf(
+      WORKFORCE_BASE.replace(APPROVAL_WHEN, 'requireWhen: { labels: [ghost_label] }'),
+      'approvalPolicies[0].requireWhen.labels[0]',
+    );
+    expect(alone).toMatch(/covers no seat/);
+    expect(alone).toMatch(/72h\/fail/);
+  });
+
+  it('a held sibling does not suppress the refusal — both halves asserted', () => {
+    // The consequence softens; the ERROR does not. A mixed array is still a typo worth failing on.
+    const doc = WORKFORCE_BASE.replace(
+      REVIEW_WHEN,
+      'requireWhen: { confidenceBelow: 0.75, labels: [production_change, ghost_label] }',
+    );
+    expectRejection(doc, 'workforce_label_unheld');
+    // …and exactly ONE error, at the offending index — the held sibling raises nothing.
+    const res = parseSpec(doc, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.filter((e) => e.code === 'workforce_label_unheld')).toEqual([
+      expect.objectContaining({
+        path: 'workforce.reviewPolicies[0].requireWhen.labels[1]',
+      }),
+    ]);
   });
 });
 

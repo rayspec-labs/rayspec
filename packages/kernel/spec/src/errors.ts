@@ -189,15 +189,16 @@ import { z } from 'zod';
  *                               label NO declared employee holds, so THAT CLAUSE can never fire:
  *                               labels match by exact equality against `employees[].labels` and
  *                               every holder is declared in the SAME document, so the only way one
- *                               arrives is a redeploy, which re-runs this lint. What the dead
- *                               clause costs depends on the rule. An approval rule's `requireWhen`
- *                               is `{ labels }` alone, so the rule dies and work that should park
- *                               for a human silently would not; a review rule naming only `labels`
- *                               dies the same way. A review rule that ALSO names `confidenceBelow`
- *                               keeps firing — the selectors are OR'd — but only via the branch the
- *                               submitting turn writes for itself, so the rule is silently
- *                               downgraded from a control to a heuristic. All three are refused;
- *                               the message names which case the author is in. Advisory until the
+ *                               arrives is a redeploy, which re-runs this lint. Every such entry is
+ *                               refused — it is a typo either way — but what it COSTS varies, and
+ *                               the message says which case the author is in rather than asserting
+ *                               one for all. `labels` is an ARRAY matched with `.some()`, so a
+ *                               held sibling means only that entry is dead and the rule is intact;
+ *                               with no held sibling a review rule falls back to its
+ *                               `confidenceBelow` heuristic if it declares one, else it can no
+ *                               longer demand review, and an approval rule stops covering any seat
+ *                               (its `request_approval` then runs on the default window, since the
+ *                               tool is offered by role rather than by rule). Advisory until the
  *                               pre-freeze review, on the false premise that a label may arrive
  *                               later.
  *  - `multiple_workforces`    — the document spells `workforce:` as a LIST, or carries a plural

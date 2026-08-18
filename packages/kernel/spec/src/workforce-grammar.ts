@@ -64,19 +64,25 @@ export type WorkforceRoleName = z.infer<typeof WorkforceRole>;
  * capabilities, whose `capability_violation` check runs in the very lint file that validates these
  * (`workforce-lint.ts`).
  *
- * MATCH RULE — exact string equality, case-sensitive, no inheritance. The matcher is
- * `.includes(label)` over the owner's own declared array (`@rayspec/core` review-policy.ts
+ * MATCH RULE — exact string equality, case-sensitive, no inheritance, ANY-of within one array. The
+ * matchers are `labels.some((l) => holder.labels.includes(l))` (`@rayspec/core` review-policy.ts
  * `requiresReview`, `workforce-tools` review-policy.ts `matchApprovalRule`); there is no
  * department- or team-level label field anywhere in this grammar, so nothing is inherited.
  *
  * CONSTRAINED to `SafeIdentifier` rather than an open string, because this token is the SOLE
- * selector for `approvalPolicies[]` — the mechanism that parks work for a human — and a typo in an
- * open string silently un-gates approval. The companion control is the lint's
- * `workforce_label_unheld` ERROR: a rule keyed on a label no declared employee holds is refused,
- * not warned about. `:`/`.` are deliberately NOT admitted: `:` is already this section's delegation
- * separator (`employee:<id>` / `department:<id>` / `team:<id>`), and admitting a namespacing
- * spelling whose hierarchy semantics do not exist would invite an affordance the matcher ignores.
- * Widening the pattern later accepts strictly more documents, so nothing here is foreclosed.
+ * selector for `approvalPolicies[]` and a typo in an open string silently defeats a declared
+ * approval gate. Precisely what it defeats, since the loose version of this sentence has already
+ * misled once: approval policies are never read by the ENGINE, and `request_approval` is offered by
+ * ROLE (`workforce-tools` roles.ts), so an uncovered seat can still park. What a typo costs is the
+ * DECLARED window and fate — the handler falls back to `?? 'fail'` and a 72h default
+ * (`workforce-tools` toolset.ts) — plus the turn-frame line that tells the seat it is covered. The
+ * companion control is the lint's `workforce_label_unheld` ERROR: a label no declared employee
+ * holds is refused, not warned about.
+ *
+ * `:`/`.` are deliberately NOT admitted: `:` is already this section's delegation separator
+ * (`employee:<id>` / `department:<id>` / `team:<id>`), and admitting a namespacing spelling whose
+ * hierarchy semantics do not exist would invite an affordance the matcher ignores. Widening the
+ * pattern later accepts strictly more documents, so nothing here is foreclosed.
  */
 export const WorkforceLabel = SafeIdentifier;
 

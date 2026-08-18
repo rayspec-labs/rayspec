@@ -2230,17 +2230,22 @@ a namespacing spelling would suggest a hierarchy the equality match does not imp
 
 A label named by a rule but held by no declared employee is refused
 (`workforce_label_unheld`), not warned about. Every holder is declared in the same document, so the
-only way one arrives is a redeploy — which re-runs this validation — and until then **that clause
-can never fire**. What the dead clause costs depends on what else the rule declares, and the error
-message names the case:
+only way one arrives is a redeploy — which re-runs this validation — and until then **that entry can
+never fire**. Every such entry is refused, because it is a typo either way; what it COSTS depends on
+what remains live, and the error message says which case you are in:
 
-- an `approvalPolicies[]` rule, whose `requireWhen` is `labels` and nothing else, is dead outright:
-  work that should park for a human silently would not;
-- a `reviewPolicies[]` rule naming only `labels` is dead the same way;
-- a `reviewPolicies[]` rule that ALSO names `confidenceBelow` keeps firing, because the two
-  selectors are OR'd — but only through the confidence branch, which the submitting turn writes
-  itself. The unheld label silently turns an unconditional control into a heuristic, which is why
-  this case is refused too rather than passed over as a redundant clause.
+- **another label in the same array IS held** — `labels` is matched with "any listed label", so only
+  that one entry is dead and the rule is otherwise untouched;
+- **no other label is held**, and a `reviewPolicies[]` rule also declares `confidenceBelow` — the
+  rule still fires, but only through the confidence branch, which the submitting turn writes itself.
+  The unheld label silently turns an unconditional control into a heuristic, which is why this case
+  is refused too rather than passed over as a redundant clause;
+- **no other label is held**, and a `reviewPolicies[]` rule declares no other selector — it can no
+  longer demand review at all;
+- **no other label is held**, on an `approvalPolicies[]` rule — the policy covers no seat. Note what
+  this does *not* mean: `request_approval` is offered by ROLE, not by rule match, so a covered seat
+  can still park. What is lost is the declared window and fate (the request falls back to a 72-hour
+  timeout with `fail`) and the turn-frame line telling the seat it was covered.
 
 The EFFECTIVE reporting edge is `reportsTo`, else the declared department's manager; the
 resulting graph must be acyclic (`reporting_cycle`) and every chain must reach the orchestrator
@@ -2454,9 +2459,9 @@ code below has a failing-spec fixture in CI. The workforce validation codes are:
 - `reserved_tool_name` — an employee's agent declares a tool named after a native workforce
   tool (natives are injected by role and always win; a shadowed tool is refused up front).
 - `workforce_label_unheld` — a review or approval policy's `requireWhen.labels` names a label no
-  declared employee holds, so that clause can never fire. On an approval policy (or a review policy
-  with no other selector) the rule dies with it; on a review policy that also names
-  `confidenceBelow` the rule survives as a self-report heuristic instead of a control.
+  declared employee holds, so that entry can never fire. Refused in every case; the message names
+  what remains live — another held label in the same array, a `confidenceBelow` heuristic, or
+  nothing.
 - `multiple_workforces` — `workforce:` is spelled as a list, or a plural `workforces:` key is
   present. Exactly zero or one workforce may be declared.
 
