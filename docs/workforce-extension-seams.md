@@ -60,7 +60,7 @@ the whole goal as one step for the default owner.
 (`packages/app/server/src/workforce-goal-intake.ts:100`); a composition supplies a replacement
 through `assembleServer`'s `orchestrationStrategy` option, which has no environment path, so a
 production entrypoint always runs the shipped default unless an embedder passes one
-(`packages/app/server/src/composition-root.ts:3475`).
+(`packages/app/server/src/composition-root.ts:3506`).
 
 **What refuses an over-reaching plan:** `planRefusal`
 (`packages/app/server/src/workforce-goal-intake.ts:49`) validates the returned plan against the
@@ -94,7 +94,7 @@ returns nothing and retains nothing, on purpose, so every consumer is tested aga
 **Wired, with one qualification.** It is called at
 `packages/app/server/src/workforce-turn-handlers.ts:187`; the injection point is the
 `memoryProviderFor` (`:73`) dependency. The composition root does not pass it
-(`packages/app/server/src/composition-root.ts:3462` calls `buildWorkforceTurnHandlers` without it),
+(`packages/app/server/src/composition-root.ts:3493` calls `buildWorkforceTurnHandlers` without it),
 so a boot always gets the shipped `TaskHistoryMemoryProvider` — the seam is injectable by an embedder
 that composes the turn handlers itself, not by configuration.
 

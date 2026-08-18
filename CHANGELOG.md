@@ -115,6 +115,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the `turn_ended` journal payload gains only the optional `classification` field, documented in
   the vocabulary's first published statement.
 
+- **`pnpm gate:migrate-upgrade` — the migration bar's other half: an existing database is upgraded,
+  not just an empty one bootstrapped.** Every database gate before it started from an empty database
+  (`gate:shadow-dryrun` applies the chain "against a TRULY EMPTY DB"; `gate:migrate-clean` provisions
+  a fresh one), so nothing exercised the apply an already-deployed installation actually performs.
+  The mechanism that makes an incremental apply correct was guarded — `gate:shadow-dryrun` asserts the
+  journal's `when` values are strictly monotonic, which is precisely drizzle's silent-skip failure mode
+  — but the apply itself was not.
+  The new gate materializes the released chain in a throwaway database through the real programmatic
+  migrator (the same `migrate(db, { migrationsFolder })` call the server boot makes), seeds real rows
+  for two tenants across `orgs` / `runs` / `journal_steps` / `run_events` / `tenant_event_streams` /
+  `tenant_events`, and then applies the full committed chain onto that populated database. It asserts
+  that `drizzle.__drizzle_migrations` advances by exactly the number of migrations after the baseline
+  (a short count is a silent skip, a long one a double apply); that every already-applied bookkeeping
+  row is byte-identical afterwards, so nothing was re-applied; that every seeded row is byte-identical,
+  compared by a digest over the column list captured **before** the upgrade, so an additive column does
+  not read as a data change while a rewrite or a loss does; that every pre-upgrade column keeps its
+  type, nullability and default; that the tables the upgrade creates — derived as a set difference, so
+  the check tracks whatever the chain adds — each hold zero rows; that a repeated apply is a no-op; and
+  that the upgraded database has zero structural drift from `schema.ts`, checked by the from-clean
+  gate's own assertion script rather than a second implementation of it.
+  The released boundary is anchored on the migration tag that ends the published chain, so the number
+  of migrations upgraded across is read off the journal at run time. An unknown anchor, and a chain
+  with nothing after the baseline, both fail the gate rather than passing it vacuously. It runs in CI
+  beside the other migration gates.
+
 ### Fixed
 
 - **The boot migrator is serialized, and a failed chain now names the pending migrations.**
@@ -150,6 +175,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now pins both halves: two concurrent runners both succeed at pool size 1, and a runner that meets a
   staged `orgs` table still aborts fail-closed with `42P07`, records nothing, leaves no partial DDL,
   **and** names the pending tags.
+
+- **Tenant data erasure is now wired on every boot, not on the shapes whose data had been noticed.**
+  The seam was widened twice — first to product `stores:`, then also to a declared `workforce:` — and
+  each widening chased the deployment whose content had just been found. One shape was still short:
+  a document that declares only `agents:`, and a boot with **no document at all**, which
+  `rayspec-serve` treats as its default. Both left `BootedServer.eraseTenantNow` `undefined`. Both
+  mount the agent-run surface anyway — `createAuthApp` registers `POST /v1/agents/:id/runs`
+  unconditionally — so both accumulate, per tenant, the `runs` header, the `journal_steps` holding raw
+  model output, the `conversation_items` holding the raw transcript, and the `run_events` journal, with
+  no operator way to remove any of it.
+  The seam is now built on every outcome the composition root produces. Nothing about the erasure
+  mechanism changed and there is no migration: the core half is derived from
+  `CORE_TENANT_SCOPED_TABLES`, and the declared store list contributes only the FK-safe ordering of the
+  **product** half, which on these shapes is empty — it erases zero product rows and reports
+  `tables: {}` while the core half does the work.
+  **Wiring it is not arming it, and that is what makes wiring it by default safe.** The destructive act
+  is still gated on `RAYSPEC_ERASURE_ENABLED` resolved at the composition root — never a spec flag — so
+  no deployment gains erase capability by upgrading: with the variable unset every call returns a
+  counts-only preview (`mode: 'dry-run'`, `dryRunReason: 'gate-disabled'`) that deletes nothing, and a
+  real erasure still refuses to run without an audit store.
+  **The proof.** `auth-only-erasure-boot.db.test.ts` boots the real composition root against a real
+  database on both shapes and asserts, on ground truth read outside the erasure path: the seam is
+  defined; the gate-off call previews the four run-history tables at their seeded counts and leaves
+  every row in place; the same boot restarted with the gate armed erases them to zero; and a second
+  tenant's rows are untouched throughout.
 
 - **`journalScrub` no longer destroys the workforce billing ledger it exists to preserve.**
   `journalScrub: true` is the softer right-to-erasure posture: it erases raw subject content while
@@ -215,9 +265,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The operator gate is untouched and still fail-closed: without `RAYSPEC_ERASURE_ENABLED` set to
   exactly `true`, every call is a DRY-RUN preview that deletes nothing, and a real erasure still
   refuses to run without an audit store.
-  The banner's unwired line no longer claims there is nothing to erase — it states that the boot
-  declared neither stores nor a workforce, which is a fact about the wiring rather than a claim about
-  what the database holds.
+  The banner's unwired line no longer claims there is nothing to erase. With the seam now built on
+  every boot (see the entry above), that line reports only what the server it was handed observably
+  carries — it names no declared section and makes no claim about what the database holds, because
+  neither is something it can see.
   **The proof.** `workforce-erasure-boot.db.test.ts` boots the real composition root on a store-less
   workforce document against a real database and asserts the seam is defined, that the banner reports
   the resolved gate posture rather than `NOT WIRED`, and that a gate-off call previews **non-zero**
