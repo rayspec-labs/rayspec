@@ -291,9 +291,10 @@ describe('examples/* boot entrypoints — every one registers the same owning ha
       // the bare `assembleServer(` instead would be worse: contract-intake and support-intake-chat
       // both print it inside a header COMMENT above their registration, which would invert the test.
       const assembleAt = src.indexOf('const server = await');
-      expect(assembleAt, 'no `const server = await …` — the ordering anchor is gone').toBeGreaterThan(
-        -1,
-      );
+      expect(
+        assembleAt,
+        'no `const server = await …` — the ordering anchor is gone',
+      ).toBeGreaterThan(-1);
       expect(src.indexOf("process.on('SIGTERM'")).toBeLessThan(assembleAt);
       // …and the graceful close REPLACES the boot-phase abort rather than adding a second pair.
       // Matched by regex, not substring: the TypeScript entrypoint annotates the same assignment as
