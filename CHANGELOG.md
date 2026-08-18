@@ -227,6 +227,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
   tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
 
+### Documentation
+
+- **`docs/workforce-architecture.md` no longer cites code by line number — six of its twelve
+  line-numbered citations pointed at the wrong thing.** The page's own contract is that every
+  guarantee names the mechanism that enforces it, and a stale pointer is that contract failing
+  quietly: the line still exists and still holds code, so a reader who checks the range sees nothing
+  wrong. The misses were near-misses, which is what makes them expensive — one pointed at
+  `decideApproval`'s journal write while the sentence was about the approval **sweep**; one was
+  attributed to "inside `runSweep`" while pointing 84 lines *above* where `runSweep` is declared;
+  one landed on the `confidenceBelow` commentary instead of the `durableWorker` refusal 118 lines
+  below it; one landed on an unrelated reserved-employee-id test. A fifth was correct until the
+  advisory-lock change above edited the cited file and moved it — self-inflicted rot, in the same
+  branch that fixed the other four, which is the case nobody looks for.
+  Every citation is now a file plus the SYMBOL, function or test title to look for, and each of the
+  fourteen new anchors was checked to resolve to exactly one place in the file it names. Nothing
+  re-verifies this page per commit — `gate:no-archaeology` and `gate:skill-drift` do not read it,
+  and an injected `task-scheduler.db.test.ts:99999` is caught by neither — so the numbers were claims
+  with no mechanism behind them. The page now says so in its preamble, so the convention survives the
+  next editor. The one exception kept is a citation into a released migration file, which is never
+  edited and therefore cannot rot.
+
 ### Upgrade notes
 
 - **One migration: `0013_workforce_dedupe_lease_and_scrub`.** It is the single coordinated

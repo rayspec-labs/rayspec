@@ -8,6 +8,22 @@ mechanism (and usually the test) that enforces it; a claim without one is a bug 
 [spec reference](./spec-reference.md#workforce-experimental)); its grammar and behavior may
 change without notice.
 
+**How this page cites code, and why it names no line numbers.** Every citation below is a file plus
+the SYMBOL, function or test title to look for — never `file.ts:120-134`. That is a deliberate
+downgrade. A line number looks more precise than a file name and is checked less, because the number
+suppresses the instinct to go and read; and it goes wrong silently, since the line still exists and
+still holds code. An audit of this page's twelve line-numbered citations found **six** pointing at
+the wrong thing, and the failure mode is the near-miss rather than the obvious miss: one landed on
+`decideApproval`'s journal write while the sentence was about the approval *sweep*, and one was
+attributed to `runSweep` while pointing 84 lines above where `runSweep` is declared. Both look right
+if you check that the cited lines are in range and contain plausible code. A fifth rotted **inside
+the branch that fixed the other four**, from that branch's own edits to the cited file.
+Nothing re-verifies this page per commit — `gate:no-archaeology` and `gate:skill-drift` do not read
+it, and an injected `task-scheduler.db.test.ts:99999` is caught by neither — so a number here is a
+claim with no mechanism behind it, which is the one thing this page says it will not print. A symbol
+survives every edit that does not rename it, and a rename is a change a reader can follow. The one
+exception is a citation into a released migration file, which is never edited and so cannot rot.
+
 ## The one rule everything else follows from
 
 **A wait is a row, never a process.** A task that is delegating, under review, or waiting for a
@@ -328,8 +344,8 @@ Pinned by the `0013` block in `packages/kernel/db/scripts/shadow-dryrun.sh` and 
 **Migrations are forward-only.** There are no down-migration files, no `drizzle-kit drop` script,
 and no claim anywhere that a schema change can be reversed. Recovery from a bad migration is a
 reviewed FORWARD migration. The chain is applied by the real programmatic migrator at every boot and
-is idempotent, so repeated boots are safe (`mount-without-deploy.db.test.ts:258-282`,
-`boot-migrator-concurrency.db.test.ts`).
+is idempotent, so repeated boots are safe (`boot-migrator-concurrency.db.test.ts`, *"a THIRD boot
+over the finished database is a clean no-op"*).
 
 **The emergency lever is the feature flag, and it preserves your data.** Unset
 `RAYSPEC_EXPERIMENTAL_WORKFORCE` and the next boot refuses the whole `workforce:` section with the
@@ -346,7 +362,8 @@ What the lever does NOT do: it does not remove the tables, it does not stop time
 approval timeouts, and it is not a schema rollback. Nothing sweeps while the deployment refuses to
 boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
 `sweepApprovalTimeouts` selects `pending` approvals on `lt(timeoutAt, now)`
-(`packages/kernel/tasks/src/approvals.ts:167-181`) — so every window that expired during the outage
+(`packages/kernel/tasks/src/approvals.ts`, that function's own `where`) — so every window that
+expired during the outage
 is due the moment you turn the flag back on, and the declared fates fire then.
 
 **The boot migrator is SERIALIZED, so a fan-out on a first bring-up no longer costs a boot** — but
@@ -412,17 +429,20 @@ So the upgrade order is: **boot once with the workforce still fully declared**, 
 a later deploy. That one boot is enough, and it cannot quietly not-happen: the stamp needs a durable
 worker and a task tenant, and BOTH of those are themselves refusals rather than conditions — a
 `workforce:` section without `deployment.durableWorker: true` is rejected at the parse with a typed
-`schema_violation` (`workforce-lint.ts:670-676`, pinned at
-`workforce-parse.negative.test.ts:606-611`), and a declared workforce with `RAYSPEC_CRON_TENANT_ID`
-unset aborts the boot (`composition-root.ts:2957-2963`, pinned at
+`schema_violation` (`workforce-lint.ts`, its `THE DURABLE WORKER` block; pinned by
+`workforce-parse.negative.test.ts`, *"rejects a workforce on a deployment without a durable
+worker"*), and a declared workforce with `RAYSPEC_CRON_TENANT_ID` unset aborts the boot
+(`composition-root.ts`, `deployDeclaredSpec`'s
+`effectiveSpec.workforce !== undefined && !config.cronTenantId` guard; pinned by
 `serve-workforce-flag.db.test.ts`). A deploy that declares a workforce and comes up has therefore
 stamped it.
 
 ## Backup and restore
 
 **The core ships no backup tool** — no scheduler, no snapshot command, no continuous WAL archiving,
-and no point-in-time recovery. `packages/compose/api-auth/src/engine/deploy.ts:68-77` says so at the
-deploy boundary ("Backup/PITR is deferred"), and nothing in this repo emits or reads a dump. What a
+and no point-in-time recovery. `packages/compose/api-auth/src/engine/deploy.ts` says so at the
+deploy boundary, in its `ROLLBACK / RECOVERY — FORWARD-FIX ONLY` docblock ("Backup/PITR is
+deferred"), and nothing in this repo emits or reads a dump. What a
 self-hoster runs is stock Postgres.
 
 What this page can promise is narrower, and it is tested: the shipped **workforce task graph and its
@@ -482,9 +502,11 @@ number of rows":
 - **`workforce_tasks.version`** — the optimistic CAS token `applyTransition` compare-and-swaps on.
   Lose it and every row is present while no parked task can ever be claimed again.
 - **`workforce_tasks.last_event_seq` and `workforce_runtime.last_event_seq`** — the journal sequence
-  HEADs. Allocation rides the owning row's own counter (`events.ts:125-134` for a task stream,
-  `:147-158` for the workforce control stream), and `run_events` carries
-  `UNIQUE(tenant_id, run_id, seq)` (`0004_run_events.sql:36`). A restore that reset a counter would not
+  HEADs. Allocation rides the owning row's own counter — in `events.ts`, the `lastEventSeq + N`
+  UPDATE that each appender runs before its insert (one for a task stream, one for the workforce
+  control stream) — and `run_events` carries `UNIQUE(tenant_id, run_id, seq)`
+  (`0004_run_events.sql:36`, a line number that is safe to cite because a released migration file is
+  never edited). A restore that reset a counter would not
   fail at restore time; it would fail on the very next append, as a duplicate key, in the last place
   an operator would look.
 
@@ -503,14 +525,15 @@ on `run_events_tenant_run_seq_idx`), and a restore missing one table's rows.
 | **A park** | Stays parked, at the version it was parked at. The structural `awaiting_children` park has no operator exit at all, and it does not acquire one across a restore. |
 | **A terminal task** | Untouched, whole-row. |
 | **A turn IN FLIGHT at dump time** | Comes back as a `working` row whose workflow no longer exists — see below. It is re-queued, not stranded. |
-| **The DBOS system database** | **NOT in the dump.** It is a separate database (`executor.ts:119-124`), so a dump of the application database does not contain it, and the restored deployment starts with an empty one. |
+| **The DBOS system database** | **NOT in the dump.** It is a separate database (`executor.ts`, the `systemDatabaseUrl` option), so a dump of the application database does not contain it, and the restored deployment starts with an empty one. |
 | **Secrets** | Not in the database at all. Restoring under freshly minted secrets has consequences for copied API keys and issued tokens — see [Restore and key rotation](./ARCHITECTURE.md#restore-and-key-rotation). |
 
 **Why the missing DBOS system database is safe, and what it costs.** A claim is an application row,
 so it travels; the workflow behind it does not. On the restored deployment the sweep asks the engine
 whether the claim's workflow id is still live, finds it absent, and treats absent the same as dead:
 it re-queues the task through the one status door and releases the claim's budget reservation in the
-same transaction (`task-scheduler.ts:936-972`, inside `runSweep`). A fresh dispatch of the same turn is safe because
+same transaction (`task-scheduler.ts`, the reap loop inside `runSweep` — the re-queue that stamps
+`turn_reaped`). A fresh dispatch of the same turn is safe because
 turn handlers are effect-free and the receipt guards double application — the same property that
 makes crash recovery safe. The cost is one repeated turn's model spend, and the reap is journaled:
 the re-queue carries `queueReason: turn_reaped`, so an operator can see afterwards which tasks the
@@ -520,11 +543,12 @@ sweep leaves a not-yet-due approval alone.
 
 **Restoring is not a rollback.** The dump carries the schema it was taken at, and the boot migrator
 described above then applies whatever is still pending — forward, because there are no
-down-migrations to apply (`deploy.ts:70`). So restoring an older dump under a newer deployment moves
-the schema *towards* that deployment and never backwards. It also does not soften the redeploy gate:
-the restored rows are live work, and `assertWorkforceSpecCompatible`
-(`workforce-boot.ts:93-101`) reads them at the next boot and refuses a document that would strand any
-of them, naming the stranded task ids — pinned at `workforce-boot.db.test.ts:110-113`.
+down-migrations to apply (the same `deploy.ts` docblock). So restoring an older dump under a newer
+deployment moves the schema *towards* that deployment and never backwards. It also does not soften
+the redeploy gate: the restored rows are live work, and `assertWorkforceSpecCompatible`
+(`workforce-boot.ts`) reads them at the next boot and refuses a document that would strand any
+of them, naming the stranded task ids — pinned by `workforce-boot.db.test.ts`, which asserts the
+refusal carries `WorkforceSpecChangeError` and the stranded task id.
 
 ## Honest scope
 
