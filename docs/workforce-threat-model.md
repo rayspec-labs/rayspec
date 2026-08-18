@@ -446,11 +446,11 @@ the class is entirely dead code.
 
 **Injection points are narrower than the interfaces suggest.** `orchestrationStrategy` reaches the
 composition only through the `buildServer` options object
-(`packages/app/server/src/composition-root.ts:3475`), and that option is explicitly **not**
+(`packages/app/server/src/composition-root.ts:3506`), and that option is explicitly **not**
 reachable from the environment-derived options
-(`packages/app/server/src/composition-root.ts:2038`) — so a production entrypoint always runs the
+(`packages/app/server/src/composition-root.ts:2043`) — so a production entrypoint always runs the
 shipped default. The turn-handler seam beside it carries the same posture, stated in its own
-docblock (`packages/app/server/src/composition-root.ts:2029`). `memoryProviderFor` is not passed by
+docblock (`packages/app/server/src/composition-root.ts:2034`). `memoryProviderFor` is not passed by
 the composition root at all; reaching it means an embedder composing the turn handlers itself.
 
 | Abuse case | Outcome | Evidence |
@@ -649,14 +649,34 @@ correct-and-uncalled: `packages/app/server/src/workforce-turn-validation.db.test
 
 ### 6.5 Tenant erasure
 
-The tenant data-erasure control seam is wired whenever the deployment declares **stores or a
-workforce** (`packages/app/server/src/composition-root.ts:3521`). The earlier condition encoded "no
-product stores ⇒ no tenant data", which the task engine falsified: both shipped workforce examples
-declare zero stores while their databases hold the tenant's whole task graph and both workforce
-`run_events` namespaces. **PROVEN** — `packages/app/server/src/workforce-erasure-boot.db.test.ts`,
-`2. the tenant-erasure control seam is WIRED on a store-less workforce boot`, and
+The tenant data-erasure control seam is wired on **every** boot, under no condition at all — the
+product deploy (`packages/app/server/src/product-boot.ts:2978`), the declared-spec deploy
+(`packages/app/server/src/composition-root.ts:3565`) and the no-document auth-only boot
+(`packages/app/server/src/composition-root.ts:2300`) each build one.
+
+**Two successive conditions each chased the shape whose data had just been noticed, and each was
+falsified by the next one.** "No product stores ⇒ no tenant data" was falsified by the task engine:
+both shipped workforce examples declare zero stores while their databases hold the tenant's whole
+task graph and both workforce `run_events` namespaces. The *stores-or-workforce* condition that
+replaced it was falsified in turn by the agent-run surface, which `createAuthApp` mounts on every
+boot — so a deployment declaring neither still accumulates that tenant's `runs`, its `journal_steps`
+(raw model output), its `conversation_items` (the raw transcript) and its `run_events` journal.
+The generalization is the point: **any condition here is a shape the seam is missing from**, which
+is why there is now none. What a document declares changes what *else* there is to erase, never
+whether there is anything.
+
+**Wiring is not arming.** A defined seam erases nothing by existing: the destructive act stays gated
+on `RAYSPEC_ERASURE_ENABLED`, resolved at the composition root and never a spec flag, and an unset
+gate makes every call a counts-only DRY-RUN preview.
+
+**PROVEN** — `packages/app/server/src/auth-only-erasure-boot.db.test.ts`, `2. the tenant-erasure
+control seam is WIRED on a declared-agents auth-only boot`; the same suite's no-document case,
+`packages/app/server/src/auth-only-erasure-boot.db.test.ts`, `7. a boot with NO document at all
+wires the seam too, and still previews`; the store-less workforce case,
+`packages/app/server/src/workforce-erasure-boot.db.test.ts`, `2. the tenant-erasure control seam is
+WIRED on a store-less workforce boot`; and
 `packages/app/server/src/erase-tenant.db.test.ts`, `14. a FULL erase (not scrub) still removes the
-WHOLE task graph, budget ledger included` — the second is what makes the workforce half of the
+WHOLE task graph, budget ledger included` — the last is what makes the workforce half of the
 oracle non-vacuous, where it previously asserted `0 === 0`.
 
 ---
@@ -821,10 +841,10 @@ why §7.5's last bullet exists.
   because only the appendix copy was checked), which is why arm 6 exists.
 
   **The residual class is the near miss, and this page shipped one before a manual audit caught
-  it.** An earlier draft cited `packages/app/server/src/composition-root.ts:2029` for the claim that
+  it.** An earlier draft cited `packages/app/server/src/composition-root.ts:2034` for the claim that
   the *orchestration strategy* option is unreachable from the environment. That line is the
   **turn-handler** option's docblock; the strategy's own is
-  `packages/app/server/src/composition-root.ts:2038`. Same file, adjacent block, and both contain
+  `packages/app/server/src/composition-root.ts:2043`. Same file, adjacent block, and both contain
   the phrase the ledger recorded — so the guard passed it, correctly and uselessly. A citation that
   is stable is not thereby a citation that is *apt*, and only reading the enclosing function or
   docblock settles which. Every citation in this page whose recorded text also occurs elsewhere in
@@ -870,8 +890,8 @@ The boot banner prints the posture **unconditionally on every full boot**, with 
 variable that suppresses it. Two exported constants carry it
 (`packages/app/server/src/banner.ts:22` and `packages/app/server/src/banner.ts:38`); the full
 banner names it in its title (`packages/app/server/src/banner.ts:60`) and the static-profile banner
-carries the same headline (`packages/app/server/src/banner.ts:222`) and the **byte-identical**
-warning block (`packages/app/server/src/banner.ts:232`).
+carries the same headline (`packages/app/server/src/banner.ts:225`) and the **byte-identical**
+warning block (`packages/app/server/src/banner.ts:235`).
 
 **PROVEN** — `packages/app/server/src/banner.test.ts` asserts the constants against their shipped
 bytes first (`the exported constants ARE the shipped strings — the anti-circularity control`),
@@ -1054,12 +1074,14 @@ packages/app/server/src/workforce-turn-handlers.ts:245 | (collected.malformed !=
 packages/app/server/src/banner.ts:22 | export const NOT_INTERNET_FACING = 'NOT internet-facing';
 packages/app/server/src/banner.ts:38 | export const POSTURE_WARNING_LINES: readonly string[] = Object.freeze([
 packages/app/server/src/banner.ts:60 | LOCAL / single-node / pre-external-hardening
-packages/app/server/src/banner.ts:222 | STATIC PROFILE (frontend-only)
-packages/app/server/src/banner.ts:232 | lines.push(...POSTURE_WARNING_LINES);
-packages/app/server/src/composition-root.ts:2029 | NOT reachable from `assembleOptsFromEnv`, so a
-packages/app/server/src/composition-root.ts:2038 | `assembleOptsFromEnv`, so a production entrypoint always runs the shipped default
-packages/app/server/src/composition-root.ts:3475 | strategy: opts.orchestrationStrategy ?? new SingleTaskPlanStrategy(),
-packages/app/server/src/composition-root.ts:3521 | if (specStores.length > 0 || effectiveSpec.workforce !== undefined) {
+packages/app/server/src/banner.ts:225 | STATIC PROFILE (frontend-only)
+packages/app/server/src/banner.ts:235 | lines.push(...POSTURE_WARNING_LINES);
+packages/app/server/src/composition-root.ts:2034 | NOT reachable from `assembleOptsFromEnv`, so a
+packages/app/server/src/composition-root.ts:2043 | `assembleOptsFromEnv`, so a production entrypoint always runs the shipped default
+packages/app/server/src/composition-root.ts:2300 | eraseTenantNow = (
+packages/app/server/src/composition-root.ts:3506 | strategy: opts.orchestrationStrategy ?? new SingleTaskPlanStrategy(),
+packages/app/server/src/composition-root.ts:3565 | const eraseTenantNow: BootedServer['eraseTenantNow'] = (
+packages/app/server/src/product-boot.ts:2978 | const eraseTenantNow: BootedServer['eraseTenantNow'] = (
 packages/kernel/platform/src/dispatch.ts:226 | const byName = new Map(deps.tools.map((t) => [t.spec.name, t]));
 packages/kernel/platform/src/dispatch.ts:318 | if (tool.inputSchema) {
 packages/kernel/db/src/tenant-db.ts:45 | export const TENANT_GUC = 'app.current_tenant';
@@ -1176,4 +1198,6 @@ packages/app/server/src/banner.test.ts | the STATIC-PROFILE boot banner carries 
 packages/app/server/src/workforce-erasure-boot.db.test.ts | 2. the tenant-erasure control seam is WIRED on a store-less workforce boot
 packages/app/server/src/erase-tenant.db.test.ts | 14. a FULL erase (not scrub) still removes the WHOLE task graph, budget ledger included
 packages/kernel/workforce-tools/src/threat-model-drift.test.ts | every citation resolves AND the cited line CONTAINS the recorded text
+packages/app/server/src/auth-only-erasure-boot.db.test.ts | 2. the tenant-erasure control seam is WIRED on a declared-agents auth-only boot
+packages/app/server/src/auth-only-erasure-boot.db.test.ts | 7. a boot with NO document at all wires the seam too, and still previews
 ```
