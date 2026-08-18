@@ -1292,8 +1292,14 @@ describe('workforce cross-tenant gate: identical structures and identifiers (CI-
       // Exact counts, both directions: neither tenant sees a row too few or a row too many.
       expect(aRows.length, name).toBe(EXPECTED_ROWS[name]);
       expect(bRows.length, name).toBe(EXPECTED_ROWS[name]);
-      expect(aRows.every((r) => r.tenantId === a.orgId), name).toBe(true);
-      expect(bRows.every((r) => r.tenantId === b.orgId), name).toBe(true);
+      expect(
+        aRows.every((r) => r.tenantId === a.orgId),
+        name,
+      ).toBe(true);
+      expect(
+        bRows.every((r) => r.tenantId === b.orgId),
+        name,
+      ).toBe(true);
       // …and the identical structures did not smuggle the other tenant's bytes in.
       expect(JSON.stringify(aRows), name).not.toContain('SECRET_FROM_B');
       expect(JSON.stringify(bRows), name).not.toContain('SECRET_FROM_A');
@@ -1372,7 +1378,9 @@ describe('workforce cross-tenant gate: identical structures and identifiers (CI-
     expect(tree.rootTaskId).toBe(a.rootTaskId);
     expect(tree.tasks.map((t) => t.taskId).sort()).toEqual([a.childTaskId, a.rootTaskId].sort());
 
-    const approvals = JSON.parse((await callAs(a, 'GET', '/v1/workforce/approvals')).text) as Array<{
+    const approvals = JSON.parse(
+      (await callAs(a, 'GET', '/v1/workforce/approvals')).text,
+    ) as Array<{
       id: string;
     }>;
     expect(approvals.map((r) => r.id)).toEqual([a.approvalId]);
@@ -1500,9 +1508,9 @@ describe('workforce cross-tenant gate: identical structures and identifiers (CI-
     expect((await callAs(a, 'POST', `/v1/workforce/tasks/${a.rootTaskId}/cancel`, {})).status).toBe(
       202,
     );
-    expect((await callAs(a, 'POST', `/v1/workforce/${wf}/halt`, { reason: 'twin gate' })).status).toBe(
-      200,
-    );
+    expect(
+      (await callAs(a, 'POST', `/v1/workforce/${wf}/halt`, { reason: 'twin gate' })).status,
+    ).toBe(200);
     expect(kicks).toBeGreaterThan(0); // the dispatcher seam is live — the verbs are not no-ops
 
     // A's own rows moved (the verbs really ran); B's did not move by a single byte, even though
