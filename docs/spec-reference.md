@@ -2226,9 +2226,21 @@ inherited from an employee's department or team, and no runtime behavior ever in
 spelling. Each label is a safe identifier (`[a-z_][a-z0-9_]*`, ≤ 63 characters) — the same rule the
 ids carry; `:` and `.` are not admitted, because `:` is already the delegation-target separator and
 a namespacing spelling would suggest a hierarchy the equality match does not implement. Use
-`finance_signoff`, not `finance:signoff`. A label named by a rule but held by no declared employee
-is refused (`workforce_label_unheld`), not warned about: every holder is declared in the same
-document, so such a rule can never fire.
+`finance_signoff`, not `finance:signoff`.
+
+A label named by a rule but held by no declared employee is refused
+(`workforce_label_unheld`), not warned about. Every holder is declared in the same document, so the
+only way one arrives is a redeploy — which re-runs this validation — and until then **that clause
+can never fire**. What the dead clause costs depends on what else the rule declares, and the error
+message names the case:
+
+- an `approvalPolicies[]` rule, whose `requireWhen` is `labels` and nothing else, is dead outright:
+  work that should park for a human silently would not;
+- a `reviewPolicies[]` rule naming only `labels` is dead the same way;
+- a `reviewPolicies[]` rule that ALSO names `confidenceBelow` keeps firing, because the two
+  selectors are OR'd — but only through the confidence branch, which the submitting turn writes
+  itself. The unheld label silently turns an unconditional control into a heuristic, which is why
+  this case is refused too rather than passed over as a redundant clause.
 
 The EFFECTIVE reporting edge is `reportsTo`, else the declared department's manager; the
 resulting graph must be acyclic (`reporting_cycle`) and every chain must reach the orchestrator
@@ -2442,8 +2454,9 @@ code below has a failing-spec fixture in CI. The workforce validation codes are:
 - `reserved_tool_name` — an employee's agent declares a tool named after a native workforce
   tool (natives are injected by role and always win; a shadowed tool is refused up front).
 - `workforce_label_unheld` — a review or approval policy's `requireWhen.labels` names a label no
-  declared employee holds, so the rule can never fire. On an approval policy that means work which
-  should park for a human silently does not.
+  declared employee holds, so that clause can never fire. On an approval policy (or a review policy
+  with no other selector) the rule dies with it; on a review policy that also names
+  `confidenceBelow` the rule survives as a self-report heuristic instead of a control.
 - `multiple_workforces` — `workforce:` is spelled as a list, or a plural `workforces:` key is
   present. Exactly zero or one workforce may be declared.
 

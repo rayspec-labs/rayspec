@@ -186,13 +186,20 @@ import { z } from 'zod';
  *                               always win; a colliding declared tool would be silently shadowed,
  *                               so it is refused up front.
  *  - `workforce_label_unheld` — a review or approval rule's `requireWhen.labels` names a policy
- *                               label NO declared employee holds. Labels are matched for exact
- *                               equality against `employees[].labels`, and every holder is declared
- *                               in the SAME document, so such a rule can never fire in this
- *                               deployment — on an approval rule that means work which should park
- *                               for a human silently does not. It was an advisory warning until the
- *                               pre-freeze review: the "the label may arrive later" premise is
- *                               false, because a later arrival is a redeploy that re-lints.
+ *                               label NO declared employee holds, so THAT CLAUSE can never fire:
+ *                               labels match by exact equality against `employees[].labels` and
+ *                               every holder is declared in the SAME document, so the only way one
+ *                               arrives is a redeploy, which re-runs this lint. What the dead
+ *                               clause costs depends on the rule. An approval rule's `requireWhen`
+ *                               is `{ labels }` alone, so the rule dies and work that should park
+ *                               for a human silently would not; a review rule naming only `labels`
+ *                               dies the same way. A review rule that ALSO names `confidenceBelow`
+ *                               keeps firing — the selectors are OR'd — but only via the branch the
+ *                               submitting turn writes for itself, so the rule is silently
+ *                               downgraded from a control to a heuristic. All three are refused;
+ *                               the message names which case the author is in. Advisory until the
+ *                               pre-freeze review, on the false premise that a label may arrive
+ *                               later.
  *  - `multiple_workforces`    — the document spells `workforce:` as a LIST, or carries a plural
  *                               `workforces:` key. Exactly zero or one workforce may be declared
  *                               (D-010) and `workforce:` is a single mapping. Raised on the RAW

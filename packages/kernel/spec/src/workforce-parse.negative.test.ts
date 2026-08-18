@@ -912,10 +912,22 @@ describe('workforce semantic lint — approval policies', () => {
  *
  * `requireWhen.labels` is matched for EXACT equality against `employees[].labels`
  * (`@rayspec/core` review-policy.ts `requiresReview`; `@rayspec/workforce-tools` review-policy.ts
- * `matchApprovalRule`), and every holder is declared in the SAME document. So a rule keyed on a
- * label nobody holds cannot fire in this deployment — and on an approval policy that means work
- * which should park for a human silently does not. The old advisory's premise ("the label may
- * arrive later") was false: a later arrival is a redeploy, which re-runs this lint.
+ * `matchApprovalRule`), and every holder is declared in the SAME document — so the only way an
+ * unheld label acquires a holder is a redeploy, which re-runs this lint. The old advisory's premise
+ * ("the label may arrive later") was false for exactly that reason.
+ *
+ * SCOPE OF THE CLAIM, stated precisely because the base fixture below is the shape that disproves
+ * the loose version. The dead thing is the CLAUSE, not always the rule:
+ *
+ *   - an approval policy's `requireWhen` is `{ labels }` alone, so the rule dies with the clause
+ *     and work that should park for a human silently would not — the un-gating case;
+ *   - a review policy naming only `labels` dies the same way;
+ *   - a review policy that ALSO names `confidenceBelow` — which is what `WORKFORCE_BASE` declares,
+ *     and what the first test below mutates — STILL FIRES, because the two selectors are OR'd. It
+ *     is refused anyway, and the reason is not "it cannot fire": the labels branch is the
+ *     unconditional ENFORCEMENT branch while `confidenceBelow` matches a number the submitting turn
+ *     wrote, so the typo silently downgrades a control to a heuristic a turn can dodge. That is a
+ *     policy judgement, and the emitted message states it rather than claiming the rule is dead.
  */
 describe('policy labels must be HELD by some declared employee', () => {
   it('a typo in a review policy label is a typed ERROR at its exact path', () => {

@@ -652,30 +652,53 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
   }
 
   // ---- POLICY LABELS ARE HELD -------------------------------------------------------------
-  // A rule keyed on a label NO declared employee holds can never fire in this deployment: the
-  // matcher is exact equality against `employees[].labels` (@rayspec/core review-policy.ts
-  // `requiresReview`; workforce-tools review-policy.ts `matchApprovalRule`), and every holder is
-  // declared in THIS document. On an approval policy that means work which should park for a human
-  // silently does not — which is why this is an ERROR and not the advisory it used to be. The old
-  // "the label may arrive later" premise was false: a later arrival is a redeploy, and a redeploy
-  // re-runs this lint.
+  // A label NO declared employee holds makes the CLAUSE that names it dead: the matcher is exact
+  // equality against `employees[].labels` (@rayspec/core review-policy.ts `requiresReview`;
+  // workforce-tools review-policy.ts `matchApprovalRule`), and every holder is declared in THIS
+  // document, so a redeploy is the only way a holder arrives — and a redeploy re-runs this lint.
+  // That is why it is an ERROR rather than the advisory it used to be, whose "the label may arrive
+  // later" premise was simply false.
+  //
+  // What the dead clause COSTS depends on what else the rule declares, and the message says which
+  // case the author is in rather than asserting one of them for all three:
+  //
+  //   - an approval policy — `requireWhen` is `{ labels }` and nothing else, so the rule is dead
+  //     outright and work that should park for a human silently does not;
+  //   - a review policy naming ONLY `labels` — likewise dead, it can no longer demand review;
+  //   - a review policy ALSO naming `confidenceBelow` — the rule still FIRES, because the two
+  //     selectors combine with OR (core review-policy.ts `requiresReview`). This is the case worth
+  //     being precise about: the labels branch is the ENFORCEMENT branch, firing unconditionally on
+  //     a declared label, while `confidenceBelow` matches a number the SUBMITTING TURN wrote and is
+  //     "a heuristic over self-report, not a control" (workforce-tools review-policy.ts). So an
+  //     unheld label here does not disable a spare clause — it silently DOWNGRADES the rule from a
+  //     control to a heuristic a turn can dodge by reporting high confidence. Refusing that is the
+  //     point of the rule; claiming the rule "can never fire" would be false about that document.
   const heldLabels = new Set(workforce.employees.flatMap((e) => e.labels));
-  const unheld = (label: string, where: string, at: string): void => {
+  const unheld = (label: string, where: string, consequence: string, at: string): void => {
     if (heldLabels.has(label)) return;
     errors.push(
       specError(
         'workforce_label_unheld',
-        `${where} guards label '${label}', which no declared employee holds — the rule can never ` +
-          'fire. Add the label to the employees it should cover, or remove it from the rule',
+        `${where} guards label '${label}', which no declared employee holds — this clause can ` +
+          `never fire, ${consequence}. Add the label to the employees it should cover, or remove ` +
+          'it from the rule',
         path(at),
       ),
     );
   };
   workforce.reviewPolicies.forEach((policy, pi) => {
+    // The remainder of THIS rule once the labels clause is dead — read off the declaration, never
+    // assumed, because `requireWhen` may legally name both selectors.
+    const consequence =
+      policy.requireWhen.confidenceBelow === undefined
+        ? 'and it is the rule’s only selector, so the rule can no longer demand review at all'
+        : 'leaving the rule with only its confidenceBelow heuristic, which matches a confidence ' +
+          'the submitting turn writes itself and so is not the unconditional control this label was';
     (policy.requireWhen.labels ?? []).forEach((label, li) => {
       unheld(
         label,
         `review policy '${policy.id}'`,
+        consequence,
         `reviewPolicies[${pi}].requireWhen.labels[${li}]`,
       );
     });
@@ -685,6 +708,10 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
       unheld(
         label,
         `approval policy '${approval.id}'`,
+        // `requireWhen` on an approval policy is `{ labels }` and nothing else, so the dead clause
+        // is the whole selector — no second branch exists to soften it.
+        'and it is the policy’s only selector, so work that should park for a human silently ' +
+          'would not',
         `approvalPolicies[${ai}].requireWhen.labels[${li}]`,
       );
     });
@@ -753,10 +780,17 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
 /**
  * The `workforce:` section raises NO advisories. It had exactly one —
  * `workforce_capability_unheld`, an unheld `requireWhen` label — and the pre-freeze grammar review
- * promoted it to the `workforce_label_unheld` ERROR in `lintWorkforce` above: an unheld label on an
- * approval policy means work that should park for a human silently does not, and the "the label may
- * arrive later" premise that justified advisory treatment is false (holders are declared in the
- * same document; a later arrival is a redeploy that re-lints).
+ * promoted it to the `workforce_label_unheld` ERROR in `lintWorkforce` above. Advisory treatment
+ * rested on "the label may arrive later", which is false: holders are declared in the same
+ * document, so a later arrival is a redeploy that re-runs this lint.
+ *
+ * Promoted for BOTH rule kinds, on two different grounds — worth keeping straight, because they are
+ * not the same argument. On an approval policy (and on a review policy naming only `labels`) the
+ * dead clause kills the rule outright. On a review policy that also names `confidenceBelow` the
+ * rule still fires — the selectors combine with OR — but only through the branch a submitting turn
+ * writes for itself, so the unheld label silently downgrades a control to a heuristic. Both deserve
+ * a refusal; neither is described by "the rule can never fire", which is why the emitted message
+ * reports the CLAUSE and names the remainder it leaves behind.
  *
  * The function stays because `lintSpecWarnings` composes it (lint.ts) and because the next
  * genuinely-heuristic workforce rule belongs here rather than in a new seam. Advisory means
