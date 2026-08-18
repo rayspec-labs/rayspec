@@ -16,13 +16,44 @@
  * parse with the one typed code, and with the flag set the same spawn walks PAST the parse and
  * stops at the next gate (the workforce's task-tenant precondition). Without the second arm the
  * first would also pass against an entrypoint that refuses every boot.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * THE SECOND SUITE IN THIS FILE — the D-013 EMERGENCY PATH, on a database that holds live work.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * Everything above refuses against an EMPTY database, which proves the refusal and says nothing at
+ * all about the promise the refusal is made in service of. D-013 makes migrations forward-only and
+ * names exactly one emergency lever: unset `RAYSPEC_EXPERIMENTAL_WORKFORCE`, the boot refuses
+ * workforce authoring and dispatch, and the durable rows are PRESERVED UNTOUCHED. The flag is read
+ * in exactly one place (`packages/kernel/spec/src/experimental.ts:9`) and enforced in exactly one
+ * (`packages/kernel/spec/src/parse.ts:152`); nothing in `@rayspec/tasks` consults it — so nothing in
+ * the engine could preserve or destroy anything on the flag's account, and nothing proved it did not.
+ *
+ * The second suite is that proof, and it is deliberately a SEQUENCE rather than an assertion:
+ * a live flag-ON deployment → real workforce state written by the real engine writers → a clean
+ * shutdown → a flag-OFF boot → a byte-level census comparison → a flag-ON boot again → the parked
+ * work resuming on the CAS token it was parked with. The last step is the one that matters most:
+ * rows can be present and still be useless, and only a resume that succeeds on the PRE-flag-off
+ * version proves the data survived usefully rather than merely numerically.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { forTenant, makeDb } from '@rayspec/db';
+import {
+  appendWorkforceEvents,
+  applyTransition,
+  applyTurnOutcome,
+  createRootTask,
+  deliverSignal,
+  type TaskRecord,
+  workforceBudgetsSchema,
+} from '@rayspec/tasks';
+import { exportPKCS8, generateKeyPair } from 'jose';
+import postgres from 'postgres';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { applyMigrations } from './composition-root.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -135,3 +166,535 @@ describe.skipIf(!hasDb)('rayspec-serve — the experimental workforce opt-in (db
     }
   }, 240_000);
 });
+
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+// D-013 emergency path: flag-off preserves the durable rows
+// ───────────────────────────────────────────────────────────────────────────────────────────────
+
+const PRESERVE_DB = `rayspec_flag_off_preserve_${process.pid}`;
+const PRESERVE_TENANT = '00000000-0000-4000-8000-0000000000f9';
+const PRESERVE_PORT = '8849';
+const WORKFORCE_ID = 'helpdesk';
+
+/** The nine tables migration 0012 creates — the whole tenant task graph. */
+const WORKFORCE_TABLES = [
+  'workforce_tasks',
+  'workforce_task_transitions',
+  'workforce_task_signals',
+  'workforce_delegations',
+  'workforce_approvals',
+  'workforce_reviews',
+  'workforce_messages',
+  'workforce_budget_ledger',
+  'workforce_runtime',
+] as const;
+
+/** A full deployment: a durable worker (the dispatcher's precondition) and a declared workforce. */
+const LIVE_WORKFORCE_YAML = `version: '1.0'
+metadata:
+  name: flag-off-preservation
+deployment:
+  durableWorker: true
+agents:
+  - id: lead_agent
+    name: lead_agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: Coordinate.
+workforce:
+  id: ${WORKFORCE_ID}
+  name: Helpdesk
+  orchestrator: lead
+  budgets:
+    workforce:
+      usd: 40
+    task:
+      usd: 2.5
+      turns: 12
+  execution:
+    maxTaskWallClock: 45m
+  departments:
+    - id: eng
+      name: Engineering
+      manager: mgr
+      mission: Own the fixes.
+      members: [dev]
+      budgets:
+        usd: 10
+  employees:
+    - id: lead
+      agent: lead_agent
+      title: Lead
+      role: orchestrator
+    - id: mgr
+      agent: lead_agent
+      title: Manager
+      role: manager
+      department: eng
+      reportsTo: lead
+    - id: dev
+      agent: lead_agent
+      title: Developer
+      role: worker
+      department: eng
+`;
+
+/** Per-table `count(*)` plus an md5 over the ORDERED full row text — "unchanged" means byte-equal. */
+interface Census {
+  readonly counts: Record<string, number>;
+  readonly digests: Record<string, string>;
+}
+
+function adminUrl(url: string): string {
+  const u = new URL(url);
+  u.pathname = '/postgres';
+  return u.toString();
+}
+function withDbName(url: string, name: string): string {
+  const u = new URL(url);
+  u.pathname = `/${name}`;
+  return u.toString();
+}
+
+describe.skipIf(!hasDb)(
+  'rayspec-serve — the D-013 emergency path preserves live workforce rows (db)',
+  () => {
+    let dbUrl = '';
+    let db: ReturnType<typeof makeDb> | undefined;
+    let specFile = '';
+    let jwtKey = '';
+    let liveCensus: Census | undefined;
+    /** The clarification-parked task, and the version it was parked at BEFORE the flag-off boot. */
+    let parked: TaskRecord | undefined;
+    let parkedVersion = -1;
+    let armsRan = 0;
+
+    beforeAll(async () => {
+      if (!hasDb) return;
+      const base = process.env.DATABASE_URL as string;
+      dbUrl = withDbName(base, PRESERVE_DB);
+      const admin = postgres(adminUrl(base), { max: 1, onnotice: () => {} });
+      try {
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${PRESERVE_DB}_dbos_sys" WITH (FORCE)`);
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${PRESERVE_DB}" WITH (FORCE)`);
+        await admin.unsafe(`CREATE DATABASE "${PRESERVE_DB}"`);
+      } finally {
+        await admin.end();
+      }
+      // The tenant row must exist before the boot: `ensureDeclaredWorkforceRuntime` inserts into
+      // `workforce_runtime`, whose only FK is `tenant_id -> orgs(id)`. Provisioning an org against a
+      // migrated database ahead of the deployment is the shipped operator order (`provisionTenant`).
+      db = makeDb(dbUrl, 2);
+      await applyMigrations(db);
+      await db.$client.unsafe(
+        `INSERT INTO orgs (id, name, slug) VALUES ('${PRESERVE_TENANT}', 'FlagOff', 'flagoff')`,
+      );
+      specFile = specPath('live-workforce.yaml', LIVE_WORKFORCE_YAML);
+      const { privateKey } = await generateKeyPair('RS256', { extractable: true });
+      jwtKey = await exportPKCS8(privateKey);
+    }, 240_000);
+
+    afterAll(async () => {
+      await db?.$client.end();
+      if (!hasDb) return;
+      const admin = postgres(adminUrl(process.env.DATABASE_URL as string), {
+        max: 1,
+        onnotice: () => {},
+      });
+      try {
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${PRESERVE_DB}_dbos_sys" WITH (FORCE)`);
+        await admin.unsafe(`DROP DATABASE IF EXISTS "${PRESERVE_DB}" WITH (FORCE)`);
+      } finally {
+        await admin.end();
+      }
+    }, 120_000);
+
+    function liveEnv(flag: boolean): NodeJS.ProcessEnv {
+      const env: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        RAYSPEC_SKIP_DOTENV: '1',
+        RAYSPEC_SPEC_PATH: specFile,
+        DATABASE_URL: dbUrl,
+        RAYSPEC_API_KEY_PEPPER: 'flag-off-preserve-pepper',
+        RAYSPEC_JWT_SIGNING_KEY: jwtKey,
+        OPENAI_API_KEY: 'sk-not-a-real-key-no-call-is-made',
+        RAYSPEC_CRON_TENANT_ID: PRESERVE_TENANT,
+        PORT: PRESERVE_PORT,
+      };
+      if (flag) env.RAYSPEC_EXPERIMENTAL_WORKFORCE = '1';
+      return env;
+    }
+
+    /**
+     * Boot the shipped entrypoint WITH the flag, wait until it is genuinely serving, then SIGTERM it
+     * and wait for a clean exit.
+     *
+     * TWO readiness signals, both required, and each is load-bearing for a different reason.
+     *
+     *   1. `workforce_runtime.budgets.declaredAt` — written by exactly one caller
+     *      (`ensureDeclaredWorkforceRuntime`, wired at composition-root.ts:3324-3331 behind the
+     *      durable-worker + task-tenant preconditions), so its appearance means this boot got all the
+     *      way through deploy and wired the dispatcher. This is the fact that makes the boot a LIVE
+     *      workforce deployment rather than merely a process. It is read off the DATABASE rather than
+     *      off a banner line so the suite is not coupled to boot copy other work is editing.
+     *   2. `GET /health` answering 200 — the process is listening. Measured, not assumed: a SIGTERM
+     *      sent after (1) but BEFORE (2) is not honoured at all. On the certification host that boot
+     *      ran on for a further 415 s without exiting, and only a second signal delivered after it was
+     *      listening ended it (then in 50 ms, exit 0). serve.ts registers its SIGINT/SIGTERM handlers
+     *      inside the listen callback (serve.ts:127-147), so the boot window has no handler of its
+     *      own — an operational note in its own right, recorded in the handback report.
+     *
+     * The SIGKILL fallback exists so a hang is reported as a failed assertion on the exit code rather
+     * than as a suite that never returns, and so a stuck server is never left behind for the next arm.
+     */
+    async function bootLiveAndShutDown(): Promise<{ code: number | null; output: string }> {
+      // `node --import tsx <file>` and NOT the `tsx` bin: the bin is a wrapper process that does not
+      // forward SIGTERM to the node process it spawns, so `child.kill()` would signal the wrapper and
+      // leave the server running.
+      const child = spawn(process.execPath, ['--import', 'tsx', SERVE], { env: liveEnv(true) });
+      let output = '';
+      child.stdout?.on('data', (d: Buffer) => {
+        output += d.toString();
+      });
+      child.stderr?.on('data', (d: Buffer) => {
+        output += d.toString();
+      });
+      let exited: number | null | undefined;
+      child.on('exit', (code) => {
+        exited = code;
+      });
+      const fail = async (what: string): Promise<never> => {
+        if (exited === undefined) child.kill('SIGKILL');
+        throw new Error(`${what} (exit=${String(exited)}):\n${output.slice(-4000)}`);
+      };
+
+      const markerDeadline = Date.now() + 180_000;
+      let marker: string | null = null;
+      while (Date.now() < markerDeadline && exited === undefined) {
+        await new Promise((r) => setTimeout(r, 500));
+        const rows = (await (db as ReturnType<typeof makeDb>).$client.unsafe(
+          `SELECT budgets->>'declaredAt' AS m FROM workforce_runtime WHERE workforce_id = '${WORKFORCE_ID}'`,
+        )) as unknown as { m: string | null }[];
+        if (rows[0]?.m) {
+          marker = rows[0].m;
+          break;
+        }
+      }
+      if (marker === null)
+        await fail('the flag-ON boot never stamped the workforce declaration marker');
+
+      const listenDeadline = Date.now() + 120_000;
+      let serving = false;
+      while (Date.now() < listenDeadline && exited === undefined) {
+        try {
+          const res = await fetch(`http://127.0.0.1:${PRESERVE_PORT}/health`);
+          if (res.ok) {
+            serving = true;
+            break;
+          }
+        } catch {
+          // not listening yet
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      if (!serving) await fail('the flag-ON boot never started serving');
+
+      child.kill('SIGTERM');
+      const code = await Promise.race([
+        new Promise<number | null>((resolve) => {
+          child.on('exit', (c) => resolve(c));
+        }),
+        new Promise<number | null>((resolve) => setTimeout(() => resolve(-1), 60_000)),
+      ]);
+      if (code === -1) {
+        child.kill('SIGKILL');
+        await new Promise((resolve) => child.on('exit', resolve));
+      }
+      return { code, output };
+    }
+
+    /** The closed-world snapshot: nine tables plus BOTH `run_events` namespaces. */
+    async function census(): Promise<Census> {
+      const client = (db as ReturnType<typeof makeDb>).$client;
+      const counts: Record<string, number> = {};
+      const digests: Record<string, string> = {};
+      for (const table of WORKFORCE_TABLES) {
+        const rows = (await client.unsafe(
+          `SELECT count(*)::int AS c,
+                  md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) AS d
+             FROM ${table} t WHERE t.tenant_id = '${PRESERVE_TENANT}'`,
+        )) as unknown as { c: number; d: string }[];
+        counts[table] = rows[0]?.c ?? -1;
+        digests[table] = rows[0]?.d ?? '';
+      }
+      // The journal, split by the two run_id namespaces the engine writes under
+      // (`<taskId>` for task events, `workforce:<id>` for control events — events.ts:97).
+      for (const [key, predicate] of [
+        ['run_events.task', "run_id NOT LIKE 'workforce:%'"],
+        ['run_events.workforce', "run_id LIKE 'workforce:%'"],
+      ] as const) {
+        const rows = (await client.unsafe(
+          `SELECT count(*)::int AS c,
+                  md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) AS d
+             FROM run_events t WHERE t.tenant_id = '${PRESERVE_TENANT}' AND ${predicate}`,
+        )) as unknown as { c: number; d: string }[];
+        counts[key] = rows[0]?.c ?? -1;
+        digests[key] = rows[0]?.d ?? '';
+      }
+      return { counts, digests };
+    }
+
+    it('phase 1+2 — a live flag-ON deployment, real workforce state, and a clean shutdown', async () => {
+      const first = await bootLiveAndShutDown();
+      expect(first.code).toBe(0); // a graceful shutdown, not a crash: the rows below are a survivor's.
+
+      // Everything below is written by the SHIPPED engine writers, never by hand-rolled INSERTs —
+      // a preservation proof over rows the engine would never produce proves nothing about the engine.
+      const tdb = forTenant(db as ReturnType<typeof makeDb>, PRESERVE_TENANT);
+      const budgets = workforceBudgetsSchema.parse({
+        workforce: { usd: 40 },
+        task: { usd: 2.5, turns: 12 },
+        departments: { eng: { usd: 10 } },
+        execution: { estimateUsdPerTurn: 0.2 },
+      });
+      const RESULT = { status: 'completed', summary: 'Done.', confidence: 0.9 };
+      const turnIdFor = (taskId: string, n: number) => `wf-task-turn:${taskId}:${n}`;
+
+      const newRoot = (over: Record<string, unknown>) =>
+        createRootTask(tdb, {
+          workforceId: WORKFORCE_ID,
+          title: 'Work',
+          goal: 'Do it',
+          owner: 'dev',
+          requestedBy: 'user',
+          department: 'eng',
+          ...over,
+        });
+      const toWorking = async (task: TaskRecord, n = 1) => {
+        const queued = await applyTransition(tdb, {
+          taskId: task.taskId,
+          expectedVersion: task.version,
+          to: 'queued',
+          actor: 'scheduler',
+        });
+        return applyTransition(tdb, {
+          taskId: task.taskId,
+          expectedVersion: queued.version,
+          to: 'working',
+          actor: 'scheduler',
+          turnId: turnIdFor(task.taskId, n),
+        });
+      };
+      const turn = (taskId: string, n: number, intent: unknown, extra: object = {}) =>
+        applyTurnOutcome(tdb, {
+          taskId,
+          turnId: turnIdFor(taskId, n),
+          turnNumber: n,
+          intent,
+          budgets,
+          actualUsd: 0.05,
+          ...extra,
+        });
+
+      // A completed task, carrying a task-scoped message.
+      const done = await newRoot({ title: 'Closed work' });
+      await toWorking(done);
+      const doneOut = await turn(
+        done.taskId,
+        1,
+        { kind: 'complete', result: RESULT },
+        { messages: [{ recipient: 'lead', body: 'Closing out.' }] },
+      );
+      expect(doneOut.task?.status).toBe('completed');
+
+      // A task parked on an APPROVAL — the approval row is the one an operator would come back to.
+      const approval = await newRoot({ title: 'Approval park' });
+      await toWorking(approval);
+      const approvalOut = await turn(approval.taskId, 1, {
+        kind: 'request_approval',
+        question: 'Ship the fix to production?',
+        options: ['yes', 'no'],
+        approver: 'user',
+        timeoutMs: 3_600_000,
+        onTimeout: 'fail',
+      });
+      expect(approvalOut.task?.statusReason).toBe('approval_pending');
+
+      // A fan-out: a STRUCTURAL park on the join, two child tasks and a delegation record.
+      const fan = await newRoot({ title: 'Fan out', owner: 'lead' });
+      await toWorking(fan);
+      const fanOut = await turn(fan.taskId, 1, {
+        kind: 'fan_out',
+        children: [
+          { title: 'Part one', goal: 'Do part one.', owner: 'dev', delegatedTo: 'department:eng' },
+          { title: 'Part two', goal: 'Do part two.', owner: 'mgr' },
+        ],
+      });
+      expect(fanOut.task?.statusReason).toBe('awaiting_children');
+
+      // A review park.
+      const review = await newRoot({ title: 'Under review' });
+      await toWorking(review);
+      const reviewOut = await turn(review.taskId, 1, { kind: 'request_review', reviewer: 'mgr' });
+      expect(reviewOut.task?.status).toBe('waiting_for_review');
+
+      // THE RESUME SUBJECT: a clarification park. Its exit is a `user_reply` operator signal, so the
+      // resume in phase 5 runs entirely through the shipped signal + transition doors.
+      const clarify = await newRoot({ title: 'Clarification park' });
+      await toWorking(clarify);
+      const clarifyOut = await turn(clarify.taskId, 1, {
+        kind: 'request_clarification',
+        question: 'Which quarter does the report cover?',
+      });
+      expect(clarifyOut.task?.statusReason).toBe('clarification_pending');
+      parked = clarifyOut.task as TaskRecord;
+      parkedVersion = (clarifyOut.task as TaskRecord).version;
+
+      // A failed task — the third terminal shape.
+      const failed = await newRoot({ title: 'Failed work' });
+      await toWorking(failed);
+      const failedOut = await turn(failed.taskId, 1, {
+        kind: 'fail',
+        message: 'The upstream API is gone.',
+      });
+      expect(failedOut.task?.status).toBe('failed');
+
+      // An UNCONSUMED operator signal, and a journal event in the workforce CONTROL namespace.
+      await deliverSignal(tdb, {
+        taskId: fan.taskId,
+        kind: 'manual_unblock',
+        signalKey: 'operator-unblock-1',
+        actor: 'user',
+      });
+      await appendWorkforceEvents(tdb, WORKFORCE_ID, [
+        { type: 'workforce.paused', payload: { by: 'user' } },
+      ]);
+
+      liveCensus = await census();
+      // ANTI-VACUITY. A census of thirteen zeroes would compare equal after the flag-off boot and
+      // prove nothing whatsoever, so every table and BOTH journal namespaces must carry rows first.
+      for (const [key, count] of Object.entries(liveCensus.counts)) {
+        expect(
+          count,
+          `${key} was never seeded — the preservation oracle would be vacuous`,
+        ).toBeGreaterThan(0);
+      }
+      // …and the graph really is in several shapes, including three distinct parks.
+      const shapes = (await (db as ReturnType<typeof makeDb>).$client.unsafe(
+        `SELECT DISTINCT status, coalesce(status_reason, '') AS reason FROM workforce_tasks
+          WHERE tenant_id = '${PRESERVE_TENANT}' ORDER BY 1, 2`,
+      )) as unknown as { status: string; reason: string }[];
+      expect(shapes.map((s) => `${s.status}(${s.reason})`)).toEqual([
+        'blocked(awaiting_children)',
+        'blocked(clarification_pending)',
+        'completed()',
+        'failed()',
+        'planned()',
+        'waiting_for_review(review_pending)',
+        'waiting_for_user(approval_pending)',
+      ]);
+      armsRan += 1;
+    }, 400_000);
+
+    it('phase 3+4 — the flag-OFF boot refuses at the parse and every durable row is byte-identical', async () => {
+      expect(liveCensus, 'phase 1+2 did not run').toBeDefined();
+      const refused = spawnSync(TSX, [SERVE], {
+        env: liveEnv(false),
+        encoding: 'utf8',
+        timeout: 300_000,
+      });
+
+      // The refusal itself, on a database that is anything but empty.
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain('experimental_section_disabled');
+      expect(refused.stderr).toContain('"path": "workforce"');
+      // Ordering, not just outcome: it stopped AT the parse, so nothing downstream of it ran. The
+      // banner is the first thing a successful boot prints, and this boot never printed one.
+      expect(refused.stdout).not.toContain('Declared agents');
+
+      // THE ORACLE. Byte-for-byte, not merely equinumerous: the digest is an md5 over the ordered
+      // full row text of every column, so a rewritten timestamp or a re-numbered seq fails it.
+      const after = await census();
+      expect(after).toEqual(liveCensus);
+      // Stated separately as well, because "no table was truncated" is the sentence D-013 makes and
+      // a reader should not have to derive it from a deep-equal.
+      for (const table of WORKFORCE_TABLES) {
+        expect(after.counts[table], `${table} lost rows across the flag-off boot`).toBe(
+          (liveCensus as Census).counts[table],
+        );
+      }
+      expect(after.counts['run_events.task']).toBe(
+        (liveCensus as Census).counts['run_events.task'],
+      );
+      expect(after.counts['run_events.workforce']).toBe(
+        (liveCensus as Census).counts['run_events.workforce'],
+      );
+      armsRan += 1;
+    }, 400_000);
+
+    it('phase 5 — re-enabling the flag boots again and the parked work resumes on its PRESERVED token', async () => {
+      expect(parked, 'phase 1+2 did not run').toBeDefined();
+      const again = await bootLiveAndShutDown();
+      expect(again.code).toBe(0);
+      // The boot walked the redeploy gate over the preserved rows and agreed the document still
+      // carries every declaration they reference — a removed employee would have refused here.
+
+      const task = parked as TaskRecord;
+      const tdb = forTenant(db as ReturnType<typeof makeDb>, PRESERVE_TENANT);
+      // The park is still the park it was, at the version it was parked at.
+      const before = (await (db as ReturnType<typeof makeDb>).$client.unsafe(
+        `SELECT status, status_reason, version FROM workforce_tasks WHERE task_id = '${task.taskId}'`,
+      )) as unknown as { status: string; status_reason: string; version: number }[];
+      expect(before[0]?.status).toBe('blocked');
+      expect(before[0]?.status_reason).toBe('clarification_pending');
+      expect(Number(before[0]?.version)).toBe(parkedVersion);
+
+      // The exit the park declares: the requester's reply. It wakes the task to `queued`.
+      const wake = await deliverSignal(tdb, {
+        taskId: task.taskId,
+        kind: 'user_reply',
+        signalKey: 'operator-reply-1',
+        actor: 'user',
+        payload: { body: 'Q3 2026.' },
+      });
+      expect(wake).toEqual({ delivered: true, woke: true });
+
+      // THE CAS PROOF. The claim presents `parkedVersion + 1` — computed from the version recorded
+      // BEFORE the flag-off boot plus the one bump the wake makes — instead of re-reading the row.
+      // Any write the flag-off boot had made to this task would have moved the version and this
+      // compare-and-swap would throw instead of claiming the turn.
+      const claimed = await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: parkedVersion + 1,
+        to: 'working',
+        actor: 'scheduler',
+        turnId: `wf-task-turn:${task.taskId}:2`,
+      });
+      expect(claimed.status).toBe('working');
+
+      // And the work actually finishes: a second turn applies over the preserved row and completes it.
+      const resumed = await applyTurnOutcome(tdb, {
+        taskId: task.taskId,
+        turnId: `wf-task-turn:${task.taskId}:2`,
+        turnNumber: 2,
+        intent: {
+          kind: 'complete',
+          result: { status: 'completed', summary: 'Q3.', confidence: 1 },
+        },
+        budgets: workforceBudgetsSchema.parse({
+          task: { usd: 2.5, turns: 12 },
+          execution: { estimateUsdPerTurn: 0.2 },
+        }),
+        actualUsd: 0.02,
+      });
+      expect(resumed.task?.status).toBe('completed');
+      expect(resumed.plan?.kind).toBe('complete');
+      armsRan += 1;
+    }, 400_000);
+
+    it('ran-guard: all three phases ran (a required DB run may not silently skip)', () => {
+      expect(armsRan).toBe(3);
+    });
+  },
+);
