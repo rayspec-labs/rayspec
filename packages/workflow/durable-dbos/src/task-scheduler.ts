@@ -56,7 +56,12 @@
  * tighter read.
  *
  * A paused workforce is skipped wholesale at the pass — its tasks stay visibly `queued`, accruing
- * nothing (the pause lives on the workforce_runtime row, deliberately not a task status).
+ * nothing (the pause lives on the workforce_runtime row, deliberately not a task status). The pass
+ * is the LATENCY half of that; the CLAIM is the guarantee half. A pass whose scope read predates
+ * the pause dispatches anyway, and a dispatch writes nothing to the task row, so the claim
+ * transaction re-reads `paused` off the runtime row it already locks and refuses. That is what
+ * makes `pauseWorkforce`'s drain — which counts only `working` rows — a complete statement rather
+ * than a race; `#claimTurn` carries the two-case ordering argument.
  *
  * The SWEEP (a second scheduled workflow) enforces the declared approval-timeout fates; wall-clock
  * and deadline ceilings are enforced at the dispatch boundary by the pass itself, which is the one
@@ -1316,12 +1321,13 @@ export class DbosTaskScheduler {
         if (!task || !isTaskStatus(task.status)) return { kind: 'noop' as const };
         if (task.turnsUsed !== job.turnNumber - 1) return { kind: 'noop' as const };
 
+        // THE RUNTIME ROW, read under its own lock and KEPT — not just for the budgets it carries
+        // but for `paused`, which the compare-and-swap below refuses on. See the pause refusal.
+        const runtime =
+          task.workforceId !== null ? await ensureWorkforceRuntime(tx, task.workforceId) : null;
         const budgets =
-          task.workforceId !== null
-            ? resolveWorkforceBudgets(
-                (await ensureWorkforceRuntime(tx, task.workforceId)).budgets,
-                task.workforceId,
-              )
+          runtime !== null && task.workforceId !== null
+            ? resolveWorkforceBudgets(runtime.budgets, task.workforceId)
             : EMPTY_BUDGETS;
 
         if (task.status === 'working') {
@@ -1352,6 +1358,38 @@ export class DbosTaskScheduler {
           return { kind: 'claimed' as const, task, budgets };
         }
         if (task.status !== 'queued') return { kind: 'noop' as const };
+
+        // ── A PAUSED WORKFORCE REFUSES THE CLAIM — AND THIS IS WHAT MAKES `pause --drain` TRUE ──
+        // The pass ALREADY skips paused workforces, and that is not enough, because a dispatch
+        // writes nothing to the task row: a turn dispatched by a pass whose scope read predates the
+        // pause is still `queued`, so `pauseWorkforce`'s drain (which counts `working` rows) reads
+        // zero and reports the workforce quiet while that turn is about to start.
+        //
+        // THE WINDOW IS CLOSED HERE BY A ROW LOCK, NOT BY A TIGHTER READ. `ensureWorkforceRuntime`
+        // above is an INSERT … ON CONFLICT DO UPDATE whose `set` is a REAL write (runtime.ts says
+        // so, and says why), so this transaction holds the runtime row's exclusive lock before the
+        // compare-and-swap below — and `pauseWorkforce` writes that SAME row in a transaction that
+        // commits BEFORE its drain ever polls. Two transactions writing one row have a total order,
+        // so there are exactly two cases and no third:
+        //
+        //   1. THIS CLAIM GOT THE ROW FIRST — the pause blocks until this transaction commits, so
+        //      the `working` row is committed before the pause is, hence before the drain's first
+        //      poll. The drain counts the turn and waits for it.
+        //   2. THE PAUSE GOT IT FIRST — this read sees `paused = true` and refuses. The task stays
+        //      `queued`: no transition, no reservation, no journal entry, no cost.
+        //
+        // The refusal (rather than "let the drain wait for dispatched-but-unclaimed work") is the
+        // shape the pause contract already promises: a paused workforce accrues NOTHING. Waiting
+        // would let a turn dispatched microseconds before the pause burn a whole turn's budget.
+        //
+        // Scoped to the `queued -> working` claim on purpose: a RECOVERY of an already-`working`
+        // row (handled above) must still finish, because its reservation is taken, the drain is
+        // already counting it, and refusing there would strand the row until the reaper.
+        //
+        // Cost: this attempt's deterministic dispatch id ends SUCCESS without moving the row, so
+        // the next pass salts past it (`#resolveDispatchId`) — the same bounded, loud walk any dead
+        // attempt takes. Nothing is stranded; a resume re-dispatches under a fresh salt.
+        if (runtime?.paused === true) return { kind: 'noop' as const };
 
         const working = await applyTransition(tx, {
           taskId: task.taskId,

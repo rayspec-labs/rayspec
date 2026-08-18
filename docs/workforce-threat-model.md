@@ -509,11 +509,11 @@ Two changes since the earlier inventory matter here:
   (`packages/kernel/spec/src/identifier.ts:19`). Labels are opaque tokens matched for equality,
   never interpreted.
 - **A rule guarding a label no employee holds is now a lint ERROR, not a warning**
-  (`packages/kernel/spec/src/workforce-lint.ts:690`). A clause that can never fire is a typo that
+  (`packages/kernel/spec/src/workforce-lint.ts:696`). A clause that can never fire is a typo that
   silently disables a control, and refusing the document is the fail-closed reading.
 
 **A declared agent tool may not carry a native tool's name** — refused at parse
-(`packages/kernel/spec/src/workforce-lint.ts:229`) and again at dispatch composition
+(`packages/kernel/spec/src/workforce-lint.ts:235`) and again at dispatch composition
 (`packages/kernel/workforce-tools/src/toolset.ts:73`, called at
 `packages/app/server/src/workforce-turn-handlers.ts:157`), both through one shared predicate that
 normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:80`, over the set at
@@ -764,12 +764,27 @@ break-glass. No document may imply that the named-approver path works end to end
 **The grammar does not yet say so, and that is a gap.** A document declaring `onTimeout: 'escalate'`
 is accepted today with one exception: the lint refuses a policy that escalates *and covers the
 orchestrator seat*, because the orchestrator reports to nobody and the runtime could not build the
-fate at all (`packages/kernel/spec/src/workforce-lint.ts:636` guards the fate,
-`packages/kernel/spec/src/workforce-lint.ts:643` raises it as an error). That is a **different**
+fate at all (`packages/kernel/spec/src/workforce-lint.ts:642` guards the fate,
+`packages/kernel/spec/src/workforce-lint.ts:649` raises it as an error). That is a **different**
 condition from the one on this page: it catches "there is no superior to name", not "the superior
-who *is* named cannot be matched by any authenticated principal". **No diagnostic covers the second
-today** — an author learns it from this page or from a 403 at 2am. A lint warning is scoped as a
-follow-up item; until it lands, this paragraph is the only warning.
+who *is* named cannot be matched by any authenticated principal".
+
+**The second condition now HAS a diagnostic** (B-017k). `doctor` raises the
+`workforce_escalation_unreachable` **advisory** on every escalating policy, at that policy's own
+path (`packages/kernel/spec/src/workforce-lint.ts:868`), so an author learns this at authoring time
+rather than from a 403 at 2am. Three things it deliberately is not, because each would overstate it:
+
+- it is a **warning, not an error**. The declaration is correct and the row *is* decidable — by an
+  owner or admin through break-glass. What is narrower than an author assumes is the resolution
+  *path*, and whether that bites depends on deployment posture the document cannot see. Refusing the
+  parse would make half a frozen closed enum unusable;
+- it is **not acknowledgeable**. `lintSuppress` is scoped to the node carrying it and no node's path
+  reaches `workforce.…`, so the code is excluded from `SuppressibleWarningCode`
+  (`packages/kernel/spec/src/errors.ts:417`) rather than offering an acknowledgement that would
+  silence nothing;
+- it **changes no enforcement**. The 403 at the decision door, the break-glass gate and the journal
+  are exactly as described above. The advisory tells an author what this page tells a reader; it
+  does not build the binding, which remains deliberately out of this release.
 
 ### 7.3 Mid-turn crash safety is SIMULATED, not empirically proven
 
@@ -1100,10 +1115,12 @@ packages/kernel/core/src/cost-policy.ts:53 | export interface CostPolicy {
 packages/kernel/core/src/approval-provider.ts:45 | export interface ApprovalProvider {
 packages/kernel/core/src/seam-contracts.ts:61 | export const SEAM_MAX_PLAN_STEPS = 64;
 packages/kernel/core/src/seam-contracts.ts:92 | export const SEAM_MAX_MEMORY_HITS = 64;
-packages/kernel/spec/src/workforce-lint.ts:229 | if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
-packages/kernel/spec/src/workforce-lint.ts:636 | if (approval.onTimeout !== 'escalate') return;
-packages/kernel/spec/src/workforce-lint.ts:643 | 'invalid_orchestrator',
-packages/kernel/spec/src/workforce-lint.ts:690 | 'workforce_label_unheld',
+packages/kernel/spec/src/workforce-lint.ts:235 | if (tool !== undefined && isReservedWorkforceToolSpelling(tool.name)) {
+packages/kernel/spec/src/workforce-lint.ts:642 | if (approval.onTimeout !== 'escalate') return;
+packages/kernel/spec/src/workforce-lint.ts:649 | 'invalid_orchestrator',
+packages/kernel/spec/src/workforce-lint.ts:696 | 'workforce_label_unheld',
+packages/kernel/spec/src/workforce-lint.ts:868 | 'workforce_escalation_unreachable',
+packages/kernel/spec/src/errors.ts:417 | 'workforce_escalation_unreachable',
 packages/kernel/spec/src/workforce-grammar.ts:87 | export const WorkforceLabel = SafeIdentifier;
 packages/kernel/spec/src/workforce-grammar.ts:129 | labels: z.array(WorkforceLabel).default([]),
 packages/kernel/spec/src/workforce-grammar.ts:211 | const PolicyLabels = z.array(WorkforceLabel).min(1);
