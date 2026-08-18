@@ -7,9 +7,15 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { SpecErrorCode } from './errors.js';
+import { exportJsonSchema } from './export.js';
 import { lintSpecWarnings } from './lint.js';
 import { type ParseSpecOptions, parseSpec } from './parse.js';
-import { WorkforceSpec } from './workforce-grammar.js';
+import {
+  MAX_DEPARTMENT_MISSION_LENGTH,
+  MAX_EMPLOYEE_TITLE_LENGTH,
+  MAX_WORKFORCE_NAME_LENGTH,
+  WorkforceSpec,
+} from './workforce-grammar.js';
 
 const ON: ParseSpecOptions = { experimentalWorkforce: true };
 
@@ -203,6 +209,166 @@ describe('grammar strictness under workforce:', () => {
       'reviewPolicies',
       'teams',
     ]);
+  });
+});
+
+/**
+ * BOUNDED CONTEXT (vision invariant §4.8). These three free-text fields render into the turn frame,
+ * which is byte-bounded per section (`@rayspec/workforce-tools` context.ts: identity 1 024 B,
+ * roleFrame 4 096 B, whole input 65 536 B). Unbounded, an oversized `mission` VALIDATES CLEAN and
+ * then throws `ContextSectionOverflowError` at every dispatch for that department's seats — a late
+ * failure the author never saw at `doctor`. The cap moves the refusal to validation, typed.
+ *
+ * The caps bound the fields; they are NOT a proof that a section always fits (the role frame renders
+ * one line per department, so N departments still compose past the budget — `ContextSectionOverflow`
+ * remains the aggregate guard, and it names the fix). Both halves are asserted: the boundary value
+ * PARSES, one code unit more is refused at its exact path.
+ */
+describe('free-text fields are bounded for the byte-bounded turn frame', () => {
+  const at = (n: number) => 'a'.repeat(n);
+  const errorsFor = (yaml: string) => {
+    const res = parseSpec(yaml, ON);
+    expect(res.ok).toBe(false);
+    return res.ok ? [] : res.errors;
+  };
+
+  it('accepts each field exactly AT its cap', () => {
+    expect(
+      parseSpec(
+        WORKFORCE_BASE.replace('  name: Helpdesk\n', `  name: ${at(MAX_WORKFORCE_NAME_LENGTH)}\n`),
+        ON,
+      ).ok,
+    ).toBe(true);
+    expect(
+      parseSpec(
+        WORKFORCE_BASE.replace('title: Lead', `title: ${at(MAX_EMPLOYEE_TITLE_LENGTH)}`),
+        ON,
+      ).ok,
+    ).toBe(true);
+    expect(
+      parseSpec(
+        WORKFORCE_BASE.replace(
+          'mission: Own the fixes.',
+          `mission: ${at(MAX_DEPARTMENT_MISSION_LENGTH)}`,
+        ),
+        ON,
+      ).ok,
+    ).toBe(true);
+  });
+
+  it('refuses one code unit past the cap, at the exact path', () => {
+    expect(
+      errorsFor(
+        WORKFORCE_BASE.replace(
+          '  name: Helpdesk\n',
+          `  name: ${at(MAX_WORKFORCE_NAME_LENGTH + 1)}\n`,
+        ),
+      ),
+    ).toContainEqual(expect.objectContaining({ code: 'schema_violation', path: 'workforce.name' }));
+    expect(
+      errorsFor(
+        WORKFORCE_BASE.replace('title: Lead', `title: ${at(MAX_EMPLOYEE_TITLE_LENGTH + 1)}`),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({ code: 'schema_violation', path: 'workforce.employees[0].title' }),
+    );
+    expect(
+      errorsFor(
+        WORKFORCE_BASE.replace(
+          'mission: Own the fixes.',
+          `mission: ${at(MAX_DEPARTMENT_MISSION_LENGTH + 1)}`,
+        ),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        code: 'schema_violation',
+        path: 'workforce.departments[0].mission',
+      }),
+    );
+  });
+
+  it('the caps fit the turn-frame sections they render into (worst case 3 bytes per code unit)', () => {
+    // A UTF-16 code unit costs at most 3 utf-8 bytes (a 4-byte astral char spends TWO code units),
+    // so these are the worst-case byte costs the frame must absorb. identity = 1 024 B carries the
+    // title; roleFrame = 4 096 B carries the workforce name and one department mission line.
+    expect(MAX_EMPLOYEE_TITLE_LENGTH * 3).toBeLessThan(1_024);
+    expect((MAX_WORKFORCE_NAME_LENGTH + MAX_DEPARTMENT_MISSION_LENGTH) * 3).toBeLessThan(
+      65_536, // the whole-input ceiling; the per-section aggregate stays guarded by ContextSectionOverflowError
+    );
+  });
+});
+
+/**
+ * THE "AT LEAST ONE OF" RULE IS PART OF THE SHAPE, not only of the lint. Both selector objects used
+ * to be plain `.strict()` objects with every member optional, so the EXPORTED JSON Schema carried
+ * `required: []` and any third-party validator — an editor, a CI schema check, another language's
+ * client — accepted `appliesTo: {}`: a rule that can never fire, silently. Expressing the rule as a
+ * union of `.strict()` variants exports it as `anyOf` with real `required` arrays, so the schema
+ * refuses exactly what the lint always refused. Tightening only.
+ */
+describe('review-policy selectors are closed shapes, not lint-only conventions', () => {
+  const reviewPolicySchema = () => {
+    const schema = exportJsonSchema() as Record<string, never>;
+    const properties = (node: unknown): Record<string, unknown> =>
+      (node as { properties: Record<string, unknown> }).properties;
+    const workforce = properties(schema).workforce;
+    const policies = properties(workforce).reviewPolicies as { items: unknown };
+    return properties(policies.items);
+  };
+
+  it('the exported schema states the rule: anyOf with NON-EMPTY required arrays', () => {
+    const policy = reviewPolicySchema();
+    for (const key of ['appliesTo', 'requireWhen'] as const) {
+      const node = policy[key] as { anyOf?: { required?: string[] }[] };
+      expect(
+        node.anyOf,
+        `${key} exports no anyOf — the rule is invisible to schema consumers`,
+      ).toBeDefined();
+      const required = (node.anyOf ?? []).map((variant) => variant.required ?? []);
+      expect(required.length).toBeGreaterThan(1);
+      for (const names of required) {
+        expect(names.length, `${key} exports a variant requiring nothing`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('every single-selector shape still parses (the rule is at-least-one, not exactly-one)', () => {
+    for (const replacement of [
+      'appliesTo: { department: engineering }',
+      'appliesTo: { employee: dev }',
+      'appliesTo: { department: engineering, employee: dev }',
+    ]) {
+      const res = parseSpec(
+        WORKFORCE_BASE.replace('appliesTo: { department: engineering }', replacement),
+        ON,
+      );
+      expect(res.ok, `${replacement} should parse`).toBe(true);
+    }
+    for (const replacement of [
+      'requireWhen: { confidenceBelow: 0.75 }',
+      'requireWhen: { capabilities: [production_change] }',
+    ]) {
+      const res = parseSpec(
+        WORKFORCE_BASE.replace(
+          'requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }',
+          replacement,
+        ),
+        ON,
+      );
+      expect(res.ok, `${replacement} should parse`).toBe(true);
+    }
+  });
+
+  it('the empty selector is refused at PARSE, with a message naming the rule', () => {
+    const res = parseSpec(
+      WORKFORCE_BASE.replace('appliesTo: { department: engineering }', 'appliesTo: {}'),
+      ON,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const issue = res.errors.find((e) => e.path === 'workforce.reviewPolicies[0].appliesTo');
+    expect(issue?.code).toBe('schema_violation');
+    expect(issue?.message).toMatch(/at least one of/);
   });
 });
 
@@ -560,6 +726,45 @@ describe('workforce semantic lint — budget coherence', () => {
       WORKFORCE_BASE.replace('    task: { usd: 2.5, turns: 12 }\n', ''),
       'schema_violation',
     );
+  });
+
+  it('a SUBTREE usd ceiling also demands the task budget (the engine refuses the same set)', () => {
+    // The engine's own coherence rule counts `subtree.usd` toward `declaresUsd` (budget.ts), so a
+    // document this lint let through would derive a budgets object the ENGINE refuses at boot —
+    // a spec that passed `doctor` and then stops the workforce.
+    const subtreeOnly = WORKFORCE_BASE.replace(
+      '    workforce: { usd: 40 }\n',
+      '    subtree: { usd: 30 }\n',
+    )
+      .replace('    task: { usd: 2.5, turns: 12 }\n', '')
+      .replace('      budgets: { usd: 10 }\n', '');
+    expectRejection(subtreeOnly, 'schema_violation');
+    // With the task tier present the same subtree ceiling is a legal declaration.
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        '    task: { usd: 2.5, turns: 12 }\n',
+        '    task: { usd: 2.5, turns: 12 }\n    subtree: { usd: 30, turns: 60 }\n',
+      ),
+      ON,
+    );
+    expect(res.ok).toBe(true);
+  });
+
+  it('a MONTHLY window normalizes through the same per-hour comparison', () => {
+    // 10 usd DAILY ≈ 0.417 usd/h is wider than 40 usd MONTHLY ≈ 0.055 usd/h, despite 40 > 10.
+    expectRejection(
+      WORKFORCE_BASE.replace(
+        '    workforce: { usd: 40 }\n',
+        '    workforce: { usd: 40, window: monthly }\n',
+      ),
+      'budget_widening',
+    );
+    // 10 usd MONTHLY is tighter than the workforce's 40 usd daily — accepted.
+    const res = parseSpec(
+      WORKFORCE_BASE.replace('budgets: { usd: 10 }', 'budgets: { usd: 10, window: monthly }'),
+      ON,
+    );
+    expect(res.ok).toBe(true);
   });
 });
 

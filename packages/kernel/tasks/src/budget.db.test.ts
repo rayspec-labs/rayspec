@@ -9,6 +9,7 @@
  *   - settlement releases the reservation, records the actual, and rolls the task row up;
  *   - subtree spend shares one root scope across sibling tasks.
  */
+import { deriveWorkforceBudgets, WorkforceSpec } from '@rayspec/spec';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authorizeTurn, settleTurn, workforceBudgetsSchema } from './budget.js';
 import { createRootTask } from './create-task.js';
@@ -228,5 +229,59 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
       "SELECT window_start FROM workforce_budget_ledger WHERE scope_kind = 'workforce' ORDER BY window_start;",
     );
     expect(rows).toHaveLength(2);
+  });
+
+  /**
+   * THE FOURTH TIER, END TO END FROM A DOCUMENT. Every other subtree test in this file hand-builds
+   * the engine object; this one goes through the GRAMMAR (`WorkforceSpec.parse`) and the
+   * DERIVATION (`deriveWorkforceBudgets`), which is where the hole was: with no `budgets.subtree`
+   * key, a declared document could not put a ceiling on the root scope at all, so `authorizeTurn`
+   * admitted forever. The CONTROL arm — the byte-identical document minus the tier — is what makes
+   * this a denial that previously would not have happened, rather than a denial somewhere else.
+   */
+  describe('a DECLARED subtree ceiling denies at the root scope', () => {
+    const document = (subtree?: { usd: number }) => ({
+      id: 'wf',
+      name: 'WF',
+      orchestrator: 'lead',
+      budgets: {
+        task: { usd: 1, turns: 10 }, // ⇒ estimateUsdPerTurn 0.1
+        ...(subtree !== undefined ? { subtree } : {}),
+      },
+      employees: [{ id: 'lead', agent: 'a', title: 'Lead', role: 'orchestrator' }],
+    });
+    const budgetsFor = (subtree?: { usd: number }) =>
+      workforceBudgetsSchema.parse(deriveWorkforceBudgets(WorkforceSpec.parse(document(subtree))));
+    const sibling = (n: number) => proposal(`child-${n}`, 0.1, { rootTaskId: 'root-1' });
+
+    it('CONTROL — the same document without the tier admits both siblings', async () => {
+      const tdb = forTenant(db, TENANT_A);
+      const budgets = budgetsFor();
+      expect(budgets.subtree).toBeUndefined();
+      expect((await authorizeTurn(tdb, budgets, sibling(1))).allowed).toBe(true);
+      expect((await authorizeTurn(tdb, budgets, sibling(2))).allowed).toBe(true);
+    });
+
+    it('with subtree declared the second sibling is denied at scopeKind root', async () => {
+      const tdb = forTenant(db, TENANT_A);
+      const budgets = budgetsFor({ usd: 0.15 });
+      expect(budgets.subtree?.usd).toBe(0.15);
+      expect((await authorizeTurn(tdb, budgets, sibling(1))).allowed).toBe(true);
+      const second = await authorizeTurn(tdb, budgets, sibling(2));
+      expect(second.allowed).toBe(false);
+      if (!second.allowed) {
+        expect(second.denial).toMatchObject({
+          scopeKind: 'root',
+          scopeId: 'root-1',
+          ceiling: { kind: 'usd', limit: 0.15 },
+          consumed: 0.1,
+        });
+      }
+      // A DENIAL MUTATES NOTHING: the root row still carries only the first sibling's reservation.
+      const root = await db.$client.unsafe(
+        "SELECT reserved_usd FROM workforce_budget_ledger WHERE scope_kind = 'root' AND scope_id = 'root-1';",
+      );
+      expect(Number(root[0]?.reserved_usd)).toBe(0.1);
+    });
   });
 });

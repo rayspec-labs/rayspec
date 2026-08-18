@@ -55,14 +55,37 @@ export const WorkforceRole = z.enum(['orchestrator', 'manager', 'worker', 'revie
 export type WorkforceRoleName = z.infer<typeof WorkforceRole>;
 
 /** Mirrors the engine's calendar windows; a drift test pins the two enums to each other. */
-export const WorkforceBudgetWindow = z.enum(['hourly', 'daily', 'weekly']);
+export const WorkforceBudgetWindow = z.enum(['hourly', 'daily', 'weekly', 'monthly']);
+export type WorkforceBudgetWindowName = z.infer<typeof WorkforceBudgetWindow>;
+
+/**
+ * BOUNDED CONTEXT (invariant §4.8) — the caps on the three free-text fields that render into the
+ * turn frame. The frame is byte-bounded per section (`@rayspec/workforce-tools` context.ts:
+ * identity 1 024 B, roleFrame 4 096 B, whole input 65 536 B) and the mandatory sections REFUSE
+ * typed rather than truncating. Unbounded here, an oversized `mission` parses clean at `doctor` and
+ * then throws `ContextSectionOverflowError` at every dispatch for that department's seats — a late
+ * failure against a document the author was told was valid.
+ *
+ * What the caps buy and what they do NOT, stated so nobody over-reads them: they make an UNBOUNDED
+ * input BOUNDED, so a single pathological field is refused at validation. They are not a proof that
+ * a section fits — the orchestrator's role frame renders one line PER DEPARTMENT, so many
+ * departments each near their cap still compose past the section budget, and
+ * `ContextSectionOverflowError` remains the aggregate guard (it already names the fix: shorter
+ * missions). `.max()` counts UTF-16 CODE UNITS; a code unit costs at most 3 utf-8 bytes (an astral
+ * character is 4 bytes but spends two code units), so the worst-case byte costs are 600 / 600 /
+ * 6 000.
+ */
+export const MAX_WORKFORCE_NAME_LENGTH = 200;
+export const MAX_EMPLOYEE_TITLE_LENGTH = 200;
+export const MAX_DEPARTMENT_MISSION_LENGTH = 2_000;
 
 export const WorkforceEmployeeSpec = z
   .object({
     id: SafeIdentifier,
     /** The declared agent (agents[].id) that runs this employee — lint-resolved. */
     agent: z.string().min(1),
-    title: z.string().min(1),
+    /** Renders into the identity section AND the head line — bounded, see the caps above. */
+    title: z.string().min(1).max(MAX_EMPLOYEE_TITLE_LENGTH),
     department: SafeIdentifier.optional(),
     /** The reporting edge; absent, the employee's department manager is the effective superior. */
     reportsTo: SafeIdentifier.optional(),
@@ -89,7 +112,8 @@ export const WorkforceDepartmentSpec = z
     name: z.string().min(1),
     /** An employee id — must hold role `manager` (or be the orchestrator); lint-checked. */
     manager: SafeIdentifier,
-    mission: z.string().min(1),
+    /** The department's routing description — renders into every covered seat's role frame. */
+    mission: z.string().min(1).max(MAX_DEPARTMENT_MISSION_LENGTH),
     members: z.array(SafeIdentifier).default([]),
     budgets: WorkforceDepartmentBudgets.optional(),
   })
@@ -106,21 +130,56 @@ export const WorkforceTeamSpec = z
   .strict();
 export type WorkforceTeamSpec = z.infer<typeof WorkforceTeamSpec>;
 
+/**
+ * The "at least one of" rule expressed IN THE SHAPE, as a union of `.strict()` variants — one per
+ * member, each requiring that member and leaving the other optional.
+ *
+ * Why a union and not a `.refine()`: a refinement is invisible to `z.toJSONSchema`, so the exported
+ * `spec.schema.json` carried `required: []` and every third-party consumer (an editor, another
+ * language's validator, a CI schema check) accepted `{}` — a selector that can never fire. A union
+ * exports as `anyOf` with real `required` arrays, so the published contract refuses exactly what
+ * the lint always refused. The lint rules STAY: they are the defense-in-depth path for a spec built
+ * in code rather than parsed, the same posture `assertSafeIdentifier` takes.
+ */
+export const WorkforceReviewAppliesTo = z.union(
+  [
+    z.object({ department: SafeIdentifier, employee: SafeIdentifier.optional() }).strict(),
+    z.object({ department: SafeIdentifier.optional(), employee: SafeIdentifier }).strict(),
+  ],
+  {
+    error:
+      "appliesTo must name at least one of 'department' or 'employee' (and no other key) — an " +
+      'unselectable rule can never fire',
+  },
+);
+
+const ConfidenceBelow = z.number().gt(0).lte(1);
+const CapabilityLabels = z.array(z.string().min(1)).min(1);
+
+export const WorkforceReviewRequireWhen = z.union(
+  [
+    z
+      .object({ confidenceBelow: ConfidenceBelow, capabilities: CapabilityLabels.optional() })
+      .strict(),
+    z
+      .object({ confidenceBelow: ConfidenceBelow.optional(), capabilities: CapabilityLabels })
+      .strict(),
+  ],
+  {
+    error:
+      "requireWhen must name at least one of 'confidenceBelow' or 'capabilities' (and no other " +
+      'key) — a rule that can never demand review is dead',
+  },
+);
+
 export const WorkforceReviewPolicySpec = z
   .object({
     id: SafeIdentifier,
-    /** Which submissions the rule covers; at least one selector is required (lint-checked). */
-    appliesTo: z
-      .object({ department: SafeIdentifier.optional(), employee: SafeIdentifier.optional() })
-      .strict(),
+    /** Which submissions the rule covers; AT LEAST ONE selector — enforced by the shape itself. */
+    appliesTo: WorkforceReviewAppliesTo,
     /** An employee id holding role `reviewer` or `manager` — lint-checked. */
     reviewer: SafeIdentifier,
-    requireWhen: z
-      .object({
-        confidenceBelow: z.number().gt(0).lte(1).optional(),
-        capabilities: z.array(z.string().min(1)).min(1).optional(),
-      })
-      .strict(),
+    requireWhen: WorkforceReviewRequireWhen,
     onReject: z.literal('rework'),
     maxRounds: z.number().int().positive(),
   })
@@ -141,10 +200,11 @@ export type WorkforceApprovalSpec = z.infer<typeof WorkforceApprovalSpec>;
 
 export const WorkforceBudgetsSpec = z
   .object({
-    /** The whole-workforce usd ceiling per calendar window. */
+    /** The whole-workforce ceilings per calendar window. */
     workforce: z
       .object({
         usd: z.number().positive().finite(),
+        turns: z.number().int().positive().optional(),
         window: WorkforceBudgetWindow.optional(),
       })
       .strict()
@@ -158,6 +218,26 @@ export const WorkforceBudgetsSpec = z
       .object({
         usd: z.number().positive().finite(),
         turns: z.number().int().positive(),
+      })
+      .strict()
+      .optional(),
+    /**
+     * Whole-SUBTREE ceilings — the ROOT task's scope row, shared by every task descended from one
+     * submitted goal. The fourth ledger tier (task / root / department / workforce); without this
+     * key the root scope of every declared document carried no ceiling and enforced nothing.
+     *
+     * Deliberately NOT both-required like `task`: the both-required rule there exists because the
+     * per-turn reservation estimate is `task.usd / task.turns`, and nothing derives an estimate
+     * from the subtree tier. This mirrors the engine's own shape, and matches the other
+     * non-estimate-bearing tier (`departments[].budgets`). Unlike the windowed tiers the root
+     * scope is UN-WINDOWED (the epoch sentinel): a subtree ceiling bounds one goal's whole tree
+     * for its lifetime, not a calendar rate — which is also why the widening rule that orders
+     * department budgets against the workforce ceiling has no meaning here.
+     */
+    subtree: z
+      .object({
+        usd: z.number().positive().finite().optional(),
+        turns: z.number().int().positive().optional(),
       })
       .strict()
       .optional(),
@@ -187,7 +267,8 @@ export type WorkforceExecutionSpec = z.infer<typeof WorkforceExecutionSpec>;
 export const WorkforceSpec = z
   .object({
     id: SafeIdentifier,
-    name: z.string().min(1),
+    /** The display name — renders into the orchestrator's role frame; bounded, see the caps above. */
+    name: z.string().min(1).max(MAX_WORKFORCE_NAME_LENGTH),
     /** The entry-point employee — must hold role `orchestrator`; lint-checked. */
     orchestrator: SafeIdentifier,
     budgets: WorkforceBudgetsSpec.optional(),
