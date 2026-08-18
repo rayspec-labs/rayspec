@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  BUDGET_WINDOWS,
   EPOCH_WINDOW_START,
   ledgerScopesFor,
   resolveWorkforceBudgets,
@@ -78,6 +79,34 @@ describe('windowStartFor', () => {
   it('a Sunday belongs to the week of the preceding Monday', () => {
     expect(windowStartFor('weekly', new Date('2026-08-16T02:00:00Z')).toISOString()).toBe(
       '2026-08-10T00:00:00.000Z',
+    );
+  });
+
+  it('a monthly bucket starts at the first UTC instant of the calendar month', () => {
+    expect(windowStartFor('monthly', now).toISOString()).toBe('2026-08-01T00:00:00.000Z');
+    // The last instant of a month still belongs to that month, not the next.
+    expect(windowStartFor('monthly', new Date('2026-01-31T23:59:59.999Z')).toISOString()).toBe(
+      '2026-01-01T00:00:00.000Z',
+    );
+    // A month boundary is its own bucket start (idempotent).
+    expect(windowStartFor('monthly', new Date('2026-03-01T00:00:00.000Z')).toISOString()).toBe(
+      '2026-03-01T00:00:00.000Z',
+    );
+    // Calendar months are NOT fixed-length: a leap February still buckets to its own first day.
+    expect(windowStartFor('monthly', new Date('2028-02-29T18:00:00Z')).toISOString()).toBe(
+      '2028-02-01T00:00:00.000Z',
+    );
+    // A December instant never rolls into the next year's January bucket.
+    expect(windowStartFor('monthly', new Date('2026-12-31T23:00:00Z')).toISOString()).toBe(
+      '2026-12-01T00:00:00.000Z',
+    );
+  });
+
+  it('every declared window has its own bucket rule — no two share one', () => {
+    const at = new Date('2026-08-14T13:37:42.123Z');
+    const buckets = BUDGET_WINDOWS.map((w) => windowStartFor(w, at).toISOString());
+    expect(new Set(buckets).size, `two windows bucket alike: ${buckets.join(', ')}`).toBe(
+      BUDGET_WINDOWS.length,
     );
   });
 });

@@ -170,6 +170,6 @@ describe('deriveWorkforceBudgets', () => {
 
 describe('window vocabulary drift pin', () => {
   it("the grammar's budget windows equal the engine's calendar windows", () => {
-    expect(WorkforceBudgetWindow.options).toEqual(['hourly', 'daily', 'weekly']);
+    expect(WorkforceBudgetWindow.options).toEqual(['hourly', 'daily', 'weekly', 'monthly']);
   });
 });

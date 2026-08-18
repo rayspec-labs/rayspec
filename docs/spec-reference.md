@@ -2076,7 +2076,9 @@ notes its presence in one neutral line; nothing in the engine reads a key inside
   segments (`tasks`, `approvals`, `reviews`, `cost`, and friends) — a workforce named after a
   collection would be unreachable for control and reads, so it is refused at parse
   (`reserved_workforce_id`) and again anywhere a task row could mint it.
-- `name` — the display name (the orchestrator's role frame renders it).
+- `name` — the display name (the orchestrator's role frame renders it). Capped at **200
+  characters**: the role frame is a byte-bounded turn-input section, and a field that renders into
+  it is refused HERE rather than at dispatch.
 - `orchestrator` — the ENTRY-POINT employee: every submitted goal becomes a task owned by this
   seat. Exactly one employee holds role `orchestrator`, the `orchestrator` key must name them,
   and they declare no `reportsTo` — the reporting chain roots AT the orchestrator
@@ -2092,21 +2094,34 @@ nothing is silently truncated. All tiers are optional; an absent tier means no c
 ```yaml
 budgets:
   workforce:
-    usd: 25            # whole-workforce ceiling per calendar window
-    window: daily      # hourly | daily | weekly (default: daily), UTC calendar windows
+    usd: 25            # whole-workforce ceiling per calendar window — REQUIRED when this tier is present
+    turns: 500         # optional turn ceiling for the same window
+    window: daily      # hourly | daily | weekly | monthly (default: daily), UTC calendar windows
   task:
     usd: 2.5           # per-task ceiling …
     turns: 20          # … BOTH members required together (see below)
+  subtree:
+    usd: 12            # whole-subtree ceiling: one submitted goal and every task under it
+    turns: 200         # either member alone is a legal declaration
   delegation:
     maxDepth: 3        # how deep delegation chains may nest
     maxPerTask: 4      # how many children one task may open in total
 ```
 
+The four ledger tiers map onto the four scopes the engine meters: `task` (one task), `subtree`
+(the ROOT task's scope — every task descended from one submitted goal), the per-department
+ceilings below, and `workforce` (all of it). `task` and `subtree` are UN-WINDOWED: they bound a
+piece of work for its lifetime, not a calendar rate, so they take no `window`. The department and
+workforce tiers are windowed, bucketed on UTC calendar boundaries — a `monthly` bucket starts at
+the first instant of the calendar month, so buckets are 28–31 days and never a fixed offset.
+
 `budgets.task` requires BOTH `usd` and `turns` whenever the object is present: the engine's
 per-turn reservation estimate derives from `usd / turns`, and a usd ceiling that cannot reserve
 per turn cannot bound concurrent dispatch — the engine refuses exactly that incoherence, so the
-grammar makes it unrepresentable. The lint additionally requires the `task` tier whenever ANY
-usd ceiling is declared anywhere in the section.
+grammar makes it unrepresentable. `budgets.subtree` carries no such rule (no estimate derives from
+it) and either member alone is legal. The lint additionally requires the `task` tier whenever ANY
+usd ceiling is declared anywhere in the section — the workforce tier, the subtree tier, or a
+department's.
 
 ### `execution`
 
@@ -2141,9 +2156,16 @@ departments:
     members: [principal_eng, devops]
     budgets:                  # optional per-department ceilings
       usd: 5
-      window: daily
+      window: daily           # hourly | daily | weekly | monthly
       maxConcurrentWorkers: 2
 ```
+
+`mission` is capped at **2000 characters**: it renders into the turn-input role frame, which is
+byte-bounded, so an oversized mission is a typed refusal at validation instead of a
+`ContextSectionOverflowError` at every dispatch. A department's `name` renders into the same line
+but carries **no maximum length today** — the cap bounds `mission` only. And a cap on one field is
+not a promise that the section fits: a workforce with many departments can still outgrow the role
+frame, which remains a dispatch-time typed error naming the same fix (shorter missions).
 
 A department resolves delegation addressed to it (`department:eng`) onto its `manager`, who
 answers FOR the department and is therefore never inside its own `members`
@@ -2164,6 +2186,9 @@ employees:
     role: worker              # orchestrator | manager | worker | reviewer (closed set)
     capabilities: [public_statement]   # opaque policy labels — matched, never interpreted
 ```
+
+`title` is capped at **200 characters** — it renders into the turn input's identity section, which
+is byte-bounded, so the refusal lands at validation rather than at dispatch.
 
 The `role` sets the NATIVE toolset an employee STARTS from at dispatch; the TASK can narrow it (a
 review task withholds `request_review`), and role also gates the classification journaling and the
@@ -2208,6 +2233,11 @@ reviewPolicies:
     onReject: rework          # the one shipped rejection behavior
     maxRounds: 2
 ```
+
+Both selector objects require AT LEAST ONE member, and the rule is part of the SHAPE, not a
+convention: each exports as an `anyOf` of closed variants in `spec.schema.json`, so `appliesTo: {}`
+or `requireWhen: {}` — a rule that could never fire — is refused by this parser AND by any
+third-party validator reading the published schema.
 
 Policy is runtime code over declared rules, never prompt text: when a covered employee submits a
 result, the FIRST matching rule (declaration order) routes it to independent review no matter

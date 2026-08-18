@@ -36,14 +36,31 @@ import {
 } from '@rayspec/core';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
 import type { RaySpec } from './grammar.js';
-import type { WorkforceEmployeeSpec } from './workforce-grammar.js';
+import type { WorkforceBudgetWindowName, WorkforceEmployeeSpec } from './workforce-grammar.js';
 
-/** Hours per calendar window — normalizes budget rates for the widening comparison. Ordering
- *  only, never billing: the engine enforces per-window amounts, this rule compares their rates. */
-const WINDOW_HOURS: Readonly<Record<string, number>> = { hourly: 1, daily: 24, weekly: 168 };
+/**
+ * Hours per calendar window — normalizes budget rates for the widening comparison. Ordering only,
+ * never billing: the engine enforces per-window amounts against real UTC calendar buckets
+ * (`windowStartFor`), this rule only ORDERS two declared rates against each other.
+ *
+ * `monthly` is 730 h — 8760/12, the exact average — and is NOMINAL by necessity: real calendar
+ * months run 672–744 h, so no constant is exact and a comparison involving `monthly` is
+ * approximate by construction. That is acceptable precisely because this table never decides an
+ * amount; it decides whether one declared ceiling out-rates another.
+ *
+ * EXHAUSTIVE BY TYPE: keyed on `WorkforceBudgetWindowName`, so a window added to the grammar
+ * without a normalization factor is a COMPILE error here — never a silent `?? 24` that would
+ * compare a new window as if it were daily.
+ */
+const WINDOW_HOURS: Readonly<Record<WorkforceBudgetWindowName, number>> = {
+  hourly: 1,
+  daily: 24,
+  weekly: 168,
+  monthly: 730,
+};
 
-function windowHours(window: string | undefined): number {
-  return WINDOW_HOURS[window ?? 'daily'] ?? 24;
+function windowHours(window: WorkforceBudgetWindowName | undefined): number {
+  return WINDOW_HOURS[window ?? 'daily'];
 }
 
 /**
@@ -634,8 +651,13 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
 
   // ---- BUDGET COHERENCE --------------------------------------------------------------------
   const workforceUsd = workforce.budgets?.workforce;
+  // EVERY usd tier counts, `subtree` included: the engine's own coherence refusal keys on the same
+  // set (budget.ts's `declaresUsd`), so a tier missing here would derive a budgets object the
+  // engine REFUSES at boot — a document that passed `doctor` and then stops the workforce.
   const anyUsdCeiling =
-    workforceUsd !== undefined || workforce.departments.some((d) => d.budgets?.usd !== undefined);
+    workforceUsd !== undefined ||
+    workforce.budgets?.subtree?.usd !== undefined ||
+    workforce.departments.some((d) => d.budgets?.usd !== undefined);
   if (anyUsdCeiling && workforce.budgets?.task === undefined) {
     errors.push(
       specError(
