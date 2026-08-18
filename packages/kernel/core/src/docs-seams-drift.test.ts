@@ -36,38 +36,45 @@ const CITATIONS: ReadonlyArray<readonly [string, string]> = [
   ['packages/app/server/src/composition-root.ts:3348', 'orchestrationStrategy'],
   ['packages/app/server/src/composition-root.ts:3335', 'buildWorkforceTurnHandlers'],
   ['packages/kernel/core/src/orchestration-strategy.ts:39', 'interface OrchestrationStrategy'],
-  ['packages/kernel/core/src/seam-contracts.ts:55', 'SEAM_MAX_PLAN_STEPS = 64'],
+  ['packages/kernel/core/src/seam-contracts.ts:61', 'SEAM_MAX_PLAN_STEPS = 64'],
   ['packages/kernel/core/src/memory-provider.ts:34', 'interface WorkforceMemoryProvider'],
-  ['packages/kernel/workforce-tools/src/context.ts:592', 'sanitizeUntrusted(hit.text)'],
+  ['packages/kernel/workforce-tools/src/context.ts:589', 'sanitizeUntrusted(hit.text)'],
   ['packages/kernel/workforce-tools/src/context.ts:72', 'recall: 4_096'],
-  ['packages/kernel/workforce-tools/src/context.ts:632-633', 'elastic'],
-  ['packages/kernel/workforce-tools/src/context.ts:582', 'SEAM_MAX_MEMORY_HITS'],
+  ['packages/kernel/workforce-tools/src/context.ts:629-630', 'const elastic:'],
+  ['packages/kernel/workforce-tools/src/context.ts:579', 'SEAM_MAX_MEMORY_HITS'],
   ['packages/kernel/workforce-tools/src/memory.ts:38', 'RECALL_MAX_HITS = 10'],
-  ['packages/kernel/core/src/worker-selector.ts:45', 'interface WorkerSelector'],
+  ['packages/kernel/core/src/worker-selector.ts:53', 'interface WorkerSelector'],
   ['packages/kernel/core/src/cost-policy.ts:53', 'interface CostPolicy'],
   ['packages/kernel/tasks/src/budget.ts:551', 'LedgerCostPolicy'],
   ['packages/kernel/core/src/approval-provider.ts:45', 'interface ApprovalProvider'],
-  ['packages/kernel/core/src/review-policy.ts:63', 'interface ReviewPolicy'],
+  ['packages/kernel/core/src/review-policy.ts:69', 'interface ReviewPolicy'],
   ['packages/kernel/workforce-tools/src/review-policy.ts:76', 'DeclaredReviewPolicy'],
+  ['packages/kernel/tasks/src/create-task.ts:48', 'MAX_TASK_DEPENDENCIES = 100'],
+  ['packages/app/server/src/workforce-goal-intake.ts:78', 'MAX_TASK_DEPENDENCIES'],
 ];
 
 /**
- * The bare-line citations the page makes as `(`:NN`)` shorthand after naming a file — pinned the
- * same way, keyed by the file the shorthand belongs to.
+ * The bare-line citations the page makes as ``(`:NN`)`` shorthand right after naming a symbol. The
+ * TOKEN is the symbol the page prints immediately before the shorthand, which is what lets the
+ * page-side arm below match each printed number to its own entry instead of merely counting them.
+ * Tokens must be unique here; the suite asserts that rather than trusting it.
  */
 const SHORTHAND: ReadonlyArray<readonly [string, number, string]> = [
   ['packages/kernel/core/src/orchestration-strategy.ts', 49, 'SingleTaskPlanStrategy'],
   ['packages/kernel/core/src/memory-provider.ts', 45, 'EmptyRecallMemoryProvider'],
-  ['packages/kernel/core/src/worker-selector.ts', 55, 'CapabilityMatchSelector'],
+  ['packages/kernel/core/src/worker-selector.ts', 63, 'CapabilityMatchSelector'],
   ['packages/kernel/core/src/approval-provider.ts', 57, 'UnroutedApprovalProvider'],
-  ['packages/kernel/core/src/review-policy.ts', 74, 'DeclaredReviewPolicy'],
+  ['packages/kernel/core/src/review-policy.ts', 80, 'DeclaredReviewPolicy'],
   ['packages/app/server/src/workforce-turn-handlers.ts', 73, 'memoryProviderFor'],
   ['packages/kernel/core/src/seam-confinement.ts', 52, 'SeamConfinementError'],
   ['packages/kernel/core/src/seam-confinement.ts', 75, 'confineWorkerSelector'],
-  ['packages/kernel/core/src/seam-confinement.ts', 204, 'confineCostPolicy'],
-  ['packages/kernel/core/src/seam-confinement.ts', 225, 'confineApprovalProvider'],
-  ['packages/kernel/core/src/seam-confinement.ts', 278, 'confineMemoryProvider'],
+  ['packages/kernel/core/src/seam-confinement.ts', 221, 'confineCostPolicy'],
+  ['packages/kernel/core/src/seam-confinement.ts', 248, 'confineApprovalProvider'],
+  ['packages/kernel/core/src/seam-confinement.ts', 307, 'confineMemoryProvider'],
 ];
+
+/** The roots a full-path citation may start with. Anything else on the page is an unresolvable form. */
+const CITATION_ROOTS = ['packages/', 'examples/', 'scripts/', 'docs/'];
 
 function lineOf(relAndLine: string): { rel: string; line: number } {
   const at = relAndLine.lastIndexOf(':');
@@ -106,11 +113,62 @@ describe('docs/workforce-extension-seams.md', () => {
     );
     const pinned = new Set(CITATIONS.map(([c]) => c));
     expect([...onPage].filter((c) => !pinned.has(c))).toEqual([]);
+  });
 
-    // The page also cites bare lines as a `(`:NN`)` shorthand after naming the file. Those carry no
-    // path to match on, so the loop is closed by COUNT: a shorthand added without a SHORTHAND entry
-    // moves this number and fails here.
-    expect([...page.matchAll(/\(`:\d+`\)/g)]).toHaveLength(SHORTHAND.length);
+  /**
+   * Every citation-shaped token on the page must be a FULL path, so the arm above sees all of them.
+   * A bare `context.ts:579` is checked by nothing: it is not a path the arm matches, and the pin
+   * table cannot tell which of several same-named files it meant. Requiring the full form is what
+   * makes "every citation on the page is pinned" true of the page rather than of a subset of it.
+   */
+  it('no citation on the page escapes the full-path form the arm above matches', () => {
+    const bare = [
+      ...page.matchAll(/`([A-Za-z0-9_./-]+\.(?:ts|tsx|mjs|js|json|md|yaml|yml):\d+(?:-\d+)?)`/g),
+    ]
+      .map((m) => m[1] as string)
+      .filter((c) => !CITATION_ROOTS.some((root) => c.startsWith(root)));
+    expect(bare, 'these citations name a file without its path, so nothing verifies them').toEqual(
+      [],
+    );
+  });
+
+  /**
+   * The ``(`:NN`)`` shorthands, checked BY VALUE.
+   *
+   * This arm previously compared only the COUNT of shorthands to the size of the pin table, which is
+   * a reading a wrong page also produces: a page printing ``(`:99999`)`` against a table holding 63
+   * was green. Counting is not checking. Each shorthand on the page is anchored to the symbol
+   * printed immediately before it, so the number the READER sees is matched to the number the table
+   * VERIFIED against the source — and `(`:99999`)` is red.
+   */
+  it('every shorthand the page PRINTS equals the line its pin verified', () => {
+    const byToken = new Map(SHORTHAND.map(([, line, token]) => [token, line]));
+    expect(
+      byToken.size,
+      'SHORTHAND tokens must be unique — a collision would hide a wrong number',
+    ).toBe(SHORTHAND.length);
+
+    const printed = [...page.matchAll(/`([A-Za-z_][\w.]*)`[^`\n]{0,24}\(`:(\d+)`\)/g)].map((m) => ({
+      token: m[1] as string,
+      line: Number.parseInt(m[2] as string, 10),
+    }));
+
+    // Every shorthand on the page resolves to a pin, and prints that pin's line.
+    for (const { token, line } of printed) {
+      const pinned = byToken.get(token);
+      expect(
+        pinned,
+        `the page prints a (\`:${line}\`) shorthand after \`${token}\`, which no pin covers`,
+      ).toBeDefined();
+      expect(
+        line,
+        `the page prints \`${token}\` (\`:${line}\`) but its pin verified line ${String(pinned)}`,
+      ).toBe(pinned);
+    }
+    // …and every pin appears on the page, so a corrected table cannot leave the prose behind.
+    expect(printed.map((p) => p.token).sort()).toEqual([...byToken.keys()].sort());
+    // No shorthand escaped the symbol-anchored pattern above (which would make it unverified).
+    expect([...page.matchAll(/\(`:\d+`\)/g)]).toHaveLength(printed.length);
   });
 
   it('every test name the page cites exists', () => {

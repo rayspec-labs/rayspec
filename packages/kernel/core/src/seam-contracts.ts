@@ -22,7 +22,7 @@
  */
 import type { ApprovalProvider } from './approval-provider.js';
 import type { CostPolicy, ProposedExecution, SettledExecution } from './cost-policy.js';
-import type { MemoryQuery, WorkforceMemoryProvider } from './memory-provider.js';
+import type { MemoryHit, MemoryQuery, WorkforceMemoryProvider } from './memory-provider.js';
 import type {
   ExecutionPlan,
   OrchestrationInput,
@@ -47,10 +47,16 @@ export interface ContractResult {
 
 /**
  * The step-count ceiling on ONE submitted goal's plan. A plan lands as sibling roots inside a single
- * transaction, so an unbounded plan is an unbounded write. The shipped default emits exactly one
- * step, and decomposition past a handful of roots belongs to the orchestrator's own turns via
- * `delegate_task` — where per-task budgets, the join machinery and the dispatch boundary all apply
- * to each new task. This bound is the seam-side statement of that split.
+ * transaction, so an unbounded plan is an unbounded write, and this is the ceiling that stops one.
+ *
+ * **64 IS A CONSERVATIVE ROUND NUMBER, NOT A DERIVED ONE.** No property of the engine produces it.
+ * It was chosen to sit far above what any honest plan needs — the shipped default emits exactly one
+ * step — and far below a write that could hurt. Real decomposition of any width belongs to the
+ * orchestrator's own turns via `delegate_task`, where per-task budgets, the join machinery and the
+ * dispatch boundary all apply to each new task; this bound is the seam-side statement of that split,
+ * not a recommended plan size.
+ *
+ * It is unrelated to `SEAM_MAX_MEMORY_HITS`, which happens to carry the same value by coincidence.
  */
 export const SEAM_MAX_PLAN_STEPS = 64;
 
@@ -62,10 +68,27 @@ export const SEAM_MAX_PLAN_STEPS = 64;
  */
 export const SEAM_MAX_STEP_TITLE_CHARS = 200;
 
+/**
+ * The per-step dependency ceiling, mirrored from the engine's `MAX_TASK_DEPENDENCIES` row bound for
+ * exactly the reason the title ceiling is mirrored: a plan the kit calls conforming must not then be
+ * refused by the intake for a bound the kit never checked. Reachable inside the step ceiling because
+ * indices may repeat (`dependsOn: [0, 0, 0, …]`). Held equal by the same drift pin.
+ */
+export const SEAM_MAX_STEP_DEPENDENCIES = 100;
+
 /** The selection rationale is journal/debug text; it is bounded so a seam cannot flood the journal. */
 export const SEAM_MAX_SELECTION_REASON_CHARS = 512;
 
-/** The recall hit ceiling a provider must respect even when the query names no limit. */
+/**
+ * The recall hit ceiling a provider must respect even when the query names no limit.
+ *
+ * Like `SEAM_MAX_PLAN_STEPS`, **64 here is a conservative round number rather than a derived one**,
+ * and the two constants are independent — a reader should not infer a relationship from their being
+ * equal. This one changes nothing shipped: `TaskHistoryMemoryProvider` clamps itself to
+ * `RECALL_MAX_HITS = 10`, and 64 hits are comfortably inside what the 4 096-byte recall budget could
+ * render anyway, so a provider losing hits at this ceiling was going to lose most of them to the byte
+ * budget regardless.
+ */
 export const SEAM_MAX_MEMORY_HITS = 64;
 
 /** The closed set of ledger scopes a denial may name. Mirrors `BudgetScopeKind`. */
@@ -205,6 +228,14 @@ export async function orchestrationStrategyContract(
         depProblems.push(`step ${index} has a non-array dependsOn`);
         continue;
       }
+      // The row bound, mirrored so the kit cannot bless a plan the intake will refuse. Checked
+      // before the per-index walk, which is the order `planRefusal` uses too.
+      if (step.dependsOn.length > SEAM_MAX_STEP_DEPENDENCIES) {
+        depProblems.push(
+          `step ${index} declares ${step.dependsOn.length} dependencies (the row bound is ${SEAM_MAX_STEP_DEPENDENCIES})`,
+        );
+        continue;
+      }
       for (const dep of step.dependsOn) {
         if (!Number.isInteger(dep) || dep < 0 || dep >= index) {
           depProblems.push(
@@ -219,7 +250,7 @@ export async function orchestrationStrategyContract(
       seam,
       'step-dependencies-name-only-prior-steps',
       depProblems,
-      'every dependency index is an integer naming a strictly earlier step of the same plan',
+      `every dependency index is an integer naming a strictly earlier step, and no step declares more than ${SEAM_MAX_STEP_DEPENDENCIES}`,
     ),
   );
 
@@ -436,6 +467,10 @@ export async function workerSelectorContract(selector: WorkerSelector): Promise<
  * Run the `WorkforceMemoryProvider` contract. Recall is rendered into a later turn's context as
  * bounded, neutralized DATA by the caller, so the properties here are about SIZE and SHAPE: a
  * provider that ignores the limit it was given hands the caller a bill it did not agree to.
+ *
+ * A broken provider is the normal case for this function, not the exceptional one — it is what an
+ * out-of-tree author runs WHILE the provider is still wrong. So a `search` that rejects, or answers
+ * with something that is not a list at all, produces a report rather than an exception.
  */
 export async function memoryProviderContract(
   provider: WorkforceMemoryProvider,
@@ -443,27 +478,64 @@ export async function memoryProviderContract(
   const seam: SeamName = 'WorkforceMemoryProvider';
   const results: ContractResult[] = [];
 
-  const unlimited = await provider.search({ text: 'contract probe' });
-  const limited = await provider.search({ text: 'contract probe', limit: 3 });
-  const scoped = await provider.search({
-    text: 'contract probe',
-    workforceId: 'wf-contract-probe',
-    limit: 1,
-  });
+  const probe = async (
+    label: string,
+    query: MemoryQuery,
+  ): Promise<
+    { label: string; hits: readonly MemoryHit[] } | { label: string; problem: string }
+  > => {
+    try {
+      const hits = await provider.search(query);
+      return Array.isArray(hits)
+        ? { label, hits }
+        : {
+            label,
+            problem: `${label} yielded ${hits === null ? 'null' : typeof hits}, not an array`,
+          };
+    } catch (err) {
+      return { label, problem: `${label} rejected (${message(err)})` };
+    }
+  };
+
+  const probes = [
+    await probe('a limit-free search', { text: 'contract probe' }),
+    await probe('a search with limit 3', { text: 'contract probe', limit: 3 }),
+    await probe('a search with limit 1', {
+      text: 'contract probe',
+      workforceId: 'wf-contract-probe',
+      limit: 1,
+    }),
+  ];
+  const broken = probes.filter((p): p is { label: string; problem: string } => 'problem' in p);
+  if (broken.length > 0) {
+    // Every property is reported, and the ones that cannot be evaluated without a list SAY they were
+    // not evaluated rather than being omitted — a caller reading this list must never have to guess
+    // whether a missing property passed.
+    const detail = broken.map((p) => p.problem).join('; ');
+    return [
+      'search-yields-a-bounded-list',
+      'search-honors-the-query-limit',
+      'hits-are-well-formed',
+      'search-does-not-mutate-the-query',
+      'remember-settles',
+    ].map((name, index) =>
+      verdict(seam, name, [index === 0 ? detail : `not evaluated — ${detail}`], ''),
+    );
+  }
+  const [unlimited, limited, scoped] = probes.map(
+    (p) => (p as { hits: readonly MemoryHit[] }).hits,
+  ) as [readonly MemoryHit[], readonly MemoryHit[], readonly MemoryHit[]];
 
   results.push(
     verdict(
       seam,
       'search-yields-a-bounded-list',
-      [
-        ...(Array.isArray(unlimited) ? [] : ['search() did not yield an array']),
-        ...(Array.isArray(unlimited) && unlimited.length > SEAM_MAX_MEMORY_HITS
-          ? [
-              `a limit-free search yielded ${unlimited.length} hits (the bound is ${SEAM_MAX_MEMORY_HITS})`,
-            ]
-          : []),
-      ],
-      `a limit-free search yielded ${Array.isArray(unlimited) ? unlimited.length : 0} hit(s)`,
+      unlimited.length > SEAM_MAX_MEMORY_HITS
+        ? [
+            `a limit-free search yielded ${unlimited.length} hits (the bound is ${SEAM_MAX_MEMORY_HITS})`,
+          ]
+        : [],
+      `a limit-free search yielded ${unlimited.length} hit(s)`,
     ),
   );
 

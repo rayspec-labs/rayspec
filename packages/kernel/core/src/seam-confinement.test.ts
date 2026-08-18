@@ -230,8 +230,51 @@ describe('confineCostPolicy', () => {
     expect(consulted).toBe(0);
   });
 
-  it('SETTLEMENT never reaches the extension — the ledger write is not a seam', async () => {
+  it('SETTLEMENT reaches the baseline FIRST and the extension after — a stateful policy can accumulate', async () => {
     const baseline = allowingBaseline();
+    const order: string[] = [];
+    const extension: CostPolicy = {
+      id: 'extension',
+      authorize: () => Promise.resolve({ allowed: true }),
+      settle: () => {
+        order.push('extension');
+        return Promise.resolve();
+      },
+    };
+    const confined = confineCostPolicy(
+      {
+        ...baseline,
+        settle: (actual) => {
+          order.push('baseline');
+          return baseline.settle(actual);
+        },
+      },
+      extension,
+    );
+    await confined.settle({ ...PROPOSED, actualUsd: 0.6 });
+    expect(order).toEqual(['baseline', 'extension']);
+    expect(baseline.settled).toEqual(['t-1']);
+  });
+
+  it("a THROWING extension settlement does not undo the baseline's ledger write", async () => {
+    const baseline = allowingBaseline();
+    const exploding: CostPolicy = {
+      id: 'exploding',
+      authorize: () => Promise.resolve({ allowed: true }),
+      settle: () => Promise.reject(new Error('the extension ledger is offline')),
+    };
+    await expect(
+      confineCostPolicy(baseline, exploding).settle({ ...PROPOSED, actualUsd: 0.6 }),
+    ).resolves.toBeUndefined();
+    expect(baseline.settled).toEqual(['t-1']);
+  });
+
+  it("a FAILING baseline settlement surfaces — it is the turn's real settlement", async () => {
+    const failing: CostPolicy = {
+      id: 'failing-baseline',
+      authorize: () => Promise.resolve({ allowed: true }),
+      settle: () => Promise.reject(new Error('the ledger write failed')),
+    };
     let extensionSettled = 0;
     const extension: CostPolicy = {
       id: 'extension',
@@ -241,9 +284,43 @@ describe('confineCostPolicy', () => {
         return Promise.resolve();
       },
     };
-    await confineCostPolicy(baseline, extension).settle({ ...PROPOSED, actualUsd: 0.6 });
-    expect(baseline.settled).toEqual(['t-1']);
+    await expect(
+      confineCostPolicy(failing, extension).settle({ ...PROPOSED, actualUsd: 0.6 }),
+    ).rejects.toThrow(/the ledger write failed/);
     expect(extensionSettled).toBe(0);
+  });
+
+  it('an accumulating extension still cannot outvote the baseline once it has spent its own ceiling', async () => {
+    // The whole point of restoring settlement: a ceiling that accumulates. After settling 0.6 against
+    // a 1.0 ceiling, the extension denies the next 0.6 turn that the baseline would have allowed.
+    let spent = 0;
+    const accumulating: CostPolicy = {
+      id: 'accumulating',
+      authorize: (proposed) =>
+        Promise.resolve(
+          spent + proposed.estimateUsd <= 1
+            ? { allowed: true }
+            : {
+                allowed: false,
+                denial: {
+                  scopeKind: 'department',
+                  scopeId: 'eng',
+                  ceiling: { kind: 'usd', limit: 1 },
+                  consumed: spent,
+                },
+              },
+        ),
+      settle: (actual) => {
+        spent += actual.actualUsd;
+        return Promise.resolve();
+      },
+    };
+    const confined = confineCostPolicy(allowingBaseline(), accumulating);
+    await expect(confined.authorize(PROPOSED)).resolves.toEqual({ allowed: true });
+    await confined.settle({ ...PROPOSED, actualUsd: 0.6 });
+    const second = await confined.authorize(PROPOSED);
+    expect(second.allowed).toBe(false);
+    expect(second.allowed === false && second.denial.consumed).toBe(0.6);
   });
 
   it('REFUSES a malformed extension decision rather than reading it as an allow', async () => {

@@ -5,7 +5,11 @@
  */
 
 import type { ExecutionPlan, OrchestrationInput, OrchestrationStrategy } from '@rayspec/core';
-import { SEAM_MAX_PLAN_STEPS, SEAM_MAX_STEP_TITLE_CHARS } from '@rayspec/core';
+import {
+  SEAM_MAX_PLAN_STEPS,
+  SEAM_MAX_STEP_DEPENDENCIES,
+  SEAM_MAX_STEP_TITLE_CHARS,
+} from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
 import { MAX_TASK_DEPENDENCIES, MAX_TASK_TITLE_CHARS } from '@rayspec/tasks';
@@ -22,6 +26,10 @@ import { buildWorkforceGoalIntake } from './workforce-goal-intake.js';
 describe('the seam kit and the engine agree on the row bounds', () => {
   it('the contract kit’s step-title ceiling IS the engine’s task-title row bound', () => {
     expect(SEAM_MAX_STEP_TITLE_CHARS).toBe(MAX_TASK_TITLE_CHARS);
+  });
+
+  it('the contract kit’s dependency ceiling IS the engine’s task-dependency row bound', () => {
+    expect(SEAM_MAX_STEP_DEPENDENCIES).toBe(MAX_TASK_DEPENDENCIES);
   });
 });
 

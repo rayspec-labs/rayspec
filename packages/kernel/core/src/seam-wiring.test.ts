@@ -25,15 +25,19 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..',
 const SCAN_ROOT = join(repoRoot, 'packages');
 
 /**
- * The seam machinery itself: the interface modules, the contract kit and the confinements. These
- * necessarily name every seam, so scanning them would only measure that they exist.
+ * The seam machinery itself: the interface modules, the contract kit and the confinements. Each of
+ * these necessarily names a seam identifier, so scanning them would only measure that they exist.
+ *
+ * The list is kept as SHORT as it can be, because every entry is a blind spot: a wiring that happened
+ * to live in an excluded file would be invisible here. Only the modules that actually name one of the
+ * TRACKED identifiers below belong in it — the two WIRED seams' own interface modules do not, because
+ * this tripwire tracks the three unwired seams and those files never mention them. The suite asserts
+ * that rather than trusting the list to have been curated correctly, which is how three unnecessary
+ * entries (`review-policy.ts`, `memory-provider.ts`, `orchestration-strategy.ts`) were found.
  */
 const SEAM_MACHINERY = new Set([
   'packages/kernel/core/src/approval-provider.ts',
   'packages/kernel/core/src/cost-policy.ts',
-  'packages/kernel/core/src/memory-provider.ts',
-  'packages/kernel/core/src/orchestration-strategy.ts',
-  'packages/kernel/core/src/review-policy.ts',
   'packages/kernel/core/src/seam-confinement.ts',
   'packages/kernel/core/src/seam-contracts.ts',
   'packages/kernel/core/src/worker-selector.ts',
@@ -158,6 +162,22 @@ describe('the extension-seam wiring tripwire', () => {
     expect(
       scanned.some(({ rel }) => rel === 'packages/app/server/src/workforce-goal-intake.ts'),
     ).toBe(true);
+  });
+
+  it('every excluded file earns its exclusion — an unnecessary entry is a blind spot', () => {
+    const seams = Object.keys(SEAM_IDENTIFIERS) as (keyof typeof SEAM_IDENTIFIERS)[];
+    for (const rel of SEAM_MACHINERY) {
+      const file = scanned.find((s) => s.rel === rel);
+      expect(
+        file,
+        `${rel} is excluded but was not scanned — a stale path in the exclusion set`,
+      ).toBeDefined();
+      const named = seams.flatMap((seam) => detectSeamReferences(seam, (file as Scanned).src));
+      expect(
+        named.length,
+        `${rel} is excluded from the scan but names no seam identifier, so the exclusion only hides it`,
+      ).toBeGreaterThan(0);
+    }
   });
 
   it('WorkerSelector has NO production reference outside its own module', () => {

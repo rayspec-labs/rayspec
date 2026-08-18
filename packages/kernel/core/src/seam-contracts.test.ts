@@ -44,6 +44,7 @@ import {
   orchestrationStrategyContract,
   runSeamContracts,
   SEAM_MAX_PLAN_STEPS,
+  SEAM_MAX_STEP_DEPENDENCIES,
   workerSelectorContract,
 } from './seam-contracts.js';
 import {
@@ -248,6 +249,56 @@ describe('OrchestrationStrategy contract', () => {
     );
   });
 
+  /**
+   * The reviewer's probe G: a 64-step plan — inside the step ceiling — whose last step carries 150
+   * dependencies, every index strictly prior. Repeating indices is what makes the row bound reachable
+   * without exceeding the step bound. The kit used to pass this plan and the engine then refused it,
+   * which is the one thing a conformance kit must never do.
+   */
+  it('TEETH: more dependencies than a row carries fails step-dependencies-name-only-prior-steps', async () => {
+    const overDeps: OrchestrationStrategy = {
+      id: 'x',
+      plan: () =>
+        Promise.resolve({
+          steps: Array.from({ length: SEAM_MAX_PLAN_STEPS }, (_v, i) => ({
+            title: `s${i}`,
+            goal: `s${i}`,
+            owner: 'o',
+            department: null,
+            dependsOn:
+              i === SEAM_MAX_PLAN_STEPS - 1
+                ? Array.from({ length: 150 }, () => 0)
+                : ([] as number[]),
+          })),
+        }),
+    };
+    const results = await orchestrationStrategyContract(overDeps);
+    expectOnlyFailure(results, 'step-dependencies-name-only-prior-steps');
+    expect(contractFailures(results)[0]?.detail).toContain(
+      `declares 150 dependencies (the row bound is ${SEAM_MAX_STEP_DEPENDENCIES})`,
+    );
+  });
+
+  it('a plan AT the dependency bound conforms — the bound refuses excess, not fan-in', async () => {
+    const atBound: OrchestrationStrategy = {
+      id: 'x',
+      plan: () =>
+        Promise.resolve({
+          steps: Array.from({ length: SEAM_MAX_PLAN_STEPS }, (_v, i) => ({
+            title: `s${i}`,
+            goal: `s${i}`,
+            owner: 'o',
+            department: null,
+            dependsOn:
+              i === SEAM_MAX_PLAN_STEPS - 1
+                ? Array.from({ length: SEAM_MAX_STEP_DEPENDENCIES }, () => 0)
+                : ([] as number[]),
+          })),
+        }),
+    };
+    expectConforms(await orchestrationStrategyContract(atBound));
+  });
+
   it('TEETH: an unbounded plan fails plan-is-bounded', async () => {
     const flood: OrchestrationStrategy = {
       id: 'x',
@@ -390,6 +441,48 @@ describe('WorkforceMemoryProvider contract', () => {
     expect(contractFailures(await memoryProviderContract(flood)).map((r) => r.name)).toContain(
       'search-honors-the-query-limit',
     );
+  });
+
+  /**
+   * The kit's whole promise is that it RETURNS a readable verdict list rather than throwing, and a
+   * provider whose `search` does not answer with a list is precisely the state an out-of-tree author
+   * is in while they are still getting it wrong. Each of these shapes used to escape as a raw
+   * TypeError from the unguarded dereference of the search result.
+   */
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a plain object', { hits: [] }],
+    ['a number', 42],
+    ['a string', 'lots of hits'],
+  ])('REPORTS rather than throws when search yields %s', async (_label, value) => {
+    const broken: WorkforceMemoryProvider = {
+      id: 'x',
+      search: () => Promise.resolve(value as unknown as readonly MemoryHit[]),
+      remember: () => Promise.resolve(),
+    };
+    const results = await memoryProviderContract(broken);
+    // Every property is still reported — a caller never has to guess whether a missing one passed.
+    expect(names(results)).toEqual([
+      'hits-are-well-formed',
+      'remember-settles',
+      'search-does-not-mutate-the-query',
+      'search-honors-the-query-limit',
+      'search-yields-a-bounded-list',
+    ]);
+    expect(contractFailures(results)).toHaveLength(5);
+    expect(results[0]?.detail).toMatch(/not an array/);
+  });
+
+  it('REPORTS rather than throws when search REJECTS', async () => {
+    const rejecting: WorkforceMemoryProvider = {
+      id: 'x',
+      search: () => Promise.reject(new Error('the index is offline')),
+      remember: () => Promise.resolve(),
+    };
+    const results = await memoryProviderContract(rejecting);
+    expect(contractFailures(results)).toHaveLength(5);
+    expect(results[0]?.detail).toMatch(/rejected \(Error: the index is offline\)/);
   });
 
   it('TEETH: a malformed hit fails hits-are-well-formed', async () => {

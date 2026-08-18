@@ -9,10 +9,13 @@
  * this class returns can authorize spend the baseline denied. Its `allowed: true` is not an
  * approval, it is the absence of an additional objection. Its only real power is to deny.
  *
- * The same composition is why `settle` here is bookkeeping and nothing more: the confinement routes
- * settlement to the baseline alone, so this method is never called through it. Keeping a local total
- * is useful for this policy's OWN future denials and for nothing else — the durable ledger the next
- * authorization reads is written by the baseline.
+ * `settle` is what makes the ceiling a CEILING rather than a per-turn estimate check: the confinement
+ * calls the baseline authoritatively and then this method advisorily, so `#spent` accumulates and the
+ * next `authorize` sees the real total. Two things follow. A failure in here is swallowed by the
+ * confinement — it must never roll back the baseline's durable ledger write — so this method must be
+ * able to lose an update without corrupting itself. And `#spent` is this policy's OWN accounting, not
+ * the deployment's: the durable ledger the baseline reads is written by the baseline, and nothing
+ * here can influence it.
  */
 import type {
   BudgetScopeKind,

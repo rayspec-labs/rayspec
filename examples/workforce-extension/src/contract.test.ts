@@ -181,6 +181,35 @@ describe('the out-of-tree implementations pass through the confinements untouche
       limit: 1,
     });
   });
+
+  it('the department ceiling ACCUMULATES through the confinement — a stateful policy works', async () => {
+    // The confinement routes settlement to the baseline authoritatively and to the extension
+    // advisorily, which is what lets a ceiling be a ceiling rather than a per-turn estimate check.
+    const allowingBaseline: CostPolicy = {
+      id: 'allowing-baseline',
+      authorize: () => Promise.resolve({ allowed: true }),
+      settle: () => Promise.resolve(),
+    };
+    const confined = confineCostPolicy(
+      allowingBaseline,
+      new DepartmentCeilingCostPolicy({ 'probe-dept': 10 }),
+    );
+    const turn = {
+      taskId: 't',
+      rootTaskId: 'r',
+      workforceId: 'wf',
+      department: 'probe-dept',
+      estimateUsd: 6,
+    };
+    await expect(confined.authorize(turn)).resolves.toEqual({ allowed: true });
+    await confined.settle({ ...turn, actualUsd: 6 });
+
+    // 6 spent against a ceiling of 10: the next 6 USD turn no longer fits.
+    const second = await confined.authorize(turn);
+    expect(second.allowed).toBe(false);
+    expect(second.allowed === false && second.denial.consumed).toBe(6);
+    expect(second.allowed === false && second.denial.scopeId).toBe('probe-dept');
+  });
 });
 
 describe('the strategy decomposes without exceeding what the intake will accept', () => {

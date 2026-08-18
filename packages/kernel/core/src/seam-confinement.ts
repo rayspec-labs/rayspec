@@ -197,9 +197,26 @@ function assertDecisionShape(decision: unknown, extensionId: string): PolicyDeci
  * allow, and no ceiling it can report that replaces the baseline's. Only when the baseline allows is
  * the extension asked, and only its denial can change the outcome.
  *
- * `settle` calls the BASELINE ONLY. Settlement is the durable ledger write that makes the next
- * authorization true; an extension that could write it could make its own future ceilings say
- * anything. The extension's own `settle` is never invoked by this wrapper.
+ * `settle` calls the BASELINE FIRST and authoritatively — that is the durable ledger write, and its
+ * failure propagates — and then the extension ADVISORILY, inside a swallowing `catch`.
+ *
+ * Why the extension is called at all, since an earlier version of this wrapper did not call it: the
+ * argument for excluding it was that an extension able to write settlement could make its own future
+ * ceilings say anything. That does not survive being followed through. An extension's `settle` writes
+ * only the EXTENSION's own state — it has no handle to the durable ledger, which is the baseline's —
+ * so an extension that lies to itself can only ever make itself deny LESS, and the baseline stays
+ * authoritative in every case because `authorize` asks it first. Excluding `settle` bought no safety
+ * and cost every stateful policy: a per-department or per-window ceiling can only accumulate if it is
+ * told what was spent, so under the old wrapper such a policy silently degraded to a per-turn
+ * estimate check. `examples/workforce-extension`'s own sample is exactly that shape.
+ *
+ * Why the `catch`: an extension's bookkeeping failing must never roll back the ledger write that has
+ * already happened. The extension's own state is its problem.
+ *
+ * What the `catch` does NOT cover, stated rather than inherited silently: an extension that HANGS
+ * still hangs the caller, here and in `authorize`, which has always awaited the extension the same
+ * way. That is one hazard, not a new one, and it belongs to whoever wires this seam — a call site
+ * needs a deadline around the whole confined policy, not a special case for settlement.
  */
 export function confineCostPolicy(baseline: CostPolicy, extension: CostPolicy): CostPolicy {
   return {
@@ -210,8 +227,14 @@ export function confineCostPolicy(baseline: CostPolicy, extension: CostPolicy): 
       // A rejecting extension fails CLOSED: the error propagates and nothing is authorized.
       return assertDecisionShape(await extension.authorize(proposed), extension.id);
     },
-    settle(actual: SettledExecution): Promise<void> {
-      return baseline.settle(actual);
+    async settle(actual: SettledExecution): Promise<void> {
+      // Authoritative. A failure here is a failure of the turn's settlement and must surface.
+      await baseline.settle(actual);
+      try {
+        await extension.settle(actual);
+      } catch {
+        // Advisory. The ledger is already written; an extension's own accounting cannot undo it.
+      }
     },
   };
 }
@@ -270,6 +293,12 @@ export function confineApprovalProvider(inner: ApprovalProvider): ApprovalProvid
  * A malformed hit is a different thing and IS refused — a non-finite score or a missing id is not an
  * oversized answer, it is an unusable one, and silently dropping it would hide a broken provider
  * behind a shorter list.
+ *
+ * Precisely: validation runs on the KEPT SLICE, after the clamp. So a malformed hit sitting BEYOND
+ * the ceiling is dropped rather than refused, and "a malformed hit is refused" is true of hits inside
+ * the ceiling. That ordering is the split applied consistently rather than an oversight — such a hit
+ * was an oversized answer before it was an unusable one — but it does mean the guarantee is bounded,
+ * and a reader is entitled to know which of the two it gets.
  *
  * What this wrapper does NOT do: neutralize hit TEXT. That belongs to whoever renders it, because
  * the neutralization has to match the document being rendered into; the workforce turn assembler
