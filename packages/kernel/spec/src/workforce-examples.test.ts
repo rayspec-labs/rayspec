@@ -1,9 +1,10 @@
 /**
  * The shipped workforce examples are EXECUTABLE TRUTH, pinned in CI: both parse and lint clean
- * with the experimental section enabled (no errors, no warnings — a rule keyed on a capability
- * nobody holds would warn here), and both are refused typed without it, at the same entry point
- * an author's document takes. That is the FULL scope of what CI guarantees for BOTH examples —
- * parse/lint clean, refused without the flag.
+ * with the experimental section enabled (no errors, no warnings — a rule keyed on a policy label
+ * nobody holds is now an ERROR, `workforce_label_unheld`, so the parse below is what catches it),
+ * and both are refused typed without it, at the same entry point an author's document takes. That
+ * is the FULL scope of what CI guarantees for BOTH examples — parse/lint clean, refused without
+ * the flag.
  *
  * The STARTER carries two gates the maintainers example does NOT: the acceptance story deploys it
  * byte-for-byte end to end (`workforce-story-e2e.db.test.ts`), and the spec-reference doc quotes its
@@ -53,6 +54,6 @@ describe('the shipped workforce examples', () => {
     expect(workforce?.employees).toHaveLength(7);
     expect(workforce?.teams.map((t) => t.id)).toEqual(['release_crew']);
     expect(workforce?.reviewPolicies.map((p) => p.id)).toEqual(['eng_quality']);
-    expect(workforce?.approvals.map((a) => a.id)).toEqual(['public_statement_signoff']);
+    expect(workforce?.approvalPolicies.map((a) => a.id)).toEqual(['public_statement_signoff']);
   });
 });

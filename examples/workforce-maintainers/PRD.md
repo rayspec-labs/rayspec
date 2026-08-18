@@ -51,8 +51,8 @@ approvals that gate anything public.
 | PRD need | Document construct |
 | --- | --- |
 | Three maintenance disciplines | `departments: triage, docs, watch` |
-| Every reproduction claim reviewed | `capabilities: [repro_required]` + `reviewPolicies[1]` (`triage_repro`) |
+| Every reproduction claim reviewed | `labels: [repro_required]` + `reviewPolicies[1]` (`triage_repro`) |
 | Writing quality gate | `reviewPolicies[0]` (`docs_quality`, `confidenceBelow: 0.85`) |
-| Human sign-off on public wording | `approvals[0]` + `capabilities: [public_statement]` on the writer and the requesting manager |
+| Human sign-off on public wording | `approvalPolicies[0]` + `labels: [public_statement]` on the writer and the requesting manager |
 | Watch spends only its allowance | `departments[watch].budgets` (`usd: 5, window: daily`) |
 | Release notes as one addressable unit | `teams[0]` (`release_notes_crew`) |

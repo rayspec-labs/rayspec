@@ -48,11 +48,37 @@ export function durationToMs(value: string): number {
 
 /**
  * The closed role set. A role determines which NATIVE toolset an employee receives at dispatch —
- * and nothing else. There is no capability-based routing: `capabilities[]` are opaque policy
- * labels, matched by review/approval rules, never interpreted.
+ * and nothing else. There is no label-based routing: `labels[]` are opaque policy labels, matched
+ * by review/approval rules, never interpreted.
  */
 export const WorkforceRole = z.enum(['orchestrator', 'manager', 'worker', 'reviewer']);
 export type WorkforceRoleName = z.infer<typeof WorkforceRole>;
+
+/**
+ * A POLICY LABEL — the token `reviewPolicies[].requireWhen.labels` and
+ * `approvalPolicies[].requireWhen.labels` match against `employees[].labels`.
+ *
+ * Named `labels` and not `capabilities` because this repo already spends "capability" on two other
+ * meanings a reader meets on the same page: the Product-YAML platform ingress contract
+ * (`docs/spec-reference.md`, a closed set of nine ids) and `@rayspec/core`'s BACKEND model
+ * capabilities, whose `capability_violation` check runs in the very lint file that validates these
+ * (`workforce-lint.ts`).
+ *
+ * MATCH RULE — exact string equality, case-sensitive, no inheritance. The matcher is
+ * `.includes(label)` over the owner's own declared array (`@rayspec/core` review-policy.ts
+ * `requiresReview`, `workforce-tools` review-policy.ts `matchApprovalRule`); there is no
+ * department- or team-level label field anywhere in this grammar, so nothing is inherited.
+ *
+ * CONSTRAINED to `SafeIdentifier` rather than an open string, because this token is the SOLE
+ * selector for `approvalPolicies[]` — the mechanism that parks work for a human — and a typo in an
+ * open string silently un-gates approval. The companion control is the lint's
+ * `workforce_label_unheld` ERROR: a rule keyed on a label no declared employee holds is refused,
+ * not warned about. `:`/`.` are deliberately NOT admitted: `:` is already this section's delegation
+ * separator (`employee:<id>` / `department:<id>` / `team:<id>`), and admitting a namespacing
+ * spelling whose hierarchy semantics do not exist would invite an affordance the matcher ignores.
+ * Widening the pattern later accepts strictly more documents, so nothing here is foreclosed.
+ */
+export const WorkforceLabel = SafeIdentifier;
 
 /** Mirrors the engine's calendar windows; a drift test pins the two enums to each other. */
 export const WorkforceBudgetWindow = z.enum(['hourly', 'daily', 'weekly', 'monthly']);
@@ -60,12 +86,13 @@ export type WorkforceBudgetWindowName = z.infer<typeof WorkforceBudgetWindow>;
 
 /**
  * BOUNDED CONTEXT — the deterministic bounded-context invariant, applied at the declaration: these
- * are the caps on the three free-text fields that render into the turn frame, which is
+ * are the caps on the four free-text fields that render into the turn frame, which is
  * byte-bounded per section (`@rayspec/workforce-tools` context.ts:
  * identity 1 024 B, roleFrame 4 096 B, whole input 65 536 B) and the mandatory sections REFUSE
  * typed rather than truncating. Unbounded here, an oversized `mission` parses clean at `doctor` and
  * then throws `ContextSectionOverflowError` at every dispatch for that department's seats — a late
- * failure against a document the author was told was valid.
+ * failure against a document the author was told was valid. `departments[].name` renders on the
+ * SAME role-frame line as `mission` and is bounded for the same reason.
  *
  * What the caps buy and what they do NOT, stated so nobody over-reads them: they make an UNBOUNDED
  * input BOUNDED, so a single pathological field is refused at validation. They are not a proof that
@@ -74,10 +101,11 @@ export type WorkforceBudgetWindowName = z.infer<typeof WorkforceBudgetWindow>;
  * `ContextSectionOverflowError` remains the aggregate guard (it already names the fix: shorter
  * missions). `.max()` counts UTF-16 CODE UNITS; a code unit costs at most 3 utf-8 bytes (an astral
  * character is 4 bytes but spends two code units), so the worst-case byte costs are 600 / 600 /
- * 6 000.
+ * 600 / 6 000.
  */
 export const MAX_WORKFORCE_NAME_LENGTH = 200;
 export const MAX_EMPLOYEE_TITLE_LENGTH = 200;
+export const MAX_DEPARTMENT_NAME_LENGTH = 200;
 export const MAX_DEPARTMENT_MISSION_LENGTH = 2_000;
 
 export const WorkforceEmployeeSpec = z
@@ -92,7 +120,7 @@ export const WorkforceEmployeeSpec = z
     reportsTo: SafeIdentifier.optional(),
     role: WorkforceRole,
     /** Opaque policy labels — matched for equality by requireWhen rules, never interpreted. */
-    capabilities: z.array(z.string().min(1)).default([]),
+    labels: z.array(WorkforceLabel).default([]),
   })
   .strict();
 export type WorkforceEmployeeSpec = z.infer<typeof WorkforceEmployeeSpec>;
@@ -103,6 +131,16 @@ export const WorkforceDepartmentBudgets = z
     turns: z.number().int().positive().optional(),
     /** Absent ⇒ the engine's default calendar window (daily). */
     window: WorkforceBudgetWindow.optional(),
+  })
+  .strict();
+
+/**
+ * A department's non-monetary ceilings. Split out of `departments[].budgets` because a worker-slot
+ * cap is a STRUCTURAL ceiling, not money — the same reason the workforce-level `execution:` block
+ * exists. `budgets:` now holds only what the ledger meters.
+ */
+export const WorkforceDepartmentExecution = z
+  .object({
     maxConcurrentWorkers: z.number().int().positive().optional(),
   })
   .strict();
@@ -110,13 +148,15 @@ export const WorkforceDepartmentBudgets = z
 export const WorkforceDepartmentSpec = z
   .object({
     id: SafeIdentifier,
-    name: z.string().min(1),
+    /** Renders into the orchestrator's role frame, one line per department — bounded, see above. */
+    name: z.string().min(1).max(MAX_DEPARTMENT_NAME_LENGTH),
     /** An employee id — must hold role `manager` (or be the orchestrator); lint-checked. */
     manager: SafeIdentifier,
     /** The department's routing description — renders into every covered seat's role frame. */
     mission: z.string().min(1).max(MAX_DEPARTMENT_MISSION_LENGTH),
     members: z.array(SafeIdentifier).default([]),
     budgets: WorkforceDepartmentBudgets.optional(),
+    execution: WorkforceDepartmentExecution.optional(),
   })
   .strict();
 export type WorkforceDepartmentSpec = z.infer<typeof WorkforceDepartmentSpec>;
@@ -126,7 +166,14 @@ export const WorkforceTeamSpec = z
     id: SafeIdentifier,
     lead: SafeIdentifier,
     members: z.array(SafeIdentifier).min(1),
-    maxSize: z.number().int().positive(),
+    /**
+     * OPTIONAL. It is an author-declared intent bound, not a runtime input: the only code that
+     * reads it is the lint rule refusing `members.length > maxSize` (workforce-lint.ts) — nothing
+     * at dispatch, delegation or join consults it, so an absent cap is the same runtime as a cap
+     * equal to `members.length`. Kept (rather than dropped) because dropping it is the more
+     * breaking choice and the declaration still documents an author's intended headroom.
+     */
+    maxSize: z.number().int().positive().optional(),
   })
   .strict();
 export type WorkforceTeamSpec = z.infer<typeof WorkforceTeamSpec>;
@@ -155,20 +202,16 @@ export const WorkforceReviewAppliesTo = z.union(
 );
 
 const ConfidenceBelow = z.number().gt(0).lte(1);
-const CapabilityLabels = z.array(z.string().min(1)).min(1);
+const PolicyLabels = z.array(WorkforceLabel).min(1);
 
 export const WorkforceReviewRequireWhen = z.union(
   [
-    z
-      .object({ confidenceBelow: ConfidenceBelow, capabilities: CapabilityLabels.optional() })
-      .strict(),
-    z
-      .object({ confidenceBelow: ConfidenceBelow.optional(), capabilities: CapabilityLabels })
-      .strict(),
+    z.object({ confidenceBelow: ConfidenceBelow, labels: PolicyLabels.optional() }).strict(),
+    z.object({ confidenceBelow: ConfidenceBelow.optional(), labels: PolicyLabels }).strict(),
   ],
   {
     error:
-      "requireWhen must name at least one of 'confidenceBelow' or 'capabilities' (and no other " +
+      "requireWhen must name at least one of 'confidenceBelow' or 'labels' (and no other " +
       'key) — a rule that can never demand review is dead',
   },
 );
@@ -182,22 +225,27 @@ export const WorkforceReviewPolicySpec = z
     reviewer: SafeIdentifier,
     requireWhen: WorkforceReviewRequireWhen,
     onReject: z.literal('rework'),
-    maxRounds: z.number().int().positive(),
+    /**
+     * This rule's review/rework ceiling. Named to match `execution.maxReviewRounds` (the
+     * workforce-wide ceiling) because they count the same thing at two scopes — the bare
+     * `maxRounds` said nothing about which rounds, nor that the two are the same unit.
+     */
+    maxReviewRounds: z.number().int().positive(),
   })
   .strict();
 export type WorkforceReviewPolicySpec = z.infer<typeof WorkforceReviewPolicySpec>;
 
-export const WorkforceApprovalSpec = z
+export const WorkforceApprovalPolicySpec = z
   .object({
     id: SafeIdentifier,
-    requireWhen: z.object({ capabilities: z.array(z.string().min(1)).min(1) }).strict(),
+    requireWhen: z.object({ labels: PolicyLabels }).strict(),
     /** v1 pins the approver to the deployment's human operator surface. */
     approver: z.literal('user'),
     timeout: DurationString,
     onTimeout: z.enum(['fail', 'escalate']),
   })
   .strict();
-export type WorkforceApprovalSpec = z.infer<typeof WorkforceApprovalSpec>;
+export type WorkforceApprovalPolicySpec = z.infer<typeof WorkforceApprovalPolicySpec>;
 
 export const WorkforceBudgetsSpec = z
   .object({
@@ -242,13 +290,6 @@ export const WorkforceBudgetsSpec = z
       })
       .strict()
       .optional(),
-    delegation: z
-      .object({
-        maxDepth: z.number().int().positive().optional(),
-        maxPerTask: z.number().int().positive().optional(),
-      })
-      .strict()
-      .optional(),
   })
   .strict();
 export type WorkforceBudgetsSpec = z.infer<typeof WorkforceBudgetsSpec>;
@@ -260,6 +301,20 @@ export const WorkforceExecutionSpec = z
     maxReviewRounds: z.number().int().positive().optional(),
     /** Absent ⇒ the engine default (`block`). */
     onBudgetExhausted: z.enum(['block', 'block_and_escalate']).optional(),
+    /**
+     * Hand-off ceilings, enforced at fan-out acceptance rather than by the ledger. They live here
+     * and not under `budgets:` because neither meters money: they bound the SHAPE of the task tree
+     * (how deep a chain nests, how many children one task may open), which is what `execution:` is
+     * for. The derived engine input keeps them in its own `delegation` slot — only the authored
+     * placement moved.
+     */
+    delegation: z
+      .object({
+        maxDepth: z.number().int().positive().optional(),
+        maxPerTask: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type WorkforceExecutionSpec = z.infer<typeof WorkforceExecutionSpec>;
@@ -278,7 +333,8 @@ export const WorkforceSpec = z
     employees: z.array(WorkforceEmployeeSpec).min(1),
     teams: z.array(WorkforceTeamSpec).default([]),
     reviewPolicies: z.array(WorkforceReviewPolicySpec).default([]),
-    approvals: z.array(WorkforceApprovalSpec).default([]),
+    /** Named for its sibling `reviewPolicies`: both are declared policy RULE SETS, not instances. */
+    approvalPolicies: z.array(WorkforceApprovalPolicySpec).default([]),
   })
   .strict();
 export type WorkforceSpec = z.infer<typeof WorkforceSpec>;

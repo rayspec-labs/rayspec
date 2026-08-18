@@ -2054,10 +2054,20 @@ durable worker needs the deployment task tenant to run under: an unset `RAYSPEC_
 serve time ABORTS THE BOOT, and that abort names only that one variable — the two failures are
 different mechanisms at different times, not one message naming both.
 
-At most ONE `workforce:` block per document. Ids everywhere in the section (`id`, employee,
-department and team ids) are safe identifiers (`[a-z_][a-z0-9_]*`): they land in URL path
-segments, in task-owner columns and in delegation target strings, and carry the same
-injection-guard posture store names do. Unknown keys are rejected at EVERY nesting level.
+**A document declares exactly ZERO or ONE workforce**, and `workforce:` is a single mapping — never
+a list, never a plural collection. Both wrong spellings are refused with the typed
+`multiple_workforces` naming the rule: a LIST under `workforce:` (at any length — accepting a
+one-element list would mint a second legal spelling for one shape), and a plural `workforces:` key,
+with or without a singular sibling. Two literal `workforce:` keys in one document are refused one
+layer earlier, by YAML's own duplicate-key rule, as `yaml_parse_error`. The constraint is on
+AUTHORING only: storage is already keyed per workforce id (`workforce_runtime` rows are
+`(tenant, workforce_id)`), so relaxing it later would be a grammar change, not a migration.
+
+Ids everywhere in the section (`id`, employee, department and team ids) are safe identifiers
+(`[a-z_][a-z0-9_]*`): they land in URL path segments, in task-owner columns and in delegation target
+strings, and carry the same injection-guard posture store names do. Policy labels
+(`employees[].labels` and the `requireWhen.labels` that select on them) carry the same rule. Unknown
+keys are rejected at EVERY nesting level.
 
 ### The reserved `managed:` section
 
@@ -2103,9 +2113,6 @@ budgets:
   subtree:
     usd: 12            # whole-subtree ceiling: one submitted goal and every task under it
     turns: 200         # either member alone is a legal declaration
-  delegation:
-    maxDepth: 3        # how deep delegation chains may nest
-    maxPerTask: 4      # how many children one task may open in total
 ```
 
 The four ledger tiers map onto the four scopes the engine meters: `task` (one task), `subtree`
@@ -2123,9 +2130,17 @@ it) and either member alone is legal. The lint additionally requires the `task` 
 usd ceiling is declared anywhere in the section — the workforce tier, the subtree tier, or a
 department's.
 
+`budgets.workforce.usd` is REQUIRED whenever that tier is present, so a turns-only whole-workforce
+ceiling is not declarable today. That is a grammar restriction, not an engine one — the engine's own
+budgets schema makes both members optional and counts dispatched turns at authorize
+(`packages/kernel/tasks/src/budget.ts`). Relaxing it later accepts documents that are refused today,
+which makes it an additive change rather than a breaking one, so it is deliberately not bundled with
+the breaking pre-freeze changes.
+
 ### `execution`
 
-Operational ceilings beside the monetary ones:
+Operational ceilings beside the monetary ones — everything that bounds the SHAPE of the work rather
+than its cost:
 
 ```yaml
 execution:
@@ -2133,7 +2148,13 @@ execution:
   maxTaskWallClock: 30m       # durations: <n><s|m|h|d>, e.g. 45s, 30m, 2h, 1d
   maxReviewRounds: 2          # review/rework cycles before a human decides
   onBudgetExhausted: block    # block (default) | block_and_escalate
+  delegation:
+    maxDepth: 3               # how deep delegation chains may nest
+    maxPerTask: 4             # how many children one task may open in total
 ```
+
+`delegation` bounds the task tree, not spend, which is why it sits here and not under `budgets:`.
+It is enforced at fan-out acceptance rather than by the ledger.
 
 Concurrency is a QUEUE, not a state: a task at a saturated workforce simply stays `queued` — no
 transition, no reservation, no journal event — and is picked up when a slot frees. The cap is held
@@ -2154,18 +2175,19 @@ departments:
     manager: mgr_eng          # an employee holding role `manager` (or the orchestrator seat)
     mission: Build and verify the release.
     members: [principal_eng, devops]
-    budgets:                  # optional per-department ceilings
+    budgets:                  # optional per-department MONEY ceilings
       usd: 5
       window: daily           # hourly | daily | weekly | monthly
+    execution:                # optional per-department structural ceilings
       maxConcurrentWorkers: 2
 ```
 
-`mission` is capped at **2000 characters**: it renders into the turn-input role frame, which is
-byte-bounded, so an oversized mission is a typed refusal at validation instead of a
-`ContextSectionOverflowError` at every dispatch. A department's `name` renders into the same line
-but carries **no maximum length today** — the cap bounds `mission` only. And a cap on one field is
-not a promise that the section fits: a workforce with many departments can still outgrow the role
-frame, which remains a dispatch-time typed error naming the same fix (shorter missions).
+`mission` is capped at **2000 characters** and `name` at **200**: both render into the same
+turn-input role-frame line (`- <id> (<name>): <mission>`), which is byte-bounded, so an oversized
+value is a typed refusal at validation instead of a `ContextSectionOverflowError` at every dispatch.
+A cap on a field is not a promise that the section fits: a workforce with many departments can still
+outgrow the role frame, which remains a dispatch-time typed error naming the same fix (shorter
+missions).
 
 A department resolves delegation addressed to it (`department:eng`) onto its `manager`, who
 answers FOR the department and is therefore never inside its own `members`
@@ -2184,7 +2206,7 @@ employees:
     department: eng           # optional; reviewers and the orchestrator often have none
     reportsTo: mgr_eng        # optional; defaults to the declared department's manager
     role: worker              # orchestrator | manager | worker | reviewer (closed set)
-    capabilities: [public_statement]   # opaque policy labels — matched, never interpreted
+    labels: [public_statement]   # opaque policy labels — matched, never interpreted
 ```
 
 `title` is capped at **200 characters** — it renders into the turn input's identity section, which
@@ -2193,8 +2215,20 @@ is byte-bounded, so the refusal lands at validation rather than at dispatch.
 The `role` sets the NATIVE toolset an employee STARTS from at dispatch; the TASK can narrow it (a
 review task withholds `request_review`), and role also gates the classification journaling and the
 structured-output check — so it is not the ONLY thing role decides, just the largest
-(see [workforce tools](./workforce-tools.md)). `capabilities` are opaque labels: review and
-approval rules match them for equality, and no runtime behavior ever interprets their spelling.
+(see [workforce tools](./workforce-tools.md)).
+
+`labels` are opaque POLICY labels — the tokens `reviewPolicies[].requireWhen.labels` and
+`approvalPolicies[].requireWhen.labels` select on. **The match rule is exact string equality,
+case-sensitive, with no inheritance**: a rule fires when the owner's own `labels` array contains the
+listed string. There is no department- or team-level label field in the grammar, so nothing is
+inherited from an employee's department or team, and no runtime behavior ever interprets a label's
+spelling. Each label is a safe identifier (`[a-z_][a-z0-9_]*`, ≤ 63 characters) — the same rule the
+ids carry; `:` and `.` are not admitted, because `:` is already the delegation-target separator and
+a namespacing spelling would suggest a hierarchy the equality match does not implement. Use
+`finance_signoff`, not `finance:signoff`. A label named by a rule but held by no declared employee
+is refused (`workforce_label_unheld`), not warned about: every holder is declared in the same
+document, so such a rule can never fire.
+
 The EFFECTIVE reporting edge is `reportsTo`, else the declared department's manager; the
 resulting graph must be acyclic (`reporting_cycle`) and every chain must reach the orchestrator
 (`orphan_employee`). An employee id may not be `user` — that is the human-owner sentinel every
@@ -2210,15 +2244,19 @@ teams:
   - id: release_crew
     lead: mgr_eng             # must hold role `manager`
     members: [principal_eng, devops]
-    maxSize: 3                # required — a team is a bounded unit
+    maxSize: 3                # optional — a declared bound on the member list
 ```
 
 A static, declared team. Delegation addressed to it (`team:release_crew`) resolves to its
 `lead`, who fans out to the members and takes the synthesis turn when the join wakes them —
 resolution never expands a team into N children by itself. Teams are deliberately
 cross-functional (members may come from different departments); the lead is never among their
-own members, the orchestrator is a member of nothing, and the member list may not exceed
-`maxSize`.
+own members, and the orchestrator is a member of nothing.
+
+`maxSize` is OPTIONAL, and it bounds the DECLARATION only: when present, a member list longer than
+it is refused at validation. Nothing at dispatch, delegation or join reads it, so omitting it is the
+same runtime as declaring it equal to `members.length` — it records the author's intended headroom
+and nothing more.
 
 ### `reviewPolicies`
 
@@ -2229,9 +2267,9 @@ reviewPolicies:
       department: eng         # and/or `employee: <id>`; at least one selector required
     reviewer: qa              # holds role `reviewer` or `manager`
     requireWhen:
-      confidenceBelow: 0.8    # and/or `capabilities: [label, …]`
+      confidenceBelow: 0.8    # and/or `labels: [label, …]`
     onReject: rework          # the one shipped rejection behavior
-    maxRounds: 2
+    maxReviewRounds: 2        # this rule's ceiling; same unit as execution.maxReviewRounds
 ```
 
 Both selector objects require AT LEAST ONE member, and the rule is part of the SHAPE, not a
@@ -2241,28 +2279,33 @@ third-party validator reading the published schema.
 
 Policy is runtime code over declared rules, never prompt text: when a covered employee submits a
 result, the FIRST matching rule (declaration order) routes it to independent review no matter
-what the turn asked for. The two triggers differ honestly: a `capabilities` rule matches the
+what the turn asked for. The two triggers differ honestly: a `labels` rule matches the
 employee's DECLARED labels and fires on every covered completion, unconditionally; a
 `confidenceBelow` rule matches the confidence the SUBMITTER wrote, so it is a useful heuristic
 over self-report, not a control — a result claiming high confidence does not trip it. A
-rejection re-queues the task for rework until `maxRounds` is spent, at which point the task
+rejection re-queues the task for rework until `maxReviewRounds` is spent, at which point the task
 parks in `waiting_for_user` for a human. A rule whose reviewer would review their own submission
 falls to the human instead — a submitter never decides their own work.
 
-### `approvals`
+`reviewPolicies[].maxReviewRounds` and `execution.maxReviewRounds` count the same thing at two
+scopes — this rule's cycles, and the workforce-wide ceiling.
+
+### `approvalPolicies`
 
 ```yaml
-approvals:
+approvalPolicies:
   - id: public_statement_signoff
     requireWhen:
-      capabilities: [public_statement]
+      labels: [public_statement]
     approver: user            # v1 pins approvals to the deployment's human operator surface
     timeout: 2h
     onTimeout: fail           # fail | escalate
 ```
 
+Named for its sibling `reviewPolicies`: both are declared policy RULE SETS.
+
 The declared window and fate for `request_approval`: when a covered employee (first matching
-rule by declared capability) asks for sign-off, the task parks in
+rule by declared label) asks for sign-off, the task parks in
 `waiting_for_user(approval_pending)` at zero cost — no process attached, no budget consumed —
 until a human decides over the HTTP surface or `rayspec workforce approvals approve|reject`. A
 hung approval always has an enforced fate: the timeout sweep applies `onTimeout` (`fail`, or
@@ -2288,13 +2331,13 @@ workforce:
     task:
       usd: 2.5
       turns: 20
-    delegation:
-      maxDepth: 3
-      maxPerTask: 4
   execution:
     maxConcurrentWorkers: 4
     maxTaskWallClock: 30m
     maxReviewRounds: 2
+    delegation:
+      maxDepth: 3
+      maxPerTask: 4
   departments:
     - id: eng
       name: Engineering
@@ -2323,7 +2366,7 @@ workforce:
       department: growth
       reportsTo: lead
       role: manager
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: principal_eng
       agent: principal_agent
       title: Principal Engineer
@@ -2342,7 +2385,7 @@ workforce:
       department: growth
       reportsTo: mgr_growth
       role: worker
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: qa
       agent: qa_agent
       title: Quality Reviewer
@@ -2361,11 +2404,11 @@ workforce:
       requireWhen:
         confidenceBelow: 0.8
       onReject: rework
-      maxRounds: 2
-  approvals:
+      maxReviewRounds: 2
+  approvalPolicies:
     - id: public_statement_signoff
       requireWhen:
-        capabilities: [public_statement]
+        labels: [public_statement]
       approver: user
       timeout: 2h
       onTimeout: fail
@@ -2394,15 +2437,19 @@ code below has a failing-spec fixture in CI. The workforce validation codes are:
   `user`.
 - `reserved_tool_name` — an employee's agent declares a tool named after a native workforce
   tool (natives are injected by role and always win; a shadowed tool is refused up front).
+- `workforce_label_unheld` — a review or approval policy's `requireWhen.labels` names a label no
+  declared employee holds, so the rule can never fire. On an approval policy that means work which
+  should park for a human silently does not.
+- `multiple_workforces` — `workforce:` is spelled as a list, or a plural `workforces:` key is
+  present. Exactly zero or one workforce may be declared.
 
 Shared codes fire here too: `duplicate_name` (ids colliding across employees, departments and
 teams), `dangling_ref` (an employee's `agent`, a member, a lead, a reviewer or a selector naming
 nothing declared), `capability_violation` (a decision role bound to a backend without native
 structured output), and `schema_violation` (a zod SHAPE failure that is not a pure unknown-key
-rejection — a wrong field type, an out-of-range number, an id carrying a metacharacter or over the
-length bound; the durable-worker coupling the same profile enforces surfaces this way too). The advisory `workforce_capability_unheld` WARNING flags a review or
-approval rule keyed on a capability no employee holds — a rule that can never fire is usually a
-typo, but it is not an error.
+rejection — a wrong field type, an out-of-range number, an id or policy label carrying a
+metacharacter or over the length bound; the durable-worker coupling the same profile enforces
+surfaces this way too). The section raises no advisory WARNINGS of its own.
 
 ### Deploying and changing a workforce
 

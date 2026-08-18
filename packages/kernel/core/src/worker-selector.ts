@@ -9,6 +9,14 @@
  * The default matches on declared capability labels only. Labels are OPAQUE: they are compared for
  * equality, never interpreted, and no fitness history or measured quality enters the decision —
  * a deployment that wants informed routing replaces the selector.
+ *
+ * NOT WIRED to the `workforce:` grammar. The only references to these symbols anywhere in the
+ * workspace are the barrel re-export (`index.ts`) and `strategy-defaults.test.ts` — no engine path
+ * constructs a `WorkerCandidate` or calls a selector today, because assignment comes from declared
+ * delegation targets. The `capabilities` spelling here is therefore NOT the spec's
+ * `employees[].labels` — which was renamed away from "capability" precisely because this repo
+ * spends that word on backend model capabilities and on the Product-YAML ingress contract.
+ * Whoever wires this seam should feed it `employees[].labels` and rename these fields to match.
  */
 
 export interface WorkerCandidate {

@@ -110,7 +110,7 @@ describe('computeTurnFacts', () => {
         id: 'eng_default',
         reviewer: 'qa',
         confidenceBelow: 0.75,
-        firesOnCapabilities: ['production_change'],
+        firesOnLabels: ['production_change'],
         maxRounds: 2,
       },
     ]);
@@ -125,7 +125,7 @@ describe('computeTurnFacts', () => {
   });
 
   it('presents the SAME approval rule the request_approval handler will bind — for seats that HOLD the tool', () => {
-    // The manager holds both the capability and the tool: the rule is a fact for its turns.
+    // The manager holds both the label and the tool: the rule is a fact for its turns.
     const task = fixtureTask({ owner: 'cmo' });
     const facts = computeTurnFacts({
       config,
@@ -139,7 +139,7 @@ describe('computeTurnFacts', () => {
       timeoutMs: 72 * 3_600_000,
       onTimeout: 'escalate',
     });
-    // The copywriter holds the capability but is a WORKER — no request_approval in its toolset,
+    // The copywriter holds the label but is a WORKER — no request_approval in its toolset,
     // so no approval fact: a turn is never told about a tool the runtime will refuse it.
     const worker = computeTurnFacts({
       config,

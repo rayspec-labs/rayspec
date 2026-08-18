@@ -86,13 +86,13 @@ workforce:
     task:
       usd: 3
       turns: 25
-    delegation:
-      maxDepth: 3
-      maxPerTask: 6
   execution:
     maxConcurrentWorkers: 6
     maxTaskWallClock: 45m
     maxReviewRounds: 3
+    delegation:
+      maxDepth: 3
+      maxPerTask: 6
   departments:
     - id: triage
       name: Issue Triage
@@ -129,7 +129,7 @@ workforce:
       department: docs
       reportsTo: lead
       role: manager
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: mgr_watch
       agent: watch_mgr_agent
       title: Watch Manager
@@ -148,14 +148,14 @@ workforce:
       department: triage
       reportsTo: mgr_triage
       role: worker
-      capabilities: [repro_required]
+      labels: [repro_required]
     - id: release_notes_writer
       agent: release_notes_agent
       title: Release Notes Writer
       department: docs
       reportsTo: mgr_docs
       role: worker
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: market_watcher
       agent: market_watcher_agent
       title: Market Watcher
@@ -180,19 +180,19 @@ workforce:
       requireWhen:
         confidenceBelow: 0.85
       onReject: rework
-      maxRounds: 3
+      maxReviewRounds: 3
     - id: triage_repro
       appliesTo:
         department: triage
       reviewer: senior_reviewer
       requireWhen:
-        capabilities: [repro_required]
+        labels: [repro_required]
       onReject: rework
-      maxRounds: 2
-  approvals:
+      maxReviewRounds: 2
+  approvalPolicies:
     - id: public_statement_signoff
       requireWhen:
-        capabilities: [public_statement]
+        labels: [public_statement]
       approver: user
       timeout: 1d
       onTimeout: escalate

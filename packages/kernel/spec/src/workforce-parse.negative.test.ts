@@ -8,10 +8,12 @@
 import { describe, expect, it } from 'vitest';
 import type { SpecErrorCode } from './errors.js';
 import { exportJsonSchema } from './export.js';
+import { MAX_IDENTIFIER_LENGTH } from './identifier.js';
 import { lintSpecWarnings } from './lint.js';
 import { type ParseSpecOptions, parseSpec } from './parse.js';
 import {
   MAX_DEPARTMENT_MISSION_LENGTH,
+  MAX_DEPARTMENT_NAME_LENGTH,
   MAX_EMPLOYEE_TITLE_LENGTH,
   MAX_WORKFORCE_NAME_LENGTH,
   WorkforceSpec,
@@ -54,12 +56,12 @@ workforce:
   budgets:
     workforce: { usd: 40 }
     task: { usd: 2.5, turns: 12 }
-    delegation: { maxDepth: 4, maxPerTask: 12 }
   execution:
     maxConcurrentWorkers: 4
     maxTaskWallClock: 45m
     maxReviewRounds: 2
     onBudgetExhausted: block_and_escalate
+    delegation: { maxDepth: 4, maxPerTask: 12 }
   departments:
     - id: engineering
       name: Engineering
@@ -67,6 +69,7 @@ workforce:
       mission: Own the fixes.
       members: [dev]
       budgets: { usd: 10 }
+      execution: { maxConcurrentWorkers: 2 }
   employees:
     - id: lead
       agent: lead_agent
@@ -84,7 +87,7 @@ workforce:
       department: engineering
       reportsTo: mgr
       role: worker
-      capabilities: [production_change]
+      labels: [production_change, public_statement]
     - id: qa
       agent: qa_agent
       title: Reviewer
@@ -99,12 +102,12 @@ workforce:
     - id: eng_default
       appliesTo: { department: engineering }
       reviewer: qa
-      requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }
+      requireWhen: { confidenceBelow: 0.75, labels: [production_change] }
       onReject: rework
-      maxRounds: 2
-  approvals:
+      maxReviewRounds: 2
+  approvalPolicies:
     - id: public_statement
-      requireWhen: { capabilities: [public_statement] }
+      requireWhen: { labels: [public_statement] }
       approver: user
       timeout: 72h
       onTimeout: escalate
@@ -172,7 +175,10 @@ describe('grammar strictness under workforce:', () => {
       'unknown_field',
     );
     expectRejection(
-      WORKFORCE_BASE.replace('      maxRounds: 2\n', '      maxRounds: 2\n      onAccept: done\n'),
+      WORKFORCE_BASE.replace(
+        '      maxReviewRounds: 2\n',
+        '      maxReviewRounds: 2\n      onAccept: done\n',
+      ),
       'unknown_field',
     );
     expectRejection(
@@ -198,7 +204,7 @@ describe('grammar strictness under workforce:', () => {
 
   it('pins the WorkforceSpec key set (a surface change is a deliberate decision)', () => {
     expect(Object.keys(WorkforceSpec.shape).sort()).toEqual([
-      'approvals',
+      'approvalPolicies',
       'budgets',
       'departments',
       'employees',
@@ -214,7 +220,7 @@ describe('grammar strictness under workforce:', () => {
 
 /**
  * BOUNDED CONTEXT — the deterministic bounded-context invariant, asserted at the declaration. These
- * three free-text fields render into the turn frame, which is byte-bounded per section
+ * four free-text fields render into the turn frame, which is byte-bounded per section
  * (`@rayspec/workforce-tools` context.ts: identity 1 024 B,
  * roleFrame 4 096 B, whole input 65 536 B). Unbounded, an oversized `mission` VALIDATES CLEAN and
  * then throws `ContextSectionOverflowError` at every dispatch for that department's seats — a late
@@ -255,6 +261,12 @@ describe('free-text fields are bounded for the byte-bounded turn frame', () => {
         ON,
       ).ok,
     ).toBe(true);
+    expect(
+      parseSpec(
+        WORKFORCE_BASE.replace('name: Engineering', `name: ${at(MAX_DEPARTMENT_NAME_LENGTH)}`),
+        ON,
+      ).ok,
+    ).toBe(true);
   });
 
   it('refuses one code unit past the cap, at the exact path', () => {
@@ -286,6 +298,19 @@ describe('free-text fields are bounded for the byte-bounded turn frame', () => {
         path: 'workforce.departments[0].mission',
       }),
     );
+    // The FOURTH bounded field. It renders on the SAME role-frame line as `mission`
+    // (`workforce-tools` context.ts renderRoleFrame: `- <id> (<name>): <mission>`), so leaving it
+    // unbounded left that line unbounded no matter what the mission cap said.
+    expect(
+      errorsFor(
+        WORKFORCE_BASE.replace('name: Engineering', `name: ${at(MAX_DEPARTMENT_NAME_LENGTH + 1)}`),
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        code: 'schema_violation',
+        path: 'workforce.departments[0].name',
+      }),
+    );
   });
 
   it('the caps fit the turn-frame sections they render into (worst case 3 bytes per code unit)', () => {
@@ -293,7 +318,9 @@ describe('free-text fields are bounded for the byte-bounded turn frame', () => {
     // so these are the worst-case byte costs the frame must absorb. identity = 1 024 B carries the
     // title; roleFrame = 4 096 B carries the workforce name and one department mission line.
     expect(MAX_EMPLOYEE_TITLE_LENGTH * 3).toBeLessThan(1_024);
-    expect((MAX_WORKFORCE_NAME_LENGTH + MAX_DEPARTMENT_MISSION_LENGTH) * 3).toBeLessThan(
+    expect(
+      (MAX_WORKFORCE_NAME_LENGTH + MAX_DEPARTMENT_NAME_LENGTH + MAX_DEPARTMENT_MISSION_LENGTH) * 3,
+    ).toBeLessThan(
       65_536, // the whole-input ceiling; the per-section aggregate stays guarded by ContextSectionOverflowError
     );
   });
@@ -347,11 +374,11 @@ describe('review-policy selectors are closed shapes, not lint-only conventions',
     }
     for (const replacement of [
       'requireWhen: { confidenceBelow: 0.75 }',
-      'requireWhen: { capabilities: [production_change] }',
+      'requireWhen: { labels: [production_change] }',
     ]) {
       const res = parseSpec(
         WORKFORCE_BASE.replace(
-          'requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }',
+          'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
           replacement,
         ),
         ON,
@@ -677,7 +704,7 @@ describe('workforce semantic lint — review policies', () => {
   it('rejects a review policy whose requireWhen names no trigger at all', () => {
     expectRejection(
       WORKFORCE_BASE.replace(
-        'requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }',
+        'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
         'requireWhen: {}',
       ),
       'schema_violation',
@@ -846,15 +873,15 @@ describe('workforce semantic lint — a manager’s authority is the department 
   });
 });
 
-describe('workforce semantic lint — approval rules', () => {
-  it('rejects an escalating approval rule that covers the orchestrator seat', () => {
+describe('workforce semantic lint — approval policies', () => {
+  it('rejects an escalating approval policy that covers the orchestrator seat', () => {
     // The orchestrator has no reportsTo by lint requirement, so no escalation target exists: the
     // toolset omits `escalateTo`, the planner refuses the intent, and the requeue re-runs the same
     // deterministic condition into permanent failure. One legal-looking spec, one bricked task.
     expectRejection(
       WORKFORCE_BASE.replace(
         '      title: Lead\n      role: orchestrator\n',
-        '      title: Lead\n      role: orchestrator\n      capabilities: [public_statement]\n',
+        '      title: Lead\n      role: orchestrator\n      labels: [public_statement]\n',
       ),
       'invalid_orchestrator',
     );
@@ -864,7 +891,7 @@ describe('workforce semantic lint — approval rules', () => {
     const res = parseSpec(
       WORKFORCE_BASE.replace(
         '      title: Lead\n      role: orchestrator\n',
-        '      title: Lead\n      role: orchestrator\n      capabilities: [public_statement]\n',
+        '      title: Lead\n      role: orchestrator\n      labels: [public_statement]\n',
       ).replace('      onTimeout: escalate', '      onTimeout: fail'),
       ON,
     );
@@ -872,10 +899,248 @@ describe('workforce semantic lint — approval rules', () => {
   });
 
   it('an escalating rule covering only non-orchestrator seats stays legal', () => {
+    // The BASE is already exactly this shape: `dev` holds public_statement, the orchestrator does
+    // not, and the rule escalates. The sanity parse above is the proof; this restates the case the
+    // rule must NOT fire on.
+    const res = parseSpec(WORKFORCE_BASE, ON);
+    expect(res.ok).toBe(true);
+  });
+});
+
+/**
+ * THE UNHELD-LABEL RULE — an ERROR, not the advisory it was before the pre-freeze review.
+ *
+ * `requireWhen.labels` is matched for EXACT equality against `employees[].labels`
+ * (`@rayspec/core` review-policy.ts `requiresReview`; `@rayspec/workforce-tools` review-policy.ts
+ * `matchApprovalRule`), and every holder is declared in the SAME document. So a rule keyed on a
+ * label nobody holds cannot fire in this deployment — and on an approval policy that means work
+ * which should park for a human silently does not. The old advisory's premise ("the label may
+ * arrive later") was false: a later arrival is a redeploy, which re-runs this lint.
+ */
+describe('policy labels must be HELD by some declared employee', () => {
+  it('a typo in a review policy label is a typed ERROR at its exact path', () => {
+    const doc = WORKFORCE_BASE.replace(
+      'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
+      'requireWhen: { confidenceBelow: 0.75, labels: [prod_chnage] }',
+    );
+    const res = parseSpec(doc, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toContainEqual(
+      expect.objectContaining({
+        code: 'workforce_label_unheld',
+        path: 'workforce.reviewPolicies[0].requireWhen.labels[0]',
+      }),
+    );
+  });
+
+  it('a typo in an APPROVAL policy label is the same error — the un-gating case', () => {
+    const doc = WORKFORCE_BASE.replace(
+      'requireWhen: { labels: [public_statement] }',
+      'requireWhen: { labels: [pubic_statement] }',
+    );
+    const res = parseSpec(doc, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toContainEqual(
+      expect.objectContaining({
+        code: 'workforce_label_unheld',
+        path: 'workforce.approvalPolicies[0].requireWhen.labels[0]',
+      }),
+    );
+  });
+
+  it('dropping the only holder of a label turns the rule that guards it red', () => {
+    // Nothing else changes: the same approval policy, the same seats, one label removed.
+    const doc = WORKFORCE_BASE.replace(
+      'labels: [production_change, public_statement]',
+      'labels: [production_change]',
+    );
+    expectRejection(doc, 'workforce_label_unheld');
+  });
+
+  it('held labels raise nothing, and the section raises NO advisories at all', () => {
+    const res = parseSpec(WORKFORCE_BASE, ON);
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(lintSpecWarnings(res.value)).toEqual([]);
+  });
+});
+
+/**
+ * THE PRE-FREEZE RENAMES — each old spelling is refused, each new one parses.
+ *
+ * These are the compatibility breaks the experimental window exists to absorb: after the freeze
+ * none of them could be made without breaking documents that parse today. The `unknown_field`
+ * refusals are the strict-object rejection doing its job, asserted at the exact path so an author
+ * reading the error is pointed at the key they wrote.
+ */
+describe('pre-freeze renames: the old spellings are refused at their exact paths', () => {
+  const unknownFieldAt = (yaml: string, path: string): void => {
+    const res = parseSpec(yaml, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toContainEqual(
+      expect.objectContaining({ code: 'unknown_field', path: `workforce.${path}` }),
+    );
+  };
+
+  it('employees[].capabilities is now `labels`', () => {
+    unknownFieldAt(
+      WORKFORCE_BASE.replace(
+        'labels: [production_change, public_statement]',
+        'capabilities: [production_change, public_statement]',
+      ),
+      'employees[2].capabilities',
+    );
+  });
+
+  it('reviewPolicies[].requireWhen.capabilities is now `labels`', () => {
+    // This selector is a z.union of closed variants (so the exported JSON Schema states the
+    // at-least-one rule as `anyOf`), and a union answers with ITS OWN message rather than a
+    // per-key `unrecognized_keys` issue. The refusal is therefore pathed at the `requireWhen`
+    // node, and the message names the key that IS accepted — which is the more useful half.
     const res = parseSpec(
       WORKFORCE_BASE.replace(
-        'capabilities: [production_change]',
-        'capabilities: [production_change, public_statement]',
+        'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
+        'requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }',
+      ),
+      ON,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    const issue = res.errors.find((e) => e.path === 'workforce.reviewPolicies[0].requireWhen');
+    expect(issue?.code).toBe('schema_violation');
+    expect(issue?.message).toMatch(/'confidenceBelow' or 'labels'/);
+  });
+
+  it('approvalPolicies[].requireWhen.capabilities is now `labels`', () => {
+    unknownFieldAt(
+      WORKFORCE_BASE.replace(
+        'requireWhen: { labels: [public_statement] }',
+        'requireWhen: { capabilities: [public_statement] }',
+      ),
+      'approvalPolicies[0].requireWhen.capabilities',
+    );
+  });
+
+  it('budgets.delegation moved under execution — the money section holds only money', () => {
+    unknownFieldAt(
+      WORKFORCE_BASE.replace(
+        '    onBudgetExhausted: block_and_escalate\n    delegation: { maxDepth: 4, maxPerTask: 12 }\n',
+        '    onBudgetExhausted: block_and_escalate\n',
+      ).replace(
+        '    task: { usd: 2.5, turns: 12 }\n',
+        '    task: { usd: 2.5, turns: 12 }\n    delegation: { maxDepth: 4, maxPerTask: 12 }\n',
+      ),
+      'budgets.delegation',
+    );
+  });
+
+  it('departments[].budgets.maxConcurrentWorkers moved to departments[].execution', () => {
+    unknownFieldAt(
+      WORKFORCE_BASE.replace(
+        '      budgets: { usd: 10 }\n      execution: { maxConcurrentWorkers: 2 }\n',
+        '      budgets: { usd: 10, maxConcurrentWorkers: 2 }\n',
+      ),
+      'departments[0].budgets.maxConcurrentWorkers',
+    );
+  });
+
+  it('reviewPolicies[].maxRounds is now maxReviewRounds, matching execution.maxReviewRounds', () => {
+    unknownFieldAt(
+      WORKFORCE_BASE.replace('      maxReviewRounds: 2\n', '      maxRounds: 2\n'),
+      'reviewPolicies[0].maxRounds',
+    );
+  });
+
+  it('approvals is now approvalPolicies, matching its sibling reviewPolicies', () => {
+    unknownFieldAt(WORKFORCE_BASE.replace('  approvalPolicies:\n', '  approvals:\n'), 'approvals');
+  });
+});
+
+/**
+ * POLICY LABELS ARE CONSTRAINED — `SafeIdentifier`, the same rule every other author-written
+ * identifier in this section carries. An open string here was the one exception, and it is the sole
+ * selector for `approvalPolicies[]`: the mechanism that parks work for a human.
+ *
+ * `:` and `.` are deliberately NOT admitted. `:` is already this section's delegation separator
+ * (`employee:<id>` / `department:<id>` / `team:<id>`), and a namespacing spelling whose hierarchy
+ * semantics do not exist would be an affordance the matcher ignores. Widening the pattern later
+ * accepts strictly more documents, so nothing is foreclosed by starting narrow.
+ */
+describe('policy labels are SafeIdentifiers, at all three sites', () => {
+  const schemaViolationAt = (yaml: string, path: string): void => {
+    const res = parseSpec(yaml, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toContainEqual(
+      expect.objectContaining({ code: 'schema_violation', path: `workforce.${path}` }),
+    );
+  };
+
+  it('refuses a metacharacter in an employee label', () => {
+    schemaViolationAt(
+      WORKFORCE_BASE.replace(
+        'labels: [production_change, public_statement]',
+        "labels: ['production change', public_statement]",
+      ),
+      'employees[2].labels[0]',
+    );
+  });
+
+  it('refuses a namespaced spelling — those semantics do not exist yet', () => {
+    schemaViolationAt(
+      WORKFORCE_BASE.replace(
+        'requireWhen: { labels: [public_statement] }',
+        "requireWhen: { labels: ['finance:signoff'] }",
+      ),
+      'approvalPolicies[0].requireWhen.labels[0]',
+    );
+  });
+
+  it('the review-policy site refuses it too, pathed at the union node it lives in', () => {
+    // `reviewPolicies[].requireWhen` is a z.union (the at-least-one rule expressed in the shape),
+    // and a union reports at its own node — so a bad label there lands as the union's message
+    // rather than at `…labels[0]`. Stated rather than glossed: the refusal is the same, the path
+    // is coarser, and that is true of every member of that object (a bad `confidenceBelow` too).
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
+        "requireWhen: { confidenceBelow: 0.75, labels: ['finance:signoff'] }",
+      ),
+      ON,
+    );
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toContainEqual(
+      expect.objectContaining({
+        code: 'schema_violation',
+        path: 'workforce.reviewPolicies[0].requireWhen',
+      }),
+    );
+  });
+
+  it('refuses an over-long approval label at the identifier limit', () => {
+    schemaViolationAt(
+      WORKFORCE_BASE.replace(
+        'requireWhen: { labels: [public_statement] }',
+        `requireWhen: { labels: [${'a'.repeat(MAX_IDENTIFIER_LENGTH + 1)}] }`,
+      ),
+      'approvalPolicies[0].requireWhen.labels[0]',
+    );
+  });
+
+  it('accepts a label exactly AT the identifier limit (both halves asserted)', () => {
+    const label = `a${'b'.repeat(MAX_IDENTIFIER_LENGTH - 1)}`;
+    expect(label).toHaveLength(MAX_IDENTIFIER_LENGTH);
+    const res = parseSpec(
+      WORKFORCE_BASE.replace(
+        'labels: [production_change, public_statement]',
+        `labels: [${label}, public_statement]`,
+      ).replace(
+        'requireWhen: { confidenceBelow: 0.75, labels: [production_change] }',
+        `requireWhen: { confidenceBelow: 0.75, labels: [${label}] }`,
       ),
       ON,
     );
@@ -883,40 +1148,123 @@ describe('workforce semantic lint — approval rules', () => {
   });
 });
 
-describe('workforce advisory warnings', () => {
-  it('warns (advisory, never fails) on a requireWhen capability label no employee holds', () => {
-    const doc = WORKFORCE_BASE.replace(
-      'requireWhen: { confidenceBelow: 0.75, capabilities: [production_change] }',
-      'requireWhen: { confidenceBelow: 0.75, capabilities: [prod_chnage] }',
-    );
-    const res = parseSpec(doc, ON);
-    expect(res.ok).toBe(true); // an unheld label is NEVER an error — a policy may guard it early
-    if (!res.ok) return;
-    const warnings = lintSpecWarnings(res.value);
-    expect(warnings).toContainEqual(
-      expect.objectContaining({
-        code: 'workforce_capability_unheld',
-        path: 'workforce.reviewPolicies[0].requireWhen.capabilities[0]',
-      }),
-    );
-    // The approval's label is unheld too (nobody holds public_statement in the base) — also advisory.
-    expect(
-      warnings.filter((w) => w.code === 'workforce_capability_unheld').length,
-    ).toBeGreaterThanOrEqual(2);
-  });
-
-  it('held labels warn nothing', () => {
-    const res = parseSpec(
-      WORKFORCE_BASE.replace(
-        'capabilities: [production_change]\n    - id: qa',
-        'capabilities: [production_change, public_statement]\n    - id: qa',
-      ),
-      ON,
-    );
+describe('teams[].maxSize is optional — a declared bound, not a runtime input', () => {
+  it('a team that declares no maxSize parses', () => {
+    const res = parseSpec(WORKFORCE_BASE.replace('      maxSize: 3\n', ''), ON);
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(
-      lintSpecWarnings(res.value).filter((w) => w.code === 'workforce_capability_unheld'),
-    ).toEqual([]);
+    expect(res.value.workforce?.teams[0]?.maxSize).toBeUndefined();
+  });
+
+  it('a declared maxSize is still enforced against the member list', () => {
+    expectRejection(WORKFORCE_BASE.replace('maxSize: 3', 'maxSize: 1'), 'schema_violation');
+  });
+});
+
+/**
+ * D-010, RAISED AS A NAMED RULE — a document declares exactly zero or one workforce.
+ *
+ * The invariant always held structurally (`workforce: WorkforceSpec.optional()` — one optional
+ * mapping, never an array, never a plural collection), and every violation always failed closed.
+ * What was missing was the ACTIONABLE half: Zod's "expected object, received array" and a bare
+ * `unknown_field` for `workforces` name neither the rule nor the fix. The check runs on the RAW
+ * document, after the experimental gate and before the strict parse (parse.ts step 2c).
+ */
+describe('exactly zero or one workforce (D-010)', () => {
+  /** A document whose `workforce:` is a LIST of `n` otherwise-valid workforce mappings. */
+  const workforceAsList = (n: number): string =>
+    [
+      "version: '1.0'",
+      'metadata:',
+      '  name: workforce-list',
+      'deployment:',
+      '  durableWorker: true',
+      'agents:',
+      '  - id: lead_agent',
+      '    name: lead_agent',
+      '    backend: openai',
+      '    model: gpt-4o-mini',
+      '    instructions: Coordinate the workforce.',
+      'workforce:',
+      ...Array.from({ length: n }, (_, i) =>
+        [
+          `  - id: wf_${i}`,
+          `    name: Workforce ${i}`,
+          '    orchestrator: lead',
+          '    employees:',
+          '      - id: lead',
+          '        agent: lead_agent',
+          '        title: Lead',
+          '        role: orchestrator',
+        ].join('\n'),
+      ),
+      '',
+    ].join('\n');
+
+  it('a LIST of two is exactly one multiple_workforces at path workforce', () => {
+    const res = parseSpec(workforceAsList(2), ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toEqual([
+      expect.objectContaining({ code: 'multiple_workforces', path: 'workforce' }),
+    ]);
+    expect(res.errors[0]?.message).toMatch(/exactly zero or one workforce/);
+  });
+
+  it('a ONE-element list is refused too — accepting it would mint a second legal spelling', () => {
+    const res = parseSpec(workforceAsList(1), ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toEqual([
+      expect.objectContaining({ code: 'multiple_workforces', path: 'workforce' }),
+    ]);
+  });
+
+  it('a plural workforces: key beside a valid workforce: short-circuits before Zod', () => {
+    const res = parseSpec(`${WORKFORCE_BASE}workforces: []\n`, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    // ONLY the named rule: the anonymous `unknown_field` for `workforces` must not also appear.
+    expect(res.errors).toEqual([
+      expect.objectContaining({ code: 'multiple_workforces', path: 'workforces' }),
+    ]);
+  });
+
+  it('a plural workforces: key ALONE is the named rule, not unknown_field', () => {
+    const pluralOnly = "version: '1.0'\nmetadata:\n  name: plural\nworkforces: []\n";
+    const res = parseSpec(pluralOnly, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toEqual([
+      expect.objectContaining({ code: 'multiple_workforces', path: 'workforces' }),
+    ]);
+    // The refusal does not depend on the opt-in: a document carrying no `workforce:` key is
+    // answered identically either way, exactly as it was when this landed as `unknown_field`.
+    expect(parseSpec(pluralOnly)).toEqual(res);
+  });
+
+  it('the experimental gate still answers FIRST — a list-shaped workforce without the flag', () => {
+    const res = parseSpec(workforceAsList(2));
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors).toEqual([
+      expect.objectContaining({ code: 'experimental_section_disabled', path: 'workforce' }),
+    ]);
+  });
+
+  it('BEHAVIOR PIN: two literal workforce: keys stay a yaml_parse_error', () => {
+    // The `yaml` library refuses duplicate mapping keys before any of our code runs. Re-coding that
+    // would mean pattern-matching a library error string; this records the layer that refuses, so a
+    // future `yaml` upgrade that softened `uniqueKeys` fails here loudly rather than silently
+    // accepting a second workforce.
+    const res = parseSpec(`${WORKFORCE_BASE}workforce:\n  id: second\n`, ON);
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.errors.map((e) => e.code)).toEqual(['yaml_parse_error']);
+  });
+
+  it('NO-OP: zero workforces and exactly one both parse unchanged', () => {
+    expect(parseSpec("version: '1.0'\nmetadata:\n  name: plain\n", ON).ok).toBe(true);
+    expect(parseSpec(WORKFORCE_BASE, ON).ok).toBe(true);
   });
 });
