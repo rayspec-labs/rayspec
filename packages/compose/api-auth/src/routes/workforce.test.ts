@@ -586,6 +586,137 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(cancelled[0]?.c).toBeGreaterThanOrEqual(1);
   });
 
+  /**
+   * THE PAUSE ROUTE'S DRAIN, AND THE 504 IT FAILS INTO (B-015 clause 5).
+   *
+   * The pause arm above posts `body: {}`, and `pauseRequestSchema` defaults `drain` to `false` — so
+   * before these arms the flag had NEVER been sent `true` over HTTP, and the whole draining half of
+   * the route was reached by nothing. `WorkforceDrainTimeoutError` -> `GATEWAY_TIMEOUT` had no test
+   * of any kind: the mapping in `mapEngineError`, and the `stillWorking` detail that makes the 504
+   * actionable, were both unexercised.
+   *
+   * The kernel side of the drain (the typed rejection, the pause staying in force, the quiet drain
+   * that never sleeps) is proven directly against `pauseWorkforce` in
+   * `@rayspec/tasks` control.db.test.ts. What is proven HERE is the part only this layer owns:
+   * the body flag reaching the engine, the error class becoming a 504, and `details` surviving the
+   * envelope — `errorEnvelope` STRIPS `details` for any code outside `DETAILS_ALLOWED`, so the one
+   * field an operator needs is one allowlist edit away from silently disappearing.
+   *
+   * WHY THESE ARMS DO NOT ASSERT A STATUS CODE ALONE. This surface family already produces a
+   * `GATEWAY_TIMEOUT` 504 from an unrelated mechanism (`routes/runs.ts`, the held-request run
+   * timeout, whose details carry `errorClass`). A route that 504'd for ANY reason — a crash in the
+   * handler, a mis-registered dependency — would satisfy `expect(res.status).toBe(504)`. The drain
+   * timeout is therefore discriminated by `details.stillWorking`, which no other 504 on this
+   * deployment carries, and by a CONTROL arm that drives the identical fixture through the same
+   * route with the flag off and gets 200.
+   */
+  describe('pause with drain', () => {
+    /** Put one task of workforce `wf` into `working` — the drain's only unit of account. */
+    async function seedWorkingTask(orgId: string): Promise<void> {
+      const tdb = forTenant(h.db, orgId);
+      const task = await seedRoot(orgId, 'Mid-turn work');
+      const queued = await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: queued.version,
+        to: 'working',
+        actor: 'scheduler',
+        turnId: 'drain-route-claim',
+      });
+    }
+
+    /** The `drain` flag as the ENGINE recorded it — the journal is where the plumbing shows up. */
+    async function journaledDrainFlags(): Promise<string[]> {
+      const rows = (await h.db.$client.unsafe(
+        "SELECT (data->>'drain') AS drain FROM run_events WHERE run_id = 'workforce:wf' AND type = 'workforce.control.paused' ORDER BY seq;",
+      )) as unknown as Array<{ drain: string }>;
+      return rows.map((r) => r.drain);
+    }
+
+    async function pausedFlag(): Promise<boolean> {
+      const rows = (await h.db.$client.unsafe(
+        "SELECT paused FROM workforce_runtime WHERE workforce_id = 'wf';",
+      )) as unknown as Array<{ paused: boolean }>;
+      return rows[0]?.paused === true;
+    }
+
+    it('a quiet workforce accepts drain:true and the flag reaches the engine', async () => {
+      const a = await principal('wf-drain-quiet@example.test', 'Org WF Drain Quiet');
+      await seedRoot(a.orgId); // present but `planned`, so the drain has rows to look past
+
+      const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/pause', {
+        body: { drain: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ workforceId: 'wf', paused: true });
+      // The body flag is what the engine saw. Asserting only the 200 would pass against a route
+      // that dropped `drain` on the floor, which is exactly what was untested here.
+      expect(
+        await journaledDrainFlags(),
+        'the pause was journaled without the drain the caller asked for',
+      ).toEqual(['true']);
+    });
+
+    it('CONTROL — the SAME working task with the flag OFF is a plain 200', async () => {
+      const a = await principal('wf-drain-off@example.test', 'Org WF Drain Off');
+      await seedWorkingTask(a.orgId);
+
+      const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/pause', {
+        body: {},
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+
+      // Same fixture as the 504 arm below, one flag different. This is what makes that arm's 504
+      // attributable to the drain rather than to the route, the fixture or the deployment.
+      expect(res.status).toBe(200);
+      expect(await journaledDrainFlags()).toEqual(['false']);
+      expect(await pausedFlag()).toBe(true);
+    });
+
+    it('a drain that cannot finish inside the request window is a 504 naming what is still working', async () => {
+      const a = await principal('wf-drain-504@example.test', 'Org WF Drain 504');
+      await seedWorkingTask(a.orgId);
+
+      // ~25s of real waiting. `HTTP_DRAIN_TIMEOUT_MS` (routes/workforce.ts) is a module constant
+      // with no injection seam, so this is the honest cost of proving the mapping end to end
+      // rather than stubbing the engine. The per-test timeout is raised for exactly this.
+      const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/pause', {
+        body: { drain: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+
+      expect(res.status).toBe(504);
+      const body = (await res.json()) as {
+        error: { code: string; message: string; details?: { stillWorking?: number } };
+      };
+      expect(body.error.code).toBe('GATEWAY_TIMEOUT');
+      // THE DISCRIMINATOR. `stillWorking` is carried by no other 504 this deployment can produce,
+      // and it only survives because GATEWAY_TIMEOUT sits in `DETAILS_ALLOWED` — drop it from that
+      // set and this line is what notices.
+      expect(
+        body.error.details?.stillWorking,
+        'the 504 does not carry the working count — either it is not the drain timeout, or the ' +
+          'envelope stripped the one detail that makes the refusal actionable',
+      ).toBe(1);
+      expect(body.error.message).toMatch(/drain/i);
+
+      // FAIL-CLOSED, and the half that matters at 2am: the rejection is about the DRAIN, never
+      // about the pause. Nothing reserves for this workforce, and the operator can re-issue.
+      expect(await pausedFlag(), 'a timed-out drain must leave the pause in force').toBe(true);
+      expect(
+        await journaledDrainFlags(),
+        'the pause is journaled once, before the drain ever polls',
+      ).toEqual(['true']);
+    }, 60_000);
+  });
+
   it('the status view reports control state, counts, queue depth, and budget headroom', async () => {
     const a = await principal('wf-status@example.test', 'Org WF Status');
     const tdb = forTenant(h.db, a.orgId);
