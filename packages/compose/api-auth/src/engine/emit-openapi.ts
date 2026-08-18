@@ -79,9 +79,25 @@ import { createBodySchema, NUMERIC_WIRE_RE, updateBodySchema } from './store-val
  *
  * So the copies stay, and the DRIFT is what is closed instead: `emit-openapi.test.ts` and
  * `openapi.test.ts` each byte-pin the value AND read the other file off disk to assert the two
- * declarations are byte-identical. The pin is mirrored in both packages on purpose — CI splits the
- * test lanes, and a one-sided pin would leave one lane silent. Softening either sentence is red in
- * both suites; verified by mutating each copy in turn.
+ * declarations are byte-identical.
+ *
+ * THE PIN IS MIRRORED BECAUSE OF THE BUILD CACHE, not because of CI's lanes — both packages sit in
+ * the SAME lane (`ci.yml` excludes each from lane 1 and includes each in lane 2), so a lane argument
+ * would be false. The real reason is that `turbo.json` declares NO `inputs` for `test`, so a task's
+ * hash covers its own package plus its dependencies — and a file read from OUTSIDE that set is
+ * invisible to it. `@rayspec/cli` depends on `@rayspec/api-auth` (via `@rayspec/server`); nothing
+ * runs the other way. Measured with `turbo run test --dry-run=json`:
+ *
+ *     SOFTEN THE CLI COPY        cli#test  e3a679e0 -> 09a325ae   MOVED
+ *                                api-auth#test  6c934bfb -> 6c934bfb   UNCHANGED
+ *     SOFTEN THIS COPY           api-auth#test  6c934bfb -> 9addba01   MOVED
+ *                                cli#test  e3a679e0 -> e343ed97   MOVED (via ^build)
+ *
+ * So the asymmetry is the point: an edit HERE moves both hashes, but an edit to the CLI copy leaves
+ * this package's hash untouched — a cached PASS would replay and the arm below would never run. The
+ * mirror in `openapi.test.ts` is the only arm whose OWN hash moves for that direction, which is what
+ * makes it load-bearing rather than decorative. Softening either sentence is red; verified by
+ * mutating each copy in turn.
  *
  * Appended, never substituted: a declared description is the product's own and survives whole.
  * `emit-openapi.test.ts` pins both spec branches (declared description, and the branch that used to

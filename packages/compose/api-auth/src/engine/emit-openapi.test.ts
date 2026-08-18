@@ -126,8 +126,22 @@ function richSpec(): RaySpec {
  *       thing under test rather than a variable compared to itself;
  *   (2) the OTHER copy — `packages/app/cli/src/openapi.ts` — is read off disk and its declaration
  *       compared BYTE FOR BYTE with this one. `packages/app/cli/src/openapi.test.ts` carries the
- *       mirror of this pair, so each package's OWN suite goes red when its OWN copy drifts. That
- *       matters because CI splits the lanes: a one-sided pin would leave one lane silent.
+ *       mirror of this pair, so each package's OWN suite goes red when its OWN copy drifts.
+ *
+ * WHY THE MIRROR IS REQUIRED — the BUILD CACHE, not CI's lanes. Both packages run in the same lane
+ * (`ci.yml` excludes each from lane 1, includes each in lane 2), so a lane argument would be false.
+ * `turbo.json` declares no `inputs` for `test`: a task's hash covers its own package plus its
+ * dependencies, and this package does not depend on `@rayspec/cli`. So THIS arm reads a file outside
+ * its own input set, and an edit to that file does not move this task's hash. Measured with
+ * `turbo run test --dry-run=json`:
+ *
+ *     SOFTEN THE CLI COPY   api-auth#test  6c934bfb -> 6c934bfb   UNCHANGED (cached PASS replays)
+ *                           cli#test       e3a679e0 -> 09a325ae   MOVED
+ *
+ * The arm below is therefore the SECOND line of defence for that direction, never the first: the
+ * mirror in `openapi.test.ts` is the one whose own hash moves. In the other direction an edit here
+ * moves both hashes (`cli#test` inherits it through `^build`), so this arm is first-line for its own
+ * package's copy.
  *
  * Source-level, deliberately: `@rayspec/cli` cannot import this package (measured — see the
  * corrected note above the constant in `emit-openapi.ts`), so the comparison reads the file rather

@@ -16,12 +16,20 @@ const ACCEPTANCE = resolve(here, '../../../../examples/expense-claim/expense-cla
 /**
  * THE POSTURE NOTICE, BYTE-PINNED — and pinned IDENTICAL to the OTHER copy of it in the tree.
  *
- * The MIRROR of the block in `packages/compose/api-auth/src/engine/emit-openapi.test.ts`, and
- * deliberately duplicated rather than shared: CI splits the test lanes, so a pin that lived only in
- * the other package would leave THIS lane silent while this package's own copy of the sentence was
- * edited. Every other assertion on this constant is self-referential
- * (`toContain(OPENAPI_POSTURE_NOTICE)`) or a substring probe (`toContain('NOT internet-facing')`),
- * and both stay green while the words are softened.
+ * The MIRROR of the block in `packages/compose/api-auth/src/engine/emit-openapi.test.ts`, and THIS
+ * side is the load-bearing one. Not for a CI-lane reason — both packages run in the same lane
+ * (`ci.yml` excludes each from lane 1 and includes each in lane 2) — but because of the BUILD CACHE:
+ * `turbo.json` declares no `inputs` for `test`, so a task's hash covers its own package plus its
+ * dependencies, and `@rayspec/api-auth` does not depend on `@rayspec/cli`. Editing THIS package's
+ * copy therefore leaves `api-auth#test`'s hash untouched and its cached PASS replays, while
+ * `cli#test`'s hash moves. Measured with `turbo run test --dry-run=json`:
+ *
+ *     cli#test       e3a679e0 -> 09a325ae   MOVED
+ *     api-auth#test  6c934bfb -> 6c934bfb   UNCHANGED
+ *
+ * So the arm in the other package cannot see an edit made here; this one can. Every other assertion
+ * on this constant is self-referential (`toContain(OPENAPI_POSTURE_NOTICE)`) or a substring probe
+ * (`toContain('NOT internet-facing')`), and both stay green while the words are softened.
  *
  * Why there are two copies at all — and why this test rather than a shared export — is written down
  * above the constant in `emit-openapi.ts`; the short version is that `@rayspec/cli` has no
