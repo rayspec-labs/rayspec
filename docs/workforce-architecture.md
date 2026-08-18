@@ -172,7 +172,7 @@ task dies gets the review released rather than stranded, and a review task's own
 never policy-reviewed — review depth is structurally one.
 
 Approvals: `request_approval` parks the task at zero cost with the DECLARED window and fate
-bound at request time (the rule matched by the employee's capabilities). A decision carries the
+bound at request time (the approval policy matched by the employee's labels). A decision carries the
 VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
 for asserting an identity. The timeout sweep gives every hung approval its declared fate.
 
@@ -260,7 +260,7 @@ result to review (which is what a low number is for), but a turn that reports `0
 rule, and a `submit_result` with no confidence at all does not trip it (the rule keys on a present
 number below the threshold). This is the deliberate exception to "model output is never authority":
 the self-report is an INPUT to a declared rule, never a bypass of one — the reviewer, the max rounds
-and the reject→rework loop are all enforced regardless, and the `firesOnCapabilities` branch of the
+and the reject→rework loop are all enforced regardless, and the `firesOnLabels` branch of the
 same policy fires UNCONDITIONALLY on the declared labels, with no number to dodge.
 
 ## Crash safety
