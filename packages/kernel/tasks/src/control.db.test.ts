@@ -315,9 +315,10 @@ describe.skipIf(!hasDb)('operator control (db)', () => {
     //
     // The arms above drive the STATIC case (terminal before the scan). The scan's read is
     // unlocked, so the branch it takes can be stale by the time the cascade holds the row: a root
-    // read as LIVE and found TERMINAL under `lockRootFirst` hits `cancelTaskCascade`'s terminal
-    // early return, which is before `cancelDescendants` — so the halt returns having done nothing
-    // for that subtree, and (unlike the static case) having taken the branch that says it did.
+    // read as LIVE and found TERMINAL under `lockRootFirst` hits the cascade's terminal early
+    // return (`attemptCancelTaskCascade`), which is before `cancelDescendants` — so the halt
+    // returns having done nothing for that subtree, and (unlike the static case) having taken the
+    // branch that says it did. `cancelLiveRoot` is the seam these arms hold.
     //
     // The interleaving below is built from REAL POSTGRES ROW LOCKS — no mock, no injected seam,
     // no patched clock. `terminalizeRootUnderHeldLock` locks the root row `FOR UPDATE` and parks;
