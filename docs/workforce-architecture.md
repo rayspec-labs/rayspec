@@ -538,5 +538,7 @@ are exactly the enforced ones named above.
   every validation rule.
 - **[Workforce events](./workforce-events.md)** — the journal vocabulary, versioned.
 - **[Workforce tools](./workforce-tools.md)** — the role toolsets and the result contract.
+- **[Workforce threat model](./workforce-threat-model.md)** — every untrusted intake surface, its
+  validation chokepoint, and the test that proves the defence (or the statement that none exists).
 - **[CLI reference → workforce](./cli-reference.md#workforce--operate-the-durable-task-engine-of-a-running-deployment)**
   — the operator console.
