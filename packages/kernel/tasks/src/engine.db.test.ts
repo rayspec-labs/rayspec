@@ -991,6 +991,133 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(stored[0]?.summary).toBe('Done.');
   });
 
+  it('a review child that FAILS on its second consecutive tool error releases the reviewed task', async () => {
+    // The SECOND of the three routes named at task-locks.ts:219-235 by which a dispatched reviewer
+    // reaches terminal without a verdict. Unlike the operator cancel above, nobody chose this: the
+    // reviewer simply misbehaved twice and the engine failed it. `waiting_for_review` has no
+    // signal-based exit (it appears in no `WAKES` park and no sweep covers it), so if the backstop
+    // did not fire here the reviewed task would sit parked forever with its result unread.
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+
+    // Offense 1 — a review child may not complete; typed tool_error, re-queued (one retry).
+    await driveChildToWorking(reviewer.task_id, 1);
+    const first = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: RESULT },
+      budgets: NO_BUDGETS,
+    });
+    expect(first.plan).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect(first.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
+    // The reviewed task is still parked at this point — one offense is a retry, not an abandonment.
+    expect(
+      (
+        await db.$client.unsafe(
+          `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+        )
+      )[0]?.status,
+    ).toBe('waiting_for_review');
+
+    // Offense 2, consecutive — the reviewer fails outright, and its terminal is the backstop's cue.
+    await driveChildToWorking(reviewer.task_id, 2);
+    const second = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 2),
+      turnNumber: 2,
+      intent: { kind: 'complete', result: RESULT },
+      budgets: NO_BUDGETS,
+    });
+    expect(second.plan).toMatchObject({ kind: 'invalid_intent', fate: 'fail' });
+    expect(second.task).toMatchObject({ status: 'failed', statusReason: 'tool_error' });
+
+    // The reviewed task is released to a human — the same place a spent round budget leaves it.
+    const released = await db.$client.unsafe(
+      `SELECT status, status_reason, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(released[0]).toMatchObject({
+      status: 'waiting_for_user',
+      status_reason: null,
+      // The stored result survives: the human sees the work the reviewer never judged.
+      summary: 'Done.',
+    });
+    // The journal names the dead reviewer AND how it died, so the operator can tell this apart from
+    // an operator cancel without reading the task tree.
+    const abandoned = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.abandoned';`,
+    )) as unknown as {
+      data: { reviewTaskId: string; reviewTaskStatus: string; outcome: string };
+    }[];
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]?.data).toMatchObject({
+      reviewTaskId: reviewer.task_id,
+      reviewTaskStatus: 'failed',
+      outcome: 'waiting_for_user',
+    });
+    // No verdict is fabricated: recording that none arrived beats inventing one.
+    const review = await db.$client.unsafe(
+      `SELECT verdict, decided_at FROM workforce_reviews WHERE task_id = '${root.taskId}';`,
+    );
+    expect(review).toHaveLength(1);
+    expect(review[0]).toMatchObject({ verdict: null, decided_at: null });
+  });
+
+  it('a cancel cascade from an ancestor leaves no task parked on a review it can never receive', async () => {
+    // The THIRD route named at task-locks.ts:219-235 — and the one that behaves differently from
+    // what that comment implies. The cascade reaches the reviewed task itself (it is a non-terminal
+    // descendant of the origin, taken shallowest-first), so the reviewed task is CANCELLED rather
+    // than released: the park is gone because the task is gone. `releaseAbandonedReview` is not
+    // reached at all, and cannot be — `cancelDescendants` (apply-intents.ts:1361-1399) transitions
+    // descendants directly and never calls `afterTaskTerminal`, and by the time the reviewer is
+    // cancelled its parent is already terminal.
+    //
+    // What is asserted is therefore the PROPERTY the backstop exists for, on this route: after an
+    // ancestor cascade nothing is left in `waiting_for_review`, and no verdict is invented.
+    const root = await driveToWorking(await newRoot({ owner: 'coordinator' }));
+    await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [{ title: 'Draft', goal: 'Write the draft.', owner: 'dev' }],
+    });
+    const childRows = (await db.$client.unsafe(
+      `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { task_id: string }[];
+    const reviewed = (childRows[0] as { task_id: string }).task_id;
+    await driveChildToWorking(reviewed, 1);
+    await completeUnderPolicy(reviewed, 1);
+    const reviewer = await reviewerChildOf(reviewed);
+    expect(
+      (
+        await db.$client.unsafe(`SELECT status FROM workforce_tasks WHERE task_id = '${reviewed}';`)
+      )[0]?.status,
+    ).toBe('waiting_for_review');
+
+    const outcome = await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
+    expect(outcome.cancelled).toContain(root.taskId);
+    expect(outcome.cancelled).toContain(reviewed);
+    expect(outcome.cancelled).toContain(reviewer.task_id);
+
+    // Nothing anywhere under this root is still waiting on a review nobody can now deliver.
+    const parked = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE root_task_id = '${root.taskId}' AND status = 'waiting_for_review';`,
+    );
+    expect(parked[0]?.c).toBe(0);
+    const statuses = (await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${reviewed}';`,
+    )) as unknown as { status: string; status_reason: string | null }[];
+    expect(statuses[0]).toMatchObject({
+      status: 'cancelled',
+      status_reason: 'cancelled_by_parent',
+    });
+    // Still no fabricated verdict — the review row records that none arrived.
+    const review = await db.$client.unsafe(
+      `SELECT verdict FROM workforce_reviews WHERE task_id = '${reviewed}';`,
+    );
+    expect(review).toHaveLength(1);
+    expect(review[0]?.verdict).toBeNull();
+  });
+
   it('an abandoned review’s stale row cannot decide the NEXT round’s park', async () => {
     const root = await driveToWorking(await newRoot({ owner: 'dev' }));
     await completeUnderPolicy(root.taskId, 1);

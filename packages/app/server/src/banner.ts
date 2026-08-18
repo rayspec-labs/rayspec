@@ -106,11 +106,15 @@ export function bootBanner(server: BootedServer, base: string): string {
       "    GDPR tombstone purge:  DRY-RUN — counts what it would delete, deletes nothing (set RAYSPEC_GDPR_PURGE_ENABLED to exactly 'true' to arm)",
     );
   }
-  // `eraseTenantNow` is undefined for an auth-only / no-product boot (a spec with zero product
-  // stores) — there is nothing there for the gate to act on, so say that instead of a gate posture.
+  // `eraseTenantNow` is undefined for a boot that declares NEITHER product stores NOR a workforce, so
+  // there is no seam for the gate to arm and a gate posture would be misleading here. What this line
+  // must NOT do is claim the database holds nothing to erase: a declared workforce puts a tenant's whole
+  // task graph and its journal in the database with no product store in sight, and that shape wires the
+  // seam — so it never reaches this branch. State the WIRING, and name both halves of what would change
+  // it; the database's contents are not something this line can speak for.
   if (server.eraseTenantNow === undefined) {
     lines.push(
-      '    Tenant data erasure:   NOT WIRED — this boot deployed no product stores, so there is nothing for RAYSPEC_ERASURE_ENABLED to act on',
+      '    Tenant data erasure:   NOT WIRED — this boot declared no product stores and no workforce, so RAYSPEC_ERASURE_ENABLED has no erasure seam to arm here',
     );
   } else if (erasureEnabled) {
     lines.push(

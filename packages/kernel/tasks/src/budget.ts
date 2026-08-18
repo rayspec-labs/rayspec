@@ -46,7 +46,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { WorkforceBudgetsInvalidError } from './errors.js';
 
-export const BUDGET_WINDOWS = ['hourly', 'daily', 'weekly'] as const;
+export const BUDGET_WINDOWS = ['hourly', 'daily', 'weekly', 'monthly'] as const;
 
 export type BudgetWindow = (typeof BUDGET_WINDOWS)[number];
 
@@ -170,18 +170,40 @@ export function resolveWorkforceBudgets(stored: unknown, workforceId: string): W
 /** The epoch sentinel `window_start` for the un-windowed scopes (keeps the UNIQUE key total). */
 export const EPOCH_WINDOW_START = new Date(0);
 
-/** The UTC calendar bucket containing `now` for a declared window. */
+/**
+ * The UTC calendar bucket containing `now` for a declared window.
+ *
+ * EXHAUSTIVE BY CONSTRUCTION: every member of `BUDGET_WINDOWS` gets its OWN branch and the tail is
+ * a `never` refusal, so adding a window without a bucket rule is a COMPILE error here rather than a
+ * silent fallthrough into whichever branch happened to be last (before `monthly` existed, the tail
+ * was an unguarded weekly fallthrough — a new member would have bucketed as weekly and enforced the
+ * wrong window). `budget.test.ts` additionally asserts that no two windows produce the same bucket.
+ */
 export function windowStartFor(window: BudgetWindow, now: Date): Date {
   const d = new Date(now.getTime());
   d.setUTCMinutes(0, 0, 0);
   if (window === 'hourly') return d;
   d.setUTCHours(0);
   if (window === 'daily') return d;
-  // weekly: back up to the UTC Monday of the week containing `now`.
-  const dow = d.getUTCDay();
-  const daysSinceMonday = (dow + 6) % 7;
-  d.setUTCDate(d.getUTCDate() - daysSinceMonday);
-  return d;
+  if (window === 'weekly') {
+    // back up to the UTC Monday of the week containing `now`.
+    const dow = d.getUTCDay();
+    const daysSinceMonday = (dow + 6) % 7;
+    d.setUTCDate(d.getUTCDate() - daysSinceMonday);
+    return d;
+  }
+  if (window === 'monthly') {
+    // The first UTC instant of the calendar month. Months are 28–31 days: the bucket is a real
+    // calendar boundary, never a fixed offset (`workforce-lint.ts`'s per-hour normalization uses a
+    // NOMINAL month for ORDERING only — the amount enforced is always this bucket's).
+    d.setUTCDate(1);
+    return d;
+  }
+  const unhandled: never = window;
+  throw new Error(
+    `unhandled budget window ${JSON.stringify(unhandled)} — every BUDGET_WINDOWS member needs its ` +
+      'own calendar bucket rule. Fail-closed.',
+  );
 }
 
 interface ScopeCheck {

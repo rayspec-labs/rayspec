@@ -46,6 +46,14 @@ coverage/
 # Dev-harness scratch (throwaway blob store written by example dev-boot scripts)
 .dev-blobs/
 
+# Agent worktrees. Coding-agent tooling materialises transient `git worktree` checkouts under
+# `.claude/worktrees/<id>/` so parallel agents can hold separate branches without fighting over one
+# working tree. Each is a FULL second checkout of this repo, so leaving it untracked is not enough:
+# `biome check .` walks it and lints thousands of duplicate files, and `pnpm lint` exits 1 through no
+# fault of the branch under test. Ignore the scratch directory only — `.claude/skills/` and the rest
+# of `.claude/` stay tracked.
+.claude/worktrees/
+
 # Env / secrets — never commit real credentials
 .env
 .env.*

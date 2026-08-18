@@ -12,7 +12,12 @@
  * schema, so the twin can never drift silently.
  */
 import type { DeclaredReviewRule } from '@rayspec/core';
-import { durationToMs, type WorkforceRoleName, type WorkforceSpec } from './workforce-grammar.js';
+import {
+  durationToMs,
+  type WorkforceBudgetWindowName,
+  type WorkforceRoleName,
+  type WorkforceSpec,
+} from './workforce-grammar.js';
 
 export interface WorkforceEmployeeConfig {
   readonly id: string;
@@ -129,8 +134,14 @@ export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig
  * invented values would be a second budget model.
  */
 export interface DeclaredEngineBudgets {
-  readonly workforce?: { readonly usd: number; readonly window?: 'hourly' | 'daily' | 'weekly' };
+  readonly workforce?: {
+    readonly usd: number;
+    readonly turns?: number;
+    readonly window?: WorkforceBudgetWindowName;
+  };
   readonly task?: { readonly usd: number; readonly turns: number };
+  /** The ROOT ledger scope's ceilings — one submitted goal's whole task tree, un-windowed. */
+  readonly subtree?: { readonly usd?: number; readonly turns?: number };
   readonly delegation?: { readonly maxDepth?: number; readonly maxPerTask?: number };
   readonly departments?: Readonly<
     Record<
@@ -138,7 +149,7 @@ export interface DeclaredEngineBudgets {
       {
         readonly usd?: number;
         readonly turns?: number;
-        readonly window?: 'hourly' | 'daily' | 'weekly';
+        readonly window?: WorkforceBudgetWindowName;
         readonly maxConcurrentWorkers?: number;
       }
     >
@@ -165,13 +176,14 @@ export function deriveWorkforceBudgets(workforce: WorkforceSpec): DeclaredEngine
   const out: {
     workforce?: DeclaredEngineBudgets['workforce'];
     task?: DeclaredEngineBudgets['task'];
+    subtree?: DeclaredEngineBudgets['subtree'];
     delegation?: DeclaredEngineBudgets['delegation'];
     departments?: Record<
       string,
       {
         usd?: number;
         turns?: number;
-        window?: 'hourly' | 'daily' | 'weekly';
+        window?: WorkforceBudgetWindowName;
         maxConcurrentWorkers?: number;
       }
     >;
@@ -187,11 +199,18 @@ export function deriveWorkforceBudgets(workforce: WorkforceSpec): DeclaredEngine
   if (budgets?.workforce !== undefined) {
     out.workforce = {
       usd: budgets.workforce.usd,
+      ...(budgets.workforce.turns !== undefined ? { turns: budgets.workforce.turns } : {}),
       ...(budgets.workforce.window !== undefined ? { window: budgets.workforce.window } : {}),
     };
   }
   if (budgets?.task !== undefined) {
     out.task = { usd: budgets.task.usd, turns: budgets.task.turns };
+  }
+  if (budgets?.subtree !== undefined) {
+    out.subtree = {
+      ...(budgets.subtree.usd !== undefined ? { usd: budgets.subtree.usd } : {}),
+      ...(budgets.subtree.turns !== undefined ? { turns: budgets.subtree.turns } : {}),
+    };
   }
   if (budgets?.delegation !== undefined) {
     out.delegation = {

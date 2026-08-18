@@ -85,7 +85,7 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     expect(banner).not.toContain('Tenant data erasure:   DRY-RUN');
   });
 
-  it('states there is nothing to erase — not a gate posture — when no product stores were deployed', () => {
+  it('states the seam is unwired — not a gate posture — when neither stores nor a workforce were declared', () => {
     const banner = bootBanner(
       booted({ housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: true } }),
       BASE,
@@ -94,6 +94,11 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     expect(banner).not.toContain('Tenant data erasure:   ARMED');
     // the line still NAMES the variable, so the block names all three on every boot it prints
     expect(banner).toContain('RAYSPEC_ERASURE_ENABLED');
+    // It says the seam is unwired, NOT that there is nothing to erase: a workforce boot holds a whole
+    // task graph with no store, so a "nothing to act on" claim here would be false the moment the
+    // wiring condition widened past product stores. Both halves of the reason are named.
+    expect(banner).toContain('no product stores and no workforce');
+    expect(banner).not.toContain('there is nothing for RAYSPEC_ERASURE_ENABLED to act on');
   });
 });
 

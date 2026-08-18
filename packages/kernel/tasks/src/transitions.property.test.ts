@@ -9,6 +9,13 @@
  *      retains a path to a terminal status (no dead ends, no live-lock pocket).
  *   3. Every re-entry into execution goes through `queued` — any step that lands on `working`
  *      departed from `queued`, in every walk and statically in the table.
+ *
+ * SCOPE, stated so nobody reads more into a green run than is there: `successors()` below is derived
+ * FROM the table under test, so this suite finds graph-shape defects and nothing else. It never
+ * calls `applyTransition`, never touches a row, and never randomizes REASONS. The engine-level half
+ * — the same seeded walk driven through the real `applyTransition` against real Postgres, with
+ * randomized `statusReason` values checked against `REASON_RULES` — is `transitions.property.db.test.ts`.
+ * This file stays pure so it keeps running in the no-database lane.
  */
 import { describe, expect, it } from 'vitest';
 import {
