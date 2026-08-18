@@ -43,7 +43,7 @@
  * unchanged), section 5's header phrase `Completed child results`, and the `- <kind>: <payload>`
  * signal lines. Changing any of these is a fixture-lockstep change, not a wording tweak.
  */
-import type { MemoryHit } from '@rayspec/core';
+import { type MemoryHit, SEAM_MAX_MEMORY_HITS } from '@rayspec/core';
 import type { WorkforceEmployeeConfig } from '@rayspec/spec';
 import { MAX_TASK_TEXT_BYTES, type MergedChildResult, type TaskRecord } from '@rayspec/tasks';
 import type { TurnFacts } from './facts.js';
@@ -633,16 +633,28 @@ function renderMessages(messages: readonly TurnMessageFact[]): string | null {
 
 function renderRecall(recall: readonly MemoryHit[]): string | null {
   if (recall.length === 0) return null;
-  let kept = recall.length;
+  // THE INPUT CAP, and why it is here rather than at the provider. Recall arrives from the
+  // `WorkforceMemoryProvider` seam, which is an injection point for out-of-tree code, so the list
+  // handed to this function is whatever that code chose to return. The shrink loop below re-measures
+  // the WHOLE block each time it drops one hit, so its cost grows with the SQUARE of that list — the
+  // byte budget was always honored, but honoring it got arbitrarily expensive. Capping the input
+  // first makes the work constant-bounded for any provider, and the drop is announced with its own
+  // marker so it is never confused with a byte-budget loss. `SEAM_MAX_MEMORY_HITS` is the seam kit's
+  // own ceiling, so a provider can self-check against the same number; the shipped provider's
+  // `RECALL_MAX_HITS` is 10, well inside it.
+  const capped = recall.slice(0, SEAM_MAX_MEMORY_HITS);
+  const overCeiling = recall.length - capped.length;
+  let kept = capped.length;
   for (;;) {
     if (kept === 0) return null;
-    const omitted = recall.length - kept;
+    const omitted = capped.length - kept;
     const block = [
       SECTION_HEADERS.recall,
       // Hit text is a prior turn's model-authored result/decision — untrusted; sanitize so it cannot
       // forge a boundary/section line from inside the recall list.
-      ...recall.slice(0, kept).map((hit) => `- ${sanitizeUntrusted(hit.text)}`),
+      ...capped.slice(0, kept).map((hit) => `- ${sanitizeUntrusted(hit.text)}`),
       ...(omitted > 0 ? [`[…${omitted} omitted: byte budget]`] : []),
+      ...(overCeiling > 0 ? [`[…${overCeiling} omitted: hit ceiling]`] : []),
     ].join('\n');
     if (bytesOf(block) <= SECTION_BUDGETS.recall) return block;
     kept -= 1;

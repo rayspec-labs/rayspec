@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "d48fa4b73eed84bf7f57ac6003ff97719ec48b491d83b13417522618bbaa03e8",
+  "lockfile_sha256": "9a43c2908cb6eed3a3b526afbc01a357a3b12d4602874bcc7c2adb89671210a5",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v22.12.0"
@@ -2268,6 +2268,7 @@
       "direct_dependents": [
         "<workspace root>",
         "examples/local-boot",
+        "examples/workforce-extension",
         "packages/adapters/deepgram",
         "packages/adapters/openai-tts",
         "packages/app/cli",
@@ -4282,6 +4283,7 @@
       "direct_dependents": [
         "<workspace root>",
         "examples/local-boot",
+        "examples/workforce-extension",
         "packages/adapters/anthropic",
         "packages/adapters/codex",
         "packages/adapters/deepgram",
@@ -4371,6 +4373,7 @@
       "direct_dependents": [
         "<workspace root>",
         "examples/local-boot",
+        "examples/workforce-extension",
         "packages/adapters/anthropic",
         "packages/adapters/codex",
         "packages/adapters/deepgram",

@@ -1,0 +1,20 @@
+{
+  "name": "@rayspec/workforce-extension-example",
+  "version": "1.8.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "An OUT-OF-TREE implementation of all five workforce extension seams. It lives outside packages/, depends on @rayspec/core the way any consumer would, imports only its published package entry, and passes the shipped seam contract kit — so 'premium intelligence can be implemented with no fork' is a thing CI runs rather than a thing the docs assert.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rayspec/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  }
+}
