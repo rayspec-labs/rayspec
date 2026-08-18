@@ -39,7 +39,11 @@ let nextGoalOutcome: WorkforceGoalOutcome = DEFAULT_GOAL_OUTCOME;
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
-/** Provision a principal (registered user → org → switch → JWT) — the org creator is an owner. */
+/**
+ * Provision a principal (registered user → org → switch → JWT) — the org creator is an owner.
+ * `userId` comes back too because the decision doors compare the SERVER-DERIVED actor string
+ * (`user:<userId>`, `actorFrom`) against the decider a row records.
+ */
 async function principal(email: string, orgName: string) {
   const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
     body: { email, password: 'a-long-enough-password' },
@@ -54,7 +58,22 @@ async function principal(email: string, orgName: string) {
     headers: { authorization: `Bearer ${t0}` },
   });
   const token = (await switchRes.json()).accessToken as string;
-  return { orgId, token };
+  const users = (await h.db.$client.unsafe(
+    `SELECT id FROM users WHERE lower(email) = lower('${email}');`,
+  )) as unknown as Array<{ id: string }>;
+  const userId = (users[0] as { id: string }).id;
+  return { orgId, token, userId, actor: `user:${userId}` };
+}
+
+/**
+ * Demote a principal to `member` — the role that HOLDS `store:write` (so it decides ordinary rows)
+ * but NOT `workforce:override`. `store:write` is sensitive, so the route re-reads the role live and
+ * the still-owner JWT claim is not what answers.
+ */
+async function demoteToMember(userId: string, orgId: string): Promise<void> {
+  await h.db.$client.unsafe(
+    `UPDATE memberships SET role = 'member' WHERE user_id = '${userId}' AND org_id = '${orgId}';`,
+  );
 }
 
 async function seedRoot(orgId: string, title = 'A durable task') {
@@ -67,8 +86,8 @@ async function seedRoot(orgId: string, title = 'A durable task') {
   });
 }
 
-/** Drive a seeded task to `working` and end its turn with a pending approval. */
-async function seedPendingApproval(orgId: string) {
+/** Drive a seeded task to `working` and end its turn with a pending approval addressed to `approver`. */
+async function seedPendingApproval(orgId: string, approver = 'user') {
   const tdb = forTenant(h.db, orgId);
   const task = await seedRoot(orgId, 'Approval subject');
   const queued = await applyTransition(tdb, {
@@ -89,7 +108,7 @@ async function seedPendingApproval(orgId: string) {
     taskId: task.taskId,
     turnId: 't1',
     turnNumber: 1,
-    intent: { kind: 'request_approval', question: 'Send it?', timeoutMs: 60_000 },
+    intent: { kind: 'request_approval', question: 'Send it?', timeoutMs: 60_000, approver },
     budgets: NO_BUDGETS,
   });
   const approvals = await h.db.$client.unsafe(
@@ -98,8 +117,14 @@ async function seedPendingApproval(orgId: string) {
   return { task, approvalId: (approvals[0] as { id: string }).id };
 }
 
-/** Drive a seeded task to `working` and end its turn parked in review. */
-async function seedPendingReview(orgId: string) {
+/**
+ * Drive a seeded task to `working` and end its turn parked in review, addressed to `reviewer`.
+ * The DEFAULT is the `'user'` sentinel — the deployment's human operator surface — because this
+ * route IS the human verdict door: a review addressed to a named EMPLOYEE is answered by that
+ * employee's dispatched review turn (apply-intents.ts re-checks `review.reviewer === task.owner`),
+ * and the named-reviewer case at this door has its own tests below.
+ */
+async function seedPendingReview(orgId: string, reviewer = 'user') {
   const tdb = forTenant(h.db, orgId);
   const task = await seedRoot(orgId, 'Review subject');
   const queued = await applyTransition(tdb, {
@@ -120,7 +145,7 @@ async function seedPendingReview(orgId: string) {
     taskId: task.taskId,
     turnId: 't1',
     turnNumber: 1,
-    intent: { kind: 'request_review', reviewer: 'reviewer-1' },
+    intent: { kind: 'request_review', reviewer },
     budgets: NO_BUDGETS,
   });
   const reviews = await h.db.$client.unsafe(
@@ -961,6 +986,249 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(blocked.status).toBe(429);
     expect((await blocked.json()).error.code).toBe('RATE_LIMITED');
     expect(goalSubmissions).toHaveLength(30); // the 31st never reached the intake
+  });
+
+  // ── the decision doors keep the authorization the engine writes ──────────────────────────────
+  //
+  // An approval's `approver` and a review's `reviewer` are accountability facts the engine
+  // JOURNALS, and the timeout sweep MINTS one when it escalates a hung request to the requester's
+  // declared superior. Before this arm, both doors authorized on tenant + `store:write` alone, so
+  // any principal in the tenant could resolve a row addressed to someone else and `decided_by` was
+  // free to contradict the trail. Every refusal below asserts THE ROW, not just the status code.
+
+  it('a NAMED approver binds the door: the principal the row names decides it', async () => {
+    const a = await principal('wf-named-ok@example.test', 'Org WF Named OK');
+    // The row names this caller's own SERVER-DERIVED actor string — the only identity the door
+    // ever compares against, and one no request body can assert.
+    const { approvalId } = await seedPendingApproval(a.orgId, a.actor);
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    const decided = await res.json();
+    expect(decided).toMatchObject({ status: 'approved', decidedBy: a.actor });
+  });
+
+  it('a NAMED approver refuses a different principal — 403, and the row is untouched', async () => {
+    const a = await principal('wf-named-deny@example.test', 'Org WF Named Deny');
+    const { task, approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(body.error.details).toMatchObject({ approver: 'ops_lead' });
+
+    // THE ROW: nothing moved, nothing was signed, nothing was journaled, the task is still parked.
+    const row = (await h.db.$client.unsafe(
+      `SELECT status, decided_by, decided_at FROM workforce_approvals WHERE id = '${approvalId}';`,
+    )) as unknown as Array<{ status: string; decided_by: string | null; decided_at: Date | null }>;
+    expect(row[0]).toMatchObject({ status: 'pending', decided_by: null, decided_at: null });
+    const events = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.approval.decided';`,
+    )) as unknown as Array<{ c: number }>;
+    expect(events[0]?.c).toBe(0);
+    const parked = (await h.db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    )) as unknown as Array<{ status: string }>;
+    expect(parked[0]?.status).toBe('waiting_for_user');
+    expect(kicks).toBe(0); // a refused decision does not nudge the dispatcher either
+  });
+
+  it("REGRESSION GUARD: an `approver: 'user'` row stays decidable by any store:write principal", async () => {
+    // The shipped posture. `request_approval` hardcodes `approver: 'user'` and the declared grammar
+    // admits nothing else, so this is the path every example takes — a user token AND an org-scoped
+    // api-key must both keep working exactly as before.
+    const a = await principal('wf-sentinel@example.test', 'Org WF Sentinel');
+    const first = await seedPendingApproval(a.orgId); // defaults to the 'user' sentinel
+    const byUser = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${first.approvalId}/decide`,
+      { body: { decision: 'approve' }, headers: { authorization: `Bearer ${a.token}` } },
+    );
+    expect(byUser.status).toBe(200);
+
+    const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${a.orgId}/api-keys`, {
+      body: { name: 'writer', scopes: ['store:read', 'store:write'] },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    const key = (await mint.json()).plaintext as string;
+    const second = await seedPendingApproval(a.orgId);
+    const byKey = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${second.approvalId}/decide`,
+      { body: { decision: 'approve' }, headers: { authorization: `Bearer ${key}` } },
+    );
+    expect(byKey.status).toBe(200);
+    expect((await byKey.json()).decidedBy).toMatch(/^api-key:/);
+  });
+
+  it('break-glass needs BOTH the asked-for override and the permission — a member gets the named 403', async () => {
+    const a = await principal('wf-glass-member@example.test', 'Org WF Glass Member');
+    await demoteToMember(a.userId, a.orgId);
+    const { approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve', override: true },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(403);
+    // The gap is named, exactly as the store:write gate names its own.
+    expect((await res.json()).error.details).toEqual({
+      missing_permission: 'workforce:override',
+    });
+    const row = (await h.db.$client.unsafe(
+      `SELECT status, decided_by FROM workforce_approvals WHERE id = '${approvalId}';`,
+    )) as unknown as Array<{ status: string; decided_by: string | null }>;
+    expect(row[0]).toMatchObject({ status: 'pending', decided_by: null });
+  });
+
+  it('break-glass without ASKING is still refused — holding the permission never overrides silently', async () => {
+    const a = await principal('wf-glass-silent@example.test', 'Org WF Glass Silent');
+    const { approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    // The org creator is an OWNER and so holds `workforce:override`; the request does not ask.
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.details).toMatchObject({ approver: 'ops_lead' });
+  });
+
+  it('break-glass decides the named row AND the journal records that an override happened', async () => {
+    const a = await principal('wf-glass-ok@example.test', 'Org WF Glass OK');
+    const { task, approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: {
+        decision: 'approve',
+        reason: 'ops_lead unreachable; incident bridge',
+        override: true,
+      },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: 'approved', decidedBy: a.actor });
+    const events = (await h.db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.approval.decided';`,
+    )) as unknown as Array<{ data: Record<string, unknown> }>;
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data).toMatchObject({
+      decidedBy: a.actor,
+      overriddenApprover: 'ops_lead',
+    });
+  });
+
+  it('a MATCHING id in another tenant is still refused — a uniform 404, and the row is untouched', async () => {
+    const a = await principal('wf-xt-a@example.test', 'Org WF XT A');
+    const b = await principal('wf-xt-b@example.test', 'Org WF XT B');
+    // Tenant A's row names tenant B's principal by its exact actor string. Identity matching must
+    // never reach across the tenant chokepoint: B gets the uniform not-found, never a decision.
+    const { approvalId } = await seedPendingApproval(a.orgId, b.actor);
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    expect(res.status).toBe(404);
+    // Not even with the override: break-glass is not a tenant escape either.
+    const forced = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${approvalId}/decide`,
+      {
+        body: { decision: 'approve', override: true },
+        headers: { authorization: `Bearer ${b.token}` },
+      },
+    );
+    expect(forced.status).toBe(404);
+    const row = (await h.db.$client.unsafe(
+      `SELECT status, decided_by FROM workforce_approvals WHERE id = '${approvalId}';`,
+    )) as unknown as Array<{ status: string; decided_by: string | null }>;
+    expect(row[0]).toMatchObject({ status: 'pending', decided_by: null });
+  });
+
+  it('the review verdict door enforces the recorded reviewer the same way', async () => {
+    const a = await principal('wf-rev-auth@example.test', 'Org WF Review Auth');
+
+    // named reviewer, different principal → 403, review untouched
+    const denied = await seedPendingReview(a.orgId, 'qa');
+    const refusal = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${denied.reviewId}/verdict`,
+      { body: { verdict: 'accept' }, headers: { authorization: `Bearer ${a.token}` } },
+    );
+    expect(refusal.status).toBe(403);
+    expect((await refusal.json()).error.details).toMatchObject({ reviewer: 'qa' });
+    const undecided = (await h.db.$client.unsafe(
+      `SELECT verdict, decided_at FROM workforce_reviews WHERE id = '${denied.reviewId}';`,
+    )) as unknown as Array<{ verdict: string | null; decided_at: Date | null }>;
+    expect(undecided[0]).toMatchObject({ verdict: null, decided_at: null });
+    const held = (await h.db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${denied.task.taskId}';`,
+    )) as unknown as Array<{ status: string }>;
+    expect(held[0]?.status).toBe('waiting_for_review');
+
+    // named reviewer, the principal it names → 200
+    const matched = await seedPendingReview(a.orgId, a.actor);
+    const ok = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${matched.reviewId}/verdict`,
+      { body: { verdict: 'accept' }, headers: { authorization: `Bearer ${a.token}` } },
+    );
+    expect(ok.status).toBe(200);
+
+    // break-glass → 200 and the journal says an override happened
+    const glass = await seedPendingReview(a.orgId, 'qa');
+    const overridden = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${glass.reviewId}/verdict`,
+      {
+        body: { verdict: 'accept', override: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      },
+    );
+    expect(overridden.status).toBe(200);
+    const events = (await h.db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${glass.task.taskId}' AND type = 'workforce.review.decided';`,
+    )) as unknown as Array<{ data: Record<string, unknown> }>;
+    expect(events[0]?.data).toMatchObject({
+      decidedBy: a.actor,
+      reviewer: 'qa',
+      overriddenReviewer: 'qa',
+    });
+  });
+
+  it('a member may NOT break the glass on a review either, and a cross-tenant match is a 404', async () => {
+    const a = await principal('wf-rev-member@example.test', 'Org WF Review Member');
+    const b = await principal('wf-rev-xt@example.test', 'Org WF Review XT');
+    const foreign = await seedPendingReview(a.orgId, b.actor);
+    const crossTenant = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${foreign.reviewId}/verdict`,
+      { body: { verdict: 'accept' }, headers: { authorization: `Bearer ${b.token}` } },
+    );
+    expect(crossTenant.status).toBe(404);
+
+    await demoteToMember(a.userId, a.orgId);
+    const named = await seedPendingReview(a.orgId, 'qa');
+    const res = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${named.reviewId}/verdict`,
+      {
+        body: { verdict: 'accept', override: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      },
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.details).toEqual({ missing_permission: 'workforce:override' });
   });
 });
 

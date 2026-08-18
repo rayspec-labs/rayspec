@@ -146,20 +146,24 @@ describe.skipIf(!hasDb)('review verdicts (db)', () => {
 
   it('two RACING verdicts on one review admit exactly one — the loser reports already-decided', async () => {
     const { review } = await parkedForReview();
+    // BOTH racers are the review's own named reviewer (`qa`): the subject here is the
+    // one-verdict-per-round compare-and-swap, and the two are told apart by their VERDICT, not by
+    // their actor. Racing two unrelated principals would now be refused by the decision-door
+    // authority gate before the CAS ever ran, which would quietly stop testing the CAS.
     const race = await Promise.allSettled([
       applyReviewVerdict(tdb(), NO_BUDGETS, {
         reviewId: review.id,
         verdict: 'accept',
         reasons: [],
         requiredChanges: [],
-        actor: 'user:a',
+        actor: 'user:qa',
       }),
       applyReviewVerdict(tdb(), NO_BUDGETS, {
         reviewId: review.id,
         verdict: 'reject',
         reasons: ['no'],
         requiredChanges: [],
-        actor: 'user:b',
+        actor: 'user:qa',
       }),
     ]);
     const wins = race.filter((r) => r.status === 'fulfilled');

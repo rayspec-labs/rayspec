@@ -684,8 +684,8 @@ rayspec workforce tasks [--status <s>] [--owner <o>] [--workforce <id>] [transpo
 rayspec workforce tasks --tree [--root <task-id>] [--json] [--workforce <id>] [transport flags]
 rayspec workforce task <id> [transport flags]
 rayspec workforce approvals list [transport flags]
-rayspec workforce approvals approve <id> [--reason <text>] [transport flags]
-rayspec workforce approvals reject <id> --reason <text> [transport flags]
+rayspec workforce approvals approve <id> [--reason <text>] [--override] [transport flags]
+rayspec workforce approvals reject <id> --reason <text> [--override] [transport flags]
 rayspec workforce cost [--window 24h|7d] [--by employee|department] [transport flags]
 rayspec workforce events <task-id> [transport flags]
 rayspec workforce pause [--drain] --workforce <id> [transport flags]
@@ -714,6 +714,39 @@ fail-closed at every step:
   permission gets the route's 403 verbatim — the CLI adds **no local
   authorization logic of its own**, because two authorization implementations
   is one too many.
+- **Who may decide an approval.** An approval row records *who* it asked, and
+  the engine keeps that. The shipped `approver: user` — the deployment's human
+  operator surface, the only value the declared grammar admits — is decidable
+  by any `store:write` principal, exactly as before, and that is the path every
+  shipped example takes. A row addressed to a **named** principal is not: the
+  timeout sweep writes one when it escalates a hung request up the requester's
+  reporting line, and only that principal may resolve it.
+
+  **What that means at this command, stated plainly: you cannot be that
+  principal.** Open core carries no principal-to-employee binding. A CLI
+  credential authenticates as `user:<id>` or `api-key:<id>`; a named approver is
+  a *declared employee id*, and the two namespaces are structurally disjoint, so
+  the comparison can never match. An escalated approval is therefore resolved
+  through `--override` — **always, not as a fallback**. There is no other route:
+  no tool decides an approval, and the escalation dispatches no turn, so nothing
+  is coming that would let the named superior answer it themselves.
+
+  An escalated approval has exactly **two** outcomes. Either someone breaks the
+  glass, or its window expires and the sweep applies the terminal `fail` fate the
+  re-issued request carries — **failing the task**. Waiting is not a third
+  outcome; it is the second one, arriving on a timer. Binding a principal to an
+  employee is a separate, unbuilt design decision; until it exists, treat
+  `--override` as the documented route for every escalated approval and read the
+  journal to see who took it.
+
+  `--override` carries no authority on its own — the route ANDs it with the
+  **`workforce:override`** permission (an `owner`/`admin` role; deliberately
+  *not* grantable to an API key, because the override exists to record which
+  *human* contradicted a named human's recorded decision, which means an
+  API-key-only deployment cannot resolve an escalated approval at all) and
+  journals the override on `workforce.approval.decided` as `overriddenApprover`.
+  Asking without the permission is a 403 naming it, never a silent ordinary
+  decision.
 - **Tenant selection**: the server derives the tenant from the credential. An
   API key is already bound to its organization, so `--tenant` /
   `RAYSPEC_TENANT_ID` beside a key is refused as unverifiable rather than
