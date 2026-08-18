@@ -24,10 +24,16 @@ import { eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { TaskNotFoundError, WorkforceUnknownError } from './errors.js';
 
-/** The version stamped into every event's `data.v`. */
+/**
+ * The version stamped into every event's `data.v`.
+ * @experimental — see docs/workforce-compatibility.md.
+ */
 export const WORKFORCE_EVENT_VERSION = 1;
 
-/** The closed event vocabulary this engine emits. */
+/**
+ * The closed event vocabulary this engine emits.
+ * @experimental — see docs/workforce-compatibility.md.
+ */
 export const WORKFORCE_EVENT_TYPES = [
   'workforce.task.created',
   'workforce.task.queued',
@@ -71,9 +77,13 @@ export const WORKFORCE_EVENT_TYPES = [
   'workforce.escalation.raised',
 ] as const;
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export type WorkforceEventType = (typeof WORKFORCE_EVENT_TYPES)[number];
 
-/** One event to append: the closed type plus its payload fields (merged into `data` beside `v`). */
+/**
+ * One event to append: the closed type plus its payload fields (merged into `data` beside `v`).
+ * @experimental — see docs/workforce-compatibility.md.
+ */
 export interface WorkforceEventInput {
   readonly type: WorkforceEventType;
   readonly payload: Readonly<Record<string, unknown>>;
@@ -84,6 +94,7 @@ export interface WorkforceEventInput {
  * conversation-payload lesson: rows are DATA and a row that does not match the envelope is dropped
  * by the reader, never trusted). The envelope is strict on `v` and `type`; the per-type payload
  * fields ride alongside and are passed through as data.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export const workforceJournalEventSchema = z
   .looseObject({
@@ -92,7 +103,10 @@ export const workforceJournalEventSchema = z
   })
   .readonly();
 
-/** The run_events `run_id` under which a workforce's control events are journaled. */
+/**
+ * The run_events `run_id` under which a workforce's control events are journaled.
+ * @experimental — see docs/workforce-compatibility.md.
+ */
 export function workforceControlStreamId(workforceId: string): string {
   return `workforce:${workforceId}`;
 }
@@ -115,6 +129,7 @@ function eventRows(
  * Append events to a TASK's journal stream. The counter UPDATE on the task row is the lock; the
  * inserts commit (or roll back) with the caller's transaction, so the stream never carries an
  * event for work that did not happen. Returns the allocated seq range.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export async function appendTaskEvents(
   tdb: TenantDb,
@@ -137,6 +152,7 @@ export async function appendTaskEvents(
 /**
  * Append control events to a WORKFORCE's journal stream (`workforce:<id>`), allocating from the
  * runtime row's counter under the same lock discipline.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export async function appendWorkforceEvents(
   tdb: TenantDb,
