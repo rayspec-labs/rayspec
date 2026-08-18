@@ -27,6 +27,7 @@ import {
   windowStartFor,
 } from '@rayspec/tasks';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { ERASED_CONTENT } from './prompt.js';
 
 /** Page caps — a snapshot is a bounded view, never a partition materialized into memory. */
 export const SNAPSHOT_SUBTREE_LIMIT = 100;
@@ -111,7 +112,10 @@ const TERMINAL = ['completed', 'failed', 'cancelled'];
 function summarize(row: TaskRecord): TaskSummary {
   return {
     taskId: row.taskId,
-    title: row.title,
+    // A NULL title means the tenant's content was erased by `journalScrub` (migration 0013) while
+    // its ledger and structure were retained. The snapshot is a RENDERING, so it names that
+    // explicitly rather than emitting an empty string an operator would read as an untitled task.
+    title: row.title ?? ERASED_CONTENT,
     status: row.status,
     statusReason: row.statusReason,
     owner: row.owner,

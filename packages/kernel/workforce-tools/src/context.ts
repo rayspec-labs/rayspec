@@ -46,6 +46,7 @@ import { MAX_TASK_TEXT_BYTES, type MergedChildResult, type TaskRecord } from '@r
 import type { TurnFacts } from './facts.js';
 import {
   DATA_BOUNDARY_LINE,
+  ERASED_CONTENT,
   ROLE_GUIDANCE,
   SECTION_HEADERS,
   TURN_ENDING_REMINDER,
@@ -167,7 +168,8 @@ export interface TurnSignalFact {
 export interface TurnMessageFact {
   readonly sender: string;
   readonly recipient: string;
-  readonly body: string;
+  /** NULL when the tenant's content was erased by `journalScrub` — renders as `ERASED_CONTENT`. */
+  readonly body: string | null;
 }
 
 export interface TurnInputFacts {
@@ -228,7 +230,9 @@ const TRUNCATED_MARKER = '…[truncated: byte budget]';
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: neutralizing C0/DEL/C1/LS/PS in untrusted text is the point.
 const UNTRUSTED_STRUCTURE_CHARS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/g;
-function sanitizeUntrusted(text: string): string {
+/** A NULL content column is ERASED (see `ERASED_CONTENT`), never an empty string. */
+function sanitizeUntrusted(text: string | null): string {
+  if (text === null) return ERASED_CONTENT;
   return text.replace(UNTRUSTED_STRUCTURE_CHARS, ' ');
 }
 const RAW_JSON_LINE_SEPARATORS = /[\u0085\u2028\u2029]/g;

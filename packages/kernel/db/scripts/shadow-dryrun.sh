@@ -417,6 +417,69 @@ assert_eq "0" "SELECT count(*) FROM workforce_task_signals;" "workforce_task_sig
 assert_eq "0" "SELECT count(*) FROM workforce_budget_ledger;" "workforce_budget_ledger cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM workforce_runtime;" "workforce_runtime cascaded away after org delete"
 
+echo "== ASSERT 0013 end state (turn dedupe keys, the claim lease, the scrubbable content columns) =="
+# THE DURABLE DEDUPE KEY. Both new indexes are PARTIAL UNIQUEs on (tenant_id, task_id, turn_number),
+# byte-shaped like 0012's transition receipt: one review and one approval per (task, turn), while a
+# turn-less row (the sweep's escalation re-issue) stays unconstrained.
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='workforce_reviews_turn_receipt_idx' AND indexdef ILIKE 'CREATE UNIQUE INDEX%' AND indexdef ILIKE '%(tenant_id, task_id, turn_number)%' AND indexdef ILIKE '%WHERE%turn_number IS NOT NULL%';" \
+  "0013 workforce_reviews turn receipt is a partial UNIQUE on (tenant_id, task_id, turn_number)"
+assert_eq "1" \
+  "SELECT count(*) FROM pg_indexes WHERE indexname='workforce_approvals_turn_receipt_idx' AND indexdef ILIKE 'CREATE UNIQUE INDEX%' AND indexdef ILIKE '%(tenant_id, task_id, turn_number)%' AND indexdef ILIKE '%WHERE%turn_number IS NOT NULL%';" \
+  "0013 workforce_approvals turn receipt is a partial UNIQUE on (tenant_id, task_id, turn_number)"
+# THE CLAIM LEASE is nullable — NULL means "this row holds no claim", which is every status but
+# `working`. A NOT NULL column here would have needed a backfill and would have lied about unclaimed
+# rows.
+assert_eq "YES" \
+  "SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name='workforce_tasks' AND column_name='claim_expires_at';" \
+  "0013 workforce_tasks.claim_expires_at exists and is nullable"
+# THE SIX SCRUBBABLE CONTENT COLUMNS accept NULL, so journalScrub can erase the content while the
+# budget ledger and every structural column are retained. A regression to NOT NULL would make the
+# scrub throw instead of erasing.
+assert_eq "YES|YES|YES|YES|YES|YES" \
+  "SELECT string_agg(is_nullable, '|' ORDER BY table_name, column_name) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='workforce_approvals' AND column_name='question') OR (table_name='workforce_delegations' AND column_name IN ('goal','expected_output')) OR (table_name='workforce_messages' AND column_name='body') OR (table_name='workforce_tasks' AND column_name IN ('title','goal')));" \
+  "0013 the six scrubbable content columns are nullable"
+# A REAL write through the new keys: one (task, turn) review/approval each, a duplicate REFUSED even
+# under a DIFFERENT round (the exact shape a replay presents — a (tenant, task, round) UNIQUE would
+# have admitted it), and two turn-LESS rows coexisting under the partial predicate.
+psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
+INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000d3', 'DedupeOrg', 'dedupeorg');
+INSERT INTO workforce_tasks (task_id, tenant_id, workforce_id, root_task_id, title, goal, owner, requested_by, status)
+VALUES ('t-dedupe', '00000000-0000-0000-0000-0000000000d3', 'wf-b', 't-dedupe', 'Root', 'Do the thing', 'user', 'user', 'working');
+INSERT INTO workforce_reviews (tenant_id, task_id, reviewer, round, turn_number)
+VALUES ('00000000-0000-0000-0000-0000000000d3', 't-dedupe', 'qa', 1, 1);
+INSERT INTO workforce_approvals (tenant_id, task_id, question, approver, status, on_timeout, turn_number)
+VALUES ('00000000-0000-0000-0000-0000000000d3', 't-dedupe', 'Proceed?', 'user', 'pending', 'fail', 1);
+INSERT INTO workforce_approvals (tenant_id, task_id, question, approver, status, on_timeout)
+VALUES ('00000000-0000-0000-0000-0000000000d3', 't-dedupe', 'Escalated?', 'boss', 'pending', 'fail'),
+       ('00000000-0000-0000-0000-0000000000d3', 't-dedupe', 'Escalated again?', 'boss', 'pending', 'fail');
+SQL
+assert_eq "refused" \
+  "WITH dup AS (INSERT INTO workforce_reviews (tenant_id, task_id, reviewer, round, turn_number) VALUES ('00000000-0000-0000-0000-0000000000d3', 't-dedupe', 'qa', 2, 1) ON CONFLICT DO NOTHING RETURNING 1) SELECT CASE WHEN count(*) = 0 THEN 'refused' ELSE 'duplicated' END FROM dup;" \
+  "0013 a second review for one (task, turn) is refused even under a different round"
+assert_eq "refused" \
+  "WITH dup AS (INSERT INTO workforce_approvals (tenant_id, task_id, question, approver, status, on_timeout, turn_number) VALUES ('00000000-0000-0000-0000-0000000000d3', 't-dedupe', 'Proceed again?', 'user', 'pending', 'fail', 1) ON CONFLICT DO NOTHING RETURNING 1) SELECT CASE WHEN count(*) = 0 THEN 'refused' ELSE 'duplicated' END FROM dup;" \
+  "0013 a second approval for one (task, turn) is refused"
+assert_eq "2" \
+  "SELECT count(*) FROM workforce_approvals WHERE task_id='t-dedupe' AND turn_number IS NULL;" \
+  "0013 two turn-LESS approvals coexist — the escalation re-issue is unconstrained"
+# The six columns really accept NULL on a REAL row (the scrub's write), and the ledger row a scrub
+# retains is untouched beside it.
+psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
+INSERT INTO workforce_budget_ledger (tenant_id, scope_kind, scope_id, window_start, settled_usd)
+VALUES ('00000000-0000-0000-0000-0000000000d3', 'task', 't-dedupe', 'epoch'::timestamptz, '0.25');
+UPDATE workforce_tasks SET title = NULL, goal = NULL WHERE task_id = 't-dedupe';
+SQL
+assert_eq "1" \
+  "SELECT count(*) FROM workforce_tasks WHERE task_id='t-dedupe' AND title IS NULL AND goal IS NULL AND status='working';" \
+  "0013 a scrubbed task row keeps its structure with its content NULL"
+assert_eq "0.25" \
+  "SELECT settled_usd FROM workforce_budget_ledger WHERE scope_id='t-dedupe';" \
+  "0013 the budget ledger row beside a scrubbed task is untouched"
+psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000000000d3';" >/dev/null
+assert_eq "0" "SELECT count(*) FROM workforce_reviews;" "workforce_reviews cascaded away after org delete"
+assert_eq "0" "SELECT count(*) FROM workforce_approvals;" "workforce_approvals cascaded away after org delete"
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');

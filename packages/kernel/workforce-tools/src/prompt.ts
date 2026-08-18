@@ -18,6 +18,16 @@ import type { EmployeeRole } from './roles.js';
 export const TURN_PROMPT_VERSION = 1;
 
 /**
+ * What an ERASED content column renders as. Since migration 0013 the untrusted content columns
+ * (`workforce_tasks.title`/`.goal`/`.description`, `workforce_messages.body`, …) are NULLABLE, and
+ * NULL has exactly one meaning: `journalScrub` erased this tenant's content while retaining its
+ * budget ledger and every structural column. Every rendering surface — the turn input, the operator
+ * snapshot, recall — names that explicitly rather than emitting an empty string, so an erased goal
+ * never reads as "no goal was given". Platform-authored, so it carries no untrusted bytes.
+ */
+export const ERASED_CONTENT = '[content erased]';
+
+/**
  * Line 2 of every turn input, byte-stable: the data/instruction boundary, stated before anything
  * else renders. Everything after it — task fields, child results, messages, recall — is authored
  * by employees, requesters or prior turns, and none of it may be read as platform instruction.
