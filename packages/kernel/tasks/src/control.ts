@@ -242,8 +242,18 @@ export interface HaltWorkforceOutcome {
  * SAME LOCKS, SAME ORDER as `cancelTaskCascade`, on a strict subset of its rows: `lockRootFirst`
  * (one row here — a root's `ancestryPath` is empty) then `lockDescendants` inside
  * `cancelDescendants`, shallowest first, ties by task id. No ledger row is touched, so the
- * tasks -> ledger rank cannot be inverted. Terminality is re-checked from the LOCKED row, never
- * from the scan's snapshot. The retry mirrors the cascade's for the same reason it exists there.
+ * tasks -> ledger rank cannot be inverted. The retry mirrors the cascade's for the same reason it
+ * exists there.
+ *
+ * WHAT THE ROOT LOCK IS FOR, stated precisely because it is NOT what it looks like. It is not
+ * protecting a re-read: terminal is absorbing (every terminal row of `ALLOWED_TRANSITIONS` is
+ * all-false), so a terminal snapshot is already a terminal row — the same reasoning
+ * `lockDescendants` states for skipping terminal descendants. It is protecting the ORDER. Every
+ * other operation on this subtree holds the root before it touches a descendant, so a transaction
+ * that locked descendants WITHOUT the root would hold a different row set from everything it can
+ * race, which is how a cycle opens. Taking it makes this path's acquisition a prefix of
+ * `cancelTaskCascade`'s, not a new order. The terminality re-check below is fail-closed defence on
+ * top of that, and is unreachable while the state machine holds.
  */
 async function cancelSubtreeUnderTerminalRoot(
   tdb: TenantDb,
@@ -256,9 +266,9 @@ async function cancelSubtreeUnderTerminalRoot(
         if (!isTaskStatus(locked.status)) {
           throw new TaskRowCorruptError(locked.taskId, `status '${locked.status}'`);
         }
-        // It moved under us between the scan and the lock: it is the live case after all, and this
-        // is not the function that handles it. The caller's next halt covers it; nothing is
-        // written here on a snapshot that no longer holds.
+        // Unreachable while the state machine holds (terminal is absorbing), so this is defence,
+        // not a race handler: if a row ever did leave a terminal status, the live case is the
+        // caller's other branch and this function must write nothing rather than guess.
         if (!isTerminalStatus(locked.status)) return { cancelled: [], signalled: [] };
         return await cancelDescendants(tx, locked, input.actor);
       });
