@@ -804,9 +804,16 @@ describe.skipIf(!canRun)(
         caught,
         'a lost journal head appended silently — the unique index is not the guard',
       ).toBeDefined();
-      const text = `${String(caught)} ${JSON.stringify(caught, Object.getOwnPropertyNames(Object(caught)))}`;
-      expect(text).toMatch(/23505|duplicate key value/);
-      expect(text).toContain('run_events_tenant_run_seq_idx');
+      // Asserted on the driver's TYPED cause rather than on message text: the SQLSTATE and the index
+      // name are the two facts that identify this failure, and a message match would keep passing
+      // against a different duplicate-key error somewhere else in the insert.
+      const cause = (caught as { cause?: { code?: string; constraint_name?: string } }).cause;
+      expect(cause?.code, `not a unique violation: ${String(caught)}`).toBe('23505');
+      expect(cause?.constraint_name).toBe('run_events_tenant_run_seq_idx');
+      // …and the seq it collided on is the FIRST one, which is what a reset counter allocates.
+      expect((caught as { cause?: { detail?: string } }).cause?.detail).toMatch(
+        /Key \(tenant_id, run_id, seq\)=\(.*, 1\) already exists\./,
+      );
       armsRan += 1;
     }, 180_000);
 
