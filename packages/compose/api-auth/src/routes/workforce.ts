@@ -17,8 +17,18 @@
  * dropped, never served verbatim. Ownership is probed on the tenant-scoped task row BEFORE
  * streaming — a foreign or absent task id is a uniform 404, no existence leak.
  *
+ * THE TWO DECISION DOORS ALSO KEEP THE ROW'S OWN AUTHORIZATION. An approval's `approver` and a
+ * review's `reviewer` are accountability facts the engine journals (and the approval timeout sweep
+ * MINTS one when it escalates to the requester's declared superior), so `store:write` alone is not
+ * enough to resolve a row addressed to someone else: the engine compares the SERVER-DERIVED actor
+ * against the recorded decider. `approver: 'user'` stays the open sentinel — the deployment's human
+ * operator surface, and the shipped single-operator posture is unchanged. The break-glass path
+ * (`override: true` on the body AND the `workforce:override` permission) exists so an unavailable
+ * decider never wedges a deployment, and lands in the journal so the trail stays honest.
+ *
  * Errors map typed: an unknown task/approval/review → 404 (uniform with foreign), a second decision
- * on a resolved approval or review → 409, a verdict aimed at a park waiting on a DIFFERENT review
+ * on a resolved approval or review → 409, a decision on a row that names a DIFFERENT decider → 403
+ * naming who it names, a verdict aimed at a park waiting on a DIFFERENT review
  * → 409 (the stale-inbox interleaving; nothing was written), a drain that cannot complete inside
  * the HTTP window → 504 (the pause itself is already in force — the response says exactly that).
  * Every typed engine refusal that can reach a route belongs in `mapEngineError`: one that does not
@@ -29,6 +39,7 @@ import { ApiError } from '@rayspec/auth-core';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import {
   ApprovalAlreadyDecidedError,
+  ApprovalApproverMismatchError,
   ApprovalNotFoundError,
   applyReviewVerdict,
   approvalDecisionSchema,
@@ -46,6 +57,7 @@ import {
   ReviewAlreadyDecidedError,
   ReviewNotForParkError,
   ReviewNotFoundError,
+  ReviewReviewerMismatchError,
   ReviewTaskStateError,
   readWorkforceRuntime,
   resolveWorkforceBudgets,
@@ -66,7 +78,12 @@ import { z } from 'zod';
 import type { AppDeps, AppEnv, WorkforceControl, WorkforceGoalIntake } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { replayJournalEventsAsSse, resolveLastEventId } from '../http/journal-replay.js';
-import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
+import {
+  enforcePermission,
+  requireAuth,
+  requirePermission,
+  resolveTenant,
+} from '../http/middleware.js';
 
 /**
  * The journal actor: the VERIFIED principal, never a client-asserted name. `requireAuth()` runs
@@ -79,6 +96,34 @@ function actorFrom(c: Context<AppEnv>): string {
   if (p?.kind === 'user' && p.userId !== undefined) return `user:${p.userId}`;
   if (p?.apiKeyId !== undefined) return `api-key:${p.apiKeyId}`;
   return 'principal:unresolved';
+}
+
+/**
+ * BREAK-GLASS on a workforce decision, resolved to the flag the engine accepts.
+ *
+ * An approval's `approver` and a review's `reviewer` bind their decision door (@rayspec/tasks
+ * decision-authority.ts). A deployment must never be permanently wedged by a named decider who has
+ * gone unavailable — but "the override happened" has to be a DELIBERATE, ATTRIBUTED act, so it
+ * takes TWO independent things, and neither alone does anything:
+ *
+ *  1. the request ASKS (`override: true` on the strict body) — intent, never authority;
+ *  2. the principal HOLDS `workforce:override` — authority, checked server-side through the very
+ *     same `enforcePermission` gate the route's `store:write` middleware used (live membership for
+ *     this sensitive permission, an `authz_denied` audit row on refusal, a 403 naming the gap).
+ *
+ * A caller that asks without the permission gets that 403 rather than a silent downgrade to an
+ * ordinary decision, whose refusal would then name the wrong problem. A caller that HOLDS the
+ * permission but did not ask overrides nothing — holding an administrative role must not quietly
+ * dissolve someone else's recorded accountability.
+ */
+async function breakGlassAuthorized(
+  deps: AppDeps,
+  c: Context<AppEnv>,
+  asked: boolean,
+): Promise<boolean> {
+  if (!asked) return false;
+  await enforcePermission(deps, c, 'workforce:override');
+  return true;
 }
 
 const DEFAULT_PAGE = 50;
@@ -250,6 +295,25 @@ function mapEngineError(err: unknown): never {
   }
   if (err instanceof ApprovalAlreadyDecidedError) {
     throw new ApiError('CONFLICT', 'The approval is already decided.');
+  }
+  // The decision doors' authority refusals. 403 rather than 404: the caller is an authenticated
+  // `store:write` member of THIS tenant and the row is theirs to see — what they lack is the
+  // identity the row names. `details` carries that name so the refusal is ACTIONABLE (route it to
+  // that principal, or break the glass); it is a tenant-internal declared id, disclosed only to a
+  // principal already able to list the row through the inbox route.
+  if (err instanceof ApprovalApproverMismatchError) {
+    throw new ApiError(
+      'FORBIDDEN',
+      'This approval names a different approver. Decide it as that principal, or re-send with `override: true` if you hold workforce:override.',
+      { approver: err.approver },
+    );
+  }
+  if (err instanceof ReviewReviewerMismatchError) {
+    throw new ApiError(
+      'FORBIDDEN',
+      'This review names a different reviewer. Decide it as that principal, or re-send with `override: true` if you hold workforce:override.',
+      { reviewer: err.reviewer },
+    );
   }
   if (err instanceof WorkforceDrainTimeoutError) {
     throw new ApiError(
@@ -744,12 +808,17 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const workforce = requireWorkforce(deps);
       const tdb = tenantHandle(deps, c.get('tenantId'));
       const body = decideRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
+      // The break-glass gate runs BEFORE the engine call: a caller that asked to override without
+      // the permission gets the named 403 here, never a mismatch error that describes the wrong
+      // problem — and never a decision.
+      const override = await breakGlassAuthorized(deps, c, body.override);
       try {
         const approval = await decideApproval(tdb, {
           approvalId: c.req.param('id'),
           decision: body.decision,
           ...(body.reason !== undefined ? { reason: body.reason } : {}),
           decidedBy: actorFrom(c),
+          overrideNamedApprover: override,
         });
         workforce.kick();
         return c.json(approval as unknown as Record<string, unknown>, 200);
@@ -792,6 +861,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       const tdb = tenantHandle(deps, c.get('tenantId'));
       const body = reviewVerdictSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
       const reviewId = c.req.param('id');
+      const override = await breakGlassAuthorized(deps, c, body.override);
       try {
         // Resolve the round ceiling from the task's own workforce declaration (a bare platform
         // task reviews under the empty declaration — no ceiling, never a guessed one).
@@ -822,6 +892,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
           reasons: body.reasons,
           requiredChanges: body.requiredChanges,
           actor: actorFrom(c),
+          overrideNamedReviewer: override,
         });
         workforce.kick();
         return c.json(

@@ -192,76 +192,98 @@ export function tenantDb(c: Context<Env>, deps: AppDeps): TenantDb {
  * requirePermission — the authz chokepoint. For a SENSITIVE permission it does a LIVE membership
  * lookup (never the JWT claim); for read-mostly permissions the claim role is acceptable. An
  * api-key principal is additionally gated by its scopes. A deny is a 403 (and audits it).
+ *
+ * The gate itself lives in `enforcePermission` so a handler can demand a SECOND permission for one
+ * privileged branch of a route (the workforce break-glass override) through the SAME code — one
+ * authorization implementation, not two.
  */
 export function requirePermission(deps: AppDeps, permission: Permission): MiddlewareHandler<Env> {
   return async (c, next) => {
-    const principal = c.get('principal');
-    if (!principal) throw unauthenticated();
-    const tenantId = c.get('tenantId');
-    if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
-
-    const auditDeny = async () => {
-      await deps.auditStore
-        .append(
-          {
-            event: 'authz_denied',
-            actorUserId: principal.userId ?? null,
-            actorOrgId: tenantId,
-            meta: { permission },
-          },
-          c.get('requestId'),
-        )
-        .catch(() => {});
-    };
-
-    let effectiveRole = principal.role;
-    if (isSensitive(permission)) {
-      // LIVE membership lookup — the JWT/session claim is NOT trusted for sensitive/mutating ops.
-      if (principal.kind === 'user' && principal.userId) {
-        const live = await deps.identityStore.liveMembership(principal.userId, tenantId);
-        if (!live) {
-          c.set('principal', { ...principal, role: undefined });
-          await auditDeny();
-          // Stays BARE (no `missing_permission` hint). This is a MEMBERSHIP failure, not a scope
-          // gap: a principal that was revoked/removed from the tenant since its token was minted may
-          // still HOLD `permission` via its (now-stale) role claim — labeling this `missing_permission`
-          // would mislead. The honest 403 here is the uniform bare `Forbidden.`; the scope-gap hint
-          // belongs only at the authorize()==false site below.
-          throw forbidden();
-        }
-        effectiveRole = live.role;
-        // Keep the live role on the principal for the handler.
-        c.set('principal', { ...principal, role: live.role });
-      } else {
-        // An api-key / m2m principal has no user membership; the KEY itself IS the live credential
-        // (no stale-claim problem — same as a non-sensitive api-key op). It does NOT get the
-        // membership recheck; it falls through to authorize(), which gates by the api-key-grantable
-        // SET ∩ scopes. The org-MANAGEMENT sensitive ops (apikey:mint/revoke, org:member:change,
-        // org:switch) are NOT in that set, so authorize() still denies them outright; only a
-        // sensitive op that IS api-key-grantable (store:write — a programmatic data write the
-        // deployer explicitly scoped at mint) is allowed. So an api-key can never perform an
-        // org-management sensitive op, but CAN write product data when scoped. (No bespoke recheck
-        // — authorize() is the single grantable-set authority.)
-      }
-    }
-
-    const ok = authorize(
-      { userId: principal.userId, role: effectiveRole, scopes: principal.scopes },
-      permission,
-      { isApiKey: principal.kind === 'apikey' || principal.kind === 'm2m' },
-    );
-    if (!ok) {
-      await auditDeny();
-      // Name the missing permission so an AUTHENTICATED operator sees a *scope/role* gap is the
-      // cause, rather than a bare `{code:"FORBIDDEN"}`. This throw is reached ONLY past the
-      // authenticated-principal (401) and tenant (404) checks above — the caller is a valid
-      // member/credential of THIS tenant — and `authorize()` returned false, i.e. the role does not
-      // grant `permission` (user) or the permission is outside the api-key's granted scope ∩
-      // grantable set (api-key). Both are a true "you lack `permission`" gap, so the hint is accurate
-      // and safe. Unauthenticated (401) and cross-tenant (404) responses never reach here, so they
-      // stay bare — no existence/scope leak.
-      throw forbidden('Forbidden.', { missing_permission: permission });
-    }
+    await enforcePermission(deps, c, permission);
     await next();
   };
+}
+
+/**
+ * The gate `requirePermission` wraps, callable DIRECTLY from a handler when one branch of a route
+ * needs more than the permission its middleware already demanded — the workforce decision doors ask
+ * for `workforce:override` only on a request that actually asks to break the glass, so an ordinary
+ * decision never pays for a second live-membership lookup.
+ *
+ * Identical semantics on every path: live membership for a sensitive permission, api-key scopes ∩
+ * the grantable set for a machine principal, an `authz_denied` audit row on refusal, and a 403 that
+ * names the missing permission. Throws; returns void on success.
+ */
+export async function enforcePermission<E extends { Variables: AppVariables }>(
+  deps: AppDeps,
+  c: Context<E>,
+  permission: Permission,
+): Promise<void> {
+  const principal = c.get('principal');
+  if (!principal) throw unauthenticated();
+  const tenantId = c.get('tenantId');
+  if (!tenantId) throw new ApiError('NOT_FOUND', 'Not found.');
+
+  const auditDeny = async () => {
+    await deps.auditStore
+      .append(
+        {
+          event: 'authz_denied',
+          actorUserId: principal.userId ?? null,
+          actorOrgId: tenantId,
+          meta: { permission },
+        },
+        c.get('requestId'),
+      )
+      .catch(() => {});
+  };
+
+  let effectiveRole = principal.role;
+  if (isSensitive(permission)) {
+    // LIVE membership lookup — the JWT/session claim is NOT trusted for sensitive/mutating ops.
+    if (principal.kind === 'user' && principal.userId) {
+      const live = await deps.identityStore.liveMembership(principal.userId, tenantId);
+      if (!live) {
+        c.set('principal', { ...principal, role: undefined });
+        await auditDeny();
+        // Stays BARE (no `missing_permission` hint). This is a MEMBERSHIP failure, not a scope
+        // gap: a principal that was revoked/removed from the tenant since its token was minted may
+        // still HOLD `permission` via its (now-stale) role claim — labeling this `missing_permission`
+        // would mislead. The honest 403 here is the uniform bare `Forbidden.`; the scope-gap hint
+        // belongs only at the authorize()==false site below.
+        throw forbidden();
+      }
+      effectiveRole = live.role;
+      // Keep the live role on the principal for the handler.
+      c.set('principal', { ...principal, role: live.role });
+    } else {
+      // An api-key / m2m principal has no user membership; the KEY itself IS the live credential
+      // (no stale-claim problem — same as a non-sensitive api-key op). It does NOT get the
+      // membership recheck; it falls through to authorize(), which gates by the api-key-grantable
+      // SET ∩ scopes. The org-MANAGEMENT sensitive ops (apikey:mint/revoke, org:member:change,
+      // org:switch) are NOT in that set, so authorize() still denies them outright; only a
+      // sensitive op that IS api-key-grantable (store:write — a programmatic data write the
+      // deployer explicitly scoped at mint) is allowed. So an api-key can never perform an
+      // org-management sensitive op, but CAN write product data when scoped. (No bespoke recheck
+      // — authorize() is the single grantable-set authority.)
+    }
+  }
+
+  const ok = authorize(
+    { userId: principal.userId, role: effectiveRole, scopes: principal.scopes },
+    permission,
+    { isApiKey: principal.kind === 'apikey' || principal.kind === 'm2m' },
+  );
+  if (!ok) {
+    await auditDeny();
+    // Name the missing permission so an AUTHENTICATED operator sees a *scope/role* gap is the
+    // cause, rather than a bare `{code:"FORBIDDEN"}`. This throw is reached ONLY past the
+    // authenticated-principal (401) and tenant (404) checks above — the caller is a valid
+    // member/credential of THIS tenant — and `authorize()` returned false, i.e. the role does not
+    // grant `permission` (user) or the permission is outside the api-key's granted scope ∩
+    // grantable set (api-key). Both are a true "you lack `permission`" gap, so the hint is accurate
+    // and safe. Unauthenticated (401) and cross-tenant (404) responses never reach here, so they
+    // stay bare — no existence/scope leak.
+    throw forbidden('Forbidden.', { missing_permission: permission });
+  }
 }

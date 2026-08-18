@@ -176,6 +176,40 @@ bound at request time (the rule matched by the employee's capabilities). A decis
 VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
 for asserting an identity. The timeout sweep gives every hung approval its declared fate.
 
+**The engine keeps the authorization it writes.** An approval's `approver` and a review's
+`reviewer` are journaled as accountability facts, so the door compares them against the deciding
+principal rather than trusting `store:write` alone
+(`packages/kernel/tasks/src/decision-authority.ts`; matrix in `decision-authority.db.test.ts`):
+
+- `approver: user` — the deployment's human operator surface, and the only value the declared
+  grammar admits — is the OPEN sentinel: any permitted principal decides it, exactly as before.
+  This is the shipped single-operator posture and the regression guard pins it.
+- A row that NAMES a principal binds to it. The case that actually arises is the escalation: when
+  an `onTimeout: escalate` request times out, the sweep closes it and re-issues it to the
+  requester's DECLARED superior (`approver: <employeeId>`, journaled as
+  `workforce.approval.requested`). Only that principal may resolve it — the operator whose
+  inaction caused the escalation cannot. The refusal is a 403 naming who the row names, and it
+  writes nothing at all.
+- **Break-glass** keeps an unavailable decider from wedging a deployment, and takes two
+  independent things so it can never happen by accident: the request must ASK (`override: true`,
+  or `--override` on the CLI) and the principal must HOLD `workforce:override` (an `owner`/`admin`
+  permission, deliberately never grantable to an API key — the override exists to record which
+  *human* contradicted a named human). The journal then carries `overriddenApprover` /
+  `overriddenReviewer`, so the trail says what happened instead of leaving `decided_by` to
+  contradict the recorded decider silently.
+
+At the HTTP door this means an escalated approval is **always** reached through break-glass, not
+usually: a principal authenticates as `user:<id>` / `api-key:<id>` and a named approver is a
+declared employee id, so the two namespaces are structurally disjoint and the comparison cannot
+match. That is the deliberate fail-closed reading — open core carries no principal-to-employee
+binding, and the honest answer to "we cannot verify this caller is `ops_lead`" is to demand the
+override and record it. There is no second route for an approval: `decideApproval` has exactly one
+caller (the HTTP door), no tool decides an approval, and the escalation dispatches no turn — so an
+escalated approval ends either in a break-glass decision or, when its window expires, in the
+terminal `fail` fate the re-issued request carries. (A named *reviewer* is the different case: a
+review verdict does arrive through that reviewer's own dispatched turn, where the actor IS the
+employee id and `apply-intents.ts` already re-checks it.)
+
 ## Budget scopes
 
 Ceilings live in a reservation ledger keyed `(scope, calendar window)` with four scope kinds in

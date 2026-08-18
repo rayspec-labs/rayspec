@@ -14,12 +14,22 @@
  * `applyReviewVerdictInTx` is the in-transaction entry for callers that already hold the task
  * locks (a turn's final application); `applyReviewVerdict` wraps it in its own transaction for
  * the HTTP verdict route.
+ *
+ * THE ROW'S `reviewer` BINDS ITS DECIDER (decision-authority.ts), exactly as an approval's
+ * `approver` does — the verdict event journals `reviewer` beside `decidedBy`, and a door that let
+ * the two disagree would be writing an accountability claim it does not keep. `'user'` stays the
+ * open sentinel (a policy that falls back to the human decides through any permitted principal);
+ * a NAMED reviewer must be the actor, or an authorized break-glass override must say so — and the
+ * journal then records it (`overriddenReviewer`). The dispatched-reviewer turn already satisfies
+ * this: apply-intents.ts refuses a `submit_review` whose `review.reviewer !== task.owner` and then
+ * passes that same owner as the actor.
  */
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import type { WorkforceBudgets } from './budget.js';
+import { mayDecide } from './decision-authority.js';
 import { TaskNotFoundError } from './errors.js';
 import { appendTaskEvents } from './events.js';
 import { joinPolicySchema } from './join.js';
@@ -107,22 +117,60 @@ export class ReviewNotForParkError extends Error {
   }
 }
 
+/**
+ * A verdict on a review this task NAMED someone else to give. The row's `reviewer` rides into the
+ * `workforce.review.decided` event beside `decidedBy`; letting the two disagree silently would
+ * make the journal's own two fields contradict each other.
+ */
+export class ReviewReviewerMismatchError extends Error {
+  readonly reviewId: string;
+  /** Who the row names. */
+  readonly reviewer: string;
+  /** Who tried. */
+  readonly actor: string;
+  constructor(reviewId: string, reviewer: string, actor: string) {
+    super(
+      `review '${reviewId}' names '${reviewer}' as its reviewer — '${actor}' is not that ` +
+        'principal, and the verdict event journals that name beside the decider. Decide it as the ' +
+        'named reviewer, or break the glass with the override permission (the journal records the ' +
+        'override). Fail-closed.',
+    );
+    this.name = 'ReviewReviewerMismatchError';
+    this.reviewId = reviewId;
+    this.reviewer = reviewer;
+    this.actor = actor;
+  }
+}
+
 export const reviewVerdictSchema = z.strictObject({
   verdict: z.enum(['accept', 'reject']),
   reasons: z.array(z.string().min(1)).default([]),
   requiredChanges: z.array(z.string().min(1)).default([]),
+  /**
+   * BREAK-GLASS INTENT — never break-glass AUTHORITY. See `approvalDecisionSchema.override`: a door
+   * that admits this ANDs it with a server-side permission check before setting
+   * `overrideNamedReviewer`.
+   */
+  override: z.boolean().default(false),
 });
 
-export type ReviewVerdictInput = z.output<typeof reviewVerdictSchema> & {
+export type ReviewVerdictInput = Omit<z.output<typeof reviewVerdictSchema>, 'override'> & {
   readonly reviewId: string;
   readonly actor: string;
+  /**
+   * The caller has VERIFIED that this principal may override a named reviewer. Set only where a
+   * request both asked for the override and passed the permission gate; it lands in the journal as
+   * `overriddenReviewer`.
+   */
+  readonly overrideNamedReviewer?: boolean;
 };
 
 /**
  * Apply one verdict INSIDE an already-open transaction. Protocol, in lock-rank order:
  *
- *   1. Plain-read the review row — an unknown id or an already-decided review is a typed refusal
- *      before any lock is taken.
+ *   1. Plain-read the review row — an unknown id, an already-decided review, or an actor the row
+ *      did not name (absent an authorized override) is a typed refusal before any lock is taken,
+ *      and before anything at all is written.
  *   2. Take THE TASK LOCK ORDER on the reviewed task (`lockRootFirst`) — before the review-row
  *      CAS and before any write, the module-header rule.
  *   3. Re-check the park under the lock. A task no longer in `waiting_for_review` means a racer's
@@ -143,6 +191,12 @@ export async function applyReviewVerdictInTx(
   const pending = reviewRows[0];
   if (!pending) throw new ReviewNotFoundError(input.reviewId);
   if (pending.verdict !== null) throw new ReviewAlreadyDecidedError(input.reviewId);
+  // WHO THE ROW NAMES. `reviewer` is written once when the review is opened and never updated, so
+  // this plain read is authoritative; the `verdict IS NULL` CAS below remains the race arbiter.
+  const overrode = !mayDecide(pending.reviewer, input.actor);
+  if (overrode && input.overrideNamedReviewer !== true) {
+    throw new ReviewReviewerMismatchError(input.reviewId, pending.reviewer, input.actor);
+  }
 
   const taskRows = (await tx
     .select(schema.workforceTasks)
@@ -209,6 +263,9 @@ export async function applyReviewVerdictInTx(
         reasons: input.reasons,
         requiredChanges: input.requiredChanges,
         outcome,
+        // PRESENT ONLY ON A BREAK-GLASS VERDICT — the one case where `decidedBy` does not answer
+        // to `reviewer`, said out loud rather than left for a reader to notice.
+        ...(overrode ? { overriddenReviewer: review.reviewer } : {}),
       },
     },
   ]);
