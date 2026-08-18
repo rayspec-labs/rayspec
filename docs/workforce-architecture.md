@@ -341,11 +341,28 @@ pg_restore --exit-on-error --no-owner --no-privileges \
   -d "postgres://…@…/rayspec_restored" workforce-….dump
 ```
 
-Then point `DATABASE_URL` at the restored database and boot normally. **`--exit-on-error` is not
-optional polish:** without it `pg_restore` prints errors and still exits 0, and a half-restored task
-graph is exactly the failure this section exists to prevent. `--no-owner --no-privileges` let the
-restore land under whatever role the new host uses instead of failing on a role that does not exist
-there.
+Then point `DATABASE_URL` at the restored database and boot normally. `--no-owner --no-privileges`
+let the restore land under whatever role the new host uses instead of failing on a role that does
+not exist there.
+
+**What `--exit-on-error` does, and what it does not do.** It does **not** rescue the exit code:
+`pg_restore` exits **1** when it hits an error either way, so `$?` is a reliable signal with or
+without the flag — check it, and do not skip checking it because the flag is present. What the flag
+changes is **where the restore stops**, and therefore how quickly you can name what went wrong.
+Measured against `pg_restore` 16.13, restoring a three-table dump into a database where the first
+table already existed:
+
+| | exit | what landed |
+|---|---|---|
+| clean restore, either way (the control) | 0 | everything |
+| error, **without** the flag | 1 | everything it could — it presses on, then reports the damage as a single `warning: errors ignored on restore: 2` at the end of a long log |
+| error, **with** the flag | 1 | it halts at the first failure, so the two later tables were **never created at all** |
+
+So the flag leaves you with *less*, on purpose: an obviously incomplete database and an error
+message sitting at the point of failure, rather than a nearly-complete one whose one missing piece is
+summarized in a line that scrolls past. For a task graph that is the trade you want — a restore that
+is visibly unfinished is recoverable, and one you believe is complete is not. Pass the flag, and
+still check `$?`.
 
 ### The two values that decide whether the restore is usable
 
