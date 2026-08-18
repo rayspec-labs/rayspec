@@ -261,6 +261,111 @@ async function assertClaimOwnership(tx: TenantDb, input: ApplyTurnInput): Promis
 }
 
 /**
+ * Open the ONE review this turn asks for, IDEMPOTENTLY — the durable second layer beneath the
+ * receipt.
+ *
+ * The receipt read at the top of this module is the primary guard and stays that. This is the layer
+ * the DATABASE enforces: `workforce_reviews_turn_receipt_idx` is a partial UNIQUE on
+ * `(tenant_id, task_id, turn_number)`, so a re-applied turn whose receipt is somehow absent — a
+ * repaired or partially restored database; any future refactor that moves this write out of the
+ * receipt's transaction — collides here instead of writing a second row. `onConflictDoNothing`
+ * makes that collision a NO-OP rather than an error surfacing to the caller, and the replay then
+ * CONVERGES on the row the first application wrote: the id it returns is that row's, so the park
+ * binding and the journal entry name the review that actually exists.
+ *
+ * `turn_number` and not `round`: `round` is derived from the rows that already exist
+ * (`reviewRoundsUsed + 1`), so a replay computes a different one and would not collide at all.
+ */
+async function openReview(
+  tx: TenantDb,
+  taskId: string,
+  turnNumber: number,
+  reviewer: string,
+  round: number,
+): Promise<string> {
+  const inserted = (await tx
+    .insert(schema.workforceReviews, { taskId, reviewer, round, turnNumber })
+    .onConflictDoNothing()
+    .returning({ id: schema.workforceReviews.id })) as { id: string }[];
+  const fresh = inserted[0];
+  if (fresh) return fresh.id;
+  const existing = (await tx
+    .select(schema.workforceReviews, { id: schema.workforceReviews.id })
+    .where(
+      and(
+        eq(schema.workforceReviews.taskId, taskId),
+        eq(schema.workforceReviews.turnNumber, turnNumber),
+      ),
+    )) as { id: string }[];
+  const row = existing[0];
+  if (!row) {
+    // The insert wrote nothing AND no row for this (task, turn) exists — the only conflict target
+    // is this turn's own key, so this is unreachable. Fail LOUD rather than return a guessed id.
+    throw new TurnStateError(
+      taskId,
+      `the review for turn ${turnNumber} neither inserted nor exists — refusing to bind a park to a review that is not there`,
+    );
+  }
+  return row.id;
+}
+
+/**
+ * Open the ONE approval this turn asks for, IDEMPOTENTLY. Same shape and same reasoning as
+ * `openReview` above, under `workforce_approvals_turn_receipt_idx`.
+ *
+ * The sweep's escalation re-issue (approvals.ts) does NOT come through here: it opens a request
+ * with no turn at all, writes `turn_number = NULL`, and is excluded by the index's partial
+ * predicate — its dedupe is the `status = 'pending'` compare-and-swap that claimed the row it
+ * escalates, and a total UNIQUE would have broken that chain.
+ */
+async function openApproval(
+  tx: TenantDb,
+  taskId: string,
+  turnNumber: number,
+  request: {
+    question: string;
+    options: readonly string[];
+    approver: string;
+    timeoutAt: Date;
+    onTimeout: string;
+    escalateTo: string | null;
+  },
+): Promise<string> {
+  const inserted = (await tx
+    .insert(schema.workforceApprovals, {
+      taskId,
+      question: request.question,
+      options: request.options,
+      approver: request.approver,
+      status: 'pending',
+      timeoutAt: request.timeoutAt,
+      onTimeout: request.onTimeout,
+      escalateTo: request.escalateTo,
+      turnNumber,
+    })
+    .onConflictDoNothing()
+    .returning({ id: schema.workforceApprovals.id })) as { id: string }[];
+  const fresh = inserted[0];
+  if (fresh) return fresh.id;
+  const existing = (await tx
+    .select(schema.workforceApprovals, { id: schema.workforceApprovals.id })
+    .where(
+      and(
+        eq(schema.workforceApprovals.taskId, taskId),
+        eq(schema.workforceApprovals.turnNumber, turnNumber),
+      ),
+    )) as { id: string }[];
+  const row = existing[0];
+  if (!row) {
+    throw new TurnStateError(
+      taskId,
+      `the approval for turn ${turnNumber} neither inserted nor exists — refusing to journal an approval that is not there`,
+    );
+  }
+  return row.id;
+}
+
+/**
  * Is this task the REVIEW CHILD its parent's park is bound to? Read from the parent's binding —
  * the same row the park lives on, so the fact cannot disagree with the park it describes. A plain
  * read: the parent is parked and moves only by a verdict, and a racing verdict only ever makes the
@@ -640,19 +745,14 @@ export async function applyTurnOutcome(
           break;
         }
         case 'request_approval': {
-          const inserted = await tx
-            .insert(schema.workforceApprovals, {
-              taskId: task.taskId,
-              question: plan.question,
-              options: plan.options,
-              approver: plan.approver,
-              status: 'pending',
-              timeoutAt: new Date(Date.now() + plan.timeoutMs),
-              onTimeout: plan.onTimeout,
-              escalateTo: plan.escalateTo,
-            })
-            .returning({ id: schema.workforceApprovals.id });
-          const approvalId = (inserted[0] as { id: string }).id;
+          const approvalId = await openApproval(tx, task.taskId, input.turnNumber, {
+            question: plan.question,
+            options: plan.options,
+            approver: plan.approver,
+            timeoutAt: new Date(Date.now() + plan.timeoutMs),
+            onTimeout: plan.onTimeout,
+            escalateTo: plan.escalateTo,
+          });
           await appendTaskEvents(tx, task.taskId, [
             {
               type: 'workforce.approval.requested',
@@ -676,17 +776,17 @@ export async function applyTurnOutcome(
           break;
         }
         case 'request_review': {
-          const inserted = await tx
-            .insert(schema.workforceReviews, {
-              taskId: task.taskId,
-              reviewer: plan.reviewer,
-              round: plan.round,
-            })
-            .returning({ id: schema.workforceReviews.id });
+          const reviewId = await openReview(
+            tx,
+            task.taskId,
+            input.turnNumber,
+            plan.reviewer,
+            plan.round,
+          );
           // A model-initiated review answers to the EXECUTION ceiling alone — no declared policy
           // stands behind it, so the binding carries none and the verdict path uses the budgets'.
           await bindReviewPark(tx, task.taskId, {
-            reviewId: (inserted[0] as { id: string }).id,
+            reviewId,
             reviewTaskId: null,
             maxRounds: null,
           });
@@ -694,7 +794,7 @@ export async function applyTurnOutcome(
             {
               type: 'workforce.review.requested',
               payload: {
-                reviewId: (inserted[0] as { id: string }).id,
+                reviewId,
                 taskId: task.taskId,
                 reviewer: plan.reviewer,
                 round: plan.round,
@@ -745,14 +845,13 @@ export async function applyTurnOutcome(
               })
               .where(eq(schema.workforceTasks.taskId, task.taskId));
           }
-          const inserted = await tx
-            .insert(schema.workforceReviews, {
-              taskId: task.taskId,
-              reviewer: plan.reviewer,
-              round: plan.round,
-            })
-            .returning({ id: schema.workforceReviews.id });
-          const reviewId = (inserted[0] as { id: string }).id;
+          const reviewId = await openReview(
+            tx,
+            task.taskId,
+            input.turnNumber,
+            plan.reviewer,
+            plan.round,
+          );
           let reviewTaskId: string | null = null;
           // The reviewer child skips the delegation depth ceiling DELIBERATELY (like the escalation
           // child): review dispatch cannot recurse, and that is now enforced rather than argued —
