@@ -66,7 +66,7 @@ const DECLARED = WorkforceSpec.parse({
       reviewer: 'qa',
       requireWhen: { confidenceBelow: 0.75 },
       onReject: 'rework',
-      maxRounds: 2,
+      maxReviewRounds: 2,
     },
   ],
 });

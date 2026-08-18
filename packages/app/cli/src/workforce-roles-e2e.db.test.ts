@@ -178,7 +178,7 @@ workforce:
       reviewer: qa
       requireWhen: { confidenceBelow: 0.75 }
       onReject: rework
-      maxRounds: 3
+      maxReviewRounds: 3
 `;
 
 function adminUrl(url: string): string {

@@ -482,8 +482,8 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       spec: {
         name: 'request_approval',
         description:
-          'End this turn by asking a human for a decision. The declared approval rule covering ' +
-          'your capabilities supplies the timeout and its fate.',
+          'End this turn by asking a human for a decision. The declared approval policy covering ' +
+          'your labels supplies the timeout and its fate.',
         parameters: {
           type: 'object',
           properties: {

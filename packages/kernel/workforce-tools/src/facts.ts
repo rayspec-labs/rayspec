@@ -22,7 +22,7 @@ export interface ApplicableReviewRuleFact {
   /** Fires on a submitted confidence below this — the self-report heuristic; null when unkeyed. */
   readonly confidenceBelow: number | null;
   /** Fires UNCONDITIONALLY when the employee holds one of these labels (the enforcement branch). */
-  readonly firesOnCapabilities: readonly string[];
+  readonly firesOnLabels: readonly string[];
   readonly maxRounds: number;
 }
 
@@ -36,7 +36,7 @@ export interface TurnFacts {
   /** Declared review rules covering this employee, declaration order. */
   readonly reviewRules: readonly ApplicableReviewRuleFact[];
   /**
-   * The declared approval rule covering this employee's capabilities — null when none matches,
+   * The declared approval policy covering this employee's labels — null when none matches,
    * and null for a seat whose toolset carries no `request_approval` at all (worker, reviewer):
    * a fact the seat cannot act on is not a fact for its turn, and stating one would tell the
    * model about a tool the runtime will refuse.
@@ -132,8 +132,8 @@ function applicableReviewRules(
       id: rule.id,
       reviewer: rule.reviewer,
       confidenceBelow: rule.requireWhen.confidenceBelow ?? null,
-      firesOnCapabilities: (rule.requireWhen.capabilities ?? []).filter((label) =>
-        employee.capabilities.includes(label),
+      firesOnLabels: (rule.requireWhen.labels ?? []).filter((label) =>
+        employee.labels.includes(label),
       ),
       maxRounds: rule.maxRounds,
     }));

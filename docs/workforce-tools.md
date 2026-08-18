@@ -59,8 +59,8 @@ urgent child can never out-spend or out-count its scopes.
 
 Every linkage a model must not choose is injected by the trusted layer, never read from
 arguments: the review id a verdict targets comes from the parent's park binding, the escalation
-target from the declared reporting edge, the approval window and fate from the rule matching the
-employee's declared capabilities. Arguments carrying a forged linkage are refused at the schema.
+target from the declared reporting edge, the approval window and fate from the policy matching the
+employee's declared labels. Arguments carrying a forged linkage are refused at the schema.
 
 ## The structured result
 
@@ -108,4 +108,4 @@ keyed by child task id — never summaries, never completion-ordered.
   sit behind.
 - **[Workforce events](./workforce-events.md)** — what each ending journals.
 - **[Spec reference → workforce](./spec-reference.md#workforce-experimental)** — roles,
-  capabilities, and the policies that route these tools' output.
+  policy labels, and the policies that route these tools' output.

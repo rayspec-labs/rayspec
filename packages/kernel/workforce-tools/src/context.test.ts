@@ -225,10 +225,7 @@ describe('assembleTurnInput', () => {
   it('refuses a mandatory config-derived section that outgrows its budget, typed', () => {
     const employee = {
       ...(config.employees.get('dev') as NonNullable<ReturnType<typeof config.employees.get>>),
-      capabilities: Array.from(
-        { length: 200 },
-        (_, index) => `capability_${index}_${'x'.repeat(20)}`,
-      ),
+      labels: Array.from({ length: 200 }, (_, index) => `label_${index}_${'x'.repeat(20)}`),
     };
     expect(() => assembleTurnInput(inputFor({ employee }))).toThrow(ContextSectionOverflowError);
   });

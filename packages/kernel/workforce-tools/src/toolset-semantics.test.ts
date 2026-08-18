@@ -298,7 +298,7 @@ describe('escalation and reviews', () => {
       ...config,
       employees: new Map(config.employees).set('lead', {
         ...(config.employees.get('lead') as WorkforceEmployeeConfig),
-        capabilities: ['public_statement'],
+        labels: ['public_statement'],
       }),
     };
     const { call, collector } = turnWith(topSeatCovered, 'lead');
@@ -312,7 +312,7 @@ describe('escalation and reviews', () => {
     expect(collected.malformed).not.toBeNull();
   });
 
-  it('request_approval pulls the declared window for the caller capabilities and names the escalation target', () => {
+  it('request_approval pulls the declared window for the caller labels and names the escalation target', () => {
     const { call, collector } = turnFor('cmo');
     call('request_approval', { question: 'Publish the statement?' });
     expect(collector.finish().intent).toMatchObject({
@@ -436,7 +436,7 @@ describe('the declared-policy matcher never lets a submitter decide their own wo
         id: 'growth_self',
         appliesTo: { department: 'growth' },
         reviewer: 'cmo',
-        requireWhen: { capabilities: ['public_statement'] },
+        requireWhen: { labels: ['public_statement'] },
         onReject: 'rework' as const,
         maxRounds: 2,
       },
