@@ -509,29 +509,45 @@ describe.skipIf(!hasDb)('the goal intake (db)', () => {
         await holderMayCommit;
       });
       await holderReady;
-      expect(holderPid, 'the holder must report a real backend pid').toBeGreaterThan(0);
 
-      // Started, deliberately NOT awaited: it must be in flight and blocked while we inspect it.
-      const settled = intakeWith(oneStep())
-        .submitGoal({
-          tenantId: TENANT,
-          workforceId: 'intake_wf',
-          goal: 'a goal racing a pause that has not committed yet',
-          requestedBy: 'user:u1',
-        })
-        .then(
-          (ok) => ({ kind: 'resolved' as const, ok }),
-          (err: unknown) => ({ kind: 'rejected' as const, err }),
-        );
+      // FROM HERE THE HOLDER EXISTS, SO EVERY PATH MUST RELEASE IT. Its transaction sits on the
+      // `workforce_runtime` row's exclusive lock; if this test throws without committing it, every
+      // later arm in this file wedges on that row until its own timeout — noise that buries the
+      // real failure. (Observed exactly that on the first R1 run.) `release` is idempotent, so the
+      // happy path releases where it must — before awaiting the submission, which cannot settle
+      // until the pause commits — and the `finally` is a backstop, not a second release.
+      //
+      // The `try` opens HERE, not after the submission is started: the pid assertion and the
+      // `submitGoal(...)` construction both sit between the holder and the old `try`, and either
+      // throwing there would have leaked the transaction. A probe that can wedge the suite for a
+      // minute is worse than no probe.
+      let released = false;
+      const release = async (): Promise<void> => {
+        if (released) return;
+        released = true;
+        commitHolder();
+        await holder;
+      };
 
-      // Wait for a backend blocked BY THE HOLDER specifically. Everything from here to the commit
-      // runs inside try/finally: an assertion that throws must still release the holder, or its
-      // transaction keeps the runtime row locked and every later arm in this file wedges on it
-      // until its own timeout — noise that would bury the real failure. (Observed exactly that on
-      // the first R1 run, which is why this is a `finally` and not a trailing statement.)
-      let blockedPid = 0;
-      let taskLockModes: string[] = [];
       try {
+        expect(holderPid, 'the holder must report a real backend pid').toBeGreaterThan(0);
+
+        // Started, deliberately NOT awaited: it must be in flight and blocked while we inspect it.
+        const settled = intakeWith(oneStep())
+          .submitGoal({
+            tenantId: TENANT,
+            workforceId: 'intake_wf',
+            goal: 'a goal racing a pause that has not committed yet',
+            requestedBy: 'user:u1',
+          })
+          .then(
+            (ok) => ({ kind: 'resolved' as const, ok }),
+            (err: unknown) => ({ kind: 'rejected' as const, err }),
+          );
+
+        // Wait for a backend blocked BY THE HOLDER specifically.
+        let blockedPid = 0;
+        let taskLockModes: string[] = [];
         const deadline = Date.now() + 10_000;
         while (Date.now() < deadline) {
           const rows = (await db.$client.unsafe(
@@ -556,33 +572,35 @@ describe.skipIf(!hasDb)('the goal intake (db)', () => {
           )) as unknown as Array<{ mode: string }>;
           taskLockModes = rows.map((l) => l.mode);
         }
+
+        // The lock evidence is captured; let the pause commit so the blocked gate can decide.
+        await release();
+
+        expect(
+          blockedPid,
+          'THE GATE DID NOT BLOCK on the uncommitted pause, so it is NOT holding the runtime row ' +
+            'lock. An unlocked read leaves the ordering half of the proof gone while every serial ' +
+            'arm still passes — which is exactly the refactor this arm exists to catch.',
+        ).toBeGreaterThan(0);
+
+        // THE RANK: blocked on workforce_runtime, it must not already hold workforce_tasks.
+        expect(
+          taskLockModes,
+          'THE LOCK RANK IS INVERTED: the intake already holds a lock on `workforce_tasks` while ' +
+            'it waits for `workforce_runtime`. The gate must run BEFORE the first task write, so ' +
+            'this transaction takes runtime -> tasks and stays a prefix of every path it can race.',
+        ).toEqual([]);
+
+        const outcome = await settled;
+        expect(outcome.kind, 'the gate must refuse once the pause it waited for is committed').toBe(
+          'rejected',
+        );
+        if (outcome.kind !== 'rejected') throw new Error('unreachable');
+        expect(outcome.err).toBeInstanceOf(WorkforcePausedError);
+        expect(await taskRows()).toHaveLength(0);
       } finally {
-        commitHolder();
-        await holder;
+        await release();
       }
-
-      expect(
-        blockedPid,
-        'THE GATE DID NOT BLOCK on the uncommitted pause, so it is NOT holding the runtime row ' +
-          'lock. An unlocked read leaves the ordering half of the proof gone while every serial ' +
-          'arm still passes — which is exactly the refactor this arm exists to catch.',
-      ).toBeGreaterThan(0);
-
-      // THE RANK: blocked on workforce_runtime, it must not already hold workforce_tasks.
-      expect(
-        taskLockModes,
-        'THE LOCK RANK IS INVERTED: the intake already holds a lock on `workforce_tasks` while it ' +
-          'waits for `workforce_runtime`. The gate must run BEFORE the first task write, so this ' +
-          'transaction takes runtime -> tasks and stays a prefix of every path it can race.',
-      ).toEqual([]);
-
-      const outcome = await settled;
-      expect(outcome.kind, 'the gate must refuse once the pause it waited for is committed').toBe(
-        'rejected',
-      );
-      if (outcome.kind !== 'rejected') throw new Error('unreachable');
-      expect(outcome.err).toBeInstanceOf(WorkforcePausedError);
-      expect(await taskRows()).toHaveLength(0);
     });
 
     it('refuses a MULTI-STEP plan at the gate, leaving ZERO rows — not a half-born plan', async () => {

@@ -59,11 +59,129 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
+import ts from 'typescript';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
 const EXAMPLES = resolve(here, '../../../../examples');
+
+// [SOURCE-MASKER v2 BEGIN] — every copy of this block is pinned byte-identical; see the sameness
+// arm at the bottom of this file, which finds the copies on disk rather than trusting a list.
+//
+// WHAT MAKES "THE MARKER IS CODE" A CHECKABLE CLAIM.
+//
+// TWO PASSES, AND THE ORDER IS WHAT MAKES THEM EXACT:
+//
+//   1. LITERALS, from the TypeScript parser's own AST. The parser — not a regex — is what decides
+//      whether a `/` opens a regular expression or divides, because that is a parse-context
+//      question no lexer can answer alone. Getting it wrong swallows real code.
+//   2. COMMENTS, scanned over a copy with pass 1's spans blanked out. On text that holds no
+//      string, template or regex literal, `//` and `/*` can ONLY begin a comment: every quote
+//      that could confuse the scan is already gone, and division can never leave two adjacent
+//      slashes because JavaScript reads those as a comment too. A comment-FIRST pass is the one
+//      that gets `'https://example.com'` wrong.
+//
+// BOTH PASSES ARE LOAD-BEARING, and that was measured rather than assumed: an AST-only masker is
+// defeated by exactly the substitution shape these scans exist to refuse, because `forEachChild`
+// never visits punctuation tokens and so never reaches a comment that is leading trivia of a bare
+// `}`; a comment-first masker breaks on `'https://…'`. Neither pass can be dropped.
+//
+// THE TWO CONSTRUCTS AN AST WALK STILL CANNOT REACH ARE CLOSED BY MECHANISM, NOT BY ARGUMENT:
+//
+//   - A SHEBANG is trivia no node carries. It can only sit at offset 0, and is masked as a span.
+//   - CONFLICT MARKERS are reported as parse diagnostics (measured: 3 for a two-way conflict), and
+//     this REFUSES any source that produces a diagnostic at all. A mis-parse under-masks, and
+//     under-masking is the direction that leaves a hole open while looking fixed.
+//
+// IT ERRS TOWARD OVER-MASKING, DELIBERATELY. Spans are taken at full extent including delimiters,
+// and an unterminated comment masks to end of file. Over-masking makes a guard go RED for the
+// wrong reason — loud, and survivable. Under-masking would leave the hole open while looking
+// fixed, which is silent. Given the choice, this instrument takes the loud failure.
+
+/** Node kinds whose text is DATA, never executable code. */
+const MASKED_LITERAL_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
+  ts.SyntaxKind.StringLiteral,
+  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
+  ts.SyntaxKind.TemplateHead,
+  ts.SyntaxKind.TemplateMiddle,
+  ts.SyntaxKind.TemplateTail,
+  ts.SyntaxKind.RegularExpressionLiteral,
+  ts.SyntaxKind.JsxText,
+]);
+
+/** Every `[from, to)` span of `source` whose text is a comment or a literal — never code. */
+function maskedSpans(
+  source: string,
+  scriptKind: ts.ScriptKind = ts.ScriptKind.TS,
+): ReadonlyArray<readonly [number, number]> {
+  const spans: Array<readonly [number, number]> = [];
+
+  // PASS 1 — literals, from the parser.
+  const parsed = ts.createSourceFile('scan.ts', source, ts.ScriptTarget.Latest, true, scriptKind);
+  // FAIL CLOSED on a source the parser could not read: a mis-parse under-masks. `parseDiagnostics`
+  // is not on the public `SourceFile` type, so it is read defensively — if the field ever
+  // disappears the check degrades to a no-op instead of throwing on every file.
+  const diagnostics = (parsed as unknown as { parseDiagnostics?: readonly unknown[] })
+    .parseDiagnostics;
+  if (Array.isArray(diagnostics) && diagnostics.length > 0) {
+    throw new Error(
+      `source masking REFUSED a file the TypeScript parser reported ${diagnostics.length} ` +
+        'syntax diagnostic(s) in (conflict markers do exactly this). A mis-parse under-masks, ' +
+        'which is the silent direction, so this throws rather than guessing.',
+    );
+  }
+  const walk = (node: ts.Node): void => {
+    if (MASKED_LITERAL_KINDS.has(node.kind)) spans.push([node.getStart(parsed), node.getEnd()]);
+    node.forEachChild(walk);
+  };
+  parsed.forEachChild(walk);
+
+  // PASS 2 — comments, over literal-free text. Blanking preserves length, so offsets still line
+  // up with the original; newlines are kept so a `//` comment still ends where it really ends.
+  const chars = source.split('');
+  for (const [from, to] of spans) {
+    for (let at = from; at < to; at += 1) {
+      if (chars[at] !== '\n') chars[at] = ' ';
+    }
+  }
+  const blanked = chars.join('');
+  // The shebang, which is trivia the AST never surfaces and which can only sit at offset 0.
+  if (blanked.startsWith('#!')) {
+    const firstLine = blanked.indexOf('\n');
+    spans.push([0, firstLine < 0 ? blanked.length : firstLine]);
+  }
+  let cursor = 0;
+  while (cursor < blanked.length) {
+    const slash = blanked.indexOf('/', cursor);
+    if (slash < 0) break;
+    const next = blanked[slash + 1];
+    if (next === '/') {
+      const newline = blanked.indexOf('\n', slash);
+      const end = newline < 0 ? blanked.length : newline;
+      spans.push([slash, end]);
+      cursor = end;
+    } else if (next === '*') {
+      const close = blanked.indexOf('*/', slash + 2);
+      const end = close < 0 ? blanked.length : close + 2;
+      spans.push([slash, end]);
+      cursor = end;
+    } else {
+      cursor = slash + 1;
+    }
+  }
+  return spans;
+}
+
+/** A code-position test over one source text, with the parse done once. */
+function codeMask(
+  source: string,
+  scriptKind: ts.ScriptKind = ts.ScriptKind.TS,
+): (offset: number) => boolean {
+  const spans = maskedSpans(source, scriptKind);
+  return (offset) => !spans.some(([from, to]) => offset >= from && offset < to);
+}
+// [SOURCE-MASKER v2 END]
 
 /** The source extensions a boot entrypoint may be written in — `local-boot`'s is TypeScript. */
 const ENTRYPOINT_EXTENSIONS = ['.mjs', '.js', '.ts', '.mts', '.cjs'];
@@ -138,6 +256,30 @@ const BOOTABLE_REL = 'support-ticket-triage/dev-boot.mjs';
  */
 const TS_ENTRYPOINT_REL = 'local-boot/serve.ts';
 const BOOTABLE_WRAPPER = resolve(EXAMPLES, BOOTABLE_REL);
+
+/**
+ * The four markers arm (b) POSITIONS (as opposed to the ones it merely requires to be present).
+ *
+ * Each must begin with an identifier or keyword and carry no comment or template delimiter — that
+ * is the precondition which makes testing where a match BEGINS sufficient, and it is asserted
+ * mechanically at the bottom of this file rather than left as a claim in prose.
+ */
+const SIGINT_REGISTRATION = "process.on('SIGINT', () => phase.handle('SIGINT'));";
+const SIGTERM_REGISTRATION = "process.on('SIGTERM', () => phase.handle('SIGTERM'));";
+const ORDERING_ANCHOR = 'const server = await';
+const SIGTERM_CALL = "process.on('SIGTERM'";
+const POSITIONED_MARKERS: Readonly<Record<string, string>> = {
+  SIGINT_REGISTRATION,
+  SIGTERM_REGISTRATION,
+  ORDERING_ANCHOR,
+  SIGTERM_CALL,
+};
+
+const SUBSTITUTION_REFUSAL =
+  'THE REGISTRATION IS PRESENT BUT IT IS NOT CODE — it sits inside a comment or a string literal. ' +
+  'That is defeat by SUBSTITUTION: comment the statement out, leave its text behind to satisfy ' +
+  'this scan, and put the real registration somewhere this file would have refused. The property ' +
+  'here is a STATEMENT and its position, never a string that spells one.';
 
 const SUITE_DB = `rayspec_devboot_shutdown_${process.pid}`;
 /** How long the wrapper gets to be gone after the signal. The shutdown itself is milliseconds. */
@@ -327,8 +469,35 @@ describe('examples/* boot entrypoints — every one registers the same owning ha
   for (const wrapper of WRAPPERS) {
     it(`${wrapper} closes the http server, awaits server.close() and exits 0`, () => {
       const src = readFileSync(resolve(EXAMPLES, wrapper), 'utf8');
-      expect(src).toContain("process.on('SIGINT', () => phase.handle('SIGINT'));");
-      expect(src).toContain("process.on('SIGTERM', () => phase.handle('SIGTERM'));");
+      // The entrypoints are a MIX of `.mjs` and `.ts`, so hand the parser the dialect the file is
+      // actually written in rather than hoping TS-mode is close enough on JavaScript.
+      const isCode = codeMask(src, /\.m?ts$/.test(wrapper) ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+      /** The first occurrence of `marker` that is real CODE, or -1. */
+      const codeIndexOf = (marker: string): number => {
+        for (let at = src.indexOf(marker); at > -1; at = src.indexOf(marker, at + 1)) {
+          if (isCode(at)) return at;
+        }
+        return -1;
+      };
+      /** How many occurrences of `marker` are real code rather than comment or literal text. */
+      const codeCountOf = (marker: string): number => {
+        let count = 0;
+        for (let at = src.indexOf(marker); at > -1; at = src.indexOf(marker, at + 1)) {
+          if (isCode(at)) count += 1;
+        }
+        return count;
+      };
+
+      expect(src).toContain(SIGINT_REGISTRATION);
+      expect(src).toContain(SIGTERM_REGISTRATION);
+      // …AND EACH REGISTRATION MUST BE CODE, not merely text. `toContain` is satisfied just as
+      // well by the same line COMMENTED OUT, and that is not a hypothetical: measured on this file
+      // 2026-08-19, commenting the SIGTERM registration out with its text intact and re-registering
+      // the real handler BELOW the boot read **9/9 GREEN** — the boot window this suite exists to
+      // close, wide open, with every arm passing. Arm (a) cannot see it either: it boots fully
+      // before it signals, so the ordering is pinned HERE and nowhere else.
+      expect(codeIndexOf(SIGINT_REGISTRATION), SUBSTITUTION_REFUSAL).toBeGreaterThan(-1);
+      expect(codeIndexOf(SIGTERM_REGISTRATION), SUBSTITUTION_REFUSAL).toBeGreaterThan(-1);
       // The registration must come BEFORE the boot, not after it — that is the whole point of the
       // `phase` indirection, and the ordering is the property, so assert the ordering.
       //
@@ -338,17 +507,50 @@ describe('examples/* boot entrypoints — every one registers the same owning ha
       // `indexOf` returned -1 — an ordering assertion that fails for the wrong reason. Anchoring on
       // the bare `assembleServer(` instead would be worse: contract-intake and support-intake-chat
       // both print it inside a header COMMENT above their registration, which would invert the test.
-      const assembleAt = src.indexOf('const server = await');
+      //
+      // That comment describes the INCIDENTAL FALSE-RED hazard (a mention accidentally satisfying
+      // an anchor). The deliberate FALSE-GREEN one is a different failure and needs a different
+      // answer, which is the code-position pair below: the raw assertions stay exactly as they
+      // were, and the same ordering is required a second time over CODE ONLY, so neither end of it
+      // can be satisfied by a comment.
+      const assembleAt = src.indexOf(ORDERING_ANCHOR);
       expect(
         assembleAt,
         'no `const server = await …` — the ordering anchor is gone',
       ).toBeGreaterThan(-1);
-      expect(src.indexOf("process.on('SIGTERM'")).toBeLessThan(assembleAt);
+      expect(src.indexOf(SIGTERM_CALL)).toBeLessThan(assembleAt);
+
+      const assembleCodeAt = codeIndexOf(ORDERING_ANCHOR);
+      expect(
+        assembleCodeAt,
+        'no `const server = await …` IN CODE — the ordering anchor survives only as comment or ' +
+          'string text, so the position this arm pins is the position of prose, not of a boot',
+      ).toBeGreaterThan(-1);
+      expect(
+        codeIndexOf(SIGTERM_CALL),
+        'THE SIGTERM REGISTRATION IS NOT CODE — it is present only as comment or string text. ' +
+          'Comment the registration out, leave its text to satisfy the assertions above, and ' +
+          'register the real handler anywhere else: the wrapper is unkillable for the whole boot ' +
+          'window again and every other arm here still passes.',
+      ).toBeGreaterThan(-1);
+      expect(
+        codeIndexOf(SIGTERM_CALL),
+        'THE SIGTERM REGISTRATION MOVED BELOW THE BOOT. Between module evaluation and that line ' +
+          'the signal is a no-op — @openai/agents-core and signal-exit each act only when they are ' +
+          'the sole listener, so with both loaded they defer to each other — and a wrapper killed ' +
+          'mid-boot hangs until SIGKILL. Registration goes before the first awaited step.',
+      ).toBeLessThan(assembleCodeAt);
       // …and the graceful close REPLACES the boot-phase abort rather than adding a second pair.
       // Matched by regex, not substring: the TypeScript entrypoint annotates the same assignment as
       // `phase.handle = (signal: string): void => {`.
       expect(src).toMatch(/phase\.handle = \(signal(?:: string)?\)(?:: void)? => \{/);
       expect(src.match(/process\.on\('SIGTERM'/g) ?? []).toHaveLength(1);
+      // EXACTLY ONE LIVE registration, counted over code. The raw count above already refuses a
+      // second one; this refuses the reading where the ONLY one left is commented out.
+      expect(
+        codeCountOf(SIGTERM_CALL),
+        "there must be exactly ONE live `process.on('SIGTERM'` registration in this entrypoint",
+      ).toBe(1);
       expect(src).toContain('received during boot — aborting before the server listens.');
       expect(src).toContain('httpServer.close(async () => {');
       // server.close() drains the durable worker and ends the DB pool; skipping it would orphan both.
@@ -367,5 +569,213 @@ describe('examples/* boot entrypoints — ran-guard', () => {
   it('the signal arm actually ran when the DB was required', () => {
     if (dbRequired) expect(signalTestsRan).toBe(2);
     else expect(true).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE MASKER'S OWN BATTERY. `maskedSpans` is now a load-bearing instrument, so it is tested like
+// one. The `code: false` rows are the attack; the `code: true` rows are the controls that a
+// masker which simply strips too much would fail — a stripper that ate real code would satisfy
+// every attack row and still be wrong, and the wrongness would show up as a guard reddening for
+// a reason that has nothing to do with the engine.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const M = 'gate(tx, id);';
+
+interface MaskCase {
+  readonly name: string;
+  readonly source: string;
+  /** Which occurrence of `M` to test — default the first. */
+  readonly nth?: number;
+  /** Whether that occurrence must be judged a real code position. */
+  readonly code: boolean;
+}
+
+const MASK_BATTERY: readonly MaskCase[] = [
+  // ── The attack surface: a marker that is present as TEXT and must not count as code. ────────
+  { name: 'inside a // comment', source: `const a = 1;\n// ${M}\n`, code: false },
+  { name: 'inside a /* */ block comment', source: `const a = 1;\n/*\n  ${M}\n*/\n`, code: false },
+  { name: 'inside a single-quoted string', source: `const s = '${M}';\n`, code: false },
+  { name: 'inside a double-quoted string', source: `const s = "${M}";\n`, code: false },
+  { name: 'inside a template literal', source: `const s = \`${M}\`;\n`, code: false },
+  {
+    name: 'inside a template literal that itself contains /* */',
+    source: `const s = \`/* ${M} */\`;\n`,
+    code: false,
+  },
+  {
+    name: 'inside a comment that is leading trivia of a bare } (the S2 shape, unreachable from the AST)',
+    source: `function f() {\n  real();\n  // ${M}\n}\n`,
+    code: false,
+  },
+  {
+    name: 'inside a JSDoc block above a declaration',
+    source: `/**\n * ${M}\n */\nconst a = 1;\n`,
+    code: false,
+  },
+
+  // ── The controls: real code that a too-eager stripper would swallow. ────────────────────────
+  { name: 'plain executable code (positive control)', source: `${M}\n`, code: true },
+  {
+    name: 'after a string containing // — on the SAME line, where a comment-first pass eats it',
+    source: `const u = 'https://example.com/a'; ${M}\n`,
+    code: true,
+  },
+  {
+    name: 'between a template opening /* and a later template closing */',
+    source: `const t = \`/* open\`;\n${M}\nconst u = \`close */\`;\n`,
+    code: true,
+  },
+  {
+    name: 'after a division whose slashes a regex-guessing stripper would pair with a later /',
+    source: `const ratio = a / b;\n${M}\nconst label = 'x/y';\n`,
+    code: true,
+  },
+  {
+    name: 'after a regex literal containing both quote kinds',
+    source: `const re = /['"]/;\n${M}\n`,
+    code: true,
+  },
+  {
+    name: 'after a regex literal containing //',
+    source: `const re = /\\/\\//;\n${M}\n`,
+    code: true,
+  },
+  {
+    name: "after a comment containing an apostrophe (don't)",
+    source: `// don't stop scanning here\nconst a = 1;\n${M}\n`,
+    code: true,
+  },
+  {
+    name: 'after a string containing an escaped quote',
+    source: `const s = 'it\\'s';\n${M}\n`,
+    code: true,
+  },
+  { name: 'after a string containing /*', source: `const s = '/*';\n${M}\n`, code: true },
+  {
+    name: 'after a template with an interpolated string expression',
+    source: `const t = \`x\${'y'}z\`;\n${M}\n`,
+    code: true,
+  },
+
+  // ── Both at once: the comment copy is text, the live copy is code. ──────────────────────────
+  {
+    name: 'present in BOTH a comment and code — the comment copy',
+    source: `// ${M}\n${M}\n`,
+    nth: 0,
+    code: false,
+  },
+  {
+    name: 'present in BOTH a comment and code — the live copy',
+    source: `// ${M}\n${M}\n`,
+    nth: 1,
+    code: true,
+  },
+];
+
+describe('maskedSpans — the adversarial battery for the instrument itself', () => {
+  for (const testCase of MASK_BATTERY) {
+    it(`${testCase.name} -> ${testCase.code ? 'CODE' : 'not code'}`, () => {
+      let at = -1;
+      for (let seen = 0; seen <= (testCase.nth ?? 0); seen += 1) {
+        at = testCase.source.indexOf(M, at + 1);
+      }
+      expect(at, 'the battery case must really contain the marker it claims to').toBeGreaterThan(
+        -1,
+      );
+      expect(codeMask(testCase.source)(at)).toBe(testCase.code);
+    });
+  }
+
+  it('is not degenerate — the battery contains BOTH verdicts, so a constant masker cannot pass', () => {
+    expect(MASK_BATTERY.some((c) => c.code)).toBe(true);
+    expect(MASK_BATTERY.some((c) => !c.code)).toBe(true);
+  });
+
+  it('every POSITIONED marker in this file is delimiter-free, which is what makes a START-position test enough', () => {
+    // The code-position test asks only where a match BEGINS. That is sufficient precisely because
+    // no marker can begin in code and continue into a comment: to do so the marker would have to
+    // contain the delimiter that opens one. Markers may legitimately reach INTO string literals,
+    // which is why the test is not "must not overlap".
+    for (const [name, marker] of Object.entries(POSITIONED_MARKERS)) {
+      expect(marker.includes('//'), `${name} must not contain a line-comment delimiter`).toBe(
+        false,
+      );
+      expect(marker.includes('/*'), `${name} must not contain a block-comment delimiter`).toBe(
+        false,
+      );
+      expect(marker.includes('`'), `${name} must not contain a template delimiter`).toBe(false);
+      expect(/^[A-Za-z_$]/.test(marker), `${name} must begin with an identifier or keyword`).toBe(
+        true,
+      );
+    }
+  });
+});
+
+/**
+ * THE MASKER IS COPIED INTO EVERY SCAN THAT NEEDS IT, SO THE COPIES ARE PINNED HERE.
+ *
+ * The scans live in different packages and there is no shared test-utility package between them, so
+ * the block above is duplicated rather than imported. Duplication without enforcement is how a
+ * load-bearing instrument rots in one place and nobody notices, so this arm DISCOVERS the copies on
+ * disk by their sentinel — it is not a hand-maintained list, and a fifth copy added tomorrow is
+ * covered the day it lands. The floor (`>= 4`) is what makes a sentinel rename red rather than
+ * vacuously green: a rule that finds nothing must not read as a rule that found no drift.
+ */
+const MASKER_OPEN = '// [SOURCE-MASKER v2 BEGIN]';
+const MASKER_CLOSE = '// [SOURCE-MASKER v2 END]';
+
+/** Every `*.test.ts` under `packages/` that carries the masker block, with the block itself. */
+function maskerCopies(): ReadonlyArray<{ readonly file: string; readonly block: string }> {
+  const packagesRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
+  const found: Array<{ file: string; block: string }> = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') {
+        continue;
+      }
+      const full = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.test.ts')) continue;
+      const text = readFileSync(full, 'utf8');
+      // The FIRST sentinel pair is the real block: the constants above sit below it in every copy.
+      const open = text.indexOf(MASKER_OPEN);
+      if (open < 0) continue;
+      const close = text.indexOf(MASKER_CLOSE, open);
+      expect(close, `${full} opens the masker block and never closes it`).toBeGreaterThan(open);
+      found.push({ file: full.slice(packagesRoot.length + 1), block: text.slice(open, close) });
+    }
+  };
+  walk(packagesRoot);
+  return found.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+describe('the source masker — every copy of it, byte-identical', () => {
+  it('is carried by at least the four scans that need it, and this file is one of them', () => {
+    const copies = maskerCopies();
+    expect(
+      copies.length,
+      'the masker sentinel found fewer copies than the scans that carry it — a rename that hides ' +
+        'the block would otherwise make this arm vacuously green',
+    ).toBeGreaterThanOrEqual(4);
+    const self = fileURLToPath(import.meta.url);
+    expect(
+      copies.some((copy) => self.endsWith(copy.file)),
+      'the discovery did not find THIS file, so it is not actually scanning where it thinks',
+    ).toBe(true);
+  });
+
+  it('has not drifted — all copies are byte-identical', () => {
+    const copies = maskerCopies();
+    const distinct = new Set(copies.map((copy) => copy.block));
+    expect(
+      distinct.size,
+      'THE MASKER HAS DRIFTED ACROSS ITS COPIES. It is duplicated because the scans live in ' +
+        'packages with no shared test-utility package between them; that is only safe while the ' +
+        `copies are identical. Copies found: ${copies.map((copy) => copy.file).join(', ')}`,
+    ).toBe(1);
   });
 });
