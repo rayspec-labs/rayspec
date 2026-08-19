@@ -293,7 +293,9 @@ describe.skipIf(!hasDb)('the approval re-request cap (db)', () => {
     expect(await approvals(root.taskId)).toHaveLength(1);
   });
 
-  // ---- EXACTLY-ONCE (vision §4.6) --------------------------------------------------------------
+  // ---- APPLICATION-LEVEL EXACTLY-ONCE ----------------------------------------------------------
+  // A model call may be repeated after a mid-turn crash; applying its effects may not. The refusal
+  // is an APPLIED outcome like any other, so it has to obey the receipt too.
 
   it('re-applying the refused turn is a no-op — the receipt still governs', async () => {
     const root = await grantedThenClaim('approve');
