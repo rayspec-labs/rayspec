@@ -77,6 +77,14 @@ export type {
 
 import type { FsSource } from './fs-source.js';
 
+// The neutral, WRITE-ONLY, path-jailed + byte-bounded `FsSink` capability contract — the injected
+// handle a TOOL handler may receive to write whole files under a jailed OUTPUT root (interface only,
+// impl injected at the composition root). Re-exported here so a handler imports every capability shape
+// from the one SDK package.
+export type { FsSink, FsSinkFactory, FsSinkQuota, FsSinkWriteResult } from './fs-sink.js';
+
+import type { FsSink } from './fs-sink.js';
+
 // The neutral TRANSCRIPT shapes an `init.stt` call returns — defined in `@rayspec/stt-port`, the
 // provider-NEUTRAL speech-to-text port (no provider is named or imported there). Re-exported on the
 // same conduit as the text/byte primitives above so a handler names the result type from the ONE SDK
@@ -369,6 +377,33 @@ export interface HandlerInit {
    * (a shared, deployment-static read root — see `FsSource`).
    */
   readonly fsSource?: FsSource;
+  /**
+   * The WRITE-ONLY, path-jailed, byte-bounded `FsSink` capability — write WHOLE FILES under a
+   * DEPLOYER-configured local OUTPUT root. It is the WRITE twin of `fsSource` and is deliberately
+   * narrower than it in three ways.
+   *
+   * OPTIONAL: present only when the deployment configured an output root at the composition root (an
+   * unset root ⇒ absent), so a handler that needs it fail-closes loudly on `undefined` rather than the
+   * engine forcing a writable root onto every deployment (mirrors `blob`/`fsSource`). It is a
+   * SERIALIZABLE-shaped handle (string paths + bytes in, plain data out), preserving the
+   * external-exposure isolate seam. NOT tenant-partitioned (a shared, deployment-static output root —
+   * see `FsSink`); a handler that needs per-tenant WRITABLE storage uses `blob`, which IS
+   * tenant-prefixed by construction.
+   *
+   * ⚠ POPULATED ON **TOOL INITS ONLY** — deliberately, and unlike `fsSource`, which is populated on
+   * `handler`-kind route inits and trigger inits as well. An HTTP route's authorization ceiling is
+   * "a credential the network can carry": a READ capability behind that ceiling is one thing, but a
+   * capability that CREATES files reachable by anyone holding a route credential is a materially larger
+   * authority than this seam was opened for. The capability exists for agent/workforce TOOL calls,
+   * which are already bounded by a turn, a role toolset, and the turn's fate machinery. Widening it to
+   * routes or triggers is a separate decision with its own review — not an omission to be quietly
+   * corrected. A route handler that must produce a file does it through a tool.
+   *
+   * WHOLE-FILE WRITE ONLY (no append, no delete, no move). That is forced, not simplified: a workforce
+   * turn re-executes on recovery and the composition refuses any declared tool whose `idempotent` flag
+   * is `false`, so only a write whose replay leaves the same end state can be offered to a seat at all.
+   */
+  readonly fsSink?: FsSink;
   /**
    * The neutral SPEECH-TO-TEXT capability — transcribe audio bytes the handler
    * already holds into the neutral transcript artifact. OPTIONAL: present only when the deployment
