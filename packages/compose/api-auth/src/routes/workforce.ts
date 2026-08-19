@@ -67,6 +67,7 @@ import {
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
+  WorkforcePausedError,
   WorkforceUnknownError,
   windowStartFor,
   workforceBudgetsSchema,
@@ -320,6 +321,17 @@ function mapEngineError(err: unknown): never {
       'GATEWAY_TIMEOUT',
       'The pause is in force, but in-flight turns did not drain inside the request window. Re-issue the drain.',
       { stillWorking: err.stillWorking },
+    );
+  }
+  // 409, not 403 and not 404: the caller is authenticated, permitted, and naming a workforce that
+  // exists and is theirs — what refuses them is the RESOURCE'S STATE, which is what CONFLICT means
+  // on this surface. It is also the honest status for the caller's next move: resume the workforce
+  // and re-send the identical request. No `details` — the code carries the whole answer, and
+  // CONFLICT is not in DETAILS_ALLOWED, so the envelope would strip one anyway.
+  if (err instanceof WorkforcePausedError) {
+    throw new ApiError(
+      'CONFLICT',
+      'The workforce is paused and is not accepting new work. Resume it, then re-submit.',
     );
   }
   throw err;
@@ -944,29 +956,38 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       );
       if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
       const body = goalRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
-      const result = await intake.submitGoal({
-        tenantId,
-        workforceId,
-        goal: body.goal,
-        ...(body.description !== undefined ? { description: body.description } : {}),
-        ...(body.priority !== undefined ? { priority: body.priority } : {}),
-        requestedBy: actorFrom(c),
-      });
-      if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
-      if (result.outcome === 'invalid_plan') {
-        // The strategy is deployment configuration, never client input — a refused plan is a
-        // server-side defect and says so (500), not a 4xx the caller cannot fix. R5: the body is
-        // STATIC — `result.detail` names employee ids, department names and the strategy id
-        // (deployment shape), and this surface's rule is that a 5xx echoes no deployment config to
-        // the client. The detail stays server-side.
-        throw new ApiError(
-          'INTERNAL',
-          'The orchestration strategy produced a plan the intake refused — a server-side ' +
-            'configuration defect. See the server logs for detail.',
-        );
+      // The intake throws TYPED engine errors (a paused workforce refuses admission), so this route
+      // maps them like every sibling control route does. Without this the refusal would surface as
+      // an unhandled 500 — a caller could not tell "not accepting work" from "the server broke".
+      // The `ApiError`s thrown below pass through `mapEngineError` untouched: it matches none of
+      // them and rethrows, so wrapping the whole block changes no existing status.
+      try {
+        const result = await intake.submitGoal({
+          tenantId,
+          workforceId,
+          goal: body.goal,
+          ...(body.description !== undefined ? { description: body.description } : {}),
+          ...(body.priority !== undefined ? { priority: body.priority } : {}),
+          requestedBy: actorFrom(c),
+        });
+        if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
+        if (result.outcome === 'invalid_plan') {
+          // The strategy is deployment configuration, never client input — a refused plan is a
+          // server-side defect and says so (500), not a 4xx the caller cannot fix. R5: the body is
+          // STATIC — `result.detail` names employee ids, department names and the strategy id
+          // (deployment shape), and this surface's rule is that a 5xx echoes no deployment config
+          // to the client. The detail stays server-side.
+          throw new ApiError(
+            'INTERNAL',
+            'The orchestration strategy produced a plan the intake refused — a server-side ' +
+              'configuration defect. See the server logs for detail.',
+          );
+        }
+        workforce.kick();
+        return c.json({ workforceId, tasks: result.tasks }, 202);
+      } catch (err) {
+        mapEngineError(err);
       }
-      workforce.kick();
-      return c.json({ workforceId, tasks: result.tasks }, 202);
     },
   );
 

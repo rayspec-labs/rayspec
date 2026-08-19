@@ -19,6 +19,7 @@ import {
   createRootTask,
   ensureWorkforceRuntime,
   insertChildTask,
+  WorkforcePausedError,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { eq } from 'drizzle-orm';
@@ -36,6 +37,8 @@ let kicks = 0;
 let goalSubmissions: Array<Parameters<WorkforceGoalIntake['submitGoal']>[0]> = [];
 const DEFAULT_GOAL_OUTCOME: WorkforceGoalOutcome = { outcome: 'created', tasks: [] };
 let nextGoalOutcome: WorkforceGoalOutcome = DEFAULT_GOAL_OUTCOME;
+/** Set to make the stub REJECT — the intake's typed engine errors are thrown, not returned. */
+let nextGoalThrow: Error | null = null;
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
@@ -173,6 +176,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
       workforceGoalIntake: {
         submitGoal: (input) => {
           goalSubmissions.push(input);
+          if (nextGoalThrow !== null) return Promise.reject(nextGoalThrow);
           return Promise.resolve(nextGoalOutcome);
         },
       },
@@ -183,6 +187,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
     kicks = 0;
     goalSubmissions = [];
     nextGoalOutcome = DEFAULT_GOAL_OUTCOME;
+    nextGoalThrow = null;
     await h.reset();
   });
   afterAll(async () => {
@@ -909,6 +914,29 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(refusedBody).not.toContain('ghost');
     expect(refusedBody).toContain('server-side');
     expect(kicks).toBe(0); // no outcome above created any work to dispatch
+  });
+
+  /**
+   * The intake refuses a paused or halted workforce by THROWING a typed engine error, so the route
+   * has to map it like every other control refusal. Un-mapped it would surface as a 500 and a
+   * caller could not tell "this workforce is not accepting work" — which they fix with resume —
+   * from "the server broke", which they cannot fix at all.
+   */
+  it('maps the intake’s paused refusal to 409 CONFLICT, and dispatches nothing', async () => {
+    const a = await principal('wf-goal-paused@example.test', 'Org WF Goal Paused');
+    nextGoalThrow = new WorkforcePausedError('wf');
+    const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'A goal submitted while the operator has the workforce paused.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.code).toBe('CONFLICT');
+    // The message names the lever, and leaks no deployment shape.
+    expect(body.error.message as string).toContain('Resume');
+    // The intake WAS reached (this is a state refusal, not a validation one) and nothing dispatched.
+    expect(goalSubmissions).toHaveLength(1);
+    expect(kicks).toBe(0);
   });
 
   it('refuses a goal outside the strict schema, a reserved workforce id, and a read-only key', async () => {
