@@ -131,10 +131,16 @@ the router in both directions, and its request bodies and task/approval/review r
 are *derived* from the same Zod schemas and database columns the handlers use, so none of
 those can drift. Its bespoke response envelopes (the `status`, `cost`, `pause`, `halt`,
 `signal`, `verdict` and `goals` shapes) and most of its status-code sets are hand-written,
-with five status codes cross-checked against a running server. Read it as an accurate map
+with seven status codes cross-checked against a running server. Read it as an accurate map
 of *which* routes exist and what they accept; treat the hand-written envelopes as very good
 documentation rather than as a mechanically enforced contract. The suite that draws that
 line names it in its own header.
+
+That distinction is not theoretical. The document's **first draft carried two false
+claims** — a `Retry-After` header on the goals `429` that the route does not send, and a
+missing `404` on the four list routes — and every structural arm stayed green through
+both. They were caught by reading the handlers, and are now observed rather than merely
+reworded. Expect the hand-written half to be able to do it again.
 
 It does **not** speak for the rest of `@rayspec/tasks`' runtime API (`pauseWorkforce`,
 `decideApproval`, the scheduler and its seams). Those symbols are engine internals of the
