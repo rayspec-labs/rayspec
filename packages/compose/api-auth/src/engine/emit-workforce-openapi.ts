@@ -93,6 +93,7 @@ import { ErrorEnvelope } from '@rayspec/auth-core';
 import { schema } from '@rayspec/db';
 import type { WORKFORCE_EXPERIMENTAL_SCHEMA_ANNOTATION } from '@rayspec/spec';
 import {
+  BUDGET_WINDOWS,
   OPERATOR_SIGNAL_KINDS,
   RESERVED_WORKFORCE_SEGMENTS,
   reviewVerdictSchema,
@@ -353,45 +354,36 @@ const REVIEW_ROW = rowSchema(
 // --- the bespoke response envelopes (HAND-WRITTEN — see the module header) ----------------------
 
 /**
- * MERGE NOTE FOR WHOEVER LANDS THE BUDGET-REPORTING BRANCH ON TOP OF THIS ONE — read this before
- * silencing the red it will give you.
+ * THE BUDGET-REPORTING FIELDS ON `GET /v1/workforce/{workforceId}/status`.
  *
- * That branch adds THREE top-level fields to `GET /v1/workforce/{workforceId}/status`:
- * `budgetExhausted`, `blockedOnBudget` and `budgetTiers`. They do NOT exist on this branch, so they
- * are deliberately absent from `STATUS_RESPONSE` — documenting a field the handler does not send is
- * an over-promise, and this file's own mutation battery (M12) proves the `LIVE ENVELOPES` arm reds
- * on exactly that. The arm will red on merge; that is the mechanism working, not a defect. Add the
- * three fields here and it goes green.
+ * This block answers the merge note PR #516 left here for PR #513. Four top-level fields landed —
+ * `budgetExhausted`, `estimateUsdPerTurn`, `blockedOnBudget`, `budgetTiers` — not the three the
+ * note anticipated: `estimateUsdPerTurn` postdates it, added when review found that `exhausted`
+ * had to mirror the engine's admission rule rather than test "ceiling spent". The `LIVE ENVELOPES`
+ * arm reddened on merge naming all four, exactly as the note predicted; that was the mechanism
+ * working.
  *
- * ADD THE SEMANTICS TOO, NOT JUST THE KEYS. `LIVE ENVELOPES` compares TOP-LEVEL KEY NAMES only, so
- * everything below is invisible to it — the document is the only place these can live, and every
- * one is an overclaim waiting to happen:
+ * WHY THE DESCRIPTIONS BELOW ARE LOAD-BEARING. `LIVE ENVELOPES` compares TOP-LEVEL KEY NAMES only.
+ * Every semantic below is invisible to it, so this document is the only place they can live, and
+ * each one is an overclaim waiting to happen. They are written on the fields themselves rather
+ * than here, so a client generator carries them.
  *
- *   - `consumedUsd` is NOT bounded by `ceilingUsd`. The denial fires when the NEXT turn's
- *     reservation would cross the line, so the turn already in flight is never aborted and settles
- *     above the ceiling by at most its own cost.
- *   - `headroomUsd` FLOORS AT 0, so 0 means "at OR PAST", never "exactly at". The unclamped
- *     `consumedUsd` beside it is the only field that distinguishes the two.
- *   - `consumedTurns` counts DISPATCHED turns, metered at AUTHORIZE; `consumedUsd` is metered at
- *     SETTLEMENT. They move at different moments — do not let the schema imply they move together.
- *   - `exhausted` is `>=`, not `>`. Landing exactly on a turns ceiling is the ORDINARY case, since
- *     turns increment by one.
- *   - `budgetExhausted` is `any tier exhausted` OR `blockedOnBudget > 0`. The disjunction is
- *     load-bearing: the tier half catches a spent ceiling with an empty queue, the parked half
- *     catches the `task` and `subtree` scopes. It means "a declared ceiling somewhere is spent",
- *     NOT "this workforce is dead".
- *   - `blockedOnBudget` counts PARKS, not CAUSES — it does not say which tier refused. That is in
- *     the journal (`workforce.budget.exceeded` carries scopeKind/scopeId/ceiling/consumed).
+ * ONE CORRECTION TO THE NOTE, because a stale spec claim is the defect this program exists to
+ * remove: it says `exhausted` is "`>=`, not `>`". That is now true only of the TURNS axis. On the
+ * usd axis `exhausted` is `consumed + estimateUsdPerTurn > ceiling` — the negation of
+ * `authorizeTurn`'s own admission test. The engine admits at `consumed + estimate <= ceiling`, so
+ * the last per-turn reservation of every usd ceiling is unspendable and a scope refuses everything
+ * while still showing unspent ceiling. A `consumed >= ceiling` test reported `exhausted: false` for
+ * every scope in that band — which is the ORDINARY end state, since the estimate is derived as
+ * `task.usd / task.turns`, an upper bound on average turn cost, so spend normally halts short of
+ * the ceiling rather than past it.
  *
- * AND THE ONE THAT IS AN OVERCLAIM BY OMISSION: `budgetTiers` enumerates only the tiers whose
- * cardinality the DECLARATION bounds — the workforce and each declared department. The `task` and
- * `subtree` scopes are NEVER in it, because they are one ledger row per task and per submitted
- * goal. So `budgetTiers` is NOT a complete list of the ceilings that can refuse work, and a client
- * that renders it as "here are your budgets" will mislead an operator whose runs are being denied
- * by a scope the array never shows. Say that in the field's own description rather than leaving it
- * inferable from the `scopeKind` enum, and say that `budgetExhausted` + `blockedOnBudget` are what
- * cover those two invisible scopes. The same caveat already applies to `budget` below and is
- * written there.
+ * AND THE ONE THAT IS AN OVERCLAIM BY OMISSION, kept verbatim from the note because it is right:
+ * `budgetTiers` enumerates only the tiers whose cardinality the DECLARATION bounds — the workforce
+ * and each declared department. The `task` and `subtree` scopes are NEVER in it, because they are
+ * one ledger row per task and per submitted goal. So it is NOT a complete list of the ceilings that
+ * can refuse work, and a client rendering it as "here are your budgets" will mislead an operator
+ * whose runs are being denied by a scope the array never shows.
  */
 const STATUS_RESPONSE = object(
   {
@@ -438,6 +430,113 @@ const STATUS_RESPONSE = object(
         'OR PAST the ceiling", never "exactly at it" — the unclamped `consumedUsd` beside it is ' +
         'what distinguishes the two.',
     },
+    budgetExhausted: {
+      ...bool,
+      description:
+        'WILL A DECLARED CEILING REFUSE THE NEXT DISPATCH? Read this first — it is the one field ' +
+        'that does not require assembling an answer. True when any tier in `budgetTiers` is ' +
+        '`exhausted` OR `blockedOnBudget > 0`. The disjunction is load-bearing in both halves: the ' +
+        'tier half catches a spent ceiling with an EMPTY queue (nothing parked yet, next goal ' +
+        'already refused), the parked half catches the `task` and `subtree` scopes that ' +
+        '`budgetTiers` can never enumerate. IT DOES NOT MEAN "this workforce is dead" — an ' +
+        'exhausted ceiling on a department nothing is working in is true, reportable and ' +
+        'survivable. Answers for the next SINGLE-TURN dispatch; a delegation reserves one estimate ' +
+        'per child, so a fan-out is refused earlier still.',
+    },
+    estimateUsdPerTurn: {
+      ...num,
+      description:
+        'The per-turn reservation every authorization adds before comparing to a usd ceiling. IT ' +
+        'IS HERE FOR THE AMOUNT, NEVER THE VERDICT: `headroomUsd` is UNSPENT CEILING, and the gap ' +
+        'between that and what may actually still be dispatched is exactly this number, so it is ' +
+        'what tells an operator how far a ceiling must be raised. Do NOT reconstruct `exhausted` ' +
+        'from it — that flag is server-derived precisely because a client recomputing the engine ' +
+        "'s admission rule gets the boolean wrong, and `budgetExhausted` additionally folds in " +
+        '`blockedOnBudget`, whose inputs are not on this response at all.',
+    },
+    blockedOnBudget: {
+      ...int,
+      description:
+        'How many tasks are parked `blocked(budget_exhausted)` RIGHT NOW, whichever scope refused ' +
+        'them — including the `task` and `subtree` scopes absent from `budgetTiers`. It counts ' +
+        'PARKS, NOT CAUSES: it does not say which tier refused. That is in the task journal, where ' +
+        '`workforce.budget.exceeded` carries `scopeKind`, `scopeId`, `ceiling` and `consumed`.',
+    },
+    budgetTiers: {
+      type: 'array',
+      description:
+        'NOT A COMPLETE LIST OF THE CEILINGS THAT CAN REFUSE WORK — read this before rendering it ' +
+        'as "your budgets". It enumerates only the tiers whose cardinality the DECLARATION bounds: ' +
+        'the workforce, and each declared department. The `task` and `subtree` scopes are NEVER ' +
+        'here, because they are one ledger row per task and per submitted goal, which this ' +
+        'summary cannot enumerate without materializing the tenant partition. A workforce stalled ' +
+        'on one of them shows an all-clear array; `budgetExhausted` and `blockedOnBudget` are what ' +
+        'cover those two invisible scopes. Ordered workforce first, then departments by id.',
+      items: object(
+        {
+          scopeKind: { ...str, enum: ['workforce', 'department'] },
+          scopeId: str,
+          window: { ...str, enum: [...BUDGET_WINDOWS] },
+          windowStart: { ...str, format: 'date-time' },
+          ceilingUsd: {
+            ...nullable(num),
+            description: 'Null when this tier declares no usd ceiling.',
+          },
+          consumedUsd: {
+            ...num,
+            description:
+              'Settled + reserved, UNCLAMPED. NOT bounded by `ceilingUsd`: a ceiling bounds what ' +
+              'may be DISPATCHED, not what may be SETTLED, so a turn already in flight settles ' +
+              'above the line by at most its own actual cost. This is the only field on the tier ' +
+              'that can show that overrun.',
+          },
+          headroomUsd: {
+            ...nullable(num),
+            description:
+              'UNSPENT CEILING (`ceilingUsd - consumedUsd`), floored at 0 — NOT what may still be ' +
+              'dispatched. Two consequences, both easy to get wrong: 0 means "at OR PAST the ' +
+              'ceiling", never "exactly at it"; and a positive value can still buy nothing, since ' +
+              'authorization admits at `consumed + estimateUsdPerTurn <= ceiling`. A tier reading ' +
+              '`headroomUsd: 0.04` refuses every dispatch when `estimateUsdPerTurn` is 0.05. ' +
+              'Subtract `estimateUsdPerTurn` for the spend that can actually still be placed.',
+          },
+          ceilingTurns: {
+            ...nullable(int),
+            description: 'Null when this tier declares no turns ceiling.',
+          },
+          consumedTurns: {
+            ...int,
+            description:
+              'DISPATCHED turns, metered at AUTHORIZE — whereas `consumedUsd` is metered at ' +
+              'SETTLEMENT. The two move at different moments and must not be read as a pair.',
+          },
+          exhausted: {
+            ...bool,
+            description:
+              "THIS TIER WILL REFUSE THE NEXT SINGLE-TURN DISPATCH — the negation of the engine's " +
+              'own admission rule, not a "ceiling spent" test. Usd axis: ' +
+              '`consumedUsd + estimateUsdPerTurn > ceilingUsd`. Turns axis: ' +
+              '`consumedTurns >= ceilingTurns` (landing exactly on a turns ceiling is the ORDINARY ' +
+              'case, since turns increment by one). The estimate term is why this is not ' +
+              '`consumed >= ceiling`: the last per-turn reservation of every usd ceiling is ' +
+              'unspendable, and consumption normally halts inside that band rather than past the ' +
+              'ceiling, because the estimate is an upper bound on average turn cost.',
+          },
+        },
+        [
+          'scopeKind',
+          'scopeId',
+          'window',
+          'windowStart',
+          'ceilingUsd',
+          'consumedUsd',
+          'headroomUsd',
+          'ceilingTurns',
+          'consumedTurns',
+          'exhausted',
+        ],
+      ),
+    },
   },
   [
     'workforceId',
@@ -448,7 +547,11 @@ const STATUS_RESPONSE = object(
     'tasks',
     'queueDepth',
     'oldestQueuedAt',
+    'budgetExhausted',
+    'estimateUsdPerTurn',
+    'blockedOnBudget',
     'budget',
+    'budgetTiers',
   ],
 );
 

@@ -2104,8 +2104,32 @@ notes its presence in one neutral line; nothing in the engine reads a key inside
 
 Declared ceilings the ENGINE enforces at the dispatch boundary — the one place a unit of work
 can be denied without killing anything in flight. A denial parks the task
-`blocked(budget_exhausted)` with a typed reason and a journal event; nothing is spent and
-nothing is silently truncated. All tiers are optional; an absent tier means no ceiling.
+`blocked(budget_exhausted)` with a typed reason and a journal event; the denied turn spends
+nothing (the whole authorization transaction rolls back) and nothing is silently truncated. All
+tiers are optional; an absent tier means no ceiling.
+
+**A ceiling bounds what may be DISPATCHED, not what may be SETTLED — do not read
+`settled_usd <= ceiling` as an invariant, because it is not one.** Authorization happens
+*between* turns: the engine denies when the NEXT turn's reservation would cross the line, so the
+turn already in flight is never aborted mid-effect and its actual cost settles ABOVE the ceiling.
+The overrun is bounded by ONE turn's actual cost, it lands in `settled_usd` exactly once, and the
+next authorization sees `consumed > ceiling` and denies — never a silent truncation
+(`packages/kernel/tasks/src/budget.ts`, `settleTurn`; pinned by `budget.db.test.ts`,
+*over-settlement lands once and the NEXT authorize is the denial — never a truncation*). Declare a
+ceiling with the cost of one turn of headroom if the number is a hard commercial limit. The overrun
+is visible, not inferred: `GET /v1/workforce/{id}/status` reports each declared tier's `consumedUsd`
+UNCLAMPED beside its `ceilingUsd`.
+
+**A ceiling also stops admitting BEFORE it is spent, and the gap is one turn's reservation.**
+Authorization compares `consumed + estimateUsdPerTurn` to the ceiling, so the last
+`estimateUsdPerTurn` of every usd ceiling is unspendable: a scope with four cents of ceiling left
+refuses every dispatch when a turn reserves five. Because the estimate is derived as
+`task.usd / task.turns` — an *upper* bound on average turn cost — consumption normally halts inside
+that band rather than over the line, so this is the ordinary end state, not an edge case. On the
+status view, `headroomUsd` is UNSPENT CEILING (`ceiling - consumed`, floored at zero), **not what
+may still be dispatched**; the field that answers dispatchability is `exhausted`, which mirrors the
+engine's admission rule, and `estimateUsdPerTurn` is reported alongside so the difference is
+computable rather than folklore.
 
 ```yaml
 budgets:

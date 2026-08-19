@@ -73,7 +73,7 @@ import {
   workforceBudgetsSchema,
   workforceJournalEventSchema,
 } from '@rayspec/tasks';
-import { and, asc, eq, gt, gte, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { z } from 'zod';
 import type { AppDeps, AppEnv, WorkforceControl, WorkforceGoalIntake } from '../app-context.js';
@@ -421,8 +421,16 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
 
   // ── reads ─────────────────────────────────────────────────────────────────────────────────────
 
-  // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, headroom.
+  // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, and the
+  // budget picture (`budgetExhausted`, `budget`, `budgetTiers`, `blockedOnBudget`).
   // Registered BEFORE the task routes so a workforce id is never shadowed by a fixed segment.
+  //
+  // THE SECOND THING A CONSUMER MUST NOT GET WRONG (the first is below): `budget` is the
+  // WORKFORCE TIER ONLY. It was once the whole budget answer, and that made this summary lie —
+  // a workforce stalled on an exhausted DEPARTMENT ceiling read as 99.86 % open, because the
+  // engine meters four scopes and this view asked one. `budgetTiers` and `blockedOnBudget` are
+  // the fix and are documented at the code that builds them; `budget` is kept, unchanged, only
+  // so existing consumers do not break. Do not read it as "the budget".
   //
   // THE ONE THING A CONSUMER OF THIS RESPONSE MUST NOT GET WRONG:
   //
@@ -463,36 +471,204 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
           .select(schema.workforceTasks, {
             status: schema.workforceTasks.status,
             count: sql<number>`count(*)::int`,
+            // The EXHAUSTION SIGNAL, aggregated in the same pass — see `blockedOnBudget` below.
+            // FILTERED on the reason, never on the status alone: a task parked awaiting children
+            // or a clarification is also `blocked`, and counting it here would tell an operator to
+            // raise a ceiling that is fine.
+            budgetBlocked: sql<number>`count(*) filter (where ${schema.workforceTasks.statusReason} = 'budget_exhausted')::int`,
             oldestQueuedAt: sql<Date | null>`min(${schema.workforceTasks.queuedAt})`,
           })
           .where(eq(schema.workforceTasks.workforceId, workforceId))
           .groupBy(schema.workforceTasks.status)) as Array<{
           status: string;
           count: number;
+          budgetBlocked: number;
           oldestQueuedAt: Date | null;
         }>;
         const byStatus: Record<string, number> = {};
         for (const g of grouped) byStatus[g.status] = g.count;
         const oldestQueuedAt = grouped.find((g) => g.status === 'queued')?.oldestQueuedAt ?? null;
-        // Headroom on the CURRENT workforce window, from the ledger row that enforces it.
-        const ceiling = budgets.workforce?.usd ?? null;
-        let consumedUsd = 0;
-        if (ceiling !== null) {
-          const windowStart = windowStartFor(budgets.workforce?.window ?? 'daily', new Date());
-          const ledger = (await tdb
-            .select(schema.workforceBudgetLedger)
-            .where(
-              and(
-                eq(schema.workforceBudgetLedger.scopeKind, 'workforce'),
-                eq(schema.workforceBudgetLedger.scopeId, workforceId),
-                eq(schema.workforceBudgetLedger.windowStart, windowStart),
-              ),
-            )) as Array<typeof schema.workforceBudgetLedger.$inferSelect>;
-          consumedUsd = ledger.reduce(
-            (sum, r) => sum + Number(r.settledUsd) + Number(r.reservedUsd),
-            0,
-          );
+        // `blocked(budget_exhausted)` is the ONLY park a budget denial produces
+        // (@rayspec/tasks `REASON_RULES`), so the blocked group carries the whole count.
+        const blockedOnBudget = grouped.find((g) => g.status === 'blocked')?.budgetBlocked ?? 0;
+
+        // ── the enforcing tiers ───────────────────────────────────────────────────────────────
+        //
+        // WHAT THIS ANSWERS, AND WHAT IT DELIBERATELY DOES NOT. The engine meters FOUR scopes
+        // (@rayspec/tasks `ledgerScopesFor`): task, root, department, workforce. This summary
+        // enumerates the two whose cardinality is BOUNDED BY THE DECLARATION — the workforce and
+        // each declared department. `task` and `root` have one ledger row per task and per
+        // submitted goal; enumerating them is exactly the tenant-partition materialization the
+        // count above avoids, so they are NOT here and `blockedOnBudget` is the only thing that
+        // speaks for them. A `subtree` ceiling fully spent with nothing queued is therefore still
+        // not visible in this summary. Stated, because the whole point of this block is that a
+        // summary must not read greener than the workforce is.
+        //
+        // Only tiers with a DECLARED ceiling are listed. A scope with no ceiling enforces nothing
+        // and can never exhaust; it still accrues a ledger row (spend visibility is not
+        // conditional on enforcement) and its spend belongs to `cost --by department`, not here.
+        const now = new Date();
+        // The per-turn reservation every authorize adds before comparing to a ceiling. One value
+        // per workforce (the dispatcher and every intent applier read this same field), so it is
+        // emitted once on the response rather than repeated on each tier.
+        const estimateUsdPerTurn = budgets.execution.estimateUsdPerTurn;
+        const declaredTiers: Array<{
+          scopeKind: 'workforce' | 'department';
+          scopeId: string;
+          window: string;
+          windowStart: Date;
+          ceilingUsd: number | null;
+          ceilingTurns: number | null;
+        }> = [];
+        if (budgets.workforce?.usd !== undefined || budgets.workforce?.turns !== undefined) {
+          const window = budgets.workforce.window;
+          declaredTiers.push({
+            scopeKind: 'workforce',
+            scopeId: workforceId,
+            window,
+            windowStart: windowStartFor(window, now),
+            ceilingUsd: budgets.workforce.usd ?? null,
+            ceilingTurns: budgets.workforce.turns ?? null,
+          });
         }
+        for (const [departmentId, dep] of Object.entries(budgets.departments ?? {}).sort(
+          ([a], [b]) => a.localeCompare(b),
+        )) {
+          if (dep.usd === undefined && dep.turns === undefined) continue;
+          declaredTiers.push({
+            scopeKind: 'department',
+            scopeId: departmentId,
+            window: dep.window,
+            windowStart: windowStartFor(dep.window, now),
+            ceilingUsd: dep.usd ?? null,
+            ceilingTurns: dep.turns ?? null,
+          });
+        }
+        // ONE bounded read for every tier: the row set is (declared tiers) x (their distinct
+        // current buckets) over the ledger's own UNIQUE key, never a scan. Rows the `IN`s
+        // over-fetch (a department whose id equals the workforce id) are discarded by the
+        // (kind, id, window) match below.
+        const ledgerRows =
+          declaredTiers.length === 0
+            ? []
+            : ((await tdb
+                .select(schema.workforceBudgetLedger)
+                .where(
+                  and(
+                    inArray(schema.workforceBudgetLedger.scopeKind, ['workforce', 'department']),
+                    inArray(schema.workforceBudgetLedger.scopeId, [
+                      ...new Set(declaredTiers.map((t) => t.scopeId)),
+                    ]),
+                    inArray(schema.workforceBudgetLedger.windowStart, [
+                      ...new Map(
+                        declaredTiers.map((t) => [t.windowStart.getTime(), t.windowStart]),
+                      ).values(),
+                    ]),
+                  ),
+                )) as Array<typeof schema.workforceBudgetLedger.$inferSelect>);
+        const budgetTiers = declaredTiers.map((tier) => {
+          const row = ledgerRows.find(
+            (r) =>
+              r.scopeKind === tier.scopeKind &&
+              r.scopeId === tier.scopeId &&
+              r.windowStart.getTime() === tier.windowStart.getTime(),
+          );
+          const tierConsumedUsd =
+            row !== undefined ? Number(row.settledUsd) + Number(row.reservedUsd) : 0;
+          const tierConsumedTurns = row?.settledTurns ?? 0;
+          return {
+            scopeKind: tier.scopeKind,
+            scopeId: tier.scopeId,
+            window: tier.window,
+            windowStart: tier.windowStart,
+            ceilingUsd: tier.ceilingUsd,
+            // UNCLAMPED, ON PURPOSE. A ceiling bounds what may be DISPATCHED, not what may be
+            // SETTLED: the denial fires when the NEXT turn would exceed, so the turn already in
+            // flight settles above the line and is never aborted. `consumedUsd > ceilingUsd` is
+            // how that one-turn overrun reaches an operator.
+            consumedUsd: tierConsumedUsd,
+            // UNSPENT CEILING — `ceiling - consumed`, floored at zero. It is NOT "what may still be
+            // dispatched", and the difference is not academic: the engine admits at
+            // `consumed + estimate <= ceiling`, so the last `estimateUsdPerTurn` of every ceiling is
+            // unspendable. A scope can sit here with `headroomUsd: 0.04` and refuse every dispatch
+            // because a turn reserves `0.05`. `exhausted` below is the field that answers
+            // dispatchability; subtract `estimateUsdPerTurn` (emitted on the response) from this to
+            // get the spend a client can still expect to place.
+            headroomUsd:
+              tier.ceilingUsd !== null ? Math.max(tier.ceilingUsd - tierConsumedUsd, 0) : null,
+            ceilingTurns: tier.ceilingTurns,
+            // Dispatched turns — counted at authorize, not at settlement (@rayspec/tasks
+            // `authorizeTurn`), which is what makes a turns ceiling bound concurrency.
+            consumedTurns: tierConsumedTurns,
+            // THE ENGINE'S OWN ADMISSION RULE, mirrored — not a "spent the ceiling" heuristic.
+            // `authorizeTurn` admits a usd scope at `consumed + estimate <= ceiling` and a turns
+            // scope at `settledTurns + 1 <= ceilingTurns`; `exhausted` is the negation of each, so
+            // it means exactly THIS SCOPE WILL REFUSE THE NEXT DISPATCH.
+            //
+            // The estimate term is the whole point. It is derived from a document as
+            // `task.usd / task.turns` — an UPPER bound on average turn cost — so real consumption
+            // normally halts SHORT of the ceiling, inside a reservation band one estimate wide
+            // where the ledger still shows unspent ceiling and nothing can run. A
+            // `consumed >= ceiling` test reports `false` for every scope in that band, which is the
+            // ordinary case, not the corner one.
+            //
+            // THE MIRROR IS UNCONDITIONAL, not "usually right". A zero estimate cannot coexist with
+            // a usd ceiling here: `resolveWorkforceBudgets` (called at the top of this handler)
+            // REFUSES every such shape with `WorkforceBudgetsInvalidError` — the fail-closed
+            // coherence rule in @rayspec/tasks `workforceBudgetsSchema`. The only shapes it accepts
+            // with a zero estimate are turns-only, where `ceilingUsd` is null and this disjunct is
+            // guarded off. So whenever the left operand is evaluated, the estimate is positive.
+            //
+            // The comparison is also STRUCTURALLY identical to the engine's, not merely equivalent:
+            // `authorizeTurn` evaluates `settled + reserved + estimate > ceiling`, and
+            // `tierConsumedUsd` is built as `settled + reserved` in that same order, so both sides
+            // reduce to `((settled + reserved) + estimate)`. IEEE-754 addition is order-sensitive,
+            // and a re-association such as `settled + (reserved + estimate)` would agree almost
+            // always and disagree exactly on the float boundaries this flag exists to get right.
+            //
+            // LIMIT, stated rather than implied away: this answers for the next SINGLE-turn
+            // dispatch. A delegation reserves `children x estimate` in one authorize
+            // (@rayspec/tasks `apply-intents`), so a fan-out is refused strictly earlier than this
+            // flag turns true.
+            exhausted:
+              (tier.ceilingUsd !== null &&
+                tierConsumedUsd + estimateUsdPerTurn > tier.ceilingUsd) ||
+              (tier.ceilingTurns !== null && tierConsumedTurns >= tier.ceilingTurns),
+          };
+        });
+
+        // The pre-existing `budget` block, UNCHANGED: the workforce tier's usd ceiling and
+        // nothing else. It is kept exactly as it was so no consumer breaks — and it is precisely
+        // why `budgetTiers` sits BESIDE it rather than inside it: `budget` is null whenever no
+        // whole-workforce usd ceiling is declared, and nesting the enumeration in it would hide
+        // an exhausted department on a document that declares department ceilings only. That
+        // would be this route's own defect, rebuilt one level down.
+        const ceiling = budgets.workforce?.usd ?? null;
+        const consumedUsd =
+          ceiling !== null
+            ? (budgetTiers.find((t) => t.scopeKind === 'workforce')?.consumedUsd ?? 0)
+            : 0;
+
+        // THE HEADLINE. One scalar, beside `paused`, because the original defect was NOT that the
+        // fact was unavailable — it was legible in `workforce events` the whole time — it was that
+        // the SUMMARY read 99.86 % open while the workforce was dead. A truth an operator has to
+        // find by scanning an array and comparing two numbers is the same defect wearing a
+        // different shape, so the array is the detail and this is the answer.
+        //
+        // A DISJUNCTION, and each half is load-bearing:
+        //  - a tier at or past its ceiling catches the DOOMED-BUT-NOT-YET-DEAD case (the ceiling is
+        //    spent, the queue happens to be empty, so nothing is parked and the next goal is
+        //    already refused);
+        //  - a task parked on budget catches the tiers this route cannot enumerate at all (task and
+        //    subtree — one ledger row per task and per submitted goal).
+        // Drop either half and there is a real workforce this flag calls healthy.
+        //
+        // WHAT IT DOES NOT SAY: not "the workforce is dead". An exhausted ceiling on a department
+        // nothing is currently working in is true, reportable, and survivable. It says A CEILING
+        // SOMEWHERE IS SPENT — `budgetTiers` says which, `blockedOnBudget` says how much work is
+        // already stopped, and the task journal says which scope refused a given task.
+        const budgetExhausted = budgetTiers.some((t) => t.exhausted) || blockedOnBudget > 0;
+
         return c.json(
           {
             workforceId,
@@ -505,6 +681,21 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             tasks: byStatus,
             queueDepth: byStatus.queued ?? 0,
             oldestQueuedAt,
+            // "Will a declared ceiling refuse the next dispatch?" — the one field an operator must
+            // not have to look for. See its derivation above for what it does and does not claim.
+            budgetExhausted,
+            // The per-turn reservation. Emitted because `headroomUsd` is UNSPENT CEILING, and the
+            // gap between that and what may actually still be dispatched is exactly this number.
+            // A client is never required to use it to answer "is this scope dead" — `exhausted`
+            // and `budgetExhausted` already do, correctly — it is here for the quantity: how much
+            // of the reported headroom is unreachable, and how far a ceiling must be raised.
+            estimateUsdPerTurn,
+            // The CONSEQUENCE signal, tier-agnostic: how many tasks are parked on an exhausted
+            // ceiling RIGHT NOW, whichever scope refused them — including the task and subtree
+            // scopes `budgetTiers` cannot enumerate. It says THAT work is dead, never WHICH
+            // ceiling killed it; that fact is in the task's journal
+            // (`workforce.budget.exceeded` carries scopeKind/scopeId/ceiling/consumed).
+            blockedOnBudget,
             budget:
               ceiling !== null
                 ? {
@@ -513,6 +704,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
                     headroomUsd: Math.max(ceiling - consumedUsd, 0),
                   }
                 : null,
+            budgetTiers,
           },
           200,
         );

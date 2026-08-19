@@ -1002,7 +1002,49 @@ journalled with the cancellation.
 `normal`, `high` or `urgent`); the deployment's orchestration strategy shapes
 it into tasks and the reply lists them. Every call is its own submission —
 there is no idempotency key on this surface yet, so a retry after a lost
-reply creates a second root; check `tasks` before retrying when that matters. `cost --by employee|department` groups
+reply creates a second root; check `tasks` before retrying when that matters.
+
+`status` answers **"is a declared ceiling spent?"** in one field:
+**`budgetExhausted`**, a boolean beside `paused`. Read that first — it is true
+when any enumerated tier sits at or past its ceiling **or** any task is parked
+`blocked(budget_exhausted)`, and each half catches a case the other cannot. It
+says a ceiling *somewhere* is spent; it does not say the workforce is dead (an
+exhausted ceiling on a department nothing is working in is survivable). Two
+fields say which and how bad:
+
+- `budgetTiers` lists every tier that *declares* a ceiling and whose cardinality
+  the declaration bounds — the workforce, and each declared department — with
+  that tier's own `consumedUsd`, `headroomUsd` and `exhausted`.
+- `blockedOnBudget` counts the tasks parked `blocked(budget_exhausted)` right
+  now, whichever scope refused them. It is the only signal that speaks for the
+  per-task and per-subtree ceilings, which are one ledger row per task and per
+  submitted goal and are therefore **never** enumerated here.
+
+So a subtree ceiling fully spent with nothing queued raises no tier row — but
+the first task it denies moves `blockedOnBudget` and `budgetExhausted`.
+`workforce events <task-id>` is where the denying scope is named. The legacy
+`budget` block is unchanged and still reports the whole-workforce tier only.
+
+A tier's `consumedUsd` is **unclamped and can exceed its `ceilingUsd`** — a
+ceiling bounds what may be *dispatched*, not what may be *settled*, so the turn
+already in flight when the ceiling is reached settles above the line (once, by
+one turn's actual cost). `headroomUsd` is floored at zero and therefore cannot
+show that overrun on its own. See
+[spec reference → `budgets`](./spec-reference.md#budgets).
+
+**`headroomUsd` is unspent ceiling, not dispatchable headroom.** Authorization
+compares `consumed + estimateUsdPerTurn` to the ceiling, so the last per-turn
+reservation of every usd ceiling cannot be spent: a tier reading
+`headroomUsd: 0.04` refuses every dispatch when `estimateUsdPerTurn` is `0.05`.
+That band is the ordinary end state, not an edge case — the estimate is an
+upper bound on average turn cost, so spend usually stops short of the ceiling
+rather than past it. Read `exhausted` for the yes/no (it mirrors the engine's
+admission rule, and it is what `budgetExhausted` is built from); subtract the
+`estimateUsdPerTurn` reported on the same response for the quantity. Both
+answer for the next single-turn dispatch — a delegation reserves one estimate
+per child, so a fan-out is refused earlier still.
+
+`cost --by employee|department` groups
 the roll-up server-side, and the payload names its basis honestly:
 `department` reads the enforcing ledger's settlement buckets, while `employee`
 aggregates task rows by owner and therefore windows by task creation time.

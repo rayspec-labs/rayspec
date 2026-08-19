@@ -8,7 +8,8 @@
  *
  * Commands (JSON on stdout — except `tasks --tree`, which renders TEXT unless --json;
  * exit 0 ok / 1 not-ok / 2 usage):
- *   workforce status --workforce <id>          control state, task counts, queue depth, headroom
+ *   workforce status --workforce <id>          control state, task counts, queue depth,
+ *                                              budgetExhausted + every declared ceiling's headroom
  *   workforce submit --workforce <id> --goal <text> [--description <text>] [--priority <p>]
  *                                               submit a goal; the strategy shapes it into tasks
  *   workforce tasks [--status] [--owner]       flat task list
