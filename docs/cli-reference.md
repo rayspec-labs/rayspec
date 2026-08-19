@@ -807,7 +807,28 @@ work that never happened.
 `normal`, `high` or `urgent`); the deployment's orchestration strategy shapes
 it into tasks and the reply lists them. Every call is its own submission —
 there is no idempotency key on this surface yet, so a retry after a lost
-reply creates a second root; check `tasks` before retrying when that matters. `cost --by employee|department` groups
+reply creates a second root; check `tasks` before retrying when that matters.
+
+`status` answers **"is this workforce stalled on money"** two ways, because
+neither answer alone is enough. `budgetTiers` lists every tier that *declares*
+a ceiling and whose cardinality the declaration bounds — the workforce, and each
+declared department — with that tier's own `consumedUsd`, `headroomUsd` and
+`exhausted`. `blockedOnBudget` counts the tasks parked `blocked(budget_exhausted)`
+right now, whichever scope refused them, and is the only signal that speaks for
+the per-task and per-subtree ceilings, which are one ledger row per task and per
+submitted goal and are therefore **never** enumerated here. So a subtree ceiling
+fully spent with nothing queued is still not visible in this summary; `workforce
+events <task-id>` is where the denying scope is named. The legacy `budget` block
+is unchanged and still reports the whole-workforce tier only.
+
+A tier's `consumedUsd` is **unclamped and can exceed its `ceilingUsd`** — a
+ceiling bounds what may be *dispatched*, not what may be *settled*, so the turn
+already in flight when the ceiling is reached settles above the line (once, by
+one turn's actual cost). `headroomUsd` is floored at zero and therefore cannot
+show that overrun on its own. See
+[spec reference → `budgets`](./spec-reference.md#budgets).
+
+`cost --by employee|department` groups
 the roll-up server-side, and the payload names its basis honestly:
 `department` reads the enforcing ledger's settlement buckets, while `employee`
 aggregates task rows by owner and therefore windows by task creation time.

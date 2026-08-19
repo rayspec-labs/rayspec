@@ -1,0 +1,389 @@
+/**
+ * `GET /v1/workforce/:workforceId/status` — the budget summary must not read greener than the
+ * workforce actually is.
+ *
+ * THE DEFECT THIS SUITE EXISTS FOR (finding L2-1, second live acceptance run). The status view
+ * reported budget headroom for the WORKFORCE TIER ONLY. The engine meters four scopes
+ * (`ledgerScopesFor`, @rayspec/tasks budget.ts) — task, root, department, workforce — and a
+ * workforce completely stalled on an exhausted DEPARTMENT ceiling read as 99.86 % open, because
+ * the route asked one ceiling and one ledger row. The fact was legible in `workforce events`; the
+ * summary an operator actually looks at was not. Both halves of the fix are asserted here:
+ *
+ *   1. `budgetTiers` — every ENFORCING tier this route can BOUND (workforce + each DECLARED
+ *      department ceiling), each with its own consumed/headroom/exhausted. The control arm is a
+ *      workforce with no department ceiling: it must emit NO department row, so the assertion
+ *      cannot pass by an emitter that lists every department unconditionally.
+ *      It sits BESIDE `budget`, not inside it, because `budget` is null whenever no whole-workforce
+ *      usd ceiling is declared — nesting the enumeration there would hide an exhausted department
+ *      on a document declaring department ceilings only, which is this exact defect one level down.
+ *   2. `blockedOnBudget` — the CONSEQUENCE signal: tasks parked `blocked(budget_exhausted)` right
+ *      now, whichever tier denied them. It exists because tier enumeration structurally cannot
+ *      cover the `task` and `root` scopes (one ledger row per task / per submitted goal — this
+ *      route may not materialize the tenant's task partition to summarize itself). Its control arm
+ *      is a task blocked for a NON-budget reason, which must not inflate the count.
+ *
+ * Neither half is redundant. Enumeration alone leaves a workforce stalled on an exhausted
+ * `subtree` ceiling reading green. The consequence signal alone reads a clean zero for a
+ * department whose ceiling is fully spent with an empty queue — a denial fires only at the NEXT
+ * dispatch — while the next submitted goal is already doomed.
+ *
+ * FINDING L2-3, pinned in the same file because it is the same operator lie from the other side.
+ * `settled_usd` CAN exceed the ceiling, by one turn's actual, BY DESIGN: the denial fires when the
+ * next dispatch would exceed, so the turn already in flight settles above the line and is never
+ * aborted (budget.ts, `settleTurn`). *A ceiling bounds what may be DISPATCHED, not what may be
+ * SETTLED.* The over-settlement is reproduced deterministically below (2 admitted turns settle
+ * $0.0012234 against a $0.0012 department ceiling — the exact live figure), and the status view is
+ * asserted to let an operator SEE it: `consumedUsd` is emitted UNCLAMPED beside `ceilingUsd`.
+ * `headroomUsd` stays clamped at zero, which is right for "what may still be dispatched" and is
+ * exactly why it cannot carry the overrun on its own.
+ *
+ * The engine is NOT driven through a stub here: `authorizeTurn`/`settleTurn` run against the real
+ * ledger, and the denial that ends the sequence is asserted with its typed scope before the route
+ * is ever called. A fixture that never actually exhausts anything would make every assertion below
+ * vacuous.
+ */
+import { forTenant } from '@rayspec/db';
+import {
+  applyTransition,
+  authorizeTurn,
+  createRootTask,
+  ensureWorkforceRuntime,
+  settleTurn,
+  type WorkforceBudgets,
+  workforceBudgetsSchema,
+} from '@rayspec/tasks';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
+
+const hasDb = Boolean(process.env.DATABASE_URL);
+const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
+// Un-skippable ran-guard: this suite is the proof for an operator-facing truthfulness finding. A
+// self-skip without DATABASE_URL would be a false green on exactly the claim that matters.
+if (requireDb && !hasDb) {
+  throw new Error(
+    'workforce-budget-tiers.db.test: DATABASE_URL is required (CI / RAYSPEC_REQUIRE_DB_TESTS) but ' +
+      'absent — refusing to silently skip the budget-reporting truth suite.',
+  );
+}
+
+let h: Harness;
+
+/**
+ * The numbers are the live acceptance run's, not invented: a `$0.0012` department ceiling, turns
+ * that actually cost `$0.0006117`, and a `$0.0005` per-turn reservation estimate. That triple is
+ * chosen so the sequence below is FORCED:
+ *
+ *   turn 1  0.0000000 + 0.0005 = 0.0005000 <= 0.0012  ADMIT   -> settled 0.0006117
+ *   turn 2  0.0006117 + 0.0005 = 0.0011117 <= 0.0012  ADMIT   -> settled 0.0012234  (OVER the line)
+ *   turn 3  0.0012234 + 0.0005 = 0.0017234  > 0.0012  DENY    (scopeKind 'department')
+ *
+ * The whole-workforce ceiling is $2, so after all of it the workforce tier is 99.94 % open — which
+ * is precisely the reading the old status view returned while every engineering task was dead.
+ */
+const DEPARTMENT_CEILING_USD = 0.0012;
+const WORKFORCE_CEILING_USD = 2;
+const ESTIMATE_USD = 0.0005;
+const ACTUAL_USD = 0.0006117;
+
+const RAW_BUDGETS = {
+  workforce: { usd: WORKFORCE_CEILING_USD, window: 'daily' },
+  departments: { eng: { usd: DEPARTMENT_CEILING_USD, window: 'daily' } },
+  execution: { estimateUsdPerTurn: ESTIMATE_USD },
+} as const;
+
+/** The SAME declaration minus the department ceiling — the control the emitter must not pad. */
+const RAW_BUDGETS_NO_DEPARTMENT_CEILING = {
+  workforce: { usd: WORKFORCE_CEILING_USD, window: 'daily' },
+  execution: { estimateUsdPerTurn: ESTIMATE_USD },
+} as const;
+
+const BUDGETS: WorkforceBudgets = workforceBudgetsSchema.parse(RAW_BUDGETS);
+
+interface StatusBudgetTier {
+  scopeKind: string;
+  scopeId: string;
+  window: string | null;
+  windowStart: string;
+  ceilingUsd: number | null;
+  consumedUsd: number;
+  headroomUsd: number | null;
+  ceilingTurns: number | null;
+  consumedTurns: number;
+  exhausted: boolean;
+}
+
+interface StatusBody {
+  workforceId: string;
+  paused: boolean;
+  tasks: Record<string, number>;
+  queueDepth: number;
+  blockedOnBudget: number;
+  budget: { ceilingUsd: number; consumedUsd: number; headroomUsd: number } | null;
+  budgetTiers: StatusBudgetTier[];
+}
+
+/** Register a principal, create an org, switch into it — the org creator is an owner. */
+async function principal(email: string, orgName: string) {
+  const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+    body: { email, password: 'a-long-enough-password' },
+  });
+  const t0 = (await reg.json()).accessToken as string;
+  const orgRes = await jsonRequest(h.app, 'POST', '/v1/orgs', {
+    body: { name: orgName },
+    headers: { authorization: `Bearer ${t0}` },
+  });
+  const orgId = (await orgRes.json()).id as string;
+  const switchRes = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
+    headers: { authorization: `Bearer ${t0}` },
+  });
+  return { orgId, token: (await switchRes.json()).accessToken as string };
+}
+
+async function readStatus(token: string, workforceId = 'wf'): Promise<StatusBody> {
+  const res = await jsonRequest(h.app, 'GET', `/v1/workforce/${workforceId}/status`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  expect(res.status).toBe(200);
+  return (await res.json()) as StatusBody;
+}
+
+/**
+ * Spend the `eng` department ceiling down through the REAL ledger and return the typed denial.
+ * Nothing here is stubbed: two turns are authorized and settled, and the third is refused by
+ * `authorizeTurn` itself.
+ */
+async function exhaustEngDepartment(orgId: string) {
+  const tdb = forTenant(h.db, orgId);
+  await ensureWorkforceRuntime(tdb, 'wf', RAW_BUDGETS);
+  const task = await createRootTask(tdb, {
+    workforceId: 'wf',
+    title: 'Engineering work',
+    goal: 'Ship the release.',
+    owner: 'principal_eng',
+    requestedBy: 'user',
+    department: 'eng',
+  });
+  const proposed = {
+    taskId: task.taskId,
+    rootTaskId: task.taskId,
+    workforceId: 'wf',
+    department: 'eng',
+    estimateUsd: ESTIMATE_USD,
+  };
+  for (let turn = 1; turn <= 2; turn++) {
+    const decision = await authorizeTurn(tdb, BUDGETS, proposed);
+    expect(decision.allowed, `turn ${turn} must be ADMITTED for the fixture to mean anything`).toBe(
+      true,
+    );
+    await tdb.transaction((tx) => settleTurn(tx, BUDGETS, { ...proposed, actualUsd: ACTUAL_USD }));
+  }
+  const denied = await authorizeTurn(tdb, BUDGETS, proposed);
+  return { tdb, task, denied };
+}
+
+describe.skipIf(!hasDb)('/v1/workforce status — budget reporting truth', () => {
+  beforeAll(async () => {
+    h = await createHarness({
+      workforce: { kick: () => {} },
+      schema: 'rayspec_test_wf_budget_tiers',
+    });
+  });
+  afterEach(async () => {
+    await h.reset();
+  });
+  afterAll(async () => {
+    await h.close();
+  });
+
+  it('the fixture really exhausts the DEPARTMENT ceiling — the denial is typed and its scope is the department', async () => {
+    const a = await principal('wf-bt-denial@example.test', 'Org WF BT Denial');
+    const { denied } = await exhaustEngDepartment(a.orgId);
+    expect(denied.allowed).toBe(false);
+    if (denied.allowed) throw new Error('unreachable — asserted above');
+    expect(denied.denial).toMatchObject({
+      scopeKind: 'department',
+      scopeId: 'eng',
+      ceiling: { kind: 'usd', limit: DEPARTMENT_CEILING_USD },
+    });
+    // The workforce tier is NOT what refused — that is the whole point of the finding.
+    expect(denied.denial.consumed).toBeGreaterThan(DEPARTMENT_CEILING_USD);
+  });
+
+  it('L2-3: settled EXCEEDS the ceiling by one turn — a ceiling bounds DISPATCH, not settlement', async () => {
+    const a = await principal('wf-bt-oversettle@example.test', 'Org WF BT Oversettle');
+    await exhaustEngDepartment(a.orgId);
+    const rows = (await h.db.$client.unsafe(
+      `SELECT settled_usd, settled_turns FROM workforce_budget_ledger
+        WHERE scope_kind = 'department' AND scope_id = 'eng';`,
+    )) as unknown as Array<{ settled_usd: string; settled_turns: number }>;
+    expect(rows).toHaveLength(1);
+    const settled = Number((rows[0] as { settled_usd: string }).settled_usd);
+    // The exact live figure: two turns at $0.0006117 against a $0.0012 ceiling.
+    expect(settled).toBeCloseTo(2 * ACTUAL_USD, 10);
+    expect(
+      settled,
+      'over-settlement by one turn is BY DESIGN — a turn that already fired is never aborted. ' +
+        'If this ever reads <= the ceiling, the docs that say so must change too, not this line.',
+    ).toBeGreaterThan(DEPARTMENT_CEILING_USD);
+  });
+
+  it('status reports EVERY enforcing tier it can bound — the exhausted department is present and marked', async () => {
+    const a = await principal('wf-bt-tiers@example.test', 'Org WF BT Tiers');
+    await exhaustEngDepartment(a.orgId);
+    const body = await readStatus(a.token);
+
+    // The workforce tier still reads wide open — TRUE, and exactly why it must not be the whole
+    // answer. Asserted rather than hidden: this is the number that lied.
+    expect(body.budget?.ceilingUsd).toBe(WORKFORCE_CEILING_USD);
+    expect(body.budget?.headroomUsd ?? 0).toBeGreaterThan(WORKFORCE_CEILING_USD * 0.99);
+
+    const tiers = body.budgetTiers;
+    const dept = tiers.find((t) => t.scopeKind === 'department' && t.scopeId === 'eng');
+    expect(
+      dept,
+      'the summary omits the tier that actually stopped the work — an operator reads a green ' +
+        'workforce headroom while every engineering task is dead',
+    ).toBeDefined();
+    const engTier = dept as StatusBudgetTier;
+    expect(engTier.ceilingUsd).toBe(DEPARTMENT_CEILING_USD);
+    expect(engTier.exhausted).toBe(true);
+    expect(engTier.window).toBe('daily');
+    expect(engTier.consumedTurns).toBe(2);
+    // UNCLAMPED — this is the field that carries the L2-3 overrun onto the operator surface.
+    expect(engTier.consumedUsd).toBeGreaterThan(DEPARTMENT_CEILING_USD);
+    // …while headroom stays clamped, which is right for "what may still be dispatched" and is
+    // precisely why it cannot express the overrun on its own.
+    expect(engTier.headroomUsd).toBe(0);
+
+    const wf = tiers.find((t) => t.scopeKind === 'workforce');
+    expect(wf, 'the workforce tier must appear in the enumeration too').toBeDefined();
+    expect((wf as StatusBudgetTier).exhausted).toBe(false);
+    expect((wf as StatusBudgetTier).scopeId).toBe('wf');
+  });
+
+  it('CONTROL: a workforce declaring NO department ceiling emits NO department tier', async () => {
+    const a = await principal('wf-bt-control@example.test', 'Org WF BT Control');
+    const tdb = forTenant(h.db, a.orgId);
+    await ensureWorkforceRuntime(tdb, 'wf', RAW_BUDGETS_NO_DEPARTMENT_CEILING);
+    const noCeiling = workforceBudgetsSchema.parse(RAW_BUDGETS_NO_DEPARTMENT_CEILING);
+    const task = await createRootTask(tdb, {
+      workforceId: 'wf',
+      title: 'Engineering work',
+      goal: 'Ship the release.',
+      owner: 'principal_eng',
+      requestedBy: 'user',
+      department: 'eng',
+    });
+    const proposed = {
+      taskId: task.taskId,
+      rootTaskId: task.taskId,
+      workforceId: 'wf',
+      department: 'eng',
+      estimateUsd: ESTIMATE_USD,
+    };
+    // The department SPENDS — it just declares no ceiling. A ledger row exists (spend visibility is
+    // not conditional on enforcement), so an emitter that walked LEDGER ROWS instead of DECLARED
+    // ceilings would happily invent a headroom-less row here.
+    const decision = await authorizeTurn(tdb, noCeiling, proposed);
+    expect(decision.allowed).toBe(true);
+    await tdb.transaction((tx) =>
+      settleTurn(tx, noCeiling, { ...proposed, actualUsd: ACTUAL_USD }),
+    );
+
+    const body = await readStatus(a.token);
+    const tiers = body.budgetTiers;
+    expect(tiers.map((t) => t.scopeKind)).toEqual(['workforce']);
+    expect(tiers.some((t) => t.scopeKind === 'department')).toBe(false);
+  });
+
+  it('status carries blockedOnBudget — the parks a tier enumeration can never see', async () => {
+    const a = await principal('wf-bt-blocked@example.test', 'Org WF BT Blocked');
+    const tdb = forTenant(h.db, a.orgId);
+    await ensureWorkforceRuntime(tdb, 'wf', RAW_BUDGETS);
+
+    // Two tasks parked on budget…
+    for (const title of ['Denied A', 'Denied B']) {
+      const task = await createRootTask(tdb, {
+        workforceId: 'wf',
+        title,
+        goal: 'Ship the release.',
+        owner: 'principal_eng',
+        requestedBy: 'user',
+        department: 'eng',
+      });
+      const queued = await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: queued.version,
+        to: 'blocked',
+        reason: 'budget_exhausted',
+        actor: 'scheduler',
+      });
+    }
+    // …and one parked for a reason that has nothing to do with money. THE CONTROL: a count that is
+    // really `blocked` would read 3 here and tell an operator to raise a ceiling that is fine.
+    const other = await createRootTask(tdb, {
+      workforceId: 'wf',
+      title: 'Waiting on children',
+      goal: 'Ship the release.',
+      owner: 'lead',
+      requestedBy: 'user',
+    });
+    const otherQueued = await applyTransition(tdb, {
+      taskId: other.taskId,
+      expectedVersion: other.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await applyTransition(tdb, {
+      taskId: other.taskId,
+      expectedVersion: otherQueued.version,
+      to: 'blocked',
+      reason: 'awaiting_children',
+      actor: 'scheduler',
+    });
+
+    const body = await readStatus(a.token);
+    expect(body.tasks.blocked, 'three tasks are blocked in total').toBe(3);
+    expect(
+      body.blockedOnBudget,
+      'the exhaustion signal must count budget parks ONLY — a review or join park is not a ' +
+        'reason to raise a ceiling',
+    ).toBe(2);
+  });
+
+  it('blockedOnBudget is 0 on a workforce whose work is merely queued', async () => {
+    const a = await principal('wf-bt-zero@example.test', 'Org WF BT Zero');
+    const tdb = forTenant(h.db, a.orgId);
+    await ensureWorkforceRuntime(tdb, 'wf', RAW_BUDGETS);
+    const task = await createRootTask(tdb, {
+      workforceId: 'wf',
+      title: 'Nothing wrong here',
+      goal: 'Ship the release.',
+      owner: 'principal_eng',
+      requestedBy: 'user',
+      department: 'eng',
+    });
+    await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const body = await readStatus(a.token);
+    expect(body.blockedOnBudget).toBe(0);
+    expect(body.queueDepth).toBe(1);
+    // The declared department ceiling is still enumerated, unexhausted — a ceiling that has not
+    // bitten yet is exactly what an operator wants to see BEFORE it does.
+    const tiers = body.budgetTiers;
+    const engTier = tiers.find((t) => t.scopeId === 'eng');
+    expect(engTier).toBeDefined();
+    expect((engTier as StatusBudgetTier).exhausted).toBe(false);
+    expect((engTier as StatusBudgetTier).consumedUsd).toBe(0);
+  });
+});

@@ -223,7 +223,9 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 resolves its active org, answering tenant_required/tenant_mismatch).
                                 Subcommands:
                                   status --workforce <id>       control state, counts, queue depth,
-                                                                current-window budget headroom
+                                                                every declared ceiling with its
+                                                                headroom, and how many tasks are
+                                                                parked on an exhausted one
                                   submit --workforce <id> --goal <text> [--description <text>]
                                          [--priority low|normal|high|urgent]
                                                                 submit a goal; the deployment's
