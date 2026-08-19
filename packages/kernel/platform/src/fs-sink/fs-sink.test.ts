@@ -16,8 +16,7 @@
  * ⚠ WHAT THE MUTATION BATTERY ACTUALLY FOUND — read this before trusting an arm's title.
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * The first draft of this header claimed that "removing the specific guard each arm names makes it
- * FAIL". THAT CLAIM WAS FALSE, and the battery is what disproved it
- * (`planning/plans/2026-08-19-UI1-file-write-handler.md` §7 records every round). Most escapes here are
+ * FAIL". THAT CLAIM WAS FALSE, and a mutation battery is what disproved it. Most escapes here are
  * refused by TWO TO FOUR INDEPENDENT LAYERS, so removing any one of them alone leaves the arm GREEN:
  *
  *   * a `..` traversal is caught by jail layers 3, 4 AND 5;
@@ -245,12 +244,11 @@ describe('FsSink — the parent re-assert, pinned DIRECTLY because the write pat
   // the design suggested. In every escape the suite above stages, `jailPath`'s own layer-5 assert
   // refuses the path FIRST — its `deepestExisting` walk finds a symlinked ancestor whether or not the
   // leaf exists. So no write-path arm reaches the re-assert while layer 5 is intact, and mutating the
-  // re-assert away leaves C5/C5b green (battery round 3, probe B4; round 4's C2 compound removes BOTH
-  // and they go red together).
+  // re-assert away leaves C5/C5b green — only a compound mutation removing BOTH turns them red.
   //
   // That leaves a security-critical branch whose only deterministic exercise is a direct one. These are
-  // it, and they are load-bearing: R3/R4 are the arms that redden when the re-assert's own comparison is
-  // mutated (round 3, D5) — including R4, which fails if the segment boundary is written as a bare
+  // it, and they are load-bearing: R3 and R4 are the arms that redden when the re-assert's own
+  // comparison is mutated — R4 specifically fails if the segment boundary is written as a bare
   // `startsWith` and a sibling directory sharing the root's name prefix slips through.
   //
   // What is NOT established here, and is claimed nowhere: an end-to-end proof of the TOCTOU race the
