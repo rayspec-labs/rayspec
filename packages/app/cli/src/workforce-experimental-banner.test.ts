@@ -215,16 +215,36 @@ describe('the surfaces the compatibility page says are UNMARKED really are', () 
     );
     expect(deployBranch.length, "the CLI's deploy branch moved or was renamed").toBeGreaterThan(0);
     expect(deployBranch).not.toContain('emitExperimentalBanner');
-    expect(readRepo('packages/app/cli/src/deploy.ts')).not.toContain('experimental:');
+    // A FIELD, however it is spelled. `not.toContain('experimental:')` missed the canonical
+    // spelling — `experimental?:`, which is exactly how `doctor.ts:58` and `plan.ts:197` declare
+    // it — so `deploy` could have grown the marking with this pin still green. The optional `?`
+    // and any spacing are part of the pattern now. It stays clear of the two
+    // `experimentalSpecOptionsFromEnv` call sites in the same file: those continue with `S`, not
+    // a colon, so the anchor cannot reach.
+    expect(readRepo('packages/app/cli/src/deploy.ts')).not.toMatch(/\bexperimental\s*\??\s*:/);
   });
 
-  it('the page names `deploy` among them, and counts THREE', () => {
+  it('the page names `deploy`, and its stated count MATCHES the list it then gives', () => {
     const page = readRepo('docs/workforce-compatibility.md');
     const at = page.indexOf('### What is NOT marked');
     expect(at, 'the unmarked-surfaces section moved or was reworded').toBeGreaterThan(-1);
     const section = page.slice(at, page.indexOf('\n## ', at));
-    expect(section).toContain('Three surfaces carry no experimental marking');
     expect(section).toContain('`rayspec deploy`');
+
+    // DERIVED, not asserted as a literal. Checking for the string "Three surfaces …" would only
+    // catch the sentence CHANGING, never the sentence being WRONG — a fourth bullet added under a
+    // stale "Three" would sail past. So: read the number the prose claims, count the bullets the
+    // page actually lists, and require them to agree. The page's whole value is honest
+    // scope-naming; an undercount is the specific way it fails.
+    const WORDS: Record<string, number> = { One: 1, Two: 2, Three: 3, Four: 4, Five: 5 };
+    const claim = /^(One|Two|Three|Four|Five) surfaces? carry no experimental marking/m.exec(
+      section,
+    );
+    expect(claim, 'the unmarked-surfaces count sentence is gone or was reworded').not.toBeNull();
+    const stated = WORDS[(claim as RegExpExecArray)[1] as string] as number;
+    const listed = section.match(/^- \*\*/gm)?.length ?? 0;
+    expect(listed, 'no unmarked-surface bullets parsed out of the section').toBeGreaterThan(0);
+    expect(stated, `the page says ${stated} but lists ${listed}`).toBe(listed);
   });
 });
 

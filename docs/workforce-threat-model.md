@@ -621,9 +621,11 @@ and the final application stays receipt-idempotent (§7.3).
 `actorFrom` (`packages/compose/api-auth/src/routes/workforce.ts:94`) reads the authenticated
 principal and returns `user:<id>` / `api-key:<id>`, with a closed sentinel rather than a guessable
 identity; `requireAuth()` runs before every caller. It is the sole source of `actor` / `decidedBy`
-on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:856`,
-`packages/compose/api-auth/src/routes/workforce.ts:931`, and the signal/cancel/pause/resume/halt
-routes). The client cannot even *attempt* the assertion: every mutating body is a `z.strictObject`,
+on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:856` on the
+approval-decide route, `packages/compose/api-auth/src/routes/workforce.ts:930` on the
+review-verdict route, and the signal/cancel/pause/resume/halt routes). The route is named beside
+each line because `actor: actorFrom(c),` is not a distinctive string — it appears eight times in
+this file — so a line number alone would not tell a re-pinner which one was meant. The client cannot even *attempt* the assertion: every mutating body is a `z.strictObject`,
 so a body carrying `decidedBy` is a 400, not a silently ignored field. Tenant is derived the same
 way (`packages/compose/api-auth/src/http/middleware.ts:174`).
 
@@ -1064,7 +1066,7 @@ packages/compose/api-auth/src/routes/workforce.ts:204 | refine(withinGoalBytes
 packages/compose/api-auth/src/routes/workforce.ts:850 | const override = await breakGlassAuthorized(deps, c, body.override);
 packages/compose/api-auth/src/routes/workforce.ts:852 | const approval = await decideApproval(tdb, {
 packages/compose/api-auth/src/routes/workforce.ts:856 | decidedBy: actorFrom(c),
-packages/compose/api-auth/src/routes/workforce.ts:931 | overrideNamedReviewer: override,
+packages/compose/api-auth/src/routes/workforce.ts:930 | actor: actorFrom(c),
 packages/compose/api-auth/src/routes/workforce.ts:965 | if (c.req.header('Idempotency-Key') !== undefined) {
 packages/compose/api-auth/src/routes/workforce.ts:977 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
 packages/compose/api-auth/src/routes/workforce.ts:989 | requestedBy: actorFrom(c),
