@@ -28,17 +28,25 @@
  * That redundancy is a good property of the code and a TRAP for the test suite: an arm that stays green
  * under every single-guard mutation is indistinguishable, by mutation alone, from an arm that measures
  * nothing. So coverage here is established by COMPOUND mutations that remove every layer protecting a
- * given arm — and those DO redden it. Two are worth naming: removing the entire jail reddens C1, C2, C4,
- * C5, C5b (and R3/R4); removing all four symlink-leaf layers reddens C3 and C3b.
+ * given arm — and those DO redden it.
+ *
+ * ⚠ THE COMPOUND, STATED CORRECTLY (a reviewer falsified the first version of this paragraph). Removing
+ * the jail ALONE reddens only C2 and C7 — the two arms with a single guard. It does NOT redden C1, C4,
+ * C5 or C5b, because the post-`mkdir` parent re-assert is a PEER full-coverage mechanism, not a
+ * backstop: it catches those escapes on its own. The compound that reddens them is **the jail AND the
+ * re-assert together**, which is what the battery actually ran. The four-layer symlink-leaf compound
+ * (jail layer 5 + `isSymbolicLink()` + `isFile()` + `O_NOFOLLOW`) does redden C3 and C3b as stated.
  *
  * Exactly two guards stand alone, and their single mutations are red: the URL-significant check (C7 —
  * with it gone, `%2e%2e/...` resolves to a real in-root directory literally named `%2e%2e` and the bytes
  * land) and layer 2's leading-BACKSLASH half (C2 — on POSIX `isAbsolute('\\etc\\passwd')` is false and
- * nothing else objects). Every bound in the second describe block is likewise singly guarded.
+ * nothing else objects). Every bound in the second describe block is likewise singly guarded, as are
+ * the hardlink guard (C12-C14) and the re-assert's own comparison (R3/R4).
  *
  * An arm's title therefore names the guard it was WRITTEN for, not the only guard that can redden it.
  */
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -201,16 +209,66 @@ describe('FsSink — the path jail (titles name the guard an arm was written for
     assertOutsideUntouched();
   });
 
-  it('C8 refuses an empty path — a write needs a file, and the root is not one (jail layer 1)', async () => {
+  // TITLE CORRECTED: this arm passes on jail layer 1's `allowRoot=false` branch, which rejects an
+  // empty/'.' path outright — NOT on any write-side guard. The original title implied the latter.
+  it('C8 refuses an empty or "." path — jail layer 1 with allowRoot=false, before any write logic', async () => {
     const s = sink();
     await expect(s.write('', enc('x'))).rejects.toThrow(FsSinkJailError);
     await expect(s.write('.', enc('x'))).rejects.toThrow(FsSinkJailError);
   });
 
-  it('C9 refuses writing OVER a directory (the leaf must be a regular file)', async () => {
+  // TITLE CORRECTED: mutating `!st.isFile()` away leaves this GREEN — what actually refuses a write
+  // over a directory is the KERNEL, via EISDIR on an O_WRONLY open. The `isFile()` branch turns that
+  // into a clearer message; it is not the guarantee. Naming it as the guard was the same
+  // single-guard assumption the mutation battery disproved elsewhere in this file.
+  it('C9 refuses writing OVER a directory — enforced by the kernel (EISDIR); isFile() only improves the message', async () => {
     mkdirSync(join(root, 'adir'), { recursive: true });
     const s = sink();
     await expect(s.write('adir', enc('x'))).rejects.toThrow(FsSinkJailError);
+  });
+
+  it('C12 refuses a HARDLINK leaf — the vector that defeats all four symlink layers', async () => {
+    // WHY THIS EXISTS: a hardlink is a regular file (isFile() true), is not a symlink
+    // (isSymbolicLink() false, so O_NOFOLLOW is content), and has no target to resolve (so the
+    // realpath assert sees the path itself and is satisfied). Every symlink defence passes it, yet
+    // the inode is shared with an entry OUTSIDE the root.
+    //
+    // The fixture is proven to be a REAL escape first: raw node:fs writes through it and the
+    // out-of-root file changes. Without that step, the refusal below could be passing because the
+    // fixture never worked.
+    const outsideFile = join(outsideDir, 'secret.txt');
+    linkSync(outsideFile, join(root, 'hard.txt')); // a second directory entry for the SAME inode
+    writeFileSync(join(root, 'hard.txt'), 'RAW WRITE PROVES THE VECTOR', 'utf8');
+    expect(readFileSync(outsideFile, 'utf8')).toBe('RAW WRITE PROVES THE VECTOR');
+
+    // Reset, then confirm the sink refuses what raw fs just demonstrated.
+    writeFileSync(outsideFile, OUTSIDE_BODY, 'utf8');
+    const s = sink();
+    await expect(s.write('hard.txt', enc('pwned'))).rejects.toThrow(
+      expect.objectContaining({ name: 'FsSinkJailError' }),
+    );
+    expect(readFileSync(outsideFile, 'utf8')).toBe(OUTSIDE_BODY);
+  });
+
+  it('C13 a hardlink whose other entry is INSIDE the root is refused too — nlink is the test, not location', async () => {
+    // The refusal is on the SHARED INODE, not on where the sibling entry happens to live. Refusing
+    // only out-of-root siblings would mean resolving them, which is exactly what a hardlink makes
+    // impossible. The cost — a legitimate in-root hardlink is refused — is accepted deliberately.
+    writeFileSync(join(root, 'original.txt'), 'original', 'utf8');
+    linkSync(join(root, 'original.txt'), join(root, 'alias.txt'));
+    const s = sink();
+    await expect(s.write('alias.txt', enc('via the hardlink'))).rejects.toThrow(
+      expect.objectContaining({ name: 'FsSinkJailError' }),
+    );
+    expect(readFileSync(join(root, 'original.txt'), 'utf8')).toBe('original');
+  });
+
+  it('C14 ACCEPT CONTROL for the hardlink guard: an ordinary file (nlink=1) still writes', async () => {
+    // Without this, a guard that refused EVERY existing file would satisfy C12 and C13.
+    const s = sink();
+    await s.write('plain.txt', enc('first'));
+    await expect(s.write('plain.txt', enc('second'))).resolves.toMatchObject({ created: false });
+    expect(readFileSync(join(root, 'plain.txt'), 'utf8')).toBe('second');
   });
 
   it('C10 the sink exposes NO read / list / delete / move / append surface (write-only is structural)', () => {

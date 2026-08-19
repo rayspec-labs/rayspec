@@ -611,4 +611,113 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     // Nothing was dropped by the reordering: declared + native = the whole offered list.
     expect(nativeNames.length + 1).toBe(offered.length);
   });
+
+  /**
+   * THE REPLAY-SAFETY REFUSAL — the door that makes "a seat may only hold re-runnable tools"
+   * structural rather than a policy someone chose.
+   *
+   * It was UNPINNED. A predicate was extracted and unit-tested, but the refusal it gates was not:
+   * deleting the whole `if (sideEffecting !== undefined) return failTurn(…)` block left every
+   * server no-DB test green, and `idempotent: false` appeared in no test in the repo. A door nothing
+   * notices the removal of is a door only by convention.
+   *
+   * It matters here specifically because the file-writing capability rests on it: a WHOLE-FILE write
+   * is honestly `idempotent: true` and an APPEND is honestly `false`, and it is THIS refusal — not
+   * the capability's own design — that keeps an appending writer off a turn that re-executes on
+   * recovery. These arms drive the real composition against real Postgres and assert the typed
+   * failure, so removing the block reddens them.
+   */
+  describe('the replay-safety refusal (the door the fs-sink capability depends on)', () => {
+    /** A declared tool shaped like a file writer, with the replay-safety flag under test. */
+    const writerTool = (name: string, idempotent: boolean) => ({
+      spec: {
+        name,
+        description: 'Writes a whole file under the deployment output root.',
+        parameters: { type: 'object' as const },
+      },
+      handler: () => ({ path: 'out.md', bytesWritten: 3, created: true }),
+      timeoutMs: 1_000,
+      idempotent,
+    });
+
+    /** Drive ONE real turn for `owner` with `tools` declared on the agent. */
+    async function turnWith(tools: ReturnType<typeof writerTool>[]) {
+      // The backend must never be reached: the refusal happens at composition, before the model runs.
+      let backendRan = false;
+      const backend = makeScriptedBackend('openai', () => {
+        backendRan = true;
+        return [{ name: 'submit_result', args: { status: 'completed', confidence: 0.9 } }];
+      });
+      const registry = new Map([
+        [
+          'a',
+          {
+            spec: {
+              name: 'a',
+              instructions: 'Do the work.',
+              model: 'model-x',
+              input: '',
+              tools: [],
+            },
+            backend,
+            tools,
+          },
+        ],
+      ]) as unknown as AgentRegistry;
+      const resolve = buildWorkforceTurnHandlers({
+        db,
+        tenantId: TENANT,
+        config,
+        registry: () => registry,
+        backendForEmployee: () => backend,
+      });
+      const task = await workingTaskFor('dev');
+      const handler = resolve('dev');
+      if (!handler) throw new Error('no handler');
+      const outcome = await handler({ task, childResults: null, signals: [], messages: [] });
+      return { outcome, backendRan, task };
+    }
+
+    it('REFUSES the turn when a declared tool is not replay-safe, naming the tool and the reason', async () => {
+      const { outcome, backendRan } = await turnWith([writerTool('append_file', false)]);
+      expect(outcome.intent.kind).toBe('fail');
+      const message = (outcome.intent as { kind: 'fail'; message: string }).message;
+      expect(message).toContain('append_file');
+      expect(message).toContain('re-execute');
+      expect(message).toContain('Fail-closed.');
+      // The refusal happens BEFORE the model is invoked — a seat never gets to call the tool once.
+      expect(backendRan).toBe(false);
+    });
+
+    it('the refused turn FAILS the task — the refusal is a real fate, not a logged warning', async () => {
+      // A refusal that produced no durable consequence would be indistinguishable from a no-op.
+      const { outcome, task } = await turnWith([writerTool('append_file', false)]);
+      await applyTurnOutcome(tdb(), {
+        taskId: task.taskId,
+        turnId: turnIdFor(task.taskId, task.turnsUsed + 1),
+        turnNumber: task.turnsUsed + 1,
+        intent: outcome.intent,
+        budgets: NO_BUDGETS,
+      });
+      const row = await rowOf(task.taskId);
+      expect(row.status).toBe('failed');
+    });
+
+    it('ACCEPT CONTROL: the SAME tool with idempotent:true runs the turn normally', async () => {
+      // Without this arm, a composition that refused EVERY declared tool would satisfy the two above.
+      const { outcome, backendRan } = await turnWith([writerTool('write_file', true)]);
+      expect(backendRan).toBe(true);
+      expect(outcome.intent.kind).not.toBe('fail');
+    });
+
+    it('finds the unsafe tool even when declared AFTER safe ones', async () => {
+      const { outcome } = await turnWith([
+        writerTool('write_file', true),
+        writerTool('lookup', true),
+        writerTool('append_file', false),
+      ]);
+      expect(outcome.intent.kind).toBe('fail');
+      expect((outcome.intent as { message: string }).message).toContain('append_file');
+    });
+  });
 });

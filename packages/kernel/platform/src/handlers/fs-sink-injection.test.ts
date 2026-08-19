@@ -23,7 +23,15 @@
  * can carry" and a capability that CREATES files behind that ceiling is a materially larger authority
  * than a read one. The last describe block pins that asymmetry so it cannot be "fixed" by accident.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { TenantDb } from '@rayspec/db';
@@ -135,6 +143,32 @@ function unwiredTool() {
   return buildToolFactory(toolSpec(), toolHandlers(), noTables, ['sinktool'])(fakeTdb())[0];
 }
 
+/** A spec declaring TWO sink-using tools, for the "one run, one budget" arm. */
+function twoToolSpec(): RaySpec {
+  const base = toolSpec();
+  return {
+    ...base,
+    tooling: [
+      ...base.tooling,
+      {
+        id: 'sinktool2',
+        name: 'sink_tool_2',
+        description: 'a SECOND tool that writes under the same output root',
+        parameters: { type: 'object', properties: { op: { type: 'string' } } },
+        handler: 'sink_h2',
+        idempotent: true,
+        timeoutMs: 3000,
+      },
+    ],
+    handlers: [...base.handlers, { id: 'sink_h2', module: './f.ts', export: 'f', kind: 'tool' }],
+  } as RaySpec;
+}
+const twoToolHandlers = (): Map<string, ResolvedHandler> =>
+  new Map([
+    ['sink_h', { kind: 'tool', fn: sinkToolFn }],
+    ['sink_h2', { kind: 'tool', fn: sinkToolFn }],
+  ]);
+
 describe('fs-sink injection — TOOL handler', () => {
   const signal = new AbortController().signal;
 
@@ -193,15 +227,80 @@ describe('fs-sink injection — TOOL handler', () => {
     );
   });
 
-  it("each tool call gets its OWN budget — one call cannot exhaust another's", async () => {
-    // The factory is invoked per tool CALL, which is what scopes the budget. Two calls through the
-    // same built tool each start fresh.
-    const tool = wiredTool({ maxTotalBytes: 10 });
+  it('THE BUDGET BINDS ACROSS CALLS — one sink per RUN, not per call (×200 amplification regression)', async () => {
+    // REGRESSION, and the defect this arm replaces was mine. The first version of this wiring minted
+    // the sink inside the PER-CALL handler closure, so every call started with a fresh budget: a
+    // declared 10-byte total admitted 2 KB across 200 calls, and `maxBytesPerFile` was the only bound
+    // that capped anything. A limit that says "run" and behaves "call" is not a limit.
+    //
+    // This is the amplification attempt run in full: 200 calls, each individually under the per-file
+    // cap, against a 10-byte TOTAL budget. Ground truth is measured off the FILESYSTEM, never from the
+    // tool's own replies — a sink that reported refusals while still writing would pass otherwise.
+    const tool = wiredTool({ maxBytesPerFile: 10, maxTotalBytes: 10, maxFiles: 1 });
+    let accepted = 0;
+    let refused = 0;
+    for (let i = 0; i < 200; i++) {
+      try {
+        await tool?.handler({ op: 'write', path: `f${i}.txt`, body: '0123456789' }, signal);
+        accepted++;
+      } catch {
+        refused++;
+      }
+    }
+    expect(accepted).toBe(1);
+    expect(refused).toBe(199);
+    expect(readdirSync(root)).toEqual(['f0.txt']);
+    expect(statSync(join(root, 'f0.txt')).size).toBe(10);
+  });
+
+  it('two tools OF THE SAME RUN share one budget — declaring more tools does not multiply it', async () => {
+    // The sink is built once per run and handed to every tool in it, so a second tool is not a second
+    // budget. Without this, an agent declaring N tools would get N times the allowance.
+    const tools = buildToolFactory(
+      twoToolSpec(),
+      twoToolHandlers(),
+      noTables,
+      ['sinktool', 'sinktool2'],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      makeFsSinkFactory(root, { maxBytesPerFile: 10, maxTotalBytes: 10, maxFiles: 2 }),
+    )(fakeTdb());
+    expect(tools).toHaveLength(2);
     await expect(
-      tool?.handler({ op: 'write', path: 'a.txt', body: '0123456789' }, signal),
+      tools[0]?.handler({ op: 'write', path: 'first.txt', body: '0123456789' }, signal),
     ).resolves.toMatchObject({ bytesWritten: 10 });
+    // The SECOND tool sees the budget the FIRST already spent.
     await expect(
-      tool?.handler({ op: 'write', path: 'b.txt', body: '0123456789' }, signal),
+      tools[1]?.handler({ op: 'write', path: 'second.txt', body: '0123456789' }, signal),
+    ).rejects.toThrow(expect.objectContaining({ name: 'FsSinkQuotaError' }));
+    expect(readdirSync(root)).toEqual(['first.txt']);
+  });
+
+  it('a DIFFERENT run gets a FRESH budget — per run must not mean per process', async () => {
+    // The other half of "per run": scoping the budget to a run must not leak it between runs, or a
+    // long-lived deployment would refuse every write after the first run exhausted the allowance.
+    const factory = makeFsSinkFactory(root, { maxTotalBytes: 10 });
+    const runFactory = buildToolFactory(
+      toolSpec(),
+      toolHandlers(),
+      noTables,
+      ['sinktool'],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      factory,
+    );
+    await expect(
+      runFactory(fakeTdb())[0]?.handler({ op: 'write', path: 'a.txt', body: '0123456789' }, signal),
+    ).resolves.toMatchObject({ bytesWritten: 10 });
+    // A second run through the SAME factory starts clean.
+    await expect(
+      runFactory(fakeTdb())[0]?.handler({ op: 'write', path: 'b.txt', body: '0123456789' }, signal),
     ).resolves.toMatchObject({ bytesWritten: 10 });
   });
 });

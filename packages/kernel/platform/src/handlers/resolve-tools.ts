@@ -34,6 +34,7 @@ import type { TenantDb } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   EmitEvent,
+  FsSink,
   FsSinkFactory,
   FsSourceFactory,
   SttCapability,
@@ -97,7 +98,12 @@ function buildNeutralTool(
   // `pnpm typecheck` did NOT catch it: this package's tsconfig excludes `**/*.test.ts`, so the
   // misaligned calls in the injection suites were never type-checked. Three suites went red at
   // RUNTIME instead. A trailing optional parameter cannot shift anything that already exists.
-  fsSinkFactory?: FsSinkFactory,
+  //
+  // Takes the ALREADY-BUILT handle, not the factory. That is the whole fix for a budget that did not
+  // bind: minting the sink here would mint it PER TOOL CALL, so `maxTotalBytes` and `maxFiles` reset
+  // on every call and only `maxBytesPerFile` ever capped anything. The run's single sink is built once
+  // by `buildToolFactory` and shared, exactly as `emit` is.
+  fsSink?: FsSink,
 ): NeutralTool {
   return {
     spec: {
@@ -119,15 +125,21 @@ function buildNeutralTool(
         // Spread so ABSENT when no source root is configured — keeping the init shape exact.
         ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
         // The WRITE-ONLY, path-jailed, byte-bounded fs-sink handle. Spread so the field is ABSENT
-        // when no output root is configured. Built PER TOOL CALL, and that is what scopes its
-        // byte/file budget to this call rather than letting one run's writes exhaust another's.
+        // when no output root is configured.
+        //
+        // ⚠ ONE SINK PER RUN, and the budget depends on it. This is the SAME handle for every tool
+        // call of the run (built once in `buildToolFactory` below, like `emit`), so `maxTotalBytes`
+        // and `maxFiles` accumulate ACROSS calls. Minting it here instead — which is what the first
+        // version of this did — reset the budget on every call and left `maxBytesPerFile` as the only
+        // bound that capped anything: a declared 10-byte total budget admitted 2 KB across 200 calls.
+        // A limit that says "run" and behaves "call" is not a limit.
         //
         // TOOL INITS ONLY — `invokeRouteHandler` / `invokeTriggerHandler` deliberately do NOT carry
         // it, unlike every capability above. An HTTP route's authorization ceiling is "a credential
         // the network can carry"; a READ capability behind that ceiling is one thing, but one that
         // CREATES files is a materially larger authority than this seam was opened for. Widening it
         // to routes or triggers is a separate decision with its own review, not an omission.
-        ...(fsSinkFactory ? { fsSink: fsSinkFactory() } : {}),
+        ...(fsSink ? { fsSink } : {}),
         // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
         // Mirrors invokeRouteHandler exactly (the SAME composition-root handle the route arm gets).
         ...(stt ? { stt } : {}),
@@ -166,7 +178,10 @@ function buildNeutralTool(
  * @param fsSourceFactory OPTIONAL composition-root `FsSourceFactory` — when wired, each tool init
  *                      carries `init.fsSource` (the READ-ONLY, path-jailed local-file reader over the
  *                      deployment's shared source root); absent on a no-source-root deploy.
- * @param fsSinkFactory OPTIONAL composition-root `FsSinkFactory` — when wired, each TOOL init carries
+ * @param fsSinkFactory OPTIONAL composition-root `FsSinkFactory`. Invoked ONCE PER RUN (beside
+ *                      `emit`), and the single resulting handle is shared by every tool of that run —
+ *                      which is what makes `maxTotalBytes` and `maxFiles` bind across calls rather
+ *                      than resetting on each one. When wired, each TOOL init carries
  *                      `init.fsSink` (the WRITE-ONLY, path-jailed, byte-bounded whole-file writer over
  *                      the deployment's output root); absent on a deploy with no output root. ROUTE and
  *                      TRIGGER inits never carry it, deliberately — see the spread's comment.
@@ -228,6 +243,11 @@ export function buildToolFactory(
     // Built ONCE per run from the run's tenant-bound handle, then shared by every tool of that run —
     // the same per-run, tenant-bound construction `init.blob` gets.
     const emit = eventBus?.immediate(tdb);
+    // ONE SINK PER RUN — built HERE, beside `emit`, and for a stronger reason than symmetry. The sink
+    // is STATEFUL: it carries the run's byte and file budget. Built per tool CALL instead, every call
+    // would start with a fresh budget and `maxTotalBytes`/`maxFiles` would bound nothing at all.
+    // Sharing this one handle across the run's tools is what makes the declared totals real.
+    const fsSink = fsSinkFactory?.();
     return resolved.map(({ tool, fn }) =>
       buildNeutralTool(
         tool,
@@ -239,7 +259,7 @@ export function buildToolFactory(
         stt,
         tts,
         emit,
-        fsSinkFactory,
+        fsSink,
       ),
     );
   };

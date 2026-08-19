@@ -32,10 +32,21 @@
  *      silently degrading to the `lstat` check alone.
  *
  *   4. PARENTS ARE CREATED BY US, THEN RE-VERIFIED. Missing parent directories are created with a
- *      recursive `mkdir` under the root. This is a real window: at jail time the parent did not exist,
- *      so layer 2's realpath assert could only check a HIGHER ancestor. So after creating them we
- *      re-run the realpath assert ON THE NOW-EXISTING PARENT. A parent that was created as, or swapped
- *      for, a symlink out of the root is caught there.
+ *      recursive `mkdir` under the root. This matters because at jail time the parent may not have
+ *      existed, so layer 2's realpath assert could only reach a HIGHER ancestor; after creating them
+ *      we re-run the realpath assert ON THE NOW-EXISTING PARENT. A parent that RESOLVES out of the
+ *      root — because it is a symlink, or sits under one — is caught there.
+ *
+ *      ⚠ WHAT THIS LAYER DOES **NOT** DO, corrected after a reviewer disproved the original claim.
+ *      An earlier version of this sentence said a parent "swapped for a symlink" is caught here. IT
+ *      IS NOT, and the failure was reproduced 6/6 with an out-of-root file overwritten. There is a
+ *      genuine TOCTOU window between this assert and the `open` below: swap the parent directory for
+ *      a symlink inside it and the write follows the swap. `O_NOFOLLOW` closes the equivalent window
+ *      for the LEAF (verified under 3000 races) but says nothing about a path COMPONENT, and Node
+ *      exposes no `openat`, so there is no directory-fd form available to close it properly.
+ *      NOT MODEL-REACHABLE: it needs a local attacker who can rename directories inside the output
+ *      root, which the threat model below already places out of scope. Stated rather than papered
+ *      over, because a docblock claiming a guarantee the code lacks is worse than no docblock.
  *
  *   5. BOUNDS ARE CHECKED BEFORE ANYTHING IS OPENED. A refused write must leave NOTHING behind — not a
  *      truncated file, not an empty one, not a created directory. So every quota check runs before the
@@ -267,6 +278,29 @@ function makeFsSink(root: string, realRoot: string, quota: Required<FsSinkQuotaC
           throw new FsSinkJailError(
             `fs-sink path '${path}' exists and is not a regular file (a directory, socket or ` +
               'device) — refusing to write over it (fail-closed).',
+          );
+        }
+        // ---- LAYER 3b: NO HARDLINK. ------------------------------------------------------------
+        // A hardlink defeats every symlink defence above, and does so silently: it is a REGULAR FILE
+        // (`isFile()` true), it is NOT a symlink (`isSymbolicLink()` false, so `O_NOFOLLOW` is
+        // content), and it has no target to resolve, so the realpath assert sees the path itself and
+        // is satisfied. Yet the inode is shared — writing here overwrites whatever OTHER directory
+        // entries point at the same inode, including one outside the root.
+        //
+        // `nlink > 1` is the whole test, and it is already in the stat we just took. It refuses the
+        // only case that matters (a second entry exists) and costs nothing.
+        //
+        // THE COST, stated: a legitimate in-root hardlink is refused too. That is the right trade —
+        // this capability writes model-proposed files into an output directory, where a shared inode
+        // is not a use case anyone has, and a refusal is recoverable while an out-of-root overwrite
+        // is not. Same threat class as the symlink layers: it needs an attacker who can already
+        // plant entries inside the root, which the header's threat model puts out of scope — this is
+        // defence in depth, not the primary containment.
+        if (st.nlink > 1) {
+          throw new FsSinkJailError(
+            `fs-sink path '${path}' is a HARDLINK (nlink=${st.nlink}) — its inode has other ` +
+              'directory entries, so writing here would overwrite content reachable elsewhere, ' +
+              'possibly outside the output root. Refused (fail-closed).',
           );
         }
       } catch (e) {
