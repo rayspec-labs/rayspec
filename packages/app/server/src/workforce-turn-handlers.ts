@@ -109,6 +109,22 @@ export function composeTurnTools(
 }
 
 /**
+ * THE REPLAY-SAFETY DOOR: the first declared tool that is NOT safe to re-run, or `undefined` when the
+ * whole list is. A workforce turn RE-EXECUTES on recovery, so a declared tool with `idempotent: false`
+ * would re-fire its side effect; the composition refuses the turn rather than offering it.
+ *
+ * EXTRACTED FROM the inline `.find()` it used to be, and the extraction is the point: this door decides
+ * which side-effecting capabilities a seat may hold at all, and nothing pinned it. It is what forces a
+ * file-writing tool to be a WHOLE-FILE write (replaying one leaves the same end state, so `true` is
+ * honest) rather than an append (replaying one doubles the file, so `false` is honest — and this door
+ * then refuses it). A future edit that weakened it would silently admit appending writes onto a turn
+ * that re-executes. Behaviour is byte-for-byte what the inline predicate did; only its name is new.
+ */
+export function findReplayUnsafeTool(agentTools: readonly NeutralTool[]): NeutralTool | undefined {
+  return agentTools.find((tool) => tool.idempotent === false);
+}
+
+/**
  * Build the production owner→handler resolver for a declared workforce. An owner that is not a
  * declared employee resolves to nothing — the engine's existing typed failure covers it.
  */
@@ -158,7 +174,7 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
       } catch (err) {
         return failTurn(err instanceof Error ? err.message : String(err));
       }
-      const sideEffecting = agentTools.find((tool) => tool.idempotent === false);
+      const sideEffecting = findReplayUnsafeTool(agentTools);
       if (sideEffecting !== undefined) {
         return failTurn(
           `agent '${employee.agent}' declares the non-idempotent tool ` +

@@ -1,0 +1,487 @@
+/**
+ * The `FsSink` path jail + bounds — the fail-the-fix suite for the ONLY containment this capability has.
+ *
+ * WHY EVERY ARM HERE IS WRITTEN AS A FAIL-THE-FIX ARM. A negative assertion ("it cannot escape the
+ * directory") is satisfied trivially by a writer that does nothing at all, and equally by one whose jail
+ * was deleted but whose test fixture happened not to reach outside. Proven only by the absence that
+ * makes it hold, such an assertion is indistinguishable from `expect(true).toBe(true)` — and that exact
+ * defect shipped twice already in this programme.
+ *
+ * Several arms assert the escape's GROUND TRUTH rather than only the throw: the target file outside the
+ * root is read back and asserted UNCHANGED, so a "refusal" that threw *after* writing is still caught.
+ * The positive control (`W1`) stops the file from passing vacuously: if `write` did nothing at all,
+ * every negative arm would still pass and W1 would not.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * ⚠ WHAT THE MUTATION BATTERY ACTUALLY FOUND — read this before trusting an arm's title.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * The first draft of this header claimed that "removing the specific guard each arm names makes it
+ * FAIL". THAT CLAIM WAS FALSE, and a mutation battery is what disproved it. Most escapes here are
+ * refused by TWO TO FOUR INDEPENDENT LAYERS, so removing any one of them alone leaves the arm GREEN:
+ *
+ *   * a `..` traversal is caught by jail layers 3, 4 AND 5;
+ *   * a symlinked PARENT by jail layer 5 AND the post-mkdir re-assert;
+ *   * a symlink LEAF by FOUR things — jail layer 5, `lstat().isSymbolicLink()`,
+ *     `lstat().isFile()` (a symlink is not a regular file, so that branch fires too), and
+ *     `O_NOFOLLOW`. The third of those was invisible until the other three were removed.
+ *
+ * That redundancy is a good property of the code and a TRAP for the test suite: an arm that stays green
+ * under every single-guard mutation is indistinguishable, by mutation alone, from an arm that measures
+ * nothing. So coverage here is established by COMPOUND mutations that remove every layer protecting a
+ * given arm — and those DO redden it.
+ *
+ * ⚠ THE COMPOUND, STATED CORRECTLY (a reviewer falsified the first version of this paragraph). Removing
+ * the jail ALONE reddens only C2 and C7 — the two arms with a single guard. It does NOT redden C1, C4,
+ * C5 or C5b, because the post-`mkdir` parent re-assert is a PEER full-coverage mechanism, not a
+ * backstop: it catches those escapes on its own. The compound that reddens them is **the jail AND the
+ * re-assert together**, which is what the battery actually ran. The four-layer symlink-leaf compound
+ * (jail layer 5 + `isSymbolicLink()` + `isFile()` + `O_NOFOLLOW`) does redden C3 and C3b as stated.
+ *
+ * Exactly two guards stand alone, and their single mutations are red: the URL-significant check (C7 —
+ * with it gone, `%2e%2e/...` resolves to a real in-root directory literally named `%2e%2e` and the bytes
+ * land) and layer 2's leading-BACKSLASH half (C2 — on POSIX `isAbsolute('\\etc\\passwd')` is false and
+ * nothing else objects). Every bound in the second describe block is likewise singly guarded, as are
+ * the hardlink guard (C12-C14) and the re-assert's own comparison (R3/R4).
+ *
+ * An arm's title therefore names the guard it was WRITTEN for, not the only guard that can redden it.
+ */
+import {
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { FsSink } from '@rayspec/handler-sdk';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  __assertRealDirUnderRootForTest,
+  FsSinkConfigError,
+  FsSinkJailError,
+  FsSinkQuotaError,
+  makeFsSinkFactory,
+} from './fs-sink.js';
+
+/** The sandbox holding BOTH the jailed output root and the out-of-root target an escape would reach. */
+let sandbox: string;
+/** The configured output root — everything the sink may touch lives strictly under here. */
+let root: string;
+/** OUTSIDE the root, inside the sandbox: the file every escape arm tries (and must fail) to reach. */
+let outsideDir: string;
+
+const OUTSIDE_BODY = 'the untouched contents of a file OUTSIDE the output root';
+
+const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+
+/** A sink with generous bounds — the confinement arms must fail on the JAIL, never on a quota. */
+function sink(opts?: {
+  maxBytesPerFile?: number;
+  maxTotalBytes?: number;
+  maxFiles?: number;
+}): FsSink {
+  return makeFsSinkFactory(root, {
+    maxBytesPerFile: opts?.maxBytesPerFile ?? 1024 * 1024,
+    maxTotalBytes: opts?.maxTotalBytes ?? 8 * 1024 * 1024,
+    maxFiles: opts?.maxFiles ?? 64,
+  })();
+}
+
+beforeEach(() => {
+  sandbox = mkdtempSync(join(tmpdir(), 'rayspec-fs-sink-'));
+  root = join(sandbox, 'out');
+  outsideDir = join(sandbox, 'outside');
+  mkdirSync(root, { recursive: true });
+  mkdirSync(outsideDir, { recursive: true });
+  writeFileSync(join(outsideDir, 'secret.txt'), OUTSIDE_BODY, 'utf8');
+});
+
+afterEach(() => {
+  rmSync(sandbox, { recursive: true, force: true });
+});
+
+/** Ground truth for an escape arm: the out-of-root file must be byte-identical to how it started. */
+function assertOutsideUntouched(): void {
+  expect(readFileSync(join(outsideDir, 'secret.txt'), 'utf8')).toBe(OUTSIDE_BODY);
+}
+
+describe('FsSink — the path jail (titles name the guard an arm was written for, not its only one)', () => {
+  it('W1 POSITIVE CONTROL: a legitimate write lands the EXACT bytes, and reports them', async () => {
+    const s = sink();
+    const first = await s.write('reports/summary.md', enc('hello sink'));
+    expect(first).toEqual({ path: 'reports/summary.md', bytesWritten: 10, created: true });
+    expect(readFileSync(join(root, 'reports/summary.md'), 'utf8')).toBe('hello sink');
+
+    // Re-writing the SAME path REPLACES it (whole-file write) and is no longer a creation.
+    const second = await s.write('reports/summary.md', enc('replaced'));
+    expect(second).toEqual({ path: 'reports/summary.md', bytesWritten: 8, created: false });
+    expect(readFileSync(join(root, 'reports/summary.md'), 'utf8')).toBe('replaced');
+  });
+
+  it('C1 refuses a `..` traversal segment (jail layer 3: the raw-segment check)', async () => {
+    const s = sink();
+    await expect(s.write('../outside/secret.txt', enc('pwned'))).rejects.toThrow(FsSinkJailError);
+    await expect(s.write('a/../../outside/secret.txt', enc('pwned'))).rejects.toThrow(
+      FsSinkJailError,
+    );
+    assertOutsideUntouched();
+  });
+
+  it('C2 refuses an absolute / leading-slash path (jail layer 2)', async () => {
+    const s = sink();
+    await expect(s.write(join(outsideDir, 'secret.txt'), enc('pwned'))).rejects.toThrow(
+      FsSinkJailError,
+    );
+    await expect(s.write('/etc/passwd', enc('pwned'))).rejects.toThrow(FsSinkJailError);
+    await expect(s.write('\\etc\\passwd', enc('pwned'))).rejects.toThrow(FsSinkJailError);
+    assertOutsideUntouched();
+  });
+
+  it('C3 refuses a SYMLINK LEAF pointing out of the root (the lstat + O_NOFOLLOW layer)', async () => {
+    // A symlink planted INSIDE the root whose target is outside it. Nothing lexical is wrong with the
+    // caller path `link.txt` — only resolving it reveals the escape.
+    symlinkSync(join(outsideDir, 'secret.txt'), join(root, 'link.txt'));
+    const s = sink();
+    await expect(s.write('link.txt', enc('pwned'))).rejects.toThrow(FsSinkJailError);
+    // GROUND TRUTH, not merely the throw: the file the symlink pointed at is byte-unchanged.
+    assertOutsideUntouched();
+  });
+
+  it('C3b refuses a symlink leaf even when its target is INSIDE the root (no write ever follows a link)', async () => {
+    writeFileSync(join(root, 'real.txt'), 'original', 'utf8');
+    symlinkSync(join(root, 'real.txt'), join(root, 'alias.txt'));
+    const s = sink();
+    await expect(s.write('alias.txt', enc('via the link'))).rejects.toThrow(FsSinkJailError);
+    // The in-root target is untouched too: the refusal is on the LINK, not on where it points.
+    expect(readFileSync(join(root, 'real.txt'), 'utf8')).toBe('original');
+  });
+
+  it('C4 refuses `.`-prefixed escapes (layers 3+4 — normalize must not launder them)', async () => {
+    const s = sink();
+    await expect(s.write('./../outside/secret.txt', enc('pwned'))).rejects.toThrow(FsSinkJailError);
+    await expect(s.write('.hidden/../../outside/secret.txt', enc('pwned'))).rejects.toThrow(
+      FsSinkJailError,
+    );
+    assertOutsideUntouched();
+  });
+
+  it('C5 refuses a path whose PARENT DIRECTORY is a symlink out of the root (jail layer 5: realpath)', async () => {
+    // THE ONE PEOPLE MISS. `escape/secret.txt` is lexically impeccable: no `..`, not absolute, and it
+    // normalizes to a path under the root. Only RESOLVING the parent reveals that it leaves.
+    symlinkSync(outsideDir, join(root, 'escape'));
+    const s = sink();
+    await expect(s.write('escape/secret.txt', enc('pwned'))).rejects.toThrow(FsSinkJailError);
+    assertOutsideUntouched();
+  });
+
+  it('C5b refuses a symlinked parent when the leaf AND an intermediate dir are ABSENT (deepestExisting)', async () => {
+    // The harder shape of C5: nothing below the symlink exists, so a realpath of the TARGET returns
+    // nothing and the assert must walk up to the deepest existing ancestor — the symlink itself.
+    symlinkSync(outsideDir, join(root, 'escape'));
+    const s = sink();
+    await expect(s.write('escape/nested/deeper/new.txt', enc('pwned'))).rejects.toThrow(
+      FsSinkJailError,
+    );
+    // And nothing was created along the way, inside or outside.
+    expect(() => readFileSync(join(outsideDir, 'nested/deeper/new.txt'))).toThrow();
+    assertOutsideUntouched();
+  });
+
+  it('C6 refuses a null byte in the path (jail layer 0)', async () => {
+    const s = sink();
+    await expect(s.write('ok\0/../../outside/secret.txt', enc('pwned'))).rejects.toThrow(
+      FsSinkJailError,
+    );
+    assertOutsideUntouched();
+  });
+
+  it('C7 refuses URL-significant chars — %2e%2e URL-decodes to `..` (jail layer 0)', async () => {
+    const s = sink();
+    await expect(s.write('%2e%2e/outside/secret.txt', enc('pwned'))).rejects.toThrow(
+      FsSinkJailError,
+    );
+    await expect(s.write('a#b.txt', enc('x'))).rejects.toThrow(FsSinkJailError);
+    await expect(s.write('a?b.txt', enc('x'))).rejects.toThrow(FsSinkJailError);
+    assertOutsideUntouched();
+  });
+
+  // TITLE CORRECTED: this arm passes on jail layer 1's `allowRoot=false` branch, which rejects an
+  // empty/'.' path outright — NOT on any write-side guard. The original title implied the latter.
+  it('C8 refuses an empty or "." path — jail layer 1 with allowRoot=false, before any write logic', async () => {
+    const s = sink();
+    await expect(s.write('', enc('x'))).rejects.toThrow(FsSinkJailError);
+    await expect(s.write('.', enc('x'))).rejects.toThrow(FsSinkJailError);
+  });
+
+  // TITLE CORRECTED: mutating `!st.isFile()` away leaves this GREEN — what actually refuses a write
+  // over a directory is the KERNEL, via EISDIR on an O_WRONLY open. The `isFile()` branch turns that
+  // into a clearer message; it is not the guarantee. Naming it as the guard was the same
+  // single-guard assumption the mutation battery disproved elsewhere in this file.
+  it('C9 refuses writing OVER a directory — enforced by the kernel (EISDIR); isFile() only improves the message', async () => {
+    mkdirSync(join(root, 'adir'), { recursive: true });
+    const s = sink();
+    await expect(s.write('adir', enc('x'))).rejects.toThrow(FsSinkJailError);
+  });
+
+  it('C12 refuses a HARDLINK leaf — the vector that defeats all four symlink layers', async () => {
+    // WHY THIS EXISTS: a hardlink is a regular file (isFile() true), is not a symlink
+    // (isSymbolicLink() false, so O_NOFOLLOW is content), and has no target to resolve (so the
+    // realpath assert sees the path itself and is satisfied). Every symlink defence passes it, yet
+    // the inode is shared with an entry OUTSIDE the root.
+    //
+    // The fixture is proven to be a REAL escape first: raw node:fs writes through it and the
+    // out-of-root file changes. Without that step, the refusal below could be passing because the
+    // fixture never worked.
+    const outsideFile = join(outsideDir, 'secret.txt');
+    linkSync(outsideFile, join(root, 'hard.txt')); // a second directory entry for the SAME inode
+    writeFileSync(join(root, 'hard.txt'), 'RAW WRITE PROVES THE VECTOR', 'utf8');
+    expect(readFileSync(outsideFile, 'utf8')).toBe('RAW WRITE PROVES THE VECTOR');
+
+    // Reset, then confirm the sink refuses what raw fs just demonstrated.
+    writeFileSync(outsideFile, OUTSIDE_BODY, 'utf8');
+    const s = sink();
+    await expect(s.write('hard.txt', enc('pwned'))).rejects.toThrow(
+      expect.objectContaining({ name: 'FsSinkJailError' }),
+    );
+    expect(readFileSync(outsideFile, 'utf8')).toBe(OUTSIDE_BODY);
+  });
+
+  it('C13 a hardlink whose other entry is INSIDE the root is refused too — nlink is the test, not location', async () => {
+    // The refusal is on the SHARED INODE, not on where the sibling entry happens to live. Refusing
+    // only out-of-root siblings would mean resolving them, which is exactly what a hardlink makes
+    // impossible. The cost — a legitimate in-root hardlink is refused — is accepted deliberately.
+    writeFileSync(join(root, 'original.txt'), 'original', 'utf8');
+    linkSync(join(root, 'original.txt'), join(root, 'alias.txt'));
+    const s = sink();
+    await expect(s.write('alias.txt', enc('via the hardlink'))).rejects.toThrow(
+      expect.objectContaining({ name: 'FsSinkJailError' }),
+    );
+    expect(readFileSync(join(root, 'original.txt'), 'utf8')).toBe('original');
+  });
+
+  it('C14 ACCEPT CONTROL for the hardlink guard: an ordinary file (nlink=1) still writes', async () => {
+    // Without this, a guard that refused EVERY existing file would satisfy C12 and C13.
+    const s = sink();
+    await s.write('plain.txt', enc('first'));
+    await expect(s.write('plain.txt', enc('second'))).resolves.toMatchObject({ created: false });
+    expect(readFileSync(join(root, 'plain.txt'), 'utf8')).toBe('second');
+  });
+
+  it('C10 the sink exposes NO read / list / delete / move / append surface (write-only is structural)', () => {
+    const s = sink();
+    // The interface is the containment: a caller cannot reach the tree except by writing one whole file.
+    expect(Object.keys(s).sort()).toEqual(['quota', 'write']);
+    for (const forbidden of [
+      'read',
+      'list',
+      'search',
+      'delete',
+      'unlink',
+      'move',
+      'rename',
+      'append',
+    ]) {
+      expect((s as unknown as Record<string, unknown>)[forbidden]).toBeUndefined();
+    }
+  });
+
+  it('C11 a legitimate nested write still creates its parents (the jail contains, it does not obstruct)', async () => {
+    const s = sink();
+    const r = await s.write('deeply/nested/dir/note.txt', enc('ok'));
+    expect(r.path).toBe('deeply/nested/dir/note.txt');
+    expect(readFileSync(join(root, 'deeply/nested/dir/note.txt'), 'utf8')).toBe('ok');
+  });
+});
+
+describe('FsSink — the parent re-assert, pinned DIRECTLY because the write path reaches it second', () => {
+  // WHY THIS DESCRIBE EXISTS, corrected against what the mutation battery observed rather than what
+  // the design suggested. In every escape the suite above stages, `jailPath`'s own layer-5 assert
+  // refuses the path FIRST — its `deepestExisting` walk finds a symlinked ancestor whether or not the
+  // leaf exists. So no write-path arm reaches the re-assert while layer 5 is intact, and mutating the
+  // re-assert away leaves C5/C5b green — only a compound mutation removing BOTH turns them red.
+  //
+  // That leaves a security-critical branch whose only deterministic exercise is a direct one. These are
+  // it, and they are load-bearing: R3 and R4 are the arms that redden when the re-assert's own
+  // comparison is mutated — R4 specifically fails if the segment boundary is written as a bare
+  // `startsWith` and a sibling directory sharing the root's name prefix slips through.
+  //
+  // What is NOT established here, and is claimed nowhere: an end-to-end proof of the TOCTOU race the
+  // re-assert exists for — a parent absent at jail time, created as or swapped for a symlink before the
+  // open. Staging that means racing the filesystem, and the suite does not pretend to.
+
+  // The function's contract is that `realRoot` is ALREADY resolved — which is how the impl calls it
+  // (the factory `realpathSync`s the root once at build time). The tests must honour that contract, and
+  // on macOS they visibly must: `tmpdir()` is itself a symlink (`/var/…` -> `/private/var/…`), so an
+  // unresolved root compares unequal to every resolved child. Caught by R1/R2 failing on the first run.
+  const realRoot = (): string => realpathSync(root);
+
+  it('R1 accepts a directory that really is under the root', async () => {
+    mkdirSync(join(root, 'nested/dir'), { recursive: true });
+    await expect(
+      __assertRealDirUnderRootForTest(realRoot(), join(root, 'nested/dir'), 'nested/dir/x.txt'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('R2 accepts the root itself (the boundary case `realDir === realRoot`)', async () => {
+    await expect(
+      __assertRealDirUnderRootForTest(realRoot(), root, 'x.txt'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('R3 REFUSES a directory that resolves, via a symlink, OUTSIDE the root', async () => {
+    // The shape the backstop exists for: the path is lexically inside, and only resolving it leaves.
+    symlinkSync(outsideDir, join(root, 'escape'));
+    await expect(
+      __assertRealDirUnderRootForTest(realRoot(), join(root, 'escape'), 'escape/x.txt'),
+    ).rejects.toThrow(FsSinkJailError);
+  });
+
+  it('R4 REFUSES a sibling whose path merely PREFIXES the root (the segment boundary, not a bare startsWith)', async () => {
+    // `/…/out-evil` starts with `/…/out` as a STRING but is not under it as a PATH. A comparison
+    // written as a bare `startsWith(realRoot)` — without the separator — would accept this one.
+    const sibling = `${root}-evil`;
+    mkdirSync(sibling, { recursive: true });
+    await expect(__assertRealDirUnderRootForTest(realRoot(), sibling, 'x.txt')).rejects.toThrow(
+      FsSinkJailError,
+    );
+  });
+
+  it('R5 REFUSES a directory that cannot be resolved at all (fail-closed, never fail-open)', async () => {
+    await expect(
+      __assertRealDirUnderRootForTest(
+        realRoot(),
+        join(root, 'does/not/exist'),
+        'does/not/exist/x.txt',
+      ),
+    ).rejects.toThrow(FsSinkJailError);
+  });
+});
+
+describe('FsSink — the bounds (a model can emit gigabytes; these say how much reaches disk)', () => {
+  it('B1 refuses a write over maxBytesPerFile, and writes NOTHING', async () => {
+    const s = sink({ maxBytesPerFile: 16 });
+    await expect(s.write('big.txt', enc('x'.repeat(17)))).rejects.toThrow(FsSinkQuotaError);
+    expect(() => readFileSync(join(root, 'big.txt'))).toThrow();
+    // Exactly at the bound is allowed — the refusal is `>`, not `>=`.
+    await expect(s.write('edge.txt', enc('x'.repeat(16)))).resolves.toMatchObject({
+      bytesWritten: 16,
+    });
+  });
+
+  it('B2 refuses a write that would exceed maxTotalBytes across DIFFERENT paths', async () => {
+    const s = sink({ maxTotalBytes: 20 });
+    await s.write('a.txt', enc('x'.repeat(12)));
+    expect(s.quota().bytesWritten).toBe(12);
+    await expect(s.write('b.txt', enc('y'.repeat(9)))).rejects.toThrow(FsSinkQuotaError);
+    expect(() => readFileSync(join(root, 'b.txt'))).toThrow();
+    // Room for a smaller one remains — the bound is a budget, not a latch.
+    await expect(s.write('b.txt', enc('y'.repeat(8)))).resolves.toMatchObject({ bytesWritten: 8 });
+    expect(s.quota().bytesWritten).toBe(20);
+  });
+
+  it('B3 refuses CREATING beyond maxFiles, while still allowing a re-write of an existing path', async () => {
+    const s = sink({ maxFiles: 2 });
+    await s.write('one.txt', enc('1'));
+    await s.write('two.txt', enc('2'));
+    await expect(s.write('three.txt', enc('3'))).rejects.toThrow(FsSinkQuotaError);
+    expect(() => readFileSync(join(root, 'three.txt'))).toThrow();
+    // The count bounds CREATION, not writing: an already-counted path stays writable.
+    await expect(s.write('one.txt', enc('1 again'))).resolves.toMatchObject({ created: false });
+    expect(s.quota().filesWritten).toBe(2);
+  });
+
+  it('B4 REPLAY STABILITY: re-writing the same path does not double-charge the byte budget', async () => {
+    // This is the arm that makes the accounting correct rather than merely present. A workforce turn
+    // RE-EXECUTES on recovery, and the tool is `idempotent: true` precisely because replaying a
+    // whole-file write is safe. Cumulative accounting would charge the replay a second time and let a
+    // RECOVERY exhaust a budget the original turn already paid — crash-safety turned into a refusal.
+    const s = sink({ maxTotalBytes: 30 });
+    for (let i = 0; i < 10; i++) {
+      await s.write('same.txt', enc('x'.repeat(25)));
+    }
+    expect(s.quota().bytesWritten).toBe(25);
+    expect(s.quota().filesWritten).toBe(1);
+    expect(readFileSync(join(root, 'same.txt'), 'utf8')).toBe('x'.repeat(25));
+  });
+
+  it('B5 FAIL-CLOSED ORDERING: a refused write never truncates the file it was refused for', async () => {
+    // The ordering guarantee, made observable. The open carries O_TRUNC, so a bound checked AFTER the
+    // open would destroy existing content and then report a refusal — the worst of both.
+    const s = sink({ maxBytesPerFile: 8 });
+    await s.write('keep.txt', enc('original'));
+    await expect(s.write('keep.txt', enc('far too long to fit'))).rejects.toThrow(FsSinkQuotaError);
+    expect(readFileSync(join(root, 'keep.txt'), 'utf8')).toBe('original');
+  });
+
+  it('B6 quota() reports the declared bounds and current consumption without throwing', async () => {
+    const s = sink({ maxBytesPerFile: 100, maxTotalBytes: 200, maxFiles: 3 });
+    expect(s.quota()).toEqual({
+      maxBytesPerFile: 100,
+      maxTotalBytes: 200,
+      maxFiles: 3,
+      bytesWritten: 0,
+      filesWritten: 0,
+    });
+    await s.write('a.txt', enc('abc'));
+    expect(s.quota()).toMatchObject({ bytesWritten: 3, filesWritten: 1 });
+  });
+
+  it("B7 each factory() call mints a FRESH budget — one run cannot spend another run's", async () => {
+    const factory = makeFsSinkFactory(root, { maxTotalBytes: 10 });
+    const runA = factory();
+    await runA.write('a.txt', enc('x'.repeat(10)));
+    expect(runA.quota().bytesWritten).toBe(10);
+    const runB = factory();
+    expect(runB.quota().bytesWritten).toBe(0);
+    await expect(runB.write('b.txt', enc('y'.repeat(10)))).resolves.toMatchObject({
+      bytesWritten: 10,
+    });
+  });
+});
+
+describe('FsSink — factory configuration (fail-closed, never a helpful guess)', () => {
+  it('refuses a root that does not exist — it never CREATES one', () => {
+    expect(() => makeFsSinkFactory(join(sandbox, 'nope'))).toThrow(FsSinkConfigError);
+    expect(() => makeFsSinkFactory(join(sandbox, 'nope'))).toThrow(
+      /does not exist or is not a directory/,
+    );
+  });
+
+  it('refuses a root that is a FILE, not a directory', () => {
+    const asFile = join(sandbox, 'a-file');
+    writeFileSync(asFile, 'x', 'utf8');
+    expect(() => makeFsSinkFactory(asFile)).toThrow(FsSinkConfigError);
+  });
+
+  it('refuses a non-positive or non-integer bound — a 0 is a misconfiguration, not "unlimited"', () => {
+    expect(() => makeFsSinkFactory(root, { maxFiles: 0 })).toThrow(FsSinkConfigError);
+    expect(() => makeFsSinkFactory(root, { maxTotalBytes: -1 })).toThrow(FsSinkConfigError);
+    expect(() => makeFsSinkFactory(root, { maxBytesPerFile: 1.5 })).toThrow(FsSinkConfigError);
+  });
+
+  it("accepts a root that is ITSELF a symlink — that is the DEPLOYER's own path, not a caller escape", async () => {
+    const realTarget = join(sandbox, 'real-out');
+    mkdirSync(realTarget, { recursive: true });
+    const linkedRoot = join(sandbox, 'linked-out');
+    symlinkSync(realTarget, linkedRoot);
+    const s = makeFsSinkFactory(linkedRoot)();
+    await expect(s.write('note.txt', enc('fine'))).resolves.toMatchObject({ path: 'note.txt' });
+    expect(readFileSync(join(realTarget, 'note.txt'), 'utf8')).toBe('fine');
+  });
+
+  it('the error NAME is the machine-readable code a seat reads through the tool-error channel', async () => {
+    const s = sink({ maxBytesPerFile: 1 });
+    // `dispatchTool` renders a thrown handler error as `handler error: ${String(e)}`, and String(e) on
+    // an Error is `${name}: ${message}` — so the class name IS the code the seat sees.
+    await expect(s.write('x.txt', enc('too long'))).rejects.toThrow(
+      expect.objectContaining({ name: 'FsSinkQuotaError' }),
+    );
+    await expect(s.write('../x.txt', enc('x'))).rejects.toThrow(
+      expect.objectContaining({ name: 'FsSinkJailError' }),
+    );
+  });
+});

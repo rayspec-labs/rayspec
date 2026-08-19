@@ -1472,6 +1472,7 @@ everywhere:
 | --- | --- | --- | --- |
 | `init.blob` | Tenant-bound binary storage (opaque keys). | `stream`-kind routes (always) and tools | a blob backend — `RAYSPEC_BLOB_ROOT`, or one an extension pack provides — and only built when the spec declares a `stream` route |
 | `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `handler`-kind routes and tools | `RAYSPEC_FS_SOURCE_ROOT` |
+| `init.fsSink` | Write-only, path-jailed, byte-bounded **whole-file** writer over a deployment-static output root. No append, delete or move: a workforce turn re-executes on recovery, so only a replay-safe write may be offered to a seat. Per-file bytes, total bytes and file count are capped, and the totals are scoped to **one run** (shared by every tool of that run). | **tools only** — deliberately narrower than its read twin, because an HTTP route's authorization ceiling is "a credential the network can carry" and a capability that *creates* files behind that ceiling is a larger authority than this seam was opened for | `RAYSPEC_FS_SINK_ROOT` |
 | `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `handler`-kind routes | `RAYSPEC_MEDIA_SIGNING_KEY` |
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |

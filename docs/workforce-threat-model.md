@@ -179,7 +179,7 @@ seat's prompt.
 
 - **Scoping is constructor-injected trusted data**, never query input: the scope is built from the
   deployed config and the dispatched task row at
-  `packages/app/server/src/workforce-turn-handlers.ts:174`, and a query naming a *different*
+  `packages/app/server/src/workforce-turn-handlers.ts:190`, and a query naming a *different*
   workforce returns nothing (`packages/kernel/workforce-tools/src/memory.ts:147`).
 - Every read runs on the caller's tenant handle
   (`packages/kernel/workforce-tools/src/memory.ts:162`), so recall cannot cross the tenant.
@@ -239,7 +239,7 @@ fields; the keyed block drops highest-task-id-first with an explicit marker
 
 **What the engine receives on a refusal is a typed sentinel, never the model's arguments**
 (`packages/kernel/workforce-tools/src/collector.ts:35`, selected at
-`packages/app/server/src/workforce-turn-handlers.ts:245`). This is the load-bearing part: forwarding
+`packages/app/server/src/workforce-turn-handlers.ts:261`). This is the load-bearing part: forwarding
 the raw value let a `submit_result` whose arguments failed the toolset schema be re-read by the
 engine as a valid intent of a *different* kind — and review-policy matching keys on the intent the
 toolset **collected**, which was none. That is a mandatory review skipped by sending the wrong
@@ -421,7 +421,7 @@ security story**, so it is stated per seam rather than in aggregate.
 | Seam | Production call site | Return value re-validated? |
 |---|---|---|
 | `OrchestrationStrategy` | **yes** — the goal intake | **yes** — `planRefusal` (`packages/app/server/src/workforce-goal-intake.ts:59`), except step count (§7.4) |
-| `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:182`) | **partly** — hits render as bounded, sanitized data (§3.3) and the input count is capped (`packages/kernel/workforce-tools/src/context.ts:645`); a *malformed* hit is rejected only by a confinement nothing calls (§7.1) |
+| `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:198`) | **partly** — hits render as bounded, sanitized data (§3.3) and the input count is capped (`packages/kernel/workforce-tools/src/context.ts:645`); a *malformed* hit is rejected only by a confinement nothing calls (§7.1) |
 | `ReviewPolicy` | **yes**, but hardcoded — no injection point | n/a |
 | `WorkerSelector` (`packages/kernel/core/src/worker-selector.ts:53`) | **NONE** | a confinement exists and **nothing calls it** (§7.1) |
 | `CostPolicy` (`packages/kernel/core/src/cost-policy.ts:53`) | **NONE** — see below; the scheduler calls the underlying `authorizeTurn` function directly | a confinement exists and **nothing calls it** (§7.1) |
@@ -446,11 +446,11 @@ the class is entirely dead code.
 
 **Injection points are narrower than the interfaces suggest.** `orchestrationStrategy` reaches the
 composition only through the `buildServer` options object
-(`packages/app/server/src/composition-root.ts:3506`), and that option is explicitly **not**
+(`packages/app/server/src/composition-root.ts:3553`), and that option is explicitly **not**
 reachable from the environment-derived options
-(`packages/app/server/src/composition-root.ts:2043`) — so a production entrypoint always runs the
+(`packages/app/server/src/composition-root.ts:2055`) — so a production entrypoint always runs the
 shipped default. The turn-handler seam beside it carries the same posture, stated in its own
-docblock (`packages/app/server/src/composition-root.ts:2034`). `memoryProviderFor` is not passed by
+docblock (`packages/app/server/src/composition-root.ts:2046`). `memoryProviderFor` is not passed by
 the composition root at all; reaching it means an embedder composing the turn handlers itself.
 
 | Abuse case | Outcome | Evidence |
@@ -515,12 +515,12 @@ Two changes since the earlier inventory matter here:
 **A declared agent tool may not carry a native tool's name** — refused at parse
 (`packages/kernel/spec/src/workforce-lint.ts:236`) and again at dispatch composition
 (`packages/kernel/workforce-tools/src/toolset.ts:75`, called at
-`packages/app/server/src/workforce-turn-handlers.ts:157`), both through one shared predicate that
+`packages/app/server/src/workforce-turn-handlers.ts:173`), both through one shared predicate that
 normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:80`, over the set at
 `packages/kernel/core/src/workforce-ids.ts:42`). See §6.4 for what happens *behind* those doors.
 
 **A declared agent tool with `idempotent: false` is refused on workforce turns**
-(`packages/app/server/src/workforce-turn-handlers.ts:161`) — a turn body re-executes on recovery,
+(`packages/app/server/src/workforce-turn-handlers.ts:177`) — a turn body re-executes on recovery,
 and a side-effecting tool would re-fire.
 
 ---
@@ -635,7 +635,7 @@ Two refusal doors (§5) sit in front. **Behind** them, the composition spreads t
 tools first and the runtime's natives **last**
 (`packages/app/server/src/workforce-turn-handlers.ts:104`, returning at
 `packages/app/server/src/workforce-turn-handlers.ts:108`, used at
-`packages/app/server/src/workforce-turn-handlers.ts:217`), and the dispatcher indexes its list into
+`packages/app/server/src/workforce-turn-handlers.ts:233`), and the dispatcher indexes its list into
 a by-name map where the later entry wins
 (`packages/kernel/platform/src/dispatch.ts:226`). So a collision that somehow reached dispatch
 resolves to the runtime's own tool. This was the reverse until recently: the doors were the *only*
@@ -653,8 +653,8 @@ correct-and-uncalled: `packages/app/server/src/workforce-turn-validation.db.test
 
 The tenant data-erasure control seam is wired on **every** boot, under no condition at all — the
 product deploy (`packages/app/server/src/product-boot.ts:2978`), the declared-spec deploy
-(`packages/app/server/src/composition-root.ts:3565`) and the no-document auth-only boot
-(`packages/app/server/src/composition-root.ts:2300`) each build one.
+(`packages/app/server/src/composition-root.ts:3612`) and the no-document auth-only boot
+(`packages/app/server/src/composition-root.ts:2312`) each build one.
 
 **Two successive conditions each chased the shape whose data had just been noticed, and each was
 falsified by the next one.** "No product stores ⇒ no tenant data" was falsified by the task engine:
@@ -889,10 +889,10 @@ why §7.5's last bullet exists.
   because only the appendix copy was checked), which is why arm 6 exists.
 
   **The residual class is the near miss, and this page shipped one before a manual audit caught
-  it.** An earlier draft cited `packages/app/server/src/composition-root.ts:2034` for the claim that
+  it.** An earlier draft cited `packages/app/server/src/composition-root.ts:2046` for the claim that
   the *orchestration strategy* option is unreachable from the environment. That line is the
   **turn-handler** option's docblock; the strategy's own is
-  `packages/app/server/src/composition-root.ts:2043`. Same file, adjacent block, and both contain
+  `packages/app/server/src/composition-root.ts:2055`. Same file, adjacent block, and both contain
   the phrase the ledger recorded — so the guard passed it, correctly and uselessly. A citation that
   is stable is not thereby a citation that is *apt*, and only reading the enclosing function or
   docblock settles which. Every citation in this page whose recorded text also occurs elsewhere in
@@ -1114,22 +1114,22 @@ packages/app/server/src/workforce-goal-intake.ts:116 | const refusal = planRefus
 packages/app/server/src/workforce-goal-intake.ts:125 | const created = await tdb.transaction(async (tx) => {
 packages/app/server/src/workforce-turn-handlers.ts:104 | export function composeTurnTools(
 packages/app/server/src/workforce-turn-handlers.ts:108 | return [...agentTools, ...nativeTools];
-packages/app/server/src/workforce-turn-handlers.ts:157 | assertNoReservedCollisions(agentTools);
-packages/app/server/src/workforce-turn-handlers.ts:161 | const sideEffecting = agentTools.find((tool) => tool.idempotent === false);
-packages/app/server/src/workforce-turn-handlers.ts:174 | const recallScope: RecallScope = {
-packages/app/server/src/workforce-turn-handlers.ts:182 | deps.memoryProviderFor?.(tdb, recallScope) ??
-packages/app/server/src/workforce-turn-handlers.ts:217 | tools: composeTurnTools(nativeTools, agentTools),
-packages/app/server/src/workforce-turn-handlers.ts:245 | (collected.malformed !== null || attemptedEnding
+packages/app/server/src/workforce-turn-handlers.ts:173 | assertNoReservedCollisions(agentTools);
+packages/app/server/src/workforce-turn-handlers.ts:177 | const sideEffecting = findReplayUnsafeTool(agentTools);
+packages/app/server/src/workforce-turn-handlers.ts:190 | const recallScope: RecallScope = {
+packages/app/server/src/workforce-turn-handlers.ts:198 | deps.memoryProviderFor?.(tdb, recallScope) ??
+packages/app/server/src/workforce-turn-handlers.ts:233 | tools: composeTurnTools(nativeTools, agentTools),
+packages/app/server/src/workforce-turn-handlers.ts:261 | (collected.malformed !== null || attemptedEnding
 packages/app/server/src/banner.ts:22 | export const NOT_INTERNET_FACING = 'NOT internet-facing';
 packages/app/server/src/banner.ts:38 | export const POSTURE_WARNING_LINES: readonly string[] = Object.freeze([
 packages/app/server/src/banner.ts:60 | LOCAL / single-node / pre-external-hardening
 packages/app/server/src/banner.ts:225 | STATIC PROFILE (frontend-only)
 packages/app/server/src/banner.ts:235 | lines.push(...POSTURE_WARNING_LINES);
-packages/app/server/src/composition-root.ts:2034 | NOT reachable from `assembleOptsFromEnv`, so a
-packages/app/server/src/composition-root.ts:2043 | `assembleOptsFromEnv`, so a production entrypoint always runs the shipped default
-packages/app/server/src/composition-root.ts:2300 | eraseTenantNow = (
-packages/app/server/src/composition-root.ts:3506 | strategy: opts.orchestrationStrategy ?? new SingleTaskPlanStrategy(),
-packages/app/server/src/composition-root.ts:3565 | const eraseTenantNow: BootedServer['eraseTenantNow'] = (
+packages/app/server/src/composition-root.ts:2046 | NOT reachable from `assembleOptsFromEnv`, so a
+packages/app/server/src/composition-root.ts:2055 | `assembleOptsFromEnv`, so a production entrypoint always runs the shipped default
+packages/app/server/src/composition-root.ts:2312 | eraseTenantNow = (
+packages/app/server/src/composition-root.ts:3553 | strategy: opts.orchestrationStrategy ?? new SingleTaskPlanStrategy(),
+packages/app/server/src/composition-root.ts:3612 | const eraseTenantNow: BootedServer['eraseTenantNow'] = (
 packages/app/server/src/product-boot.ts:2978 | const eraseTenantNow: BootedServer['eraseTenantNow'] = (
 packages/kernel/platform/src/dispatch.ts:226 | const byName = new Map(deps.tools.map((t) => [t.spec.name, t]));
 packages/kernel/platform/src/dispatch.ts:318 | if (tool.inputSchema) {

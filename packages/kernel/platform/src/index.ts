@@ -23,6 +23,13 @@ export type {
   // re-exported here so a platform consumer (the api-auth declarative engine) types its
   // emit-injection seam against the one @rayspec/platform package, like the contracts around it.
   EmitEvent,
+  // The neutral WRITE-ONLY fs-sink CONTRACT types — re-exported on the same conduit as the fs-source
+  // contracts below, so the api-auth declarative engine types its fs-sink-injection seam against the
+  // one @rayspec/platform package. TYPE-ONLY; the impl is the value export further down.
+  FsSink,
+  FsSinkFactory,
+  FsSinkQuota,
+  FsSinkWriteResult,
   FsSource,
   FsSourceEntry,
   FsSourceFactory,
@@ -127,6 +134,20 @@ export {
   type LoadedExtensions,
   loadExtensions,
 } from './extensions/index.js';
+// The fs-backed WRITE-ONLY, path-jailed, byte-bounded `FsSink` impl + composition-root factory. The
+// WRITE twin of the fs-source above: it reuses that module's `jailPath` rather than reimplementing it,
+// and adds the write-specific layers (no symlink leaf, parents re-verified after creation, every bound
+// checked before anything is opened).
+export {
+  DEFAULT_MAX_SINK_BYTES_PER_FILE,
+  DEFAULT_MAX_SINK_FILES,
+  DEFAULT_MAX_SINK_TOTAL_BYTES,
+  FsSinkConfigError,
+  FsSinkJailError,
+  type FsSinkQuotaConfig,
+  FsSinkQuotaError,
+  makeFsSinkFactory,
+} from './fs-sink/index.js';
 // The fs-backed READ-ONLY, path-jailed `FsSource` impl + composition-root factory (the path jail is the
 // ENTIRE containment; a symlink/traversal/absolute escape is refused fail-closed — never foreign bytes).
 export {

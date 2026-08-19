@@ -42,7 +42,7 @@ Two properties hold across all five and are checked directly against the interfa
 **On granting tools.** No seam has a tool surface. A turn's native toolset is derived from the
 employee's declared role — `TOOLSETS_BY_ROLE[employee.role]`
 (`packages/kernel/workforce-tools/src/toolset.ts:849`), assembled at
-`packages/app/server/src/workforce-turn-handlers.ts:139`. The one indirect influence is real and
+`packages/app/server/src/workforce-turn-handlers.ts:155`. The one indirect influence is real and
 worth stating precisely: an `OrchestrationStrategy` chooses which declared seat owns a step, and a
 seat's role determines its toolset. So a strategy selects among the toolsets the workforce already
 declared; it cannot invent a seat, and it cannot change what a seat's role is allowed to call.
@@ -60,7 +60,7 @@ the whole goal as one step for the default owner.
 (`packages/app/server/src/workforce-goal-intake.ts:110`); a composition supplies a replacement
 through `assembleServer`'s `orchestrationStrategy` option, which has no environment path, so a
 production entrypoint always runs the shipped default unless an embedder passes one
-(`packages/app/server/src/composition-root.ts:3506`).
+(`packages/app/server/src/composition-root.ts:3553`).
 
 **What refuses an over-reaching plan:** `planRefusal`
 (`packages/app/server/src/workforce-goal-intake.ts:59`) validates the returned plan against the
@@ -92,9 +92,9 @@ budget; the ceiling exists to stop a runaway, not to express a recommended plan 
 returns nothing and retains nothing, on purpose, so every consumer is tested against an empty recall.
 
 **Wired, with one qualification.** It is called at
-`packages/app/server/src/workforce-turn-handlers.ts:187`; the injection point is the
+`packages/app/server/src/workforce-turn-handlers.ts:203`; the injection point is the
 `memoryProviderFor` (`:73`) dependency. The composition root does not pass it
-(`packages/app/server/src/composition-root.ts:3493` calls `buildWorkforceTurnHandlers` without it),
+(`packages/app/server/src/composition-root.ts:3540` calls `buildWorkforceTurnHandlers` without it),
 so a boot always gets the shipped `TaskHistoryMemoryProvider` — the seam is injectable by an embedder
 that composes the turn handlers itself, not by configuration.
 

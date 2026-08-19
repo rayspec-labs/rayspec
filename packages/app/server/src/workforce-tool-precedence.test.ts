@@ -42,7 +42,7 @@ import { RESERVED_WORKFORCE_TOOL_NAMES } from '@rayspec/core';
 import { makeDispatchTool } from '@rayspec/platform';
 import { assertNoReservedCollisions } from '@rayspec/workforce-tools';
 import { describe, expect, it } from 'vitest';
-import { composeTurnTools } from './workforce-turn-handlers.js';
+import { composeTurnTools, findReplayUnsafeTool } from './workforce-turn-handlers.js';
 
 /** The reserved native this suite forges a collision on — a TURN-ENDING one, the worst case. */
 const COLLIDING_NAME = 'submit_result';
@@ -144,5 +144,75 @@ describe('native tools cannot be shadowed by a declared tool, even past both ref
       'delegate_task',
       'send_message',
     ]);
+  });
+});
+
+/**
+ * THE REPLAY-SAFETY DOOR — the rule that decides which SIDE-EFFECTING capabilities a seat may hold.
+ *
+ * It had no test. That matters now because a file-writing capability reaches seats through exactly this
+ * path, and this door is the whole reason such a tool must be a WHOLE-FILE write: a workforce turn
+ * re-executes on recovery, so replaying a whole-file write leaves the same end state (`idempotent: true`
+ * is honest) while replaying an APPEND doubles the file (`idempotent: false` is honest — and the door
+ * then refuses the turn rather than offering it). Weaken this and an appending writer can be declared
+ * on a seat that re-executes.
+ *
+ * The `.find()` was extracted to a named export purely so it could be pinned; behaviour is unchanged.
+ */
+describe('the replay-safety door: a declared tool that is not re-runnable never reaches a seat', () => {
+  /** A declared tool shaped like the file-writing one this capability is for. */
+  function writerTool(name: string, idempotent: boolean): NeutralTool {
+    return {
+      spec: { name, description: 'write a whole file', parameters: { type: 'object' } },
+      handler: () => ({ path: 'out.md', bytesWritten: 3, created: true }),
+      timeoutMs: 3000,
+      idempotent,
+    };
+  }
+
+  it('FINDS a declared tool that declares itself NOT replay-safe', () => {
+    expect(findReplayUnsafeTool([writerTool('append_file', false)])?.spec.name).toBe('append_file');
+  });
+
+  it('finds NOTHING when every declared tool is replay-safe — a whole-file writer passes', () => {
+    expect(findReplayUnsafeTool([writerTool('write_file', true)])).toBeUndefined();
+  });
+
+  it('finds the unsafe one even when it is buried among safe siblings', () => {
+    const tools = [
+      writerTool('write_file', true),
+      writerTool('lookup', true),
+      writerTool('charge_card', false),
+      writerTool('search', true),
+    ];
+    expect(findReplayUnsafeTool(tools)?.spec.name).toBe('charge_card');
+  });
+
+  it('treats an ABSENT flag as replay-safe, exactly as the strict `=== false` comparison does', () => {
+    // Not an oversight being enshrined: the flag is REQUIRED on a declared tool (the grammar has no
+    // default), so this pins the comparison's shape rather than blessing a missing value. A rewrite to
+    // `!tool.idempotent` would change behaviour here, and this arm is what would catch it.
+    const noFlag = { ...writerTool('x', true), idempotent: undefined as unknown as boolean };
+    expect(findReplayUnsafeTool([noFlag])).toBeUndefined();
+  });
+
+  it('an empty tool list is trivially safe', () => {
+    expect(findReplayUnsafeTool([])).toBeUndefined();
+  });
+});
+
+describe('precedence still holds with a file-writing tool present', () => {
+  it('a declared write_file dispatches, and a colliding native still wins', async () => {
+    // The capability this branch adds is a DECLARED tool. It must be reachable (or it is useless) and
+    // must not be able to shadow a native (or "natives win, always" is not true any more). Both, on
+    // one composition.
+    const nativeTools = [markerTool(COLLIDING_NAME, 'native')];
+    const agentTools = [
+      markerTool('write_file', 'declared'),
+      markerTool(COLLIDING_NAME, 'declared'),
+    ];
+    const composed = composeTurnTools(nativeTools, agentTools);
+    await expect(dispatchSide(composed, 'write_file')).resolves.toBe('declared');
+    await expect(dispatchSide(composed, COLLIDING_NAME)).resolves.toBe('native');
   });
 });

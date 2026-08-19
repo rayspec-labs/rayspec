@@ -16,6 +16,7 @@ import type { Db, StoreConflictKeys } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   DurableExecutor,
+  FsSinkFactory,
   FsSourceFactory,
   ResolvedHandler,
   SttCapability,
@@ -165,6 +166,21 @@ export interface DeclarativeEngine {
    * root ⇒ available to every handler; unset ⇒ absent. NOT tenant-partitioned (see `FsSource`).
    */
   fsSourceFactory?: FsSourceFactory;
+  /**
+   * the composition-root `FsSinkFactory` — the WRITE-ONLY, path-jailed, byte-bounded whole-file
+   * writer a TOOL handler receives as `init.fsSink` (`fsSinkFactory()`, no tenant arg: a shared,
+   * deployment-static OUTPUT root jailed by construction, mirroring `fsSourceFactory`). Injected
+   * exactly like `blobFactory` (the platform ships no backend, the deployer chooses the root via
+   * `RAYSPEC_FS_SINK_ROOT`). OPTIONAL: absent when no output root is configured — a handler that
+   * reads `init.fsSink` then fail-closes loudly on `undefined`.
+   *
+   * ⚠ TOOL INITS ONLY, unlike `fsSourceFactory` which also reaches route and trigger inits. A route's
+   * authorization ceiling is "a credential the network can carry", and a capability that CREATES files
+   * behind that ceiling is a materially larger authority than a read one; this seam was opened for
+   * agent/workforce tool calls, which are already bounded by a turn and a role toolset. Widening it is
+   * a separate decision with its own review. NOT tenant-partitioned (see `FsSink`).
+   */
+  fsSinkFactory?: FsSinkFactory;
   /**
    * the composition-root `SttCapability` — the speech-to-text handle a tool/route handler
    * receives as `init.stt` (transcribe audio bytes the handler already holds; no tenant arg, since it

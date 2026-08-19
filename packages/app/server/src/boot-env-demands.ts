@@ -347,6 +347,20 @@ export const FS_SOURCE_ROOT: BootEnvVar = {
   what: 'the READ-ONLY source root `init.fsSource` reads under',
 };
 
+/**
+ * `RAYSPEC_FS_SINK_ROOT` — OPTIONAL on both profiles and demanded by no document signal, exactly like
+ * its read twin above. Unset ⇒ `init.fsSink` is absent. Only a SET-but-unusable value (nonexistent, not
+ * a directory, or a platform without `O_NOFOLLOW`) refuses the boot.
+ *
+ * Worth an operator's attention in a way the read root is not: this is the ONE directory a model's
+ * output can reach the filesystem through, so where it points is a security decision, not a convenience.
+ */
+export const FS_SINK_ROOT: BootEnvVar = {
+  name: 'RAYSPEC_FS_SINK_ROOT',
+  fileVariant: null,
+  what: 'the WRITE-ONLY output root a declared tool`s `init.fsSink` writes whole files under',
+};
+
 // ── the shared PREDICATES — the document questions the boot gates ask ─────────────────────────────
 
 /**
@@ -848,6 +862,12 @@ function backendReport(
         'OPTIONAL and demanded by no document signal — no route kind requires it. Unset ⇒ ' +
         '`init.fsSource` is absent; only a SET value naming a nonexistent directory refuses the boot',
     }),
+    optionalRow(env, FS_SINK_ROOT, {
+      note:
+        'OPTIONAL and demanded by no document signal, like its read twin. Unset ⇒ `init.fsSink` is ' +
+        'absent; only a SET but unusable value refuses the boot. It is the ONE directory model ' +
+        'output can reach the filesystem through — where it points is a security decision',
+    }),
   ];
   if (backends.has('anthropic')) {
     optional.push(
@@ -952,6 +972,12 @@ async function productReport(
       note:
         'OPTIONAL and demanded by no document signal. Unset ⇒ `init.fsSource` is absent; only a SET ' +
         'value naming a nonexistent directory refuses the boot',
+    }),
+    optionalRow(env, FS_SINK_ROOT, {
+      note:
+        'OPTIONAL and demanded by no document signal, like its read twin. Unset ⇒ `init.fsSink` is ' +
+        'absent; only a SET but unusable value refuses the boot. It is the ONE directory model ' +
+        'output can reach the filesystem through — where it points is a security decision',
     }),
   ];
 
