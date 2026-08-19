@@ -41,14 +41,21 @@
  *
  *   1. NESTED shapes. Both live arms compare TOP-LEVEL keys only. A change inside
  *      `status.budget`, `tree.budgets`, a `cost` group, or a `goals` task entry does NOT go red.
- *   2. TWO envelopes are unreachable without deeper engine state and are transcription-only:
- *      the review-verdict 200 (`{reviewId, verdict, taskId, taskStatus}`) and the 504 drain-timeout
- *      body. The approval-decide 200 is the approval ROW, whose shape IS covered by the inbox probe.
- *   3. STATUS CODES are spot-checked, not derived. SEVEN are OBSERVED against the running server
- *      (401; the fail-closed 501; a 400 on an off-vocabulary status filter; a 400 on the goals
+ *   2. THREE of the sixteen success bodies are driven by nothing and are transcription-only: the
+ *      review-verdict 200 (`{reviewId, verdict, taskId, taskStatus}`, covered by nothing at all),
+ *      the approval-decide 200 (the approval ROW, whose SHAPE is covered by the inbox probe, but
+ *      whose operation is never called) and the SSE events 200. That set is DERIVED by
+ *      `THE PUBLISHED POSTURE…` as `documented 2xx - observed 2xx` and compared against what the
+ *      served tag publishes, so neither this comment nor the document can drift away from it.
+ *      The 504 drain-timeout body used to be on this list as "unreachable". It is not: `OBSERVED
+ *      504` drives it, which is how the wrong description of `details.stillWorking` was pinned.
+ *   3. STATUS CODES are spot-checked, not derived. 21 of the 106 documented `(operation, status)`
+ *      pairs are OBSERVED against the running server — the thirteen driven 2xx above plus 401; the
+ *      fail-closed 501; a 400 on an off-vocabulary status filter; a 400 on the goals
  *      `Idempotency-Key` refusal; a 404 on an unknown task id; a 404 on a tenantless credential; a
- *      429 from the SHIPPED goal-submit quota). The rest are hand-derived from `mapEngineError` by
- *      reading, so a newly-added `mapEngineError` branch does not go red here.
+ *      429 from the SHIPPED goal-submit quota; and the 504 drain timeout. The rest are hand-derived
+ *      from `mapEngineError` by reading, so a newly-added `mapEngineError` branch does not go red
+ *      here.
  *   4. FIELD TYPES are not compared — only key sets. A field whose type changed stays green.
  *
  * TWO ARMS EXIST BECAUSE THE FIRST DRAFT OF THE DOCUMENT WAS WRONG, and every structural arm stayed
@@ -73,6 +80,7 @@ import { serve } from '@hono/node-server';
 import { forTenant, schema } from '@rayspec/db';
 import { parseSpec, type RaySpec, WORKFORCE_EXPERIMENTAL_SCHEMA_ANNOTATION } from '@rayspec/spec';
 import {
+  applyTransition,
   createRootTask,
   ensureWorkforceRuntime,
   OPERATOR_SIGNAL_KINDS,
@@ -83,13 +91,18 @@ import { getTableColumns } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import {
+  HTTP_DRAIN_TIMEOUT_MS,
   WORKFORCE_EXPERIMENTAL_HEADER,
   WORKFORCE_EXPERIMENTAL_HEADER_VALUE,
 } from '../routes/workforce.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 import { OPENAPI_POSTURE_NOTICE } from './emit-openapi.js';
-import { WORKFORCE_OPENAPI_TAG, WORKFORCE_SECTION_PREFIX } from './emit-workforce-openapi.js';
+import {
+  WORKFORCE_OPENAPI_TAG,
+  WORKFORCE_SECTION_PREFIX,
+  WORKFORCE_VERIFICATION_POSTURE,
+} from './emit-workforce-openapi.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -139,6 +152,55 @@ const agentRegistry: AgentRegistry = new Map<string, AgentRegistryEntry>([
 const PROBE_WORKFORCE = 'envelope-probe';
 /** A SECOND workforce, used only by pause/resume/halt, so a halt cannot affect the reads above. */
 const CONTROL_WORKFORCE = 'control-probe';
+/**
+ * A THIRD workforce, owned entirely by the OBSERVED 504 arm. It ends the run PAUSED with one task
+ * stuck in `working`, which is precisely the state no other arm may see — hence its own id.
+ */
+const DRAIN_WORKFORCE = 'drain-504-probe';
+
+/**
+ * A `details` value's OBSERVED JavaScript type → the prose the served document is REQUIRED to use
+ * for it, and the prose it may not.
+ *
+ * WHY THIS TABLE EXISTS. `details.stillWorking` shipped in the first draft of this document
+ * described as a value that "lists the task ids still working". It is a `number` — a `count(*)::int`
+ * taken IN the database (`@rayspec/tasks` `control.ts`, `workingCount`) precisely so a drain poll
+ * never materializes the working set. A generated client that believed the document would have
+ * iterated an integer. Nothing in this suite noticed: a reviewer replaced an entire response
+ * description with a nonsense claim and all 32 arms stayed green, because DESCRIPTIONS were checked
+ * by nothing at all.
+ *
+ * So the rule is derived from the wire rather than transcribed: whatever `typeof` the real response
+ * carries selects the vocabulary the description must use. `mustNot` deliberately targets the FALSE
+ * CLAIM SHAPE — a verb that says the field ENUMERATES something — and not the bare word `ids`, so a
+ * description is still free to say "not their ids", which is the useful thing to tell a client.
+ */
+const DETAIL_TYPE_PROSE: Readonly<
+  Record<string, { readonly must: RegExp; readonly mustNot: RegExp }>
+> = {
+  number: {
+    must: /\b(count|number of)\b/i,
+    mustNot: /\b(lists?|names|enumerates)\b[^.]{0,40}\bids?\b/i,
+  },
+};
+
+/**
+ * THE OBSERVATION LEDGER — what this RUN actually drove against the booted server.
+ *
+ * The served tag publishes a number: how many of the `(operation, status)` pairs it documents are
+ * OBSERVED rather than read off `mapEngineError` by hand. That number is a claim about THIS FILE,
+ * so this file is where it has to be answered. Every arm that drives a real request records the
+ * pair it observed here, and the posture arm — declared LAST, so it runs last — compares the
+ * recording against `WORKFORCE_VERIFICATION_POSTURE.observedPairs`. Add an observation and the
+ * document's number must move with it; delete an arm and the number goes red.
+ *
+ * A pair is `METHOD <openapi path> <status>`, so the three `cost` probes (one route, three query
+ * shapes) collapse to one observation — the document has one `(operation, status)` entry for them.
+ */
+const observedPairs = new Set<string>();
+function recordObserved(method: string, docPath: string, status: string): void {
+  observedPairs.add(`${method.toUpperCase()} ${docPath} ${status}`);
+}
 
 /** The extension keyword, taken from the JSON-Schema annotation so there is exactly ONE spelling. */
 const EXPERIMENTAL_KEY = Object.keys(WORKFORCE_EXPERIMENTAL_SCHEMA_ANNOTATION).find((k) =>
@@ -225,6 +287,8 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
   let base: string;
   let doc: Doc;
   let token: string;
+  /** The tenant the `token` above is scoped to — the OBSERVED 504 arm seeds its own row through it. */
+  let probeOrgId: string;
   /** Seeded engine state the live-envelope probes read and mutate. See `ENVELOPE_PROBES`. */
   let seeded: {
     readonly treeTaskId: string;
@@ -283,6 +347,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${t0}` },
     });
     const orgId = (await orgRes.json()).id as string;
+    probeOrgId = orgId;
     const sw = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/switch`, {
       headers: { authorization: `Bearer ${t0}` },
     });
@@ -564,6 +629,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
   it('OBSERVED 401: an unauthenticated read answers 401, and 401 is documented', async () => {
     const res = await fetch(`${base}/v1/workforce/tasks`);
     expect(res.status).toBe(401);
+    recordObserved('GET', '/v1/workforce/tasks', '401');
     expect(operationAt(doc, 'GET', '/v1/workforce/tasks').responses['401']).toBeTruthy();
   });
 
@@ -585,6 +651,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${noSeamToken}` },
     });
     expect(res.status).toBe(501);
+    recordObserved('GET', '/v1/workforce/tasks', '501');
     expect(operationAt(doc, 'GET', '/v1/workforce/tasks').responses['501']).toBeTruthy();
   });
 
@@ -593,6 +660,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(400);
+    recordObserved('GET', '/v1/workforce/tasks', '400');
     expect(operationAt(doc, 'GET', '/v1/workforce/tasks').responses['400']).toBeTruthy();
   });
 
@@ -609,6 +677,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       body: JSON.stringify({ goal: 'ship it' }),
     });
     expect(res.status).toBe(400);
+    recordObserved('POST', '/v1/workforce/{workforceId}/goals', '400');
     const op = operationAt(doc, 'POST', '/v1/workforce/{workforceId}/goals');
     expect(op.responses['400']).toBeTruthy();
     expect(op.responses['400']?.description).toMatch(/Idempotency-Key/);
@@ -619,6 +688,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(res.status).toBe(404);
+    recordObserved('GET', '/v1/workforce/tasks/{id}', '404');
     expect(operationAt(doc, 'GET', '/v1/workforce/tasks/{id}').responses['404']).toBeTruthy();
   });
 
@@ -637,6 +707,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${orgless}` },
     });
     expect(res.status).toBe(404);
+    recordObserved('GET', '/v1/workforce/tasks', '404');
     // …and the document says so on a route whose 404 comes ONLY from this path.
     const listOp = operationAt(doc, 'GET', '/v1/workforce/tasks');
     expect(listOp.responses['404'], 'the list route documents no 404').toBeTruthy();
@@ -677,6 +748,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     };
     expect(envelope.error.code).toBe('RATE_LIMITED');
     expect(typeof envelope.error.details?.retryAfterMs).toBe('number');
+    recordObserved('POST', '/v1/workforce/{workforceId}/goals', '429');
 
     // …and the document says exactly that, header absence included.
     const op = operationAt(doc, 'POST', '/v1/workforce/{workforceId}/goals');
@@ -685,6 +757,105 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     expect(documented?.description).toMatch(/retryAfterMs/);
     expect(Object.keys(documented?.headers ?? {})).toEqual([WORKFORCE_EXPERIMENTAL_HEADER]);
   });
+
+  it('OBSERVED 504: the drain timeout is REAL, and the document describes `details.stillWorking` as ' +
+    'the count it is — not as a list of ids', async () => {
+    /**
+     * THE THIRD FALSE CLAIM THIS DOCUMENT SHIPPED, and the first one a test can hold down.
+     *
+     * The 504's description said `details.stillWorking` "lists the task ids still working". It is
+     * a `number`: `WorkforceDrainTimeoutError` declares `readonly stillWorking: number`
+     * (`@rayspec/tasks` `control.ts`), it is filled from a `count(*)::int` evaluated IN the
+     * database so that a drain poll never materializes the working set, and `mapEngineError`
+     * (`routes/workforce.ts`) passes it to the envelope verbatim. A UI generated from the wrong
+     * document would have tried to render an integer as a list of task ids.
+     *
+     * WHY IT SURVIVED. Every other arm in this file checks STRUCTURE — which paths, which
+     * statuses, which keys, which headers. Response DESCRIPTIONS were checked by nothing: a
+     * reviewer swapped this one for an unrelated claim and the suite stayed 32/32 green. So this
+     * arm does not reword the sentence, it OBSERVES the value and makes the sentence answer to it.
+     *
+     * WHY IT IS WORTH ~25 SECONDS. The previous arm here asserted only that a `504` key existed on
+     * both draining routes and said in a comment that reaching it "needs a turn that outlives the
+     * 25s HTTP drain window". It does — and `routes/workforce.test.ts` already pays that cost, so
+     * "unreachable" was never true. Paying it here turns the last transcription-only status on
+     * this surface into an observed one, which is the whole posture this document publishes.
+     *
+     * BOTH DRAINING ROUTES ARE COVERED BY ONE DRIVE. `pause` and `halt` share the single
+     * `DRAIN_TIMEOUT` constant in the emitter, so observing either one validates the sentence
+     * both of them serve — and the loop below asserts the sentence on both.
+     */
+    const tdb = forTenant(h.db, probeOrgId);
+    await ensureWorkforceRuntime(tdb, DRAIN_WORKFORCE);
+    const task = await createRootTask(tdb, {
+      workforceId: DRAIN_WORKFORCE,
+      title: 'drain 504 probe',
+      goal: 'occupy the drain',
+      owner: 'user',
+      requestedBy: 'user:seed',
+    });
+    // Through the engine's own transition chokepoint, never by writing `status` by hand: the
+    // drain counts what `applyTransition` produced, so a hand-written row would prove nothing.
+    const queued = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'openapi-drain-claim',
+    });
+
+    const res = await authed(`/v1/workforce/${DRAIN_WORKFORCE}/pause`, 'POST', { drain: true });
+    expect(res.status, 'the drain did not time out — this arm proves nothing').toBe(504);
+    const body = (await res.json()) as {
+      error: { code: string; message: string; details?: Record<string, unknown> };
+    };
+    expect(body.error.code).toBe('GATEWAY_TIMEOUT');
+    const details = body.error.details ?? {};
+    // The whole `details` object, not just the one key: if the envelope ever grows a second
+    // field the loop below demands the document describe that one too.
+    expect(Object.keys(details).sort(), 'the 504 carries a different detail set now').toEqual([
+      'stillWorking',
+    ]);
+    expect(details.stillWorking, 'one task was seeded working').toBe(1);
+    recordObserved('POST', '/v1/workforce/{workforceId}/pause', '504');
+
+    for (const path of ['/v1/workforce/{workforceId}/pause', '/v1/workforce/{workforceId}/halt']) {
+      const desc = operationAt(doc, 'POST', path).responses['504']?.description ?? '';
+      // (1) IT MUST STILL BE ABOUT THIS REFUSAL. This is the half that reds when a description is
+      //     replaced wholesale rather than subtly mis-worded — the failure mode observed in
+      //     review. Each token below is derived, not transcribed: the field names come from the
+      //     live envelope, the window from the route's own exported constant.
+      for (const token of [...Object.keys(details), String(HTTP_DRAIN_TIMEOUT_MS), 'drain']) {
+        expect(desc, `POST ${path} 504 no longer mentions '${token}'`).toContain(token);
+      }
+      // (2) IT MUST DESCRIBE THE VALUE AS THE TYPE THE WIRE ACTUALLY CARRIES.
+      for (const [key, value] of Object.entries(details)) {
+        const rule = DETAIL_TYPE_PROSE[typeof value];
+        expect(
+          rule,
+          `the 504 carries \`${key}\` as a ${typeof value} and no prose rule covers that type — ` +
+            'add one to DETAIL_TYPE_PROSE rather than leaving the description unguarded',
+        ).toBeTruthy();
+        expect(
+          desc,
+          `POST ${path} 504 describes \`${key}\` (a ${typeof value} on the wire) without saying so`,
+        ).toMatch((rule as { must: RegExp }).must);
+        expect(
+          desc,
+          `POST ${path} 504 claims \`${key}\` enumerates ids — it is a ${typeof value}`,
+        ).not.toMatch((rule as { mustNot: RegExp }).mustNot);
+      }
+    }
+    // The 60 s per-test timeout below: ~25 s of real waiting happens INSIDE the request.
+    // `HTTP_DRAIN_TIMEOUT_MS` is a module constant with no injection seam, so that wait is the
+    // honest cost of an OBSERVED 504 rather than a stubbed one.
+  }, 60_000);
 
   it('OBSERVED headers: the two list routes differ on X-Result-Truncated, and the document says which', async () => {
     // The response headers are the other place a hand-written document can quietly over-claim (see
@@ -696,6 +867,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(approvals.status).toBe(200);
+    recordObserved('GET', '/v1/workforce/approvals', '200');
     expect(approvals.headers.get('x-result-truncated')).toBe('false');
     const approvalsDoc = operationAt(doc, 'GET', '/v1/workforce/approvals').responses['200'];
     expect(Object.keys(approvalsDoc?.headers ?? {})).toContain('X-Result-Truncated');
@@ -707,6 +879,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${token}` },
     });
     expect(tasks.status).toBe(200);
+    recordObserved('GET', '/v1/workforce/tasks', '200');
     expect(
       tasks.headers.get('x-result-truncated'),
       'an unfilled task page sends no flag',
@@ -838,6 +1011,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       const res = await probe.send();
       const body = (await res.json()) as Record<string, unknown>;
       expect(res.status, `${probe.name}: ${JSON.stringify(body)}`).toBe(Number(probe.status));
+      recordObserved(probe.method, probe.path, probe.status);
 
       const op = operationAt(doc, probe.method, probe.path);
       const schemaNode = op.responses[probe.status]?.content?.['application/json']?.schema as
@@ -878,6 +1052,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     for (const list of lists) {
       const res = await authed(list.path);
       expect(res.status).toBe(200);
+      recordObserved('GET', list.docPath, '200');
       const rows = (await res.json()) as Record<string, unknown>[];
       expect(
         rows.length,
@@ -900,6 +1075,7 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     // The single-row read serves the SAME shape as the list, from a different handler.
     const one = await authed(`/v1/workforce/tasks/${seeded.treeTaskId}`);
     expect(one.status).toBe(200);
+    recordObserved('GET', '/v1/workforce/tasks/{id}', '200');
     const row = (await one.json()) as Record<string, unknown>;
     const props = (
       operationAt(doc, 'GET', '/v1/workforce/tasks/{id}').responses['200']?.content?.[
@@ -952,5 +1128,100 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       expect(op, `declared ${route.method} ${route.path} vanished from the document`).toBeTruthy();
     }
     expect(doc.info.title).toBe(spec.metadata.name);
+  });
+
+  // ── I. THE POSTURE LOOP — the document's claim about its own coverage, vs this run ────────────
+
+  /**
+   * DECLARED LAST ON PURPOSE. Vitest runs the arms of a file in declaration order, so by the time
+   * this one executes every observing arm above has filed its `(operation, status)` pair in
+   * `observedPairs`. This arm is therefore the only place in the repository that can answer the
+   * question the served document asks a stranger to trust: *how much of this is actually checked?*
+   *
+   * It is deliberately the LAST loop to close. The first three loops (path/method, success-body
+   * keys, row shapes) each pin a piece of the document against the running system. None of them
+   * pins the document's statement ABOUT those pins — and that statement was wrong in both
+   * directions at once: it over-claimed ("the TOP-LEVEL field names of EACH successful response",
+   * when three of sixteen are driven by nothing) and under-claimed ("seven status codes observed",
+   * when twenty-one of the hundred-and-six documented pairs are). An over-claim turns into wrong
+   * generated code; an under-claim makes a reader distrust coverage that is real. Both are defects
+   * in the artifact, and neither could go red before this arm existed.
+   *
+   * Note what is DERIVED rather than transcribed here: the undriven success bodies are computed as
+   * `documented 2xx − observed 2xx`, so the list the document publishes is checked against the
+   * document and this run — never against a comment someone kept up to date by hand.
+   *
+   * If you are running a single arm with `-t`, this one will fail: it compares what THIS RUN drove
+   * against what the document publishes, and a filtered run drives almost nothing. That is the
+   * mechanism, not a flake. Run the file.
+   */
+  it('THE PUBLISHED POSTURE IS THE POSTURE THIS FILE ACTUALLY ENFORCES', () => {
+    const documentedPairs: string[] = [];
+    for (const { path, method, op } of workforceOperations(doc)) {
+      for (const status of Object.keys(op.responses)) {
+        documentedPairs.push(`${method.toUpperCase()} ${path} ${status}`);
+      }
+    }
+    // Anti-vacuity, the same guard the path/method arm carries: an empty document would satisfy
+    // every set comparison below.
+    expect(documentedPairs.length, 'the document describes no responses at all').toBeGreaterThan(
+      16,
+    );
+    expect(observedPairs.size, 'this run observed nothing — the ledger is empty').toBeGreaterThan(
+      0,
+    );
+
+    // 1. NOTHING IS OBSERVED THAT IS NOT DOCUMENTED. A response a test drives and the document does
+    //    not describe is a hole in the contract, whichever way it got there.
+    for (const pair of [...observedPairs].sort()) {
+      expect(documentedPairs, `OBSERVED ${pair}, which the document does not describe`).toContain(
+        pair,
+      );
+    }
+
+    // 2. THE COUNT THE DOCUMENT PUBLISHES IS THE COUNT THIS FILE DROVE.
+    expect(
+      observedPairs.size,
+      'the document publishes an observed-pair count that this run did not produce — add the ' +
+        'observation, or correct WORKFORCE_VERIFICATION_POSTURE.observedPairs',
+    ).toBe(WORKFORCE_VERIFICATION_POSTURE.observedPairs);
+
+    // 3. THE UNDRIVEN SUCCESS BODIES ARE DERIVED, NOT TRUSTED: documented 2xx minus observed 2xx.
+    //    This is the arm that catches the over-claim. A 17th operation added without a probe lands
+    //    here, and so does a probe deleted from `LIVE ENVELOPES`.
+    const is2xx = (pair: string) => /\s2\d\d$/.test(pair);
+    const undriven = documentedPairs.filter((p) => is2xx(p) && !observedPairs.has(p)).sort();
+    expect(
+      undriven,
+      'the document names a different set of unchecked success bodies than the one this run ' +
+        'leaves unchecked',
+    ).toEqual([...WORKFORCE_VERIFICATION_POSTURE.successBodiesTranscribed].sort());
+
+    // 4. AND ALL OF IT IS IN THE SERVED BYTES — not merely in a constant a consumer never sees.
+    //    The tag is the only place a client generator can read any of this.
+    const text = (doc.tags ?? []).find((t) => t.name === WORKFORCE_OPENAPI_TAG)?.description ?? '';
+    const operations = workforceOperations(doc).length;
+    const checked = operations - undriven.length;
+    expect(text, 'the tag does not say how many success bodies are checked').toContain(
+      `${checked} of the ${operations} operations`,
+    );
+    expect(text, 'the tag does not say how large this section is').toContain(
+      `${documentedPairs.length} (operation, status) pairs`,
+    );
+    expect(text, 'the tag does not say how many pairs are observed').toContain(
+      `${observedPairs.size} are OBSERVED`,
+    );
+    // The exact over-claim that shipped. It is cheap to name it and expensive to let it back.
+    expect(text, 'the tag is back to claiming EACH successful response is checked').not.toMatch(
+      /each successful response/i,
+    );
+    // Every undriven success body must be NAMED, not merely counted: "three are unchecked" does not
+    // tell an integrator whether the one they are about to generate against is among them.
+    for (const pair of undriven) {
+      expect(text, `the tag does not name the unchecked success body ${pair}`).toContain(pair);
+    }
+    // `mapEngineError` maps errors; no 2xx is in it. The old sentence implied the residue was all
+    // error codes, which is why the three unchecked 2xx had nowhere to be mentioned.
+    expect(text, 'the tag does not say the error mapping covers no 2xx').toMatch(/no 2xx/i);
   });
 });

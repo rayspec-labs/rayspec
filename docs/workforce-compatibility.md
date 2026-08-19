@@ -146,14 +146,31 @@ the same Zod schemas and database columns the handlers use.
 **What is still not checked**, and you should read the document accordingly: nested shapes
 (only top-level keys are compared, so a change inside `status.budget`, `tree.budgets`, a
 `cost` group or a `goals` task entry is invisible to the suite); field *types*, as opposed
-to field names; the review-verdict body and the `504` drain-timeout body, which the suite
-cannot reach; and most status codes — seven are observed against a running server, the rest
-are read off the error mapping by hand.
+to field names; three of the sixteen success bodies, which no test drives — the
+review-verdict `200`, the approval-decide `200` (its approval *row* shape is covered by the
+inbox probe, but that operation is never called) and the SSE events `200`; and most status
+codes — **21 of the 106 documented `(operation, status)` pairs** are observed against a
+running server, the rest are read off the error mapping by hand, and that mapping covers
+errors only, so no `2xx` is in it.
 
 That last line is not theoretical. The document's **first draft carried two false claims** —
 a `Retry-After` header on the goals `429` that the route does not send, and a missing `404`
 on the four list routes — and every structural arm stayed green through both. They were
-caught by reading the handlers, and are now observed rather than merely reworded.
+caught by reading the handlers, and are now observed rather than merely reworded. A third
+shipped in the same draft: the `504` drain timeout said `details.stillWorking` *listed the
+task ids* still working. It is a **count** — the drain sizes the working set with `count(*)`
+inside the database so a poll never materializes it — and a UI generated from that sentence
+would have iterated an integer. It is now observed too: a test seeds one working task, pays
+the real 25 s drain window, and requires the published sentence to match the type the wire
+actually carried.
+
+The counts above are likewise not maintained by hand. The served document publishes them and
+the suite recomputes them every run: it keeps a ledger of every `(operation, status)` pair it
+drives, derives the unchecked success bodies as *documented `2xx` minus observed `2xx`*, and
+fails if the published paragraph disagrees. That guard exists because the paragraph's first
+version claimed the field names of **each** successful response were checked and said seven
+status codes were observed — an over-claim and an under-claim in one sentence, in the one
+copy of this posture a stranger actually reads.
 
 It does **not** speak for the rest of `@rayspec/tasks`' runtime API (`pauseWorkforce`,
 `decideApproval`, the scheduler and its seams). Those symbols are engine internals of the

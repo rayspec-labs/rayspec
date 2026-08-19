@@ -52,10 +52,20 @@
  *     - NESTED shapes. Both live arms compare TOP-LEVEL keys only, so a change inside
  *       `status.budget`, `tree.budgets`, a `cost` group or a `goals` task entry stays green;
  *     - FIELD TYPES — key sets are compared, not types;
- *     - the review-verdict 200 and the 504 drain-timeout body, which need engine state the suite
- *       does not reach. (The approval-decide 200 is the approval ROW, covered by the inbox probe.);
- *     - the per-operation status-code SETS. Seven are cross-checked against a running server;
- *       the rest are read off `mapEngineError`.
+ *     - THREE of the sixteen success bodies, driven by nothing: the review-verdict 200, the
+ *       approval-decide 200 (its approval ROW shape is covered by the inbox probe, but the
+ *       operation's own response is not) and the SSE events 200. The set is not transcribed
+ *       here — `WORKFORCE_VERIFICATION_POSTURE` carries it and the suite DERIVES it as
+ *       `documented 2xx - observed 2xx`, so this paragraph cannot quietly go stale;
+ *     - the per-operation status-code SETS. 21 of the 106 documented `(operation, status)` pairs
+ *       are cross-checked against a running server; the rest are read off `mapEngineError`, which
+ *       maps errors only.
+ *
+ *   THE 504 DRAIN TIMEOUT IS NO LONGER IN THAT LIST. It was called unreachable, and it never was:
+ *   `OBSERVED 504` seeds one working task and pays the ~25 s drain window, exactly as
+ *   `routes/workforce.test.ts` already did. That matters because the 504's description was WRONG
+ *   (see `DRAIN_TIMEOUT`), and an unreachable response is a response whose prose nothing can hold
+ *   down.
  *
  *   TWO ERRORS ALREADY SHIPPED INTO THIS FILE'S FIRST DRAFT AND WERE CAUGHT BY READING THE
  *   HANDLERS, not by a red test — a `Retry-After` header on the goals 429 that this route does not
@@ -135,6 +145,44 @@ type ExperimentalExtensionKey = Extract<
 const EXPERIMENTAL_EXTENSION_KEY: ExperimentalExtensionKey = 'x-rayspec-experimental';
 
 /**
+ * HOW FAR THIS DOCUMENT'S GUARANTEES REACH, as two numbers the served tag publishes.
+ *
+ * Everything else in the verification paragraph can be COUNTED from the document itself, and is
+ * (see `withWorkforceSection`). These two cannot: they are facts about
+ * `workforce-openapi.db.test.ts` — how much of the surface that suite actually drives — and a
+ * document cannot introspect the suite that checks it. So they are declared here and PINNED there:
+ * the suite keeps its own ledger of every `(operation, status)` pair it observes against a booted
+ * server and compares it to these values, and derives the undriven success bodies as
+ * `documented 2xx − observed 2xx` rather than trusting the list below.
+ *
+ * WHY THAT PIN EXISTS. The first published version of this paragraph claimed the suite checked "the
+ * TOP-LEVEL field names of each successful response". Three of the sixteen were driven by nothing.
+ * It also said "seven status codes are observed", which undersold real coverage by a factor of
+ * three. The module header, the suite header and `docs/workforce-compatibility.md` all stated the
+ * limit accurately — only the SERVED document, the one copy a stranger reads, did not. Numbers in
+ * prose rot; numbers a test recomputes do not.
+ */
+export const WORKFORCE_VERIFICATION_POSTURE = {
+  /**
+   * The success bodies NO test drives. Transcribed from the handlers by hand, so read them as
+   * documentation. Derived and re-checked by the suite as `documented 2xx − observed 2xx`; do not
+   * edit this list by guessing — run the suite and it will tell you what belongs in it.
+   *
+   * The decide 200 deserves its caveat: it serves the approval ROW, and that row's SHAPE is covered
+   * by the inbox list probe. The operation's own response is still driven by nothing, which is what
+   * this list is about. The verdict envelope (`{reviewId, verdict, taskId, taskStatus}`) is covered
+   * by nothing at all, and the events 200 is an SSE stream rather than a JSON envelope.
+   */
+  successBodiesTranscribed: [
+    'POST /v1/workforce/approvals/{id}/decide 200',
+    'POST /v1/workforce/reviews/{id}/verdict 200',
+    'GET /v1/workforce/tasks/{id}/events 200',
+  ] as readonly string[],
+  /** `(operation, status)` pairs OBSERVED against a running server by `workforce-openapi.db.test.ts`. */
+  observedPairs: 21,
+} as const;
+
+/**
  * The tag's prose. States the stability claim; it does NOT restate the deployment posture.
  *
  * It also states HOW MUCH OF THIS SECTION IS MECHANICALLY VERIFIED. A generated client is built by
@@ -143,21 +191,40 @@ const EXPERIMENTAL_EXTENSION_KEY: ExperimentalExtensionKey = 'x-rayspec-experime
  * Shipping the verification posture inside the artifact is the difference between a contract and a
  * claim — and this section's own history says the difference matters: its first draft named a
  * response header the route does not send.
+ *
+ * The counts come from the caller, which has just BUILT the section and can therefore size it,
+ * rather than from a literal that a later edit would leave stale.
  */
-const WORKFORCE_TAG_DESCRIPTION =
-  'EXPERIMENTAL — the durable task-engine control surface. These routes are NOT part of the frozen ' +
-  'v1.0 API. While the section is experimental its paths, request and response shapes, status codes ' +
-  'and behaviour may change in any release, including a patch release, and no deprecation period is ' +
-  'promised. Every response from this prefix also carries the ' +
-  `\`${WORKFORCE_EXPERIMENTAL_HEADER}: ${WORKFORCE_EXPERIMENTAL_HEADER_VALUE}\` header.\n\n` +
-  'HOW MUCH OF THIS SECTION IS VERIFIED, so you know what to trust. CHECKED against the running ' +
-  'server, in both directions, by a test that fails if they disagree: (a) the set of paths and ' +
-  'methods, against the router itself; (b) the TOP-LEVEL field names of each successful response, ' +
-  'against real responses from a booted server. Also derived from the code rather than transcribed: ' +
-  'every request body schema, and the task / approval / review row schemas. NOT CHECKED — treat as ' +
-  'documentation rather than as contract: nested object shapes, field TYPES (only names are ' +
-  'compared), and most status codes (seven are observed; the rest are transcribed from the error ' +
-  'mapping). See docs/workforce-compatibility.md.';
+function workforceTagDescription(counted: {
+  readonly operations: number;
+  readonly pairs: number;
+}): string {
+  const transcribed = WORKFORCE_VERIFICATION_POSTURE.successBodiesTranscribed;
+  const checked = counted.operations - transcribed.length;
+  return (
+    'EXPERIMENTAL — the durable task-engine control surface. These routes are NOT part of the frozen ' +
+    'v1.0 API. While the section is experimental its paths, request and response shapes, status codes ' +
+    'and behaviour may change in any release, including a patch release, and no deprecation period is ' +
+    'promised. Every response from this prefix also carries the ' +
+    `\`${WORKFORCE_EXPERIMENTAL_HEADER}: ${WORKFORCE_EXPERIMENTAL_HEADER_VALUE}\` header.\n\n` +
+    'HOW MUCH OF THIS SECTION IS VERIFIED, so you know what to trust. CHECKED against the running ' +
+    'server, in both directions, by a test that fails if they disagree: (a) the set of paths and ' +
+    'methods, against the router itself; (b) the TOP-LEVEL field names of the successful response of ' +
+    `${checked} of the ${counted.operations} operations, against real responses from a booted ` +
+    'server. ' +
+    (transcribed.length > 0
+      ? `The other ${transcribed.length} success ${transcribed.length === 1 ? 'body is' : 'bodies are'} ` +
+        `checked by NOTHING and transcribed from the handlers by hand — ${transcribed.join('; ')}. `
+      : '') +
+    'Also derived from the code rather than transcribed: every request body schema, and the task / ' +
+    'approval / review row schemas. NOT CHECKED — treat as documentation rather than as contract: ' +
+    'nested object shapes, field TYPES (only names are compared), and most status codes: this ' +
+    `section documents ${counted.pairs} (operation, status) pairs, of which ` +
+    `${WORKFORCE_VERIFICATION_POSTURE.observedPairs} are OBSERVED against a running server. The ` +
+    'rest are hand-derived by reading `mapEngineError`, which maps ERRORS only — no 2xx response is ' +
+    'in it at all. See docs/workforce-compatibility.md.'
+  );
+}
 
 /** Every non-2xx body on this surface is the platform's closed error envelope. */
 const ERROR_SCHEMA_REF = { $ref: '#/components/schemas/Error' } as const;
@@ -578,9 +645,27 @@ const TOO_LARGE =
 const RESERVED_SEGMENT =
   `The workforce id is empty or is a reserved path segment (${RESERVED_WORKFORCE_SEGMENTS.join(', ')}), ` +
   'which would collide with a fixed segment on this surface.';
+/**
+ * The 504 both draining routes serve. `pause` (with `drain: true`) and `halt` share this ONE
+ * sentence, so it is written once and `workforce-openapi.db.test.ts` asserts it on both.
+ *
+ * `details.stillWorking` IS A COUNT, and the first draft of this document said it was a list of
+ * task ids — a type error in the served bytes, which a generated client would have turned into a
+ * type error in code. It is a `number` all the way down: `WorkforceDrainTimeoutError` declares
+ * `readonly stillWorking: number` (`@rayspec/tasks` `control.ts`), the drain fills it from a
+ * `count(*)::int` evaluated IN the database so that a poll never materializes the working set, and
+ * `mapEngineError` (`routes/workforce.ts`) hands it to the envelope verbatim. There are no ids to
+ * report, by design — telling a client that is more useful than the bare type.
+ *
+ * The wording is no longer only prose: `OBSERVED 504` drives a real drain timeout and requires this
+ * sentence to match the `typeof` the wire actually carried.
+ */
 const DRAIN_TIMEOUT =
   `The pause IS in force, but in-flight turns did not go quiet inside the ${HTTP_DRAIN_TIMEOUT_MS} ms ` +
-  'request window. `details.stillWorking` lists the task ids still working. Re-issue the drain.';
+  'request window. `details.stillWorking` is the COUNT of tasks still working — a number, not their ' +
+  'ids: the drain sizes the working set with `count(*)` inside the database precisely so that ' +
+  'polling it never materializes that set, so no ids exist to report and a client must not expect ' +
+  'any. Re-issue the drain.';
 
 // --- the operation builder ----------------------------------------------------------------------
 
@@ -1139,13 +1224,26 @@ export function withWorkforceSection(doc: OpenApiDocument): OpenApiDocument {
     // Two methods on one path (none today) would merge into one path item, as OpenAPI requires.
     item[spec.method] = buildOperation(spec);
   }
+  // SIZE THE SECTION FROM THE SECTION, never from a literal. The tag publishes how many operations
+  // and how many `(operation, status)` pairs this section describes; counting the objects that were
+  // just built is the only version of those numbers that cannot go stale when an operation or a
+  // status is added. `buildOperation` adds the shared 401/403/404/501 to every operation, so a
+  // count taken off the `OPERATIONS` source would understate the document a consumer receives.
+  let operations = 0;
+  let pairs = 0;
+  for (const item of Object.values(paths)) {
+    for (const op of Object.values(item)) {
+      operations += 1;
+      pairs += Object.keys(op.responses).length;
+    }
+  }
   return {
     ...doc,
     tags: [
       ...(doc.tags ?? []),
       {
         name: WORKFORCE_OPENAPI_TAG,
-        description: WORKFORCE_TAG_DESCRIPTION,
+        description: workforceTagDescription({ operations, pairs }),
         [EXPERIMENTAL_EXTENSION_KEY]: true,
       },
     ],
