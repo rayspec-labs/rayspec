@@ -586,7 +586,9 @@ describe(`${PAGE_PATH} — the citation ledger`, () => {
     const schedulerPath = 'packages/workflow/durable-dbos/src/task-scheduler.ts';
     const source = textOf(schedulerPath);
     expect(source, `${schedulerPath} is gone — the arm below would check nothing`).not.toBeNull();
-    const declared = /DEFAULT_TURN_LEASE_MS\s*=\s*([\d_]+)/.exec(source as string);
+    // Anchored on `const`, so a mention inside a docblock or a call site cannot be read as the
+    // declaration — the value must come from the one line that actually defines it.
+    const declared = /const DEFAULT_TURN_LEASE_MS\s*=\s*([\d_]+)/.exec(source as string);
     expect(
       declared,
       `DEFAULT_TURN_LEASE_MS is no longer declared in ${schedulerPath} — nothing anchors the number`,
