@@ -2,8 +2,9 @@
  * THE ENGINE'S LOCK RANKS against real Postgres — the interleavings a single-threaded suite never
  * reaches, driven deterministically by parking one operation on a row lock a third session holds.
  *
- * The declared order (apply-intents.ts's module header, restated at task-scheduler.ts:1127-1133 and
- * docs/workforce-architecture.md:191-193) is four ranks, and this file covers all four:
+ * The declared order (apply-intents.ts's module header, restated in task-scheduler.ts's
+ * `THE LOCK RANK` docblock and in docs/workforce-architecture.md → "Budget scopes") is four ranks,
+ * and this file covers all four:
  *
  *   1. INTRA-TASK, root-first: ancestors before the task, the task before its descendants, ties by
  *      id. root -> middle(working) -> leaf: the middle task's completing turn cascades DOWN into the
