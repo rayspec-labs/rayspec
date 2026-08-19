@@ -127,6 +127,15 @@ const SELF_CONSTRUCT_VECTORS = [
     re: /\bmakeFsSourceFactory\s*\(/,
     what: 'makeFsSourceFactory(...) (a raw fs-source backend factory — use the injected init.fsSource handle)',
   },
+  // A raw WRITE-ONLY fs-sink backend — constructing the path-jailed, byte-bounded file writer instead
+  // of using the injected init.fsSink. This is the highest-stakes vector in the list: a self-built sink
+  // takes its OWN root and its OWN bounds, so a handler that constructed one would choose where model
+  // output lands and how much of it — defeating both the path jail and the byte budget in one call, and
+  // over a directory the deployer never nominated.
+  {
+    re: /\bmakeFsSinkFactory\s*\(/,
+    what: 'makeFsSinkFactory(...) (a raw fs-sink backend factory, with a self-chosen root AND self-chosen bounds — use the injected init.fsSink handle)',
+  },
   // A self-built STT stack — selecting a provider / constructing a provider adapter instead of using
   // the injected init.stt. A handler that builds its own adapter reads the provider credential itself
   // and pins the deployment's provider choice inside product code, defeating the injection seam.
@@ -295,6 +304,15 @@ function selfTest() {
     { rel: 'h/x.ts', src: 'const blob = new FsBlobStore(root, tenantId);', expect: true },
     { rel: 'h/x.ts', src: "const f = makeFsBlobStoreFactory('/data/blobs');", expect: true },
     { rel: 'h/x.ts', src: "const s = makeFsSourceFactory('/data/reference');", expect: true },
+    { rel: 'h/x.ts', src: "const w = makeFsSinkFactory('/data/out');", expect: true },
+    // The shape that makes this vector matter: a self-chosen root AND self-chosen bounds in one call.
+    {
+      rel: 'h/x.ts',
+      src: "const w = makeFsSinkFactory('/', { maxTotalBytes: 1e12, maxFiles: 1e6 });",
+      expect: true,
+    },
+    // NEGATIVE control: reading the INJECTED handle is the sanctioned path and must NOT be flagged.
+    { rel: 'h/x.ts', src: "await init.fsSink.write('report.md', bytes);", expect: false },
     {
       rel: 'h/x.ts',
       src: "const stt = buildSttCapability({ sttProvider: 'fake' });",

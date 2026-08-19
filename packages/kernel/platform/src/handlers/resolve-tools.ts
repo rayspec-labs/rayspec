@@ -34,6 +34,7 @@ import type { TenantDb } from '@rayspec/db';
 import type {
   BlobStoreFactory,
   EmitEvent,
+  FsSinkFactory,
   FsSourceFactory,
   SttCapability,
   ToolHandler,
@@ -91,6 +92,12 @@ function buildNeutralTool(
   stt?: SttCapability,
   tts?: TtsCapability,
   emit?: EmitEvent,
+  // APPENDED LAST, deliberately. Inserting it next to `fsSourceFactory` (where it belongs by
+  // meaning) silently shifted `stt`/`tts`/`eventBus` at every positional call site, and
+  // `pnpm typecheck` did NOT catch it: this package's tsconfig excludes `**/*.test.ts`, so the
+  // misaligned calls in the injection suites were never type-checked. Three suites went red at
+  // RUNTIME instead. A trailing optional parameter cannot shift anything that already exists.
+  fsSinkFactory?: FsSinkFactory,
 ): NeutralTool {
   return {
     spec: {
@@ -111,6 +118,16 @@ function buildNeutralTool(
         // The READ-ONLY, path-jailed fs-source handle (shared deployment-static root, no tenant arg).
         // Spread so ABSENT when no source root is configured — keeping the init shape exact.
         ...(fsSourceFactory ? { fsSource: fsSourceFactory() } : {}),
+        // The WRITE-ONLY, path-jailed, byte-bounded fs-sink handle. Spread so the field is ABSENT
+        // when no output root is configured. Built PER TOOL CALL, and that is what scopes its
+        // byte/file budget to this call rather than letting one run's writes exhaust another's.
+        //
+        // TOOL INITS ONLY — `invokeRouteHandler` / `invokeTriggerHandler` deliberately do NOT carry
+        // it, unlike every capability above. An HTTP route's authorization ceiling is "a credential
+        // the network can carry"; a READ capability behind that ceiling is one thing, but one that
+        // CREATES files is a materially larger authority than this seam was opened for. Widening it
+        // to routes or triggers is a separate decision with its own review, not an omission.
+        ...(fsSinkFactory ? { fsSink: fsSinkFactory() } : {}),
         // The speech-to-text capability (spread so ABSENT when no STT provider is configured).
         // Mirrors invokeRouteHandler exactly (the SAME composition-root handle the route arm gets).
         ...(stt ? { stt } : {}),
@@ -149,6 +166,10 @@ function buildNeutralTool(
  * @param fsSourceFactory OPTIONAL composition-root `FsSourceFactory` — when wired, each tool init
  *                      carries `init.fsSource` (the READ-ONLY, path-jailed local-file reader over the
  *                      deployment's shared source root); absent on a no-source-root deploy.
+ * @param fsSinkFactory OPTIONAL composition-root `FsSinkFactory` — when wired, each TOOL init carries
+ *                      `init.fsSink` (the WRITE-ONLY, path-jailed, byte-bounded whole-file writer over
+ *                      the deployment's output root); absent on a deploy with no output root. ROUTE and
+ *                      TRIGGER inits never carry it, deliberately — see the spread's comment.
  * @param stt           OPTIONAL composition-root `SttCapability` — when wired, each tool init carries
  *                      `init.stt` (transcribe audio bytes through the deployment's configured STT
  *                      provider); absent on a deploy with no `STT_PROVIDER` configured.
@@ -172,6 +193,9 @@ export function buildToolFactory(
   stt?: SttCapability,
   tts?: TtsCapability,
   eventBus?: TenantEventBus,
+  // APPENDED LAST — see `buildNeutralTool`'s note. A trailing optional parameter is the only kind
+  // that cannot silently re-bind an existing positional call.
+  fsSinkFactory?: FsSinkFactory,
 ): ToolFactory {
   const toolById = new Map(spec.tooling.map((t) => [t.id, t]));
 
@@ -205,7 +229,18 @@ export function buildToolFactory(
     // the same per-run, tenant-bound construction `init.blob` gets.
     const emit = eventBus?.immediate(tdb);
     return resolved.map(({ tool, fn }) =>
-      buildNeutralTool(tool, fn, tdb, productTables, blobFactory, fsSourceFactory, stt, tts, emit),
+      buildNeutralTool(
+        tool,
+        fn,
+        tdb,
+        productTables,
+        blobFactory,
+        fsSourceFactory,
+        stt,
+        tts,
+        emit,
+        fsSinkFactory,
+      ),
     );
   };
 }

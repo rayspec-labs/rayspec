@@ -38,6 +38,7 @@ import type { AgentSpec, Backend, BackendId } from '@rayspec/core';
 import {
   type BlobStoreFactory,
   buildToolFactory,
+  type FsSinkFactory,
   type FsSourceFactory,
   type ResolvedHandler,
   type SttCapability,
@@ -73,6 +74,17 @@ export interface BuildAgentRegistryConfig {
    * (the tool's `init.fsSource` is then undefined, fail-closed loudly).
    */
   fsSourceFactory?: FsSourceFactory;
+  /**
+   * the composition-root `FsSinkFactory`. When wired, each declared tool's per-run `ToolHandlerInit`
+   * carries `init.fsSink` — the WRITE-ONLY, path-jailed, byte-bounded whole-file writer over the
+   * deployment's output root. Optional: absent when no output root is configured (the tool's
+   * `init.fsSink` is then undefined, fail-closed loudly).
+   *
+   * Unlike every sibling here, this one is NOT "the SAME one the route arm uses" — the route arm never
+   * receives it. See `resolve-tools.ts`'s spread for why a write capability is not put behind a
+   * network-carried credential.
+   */
+  fsSinkFactory?: FsSinkFactory;
   /**
    * the composition-root `SttCapability` (the SAME one the route arm uses). When wired, each declared
    * tool's per-run `ToolHandlerInit` carries `init.stt` — transcribe audio bytes through the
@@ -131,6 +143,7 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
     productTables,
     blobFactory,
     fsSourceFactory,
+    fsSinkFactory,
     sttCapability,
     ttsCapability,
     eventBus,
@@ -163,6 +176,9 @@ export function buildAgentRegistry(config: BuildAgentRegistryConfig): AgentRegis
       sttCapability,
       ttsCapability,
       eventBus,
+      // LAST — see buildToolFactory's note on why this one is appended rather than grouped with
+      // its read twin.
+      fsSinkFactory,
     );
 
     registry.set(agent.id, {

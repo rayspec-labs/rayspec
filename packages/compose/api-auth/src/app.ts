@@ -393,6 +393,11 @@ function withDeclaredAgents(deps: AppDeps): AppDeps {
     // thread the wired READ-ONLY fs-source so a declared tool's init carries a path-jailed
     // `init.fsSource` (the SAME factory the route arm reads). Absent when no source root is configured.
     ...(engine.fsSourceFactory ? { fsSourceFactory: engine.fsSourceFactory } : {}),
+    // thread the wired WRITE-ONLY fs-sink so a declared tool's init carries a path-jailed,
+    // byte-bounded `init.fsSink`. Absent when no output root is configured. Unlike its siblings this
+    // one is NOT also read by the route arm — a write capability is deliberately not placed behind a
+    // network-carried credential (see resolve-tools.ts).
+    ...(engine.fsSinkFactory ? { fsSinkFactory: engine.fsSinkFactory } : {}),
     // thread the wired speech-to-text capability so a declared tool's init carries `init.stt`
     // (the SAME handle the route arm reads). Absent when no STT provider is configured.
     ...(engine.sttCapability ? { sttCapability: engine.sttCapability } : {}),

@@ -103,6 +103,8 @@ import {
   type DurableExecutor,
   type DurableExecutorIdentity,
   ExtensionLoadError,
+  FsSinkConfigError,
+  type FsSinkFactory,
   FsSourceConfigError,
   type FsSourceFactory,
   invokeTriggerHandler,
@@ -110,6 +112,7 @@ import {
   loadExtensions,
   type ModuleImporter,
   makeFsBlobStoreFactory,
+  makeFsSinkFactory,
   makeFsSourceFactory,
   type RunJob,
 } from '@rayspec/platform';
@@ -550,6 +553,13 @@ export interface ServerConfig {
    * per-tenant; the path jail is its containment — LOCAL/self-host, pre-hardening).
    */
   fsSourceRoot?: string;
+  /**
+   * RAYSPEC_FS_SINK_ROOT. OPTIONAL: unset ⇒ no fs-sink is wired (`init.fsSink` is absent; a TOOL
+   * handler that needs it fail-closes loudly). The WRITE-ONLY, path-jailed, byte-bounded output root a
+   * declared tool writes whole files under — the write twin of `fsSourceRoot`, and reaching TOOL inits
+   * only (never route or trigger inits).
+   */
+  fsSinkRoot?: string;
   /**
    * The DISTINCT HS256 secret for the media-token (playback) auth path — set via
    * RAYSPEC_MEDIA_SIGNING_KEY. It is SEPARATE from the RS256 `jwtSigningKeyPem` (a leaked media URL
@@ -1217,6 +1227,8 @@ export function loadServerConfig(
   // existence/is-a-dir is fail-closed-validated at factory-build time (makeFsSourceFactory).
   const fsSourceRoot = env.RAYSPEC_FS_SOURCE_ROOT?.trim();
   if (fsSourceRoot) config.fsSourceRoot = resolve(fsSourceRoot);
+  const fsSinkRoot = env.RAYSPEC_FS_SINK_ROOT?.trim();
+  if (fsSinkRoot) config.fsSinkRoot = resolve(fsSinkRoot);
 
   // The distinct media signing key (HS256). Whether it is REQUIRED is decided at deploy
   // time (only a spec with a playback route needs it) — loadServerConfig just resolves it;
@@ -2811,6 +2823,30 @@ async function deployDeclaredSpec(
     }
   }
 
+  // ── The WRITE-ONLY FS-SINK backend build ───────────────────────────────────
+  // The WRITE-ONLY, path-jailed, byte-bounded `FsSink` (`init.fsSink`) writes whole files under
+  // RAYSPEC_FS_SINK_ROOT. Deploy-config-gated exactly like the fs-source above: build the factory when
+  // a root is configured, else leave it undefined (a TOOL handler that reads `init.fsSink` then
+  // fail-closes loudly). `makeFsSinkFactory` fail-closes at build if the root is missing / not a
+  // directory, or if the platform lacks O_NOFOLLOW; it takes a plain `root` and knows nothing about the
+  // environment, so that refusal is re-raised HERE in the house form naming the VARIABLE to fix.
+  //
+  // ⚠ Nothing here CREATES the root. An operator who has not made the output directory has not decided
+  // where model-produced files go, and inventing one would put them somewhere nobody is watching.
+  let fsSinkFactory: FsSinkFactory | undefined;
+  if (config.fsSinkRoot) {
+    try {
+      fsSinkFactory = makeFsSinkFactory(config.fsSinkRoot);
+    } catch (err) {
+      if (!(err instanceof FsSinkConfigError)) throw err;
+      throw new BootConfigError(
+        `Boot aborted — RAYSPEC_FS_SINK_ROOT='${config.fsSinkRoot}' is not usable as an output root: ` +
+          `${err.message} It is the WRITE root a declared tool's \`init.fsSink\` writes under; point ` +
+          'it at an existing directory on the box (nothing here creates it). Fail-closed.',
+      );
+    }
+  }
+
   // ── The MEDIA-TOKEN service (playback's 2nd auth path) deploy guard + build ──
   // A `kind:'stream', mode:'playback'` route is authenticated by a signed `?token=` media-JWT (HS256,
   // a DISTINCT key from the RS256 API/JWKS chain — a leaked media URL must not grant API access). FAIL
@@ -3193,6 +3229,12 @@ async function deployDeclaredSpec(
               // Every one is spread-when-wired, so a deployment that configured none builds a
               // byte-identical registry to before.
               ...(fsSourceFactory ? { fsSourceFactory } : {}),
+              // The WRITE-ONLY fs-sink, threaded on the SAME terms and for the SAME reason: a
+              // declared tool the OFF-REQUEST worker runs must see the same capability set the sync
+              // run surface gives it, or the identical tool works in-request and throws off-request.
+              // It touches the run's transaction no more than `fsSourceFactory()` does — it writes to
+              // the deployment's jailed output root and takes no database at all.
+              ...(fsSinkFactory ? { fsSinkFactory } : {}),
               ...(sttCapability ? { sttCapability } : {}),
               ...(ttsCapability ? { ttsCapability } : {}),
               // `eventBus` is DELIBERATELY NOT threaded here, and it is the one capability that
@@ -3226,6 +3268,11 @@ async function deployDeclaredSpec(
             // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
             // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
             ...(fsSourceFactory ? { fsSourceFactory } : {}),
+            // Inject the WRITE-ONLY fs-sink (when an output root is configured) so a declared TOOL
+            // handler's `init.fsSink` writes whole files under the deployment's jailed output root.
+            // Spread so ABSENT when unset. Note it reaches TOOL inits only — `resolve-tools.ts` is the
+            // sole builder that spreads it; the route and trigger builders deliberately do not.
+            ...(fsSinkFactory ? { fsSinkFactory } : {}),
             // Inject the media-token service (when wired) so the playback arm's 2nd auth path
             // + the mint capability are available. Spread so ABSENT for a no-playback spec.
             ...(mediaTokenService ? { mediaTokenService } : {}),
