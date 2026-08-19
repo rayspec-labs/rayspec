@@ -400,6 +400,28 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
 
   // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, headroom.
   // Registered BEFORE the task routes so a workforce id is never shadowed by a fixed segment.
+  //
+  // THE ONE THING A CONSUMER OF THIS RESPONSE MUST NOT GET WRONG:
+  //
+  //   `paused` is the LIVENESS flag. It alone answers "is this workforce stopped right now".
+  //   `haltReason` (with `haltedAt`) answers "WHY WAS THIS LAST HALTED". It is a HISTORICAL
+  //   RECORD, never a liveness flag, and it is NOT cleared by a resume.
+  //
+  // So `{ paused: false, haltReason: 'incident' }` is a normal, correct state: it means the
+  // workforce was halted for 'incident', an operator resumed it, and it is RUNNING NOW. Resume
+  // deliberately keeps the reason — clearing it would destroy the only durable record of why the
+  // last halt happened outside the event journal, which is the more expensive thing to lose.
+  //
+  // Branching on `haltReason !== null` to decide whether a workforce is halted is therefore WRONG
+  // in exactly one direction: it reports a resumed workforce as halted, forever, from its first
+  // halt onward. Branch on `paused`. A halt implies a pause — `haltWorkforce`'s first act is
+  // `pauseWorkforce(..., drain: true)` — so `paused` covers both operator verbs on its own.
+  //
+  // Pinned by `routes/workforce.test.ts`, `halt then resume reports paused:false with the halt
+  // reason KEPT`. RESIDUAL, stated rather than implied away: that test holds this DOCUMENTATION
+  // honest,
+  // not any consumer's use of it. Nothing structural stops a client from reading `haltReason` as
+  // liveness — the field is on the wire and the API cannot police how it is interpreted.
   app.get(
     '/v1/workforce/:workforceId/status',
     requireAuth(),
@@ -454,6 +476,8 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             paused: runtime.paused,
             pausedAt: runtime.pausedAt,
             pausedBy: runtime.pausedBy,
+            // HISTORICAL — "why was this last halted", not "is it halted now". Survives a resume
+            // by design; `paused` above is the liveness flag. See this route's header.
             haltReason: runtime.haltReason,
             tasks: byStatus,
             queueDepth: byStatus.queued ?? 0,

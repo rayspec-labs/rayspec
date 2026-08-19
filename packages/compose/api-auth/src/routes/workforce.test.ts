@@ -624,6 +624,45 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(unknown.status).toBe(404);
   });
 
+  /**
+   * `haltReason` is a HISTORICAL RECORD — "why was this last halted" — not a liveness flag. The
+   * resume verb clears `paused`/`pausedAt`/`pausedBy` and deliberately keeps the reason, because
+   * clearing it would destroy the only durable record of the last halt outside the event journal.
+   *
+   * This pins the observable consequence: after halt-then-resume the status view reports
+   * `paused: false` WITH the reason still set. A reader who "tightens" the API by clearing
+   * `haltReason` on resume, or who re-derives `paused` from it, fails here.
+   *
+   * Both assertions are POSITIVE — an exact `false` and an exact reason string — so neither can
+   * pass by matching nothing. `paused: true` is asserted first on the same workforce, so the field
+   * is proven to move rather than being constant-false throughout.
+   */
+  it('halt then resume reports paused:false with the halt reason KEPT', async () => {
+    const a = await principal('wf-halt-history@example.test', 'Org WF Halt History');
+    const auth = { authorization: `Bearer ${a.token}` };
+    await ensureWorkforceRuntime(forTenant(h.db, a.orgId), 'wf', {});
+
+    const halt = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/halt', {
+      body: { reason: 'incident-4711' },
+      headers: auth,
+    });
+    expect(halt.status).toBe(200);
+
+    // Halted: paused is true AND the reason is recorded. The control arm for the assertion below —
+    // it proves `paused` is not simply always false in this fixture.
+    const halted = await jsonRequest(h.app, 'GET', '/v1/workforce/wf/status', { headers: auth });
+    expect(halted.status).toBe(200);
+    expect(await halted.json()).toMatchObject({ paused: true, haltReason: 'incident-4711' });
+
+    const resume = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/resume', { headers: auth });
+    expect(resume.status).toBe(200);
+
+    // THE PIN: running again, and the record of WHY it was last halted survived the resume.
+    const resumed = await jsonRequest(h.app, 'GET', '/v1/workforce/wf/status', { headers: auth });
+    expect(resumed.status).toBe(200);
+    expect(await resumed.json()).toMatchObject({ paused: false, haltReason: 'incident-4711' });
+  });
+
   it('a fixed collection segment is reserved, and it does not shadow a workforce id or a task id', async () => {
     const a = await principal('wf-reserved@example.test', 'Org WF Reserved');
     const task = await seedRoot(a.orgId, 'Not shadowed');
