@@ -723,6 +723,7 @@ rayspec workforce task <id> [transport flags]
 rayspec workforce approvals list [transport flags]
 rayspec workforce approvals approve <id> [--reason <text>] [--override] [transport flags]
 rayspec workforce approvals reject <id> --reason <text> [--override] [transport flags]
+rayspec workforce signal <task-id> --kind <manual_unblock|budget_raised|user_reply> [--payload <json>] [--signal-key <key>] [transport flags]
 rayspec workforce cost [--window 24h|7d] [--by employee|department] [transport flags]
 rayspec workforce events <task-id> [transport flags]
 rayspec workforce pause [--drain] --workforce <id> [transport flags]
@@ -746,8 +747,9 @@ fail-closed at every step:
 - **Authentication**: an API key from `--api-key` or `RAYSPEC_API_KEY`, sent
   exactly as the HTTP API expects it. Read commands (`status`, `tasks`, `task`,
   `approvals list`, `cost`, `events`) need **`store:read`**; every mutating
-  command (`submit`, `approvals approve`/`reject`, `pause`/`resume`/`halt`)
-  needs **`store:write`**, matching the route permissions. A key without the
+  command (`submit`, `approvals approve`/`reject`, `signal`,
+  `pause`/`resume`/`halt`) needs **`store:write`**, matching the route
+  permissions. A key without the
   permission gets the route's 403 verbatim — the CLI adds **no local
   authorization logic of its own**, because two authorization implementations
   is one too many.
@@ -802,6 +804,34 @@ plus the resolved budgets). Without `--root`, exactly one root task is the
 unambiguous pick; zero or several is an error naming the options. `--status`
 and `--owner` stay with the flat list — a filtered tree would render holes as
 work that never happened.
+
+**Not every task waiting on a human is an approval.** When a review spends its
+declared round budget, the engine parks the task for a person to decide rather
+than looping — and that park carries **no approval row**, because there is no
+approval to decide. `approvals list` therefore cannot show it. So the command
+reports it alongside, under a **separate** `signalParked` key (the `approvals`
+array keeps exactly the shape `approvals approve <id>` consumes — an id you read
+out of it is always one that command can act on), each entry carrying the exact
+command that releases it. When that advisory read is itself refused, the reply
+says so in `signalParkedError` rather than omitting the key: a silently missing
+advisory would be indistinguishable from "nothing is parked".
+
+`signal` is that release. It delivers one **operator** wake signal to a parked
+task: `user_reply` answers the reasonless "a human decides" park (review rounds
+spent, an escalated budget) and a pending clarification; `budget_raised` answers
+a task blocked on an exhausted budget; `manual_unblock` answers the ordinary
+blocked reasons that have a real lever behind them. Those three are the whole
+set — the engine's other signal kinds are written by the mechanism that
+establishes the fact they report (the fan-in join, the escalation reply, the
+verdict route), and posting one by hand would assert that fact instead of
+observing it, so the route refuses them and so does this command. **Structural
+parks are not releasable this way at all**: a fan-out join and an escalation
+wait on a child task's terminal, which an override does not change — the lever
+there is to cancel the child, so its terminal satisfies the park through the
+park's own path. `--payload` is a JSON object carried to the waking turn;
+`--signal-key` is the delivery's idempotency key (the engine dedupes on task and
+key, so a re-send under the same key collapses into one delivery — absent, every
+call is its own delivery).
 
 `submit` hands one goal to the declared workforce (`--priority` takes `low`,
 `normal`, `high` or `urgent`); the deployment's orchestration strategy shapes

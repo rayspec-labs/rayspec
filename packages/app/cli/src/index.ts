@@ -211,7 +211,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     commands: [
       {
         name: 'workforce',
-        block: `  rayspec workforce <status|submit|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
+        block: `  rayspec workforce <status|submit|tasks|task|approvals|signal|cost|events|pause|resume|halt> [flags]
                                 The operator console for the durable task engine, speaking to a
                                 RUNNING deployment over its authenticated HTTP API. Shared flags on
                                 every subcommand: --url <base> (else RAYSPEC_URL, else a single
@@ -235,7 +235,13 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                                                 (status, confidence, cost per node;
                                                                 --json for the machine shape)
                                   task <id>                     one task
-                                  approvals list                the pending inbox
+                                  approvals list                the pending inbox, PLUS a
+                                                                signalParked advisory: tasks parked
+                                                                on a human that carry no approval
+                                                                row (review rounds spent), each
+                                                                with the command that releases it.
+                                                                A refused advisory read is reported
+                                                                as signalParkedError, never dropped.
                                   approvals approve <id> [--reason <text>] [--override]
                                   approvals reject <id> --reason <text> [--override]
                                                                 --override is the BREAK-GLASS ask on
@@ -246,6 +252,20 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                                                 authority: the route ANDs it with the
                                                                 workforce:override permission and
                                                                 journals the override.
+                                  signal <task-id> --kind manual_unblock|budget_raised|user_reply
+                                         [--payload <json>] [--signal-key <key>]
+                                                                deliver ONE operator wake signal to
+                                                                a parked task (user_reply releases
+                                                                the "a human decides" park a spent
+                                                                review budget leaves behind). Those
+                                                                three kinds are the whole set; the
+                                                                engine's others are written by the
+                                                                mechanism that establishes the fact
+                                                                they report. Structural parks (a
+                                                                fan-out join, an escalation) are not
+                                                                releasable this way — cancel the
+                                                                child instead. --signal-key is the
+                                                                delivery's idempotency key.
                                   cost [--window 24h|7d] [--by employee|department]
                                                                 settled/reserved roll-up (grouped
                                                                 server-side when --by is given)
