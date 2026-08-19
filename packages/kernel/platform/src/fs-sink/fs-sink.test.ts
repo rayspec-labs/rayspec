@@ -7,15 +7,37 @@
  * makes it hold, such an assertion is indistinguishable from `expect(true).toBe(true)` — and that exact
  * defect shipped twice already in this programme.
  *
- * So each confinement arm is built so that REMOVING THE SPECIFIC GUARD IT NAMES makes it FAIL, and each
- * was run in that state before being run green. The guard each arm attacks is named in its title, and
- * the mutation that must redden it is recorded in the plan
- * (`planning/plans/2026-08-19-UI1-file-write-handler.md` §7). Two arms carry the discipline further and
- * assert the escape's GROUND TRUTH rather than only the throw: the target file outside the root is read
- * back and asserted UNCHANGED, so a "refusal" that threw *after* writing would still be caught.
+ * Several arms assert the escape's GROUND TRUTH rather than only the throw: the target file outside the
+ * root is read back and asserted UNCHANGED, so a "refusal" that threw *after* writing is still caught.
+ * The positive control (`W1`) stops the file from passing vacuously: if `write` did nothing at all,
+ * every negative arm would still pass and W1 would not.
  *
- * The positive control (`W1`) is what stops the whole file from passing vacuously: if `write` did
- * nothing at all, every negative arm would still pass and W1 would not.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * ⚠ WHAT THE MUTATION BATTERY ACTUALLY FOUND — read this before trusting an arm's title.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * The first draft of this header claimed that "removing the specific guard each arm names makes it
+ * FAIL". THAT CLAIM WAS FALSE, and the battery is what disproved it
+ * (`planning/plans/2026-08-19-UI1-file-write-handler.md` §7 records every round). Most escapes here are
+ * refused by TWO TO FOUR INDEPENDENT LAYERS, so removing any one of them alone leaves the arm GREEN:
+ *
+ *   * a `..` traversal is caught by jail layers 3, 4 AND 5;
+ *   * a symlinked PARENT by jail layer 5 AND the post-mkdir re-assert;
+ *   * a symlink LEAF by FOUR things — jail layer 5, `lstat().isSymbolicLink()`,
+ *     `lstat().isFile()` (a symlink is not a regular file, so that branch fires too), and
+ *     `O_NOFOLLOW`. The third of those was invisible until the other three were removed.
+ *
+ * That redundancy is a good property of the code and a TRAP for the test suite: an arm that stays green
+ * under every single-guard mutation is indistinguishable, by mutation alone, from an arm that measures
+ * nothing. So coverage here is established by COMPOUND mutations that remove every layer protecting a
+ * given arm — and those DO redden it. Two are worth naming: removing the entire jail reddens C1, C2, C4,
+ * C5, C5b (and R3/R4); removing all four symlink-leaf layers reddens C3 and C3b.
+ *
+ * Exactly two guards stand alone, and their single mutations are red: the URL-significant check (C7 —
+ * with it gone, `%2e%2e/...` resolves to a real in-root directory literally named `%2e%2e` and the bytes
+ * land) and layer 2's leading-BACKSLASH half (C2 — on POSIX `isAbsolute('\\etc\\passwd')` is false and
+ * nothing else objects). Every bound in the second describe block is likewise singly guarded.
+ *
+ * An arm's title therefore names the guard it was WRITTEN for, not the only guard that can redden it.
  */
 import {
   mkdirSync,
@@ -80,7 +102,7 @@ function assertOutsideUntouched(): void {
   expect(readFileSync(join(outsideDir, 'secret.txt'), 'utf8')).toBe(OUTSIDE_BODY);
 }
 
-describe('FsSink — the path jail (each arm names the guard whose removal must redden it)', () => {
+describe('FsSink — the path jail (titles name the guard an arm was written for, not its only one)', () => {
   it('W1 POSITIVE CONTROL: a legitimate write lands the EXACT bytes, and reports them', async () => {
     const s = sink();
     const first = await s.write('reports/summary.md', enc('hello sink'));
@@ -218,17 +240,22 @@ describe('FsSink — the path jail (each arm names the guard whose removal must 
   });
 });
 
-describe('FsSink — the parent re-assert, pinned DIRECTLY because no staged escape reaches it', () => {
-  // WHY THIS DESCRIBE EXISTS, stated plainly. In every escape the suite above can stage
-  // deterministically, `jailPath`'s own layer-5 assert refuses the path BEFORE control reaches the
-  // parent re-assert — its `deepestExisting` walk finds a symlinked ancestor whether or not the leaf
-  // exists (that is exactly what C5 and C5b prove). So the re-assert is a TOCTOU backstop: it earns its
-  // place only when a parent absent at jail time is created as, or swapped for, a symlink in the window
-  // before the open, and staging that means racing the filesystem.
+describe('FsSink — the parent re-assert, pinned DIRECTLY because the write path reaches it second', () => {
+  // WHY THIS DESCRIBE EXISTS, corrected against what the mutation battery observed rather than what
+  // the design suggested. In every escape the suite above stages, `jailPath`'s own layer-5 assert
+  // refuses the path FIRST — its `deepestExisting` walk finds a symlinked ancestor whether or not the
+  // leaf exists. So no write-path arm reaches the re-assert while layer 5 is intact, and mutating the
+  // re-assert away leaves C5/C5b green (battery round 3, probe B4; round 4's C2 compound removes BOTH
+  // and they go red together).
   //
-  // The choice is therefore between a security-critical branch that NO test can redden and a direct
-  // pin on its logic. This is the direct pin. What it does NOT establish — and what is not claimed
-  // anywhere — is an end-to-end proof of the race itself.
+  // That leaves a security-critical branch whose only deterministic exercise is a direct one. These are
+  // it, and they are load-bearing: R3/R4 are the arms that redden when the re-assert's own comparison is
+  // mutated (round 3, D5) — including R4, which fails if the segment boundary is written as a bare
+  // `startsWith` and a sibling directory sharing the root's name prefix slips through.
+  //
+  // What is NOT established here, and is claimed nowhere: an end-to-end proof of the TOCTOU race the
+  // re-assert exists for — a parent absent at jail time, created as or swapped for a symlink before the
+  // open. Staging that means racing the filesystem, and the suite does not pretend to.
 
   // The function's contract is that `realRoot` is ALREADY resolved — which is how the impl calls it
   // (the factory `realpathSync`s the root once at build time). The tests must honour that contract, and

@@ -123,17 +123,18 @@ function toPosixRelative(root: string, absolute: string): string {
  * the real root. This is layer 4's re-verification: at jail time the directory may not have existed, so
  * the realpath assert could only reach a higher ancestor.
  *
- * ⚠ HONEST NOTE ON WHAT PINS THIS. In every escape a test can stage DETERMINISTICALLY, `jailPath`'s
- * own layer-5 assert has already refused the path before control reaches here — its `deepestExisting`
- * walk finds the symlinked ancestor whether or not the leaf exists. So this re-assert is a TOCTOU
- * BACKSTOP: it earns its place only when a parent that did not exist at jail time is created as, or
- * swapped for, a symlink in the window before the open, which a test cannot stage without racing the
- * filesystem. Rather than leave a security-critical branch that no test can redden, it is EXPORTED and
- * pinned directly (`__assertRealDirUnderRootForTest`) — the mutation battery mutates its comparison and
- * watches that arm fire. What is NOT claimed: an end-to-end proof of the race itself. The same is true
- * of `O_NOFOLLOW` on the leaf open, whose deterministic twin is the `lstat` refusal above it; the
- * battery proves that layer's independence by mutating the `lstat` away and confirming the symlink arm
- * stays RED.
+ * ⚠ HONEST NOTE ON WHAT PINS THIS — corrected against the mutation battery, which disproved the first
+ * version of this paragraph. In every escape a test stages, `jailPath`'s layer-5 assert refuses the path
+ * BEFORE control reaches here (its `deepestExisting` walk finds the symlinked ancestor whether or not
+ * the leaf exists), so mutating this re-assert away leaves the write-path arms GREEN. It is therefore
+ * EXPORTED and pinned directly (`__assertRealDirUnderRootForTest`, arms R1-R5): mutating its comparison
+ * reddens R3/R4, and R4 specifically fails if the segment boundary degrades to a bare `startsWith`,
+ * which would admit a sibling directory sharing the root's name prefix.
+ *
+ * What is NOT claimed: an end-to-end proof of the TOCTOU race this exists for. And note the battery's
+ * broader correction — a symlink LEAF turns out to be refused by FOUR independent layers here (jail
+ * layer 5, `isSymbolicLink()`, `isFile()` — a symlink is not a regular file — and `O_NOFOLLOW`), so no
+ * single one of them can be called "the" guard. Only removing all four lets the escape through.
  */
 export async function assertRealDirUnderRoot(
   realRoot: string,
