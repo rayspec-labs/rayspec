@@ -213,16 +213,21 @@ const PROSE_LINE_ANCHOR_RE = /#L\d+(?:-L?\d+)?/g;
  *
  * THE BOUND, MEASURED — and it is wider than a first reading suggests.
  *
- * Of 190 backticked tokens in the prose, 38 are file citations (covered by their own arms) and 23
- * are mixed-case bare identifiers, which this arm requires a ledger row for. The remaining 129 fall
- * outside it, in SIX measured families: whitespace (33), punctuation or brackets (17), DOTTED names
- * (11), an `_` or `-` separator (37), no lowercase (4), no uppercase (27).
+ * The counts below are a SNAPSHOT taken when this was written, not pins: they drift as the page is
+ * edited, and nothing asserts them. The SHAPE of the bound is what to read. (Deliberately not
+ * pinned — a count that reddens on every ordinary paragraph would be noise, and this file is meant
+ * to red only when a citation stops being true.)
+ *
+ * Of 190 backticked tokens in the prose, 38 were file citations (covered by their own arms) and 23
+ * were mixed-case bare identifiers, which this arm requires a ledger row for. The remaining 129 fell
+ * outside it, in SIX families: whitespace (33), punctuation or brackets (17), DOTTED names (11), an
+ * `_` or `-` separator (37), no lowercase (4), no uppercase (27).
  *
  * An earlier version of this comment said "four families", and claimed none of them was a symbol a
  * reader would go looking for in a file. BOTH HALVES WERE WRONG, and measurably so:
  * `workforce.approval.requested`, `manual_unblock`, `run_events_tenant_run_seq_idx`,
  * `workforce_tasks.claim_expires_at` and 36 others are greppable identifiers a reader absolutely
- * would chase — 40 such tokens sit on this page unpinned. Five excluded tokens ARE pinned, but only
+ * would chase — 40 such tokens sat on this page unpinned. Five excluded tokens ARE pinned, but only
  * because some ledger row happens to use one as its text; nothing requires it.
  *
  * So the honest statement is: this arm binds MIXED-CASE BARE IDENTIFIERS, and the separator-bearing
