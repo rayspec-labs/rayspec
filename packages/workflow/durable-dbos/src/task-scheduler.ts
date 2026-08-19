@@ -1286,16 +1286,21 @@ export class DbosTaskScheduler {
    *     kernel-side enforcers — `lockRootFirst`/`lockDescendants` (task-locks.ts, apply-intents.ts)
    *     and `ledgerScopesFor`'s canonical walk (budget.ts) — so a kernel mutation reddens
    *     @rayspec/tasks' own cascade-locking suite.
-   *   - `workforce_runtime -> workforce_tasks` HAS NO KERNEL-SIDE ENFORCER, by construction. All
-   *     three composite runtime+tasks transactions live in THIS file (`#claimTurn`, `#parkDenied`,
-   *     and the reaper's reservation release), and the kernel deliberately keeps the two apart:
-   *     `control.ts` runs `pauseWorkforce`'s runtime write and `cancelTaskCascade`'s task writes in
-   *     SEPARATE transactions, which is precisely why a halt can never be half of a cycle. So this
-   *     rank is held by the three call sites above and by nothing else; the test that guards it
-   *     (@rayspec/tasks cascade-locking.db.test.ts, `a claim and a denied-claim park QUEUE`) mirrors
-   *     these shapes from the exported primitives rather than mutating a kernel enforcer, because
-   *     there is none to mutate. Adding a fourth composite runtime+tasks transaction anywhere means
-   *     taking the runtime row first, here, by hand.
+   *   - `workforce_runtime -> workforce_tasks` HAS NO KERNEL-SIDE ENFORCER, by construction. Three
+   *     of the FOUR composite runtime+tasks transactions live in THIS file (`#claimTurn`,
+   *     `#parkDenied`, and the reaper's reservation release), and the kernel deliberately keeps the
+   *     two apart: `control.ts` runs `pauseWorkforce`'s runtime write and `cancelTaskCascade`'s task
+   *     writes in SEPARATE transactions, which is precisely why a halt can never be half of a cycle.
+   *     THE FOURTH, and the only one outside this file, is the GOAL INTAKE (@rayspec/server
+   *     workforce-goal-intake.ts): it calls `assertWorkforceAcceptsWork` — which upserts, and so
+   *     LOCKS, the runtime row — as the first statement of the transaction its `createRootTask`
+   *     inserts then run in. That is this rank's order, taken by hand exactly as the rule below
+   *     requires, and it is the reason a paused workforce can refuse a new root atomically instead
+   *     of racing the pause. So this rank is held by those four call sites and by nothing else; the
+   *     test that guards it (@rayspec/tasks cascade-locking.db.test.ts, `a claim and a denied-claim
+   *     park QUEUE`) mirrors these shapes from the exported primitives rather than mutating a kernel
+   *     enforcer, because there is none to mutate. Adding a FIFTH composite runtime+tasks
+   *     transaction anywhere means taking the runtime row first, by hand, the same way.
    */
   async #claimTurn(
     tdb: TenantDb,

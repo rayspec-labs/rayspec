@@ -67,6 +67,7 @@ import {
   TASK_STATUSES,
   TaskNotFoundError,
   WorkforceDrainTimeoutError,
+  WorkforcePausedError,
   WorkforceUnknownError,
   windowStartFor,
   workforceBudgetsSchema,
@@ -322,6 +323,17 @@ function mapEngineError(err: unknown): never {
       { stillWorking: err.stillWorking },
     );
   }
+  // 409, not 403 and not 404: the caller is authenticated, permitted, and naming a workforce that
+  // exists and is theirs — what refuses them is the RESOURCE'S STATE, which is what CONFLICT means
+  // on this surface. It is also the honest status for the caller's next move: resume the workforce
+  // and re-send the identical request. No `details` — the code carries the whole answer, and
+  // CONFLICT is not in DETAILS_ALLOWED, so the envelope would strip one anyway.
+  if (err instanceof WorkforcePausedError) {
+    throw new ApiError(
+      'CONFLICT',
+      'The workforce is paused and is not accepting new work. Resume it, then re-submit.',
+    );
+  }
   throw err;
 }
 
@@ -388,6 +400,28 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
 
   // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, headroom.
   // Registered BEFORE the task routes so a workforce id is never shadowed by a fixed segment.
+  //
+  // THE ONE THING A CONSUMER OF THIS RESPONSE MUST NOT GET WRONG:
+  //
+  //   `paused` is the LIVENESS flag. It alone answers "is this workforce stopped right now".
+  //   `haltReason` (with `haltedAt`) answers "WHY WAS THIS LAST HALTED". It is a HISTORICAL
+  //   RECORD, never a liveness flag, and it is NOT cleared by a resume.
+  //
+  // So `{ paused: false, haltReason: 'incident' }` is a normal, correct state: it means the
+  // workforce was halted for 'incident', an operator resumed it, and it is RUNNING NOW. Resume
+  // deliberately keeps the reason — clearing it would destroy the only durable record of why the
+  // last halt happened outside the event journal, which is the more expensive thing to lose.
+  //
+  // Branching on `haltReason !== null` to decide whether a workforce is halted is therefore WRONG
+  // in exactly one direction: it reports a resumed workforce as halted, forever, from its first
+  // halt onward. Branch on `paused`. A halt implies a pause — `haltWorkforce`'s first act is
+  // `pauseWorkforce(..., drain: true)` — so `paused` covers both operator verbs on its own.
+  //
+  // Pinned by `routes/workforce.test.ts`, `halt then resume reports paused:false with the halt
+  // reason KEPT`. RESIDUAL, stated rather than implied away: that test holds this DOCUMENTATION
+  // honest,
+  // not any consumer's use of it. Nothing structural stops a client from reading `haltReason` as
+  // liveness — the field is on the wire and the API cannot police how it is interpreted.
   app.get(
     '/v1/workforce/:workforceId/status',
     requireAuth(),
@@ -442,6 +476,8 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             paused: runtime.paused,
             pausedAt: runtime.pausedAt,
             pausedBy: runtime.pausedBy,
+            // HISTORICAL — "why was this last halted", not "is it halted now". Survives a resume
+            // by design; `paused` above is the liveness flag. See this route's header.
             haltReason: runtime.haltReason,
             tasks: byStatus,
             queueDepth: byStatus.queued ?? 0,
@@ -980,29 +1016,38 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
       );
       if (!allowed) throw new ApiError('RATE_LIMITED', 'Too many requests.', { retryAfterMs });
       const body = goalRequestSchema.parse(await readBoundedJson(c, deps.maxJsonBodyBytes, {}));
-      const result = await intake.submitGoal({
-        tenantId,
-        workforceId,
-        goal: body.goal,
-        ...(body.description !== undefined ? { description: body.description } : {}),
-        ...(body.priority !== undefined ? { priority: body.priority } : {}),
-        requestedBy: actorFrom(c),
-      });
-      if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
-      if (result.outcome === 'invalid_plan') {
-        // The strategy is deployment configuration, never client input — a refused plan is a
-        // server-side defect and says so (500), not a 4xx the caller cannot fix. R5: the body is
-        // STATIC — `result.detail` names employee ids, department names and the strategy id
-        // (deployment shape), and this surface's rule is that a 5xx echoes no deployment config to
-        // the client. The detail stays server-side.
-        throw new ApiError(
-          'INTERNAL',
-          'The orchestration strategy produced a plan the intake refused — a server-side ' +
-            'configuration defect. See the server logs for detail.',
-        );
+      // The intake throws TYPED engine errors (a paused workforce refuses admission), so this route
+      // maps them like every sibling control route does. Without this the refusal would surface as
+      // an unhandled 500 — a caller could not tell "not accepting work" from "the server broke".
+      // The `ApiError`s thrown below pass through `mapEngineError` untouched: it matches none of
+      // them and rethrows, so wrapping the whole block changes no existing status.
+      try {
+        const result = await intake.submitGoal({
+          tenantId,
+          workforceId,
+          goal: body.goal,
+          ...(body.description !== undefined ? { description: body.description } : {}),
+          ...(body.priority !== undefined ? { priority: body.priority } : {}),
+          requestedBy: actorFrom(c),
+        });
+        if (result.outcome === 'not_found') throw new ApiError('NOT_FOUND', 'Not found.');
+        if (result.outcome === 'invalid_plan') {
+          // The strategy is deployment configuration, never client input — a refused plan is a
+          // server-side defect and says so (500), not a 4xx the caller cannot fix. R5: the body is
+          // STATIC — `result.detail` names employee ids, department names and the strategy id
+          // (deployment shape), and this surface's rule is that a 5xx echoes no deployment config
+          // to the client. The detail stays server-side.
+          throw new ApiError(
+            'INTERNAL',
+            'The orchestration strategy produced a plan the intake refused — a server-side ' +
+              'configuration defect. See the server logs for detail.',
+          );
+        }
+        workforce.kick();
+        return c.json({ workforceId, tasks: result.tasks }, 202);
+      } catch (err) {
+        mapEngineError(err);
       }
-      workforce.kick();
-      return c.json({ workforceId, tasks: result.tasks }, 202);
     },
   );
 

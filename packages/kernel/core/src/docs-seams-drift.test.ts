@@ -25,10 +25,10 @@ const page = readFileSync(join(repoRoot, PAGE), 'utf8');
  * must contain. A line that moved is a failure with the real location in the message.
  */
 const CITATIONS: ReadonlyArray<readonly [string, string]> = [
-  ['packages/app/server/src/workforce-goal-intake.ts:97-98', 'tenantId'],
-  ['packages/app/server/src/workforce-goal-intake.ts:49', 'function planRefusal'],
-  ['packages/app/server/src/workforce-goal-intake.ts:58', 'SEAM_MAX_PLAN_STEPS'],
-  ['packages/app/server/src/workforce-goal-intake.ts:100', 'strategy.plan'],
+  ['packages/app/server/src/workforce-goal-intake.ts:107-108', 'tenantId'],
+  ['packages/app/server/src/workforce-goal-intake.ts:59', 'function planRefusal'],
+  ['packages/app/server/src/workforce-goal-intake.ts:68', 'SEAM_MAX_PLAN_STEPS'],
+  ['packages/app/server/src/workforce-goal-intake.ts:110', 'strategy.plan'],
   ['packages/kernel/workforce-tools/src/toolset.ts:835', 'TOOLSETS_BY_ROLE['],
   ['packages/app/server/src/workforce-turn-handlers.ts:139', 'buildRoleToolset'],
   ['packages/app/server/src/workforce-turn-handlers.ts:187', 'memory.search'],
@@ -50,7 +50,7 @@ const CITATIONS: ReadonlyArray<readonly [string, string]> = [
   ['packages/kernel/core/src/review-policy.ts:69', 'interface ReviewPolicy'],
   ['packages/kernel/workforce-tools/src/review-policy.ts:76', 'DeclaredReviewPolicy'],
   ['packages/kernel/tasks/src/create-task.ts:48', 'MAX_TASK_DEPENDENCIES = 100'],
-  ['packages/app/server/src/workforce-goal-intake.ts:78', 'MAX_TASK_DEPENDENCIES'],
+  ['packages/app/server/src/workforce-goal-intake.ts:88', 'MAX_TASK_DEPENDENCIES'],
 ];
 
 /**

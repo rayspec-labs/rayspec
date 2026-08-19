@@ -19,6 +19,7 @@ import {
   createRootTask,
   ensureWorkforceRuntime,
   insertChildTask,
+  WorkforcePausedError,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { eq } from 'drizzle-orm';
@@ -36,6 +37,8 @@ let kicks = 0;
 let goalSubmissions: Array<Parameters<WorkforceGoalIntake['submitGoal']>[0]> = [];
 const DEFAULT_GOAL_OUTCOME: WorkforceGoalOutcome = { outcome: 'created', tasks: [] };
 let nextGoalOutcome: WorkforceGoalOutcome = DEFAULT_GOAL_OUTCOME;
+/** Set to make the stub REJECT — the intake's typed engine errors are thrown, not returned. */
+let nextGoalThrow: Error | null = null;
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
@@ -173,6 +176,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
       workforceGoalIntake: {
         submitGoal: (input) => {
           goalSubmissions.push(input);
+          if (nextGoalThrow !== null) return Promise.reject(nextGoalThrow);
           return Promise.resolve(nextGoalOutcome);
         },
       },
@@ -183,6 +187,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
     kicks = 0;
     goalSubmissions = [];
     nextGoalOutcome = DEFAULT_GOAL_OUTCOME;
+    nextGoalThrow = null;
     await h.reset();
   });
   afterAll(async () => {
@@ -750,6 +755,45 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(unknown.status).toBe(404);
   });
 
+  /**
+   * `haltReason` is a HISTORICAL RECORD — "why was this last halted" — not a liveness flag. The
+   * resume verb clears `paused`/`pausedAt`/`pausedBy` and deliberately keeps the reason, because
+   * clearing it would destroy the only durable record of the last halt outside the event journal.
+   *
+   * This pins the observable consequence: after halt-then-resume the status view reports
+   * `paused: false` WITH the reason still set. A reader who "tightens" the API by clearing
+   * `haltReason` on resume, or who re-derives `paused` from it, fails here.
+   *
+   * Both assertions are POSITIVE — an exact `false` and an exact reason string — so neither can
+   * pass by matching nothing. `paused: true` is asserted first on the same workforce, so the field
+   * is proven to move rather than being constant-false throughout.
+   */
+  it('halt then resume reports paused:false with the halt reason KEPT', async () => {
+    const a = await principal('wf-halt-history@example.test', 'Org WF Halt History');
+    const auth = { authorization: `Bearer ${a.token}` };
+    await ensureWorkforceRuntime(forTenant(h.db, a.orgId), 'wf', {});
+
+    const halt = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/halt', {
+      body: { reason: 'incident-4711' },
+      headers: auth,
+    });
+    expect(halt.status).toBe(200);
+
+    // Halted: paused is true AND the reason is recorded. The control arm for the assertion below —
+    // it proves `paused` is not simply always false in this fixture.
+    const halted = await jsonRequest(h.app, 'GET', '/v1/workforce/wf/status', { headers: auth });
+    expect(halted.status).toBe(200);
+    expect(await halted.json()).toMatchObject({ paused: true, haltReason: 'incident-4711' });
+
+    const resume = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/resume', { headers: auth });
+    expect(resume.status).toBe(200);
+
+    // THE PIN: running again, and the record of WHY it was last halted survived the resume.
+    const resumed = await jsonRequest(h.app, 'GET', '/v1/workforce/wf/status', { headers: auth });
+    expect(resumed.status).toBe(200);
+    expect(await resumed.json()).toMatchObject({ paused: false, haltReason: 'incident-4711' });
+  });
+
   it('a fixed collection segment is reserved, and it does not shadow a workforce id or a task id', async () => {
     const a = await principal('wf-reserved@example.test', 'Org WF Reserved');
     const task = await seedRoot(a.orgId, 'Not shadowed');
@@ -1040,6 +1084,29 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(refusedBody).not.toContain('ghost');
     expect(refusedBody).toContain('server-side');
     expect(kicks).toBe(0); // no outcome above created any work to dispatch
+  });
+
+  /**
+   * The intake refuses a paused or halted workforce by THROWING a typed engine error, so the route
+   * has to map it like every other control refusal. Un-mapped it would surface as a 500 and a
+   * caller could not tell "this workforce is not accepting work" — which they fix with resume —
+   * from "the server broke", which they cannot fix at all.
+   */
+  it('maps the intake’s paused refusal to 409 CONFLICT, and dispatches nothing', async () => {
+    const a = await principal('wf-goal-paused@example.test', 'Org WF Goal Paused');
+    nextGoalThrow = new WorkforcePausedError('wf');
+    const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'A goal submitted while the operator has the workforce paused.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.code).toBe('CONFLICT');
+    // The message names the lever, and leaks no deployment shape.
+    expect(body.error.message as string).toContain('Resume');
+    // The intake WAS reached (this is a state refusal, not a validation one) and nothing dispatched.
+    expect(goalSubmissions).toHaveLength(1);
+    expect(kicks).toBe(0);
   });
 
   it('refuses a goal outside the strict schema, a reserved workforce id, and a read-only key', async () => {

@@ -35,7 +35,7 @@ Two properties hold across all five and are checked directly against the interfa
 - **No seam can assert a tenant.** No type any seam touches carries a tenant field, in either
   direction. (`'no seam type carries a tenant'`.) For the one seam that runs before tenant-scoped
   work, the intake reconciles the tenant and the workforce id BEFORE calling it
-  (`packages/app/server/src/workforce-goal-intake.ts:97-98`), which
+  (`packages/app/server/src/workforce-goal-intake.ts:107-108`), which
   `workforce-goal-intake.db.test.ts` pins as `'reconciles tenant and workforce BEFORE the strategy
   runs'`.
 
@@ -57,13 +57,13 @@ declared; it cannot invent a seat, and it cannot change what a seat's role is al
 the whole goal as one step for the default owner.
 
 **Wired.** Its production caller is the goal intake
-(`packages/app/server/src/workforce-goal-intake.ts:100`); a composition supplies a replacement
+(`packages/app/server/src/workforce-goal-intake.ts:110`); a composition supplies a replacement
 through `assembleServer`'s `orchestrationStrategy` option, which has no environment path, so a
 production entrypoint always runs the shipped default unless an embedder passes one
 (`packages/app/server/src/composition-root.ts:3506`).
 
 **What refuses an over-reaching plan:** `planRefusal`
-(`packages/app/server/src/workforce-goal-intake.ts:49`) validates the returned plan against the
+(`packages/app/server/src/workforce-goal-intake.ts:59`) validates the returned plan against the
 DECLARED workforce and the row bounds, and it runs before the first insert. The whole plan is then
 created in one transaction, so a refused plan writes zero rows and a multi-step plan is never
 half-born. Each of these is a driven cell of `'refuses every over-reaching plan shape typed, with
@@ -80,7 +80,7 @@ ZERO rows'` in `workforce-goal-intake.db.test.ts`, and each asserts the zero-row
 | A plan wider than `SEAM_MAX_PLAN_STEPS` | one submitted goal may not become an unbounded write |
 
 The step ceiling is `SEAM_MAX_PLAN_STEPS = 64` (`packages/kernel/core/src/seam-contracts.ts:61`),
-enforced at `packages/app/server/src/workforce-goal-intake.ts:58`. **64 is a conservative round
+enforced at `packages/app/server/src/workforce-goal-intake.ts:68`. **64 is a conservative round
 number, not a derived one** — far above what the shipped default produces (one step) and far below a
 write that could hurt. Decomposition of any real width belongs to the orchestrator's own turns
 through `delegate_task`, where each new task crosses the dispatch boundary and draws on its own
