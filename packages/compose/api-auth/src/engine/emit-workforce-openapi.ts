@@ -69,7 +69,6 @@ import { ErrorEnvelope } from '@rayspec/auth-core';
 import { schema } from '@rayspec/db';
 import type { WORKFORCE_EXPERIMENTAL_SCHEMA_ANNOTATION } from '@rayspec/spec';
 import {
-  approvalDecisionSchema,
   OPERATOR_SIGNAL_KINDS,
   RESERVED_WORKFORCE_SEGMENTS,
   reviewVerdictSchema,
@@ -82,6 +81,7 @@ import {
   APPROVAL_STATUSES,
   cancelRequestSchema,
   DEFAULT_PAGE,
+  decideRequestSchema,
   goalRequestSchema,
   HTTP_DRAIN_TIMEOUT_MS,
   haltRequestSchema,
@@ -889,7 +889,10 @@ const OPERATIONS: readonly OperationSpec[] = [
       'decide a row addressed to someone else. `override: true` asks to break the glass and takes ' +
       'the separate `workforce:override` permission — asking without holding it is a 403, never a ' +
       'silent downgrade to an ordinary decision.',
-    requestBody: { schema: approvalDecisionSchema, description: 'The decision.' },
+    // `decideRequestSchema`, not the engine's `approvalDecisionSchema` it aliases: the point of
+    // deriving is to read the object THE HANDLER PARSES, so if this route ever narrows its body the
+    // document narrows with it rather than describing the engine's wider one.
+    requestBody: { schema: decideRequestSchema, description: 'The decision.' },
     success: { status: '200', description: 'The decided approval row.', schema: APPROVAL_ROW },
     errors: {
       '400': 'The body is malformed or carries an unknown field.',
