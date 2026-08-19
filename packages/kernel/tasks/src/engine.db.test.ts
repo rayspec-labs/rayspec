@@ -20,6 +20,7 @@ import { ApprovalAlreadyDecidedError, decideApproval, sweepApprovalTimeouts } fr
 import { workforceBudgetsSchema } from './budget.js';
 import { cancelTaskCascade } from './control.js';
 import { createRootTask } from './create-task.js';
+import { TaskNotFoundError } from './errors.js';
 import { applyReviewVerdict, ReviewNotForParkError } from './reviews.js';
 import { deliverSignal } from './signals.js';
 import {
@@ -991,6 +992,137 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(stored[0]?.summary).toBe('Done.');
   });
 
+  it('a review child that FAILS on its second consecutive tool error releases the reviewed task', async () => {
+    // The SECOND of the routes into the backstop named at task-locks.ts (an operator cancel of the
+    // reviewer, this one, and the approval-timeout sweep — the "cancel cascade from an ancestor"
+    // that comment used to list is NOT one, see the case below and the comment's own note).
+    // Unlike the operator cancel above, nobody chose this: the
+    // reviewer simply misbehaved twice and the engine failed it. `waiting_for_review` has no
+    // signal-based exit (it appears in no `WAKES` park and no sweep covers it), so if the backstop
+    // did not fire here the reviewed task would sit parked forever with its result unread.
+    const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+    await completeUnderPolicy(root.taskId, 1);
+    const reviewer = await reviewerChildOf(root.taskId);
+
+    // Offense 1 — a review child may not complete; typed tool_error, re-queued (one retry).
+    await driveChildToWorking(reviewer.task_id, 1);
+    const first = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 1),
+      turnNumber: 1,
+      intent: { kind: 'complete', result: RESULT },
+      budgets: NO_BUDGETS,
+    });
+    expect(first.plan).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect(first.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
+    // The reviewed task is still parked at this point — one offense is a retry, not an abandonment.
+    expect(
+      (
+        await db.$client.unsafe(
+          `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+        )
+      )[0]?.status,
+    ).toBe('waiting_for_review');
+
+    // Offense 2, consecutive — the reviewer fails outright, and its terminal is the backstop's cue.
+    await driveChildToWorking(reviewer.task_id, 2);
+    const second = await applyTurnOutcome(tdb(), {
+      taskId: reviewer.task_id,
+      turnId: turnIdFor(reviewer.task_id, 2),
+      turnNumber: 2,
+      intent: { kind: 'complete', result: RESULT },
+      budgets: NO_BUDGETS,
+    });
+    expect(second.plan).toMatchObject({ kind: 'invalid_intent', fate: 'fail' });
+    expect(second.task).toMatchObject({ status: 'failed', statusReason: 'tool_error' });
+
+    // The reviewed task is released to a human — the same place a spent round budget leaves it.
+    const released = await db.$client.unsafe(
+      `SELECT status, status_reason, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(released[0]).toMatchObject({
+      status: 'waiting_for_user',
+      status_reason: null,
+      // The stored result survives: the human sees the work the reviewer never judged.
+      summary: 'Done.',
+    });
+    // The journal names the dead reviewer AND how it died, so the operator can tell this apart from
+    // an operator cancel without reading the task tree.
+    const abandoned = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.abandoned';`,
+    )) as unknown as {
+      data: { reviewTaskId: string; reviewTaskStatus: string; outcome: string };
+    }[];
+    expect(abandoned).toHaveLength(1);
+    expect(abandoned[0]?.data).toMatchObject({
+      reviewTaskId: reviewer.task_id,
+      reviewTaskStatus: 'failed',
+      outcome: 'waiting_for_user',
+    });
+    // No verdict is fabricated: recording that none arrived beats inventing one.
+    const review = await db.$client.unsafe(
+      `SELECT verdict, decided_at FROM workforce_reviews WHERE task_id = '${root.taskId}';`,
+    );
+    expect(review).toHaveLength(1);
+    expect(review[0]).toMatchObject({ verdict: null, decided_at: null });
+  });
+
+  it('a cancel cascade from an ancestor leaves no task parked on a review it can never receive', async () => {
+    // The route task-locks.ts USED to name as a third way into the backstop, and does not any more,
+    // because it is not one. The cascade reaches the reviewed task itself (it is a non-terminal
+    // descendant of the origin, taken shallowest-first), so the reviewed task is CANCELLED rather
+    // than released: the park is gone because the task is gone. `releaseAbandonedReview` is not
+    // reached at all, and cannot be — the binding reason is that `cancelDescendants`
+    // (apply-intents.ts:1361-1399) transitions descendants directly and never calls
+    // `afterTaskTerminal`, which is the backstop's ONLY caller, so this route never enters its call
+    // graph. (That the reviewer's parent is already terminal by then is also true, but it is the
+    // second guard, not the one that decides.)
+    //
+    // What is asserted is therefore the PROPERTY the backstop exists for, on this route: after an
+    // ancestor cascade nothing is left in `waiting_for_review`, and no verdict is invented.
+    const root = await driveToWorking(await newRoot({ owner: 'coordinator' }));
+    await turn(root.taskId, 1, {
+      kind: 'fan_out',
+      children: [{ title: 'Draft', goal: 'Write the draft.', owner: 'dev' }],
+    });
+    const childRows = (await db.$client.unsafe(
+      `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { task_id: string }[];
+    const reviewed = (childRows[0] as { task_id: string }).task_id;
+    await driveChildToWorking(reviewed, 1);
+    await completeUnderPolicy(reviewed, 1);
+    const reviewer = await reviewerChildOf(reviewed);
+    expect(
+      (
+        await db.$client.unsafe(`SELECT status FROM workforce_tasks WHERE task_id = '${reviewed}';`)
+      )[0]?.status,
+    ).toBe('waiting_for_review');
+
+    const outcome = await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
+    expect(outcome.cancelled).toContain(root.taskId);
+    expect(outcome.cancelled).toContain(reviewed);
+    expect(outcome.cancelled).toContain(reviewer.task_id);
+
+    // Nothing anywhere under this root is still waiting on a review nobody can now deliver.
+    const parked = await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_tasks WHERE root_task_id = '${root.taskId}' AND status = 'waiting_for_review';`,
+    );
+    expect(parked[0]?.c).toBe(0);
+    const statuses = (await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${reviewed}';`,
+    )) as unknown as { status: string; status_reason: string | null }[];
+    expect(statuses[0]).toMatchObject({
+      status: 'cancelled',
+      status_reason: 'cancelled_by_parent',
+    });
+    // Still no fabricated verdict — the review row records that none arrived.
+    const review = await db.$client.unsafe(
+      `SELECT verdict FROM workforce_reviews WHERE task_id = '${reviewed}';`,
+    );
+    expect(review).toHaveLength(1);
+    expect(review[0]?.verdict).toBeNull();
+  });
+
   it('an abandoned review’s stale row cannot decide the NEXT round’s park', async () => {
     const root = await driveToWorking(await newRoot({ owner: 'dev' }));
     await completeUnderPolicy(root.taskId, 1);
@@ -1035,7 +1167,10 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         verdict: 'accept',
         reasons: [],
         requiredChanges: [],
-        actor: 'user:ops',
+        // The review's OWN named reviewer, so the refusal under test is the PARK BINDING and not
+        // the decision-door authority gate (which would refuse an unrelated operator first and
+        // stop exercising the binding at all).
+        actor: 'user:qa',
       }),
     ).rejects.toBeInstanceOf(ReviewNotForParkError);
     const held = await db.$client.unsafe(
@@ -1094,13 +1229,14 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     const review = (await db.$client.unsafe(
       `SELECT id FROM workforce_reviews WHERE task_id = '${root.taskId}' AND round = 1;`,
     )) as unknown as { id: string }[];
-    // The HUMAN verdict route decides first.
+    // The HUMAN verdict route decides first — as the reviewer the row names, which is who the
+    // decision door admits (the subject here is the LOST RACE, not the authority gate).
     await applyReviewVerdict(tdb(), NO_BUDGETS, {
       reviewId: (review[0] as { id: string }).id,
       verdict: 'accept',
       reasons: [],
       requiredChanges: [],
-      actor: 'user:qa-lead',
+      actor: 'user:qa',
     });
     // The dispatched reviewer's turn then lands — benign, recorded as superseded.
     await driveChildToWorking(reviewer.task_id);
@@ -2537,5 +2673,105 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${c0.task_id}';`,
     );
     expect(c0after[0]).toMatchObject({ status: 'cancelled', status_reason: 'cancelled_by_user' });
+  });
+
+  /**
+   * CANCEL IS IDEMPOTENT ON A TERMINAL TARGET (B-015 clause 4).
+   *
+   * `cancelTaskCascade` opens with `if (isTerminalStatus(task.status)) return { cancelled: [],
+   * signalled: [] }`, and every one of the twelve `cancelTaskCascade` calls across this file,
+   * `cascade-locking.db.test.ts` and `backup-restore.db.test.ts` was SINGLE-SHOT. Nothing ever
+   * re-cancelled a task, so the early return had no arm at all.
+   *
+   * It is not an incidental early return. `control.ts` leans on it in prose while explaining why a
+   * terminal root needs its OWN cascade helper — "`cancelTaskCascade` cannot serve this case …: it
+   * returns early on a terminal target by design, and relaxing that would change cancellation
+   * semantics for every caller of the public cancel verb" — so the halt path's correctness argument
+   * cites this behaviour. A guarantee another module reasons from is exactly the kind that needs a
+   * test rather than a comment.
+   *
+   * OPERATIONALLY it is the double-click: an operator cancels, the request looks slow, they cancel
+   * again. The second call must be a no-op that reports honestly, not a second cascade, not a
+   * refusal, and not a version bump that invalidates whatever else holds that row's version.
+   *
+   * The empty outcome is asserted STRUCTURALLY (`toEqual({ cancelled: [], signalled: [] })`) rather
+   * than as "did not contain the task": a function that returned `{ cancelled: [someOtherId] }`
+   * would satisfy the weaker form.
+   */
+  describe('a second cancel of a terminal task is a reported no-op', () => {
+    /** The WHOLE row: a no-op that wrote to any column at all has to show up somewhere. */
+    async function rowOf(taskId: string): Promise<Record<string, unknown>> {
+      const rows = (await db.$client.unsafe(
+        `SELECT * FROM workforce_tasks WHERE task_id = '${taskId}';`,
+      )) as unknown as Record<string, unknown>[];
+      return rows[0] as Record<string, unknown>;
+    }
+
+    async function transitionCount(taskId: string): Promise<number> {
+      const rows = (await db.$client.unsafe(
+        `SELECT count(*)::int AS c FROM workforce_task_transitions WHERE task_id = '${taskId}';`,
+      )) as unknown as { c: number }[];
+      return (rows[0] as { c: number }).c;
+    }
+
+    it('re-cancelling a CANCELLED task returns the empty outcome and writes nothing', async () => {
+      const root = await newRoot();
+      await applyTransition(tdb(), {
+        taskId: root.taskId,
+        expectedVersion: root.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+
+      const first = await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
+      expect(first.cancelled).toEqual([root.taskId]);
+      const afterFirst = await rowOf(root.taskId);
+      const transitionsAfterFirst = await transitionCount(root.taskId);
+      expect(afterFirst).toMatchObject({ status: 'cancelled', status_reason: 'cancelled_by_user' });
+
+      const second = await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' });
+
+      expect(
+        second,
+        'the second cancel did work — a terminal target must be a no-op, not a second cascade',
+      ).toEqual({ cancelled: [], signalled: [] });
+      // NOTHING WAS WRITTEN. `version` is the load-bearing column: a re-terminalising write that
+      // happened to land on the same status would still bump it, and would invalidate the optimistic
+      // version any concurrent holder of this row is carrying.
+      expect(await rowOf(root.taskId)).toEqual(afterFirst);
+      expect(await transitionCount(root.taskId), 'the no-op journaled a transition').toBe(
+        transitionsAfterFirst,
+      );
+    });
+
+    it('the guard is TERMINALITY, not cancelled-ness: a COMPLETED task is the same no-op', async () => {
+      // `isTerminalStatus` covers completed / failed / cancelled. A guard mistakenly written as
+      // `status === 'cancelled'` would pass the arm above and cancel a finished task here — which is
+      // a status write the state machine must refuse, since every terminal row of
+      // ALLOWED_TRANSITIONS is all-false.
+      const root = await driveToWorking(await newRoot());
+      const done = await turn(root.taskId, 1, { kind: 'complete', result: RESULT });
+      expect(done.task?.status).toBe('completed');
+      const before = await rowOf(root.taskId);
+
+      expect(await cancelTaskCascade(tdb(), { taskId: root.taskId, actor: 'user' })).toEqual({
+        cancelled: [],
+        signalled: [],
+      });
+
+      expect(
+        await rowOf(root.taskId),
+        'a completed task was written to by a cancel — the early return keys on the wrong predicate',
+      ).toEqual(before);
+    });
+
+    it('the empty outcome is NOT how this function answers an unknown task', async () => {
+      // Without this, `{ cancelled: [], signalled: [] }` above is compatible with "the cancel verb
+      // silently swallows everything it is handed" — the arms would be green against a function
+      // that never does anything at all.
+      await expect(
+        cancelTaskCascade(tdb(), { taskId: 'wf-task-nope', actor: 'user' }),
+      ).rejects.toBeInstanceOf(TaskNotFoundError);
+    });
   });
 });

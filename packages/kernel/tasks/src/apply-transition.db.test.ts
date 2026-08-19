@@ -9,12 +9,25 @@
  *   - two CONCURRENT compare-and-swaps on one version admit exactly one winner (the fail-the-fix
  *     property for double dispatch);
  *   - the tenant predicate holds: tenant B can neither see nor transition tenant A's task.
+ *
+ * TERMINAL NON-RESURRECTION IS PROVEN HERE DIRECTLY, on a seeded terminal row against the running
+ * engine — not composed from the table test plus a `planned -> working` refusal. Two doors, both
+ * shut: `applyTransition` on a terminal row refuses EVERY target and mutates nothing, and a signal
+ * delivered to a terminal task is recorded but wakes nothing. Re-opening finished work means a NEW
+ * task with `parentTaskId` set; there is no path back into a terminal row.
  */
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { applyTransition } from './apply-transition.js';
 import { createRootTask } from './create-task.js';
 import { TaskNotFoundError, TaskVersionConflictError } from './errors.js';
-import { StatusReasonInvalidError, TaskTransitionIllegalError } from './status.js';
+import { deliverSignal, SIGNAL_KINDS } from './signals.js';
+import {
+  StatusReasonInvalidError,
+  TASK_STATUSES,
+  TaskTransitionIllegalError,
+  TERMINAL_STATUSES,
+  type TerminalStatus,
+} from './status.js';
 import {
   forTenant,
   makeTestDb,
@@ -23,6 +36,7 @@ import {
   TENANT_A,
   TENANT_B,
 } from './test-support/test-db.js';
+import { renewTurnLease } from './turn-lease.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -45,7 +59,7 @@ describe.skipIf(!hasDb)('applyTransition (db)', () => {
 
   beforeEach(async () => {
     await db.$client.unsafe(
-      'TRUNCATE workforce_tasks, workforce_task_transitions, run_events CASCADE;',
+      'TRUNCATE workforce_tasks, workforce_task_transitions, workforce_task_signals, run_events CASCADE;',
     );
     await seedOrgs(db);
   });
@@ -58,6 +72,52 @@ describe.skipIf(!hasDb)('applyTransition (db)', () => {
       owner: 'user',
       requestedBy: 'user',
     });
+  }
+
+  /** The reason each terminal status is reached with (`cancelled` demands one; the other two do not). */
+  const TERMINAL_REASON: Readonly<Record<TerminalStatus, string | null>> = {
+    completed: null,
+    failed: null,
+    cancelled: 'cancelled_by_user',
+  };
+
+  /** Seed a task and drive it to `terminal` through the real engine: planned -> queued -> working -> X. */
+  async function seedTerminalTask(terminal: TerminalStatus) {
+    const tdb = forTenant(db, TENANT_A);
+    const task = await seedTask();
+    const queued = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const working = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+    });
+    const reason = TERMINAL_REASON[terminal];
+    const done = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: working.version,
+      to: terminal,
+      ...(reason !== null ? { reason } : {}),
+      actor: 'user',
+    });
+    expect(done.status).toBe(terminal);
+    return done;
+  }
+
+  /** Everything a refusal must leave untouched: the row, its audit spine, and its journal. */
+  async function durableSnapshot(taskId: string) {
+    const rows = await db.$client.unsafe(
+      `SELECT t.status, t.status_reason, t.version,
+              (SELECT count(*)::int FROM workforce_task_transitions WHERE task_id = t.task_id) AS log,
+              (SELECT count(*)::int FROM run_events WHERE run_id = t.task_id) AS events
+         FROM workforce_tasks t WHERE t.task_id = '${taskId}';`,
+    );
+    return rows[0];
   }
 
   it('applies a legal transition: status + version move, one log row, journaled before returning', async () => {
@@ -216,6 +276,151 @@ describe.skipIf(!hasDb)('applyTransition (db)', () => {
       `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.task.queued';`,
     );
     expect(queuedEvents[0]?.c).toBe(1);
+  });
+
+  it('a seeded terminal row refuses EVERY target and mutates nothing (non-resurrection)', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    for (const terminal of TERMINAL_STATUSES) {
+      const done = await seedTerminalTask(terminal);
+      const before = await durableSnapshot(done.taskId);
+      // All nine targets, including the terminal's own status — the row is ABSORBING, so there is
+      // no door at all, not merely no door back to `queued`.
+      for (const to of TASK_STATUSES) {
+        await expect(
+          applyTransition(tdb, {
+            taskId: done.taskId,
+            expectedVersion: done.version,
+            to,
+            actor: 'user',
+          }),
+          `${terminal} -> ${to} must be a typed refusal`,
+        ).rejects.toBeInstanceOf(TaskTransitionIllegalError);
+      }
+      // Nothing moved: not the status, not the reason, not the version, not the audit spine, not
+      // the journal. A refusal is fail-closed, never a partial write.
+      expect(await durableSnapshot(done.taskId), `${terminal} row after 9 refusals`).toEqual(
+        before,
+      );
+    }
+  });
+
+  it('a signal delivered to a terminal task is recorded but wakes nothing', async () => {
+    const tdb = forTenant(db, TENANT_A);
+    for (const terminal of TERMINAL_STATUSES) {
+      const done = await seedTerminalTask(terminal);
+      const before = await durableSnapshot(done.taskId);
+      // Every kind in the CLOSED vocabulary, so this cannot rot into "the one kind we remembered":
+      // no terminal status appears in any `WAKES` park, so `answersPark` is false for all of them.
+      for (const kind of SIGNAL_KINDS) {
+        await expect(
+          deliverSignal(tdb, {
+            taskId: done.taskId,
+            kind,
+            signalKey: `${kind}:${done.taskId}`,
+            actor: 'user',
+          }),
+          `${kind} delivered to a ${terminal} task`,
+        ).resolves.toEqual({ delivered: true, woke: false });
+      }
+      // The deliveries are RECORDED (an operator can see what arrived too late) and left pending —
+      // "wakes nothing" is not "drops it on the floor".
+      const signals = await db.$client.unsafe(
+        `SELECT count(*)::int AS c, count(consumed_at)::int AS consumed FROM workforce_task_signals WHERE task_id = '${done.taskId}';`,
+      );
+      expect(signals[0]).toMatchObject({ c: SIGNAL_KINDS.length, consumed: 0 });
+      expect(await durableSnapshot(done.taskId), `${terminal} row after every signal kind`).toEqual(
+        before,
+      );
+    }
+  });
+
+  it('the claim LEASE is stamped by the entry into working and cleared by every exit from it', async () => {
+    // The lease lives in the SAME compare-and-swap UPDATE that writes the status and stamps
+    // started_at, so it can never disagree with the claim it describes and no second writer exists.
+    const task = await seedTask();
+    const queued = await applyTransition(forTenant(db, TENANT_A), {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    expect(queued.claimExpiresAt).toBeNull();
+
+    const leaseUntil = new Date(Date.now() + 1_800_000);
+    const working = await applyTransition(forTenant(db, TENANT_A), {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'wf-task-turn:x:1:2',
+      leaseUntil,
+    });
+    expect(working.claimExpiresAt?.toISOString()).toBe(leaseUntil.toISOString());
+
+    // Any exit from `working` clears it — a stale expiry must never be readable on a row that
+    // holds no claim.
+    const done = await applyTransition(forTenant(db, TENANT_A), {
+      taskId: task.taskId,
+      expectedVersion: working.version,
+      to: 'completed',
+      actor: 'user',
+    });
+    expect(done.claimExpiresAt).toBeNull();
+  });
+
+  it('renewTurnLease extends only a LIVE claim — it matches nothing once the row leaves working', async () => {
+    // The production call site is the durable engine's recovery of its OWN claim, which no test in
+    // this repo executes (whole-body recovery is simulated by the receipt/reaper suites, never
+    // driven). So the function's own guarantees are asserted here directly: it moves the lease on a
+    // `working` row, and — because it is scoped to `status = 'working'` — it can neither resurrect a
+    // terminal row nor extend a claim a reap has already taken away.
+    const task = await seedTask();
+    const tdb = forTenant(db, TENANT_A);
+    const queued = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: task.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    const first = new Date(Date.now() + 60_000);
+    const working = await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: queued.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: 'wf-task-turn:x:1:2',
+      leaseUntil: first,
+    });
+    expect(working.claimExpiresAt?.toISOString()).toBe(first.toISOString());
+
+    const renewed = new Date(Date.now() + 1_800_000);
+    expect(await renewTurnLease(tdb, task.taskId, renewed)).toBe(true);
+    const afterRenew = await db.$client.unsafe(
+      `SELECT claim_expires_at, status, version FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(new Date(afterRenew[0]?.claim_expires_at as string).toISOString()).toBe(
+      renewed.toISOString(),
+    );
+    // A renewal is NOT a transition: the status and the compare-and-swap token do not move, so it
+    // can never be mistaken for one or invalidate a concurrent holder's expected version.
+    expect(afterRenew[0]?.status).toBe('working');
+    expect(afterRenew[0]?.version).toBe(working.version);
+
+    // The reap takes the row out of `working`; a late renewal from the superseded execution now
+    // matches nothing and leaves the lease cleared.
+    await applyTransition(tdb, {
+      taskId: task.taskId,
+      expectedVersion: working.version,
+      to: 'queued',
+      reason: 'tool_error',
+      actor: 'scheduler',
+      queueReason: 'turn_lease_expired',
+    });
+    expect(await renewTurnLease(tdb, task.taskId, new Date(Date.now() + 1_800_000))).toBe(false);
+    const afterReap = await db.$client.unsafe(
+      `SELECT claim_expires_at FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    );
+    expect(afterReap[0]?.claim_expires_at).toBeNull();
   });
 
   it('the tenant predicate holds: tenant B cannot see or transition tenant A task', async () => {

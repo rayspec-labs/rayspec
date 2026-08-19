@@ -8,7 +8,7 @@
  * reviewer, counting rounds) stays with the engine.
  *
  * Whether a rule matches is a different question from whether it can be argued with, and the two
- * `requireWhen` triggers differ there. A `capabilities` rule is matched against the deployed
+ * `requireWhen` triggers differ there. A `labels` rule is matched against the deployed
  * document and holds unconditionally. A `confidenceBelow` rule is matched against
  * `ReviewedResult.confidence` — which the SUBMITTER wrote — so a result claiming high confidence
  * simply does not trip it. That is a heuristic over self-report, useful and not a control; see
@@ -18,13 +18,13 @@
  * one implementation, not a default and a twin.
  */
 
-/** What a rule is matched against. Capability labels are opaque — compared, never interpreted. */
+/** What a rule is matched against. Policy labels are opaque — compared, never interpreted. */
 export interface ReviewSubject {
   readonly taskId: string;
   readonly owner: string;
   readonly department: string | null;
-  /** The owner's declared capability labels. */
-  readonly capabilities: readonly string[];
+  /** The owner's declared policy labels (the spec's `employees[].labels`). */
+  readonly labels: readonly string[];
 }
 
 export interface ReviewedResult {
@@ -44,9 +44,15 @@ export interface DeclaredReviewRule {
   /** When a covered subject's submission demands review. */
   readonly requireWhen: {
     readonly confidenceBelow?: number;
-    readonly capabilities?: readonly string[];
+    readonly labels?: readonly string[];
   };
   readonly onReject: 'rework';
+  /**
+   * The round ceiling this rule carries into one review BINDING. The document spells it
+   * `reviewPolicies[].maxReviewRounds` (aligned with `execution.maxReviewRounds`, the
+   * workforce-wide ceiling); `deriveWorkforceConfig` maps that declared name onto this runtime one,
+   * which the engine's review binding also uses. Two scopes, deliberately two nouns.
+   */
   readonly maxRounds: number;
 }
 
@@ -68,7 +74,7 @@ export interface ReviewPolicy {
 /**
  * The declared-rules matcher, and the honest default. `appliesTo` selects the rules that cover the
  * subject (department match, or employee match); `requireWhen` fires when the submitted confidence
- * is BELOW the threshold, or when the subject holds ANY listed capability label. The FIRST matching
+ * is BELOW the threshold, or when the subject holds ANY listed policy label. The FIRST matching
  * rule in declaration order wins — deterministic, order-stable, no scoring.
  */
 export class DeclaredReviewPolicy implements ReviewPolicy {
@@ -123,5 +129,5 @@ function requiresReview(
   ) {
     return true;
   }
-  return (rule.requireWhen.capabilities ?? []).some((label) => task.capabilities.includes(label));
+  return (rule.requireWhen.labels ?? []).some((label) => task.labels.includes(label));
 }

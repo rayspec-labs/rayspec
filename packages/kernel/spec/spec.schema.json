@@ -195,8 +195,7 @@
                     "typescript_handler_module",
                     "stream_playback_media_token",
                     "agent_untrusted_field_precedence",
-                    "cron_tenant_required",
-                    "workforce_capability_unheld"
+                    "cron_tenant_required"
                   ]
                 },
                 "because": {
@@ -413,8 +412,7 @@
                     "typescript_handler_module",
                     "stream_playback_media_token",
                     "agent_untrusted_field_precedence",
-                    "cron_tenant_required",
-                    "workforce_capability_unheld"
+                    "cron_tenant_required"
                   ]
                 },
                 "because": {
@@ -525,8 +523,7 @@
                     "typescript_handler_module",
                     "stream_playback_media_token",
                     "agent_untrusted_field_precedence",
-                    "cron_tenant_required",
-                    "workforce_capability_unheld"
+                    "cron_tenant_required"
                   ]
                 },
                 "because": {
@@ -696,8 +693,7 @@
                     "typescript_handler_module",
                     "stream_playback_media_token",
                     "agent_untrusted_field_precedence",
-                    "cron_tenant_required",
-                    "workforce_capability_unheld"
+                    "cron_tenant_required"
                   ]
                 },
                 "because": {
@@ -764,8 +760,7 @@
                     "typescript_handler_module",
                     "stream_playback_media_token",
                     "agent_untrusted_field_precedence",
-                    "cron_tenant_required",
-                    "workforce_capability_unheld"
+                    "cron_tenant_required"
                   ]
                 },
                 "because": {
@@ -890,7 +885,8 @@
         },
         "name": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 200
         },
         "orchestrator": {
           "type": "string",
@@ -908,12 +904,18 @@
                   "type": "number",
                   "exclusiveMinimum": 0
                 },
+                "turns": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
                 "window": {
                   "type": "string",
                   "enum": [
                     "hourly",
                     "daily",
-                    "weekly"
+                    "weekly",
+                    "monthly"
                   ]
                 }
               },
@@ -941,15 +943,14 @@
               ],
               "additionalProperties": false
             },
-            "delegation": {
+            "subtree": {
               "type": "object",
               "properties": {
-                "maxDepth": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
+                "usd": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
                 },
-                "maxPerTask": {
+                "turns": {
                   "type": "integer",
                   "exclusiveMinimum": 0,
                   "maximum": 9007199254740991
@@ -983,6 +984,22 @@
                 "block",
                 "block_and_escalate"
               ]
+            },
+            "delegation": {
+              "type": "object",
+              "properties": {
+                "maxDepth": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "maxPerTask": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1001,7 +1018,8 @@
               },
               "name": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 200
               },
               "manager": {
                 "type": "string",
@@ -1011,7 +1029,8 @@
               },
               "mission": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 2000
               },
               "members": {
                 "default": [],
@@ -1040,9 +1059,16 @@
                     "enum": [
                       "hourly",
                       "daily",
-                      "weekly"
+                      "weekly",
+                      "monthly"
                     ]
-                  },
+                  }
+                },
+                "additionalProperties": false
+              },
+              "execution": {
+                "type": "object",
+                "properties": {
                   "maxConcurrentWorkers": {
                     "type": "integer",
                     "exclusiveMinimum": 0,
@@ -1079,7 +1105,8 @@
               },
               "title": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "maxLength": 200
               },
               "department": {
                 "type": "string",
@@ -1102,12 +1129,14 @@
                   "reviewer"
                 ]
               },
-              "capabilities": {
+              "labels": {
                 "default": [],
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "minLength": 1
+                  "minLength": 1,
+                  "maxLength": 63,
+                  "pattern": "^[a-z_][a-z0-9_]*$"
                 }
               }
             },
@@ -1157,8 +1186,7 @@
             "required": [
               "id",
               "lead",
-              "members",
-              "maxSize"
+              "members"
             ],
             "additionalProperties": false
           }
@@ -1176,22 +1204,50 @@
                 "pattern": "^[a-z_][a-z0-9_]*$"
               },
               "appliesTo": {
-                "type": "object",
-                "properties": {
-                  "department": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 63,
-                    "pattern": "^[a-z_][a-z0-9_]*$"
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "department": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z_][a-z0-9_]*$"
+                      },
+                      "employee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z_][a-z0-9_]*$"
+                      }
+                    },
+                    "required": [
+                      "department"
+                    ],
+                    "additionalProperties": false
                   },
-                  "employee": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 63,
-                    "pattern": "^[a-z_][a-z0-9_]*$"
+                  {
+                    "type": "object",
+                    "properties": {
+                      "department": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z_][a-z0-9_]*$"
+                      },
+                      "employee": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 63,
+                        "pattern": "^[a-z_][a-z0-9_]*$"
+                      }
+                    },
+                    "required": [
+                      "employee"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "additionalProperties": false
+                ]
               },
               "reviewer": {
                 "type": "string",
@@ -1200,29 +1256,62 @@
                 "pattern": "^[a-z_][a-z0-9_]*$"
               },
               "requireWhen": {
-                "type": "object",
-                "properties": {
-                  "confidenceBelow": {
-                    "type": "number",
-                    "exclusiveMinimum": 0,
-                    "maximum": 1
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "confidenceBelow": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1
+                      },
+                      "labels": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 63,
+                          "pattern": "^[a-z_][a-z0-9_]*$"
+                        }
+                      }
+                    },
+                    "required": [
+                      "confidenceBelow"
+                    ],
+                    "additionalProperties": false
                   },
-                  "capabilities": {
-                    "minItems": 1,
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "minLength": 1
-                    }
+                  {
+                    "type": "object",
+                    "properties": {
+                      "confidenceBelow": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1
+                      },
+                      "labels": {
+                        "minItems": 1,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 63,
+                          "pattern": "^[a-z_][a-z0-9_]*$"
+                        }
+                      }
+                    },
+                    "required": [
+                      "labels"
+                    ],
+                    "additionalProperties": false
                   }
-                },
-                "additionalProperties": false
+                ]
               },
               "onReject": {
                 "type": "string",
                 "const": "rework"
               },
-              "maxRounds": {
+              "maxReviewRounds": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
@@ -1234,12 +1323,12 @@
               "reviewer",
               "requireWhen",
               "onReject",
-              "maxRounds"
+              "maxReviewRounds"
             ],
             "additionalProperties": false
           }
         },
-        "approvals": {
+        "approvalPolicies": {
           "default": [],
           "type": "array",
           "items": {
@@ -1254,17 +1343,19 @@
               "requireWhen": {
                 "type": "object",
                 "properties": {
-                  "capabilities": {
+                  "labels": {
                     "minItems": 1,
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "minLength": 1
+                      "minLength": 1,
+                      "maxLength": 63,
+                      "pattern": "^[a-z_][a-z0-9_]*$"
                     }
                   }
                 },
                 "required": [
-                  "capabilities"
+                  "labels"
                 ],
                 "additionalProperties": false
               },
@@ -1301,7 +1392,10 @@
         "orchestrator",
         "employees"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "title": "workforce (EXPERIMENTAL — not part of the frozen v1.0 grammar)",
+      "description": "EXPERIMENTAL. This section is NOT part of the frozen v1.0 grammar. A document that declares `workforce:` is refused at parse with `experimental_section_disabled` unless RAYSPEC_EXPERIMENTAL_WORKFORCE is set to an opt-in value. While it is experimental its shape, its validation rules and its behaviour may change in any release, including a patch release, and no deprecation period is promised. See docs/workforce-compatibility.md.",
+      "x-rayspec-experimental": true
     },
     "managed": {
       "type": "object",

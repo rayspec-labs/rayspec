@@ -81,6 +81,45 @@ export class AuditStore {
   }
 
   /**
+   * append ONE out-of-band ERASURE-REQUESTED record (its own committed insert) — WHO asked, WHY, and
+   * under which RESOLVED gate.
+   *
+   * It is the companion to {@link appendErasure} and covers the two things that record cannot. First,
+   * `tenant_data_erased` names no invoker: it is written from inside `eraseTenant`, which is handed a
+   * tenant id and nothing about the caller. Second, and more importantly, it is written ONLY on the
+   * path that actually deletes — so an attempt the operator gate REFUSED (`RAYSPEC_ERASURE_ENABLED`
+   * anything but the exact string `"true"`) leaves no trace at all today. Someone trying to destroy a
+   * tenant and being stopped is precisely the event an audit trail exists for.
+   *
+   * The event name is a fixed literal (`tenant_erase_requested`) for the same reason
+   * {@link appendTenantProvisioned}'s is: an operator command reaches no route, so it is not an
+   * `AuthEventName`. `actorUserId` is NULL and that is the honest value — the command's authority is
+   * possession of the connection string, not a principal. `actorOrgId` is the TARGET org, so the
+   * record surfaces under the tenant it concerns; `auth_audit` is a GLOBAL/auth table that tenant
+   * erasure deliberately does not erase, so the record SURVIVES the erasure it describes.
+   *
+   * `meta` carries flags, counts-free intent and the operator's stated reason — never a secret and
+   * never a connection string. Like {@link appendErasure}, and UNLIKE {@link appendTenantProvisioned},
+   * it THROWS on a write failure: it is written BEFORE the act, so a caller that cannot record the
+   * attempt must not make it.
+   */
+  async appendTenantErasureRequested(record: {
+    tenantId: string;
+    requestId: string;
+    meta: Record<string, unknown>;
+  }): Promise<void> {
+    await this.db.insert(schema.authAudit).values({
+      actorOrgId: record.tenantId,
+      actorUserId: null,
+      event: 'tenant_erase_requested',
+      requestId: record.requestId,
+      targetHash: null,
+      ipHash: null,
+      meta: record.meta,
+    });
+  }
+
+  /**
    * append ONE out-of-band TENANT-PROVISIONED record (its own committed insert). An operator holding
    * the database created or resolved an org and, optionally, issued the owner invite that hands it
    * over — a durable trail is the only evidence that ever existed of who the tenant was made for.

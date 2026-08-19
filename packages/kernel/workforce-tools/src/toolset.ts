@@ -30,6 +30,7 @@ import {
   MAX_MESSAGES_PER_TURN,
   MAX_TASK_TEXT_BYTES,
   MAX_TASK_TITLE_CHARS,
+  normalizeApprovalQuestion,
   type TaskRecord,
   turnIntentSchema,
   workerResultSchema,
@@ -37,6 +38,7 @@ import {
 import { z } from 'zod';
 import type { TurnCollector } from './collector.js';
 import {
+  ApprovalAlreadyResolvedError,
   ApprovalEscalationTargetMissingError,
   EscalationTargetMissingError,
   ReservedToolNameError,
@@ -482,8 +484,8 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
       spec: {
         name: 'request_approval',
         description:
-          'End this turn by asking a human for a decision. The declared approval rule covering ' +
-          'your capabilities supplies the timeout and its fate.',
+          'End this turn by asking a human for a decision. The declared approval policy covering ' +
+          'your labels supplies the timeout and its fate.',
         parameters: {
           type: 'object',
           properties: {
@@ -511,6 +513,18 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
             args,
             new ApprovalEscalationTargetMissingError(employee.id, rule?.id ?? '(unnamed)'),
           );
+        }
+        // THE RE-REQUEST CAP, model-facing half. The engine refuses this too and THAT arm is the
+        // authority (it re-reads the approvals table under the task lock and catches every caller);
+        // this one exists so the seat learns it INSIDE the turn and can still end with a different
+        // tool, instead of burning the turn and failing the task on the next offence. The snapshot
+        // field is advisory by the same reasoning `delegationsFromTask` is (snapshot.ts) — a stale
+        // read can only ever let a request through to the engine, never invent a refusal.
+        const asked = normalizeApprovalQuestion(question);
+        if (
+          snapshot.resolvedApprovalQuestions.some((q) => normalizeApprovalQuestion(q) === asked)
+        ) {
+          refuseEnding(args, new ApprovalAlreadyResolvedError(question));
         }
         return endTurn({
           kind: 'request_approval',

@@ -185,6 +185,29 @@ import { z } from 'zod';
  *                               NATIVE workforce tool. Natives are injected by role at dispatch and
  *                               always win; a colliding declared tool would be silently shadowed,
  *                               so it is refused up front.
+ *  - `workforce_label_unheld` — a review or approval rule's `requireWhen.labels` names a policy
+ *                               label NO declared employee holds, so THAT CLAUSE can never fire:
+ *                               labels match by exact equality against `employees[].labels` and
+ *                               every holder is declared in the SAME document, so the only way one
+ *                               arrives is a redeploy, which re-runs this lint. Every such entry is
+ *                               refused — it is a typo either way — but what it COSTS varies, and
+ *                               the message says which case the author is in rather than asserting
+ *                               one for all. `labels` is an ARRAY matched with `.some()`, so a
+ *                               held sibling means only that entry is dead and the rule is intact;
+ *                               with no held sibling a review rule falls back to its
+ *                               `confidenceBelow` heuristic if it declares one, else it can no
+ *                               longer demand review, and an approval rule stops covering any seat
+ *                               (its `request_approval` then runs on the default window, since the
+ *                               tool is offered by role rather than by rule). Advisory until the
+ *                               pre-freeze review, on the false premise that a label may arrive
+ *                               later.
+ *  - `multiple_workforces`    — the document spells `workforce:` as a LIST, or carries a plural
+ *                               `workforces:` key. Exactly zero or one workforce may be declared
+ *                               (D-010) and `workforce:` is a single mapping. Raised on the RAW
+ *                               document before the shape parse, so the author gets the named rule
+ *                               instead of a generic `unknown_field` / "expected object, received
+ *                               array". Two literal `workforce:` keys stay `yaml_parse_error` —
+ *                               YAML's own uniqueness refusal, not re-coded here.
  */
 export const SpecErrorCode = z.enum([
   'yaml_parse_error',
@@ -226,6 +249,8 @@ export const SpecErrorCode = z.enum([
   'budget_widening',
   'reserved_workforce_id',
   'reserved_tool_name',
+  'workforce_label_unheld',
+  'multiple_workforces',
 ]);
 export type SpecErrorCode = z.infer<typeof SpecErrorCode>;
 
@@ -324,6 +349,27 @@ export function specError(code: SpecErrorCode, message: string, path?: string): 
  *                               cron document including the ones that set it correctly. The org the
  *                               id names does NOT have to exist at boot — the scheduler starts and
  *                               skips each firing until it does — but the variable itself must be set.
+ *  - `workforce_escalation_unreachable` — an approval policy declares `onTimeout: 'escalate'`. When it
+ *                               times out the sweep re-issues the request naming the requester's
+ *                               declared superior — an EMPLOYEE id — as its approver (@rayspec/tasks
+ *                               approvals.ts), and the two namespaces that meet on that column are
+ *                               STRUCTURALLY DISJOINT: an authenticated principal is `user:<uuid>` or
+ *                               `api-key:<uuid>` (both id columns are Postgres `uuid`, always
+ *                               hyphenated) and an employee id is a `SafeIdentifier`, which forbids
+ *                               `-`. So a NAMED approver can never be matched at the HTTP door
+ *                               (@rayspec/tasks decision-authority.ts `mayDecide`), and the only route
+ *                               left is break-glass — `override: true` plus `workforce:override`,
+ *                               which owner/admin humans hold and an api-key can never be granted, so
+ *                               an api-key-only deployment cannot resolve one at all. ADVISORY, not an
+ *                               error, because the declaration is CORRECT and the row IS decidable:
+ *                               the resolution path is narrower than an author would assume, which is
+ *                               what an advisory is for. Erroring would make half a frozen closed enum
+ *                               unusable — a grammar change wearing a lint's clothes — and would force
+ *                               authors to delete declarations a principal↔employee binding is meant
+ *                               to support later. Whether it bites at all depends on deployment
+ *                               posture (is a human owner/admin reachable?), which the document cannot
+ *                               see. NOT SUPPRESSIBLE, structurally rather than by choice: see
+ *                               `SuppressibleWarningCode`.
  *  - `stale_suppression`      — a node's `lintSuppress` entry acknowledges an advisory code that no
  *                               longer fires on that node (`applyLintSuppressions`, lint.ts). The
  *                               acknowledgement has outlived its finding — the heuristic changed, or
@@ -340,26 +386,66 @@ export const SpecWarningCode = z.enum([
   'stream_playback_media_token',
   'agent_untrusted_field_precedence',
   'cron_tenant_required',
+  'workforce_escalation_unreachable',
   'stale_suppression',
-  /**
-   * A `requireWhen.capabilities` label no declared employee holds. Capabilities are OPAQUE policy
-   * labels, so a rule guarding a label nobody carries yet is legal (it may arrive later) — but it
-   * can also be a typo that silently never fires, so it warns.
-   */
-  'workforce_capability_unheld',
 ]);
 export type SpecWarningCode = z.infer<typeof SpecWarningCode>;
 
 /**
- * The advisory codes a node's `lintSuppress` may acknowledge — every warning code EXCEPT
- * `stale_suppression`. Derived (never re-listed) so a new advisory code is suppressible by default
- * and the one exclusion stays visible here. `stale_suppression` is excluded because it reports on
- * the suppressions themselves: were it acknowledgeable, a rotted acknowledgement could be silenced
- * by one more acknowledgement, which is exactly the silent rot the code exists to prevent. Error
- * codes (`SpecErrorCode`) are structurally absent — a suppression can never name one, so
+ * The advisory codes a node's `lintSuppress` may acknowledge. Derived by EXCLUSION (never re-listed)
+ * so a new advisory code is suppressible by default and every exclusion has to justify itself here.
+ * Error codes (`SpecErrorCode`) are structurally absent — a suppression can never name one, so
  * suppressing an error is not expressible at all (advisories only, fail-closed at parse).
+ *
+ * THE RULE FOR EXCLUDING A CODE: exclude it when an acknowledgement of it could not do what an
+ * acknowledgement means. Two codes qualify, for two different reasons:
+ *
+ *  - `stale_suppression` reports on the suppressions themselves. Were it acknowledgeable, a rotted
+ *    acknowledgement could be silenced by one more acknowledgement — exactly the silent rot the code
+ *    exists to detect.
+ *  - `workforce_escalation_unreachable` fires on a `workforce.…` path, and suppression is scoped by
+ *    NODE (`applyLintSuppressions`, lint.ts): only agents/stores/api/triggers/handlers may carry
+ *    `lintSuppress`, and a finding is acknowledged only when its path lies UNDER the suppressing
+ *    node's. No node's path can ever contain `workforce.…`, so admitting this code would let an
+ *    author write an acknowledgement that silences nothing and returns as a `stale_suppression`.
+ *    Refusing it at the grammar is the honest shape: the document may not claim a review it cannot
+ *    record. (Giving the workforce section its own `lintSuppress` would be a grammar widening, and
+ *    the v1 surface is frozen.)
  */
-export const SuppressibleWarningCode = SpecWarningCode.exclude(['stale_suppression']);
+export const SuppressibleWarningCode = SpecWarningCode.exclude([
+  'stale_suppression',
+  'workforce_escalation_unreachable',
+]);
+
+/** Every warning code an author may NOT acknowledge — derived, so it can never disagree above. */
+export type ExcludedWarningCode = Exclude<SpecWarningCode, SuppressibleWarningCode>;
+
+/**
+ * WHY each excluded code is excluded, in the author's terms — the text `grammar.ts` refuses a bad
+ * `lintSuppress` entry with. Keyed on `ExcludedWarningCode`, so a THIRD exclusion added above is a
+ * COMPILE error here rather than an author-facing message that quietly omits it: the rule this
+ * codebase keeps relearning is that a curated list drifts and a derived one cannot.
+ *
+ * The phrasing is deliberately the author's situation, not the maintainer's taxonomy. Someone who
+ * wrote the entry needs to know why THEIR code is refused; being told about a different code's
+ * rationale reads as the tool not having understood them.
+ */
+const EXCLUDED_WARNING_REASON: Readonly<Record<ExcludedWarningCode, string>> = {
+  stale_suppression:
+    'it reports on suppressions themselves, so acknowledging it would let a rotted ' +
+    'acknowledgement be silenced by one more acknowledgement',
+  workforce_escalation_unreachable:
+    'it reports on a `workforce.…` path, and a suppression only covers findings under the NODE ' +
+    'that carries it (agents/stores/api/triggers/handlers) — no node path can reach the ' +
+    'workforce section, so the entry would silence nothing and come back as stale_suppression',
+};
+
+/** The excluded codes with their reasons, rendered once for the parse refusal. */
+export const EXCLUDED_WARNING_RATIONALE: string = (
+  Object.keys(EXCLUDED_WARNING_REASON) as ExcludedWarningCode[]
+)
+  .map((code) => `\`${code}\` (${EXCLUDED_WARNING_REASON[code]})`)
+  .join('; ');
 export type SuppressibleWarningCode = z.infer<typeof SuppressibleWarningCode>;
 
 /** A single NON-FATAL spec warning (closed code + message + optional JSON path). Never fails a parse. */

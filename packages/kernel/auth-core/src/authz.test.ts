@@ -17,6 +17,8 @@ const ALL_PERMISSIONS: Permission[] = [
   'agent:read',
   'store:read',
   'store:write',
+  'events:read',
+  'workforce:override',
   'org:read',
   'org:member:add',
   'org:member:change',
@@ -53,6 +55,16 @@ describe('ROLE_PERMISSIONS matrix', () => {
     expect(roleGrants('member', 'org:member:change')).toBe(false);
   });
 
+  it('the workforce break-glass override is owner/admin only — a member holds store:write but not this', () => {
+    // The break-glass permission exists to say WHICH HUMAN overrode a named approver/reviewer on a
+    // decision the engine journaled as an accountability fact. Every role that can decide at all
+    // holds `store:write`; only the two ADMINISTRATIVE roles may override the recorded decider.
+    expect(roleGrants('owner', 'workforce:override')).toBe(true);
+    expect(roleGrants('admin', 'workforce:override')).toBe(true);
+    expect(roleGrants('member', 'workforce:override')).toBe(false);
+    expect(roleGrants('member', 'store:write')).toBe(true); // …and still decides ordinary rows
+  });
+
   it('an unknown/undefined role grants nothing', () => {
     expect(roleGrants(undefined, 'agent:run')).toBe(false);
     expect(roleGrants('nonexistent', 'agent:run')).toBe(false);
@@ -80,6 +92,9 @@ describe('isSensitive', () => {
   });
   it('marks store:write SENSITIVE — a product-data mutation re-checks live membership', () => {
     expect(isSensitive('store:write')).toBe(true);
+  });
+  it('marks workforce:override SENSITIVE — break-glass never rides a stale JWT claim', () => {
+    expect(isSensitive('workforce:override')).toBe(true);
   });
 });
 
@@ -143,6 +158,22 @@ describe('API_KEY_GRANTABLE — derived whole-matrix invariant (single source of
     for (const p of API_KEY_GRANTABLE) {
       expect(authorize({ scopes: [] }, p, { isApiKey: true })).toBe(false);
     }
+  });
+
+  it('an api-key can NEVER break the glass on a named approver/reviewer, however it is scoped', () => {
+    // The override's whole purpose is to record WHICH HUMAN overrode a named human. A machine
+    // credential is exactly the principal that must not be able to do it silently, so the
+    // permission stays outside the grantable set — the same boundary the org-management ops sit
+    // behind. An api-key still decides `approver: 'user'` rows through `store:write`.
+    expect(grantable.has('workforce:override')).toBe(false);
+    expect(
+      authorize({ scopes: ['workforce:override'] as never }, 'workforce:override', {
+        isApiKey: true,
+      }),
+    ).toBe(false);
+    expect(
+      authorize({ scopes: [...ALL] as string[] }, 'workforce:override', { isApiKey: true }),
+    ).toBe(false);
   });
 
   it('EVERY org-management sensitive op is denied an api-key even with ALL scopes granted', () => {

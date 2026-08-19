@@ -98,7 +98,7 @@ describe('DeclaredReviewPolicy', () => {
       id: 'eng-default',
       appliesTo: { department: 'eng' },
       reviewer: 'qa',
-      requireWhen: { confidenceBelow: 0.75, capabilities: ['production_change'] },
+      requireWhen: { confidenceBelow: 0.75, labels: ['production_change'] },
       onReject: 'rework',
       maxRounds: 2,
     },
@@ -112,7 +112,7 @@ describe('DeclaredReviewPolicy', () => {
     },
   ];
   const policy = new DeclaredReviewPolicy(rules);
-  const subject = { taskId: 't', owner: 'dev', department: 'eng', capabilities: [] as string[] };
+  const subject = { taskId: 't', owner: 'dev', department: 'eng', labels: [] as string[] };
 
   it('matches a declared policy by department and confidence threshold', async () => {
     const decision = await policy.evaluate(subject, { output: {}, confidence: 0.6 });
@@ -125,9 +125,9 @@ describe('DeclaredReviewPolicy', () => {
     });
   });
 
-  it('capability overlap triggers review even at high confidence', async () => {
+  it('policy-label overlap triggers review even at high confidence', async () => {
     const decision = await policy.evaluate(
-      { ...subject, capabilities: ['production_change'] },
+      { ...subject, labels: ['production_change'] },
       { output: {}, confidence: 0.99 },
     );
     expect(decision.required).toBe(true);
@@ -135,7 +135,7 @@ describe('DeclaredReviewPolicy', () => {
 
   it('no matching rule means no review required', async () => {
     const decision = await policy.evaluate(
-      { taskId: 't', owner: 'dev', department: 'growth', capabilities: [] },
+      { taskId: 't', owner: 'dev', department: 'growth', labels: [] },
       { output: {}, confidence: 0.1 },
     );
     expect(decision).toEqual({ required: false });
@@ -148,7 +148,7 @@ describe('DeclaredReviewPolicy', () => {
 
   it('the first matching rule in declaration order wins', async () => {
     const decision = await policy.evaluate(
-      { taskId: 't', owner: 'copywriter', department: 'eng', capabilities: [] },
+      { taskId: 't', owner: 'copywriter', department: 'eng', labels: [] },
       { output: {}, confidence: 0.5 },
     );
     expect(decision.required && decision.policyId).toBe('eng-default');

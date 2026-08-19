@@ -90,6 +90,11 @@ export {
   type PlannedMigration,
   type RolloutConfig,
 } from './engine/deploy.js';
+// The posture notice both OpenAPI documents carry in `info.description` — exported so the CLI's
+// generated-artifact path shares THIS literal instead of holding a second one that can drift from
+// it. See the docblock on the constant for why this package owns it (it is the only one of the two
+// owners the other can reach without inverting the dependency graph).
+export { OPENAPI_POSTURE_NOTICE } from './engine/emit-openapi.js';
 // the tenant event-bus capability builder — the composition root constructs ONE per deployment that
 // enabled the bus and injects it onto the engine, where its presence is what makes a route/tool init
 // carry `init.emit`.

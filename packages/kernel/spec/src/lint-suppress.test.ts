@@ -3,9 +3,12 @@
  *
  * The grammar half (fail-closed at parse): a suppression entry is `{ code, because }` where `code`
  * must be a suppressible ADVISORY code — an ERROR code is rejected (errors cannot be suppressed),
- * `stale_suppression` is rejected (the rot detector cannot acknowledge itself) — and `because` must
+ * and every code EXCLUDED from `SuppressibleWarningCode` is rejected — and `because` must
  * carry a non-empty, non-whitespace justification (suppression without a recorded reason is
  * rejected at parse).
+ *
+ * The exclusion set is NOT restated here, and that is the point: it is read off the enums, so this
+ * suite cannot fall behind a new exclusion the way the author-facing message once did.
  *
  * The application half (`applyLintSuppressions`): a suppression filters ONLY advisories produced by
  * the node it sits on (an agent, a store, a route, a trigger, a handler) — never the same code fired
@@ -18,6 +21,7 @@
  * passthrough test is RED if a suppression-free document's warnings are reordered or rewritten.
  */
 import { describe, expect, it } from 'vitest';
+import { SpecWarningCode, SuppressibleWarningCode } from './errors.js';
 import { applyLintSuppressions, lintSpecWarnings } from './lint.js';
 import { parseSpec } from './parse.js';
 
@@ -380,5 +384,57 @@ api:
     const applied = applyLintSuppressions(value, raw);
     expect(applied.warnings).toEqual(raw);
     expect(applied.suppressed).toEqual([]);
+  });
+
+  /**
+   * THE MESSAGE MUST NOT DRIFT BEHIND THE ENUM.
+   *
+   * This exists because it already happened: `workforce_escalation_unreachable` was excluded from
+   * `SuppressibleWarningCode` while the refusal text still offered only two rationales — "an error
+   * cannot be suppressed" and "stale_suppression cannot acknowledge itself" — so an author
+   * acknowledging the new code was told about two cases that were not theirs. The list was
+   * curated; curated lists drift. This reads the exclusion set off the enums and demands the
+   * refusal name every member, so the next exclusion cannot land silently.
+   *
+   * The rationale TEXT is additionally keyed on `ExcludedWarningCode` in errors.ts, so a new
+   * exclusion without a reason is a COMPILE error before it ever reaches this assertion.
+   */
+  it('the parse refusal NAMES every excluded advisory code, derived from the enums', () => {
+    const suppressible = new Set<string>(SuppressibleWarningCode.options);
+    const excluded = SpecWarningCode.options.filter((c) => !suppressible.has(c));
+    // Ran-guard: an empty exclusion set would make every assertion below vacuously true.
+    expect(
+      excluded.length,
+      'there must BE excluded codes for this guard to mean anything',
+    ).toBeGreaterThan(0);
+
+    const doc = [
+      "version: '1.0'",
+      'metadata:',
+      '  name: p',
+      'agents:',
+      '  - id: a',
+      '    name: a',
+      '    backend: openai',
+      '    model: gpt-4o-mini',
+      '    instructions: Do the thing.',
+      '    lintSuppress:',
+      `      - code: ${excluded[0]}`,
+      '        because: reviewed, not applicable',
+      '',
+    ].join('\n');
+    const res = parseSpec(doc);
+    expect(res.ok, 'an excluded code must be refused at parse').toBe(false);
+    if (res.ok) return;
+    const text = res.errors.map((e) => e.message).join(' | ');
+
+    for (const code of excluded) {
+      expect(text, `the refusal must name the excluded code '${code}' and why`).toContain(code);
+    }
+    // …and it must still list what IS permitted, or the author is told what they cannot do and
+    // never what they can.
+    for (const code of SuppressibleWarningCode.options) {
+      expect(text, `the refusal must still offer the permitted code '${code}'`).toContain(code);
+    }
   });
 });

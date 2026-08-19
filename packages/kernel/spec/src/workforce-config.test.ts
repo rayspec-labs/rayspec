@@ -15,13 +15,13 @@ const FULL = WorkforceSpec.parse({
   budgets: {
     workforce: { usd: 40 },
     task: { usd: 2.5, turns: 12 },
-    delegation: { maxDepth: 4, maxPerTask: 12 },
   },
   execution: {
     maxConcurrentWorkers: 4,
     maxTaskWallClock: '45m',
     maxReviewRounds: 2,
     onBudgetExhausted: 'block_and_escalate',
+    delegation: { maxDepth: 4, maxPerTask: 12 },
   },
   departments: [
     {
@@ -31,6 +31,7 @@ const FULL = WorkforceSpec.parse({
       mission: 'Own the fixes.',
       members: ['dev'],
       budgets: { usd: 10, window: 'daily' },
+      execution: { maxConcurrentWorkers: 2 },
     },
   ],
   employees: [
@@ -49,7 +50,7 @@ const FULL = WorkforceSpec.parse({
       title: 'Developer',
       department: 'engineering',
       role: 'worker',
-      capabilities: ['production_change'],
+      labels: ['production_change', 'public_statement'],
     },
     { id: 'qa', agent: 'qa_agent', title: 'Reviewer', reportsTo: 'lead', role: 'reviewer' },
   ],
@@ -59,15 +60,15 @@ const FULL = WorkforceSpec.parse({
       id: 'eng_default',
       appliesTo: { department: 'engineering' },
       reviewer: 'qa',
-      requireWhen: { confidenceBelow: 0.75, capabilities: ['production_change'] },
+      requireWhen: { confidenceBelow: 0.75, labels: ['production_change'] },
       onReject: 'rework',
-      maxRounds: 2,
+      maxReviewRounds: 2,
     },
   ],
-  approvals: [
+  approvalPolicies: [
     {
       id: 'public_statement',
-      requireWhen: { capabilities: ['public_statement'] },
+      requireWhen: { labels: ['public_statement'] },
       approver: 'user',
       timeout: '72h',
       onTimeout: 'escalate',
@@ -84,12 +85,12 @@ describe('deriveWorkforceConfig', () => {
     expect(config.employees.get('lead')?.reportsTo).toBeNull(); // the root
   });
 
-  it('carries roles, departments, teams and capabilities verbatim', () => {
+  it('carries roles, departments, teams and labels verbatim', () => {
     expect(config.orchestrator).toBe('lead');
     expect(config.employees.get('dev')).toMatchObject({
       role: 'worker',
       department: 'engineering',
-      capabilities: ['production_change'],
+      labels: ['production_change', 'public_statement'],
     });
     expect(config.departments.get('engineering')?.manager).toBe('mgr');
     expect(config.teams.get('fix_team')).toEqual({
@@ -105,18 +106,20 @@ describe('deriveWorkforceConfig', () => {
         id: 'eng_default',
         appliesTo: { department: 'engineering' },
         reviewer: 'qa',
-        requireWhen: { confidenceBelow: 0.75, capabilities: ['production_change'] },
+        requireWhen: { confidenceBelow: 0.75, labels: ['production_change'] },
         onReject: 'rework',
+        // DECLARED as `maxReviewRounds` (aligned with `execution.maxReviewRounds`); the runtime
+        // review BINDING keeps the older `maxRounds` noun, and this derivation is where they meet.
         maxRounds: 2,
       },
     ]);
   });
 
   it('approval timeouts arrive pre-parsed to milliseconds', () => {
-    expect(config.approvals).toEqual([
+    expect(config.approvalPolicies).toEqual([
       {
         id: 'public_statement',
-        capabilities: ['public_statement'],
+        labels: ['public_statement'],
         approver: 'user',
         timeoutMs: 72 * 3_600_000,
         onTimeout: 'escalate',
@@ -135,10 +138,38 @@ describe('deriveWorkforceBudgets', () => {
     expect(deriveWorkforceBudgets(FULL).execution?.maxTaskWallClockMs).toBe(2_700_000);
   });
 
-  it('maps departments[].budgets onto the engine departments record keyed by id', () => {
+  it('collapses departments[].budgets AND departments[].execution into one engine record', () => {
+    // Two AUTHORED objects (money vs. worker slots), one engine per-department record — the split
+    // is a placement change in the document, not a change to what the engine receives.
     expect(deriveWorkforceBudgets(FULL).departments).toEqual({
-      engineering: { usd: 10, window: 'daily' },
+      engineering: { usd: 10, window: 'daily', maxConcurrentWorkers: 2 },
     });
+  });
+
+  it('a department declaring ONLY execution still reaches the engine record', () => {
+    const slotsOnly = WorkforceSpec.parse({
+      id: 'wf',
+      name: 'WF',
+      orchestrator: 'lead',
+      departments: [
+        {
+          id: 'eng',
+          name: 'Eng',
+          manager: 'lead',
+          mission: 'Ship.',
+          execution: { maxConcurrentWorkers: 3 },
+        },
+      ],
+      employees: [{ id: 'lead', agent: 'a', title: 'Lead', role: 'orchestrator' }],
+    });
+    expect(deriveWorkforceBudgets(slotsOnly).departments).toEqual({
+      eng: { maxConcurrentWorkers: 3 },
+    });
+  });
+
+  it("execution.delegation derives into the engine's own top-level delegation slot", () => {
+    // The AUTHORED key moved out of `budgets:`; the ENGINE shape did not move at all.
+    expect(deriveWorkforceBudgets(FULL).delegation).toEqual({ maxDepth: 4, maxPerTask: 12 });
   });
 
   it('omits absent budget tiers rather than defaulting them', () => {
@@ -156,7 +187,7 @@ describe('deriveWorkforceBudgets', () => {
       workforce: { usd: 40 },
       task: { usd: 2.5, turns: 12 },
       delegation: { maxDepth: 4, maxPerTask: 12 },
-      departments: { engineering: { usd: 10, window: 'daily' } },
+      departments: { engineering: { usd: 10, window: 'daily', maxConcurrentWorkers: 2 } },
       execution: {
         maxConcurrentWorkers: 4,
         maxTaskWallClockMs: 2_700_000,
@@ -170,6 +201,6 @@ describe('deriveWorkforceBudgets', () => {
 
 describe('window vocabulary drift pin', () => {
   it("the grammar's budget windows equal the engine's calendar windows", () => {
-    expect(WorkforceBudgetWindow.options).toEqual(['hourly', 'daily', 'weekly']);
+    expect(WorkforceBudgetWindow.options).toEqual(['hourly', 'daily', 'weekly', 'monthly']);
   });
 });

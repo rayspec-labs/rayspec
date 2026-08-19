@@ -14,7 +14,7 @@
  * The two `requireWhen` triggers are NOT equally trustworthy, and the difference is which side
  * supplies the value:
  *
- *   - `capabilities` is matched against the EMPLOYEE's declared capability labels — a fact from the
+ *   - `labels` is matched against the EMPLOYEE's declared policy labels — a fact from the
  *     deployed document, which the turn cannot change. A rule keyed on it fires whenever it applies,
  *     and this is the branch to write a rule on when the rule must hold.
  *   - `confidenceBelow` is matched against `result.confidence`, a number the SUBMITTING TURN wrote.
@@ -47,7 +47,7 @@ export interface MatchedApprovalRule {
 }
 
 /**
- * The declared approval rule covering this employee's capabilities, or null. ONE predicate with
+ * The declared approval policy covering this employee's labels, or null. ONE predicate with
  * two consumers — the `request_approval` handler (which binds the matched window and fate onto
  * the intent) and the turn scaffolding (which presents the same rule as a fact before the model
  * runs) — so what a turn is told and what its request gets can never diverge. First declared
@@ -57,8 +57,8 @@ export function matchApprovalRule(
   config: WorkforceConfig,
   employee: WorkforceEmployeeConfig,
 ): MatchedApprovalRule | null {
-  const rule = config.approvals.find((candidate) =>
-    candidate.capabilities.some((label) => employee.capabilities.includes(label)),
+  const rule = config.approvalPolicies.find((candidate) =>
+    candidate.labels.some((label) => employee.labels.includes(label)),
   );
   if (!rule) return null;
   return { id: rule.id, timeoutMs: rule.timeoutMs, onTimeout: rule.onTimeout };
@@ -78,7 +78,7 @@ export async function matchReviewPolicy(
       taskId: input.taskId,
       owner: input.employee.id,
       department: input.employee.department,
-      capabilities: input.employee.capabilities,
+      labels: input.employee.labels,
     },
     { output: input.result, confidence: input.result.confidence },
   );

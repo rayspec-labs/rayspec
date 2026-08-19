@@ -297,6 +297,11 @@ service additionally needs.
 
 ### Restore and key rotation
 
+This section is about what a **restore does to credentials**. The commands themselves — the
+`pg_dump`/`pg_restore` pair a self-hoster runs, what the dump does and does not carry, and what a
+restored deployment resumes — are in
+[Workforce architecture → Backup and restore](./workforce-architecture.md#backup-and-restore).
+
 The boot secrets live in the environment, never in the database — which has a sharp
 operational consequence when you **restore a database dump under different secrets**.
 A full dump restores the rows whole — orgs, users, memberships, the argon2id password
@@ -343,7 +348,11 @@ generated from the spec with the tenancy and data-lifecycle columns injected
 automatically, and every migration is diffed against the current schema and passed
 through a safety gate (a destructive change is blocked unless explicitly allowed)
 before it is applied — including a from-clean-database check that the whole
-migration chain bootstraps an empty database correctly.
+migration chain bootstraps an empty database correctly, and an upgrade check that
+materializes the released chain, puts real rows in it, and applies the newer
+migrations to that populated database: no migration silently skipped or
+re-applied, every pre-existing row byte-identical afterwards, and zero structural
+drift from the schema.
 
 A booted deploy applies this generated schema in one direction only: it materializes a
 store on a clean database and mounts it when the live schema already matches. It is

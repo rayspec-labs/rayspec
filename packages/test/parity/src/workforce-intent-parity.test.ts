@@ -72,7 +72,7 @@ workforce:
       department: eng
       reportsTo: lead
       role: manager
-      capabilities: [public_statement]
+      labels: [public_statement]
     - id: dev
       agent: worker_agent
       title: Developer
@@ -90,10 +90,10 @@ workforce:
       reviewer: qa
       requireWhen: { confidenceBelow: 0.8 }
       onReject: rework
-      maxRounds: 2
-  approvals:
+      maxReviewRounds: 2
+  approvalPolicies:
     - id: statement_approval
-      requireWhen: { capabilities: [public_statement] }
+      requireWhen: { labels: [public_statement] }
       approver: user
       timeout: 24h
       onTimeout: escalate
@@ -169,6 +169,10 @@ function runScript(
     departmentTasks: [],
     workforceState: null,
     pendingReview: overrides.pendingReview ?? null,
+    // The re-request cap's advisory input. Empty here on purpose: the parity fixture asserts the
+    // SHAPE of a first request, identically across backends — the cap's own behaviour is proven in
+    // toolset-semantics.test.ts and approval-rerequest.db.test.ts, not by a four-way transcript.
+    resolvedApprovalQuestions: [],
   };
   const collector = new TurnCollector({
     tenantId: task.tenantId,

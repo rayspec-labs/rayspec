@@ -37,7 +37,8 @@
     "gen:product-schema": "tsx scripts/gen-product-schema.ts",
     "gate:migrations": "tsx scripts/scan-migrations.ts",
     "gate:shadow-dryrun": "bash scripts/shadow-dryrun.sh",
-    "gate:migrate-clean": "bash scripts/migrate-clean.sh"
+    "gate:migrate-clean": "bash scripts/migrate-clean.sh",
+    "gate:migrate-upgrade": "tsx scripts/migrate-upgrade.ts"
   },
   "dependencies": {
     "@rayspec/spec": "workspace:*",

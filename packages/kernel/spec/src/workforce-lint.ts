@@ -14,11 +14,18 @@
  * (delegation targets are `employee:<id>`/`department:<id>`/`team:<id>` strings; cross-section
  * ambiguity would make them unreadable) · decision roles demand native structured output of their
  * backend · review policies name a reviewer-or-manager reviewer and a non-empty selector ·
- * approval rules that escalate on timeout never cover the orchestrator seat · department budgets
+ * approval policies that escalate on timeout never cover the orchestrator seat · every
+ * `requireWhen` policy label is HELD by some declared employee · department budgets
  * never out-rate the workforce ceiling · a usd ceiling requires the task budget its per-turn
  * estimate derives from · reserved ids and reserved native tool names are refused · teams fit
- * their declared size, are LED BY A MANAGER, and hold neither their own lead nor the orchestrator
- * among their members · a workforce requires the durable worker that runs it.
+ * their declared size WHEN THEY DECLARE ONE, are LED BY A MANAGER, and hold neither their own lead
+ * nor the orchestrator among their members · a workforce requires the durable worker that runs it.
+ *
+ * ONE ADVISORY sits beside that set, in `lintWorkforceWarnings` at the foot of this file:
+ * `workforce_escalation_unreachable`, on every `onTimeout: 'escalate'` policy. It is the one rule
+ * here whose subject is a correct declaration rather than an incoherent one — the escalated row is
+ * addressed to an employee, and only break-glass can answer it — so it informs and never refuses.
+ * That function carries the full warning-versus-error argument.
  *
  * A recurring shape in the structural rules: every one of them exists because some RUNTIME path
  * keys on the declaration, and a declaration the runtime reads differently than a reader does is
@@ -36,14 +43,31 @@ import {
 } from '@rayspec/core';
 import { type SpecError, type SpecWarning, specError, specWarning } from './errors.js';
 import type { RaySpec } from './grammar.js';
-import type { WorkforceEmployeeSpec } from './workforce-grammar.js';
+import type { WorkforceBudgetWindowName, WorkforceEmployeeSpec } from './workforce-grammar.js';
 
-/** Hours per calendar window — normalizes budget rates for the widening comparison. Ordering
- *  only, never billing: the engine enforces per-window amounts, this rule compares their rates. */
-const WINDOW_HOURS: Readonly<Record<string, number>> = { hourly: 1, daily: 24, weekly: 168 };
+/**
+ * Hours per calendar window — normalizes budget rates for the widening comparison. Ordering only,
+ * never billing: the engine enforces per-window amounts against real UTC calendar buckets
+ * (`windowStartFor`), this rule only ORDERS two declared rates against each other.
+ *
+ * `monthly` is 730 h — 8760/12, the exact average — and is NOMINAL by necessity: real calendar
+ * months run 672–744 h, so no constant is exact and a comparison involving `monthly` is
+ * approximate by construction. That is acceptable precisely because this table never decides an
+ * amount; it decides whether one declared ceiling out-rates another.
+ *
+ * EXHAUSTIVE BY TYPE: keyed on `WorkforceBudgetWindowName`, so a window added to the grammar
+ * without a normalization factor is a COMPILE error here — never a silent `?? 24` that would
+ * compare a new window as if it were daily.
+ */
+const WINDOW_HOURS: Readonly<Record<WorkforceBudgetWindowName, number>> = {
+  hourly: 1,
+  daily: 24,
+  weekly: 168,
+  monthly: 730,
+};
 
-function windowHours(window: string | undefined): number {
-  return WINDOW_HOURS[window ?? 'daily'] ?? 24;
+function windowHours(window: WorkforceBudgetWindowName | undefined): number {
+  return WINDOW_HOURS[window ?? 'daily'];
 }
 
 /**
@@ -64,6 +88,7 @@ function effectiveReportsTo(
   return null;
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export function lintWorkforce(spec: RaySpec): SpecError[] {
   const workforce = spec.workforce;
   if (workforce === undefined) return [];
@@ -142,10 +167,10 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
     (i) => path(`reviewPolicies[${i}].id`),
   );
   dupWithin(
-    workforce.approvals,
+    workforce.approvalPolicies,
     (a) => a.id,
-    'approval id',
-    (i) => path(`approvals[${i}].id`),
+    'approval policy id',
+    (i) => path(`approvalPolicies[${i}].id`),
   );
   // Cross-section: a delegation target is written `employee:<id>` / `department:<id>` /
   // `team:<id>`; one id living in two sections makes every human-readable surface ambiguous.
@@ -526,7 +551,8 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
         );
       }
     });
-    if (team.members.length > team.maxSize) {
+    // `maxSize` is OPTIONAL; an omitted cap declares no bound, so there is nothing to exceed.
+    if (team.maxSize !== undefined && team.members.length > team.maxSize) {
       errors.push(
         specError(
           'schema_violation',
@@ -552,13 +578,13 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
     }
     if (
       policy.requireWhen.confidenceBelow === undefined &&
-      policy.requireWhen.capabilities === undefined
+      policy.requireWhen.labels === undefined
     ) {
       errors.push(
         specError(
           'schema_violation',
           `review policy '${policy.id}' requireWhen names neither a confidence threshold nor a ` +
-            'capability — a rule that can never demand review is dead',
+            'policy label — a rule that can never demand review is dead',
           path(`reviewPolicies[${pi}].requireWhen`),
         ),
       );
@@ -613,29 +639,127 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
   // condition straight into permanent failure. One legal-looking document, one bricked task —
   // which is why this is a parse-time error rather than a runtime fallback nobody declared.
   if (orchestrator !== undefined) {
-    workforce.approvals.forEach((approval, ai) => {
+    workforce.approvalPolicies.forEach((approval, ai) => {
       if (approval.onTimeout !== 'escalate') return;
-      const covers = approval.requireWhen.capabilities.filter((label) =>
-        orchestrator.capabilities.includes(label),
+      const covers = approval.requireWhen.labels.filter((label) =>
+        orchestrator.labels.includes(label),
       );
       if (covers.length === 0) return;
       errors.push(
         specError(
           'invalid_orchestrator',
-          `approval '${approval.id}' escalates on timeout and covers the orchestrator seat ` +
-            `'${orchestrator.id}' (capability ${covers.map((c) => `'${c}'`).join(', ')}) — the ` +
+          `approval policy '${approval.id}' escalates on timeout and covers the orchestrator seat ` +
+            `'${orchestrator.id}' (label ${covers.map((c) => `'${c}'`).join(', ')}) — the ` +
             'orchestrator reports to nobody, so there is no approver to escalate to and every ' +
             "such request would fail deterministically. Declare onTimeout: 'fail' for this seat",
-          path(`approvals[${ai}].onTimeout`),
+          path(`approvalPolicies[${ai}].onTimeout`),
         ),
       );
     });
   }
 
+  // ---- POLICY LABELS ARE HELD -------------------------------------------------------------
+  // A label NO declared employee holds makes the CLAUSE that names it dead: the matcher is exact
+  // equality against `employees[].labels` (@rayspec/core review-policy.ts `requiresReview`;
+  // workforce-tools review-policy.ts `matchApprovalRule`), and every holder is declared in THIS
+  // document, so a redeploy is the only way a holder arrives — and a redeploy re-runs this lint.
+  // That is why it is an ERROR rather than the advisory it used to be, whose "the label may arrive
+  // later" premise was simply false.
+  //
+  // What the dead clause COSTS is NOT a property of the label — it is a property of what remains
+  // live once this entry is gone, which the message must read off the declaration rather than
+  // assume. Two things remain, and both have to be consulted:
+  //
+  //   1. SIBLING LABELS. `requireWhen.labels` is an ARRAY and both matchers accept on ANY held
+  //      entry — `labels.some((l) => holder.labels.includes(l))` in core review-policy.ts
+  //      `requiresReview` and in workforce-tools review-policy.ts `matchApprovalRule`. So one
+  //      unheld entry beside a held one kills that ENTRY and nothing else; the rule keeps firing
+  //      unconditionally on the held sibling. Any message claiming the rule is degraded is false
+  //      for that document.
+  //   2. `confidenceBelow`, on review policies only. The selectors combine with OR, so a rule that
+  //      declares it still fires — but only through the branch matching a number the SUBMITTING
+  //      TURN wrote, documented as "a heuristic over self-report, not a control" (workforce-tools
+  //      review-policy.ts). The labels branch is the unconditional ENFORCEMENT branch, so losing it
+  //      silently DOWNGRADES a control to a dodgeable heuristic — which is worth refusing, and is a
+  //      different statement from "the rule can never fire".
+  //
+  // Six cells: {approval, review+confidenceBelow, review labels-only} × {a sibling is held, none
+  // is}. Every one is probed in `workforce-parse.negative.test.ts`; the refusal itself is identical
+  // in all six (an unheld label is a typo worth failing on regardless) — only this clause varies.
+  const heldLabels = new Set(workforce.employees.flatMap((e) => e.labels));
+  /** Does the SAME `labels` array carry another entry that IS held? Then only this entry is dead. */
+  const hasHeldSibling = (labels: readonly string[], label: string): boolean =>
+    labels.some((other) => other !== label && heldLabels.has(other));
+  const unheld = (label: string, where: string, consequence: string, at: string): void => {
+    if (heldLabels.has(label)) return;
+    errors.push(
+      specError(
+        'workforce_label_unheld',
+        `${where} guards label '${label}', which no declared employee holds — this clause can ` +
+          `never fire, ${consequence}. Add the label to the employees it should cover, or remove ` +
+          'it from the rule',
+        path(at),
+      ),
+    );
+  };
+  workforce.reviewPolicies.forEach((policy, pi) => {
+    const labels = policy.requireWhen.labels ?? [];
+    labels.forEach((label, li) => {
+      const consequence = hasHeldSibling(labels, label)
+        ? 'though the rule still fires on the other declared label(s) that ARE held — only this ' +
+          'entry is dead'
+        : policy.requireWhen.confidenceBelow === undefined
+          ? 'and no other selector remains, so the rule can no longer demand review at all'
+          : 'leaving the rule with only its confidenceBelow heuristic, which matches a confidence ' +
+            'the submitting turn writes itself and so is not the unconditional control this ' +
+            'label was';
+      unheld(
+        label,
+        `review policy '${policy.id}'`,
+        consequence,
+        `reviewPolicies[${pi}].requireWhen.labels[${li}]`,
+      );
+    });
+  });
+  workforce.approvalPolicies.forEach((approval, ai) => {
+    const labels = approval.requireWhen.labels;
+    labels.forEach((label, li) => {
+      // An approval policy's `requireWhen` is `{ labels }` alone, so with no held sibling the whole
+      // selector is dead. What that costs is NOT a skipped park: the engine never reads approval
+      // policies at all, and `request_approval` is offered by ROLE (workforce-tools roles.ts), so
+      // the seat can still park. What is lost is the declared window and fate — the handler falls
+      // back to `rule?.onTimeout ?? 'fail'` and `rule?.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS`
+      // (72h, workforce-tools toolset.ts) — plus the turn-frame fact that told the seat it was
+      // covered.
+      const consequence = hasHeldSibling(labels, label)
+        ? 'though the policy still covers every seat holding the other declared label(s) — only ' +
+          'this entry is dead'
+        : 'and no other selector remains, so the policy covers no seat: request_approval is still ' +
+          'offered by role, but any approval falls back to the default 72h/fail window instead of ' +
+          'the one declared here';
+      unheld(
+        label,
+        `approval policy '${approval.id}'`,
+        consequence,
+        `approvalPolicies[${ai}].requireWhen.labels[${li}]`,
+      );
+    });
+  });
+
   // ---- BUDGET COHERENCE --------------------------------------------------------------------
   const workforceUsd = workforce.budgets?.workforce;
+  // EVERY usd tier counts, `subtree` included: the engine's own coherence refusal keys on the same
+  // set (budget.ts's `declaresUsd`), so a tier missing here would derive a budgets object the
+  // engine REFUSES at boot — a document that passed `doctor` and then stops the workforce.
+  // Keyed on `.usd` at EVERY tier, never on the tier OBJECT. Today `budgets.workforce.usd` is
+  // required, so `workforceUsd !== undefined` would be equivalent — but only by accident of that
+  // requirement. Should a turns-only workforce ceiling ever be admitted (making `usd` optional),
+  // an object-keyed test would demand a `task` budget for a declaration that names no money at
+  // all. Written the way the rule MEANS, so that change stays additive.
   const anyUsdCeiling =
-    workforceUsd !== undefined || workforce.departments.some((d) => d.budgets?.usd !== undefined);
+    workforceUsd?.usd !== undefined ||
+    workforce.budgets?.subtree?.usd !== undefined ||
+    workforce.departments.some((d) => d.budgets?.usd !== undefined);
   if (anyUsdCeiling && workforce.budgets?.task === undefined) {
     errors.push(
       specError(
@@ -682,39 +806,83 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
   return errors;
 }
 
-/** Advisory only: a requireWhen label no declared employee holds may be a typo that never fires. */
+/**
+ * The `workforce:` section's advisories. Exactly one, and the section's history is why the bar for
+ * being here is worth restating.
+ *
+ * It previously had `workforce_capability_unheld` (an unheld `requireWhen` label) and the pre-freeze
+ * grammar review PROMOTED it to the `workforce_label_unheld` ERROR in `lintWorkforce` above, because
+ * its advisory premise — "the label may arrive later" — was false: holders are declared in the same
+ * document, so a later arrival is a redeploy that re-runs this lint. Advisory means "a heuristic
+ * that must never fail a deploy", and that rule was not a heuristic.
+ *
+ * ── `workforce_escalation_unreachable` — AND WHY THE PROMOTION ABOVE DOES NOT TRANSFER ──────────
+ *
+ * `onTimeout: 'escalate'` mints a row addressed to a superior who cannot answer at the HTTP door.
+ * The sweep re-issues the timed-out request with `approver: escalateTo` (@rayspec/tasks
+ * approvals.ts), an EMPLOYEE id — and the two namespaces that meet on that column are structurally
+ * disjoint: an authenticated principal is `user:<uuid>` / `api-key:<uuid>` (both id columns are
+ * Postgres `uuid`, so always hyphenated), while an employee id is a `SafeIdentifier`, which forbids
+ * `-`. `mayDecide` (@rayspec/tasks decision-authority.ts) matches the WHOLE remainder after a closed
+ * scheme prefix, so no principal string can ever satisfy one. That impossibility is EXECUTED rather
+ * than argued, in @rayspec/tasks decision-authority.test.ts, over runtime-minted uuids checked
+ * against this package's own `SAFE_IDENTIFIER_RE`.
+ *
+ * The only route left is break-glass — `override: true` plus the `workforce:override` permission —
+ * which owner/admin humans hold and an api-key never can (@rayspec/auth-core `API_KEY_GRANTABLE`,
+ * pinned in its own suite). So an api-key-only deployment cannot resolve an escalated approval at
+ * all, and every other deployment resolves it only by an administrative override.
+ *
+ * ADVISORY, on this file's own definition, and the contrast with the promotion is the argument:
+ * `workforce_label_unheld` was promoted because the clause could NEVER FIRE — the document was
+ * simply wrong. Here the declaration is CORRECT and the row IS decidable; what is narrower than an
+ * author would assume is the resolution PATH. Three consequences of erroring instead, each on its
+ * own sufficient:
+ *
+ *   1. it would make half a frozen closed enum unusable, which is a GRAMMAR change wearing a lint's
+ *      clothes. If `escalate` were genuinely unusable the honest act is to delete it from the enum;
+ *   2. it would force authors to remove declarations that a principal↔employee binding is intended
+ *      to support in a later release — churn against a decision meant to be revisited, not undone;
+ *   3. whether it bites at all depends on deployment posture (is a human owner/admin reachable?),
+ *      which this pass — pure over the document — cannot see. Erroring would fail every escalating
+ *      document including the ones whose operators can resolve them.
+ *
+ * THE MESSAGE OFFERS ONLY REMEDIES THAT EXIST. `lintSuppress` is deliberately not among them: it is
+ * scoped by node and no node's path covers `workforce.…`, so the code is excluded from
+ * `SuppressibleWarningCode` and an acknowledgement of it is refused at parse. Telling an author to
+ * suppress this would name a mechanism the grammar does not have.
+ *
+ * @experimental — see docs/workforce-compatibility.md.
+ */
 export function lintWorkforceWarnings(spec: RaySpec): SpecWarning[] {
   const workforce = spec.workforce;
   if (workforce === undefined) return [];
   const warnings: SpecWarning[] = [];
-  const held = new Set(workforce.employees.flatMap((e) => e.capabilities));
-  workforce.reviewPolicies.forEach((policy, pi) => {
-    (policy.requireWhen.capabilities ?? []).forEach((label, li) => {
-      if (!held.has(label)) {
-        warnings.push(
-          specWarning(
-            'workforce_capability_unheld',
-            `review policy '${policy.id}' guards capability '${label}', which no declared ` +
-              'employee holds — legal (the label may arrive later) but the rule cannot fire today',
-            `workforce.reviewPolicies[${pi}].requireWhen.capabilities[${li}]`,
-          ),
-        );
-      }
-    });
+  const path = (suffix: string) => `workforce.${suffix}`;
+
+  // Per POLICY, not per document: the path is what sends the author to the line they wrote. The
+  // orchestrator-seat case is refused as an ERROR by `lintWorkforce` above and is a different
+  // statement (no target at all, vs a target no principal can be), so this rule does not special-
+  // case it — an errored document never reaches a warnings pass anyway.
+  workforce.approvalPolicies.forEach((approval, ai) => {
+    if (approval.onTimeout !== 'escalate') return;
+    warnings.push(
+      specWarning(
+        'workforce_escalation_unreachable',
+        `approval policy '${approval.id}' declares onTimeout: 'escalate'. On timeout the sweep ` +
+          "re-issues the request naming the requester's declared superior — an EMPLOYEE id — as " +
+          'its approver, and no principal an HTTP request can authenticate as is ever equal to ' +
+          "one: a principal is 'user:<uuid>' or 'api-key:<uuid>', and an employee id may not " +
+          'contain a hyphen. So an escalated approval is resolvable ONLY through break-glass ' +
+          '(override: true plus the workforce:override permission), which an owner or admin holds ' +
+          'and an api-key can never be granted — a deployment authenticated only by api-keys ' +
+          'cannot resolve one at all. This is a deliberate v1 boundary, not a defect: binding a ' +
+          "principal to an employee is not in this release. Declare onTimeout: 'fail' if no human " +
+          'owner or admin will be reachable to break the glass',
+        path(`approvalPolicies[${ai}].onTimeout`),
+      ),
+    );
   });
-  workforce.approvals.forEach((approval, ai) => {
-    approval.requireWhen.capabilities.forEach((label, li) => {
-      if (!held.has(label)) {
-        warnings.push(
-          specWarning(
-            'workforce_capability_unheld',
-            `approval '${approval.id}' guards capability '${label}', which no declared employee ` +
-              'holds — legal (the label may arrive later) but the rule cannot fire today',
-            `workforce.approvals[${ai}].requireWhen.capabilities[${li}]`,
-          ),
-        );
-      }
-    });
-  });
+
   return warnings;
 }

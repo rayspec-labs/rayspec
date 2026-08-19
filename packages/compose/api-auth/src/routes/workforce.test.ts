@@ -19,6 +19,7 @@ import {
   createRootTask,
   ensureWorkforceRuntime,
   insertChildTask,
+  WorkforcePausedError,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { eq } from 'drizzle-orm';
@@ -36,10 +37,16 @@ let kicks = 0;
 let goalSubmissions: Array<Parameters<WorkforceGoalIntake['submitGoal']>[0]> = [];
 const DEFAULT_GOAL_OUTCOME: WorkforceGoalOutcome = { outcome: 'created', tasks: [] };
 let nextGoalOutcome: WorkforceGoalOutcome = DEFAULT_GOAL_OUTCOME;
+/** Set to make the stub REJECT — the intake's typed engine errors are thrown, not returned. */
+let nextGoalThrow: Error | null = null;
 
 const NO_BUDGETS = workforceBudgetsSchema.parse({});
 
-/** Provision a principal (registered user → org → switch → JWT) — the org creator is an owner. */
+/**
+ * Provision a principal (registered user → org → switch → JWT) — the org creator is an owner.
+ * `userId` comes back too because the decision doors compare the SERVER-DERIVED actor string
+ * (`user:<userId>`, `actorFrom`) against the decider a row records.
+ */
 async function principal(email: string, orgName: string) {
   const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
     body: { email, password: 'a-long-enough-password' },
@@ -54,7 +61,22 @@ async function principal(email: string, orgName: string) {
     headers: { authorization: `Bearer ${t0}` },
   });
   const token = (await switchRes.json()).accessToken as string;
-  return { orgId, token };
+  const users = (await h.db.$client.unsafe(
+    `SELECT id FROM users WHERE lower(email) = lower('${email}');`,
+  )) as unknown as Array<{ id: string }>;
+  const userId = (users[0] as { id: string }).id;
+  return { orgId, token, userId, actor: `user:${userId}` };
+}
+
+/**
+ * Demote a principal to `member` — the role that HOLDS `store:write` (so it decides ordinary rows)
+ * but NOT `workforce:override`. `store:write` is sensitive, so the route re-reads the role live and
+ * the still-owner JWT claim is not what answers.
+ */
+async function demoteToMember(userId: string, orgId: string): Promise<void> {
+  await h.db.$client.unsafe(
+    `UPDATE memberships SET role = 'member' WHERE user_id = '${userId}' AND org_id = '${orgId}';`,
+  );
 }
 
 async function seedRoot(orgId: string, title = 'A durable task') {
@@ -67,8 +89,8 @@ async function seedRoot(orgId: string, title = 'A durable task') {
   });
 }
 
-/** Drive a seeded task to `working` and end its turn with a pending approval. */
-async function seedPendingApproval(orgId: string) {
+/** Drive a seeded task to `working` and end its turn with a pending approval addressed to `approver`. */
+async function seedPendingApproval(orgId: string, approver = 'user') {
   const tdb = forTenant(h.db, orgId);
   const task = await seedRoot(orgId, 'Approval subject');
   const queued = await applyTransition(tdb, {
@@ -89,7 +111,7 @@ async function seedPendingApproval(orgId: string) {
     taskId: task.taskId,
     turnId: 't1',
     turnNumber: 1,
-    intent: { kind: 'request_approval', question: 'Send it?', timeoutMs: 60_000 },
+    intent: { kind: 'request_approval', question: 'Send it?', timeoutMs: 60_000, approver },
     budgets: NO_BUDGETS,
   });
   const approvals = await h.db.$client.unsafe(
@@ -98,8 +120,14 @@ async function seedPendingApproval(orgId: string) {
   return { task, approvalId: (approvals[0] as { id: string }).id };
 }
 
-/** Drive a seeded task to `working` and end its turn parked in review. */
-async function seedPendingReview(orgId: string) {
+/**
+ * Drive a seeded task to `working` and end its turn parked in review, addressed to `reviewer`.
+ * The DEFAULT is the `'user'` sentinel — the deployment's human operator surface — because this
+ * route IS the human verdict door: a review addressed to a named EMPLOYEE is answered by that
+ * employee's dispatched review turn (apply-intents.ts re-checks `review.reviewer === task.owner`),
+ * and the named-reviewer case at this door has its own tests below.
+ */
+async function seedPendingReview(orgId: string, reviewer = 'user') {
   const tdb = forTenant(h.db, orgId);
   const task = await seedRoot(orgId, 'Review subject');
   const queued = await applyTransition(tdb, {
@@ -120,7 +148,7 @@ async function seedPendingReview(orgId: string) {
     taskId: task.taskId,
     turnId: 't1',
     turnNumber: 1,
-    intent: { kind: 'request_review', reviewer: 'reviewer-1' },
+    intent: { kind: 'request_review', reviewer },
     budgets: NO_BUDGETS,
   });
   const reviews = await h.db.$client.unsafe(
@@ -148,6 +176,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
       workforceGoalIntake: {
         submitGoal: (input) => {
           goalSubmissions.push(input);
+          if (nextGoalThrow !== null) return Promise.reject(nextGoalThrow);
           return Promise.resolve(nextGoalOutcome);
         },
       },
@@ -158,6 +187,7 @@ describe('/v1/workforce (the task-engine surface)', () => {
     kicks = 0;
     goalSubmissions = [];
     nextGoalOutcome = DEFAULT_GOAL_OUTCOME;
+    nextGoalThrow = null;
     await h.reset();
   });
   afterAll(async () => {
@@ -561,6 +591,137 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(cancelled[0]?.c).toBeGreaterThanOrEqual(1);
   });
 
+  /**
+   * THE PAUSE ROUTE'S DRAIN, AND THE 504 IT FAILS INTO (B-015 clause 5).
+   *
+   * The pause arm above posts `body: {}`, and `pauseRequestSchema` defaults `drain` to `false` — so
+   * before these arms the flag had NEVER been sent `true` over HTTP, and the whole draining half of
+   * the route was reached by nothing. `WorkforceDrainTimeoutError` -> `GATEWAY_TIMEOUT` had no test
+   * of any kind: the mapping in `mapEngineError`, and the `stillWorking` detail that makes the 504
+   * actionable, were both unexercised.
+   *
+   * The kernel side of the drain (the typed rejection, the pause staying in force, the quiet drain
+   * that never sleeps) is proven directly against `pauseWorkforce` in
+   * `@rayspec/tasks` control.db.test.ts. What is proven HERE is the part only this layer owns:
+   * the body flag reaching the engine, the error class becoming a 504, and `details` surviving the
+   * envelope — `errorEnvelope` STRIPS `details` for any code outside `DETAILS_ALLOWED`, so the one
+   * field an operator needs is one allowlist edit away from silently disappearing.
+   *
+   * WHY THESE ARMS DO NOT ASSERT A STATUS CODE ALONE. This surface family already produces a
+   * `GATEWAY_TIMEOUT` 504 from an unrelated mechanism (`routes/runs.ts`, the held-request run
+   * timeout, whose details carry `errorClass`). A route that 504'd for ANY reason — a crash in the
+   * handler, a mis-registered dependency — would satisfy `expect(res.status).toBe(504)`. The drain
+   * timeout is therefore discriminated by `details.stillWorking`, which no other 504 on this
+   * deployment carries, and by a CONTROL arm that drives the identical fixture through the same
+   * route with the flag off and gets 200.
+   */
+  describe('pause with drain', () => {
+    /** Put one task of workforce `wf` into `working` — the drain's only unit of account. */
+    async function seedWorkingTask(orgId: string): Promise<void> {
+      const tdb = forTenant(h.db, orgId);
+      const task = await seedRoot(orgId, 'Mid-turn work');
+      const queued = await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: queued.version,
+        to: 'working',
+        actor: 'scheduler',
+        turnId: 'drain-route-claim',
+      });
+    }
+
+    /** The `drain` flag as the ENGINE recorded it — the journal is where the plumbing shows up. */
+    async function journaledDrainFlags(): Promise<string[]> {
+      const rows = (await h.db.$client.unsafe(
+        "SELECT (data->>'drain') AS drain FROM run_events WHERE run_id = 'workforce:wf' AND type = 'workforce.control.paused' ORDER BY seq;",
+      )) as unknown as Array<{ drain: string }>;
+      return rows.map((r) => r.drain);
+    }
+
+    async function pausedFlag(): Promise<boolean> {
+      const rows = (await h.db.$client.unsafe(
+        "SELECT paused FROM workforce_runtime WHERE workforce_id = 'wf';",
+      )) as unknown as Array<{ paused: boolean }>;
+      return rows[0]?.paused === true;
+    }
+
+    it('a quiet workforce accepts drain:true and the flag reaches the engine', async () => {
+      const a = await principal('wf-drain-quiet@example.test', 'Org WF Drain Quiet');
+      await seedRoot(a.orgId); // present but `planned`, so the drain has rows to look past
+
+      const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/pause', {
+        body: { drain: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ workforceId: 'wf', paused: true });
+      // The body flag is what the engine saw. Asserting only the 200 would pass against a route
+      // that dropped `drain` on the floor, which is exactly what was untested here.
+      expect(
+        await journaledDrainFlags(),
+        'the pause was journaled without the drain the caller asked for',
+      ).toEqual(['true']);
+    });
+
+    it('CONTROL — the SAME working task with the flag OFF is a plain 200', async () => {
+      const a = await principal('wf-drain-off@example.test', 'Org WF Drain Off');
+      await seedWorkingTask(a.orgId);
+
+      const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/pause', {
+        body: {},
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+
+      // Same fixture as the 504 arm below, one flag different. This is what makes that arm's 504
+      // attributable to the drain rather than to the route, the fixture or the deployment.
+      expect(res.status).toBe(200);
+      expect(await journaledDrainFlags()).toEqual(['false']);
+      expect(await pausedFlag()).toBe(true);
+    });
+
+    it('a drain that cannot finish inside the request window is a 504 naming what is still working', async () => {
+      const a = await principal('wf-drain-504@example.test', 'Org WF Drain 504');
+      await seedWorkingTask(a.orgId);
+
+      // ~25s of real waiting. `HTTP_DRAIN_TIMEOUT_MS` (routes/workforce.ts) is a module constant
+      // with no injection seam, so this is the honest cost of proving the mapping end to end
+      // rather than stubbing the engine. The per-test timeout is raised for exactly this.
+      const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/pause', {
+        body: { drain: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      });
+
+      expect(res.status).toBe(504);
+      const body = (await res.json()) as {
+        error: { code: string; message: string; details?: { stillWorking?: number } };
+      };
+      expect(body.error.code).toBe('GATEWAY_TIMEOUT');
+      // THE DISCRIMINATOR. `stillWorking` is carried by no other 504 this deployment can produce,
+      // and it only survives because GATEWAY_TIMEOUT sits in `DETAILS_ALLOWED` — drop it from that
+      // set and this line is what notices.
+      expect(
+        body.error.details?.stillWorking,
+        'the 504 does not carry the working count — either it is not the drain timeout, or the ' +
+          'envelope stripped the one detail that makes the refusal actionable',
+      ).toBe(1);
+      expect(body.error.message).toMatch(/drain/i);
+
+      // FAIL-CLOSED, and the half that matters at 2am: the rejection is about the DRAIN, never
+      // about the pause. Nothing reserves for this workforce, and the operator can re-issue.
+      expect(await pausedFlag(), 'a timed-out drain must leave the pause in force').toBe(true);
+      expect(
+        await journaledDrainFlags(),
+        'the pause is journaled once, before the drain ever polls',
+      ).toEqual(['true']);
+    }, 60_000);
+  });
+
   it('the status view reports control state, counts, queue depth, and budget headroom', async () => {
     const a = await principal('wf-status@example.test', 'Org WF Status');
     const tdb = forTenant(h.db, a.orgId);
@@ -592,6 +753,45 @@ describe('/v1/workforce (the task-engine surface)', () => {
       headers: { authorization: `Bearer ${a.token}` },
     });
     expect(unknown.status).toBe(404);
+  });
+
+  /**
+   * `haltReason` is a HISTORICAL RECORD — "why was this last halted" — not a liveness flag. The
+   * resume verb clears `paused`/`pausedAt`/`pausedBy` and deliberately keeps the reason, because
+   * clearing it would destroy the only durable record of the last halt outside the event journal.
+   *
+   * This pins the observable consequence: after halt-then-resume the status view reports
+   * `paused: false` WITH the reason still set. A reader who "tightens" the API by clearing
+   * `haltReason` on resume, or who re-derives `paused` from it, fails here.
+   *
+   * Both assertions are POSITIVE — an exact `false` and an exact reason string — so neither can
+   * pass by matching nothing. `paused: true` is asserted first on the same workforce, so the field
+   * is proven to move rather than being constant-false throughout.
+   */
+  it('halt then resume reports paused:false with the halt reason KEPT', async () => {
+    const a = await principal('wf-halt-history@example.test', 'Org WF Halt History');
+    const auth = { authorization: `Bearer ${a.token}` };
+    await ensureWorkforceRuntime(forTenant(h.db, a.orgId), 'wf', {});
+
+    const halt = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/halt', {
+      body: { reason: 'incident-4711' },
+      headers: auth,
+    });
+    expect(halt.status).toBe(200);
+
+    // Halted: paused is true AND the reason is recorded. The control arm for the assertion below —
+    // it proves `paused` is not simply always false in this fixture.
+    const halted = await jsonRequest(h.app, 'GET', '/v1/workforce/wf/status', { headers: auth });
+    expect(halted.status).toBe(200);
+    expect(await halted.json()).toMatchObject({ paused: true, haltReason: 'incident-4711' });
+
+    const resume = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/resume', { headers: auth });
+    expect(resume.status).toBe(200);
+
+    // THE PIN: running again, and the record of WHY it was last halted survived the resume.
+    const resumed = await jsonRequest(h.app, 'GET', '/v1/workforce/wf/status', { headers: auth });
+    expect(resumed.status).toBe(200);
+    expect(await resumed.json()).toMatchObject({ paused: false, haltReason: 'incident-4711' });
   });
 
   it('a fixed collection segment is reserved, and it does not shadow a workforce id or a task id', async () => {
@@ -886,6 +1086,29 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(kicks).toBe(0); // no outcome above created any work to dispatch
   });
 
+  /**
+   * The intake refuses a paused or halted workforce by THROWING a typed engine error, so the route
+   * has to map it like every other control refusal. Un-mapped it would surface as a 500 and a
+   * caller could not tell "this workforce is not accepting work" — which they fix with resume —
+   * from "the server broke", which they cannot fix at all.
+   */
+  it('maps the intake’s paused refusal to 409 CONFLICT, and dispatches nothing', async () => {
+    const a = await principal('wf-goal-paused@example.test', 'Org WF Goal Paused');
+    nextGoalThrow = new WorkforcePausedError('wf');
+    const res = await jsonRequest(h.app, 'POST', '/v1/workforce/wf/goals', {
+      body: { goal: 'A goal submitted while the operator has the workforce paused.' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error.code).toBe('CONFLICT');
+    // The message names the lever, and leaks no deployment shape.
+    expect(body.error.message as string).toContain('Resume');
+    // The intake WAS reached (this is a state refusal, not a validation one) and nothing dispatched.
+    expect(goalSubmissions).toHaveLength(1);
+    expect(kicks).toBe(0);
+  });
+
   it('refuses a goal outside the strict schema, a reserved workforce id, and a read-only key', async () => {
     const a = await principal('wf-goal-refuse@example.test', 'Org WF Goal Refuse');
     const auth = { authorization: `Bearer ${a.token}` };
@@ -961,6 +1184,249 @@ describe('/v1/workforce (the task-engine surface)', () => {
     expect(blocked.status).toBe(429);
     expect((await blocked.json()).error.code).toBe('RATE_LIMITED');
     expect(goalSubmissions).toHaveLength(30); // the 31st never reached the intake
+  });
+
+  // ── the decision doors keep the authorization the engine writes ──────────────────────────────
+  //
+  // An approval's `approver` and a review's `reviewer` are accountability facts the engine
+  // JOURNALS, and the timeout sweep MINTS one when it escalates a hung request to the requester's
+  // declared superior. Before this arm, both doors authorized on tenant + `store:write` alone, so
+  // any principal in the tenant could resolve a row addressed to someone else and `decided_by` was
+  // free to contradict the trail. Every refusal below asserts THE ROW, not just the status code.
+
+  it('a NAMED approver binds the door: the principal the row names decides it', async () => {
+    const a = await principal('wf-named-ok@example.test', 'Org WF Named OK');
+    // The row names this caller's own SERVER-DERIVED actor string — the only identity the door
+    // ever compares against, and one no request body can assert.
+    const { approvalId } = await seedPendingApproval(a.orgId, a.actor);
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    const decided = await res.json();
+    expect(decided).toMatchObject({ status: 'approved', decidedBy: a.actor });
+  });
+
+  it('a NAMED approver refuses a different principal — 403, and the row is untouched', async () => {
+    const a = await principal('wf-named-deny@example.test', 'Org WF Named Deny');
+    const { task, approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(body.error.details).toMatchObject({ approver: 'ops_lead' });
+
+    // THE ROW: nothing moved, nothing was signed, nothing was journaled, the task is still parked.
+    const row = (await h.db.$client.unsafe(
+      `SELECT status, decided_by, decided_at FROM workforce_approvals WHERE id = '${approvalId}';`,
+    )) as unknown as Array<{ status: string; decided_by: string | null; decided_at: Date | null }>;
+    expect(row[0]).toMatchObject({ status: 'pending', decided_by: null, decided_at: null });
+    const events = (await h.db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.approval.decided';`,
+    )) as unknown as Array<{ c: number }>;
+    expect(events[0]?.c).toBe(0);
+    const parked = (await h.db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+    )) as unknown as Array<{ status: string }>;
+    expect(parked[0]?.status).toBe('waiting_for_user');
+    expect(kicks).toBe(0); // a refused decision does not nudge the dispatcher either
+  });
+
+  it("REGRESSION GUARD: an `approver: 'user'` row stays decidable by any store:write principal", async () => {
+    // The shipped posture. `request_approval` hardcodes `approver: 'user'` and the declared grammar
+    // admits nothing else, so this is the path every example takes — a user token AND an org-scoped
+    // api-key must both keep working exactly as before.
+    const a = await principal('wf-sentinel@example.test', 'Org WF Sentinel');
+    const first = await seedPendingApproval(a.orgId); // defaults to the 'user' sentinel
+    const byUser = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${first.approvalId}/decide`,
+      { body: { decision: 'approve' }, headers: { authorization: `Bearer ${a.token}` } },
+    );
+    expect(byUser.status).toBe(200);
+
+    const mint = await jsonRequest(h.app, 'POST', `/v1/orgs/${a.orgId}/api-keys`, {
+      body: { name: 'writer', scopes: ['store:read', 'store:write'] },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    const key = (await mint.json()).plaintext as string;
+    const second = await seedPendingApproval(a.orgId);
+    const byKey = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${second.approvalId}/decide`,
+      { body: { decision: 'approve' }, headers: { authorization: `Bearer ${key}` } },
+    );
+    expect(byKey.status).toBe(200);
+    expect((await byKey.json()).decidedBy).toMatch(/^api-key:/);
+  });
+
+  it('break-glass needs BOTH the asked-for override and the permission — a member gets the named 403', async () => {
+    const a = await principal('wf-glass-member@example.test', 'Org WF Glass Member');
+    await demoteToMember(a.userId, a.orgId);
+    const { approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve', override: true },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(403);
+    // The gap is named, exactly as the store:write gate names its own.
+    expect((await res.json()).error.details).toEqual({
+      missing_permission: 'workforce:override',
+    });
+    const row = (await h.db.$client.unsafe(
+      `SELECT status, decided_by FROM workforce_approvals WHERE id = '${approvalId}';`,
+    )) as unknown as Array<{ status: string; decided_by: string | null }>;
+    expect(row[0]).toMatchObject({ status: 'pending', decided_by: null });
+  });
+
+  it('break-glass without ASKING is still refused — holding the permission never overrides silently', async () => {
+    const a = await principal('wf-glass-silent@example.test', 'Org WF Glass Silent');
+    const { approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    // The org creator is an OWNER and so holds `workforce:override`; the request does not ask.
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.details).toMatchObject({ approver: 'ops_lead' });
+  });
+
+  it('break-glass decides the named row AND the journal records that an override happened', async () => {
+    const a = await principal('wf-glass-ok@example.test', 'Org WF Glass OK');
+    const { task, approvalId } = await seedPendingApproval(a.orgId, 'ops_lead');
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: {
+        decision: 'approve',
+        reason: 'ops_lead unreachable; incident bridge',
+        override: true,
+      },
+      headers: { authorization: `Bearer ${a.token}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: 'approved', decidedBy: a.actor });
+    const events = (await h.db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.approval.decided';`,
+    )) as unknown as Array<{ data: Record<string, unknown> }>;
+    expect(events).toHaveLength(1);
+    expect(events[0]?.data).toMatchObject({
+      decidedBy: a.actor,
+      overriddenApprover: 'ops_lead',
+    });
+  });
+
+  it('a MATCHING id in another tenant is still refused — a uniform 404, and the row is untouched', async () => {
+    const a = await principal('wf-xt-a@example.test', 'Org WF XT A');
+    const b = await principal('wf-xt-b@example.test', 'Org WF XT B');
+    // Tenant A's row names tenant B's principal by its exact actor string. Identity matching must
+    // never reach across the tenant chokepoint: B gets the uniform not-found, never a decision.
+    const { approvalId } = await seedPendingApproval(a.orgId, b.actor);
+    const res = await jsonRequest(h.app, 'POST', `/v1/workforce/approvals/${approvalId}/decide`, {
+      body: { decision: 'approve' },
+      headers: { authorization: `Bearer ${b.token}` },
+    });
+    expect(res.status).toBe(404);
+    // Not even with the override: break-glass is not a tenant escape either.
+    const forced = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/approvals/${approvalId}/decide`,
+      {
+        body: { decision: 'approve', override: true },
+        headers: { authorization: `Bearer ${b.token}` },
+      },
+    );
+    expect(forced.status).toBe(404);
+    const row = (await h.db.$client.unsafe(
+      `SELECT status, decided_by FROM workforce_approvals WHERE id = '${approvalId}';`,
+    )) as unknown as Array<{ status: string; decided_by: string | null }>;
+    expect(row[0]).toMatchObject({ status: 'pending', decided_by: null });
+  });
+
+  it('the review verdict door enforces the recorded reviewer the same way', async () => {
+    const a = await principal('wf-rev-auth@example.test', 'Org WF Review Auth');
+
+    // named reviewer, different principal → 403, review untouched
+    const denied = await seedPendingReview(a.orgId, 'qa');
+    const refusal = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${denied.reviewId}/verdict`,
+      { body: { verdict: 'accept' }, headers: { authorization: `Bearer ${a.token}` } },
+    );
+    expect(refusal.status).toBe(403);
+    expect((await refusal.json()).error.details).toMatchObject({ reviewer: 'qa' });
+    const undecided = (await h.db.$client.unsafe(
+      `SELECT verdict, decided_at FROM workforce_reviews WHERE id = '${denied.reviewId}';`,
+    )) as unknown as Array<{ verdict: string | null; decided_at: Date | null }>;
+    expect(undecided[0]).toMatchObject({ verdict: null, decided_at: null });
+    const held = (await h.db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${denied.task.taskId}';`,
+    )) as unknown as Array<{ status: string }>;
+    expect(held[0]?.status).toBe('waiting_for_review');
+
+    // named reviewer, the principal it names → 200
+    const matched = await seedPendingReview(a.orgId, a.actor);
+    const ok = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${matched.reviewId}/verdict`,
+      { body: { verdict: 'accept' }, headers: { authorization: `Bearer ${a.token}` } },
+    );
+    expect(ok.status).toBe(200);
+
+    // break-glass → 200 and the journal says an override happened
+    const glass = await seedPendingReview(a.orgId, 'qa');
+    const overridden = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${glass.reviewId}/verdict`,
+      {
+        body: { verdict: 'accept', override: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      },
+    );
+    expect(overridden.status).toBe(200);
+    const events = (await h.db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${glass.task.taskId}' AND type = 'workforce.review.decided';`,
+    )) as unknown as Array<{ data: Record<string, unknown> }>;
+    expect(events[0]?.data).toMatchObject({
+      decidedBy: a.actor,
+      reviewer: 'qa',
+      overriddenReviewer: 'qa',
+    });
+  });
+
+  it('a member may NOT break the glass on a review either, and a cross-tenant match is a 404', async () => {
+    const a = await principal('wf-rev-member@example.test', 'Org WF Review Member');
+    const b = await principal('wf-rev-xt@example.test', 'Org WF Review XT');
+    const foreign = await seedPendingReview(a.orgId, b.actor);
+    const crossTenant = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${foreign.reviewId}/verdict`,
+      { body: { verdict: 'accept' }, headers: { authorization: `Bearer ${b.token}` } },
+    );
+    expect(crossTenant.status).toBe(404);
+
+    await demoteToMember(a.userId, a.orgId);
+    const named = await seedPendingReview(a.orgId, 'qa');
+    const res = await jsonRequest(
+      h.app,
+      'POST',
+      `/v1/workforce/reviews/${named.reviewId}/verdict`,
+      {
+        body: { verdict: 'accept', override: true },
+        headers: { authorization: `Bearer ${a.token}` },
+      },
+    );
+    expect(res.status).toBe(403);
+    expect((await res.json()).error.details).toEqual({ missing_permission: 'workforce:override' });
   });
 });
 

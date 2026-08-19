@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A durable dedupe key beneath the turn receipt, and a claim LEASE that reaps a wedged turn**
+  (migration `0013_workforce_dedupe_lease_and_scrub`, additive and nullable throughout — see the
+  upgrade note below).
+  *The dedupe key.* A re-applied turn was already a clean no-op, but for reviews and approvals the
+  turn RECEIPT was the only thing making it one: `workforce_reviews` carried a **non-unique**
+  `(tenant_id, task_id, round)` index and `workforce_approvals` carried no uniqueness at all, while
+  children have had two layers since the engine landed (a deterministic primary key **and** the
+  delegation UNIQUE). Both tables now carry a nullable `turn_number` and a partial
+  `UNIQUE (tenant_id, task_id, turn_number) WHERE turn_number IS NOT NULL` — byte-shaped like the
+  transition receipt it backs up — and both insert sites absorb the conflict and converge on the row
+  the first application wrote, so a replay is a no-op rather than an error.
+  **Why `turn_number` and not `round`:** `round` is not an input to the turn, it is derived from the
+  number of review rows that already exist (`reviewRoundsUsed + 1`), so a second application of the
+  same turn computes a *different* round and a `(tenant_id, task_id, round)` UNIQUE would admit
+  exactly the duplicate it was added to prevent. `turn_number` is an input and is stable across
+  replay. It also makes the migration unfailable: the column is new, so every pre-existing row holds
+  NULL and the partial predicate matches none of them — a retro-fitted UNIQUE on the populated
+  `round` column could have failed at migration time on a database that already held duplicates.
+  The approval-timeout sweep's escalation re-issue opens a request with **no** turn, writes
+  `turn_number = NULL`, and stays unconstrained; its dedupe is the `status = 'pending'`
+  compare-and-swap that claimed the row it escalates.
+  *The lease.* The reaper's only liveness oracle was a durable-engine workflow-status query, which
+  has a blind spot: a worker whose process is up and whose turn workflow is genuinely `PENDING` but
+  whose body is WEDGED reaches neither release path — not the turn's final transaction, which it
+  never gets to, and not the reaper, which asked the engine and was told the workflow was alive. Such
+  a row held its `maxConcurrentWorkers` slot **and its budget reservation forever**, and because the
+  `task`/`root` ledger scopes are un-windowed the stranded estimate never rolled over: enough wedged
+  turns and a task is denied at a ceiling it has spent nothing against. Every claim now stamps
+  `workforce_tasks.claim_expires_at` in the same compare-and-swap that writes `working` (and every
+  transition out of `working` clears it, so a stale expiry is never readable on an unclaimed row),
+  a durable-engine recovery of its own claim renews it, and the sweep reaps an expired claim through
+  the **identical** path as a dead one — same re-queue, same release of exactly what the claim
+  reserved in the window it reserved it in — journaling
+  `queueReason: 'turn_lease_expired'` so an operator can tell "the workflow died" from "the worker
+  wedged".
+  **The default is 30 minutes and deliberately errs long.** The two failure modes are not
+  symmetric: a turn reaped while still healthy cannot corrupt anything (its final application is
+  refused over the successor's claim by the claim-ownership check, so the cost is duplicated work),
+  whereas the condition it fixes is unbounded. 30 minutes is anchored on the shipped examples' own
+  whole-TASK wall clocks — 30m and 45m — and a task is many turns, so a single turn that has run
+  that long has consumed the entire task ceiling the starter example declares. Deployments that need
+  a different window pass `turnLeaseMs` to the scheduler, the same convention as `reserveSchedule` /
+  `sweepSchedule` / `turnQueueConcurrency`; it is deliberately **not** a `budgets.execution` key,
+  because the declared-budgets schema is drift-locked to the authoring grammar and this is a
+  dispatcher safety net rather than per-workforce policy.
+  **The proof.** `turn-dedupe.db.test.ts` drives a replayed `request_review` and `request_approval`
+  turn WITH ITS RECEIPT DELETED — the transitions table is append-only by discipline, not by
+  constraint — and asserts exactly one row survives, the first one, while the row the replay would
+  have written carried `round = 2`; plus the raw `23505` refusal and the turn-less rows coexisting
+  under the partial predicate. `task-scheduler.db.test.ts` parks a handler on an unresolved promise
+  so the workflow stays genuinely `PENDING`, steps the sweep's clock past the lease, and asserts the
+  row returns to `queued` with `reserved_usd` back to 0 on both the task and root scopes and
+  `settled_turns` unchanged — and, separately, that a live turn INSIDE its lease survives every
+  sweep, including one taken a millisecond before expiry.
+
 - **The workforce reference orchestration: policy-aware turns, recall, an operator tree, and an
   end-to-end acceptance story** (all behind `RAYSPEC_EXPERIMENTAL_WORKFORCE`, exactly as before —
   a document without the section parses byte-identically, and one with it is still refused typed
@@ -59,6 +114,211 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one JSON object (`tasks --tree`'s text rendering is the group's one documented exception); and
   the `turn_ended` journal payload gains only the optional `classification` field, documented in
   the vocabulary's first published statement.
+
+- **`pnpm gate:migrate-upgrade` — the migration bar's other half: an existing database is upgraded,
+  not just an empty one bootstrapped.** Every database gate before it started from an empty database
+  (`gate:shadow-dryrun` applies the chain "against a TRULY EMPTY DB"; `gate:migrate-clean` provisions
+  a fresh one), so nothing exercised the apply an already-deployed installation actually performs.
+  The mechanism that makes an incremental apply correct was guarded — `gate:shadow-dryrun` asserts the
+  journal's `when` values are strictly monotonic, which is precisely drizzle's silent-skip failure mode
+  — but the apply itself was not.
+  The new gate materializes the released chain in a throwaway database through the real programmatic
+  migrator (the same `migrate(db, { migrationsFolder })` call the server boot makes), seeds real rows
+  for two tenants across `orgs` / `runs` / `journal_steps` / `run_events` / `tenant_event_streams` /
+  `tenant_events`, and then applies the full committed chain onto that populated database. It asserts
+  that `drizzle.__drizzle_migrations` advances by exactly the number of migrations after the baseline
+  (a short count is a silent skip, a long one a double apply); that every already-applied bookkeeping
+  row is byte-identical afterwards, so nothing was re-applied; that every seeded row is byte-identical,
+  compared by a digest over the column list captured **before** the upgrade, so an additive column does
+  not read as a data change while a rewrite or a loss does; that every pre-upgrade column keeps its
+  type, nullability and default; that the tables the upgrade creates — derived as a set difference, so
+  the check tracks whatever the chain adds — each hold zero rows; that a repeated apply is a no-op; and
+  that the upgraded database has zero structural drift from `schema.ts`, checked by the from-clean
+  gate's own assertion script rather than a second implementation of it.
+  The released boundary is anchored on the migration tag that ends the published chain, so the number
+  of migrations upgraded across is read off the journal at run time. An unknown anchor, and a chain
+  with nothing after the baseline, both fail the gate rather than passing it vacuously. It runs in CI
+  beside the other migration gates.
+
+### Fixed
+
+- **The boot migrator is serialized, and a failed chain now names the pending migrations.**
+  `applyMigrations` took no advisory lock, so two runners against the same fresh database raced on
+  the migrator's own `CREATE SCHEMA/TABLE IF NOT EXISTS` bootstrap — a check-then-create window — and
+  the loser died on a duplicate-object error before it reached the chain at all. That is exactly what
+  a deploy script that fans out on a first bring-up produces, and on the certification host it
+  produced a loser on **every** run (SQLSTATE `23505`, from the migrator's very first statement).
+  `rayspec provision-tenant` already worked around it by taking the lock around its own call; the
+  boot did not, and neither does a second replica. The lock now lives in `applyMigrations` itself, on
+  a key `@rayspec/db` owns and exports beside `migrationsDir()` — so two concurrent boots both
+  succeed rather than costing one of them a restart. The command's outer wrapper is **gone**, and
+  must stay gone: two sessions of one process holding the same advisory key wait on each other.
+  It is a session-scoped `pg_advisory_lock` on a connection of its own, not a transaction-scoped one
+  on a pooled connection: the pooled shape holds the connection the migration itself needs, so it
+  deadlocks any handle whose pool is sized 1 (measured — pool 4 applies in ~540ms, pool 1 never
+  completes). The lock is released by closing that connection in a `finally`, and by the connection
+  dying, so a boot killed mid-migration never leaves the next one waiting.
+  This is **not** multi-replica upgrade safety and does not claim to be: it serializes runners that
+  take the same key, so a `drizzle-kit migrate` or a psql run beside it is unaffected, and a rolling
+  deploy whose two binaries expect different schemas is a separate problem. Run migrations from one
+  runner remains the advice; a fan-out just no longer costs a boot.
+  Separately, a failure is now diagnosable without a follow-up query. The migrator's error quotes the
+  failing STATEMENT and carries the Postgres cause but never the migration TAG, so `applyMigrations`
+  reads the pending tags *before* it applies anything — joining
+  `max(created_at)` in `drizzle.__drizzle_migrations` against `drizzle/meta/_journal.json` — and
+  rethrows a `MigrationChainError` naming them in chain order, stating that the batch is
+  all-or-nothing so the database is unchanged, and carrying the original error as `cause`. The whole
+  pending list ships rather than one file because the pending set is one transaction: narrowing it
+  further would mean applying migrations one at a time, which would trade away the whole-chain
+  atomicity that makes "the database is unchanged" true.
+  `boot-migrator-concurrency.db.test.ts` inverted with the contract — it used to pin the caveat, and
+  now pins both halves: two concurrent runners both succeed at pool size 1, and a runner that meets a
+  staged `orgs` table still aborts fail-closed with `42P07`, records nothing, leaves no partial DDL,
+  **and** names the pending tags.
+
+- **Tenant data erasure is now wired on every boot, not on the shapes whose data had been noticed.**
+  The seam was widened twice — first to product `stores:`, then also to a declared `workforce:` — and
+  each widening chased the deployment whose content had just been found. One shape was still short:
+  a document that declares only `agents:`, and a boot with **no document at all**, which
+  `rayspec-serve` treats as its default. Both left `BootedServer.eraseTenantNow` `undefined`. Both
+  mount the agent-run surface anyway — `createAuthApp` registers `POST /v1/agents/:id/runs`
+  unconditionally — so both accumulate, per tenant, the `runs` header, the `journal_steps` holding raw
+  model output, the `conversation_items` holding the raw transcript, and the `run_events` journal, with
+  no operator way to remove any of it.
+  The seam is now built on every outcome the composition root produces. Nothing about the erasure
+  mechanism changed and there is no migration: the core half is derived from
+  `CORE_TENANT_SCOPED_TABLES`, and the declared store list contributes only the FK-safe ordering of the
+  **product** half, which on these shapes is empty — it erases zero product rows and reports
+  `tables: {}` while the core half does the work.
+  **Wiring it is not arming it, and that is what makes wiring it by default safe.** The destructive act
+  is still gated on `RAYSPEC_ERASURE_ENABLED` resolved at the composition root — never a spec flag — so
+  no deployment gains erase capability by upgrading: with the variable unset every call returns a
+  counts-only preview (`mode: 'dry-run'`, `dryRunReason: 'gate-disabled'`) that deletes nothing, and a
+  real erasure still refuses to run without an audit store.
+  **The proof.** `auth-only-erasure-boot.db.test.ts` boots the real composition root against a real
+  database on both shapes and asserts, on ground truth read outside the erasure path: the seam is
+  defined; the gate-off call previews the four run-history tables at their seeded counts and leaves
+  every row in place; the same boot restarted with the gate armed erases them to zero; and a second
+  tenant's rows are untouched throughout.
+
+- **`journalScrub` no longer destroys the workforce billing ledger it exists to preserve.**
+  `journalScrub: true` is the softer right-to-erasure posture: it erases raw subject content while
+  KEEPING every structural, idempotency and cost column, so billing reconciliation and exactly-once
+  integrity survive. The nine task-engine tables were not in the scrub set, so scrub mode
+  **hard-deleted all nine — `workforce_budget_ledger` included**, which is the workforce analogue of
+  exactly the cost columns the mode retains on `journal_steps`. The mode inverted its own purpose,
+  and on the one deployment shape whose only subject content is the task graph. PR #488 made scrub
+  reachable on a workforce deployment for the first time, so the path has real users.
+  Scrub mode now erases the workforce CONTENT and keeps the rows:
+  `workforce_tasks.title`/`.goal`/`.description`/`.result` set to NULL and `.artifacts` emptied;
+  `workforce_messages.body`; `workforce_approvals.question`/`.reason` and `.options`;
+  `workforce_reviews.reasons`/`.required_changes`; `workforce_delegations.goal`;
+  `workforce_task_signals.payload`. `workforce_budget_ledger`, `workforce_task_transitions` and
+  `workforce_runtime` are retained WHOLE — they hold no subject content, and a ledger retained
+  without the task rows its `scope_id` attributes spend to would be unreconcilable, which is why
+  "retain the ledger" means retaining the set rather than one table.
+  This is the change migration `0013` carries for erasure: five `text NOT NULL` columns —
+  `workforce_tasks.title`, `.goal`, `workforce_messages.body`, `workforce_approvals.question` and
+  `workforce_delegations.goal` — now accept NULL. Those five are the complete set of `text NOT NULL`
+  columns across the nine tables that carry CONTENT. `workforce_delegations.expected_output` looks
+  like a sixth and is not: every writer is the engine's own `'worker_result'` literal and no
+  production path reads it, so it is a structural constant the scrub keeps and the migration leaves
+  `NOT NULL`. The jsonb list columns go to their own
+  declared `'[]'`/`'{}'` rather than being made nullable, and the three already-nullable text columns
+  needed no change. **Nullable here means "erased", not "optional":** every write path still requires
+  all five, so a NULL has exactly one meaning, and every rendering surface — the turn input, the
+  operator snapshot, recall — names it as `[content erased]` rather than emitting an empty string.
+  The **default (full-delete) mode is byte-for-byte unchanged**, and `run_events` is still hard-
+  deleted in both modes, so the workforce journal's own event payloads go with it either way. Two
+  scope boundaries are stated rather than left to be discovered: the actor identifiers on the
+  retained rows (`owner`, `requested_by`, `approver`, `decided_by`, `reviewer`, `delegated_by`,
+  `delegated_to`, `resolved_owner`) survive a scrub as the accountability spine — a deployment that
+  needs those gone uses the full delete — and a scrubbed task row keeps its status and counters, so
+  an unfinished task of an erased tenant would resume against a NULL goal; halt the workforce before
+  scrubbing a tenant with live work.
+  **The proof.** `erase-tenant.db.test.ts` gains two scenarios on the existing real-DB seed: a scrub
+  leaves the ledger row with `reserved_usd`/`settled_usd`/`settled_turns` byte-identical to the seed
+  and every named content column NULL or empty while the structural columns are unchanged, and a
+  full erase still removes all nine tables and both workforce journal namespaces. Its scrub-report
+  map is pinned as a whole object, so a table silently leaving the scrub set — the exact way the
+  workforce half was lost — goes RED. The cross-tenant scenario now also asserts the second tenant's
+  workforce content is untouched, which an un-scoped scrub UPDATE would flip.
+
+- **Tenant data erasure is now wired on a workforce deployment — the one shape where it was
+  unreachable.** The erasure control seam (`BootedServer.eraseTenantNow`, the operator's
+  right-to-erasure entry point) was constructed only when the deployed document declared product
+  `stores:`. Both shipped workforce examples declare **zero** stores, so a workforce deployment came
+  up with the seam `undefined` and a boot banner reading *"NOT WIRED — this boot deployed no product
+  stores, so there is nothing for `RAYSPEC_ERASURE_ENABLED` to act on"* — while its database held,
+  per tenant, the whole task graph: task titles, goals, descriptions, results and artifacts,
+  inter-agent message bodies, approval questions, decisions and free-text reasons, review reasons and
+  required changes, delegation goals and expected outputs, and the entire `run_events` journal under
+  both workforce namespaces (`run_id = <taskId>` and `run_id = workforce:<id>`). No shipped operator
+  command could erase any of it; nothing in production code deletes an `orgs` row either, so those
+  tables' `ON DELETE CASCADE` was a net nobody pulled.
+  The seam is now wired when the document declares product stores **or** a workforce. Nothing about
+  the erasure mechanism changed and there is no migration: `eraseTenant` already derives its core half
+  from `CORE_TENANT_SCOPED_TABLES`, which has carried all nine task-engine tables and `run_events`
+  since the engine landed, and every delete is still the same `forTenant`-scoped
+  `DELETE ... WHERE tenant_id` with no `run_id` predicate — so both workforce journal namespaces go
+  with it. A store-less deploy simply passes an empty product-table map and erases zero product rows.
+  The operator gate is untouched and still fail-closed: without `RAYSPEC_ERASURE_ENABLED` set to
+  exactly `true`, every call is a DRY-RUN preview that deletes nothing, and a real erasure still
+  refuses to run without an audit store.
+  The banner's unwired line no longer claims there is nothing to erase. With the seam now built on
+  every boot (see the entry above), that line reports only what the server it was handed observably
+  carries — it names no declared section and makes no claim about what the database holds, because
+  neither is something it can see.
+  **The proof.** `workforce-erasure-boot.db.test.ts` boots the real composition root on a store-less
+  workforce document against a real database and asserts the seam is defined, that the banner reports
+  the resolved gate posture rather than `NOT WIRED`, and that a gate-off call previews **non-zero**
+  counts for all nine task-engine tables while mutating nothing. `erase-tenant.db.test.ts`'s workforce
+  coverage stopped being vacuous: its core seed now writes a real row into each of the nine and one
+  `run_events` row per namespace (agent-run, per-task, workforce control), so the post-erase read-back
+  is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
+  tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
+
+### Documentation
+
+- **`docs/workforce-architecture.md` no longer cites code by line number — six of its twelve
+  line-numbered citations pointed at the wrong thing.** The page's own contract is that every
+  guarantee names the mechanism that enforces it, and a stale pointer is that contract failing
+  quietly: the line still exists and still holds code, so a reader who checks the range sees nothing
+  wrong. The misses were near-misses, which is what makes them expensive — one pointed at
+  `decideApproval`'s journal write while the sentence was about the approval **sweep**; one was
+  attributed to "inside `runSweep`" while pointing 84 lines *above* where `runSweep` is declared;
+  one landed on the `confidenceBelow` commentary instead of the `durableWorker` refusal 118 lines
+  below it; one landed on an unrelated reserved-employee-id test. A fifth was correct until the
+  advisory-lock change above edited the cited file and moved it — self-inflicted rot, in the same
+  branch that fixed the other four, which is the case nobody looks for.
+  Every citation is now a file plus the SYMBOL, function or test title to look for, and each of the
+  fourteen new anchors was checked to resolve to exactly one place in the file it names. Nothing
+  re-verifies this page per commit — `gate:no-archaeology` and `gate:skill-drift` do not read it,
+  and an injected `task-scheduler.db.test.ts:99999` is caught by neither — so the numbers were claims
+  with no mechanism behind them. The page now says so in its preamble, so the convention survives the
+  next editor. The one exception kept is a citation into a released migration file, which is never
+  edited and therefore cannot rot.
+
+### Upgrade notes
+
+- **One migration: `0013_workforce_dedupe_lease_and_scrub`.** It is the single coordinated
+  persisted-shape change this release carries — three nullable columns
+  (`workforce_reviews.turn_number`, `workforce_approvals.turn_number`,
+  `workforce_tasks.claim_expires_at`), two partial UNIQUE indexes, and six `ALTER COLUMN … DROP NOT
+  NULL`. Nothing else in the schema moves.
+  **It cannot fail on a populated database and needs no backfill.** Every added column is nullable,
+  so no existing row can violate it and no default has to be written; `DROP NOT NULL` never fails on
+  data; and because `turn_number` is new, every pre-existing review and approval row holds NULL,
+  which the partial predicate `WHERE turn_number IS NOT NULL` excludes — so both UNIQUE indexes match
+  **zero** existing rows and cannot trip on a database that already holds duplicate review rounds.
+  The only lock taken is the brief `ACCESS EXCLUSIVE` of the `ALTER`s on nine small tables.
+  **Rolling the binary back is safe.** Older releases never read the new columns, and a relaxed NOT
+  NULL is a superset of what they wrote. Forward-only per the project's migration policy: there is
+  no down-migration, and none is claimed.
+  **No operator action is required.** The claim lease defaults to 30 minutes with no configuration;
+  `journalScrub` behaviour changes only for callers who pass `journalScrub: true` (the default
+  full-delete mode is byte-for-byte unchanged); and nothing about the existing turn receipt, the
+  dispatch law or the budget protocol changes shape.
 
 ## [1.8.0] - 2026-08-15
 

@@ -16,14 +16,24 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { AgentTracingPosture } from './agent-tracing.js';
-import { bootBanner } from './banner.js';
-import { type BootedServer, parseCleanupSettings } from './composition-root.js';
+import {
+  bootBanner,
+  NOT_INTERNET_FACING,
+  POSTURE_WARNING_LINES,
+  staticBootBanner,
+} from './banner.js';
+import {
+  type BootedServer,
+  parseCleanupSettings,
+  type StaticBootedServer,
+} from './composition-root.js';
 
 const BASE = 'http://127.0.0.1:8080';
 
 // The banner reads the two control seams as PRESENCE signals only (never calls them): `runCleanupNow`
-// is undefined for a boot that launches no durable worker, `eraseTenantNow` for one with no product
-// stores. Presence stubs stand in for both.
+// is undefined for a boot that launches no durable worker; `eraseTenantNow` is optional on the type,
+// so a hand-assembled `BootedServer` can arrive without one even though every `assembleServer` boot
+// wires it. Presence stubs stand in for both.
 const CLEANUP_SEAM = {} as NonNullable<BootedServer['runCleanupNow']>;
 const ERASE_SEAM = {} as NonNullable<BootedServer['eraseTenantNow']>;
 
@@ -39,6 +49,16 @@ function booted(over: Partial<BootedServer> = {}): BootedServer {
     drift: [],
     housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: false },
     agentTracing: 'off',
+    close: async () => {},
+    ...over,
+  };
+}
+
+/** A stub static-profile boot — the static banner reads only the mount list. */
+function bootedStatic(over: Partial<StaticBootedServer> = {}): StaticBootedServer {
+  return {
+    app: {} as StaticBootedServer['app'],
+    frontendMounts: [{ route: '/', dir: 'web/dist', spa: true, cleanUrls: false }],
     close: async () => {},
     ...over,
   };
@@ -85,7 +105,7 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     expect(banner).not.toContain('Tenant data erasure:   DRY-RUN');
   });
 
-  it('states there is nothing to erase — not a gate posture — when no product stores were deployed', () => {
+  it('states the seam is unwired — not a gate posture — when the server carries none', () => {
     const banner = bootBanner(
       booted({ housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: true } }),
       BASE,
@@ -94,6 +114,45 @@ describe('bootBanner — the resolved tenant data-erasure gate', () => {
     expect(banner).not.toContain('Tenant data erasure:   ARMED');
     // the line still NAMES the variable, so the block names all three on every boot it prints
     expect(banner).toContain('RAYSPEC_ERASURE_ENABLED');
+  });
+});
+
+/**
+ * The unwired line's CONTENT, guarded separately from its presence.
+ *
+ * This line has twice been written as a claim about the deployment — first that a boot with no product
+ * stores had nothing to erase, then that it had declared neither stores nor a workforce — and both
+ * became false as the wiring widened. The seam is now wired on every boot `assembleServer` produces
+ * (proven on a store-less workforce boot in `workforce-erasure-boot.db.test.ts` and on both auth-only
+ * shapes in `auth-only-erasure-boot.db.test.ts`), so the only honest thing this line can report is
+ * what the server it was handed observably carries. These arms pin that: it may say the seam is
+ * absent, and it may not explain that absence by describing a document it cannot see.
+ */
+describe('bootBanner — the unwired erasure line describes the server, not the document', () => {
+  const unwired = (): string =>
+    bootBanner(
+      booted({ housekeeping: { cleanup: parseCleanupSettings({}), erasureEnabled: false } }),
+      BASE,
+    )
+      .split('\n')
+      .filter((l) => l.includes('Tenant data erasure:'))
+      .join('\n');
+
+  it('names the missing seam and the variable that would arm one', () => {
+    const line = unwired();
+    expect(line).toContain('NOT WIRED');
+    expect(line).toContain('no erasure seam');
+    expect(line).toContain('RAYSPEC_ERASURE_ENABLED');
+  });
+
+  it('makes no claim about declared stores, a declared workforce, or what the database holds', () => {
+    const line = unwired();
+    // The two document facts the line used to explain itself with, and could not see.
+    expect(line).not.toMatch(/stores/i);
+    expect(line).not.toMatch(/workforce/i);
+    // The claim underneath both: that there is no tenant data here. The line may say the SEAM is
+    // missing (it can see that); it may not say there is nothing to erase or to act on.
+    expect(line).not.toMatch(/nothing\b[^.]*\b(erase|act on)/i);
   });
 });
 
@@ -172,5 +231,76 @@ describe('bootBanner — the observed agent trace-export posture', () => {
       'RAYSPEC_AGENT_TRACING=off — every boot that prints this banner reads it',
     );
     expect(banner).not.toContain('Trace export:          OFF');
+  });
+});
+
+/**
+ * THE POSTURE WARNING — the one operator-facing statement of this server's LOCAL / not-hardened
+ * posture that is genuinely impossible to miss, and the one thing in this file that was held in
+ * place by nothing at all.
+ *
+ * Everything else here pins a RESOLVED value (a gate, a crontab, an observed export posture), so a
+ * wording change to any of those REDs. The warning was two bare string literals in `bootBanner`
+ * with no assertion anywhere in the repository — a refactor could delete it and every suite would
+ * stay green — and `staticBootBanner` carried no warning at all, though a static boot binds through
+ * the SAME host/port path: `loadServerConfig` and `loadStaticServerConfig` (composition-root.ts)
+ * both default `RAYSPEC_HOST` to `DEFAULT_HOST` and both honour an explicit non-loopback value.
+ *
+ * WHAT THIS PINS, and why each half:
+ *   - the exported constants are asserted against the SHIPPED LITERALS first. Without that arm the
+ *     rest is circular: reword the constant and the `toContain(NOT_INTERNET_FACING)` assertions
+ *     follow it happily into a banner that no longer warns anybody.
+ *   - both banners are then asserted to carry both halves — the headline an operator scans and the
+ *     instruction they act on — and to carry the warning block BYTE-IDENTICALLY, which is what
+ *     keeps one profile from drifting away from the other the way the static one already had.
+ *
+ * `wrapper-agent-tracing.test.ts:134-167` is the companion property and covers a different axis: it
+ * discovers the `bootBanner(` CALL SITES and requires each to apply a trace-export posture, so a
+ * fifth silent boot REDs there. It says nothing about what the banner CONTAINS — this does.
+ */
+describe('both boot banners — the LOCAL / NOT-internet-facing posture warning', () => {
+  it('the exported constants ARE the shipped strings — the anti-circularity control', () => {
+    // These four literals are the assertion. If a change reworded the constants, every arm below
+    // would still pass while the shipped banner said something else; this arm is what makes the
+    // others load-bearing. Changing the wording is therefore a deliberate edit HERE first.
+    expect(NOT_INTERNET_FACING).toBe('NOT internet-facing');
+    expect(POSTURE_WARNING_LINES).toEqual([
+      '  The external-hardening suite (RLS / KMS-wrapped DEKs / per-tenant sandbox / DPoP) is the gate before external',
+      '  exposure and is NOT built yet. Do not place this server behind a public address.',
+    ]);
+  });
+
+  it('the FULL boot banner names the posture in its title and the instruction on its own line', () => {
+    const banner = bootBanner(booted(), BASE);
+    const lines = banner.split('\n');
+    // The title line an operator scans, matched as a whole line so the headline cannot survive only
+    // as a fragment buried in prose.
+    expect(lines).toContain(
+      '  RaySpec server — LOCAL / single-node / pre-external-hardening — NOT internet-facing',
+    );
+    expect(banner).toContain('Do not place this server behind a public address.');
+    expect(banner).toContain(POSTURE_WARNING_LINES.join('\n'));
+  });
+
+  it('the STATIC-PROFILE boot banner carries the SAME warning, byte-identically', () => {
+    // A static boot opens no database and mounts no auth surface — which is exactly why it read as
+    // harmless and shipped with no warning. It still binds a TCP host/port and still has no external
+    // hardening in front of it, so the posture statement is the same statement.
+    const banner = staticBootBanner(bootedStatic(), BASE);
+    const lines = banner.split('\n');
+    expect(lines).toContain(
+      '  RaySpec server — STATIC PROFILE (frontend-only) — NOT internet-facing',
+    );
+    expect(banner).toContain('Do not place this server behind a public address.');
+    // BYTE-IDENTICAL to the full banner's block, not merely similar: one literal, two call sites.
+    expect(banner).toContain(POSTURE_WARNING_LINES.join('\n'));
+  });
+
+  it('neither banner offers an env var that suppresses the warning', () => {
+    // The warning is unconditional by construction (no branch reads it), and the two banners agree.
+    // A future "quiet mode" would have to delete this arm rather than add a flag past it.
+    for (const banner of [bootBanner(booted(), BASE), staticBootBanner(bootedStatic(), BASE)]) {
+      expect(banner).not.toMatch(/RAYSPEC_[A-Z_]*(QUIET|SILENC|SUPPRESS|NO_BANNER)/);
+    }
   });
 });

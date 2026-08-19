@@ -48,6 +48,13 @@ export interface ApplyTransitionInput {
   readonly turnNumber?: number;
   /** For `to: 'queued'` — what queued the task ('initial' or the absorbing signal kind). */
   readonly queueReason?: string;
+  /**
+   * For `to: 'working'` — the instant this claim's LEASE expires (`claim_expires_at`), written in
+   * the same compare-and-swap UPDATE as the status so the lease can never disagree with the claim
+   * it describes. Omitted (or on any other target) the column is set to NULL: leaving `working`
+   * always releases the lease, and a `working` row driven there outside a dispatch holds none.
+   */
+  readonly leaseUntil?: Date;
 }
 
 export async function applyTransition(
@@ -80,6 +87,12 @@ export async function applyTransition(
         ...(input.to === 'working'
           ? { startedAt: sql`coalesce(${schema.workforceTasks.startedAt}, now())` }
           : {}),
+        // THE CLAIM LEASE moves with the status, in this one statement: a claim stamps its expiry,
+        // and EVERY exit from `working` clears it — a stale expiry must never be readable on a row
+        // that holds no claim, or the reaper would re-reap a task it already re-queued. A `working`
+        // target with no lease (a test/operator drive, not a dispatch) writes NULL, which the reaper
+        // reads as "not a leased claim" and leaves alone.
+        claimExpiresAt: input.to === 'working' ? (input.leaseUntil ?? null) : null,
         ...(terminal ? { completedAt: sql`now()` } : {}),
       })
       .where(

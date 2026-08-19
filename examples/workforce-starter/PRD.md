@@ -58,6 +58,6 @@ it on the same database, and the story continues where it stood.
 | One entry seat for every goal | `workforce.orchestrator: lead` |
 | Two parallel streams | `departments: eng, growth` + plural `delegate_task` |
 | Independent review of risky work | `reviewPolicies[0]` (`eng_quality`, `confidenceBelow: 0.8`, reviewer `qa`) |
-| Human sign-off on public wording | `approvals[0]` (`public_statement_signoff`) + `capabilities: [public_statement]` on the copywriter and the growth manager (the requesting seat) |
+| Human sign-off on public wording | `approvalPolicies[0]` (`public_statement_signoff`) + `labels: [public_statement]` on the copywriter and the growth manager (the requesting seat) |
 | A team the orchestrator can address whole | `teams[0]` (`release_crew`, led by `mgr_eng`) |
 | Spend and depth ceilings | `budgets` + `execution` |

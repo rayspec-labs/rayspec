@@ -333,6 +333,26 @@ async function provisionDevDatabase(baseUrl: string, devDbName: string): Promise
 }
 
 async function main(): Promise<void> {
+  // OWN THE TERMINATION SIGNALS FIRST — before anything that can await. Node's default action for
+  // SIGINT/SIGTERM is to terminate, so registering nothing looks safe; it is not. The static imports
+  // at the head of this file already installed two handlers this wrapper does not own —
+  // @openai/agents-core's tracing provider and signal-exit — and each acts ONLY when it is the sole
+  // listener, so with both loaded they defer to each other and the signal becomes a NO-OP. The whole
+  // boot (dev-DB provisioning, the migration chain, the assemble) was therefore unkillable by
+  // SIGTERM. The handler starts in a boot phase that aborts and is REPLACED, not re-registered, once
+  // there is something to close — exactly one pair lives on this process. NOT SIGHUP: signal-exit is
+  // its only listener there and re-raises it, so that signal already stops this process.
+  const phase = {
+    handle: (signal: string): void => {
+      console.log(
+        `\n[local-boot] ${signal} received during boot — aborting before the server listens.`,
+      );
+      process.exit(0);
+    },
+  };
+  process.on('SIGINT', () => phase.handle('SIGINT'));
+  process.on('SIGTERM', () => phase.handle('SIGTERM'));
+
   // Progress line BEFORE the (potentially slow) dev-DB provisioning + assemble step, so a hang is never
   // silent — the banner below prints only once the whole boot succeeds.
   console.log(
@@ -454,16 +474,15 @@ async function main(): Promise<void> {
   );
 
   // Graceful shutdown: stop accepting connections + drain the server's pools so a Ctrl-C releases
-  // everything cleanly.
-  const shutdown = (signal: string): void => {
+  // everything cleanly. The handlers are already installed at the top of `main()`; this hands them
+  // the graceful close now that there is something to close.
+  phase.handle = (signal: string): void => {
     console.log(`\n[local-boot] ${signal} received — shutting down…`);
     httpServer.close(async () => {
       await server.close();
       process.exit(0);
     });
   };
-  process.on('SIGINT', () => shutdown('SIGINT'));
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 // Only boot when run as the process entrypoint (`pnpm --filter @rayspec/local-boot serve`). When this

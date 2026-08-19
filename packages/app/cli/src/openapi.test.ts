@@ -8,10 +8,80 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { runOpenapi } from './openapi.js';
+import { OPENAPI_POSTURE_NOTICE, runOpenapi } from './openapi.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ACCEPTANCE = resolve(here, '../../../../examples/expense-claim/expense-claim.product.yaml');
+
+/**
+ * THE POSTURE NOTICE, BYTE-PINNED — and pinned IDENTICAL to the OTHER copy of it in the tree.
+ *
+ * The MIRROR of the block in `packages/compose/api-auth/src/engine/emit-openapi.test.ts`, and THIS
+ * side is the load-bearing one. Not for a CI-lane reason — both packages run in the same lane
+ * (`ci.yml` excludes each from lane 1 and includes each in lane 2) — but because of the BUILD CACHE:
+ * `turbo.json` declares no `inputs` for `test`, so a task's hash covers its own package plus its
+ * dependencies, and `@rayspec/api-auth` does not depend on `@rayspec/cli`. Editing THIS package's
+ * copy therefore leaves `api-auth#test`'s hash untouched and its cached PASS replays, while
+ * `cli#test`'s hash moves. Measured with `turbo run test --dry-run=json`:
+ *
+ *     cli#test       e3a679e0 -> 09a325ae   MOVED
+ *     api-auth#test  6c934bfb -> 6c934bfb   UNCHANGED
+ *
+ * So the arm in the other package cannot see an edit made here; this one can. Every other assertion
+ * on this constant is self-referential (`toContain(OPENAPI_POSTURE_NOTICE)`) or a substring probe
+ * (`toContain('NOT internet-facing')`), and both stay green while the words are softened.
+ *
+ * Why there are two copies at all — and why this test rather than a shared export — is written down
+ * above the constant in `emit-openapi.ts`; the short version is that `@rayspec/cli` has no
+ * dependency edge to `@rayspec/api-auth`, so the comparison is made over the SOURCE FILE instead of
+ * over an import.
+ */
+const REPO_ROOT = resolve(here, '../../../..');
+const OWN_COPY_REL = 'packages/app/cli/src/openapi.ts';
+const API_AUTH_COPY_REL = 'packages/compose/api-auth/src/engine/emit-openapi.ts';
+
+/** The exact text. Not derived from the source under test — that is the point of a byte-pin. */
+const PINNED_NOTICE =
+  'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, pre-external-hardening RaySpec deployment. The separate hardening layer (per-tenant sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put this behind a public address.';
+
+/** Lift the whole `export const OPENAPI_POSTURE_NOTICE = …;` declaration out of a source file. */
+function noticeDeclaration(rel: string): string {
+  const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
+  const match = /^export const OPENAPI_POSTURE_NOTICE =\n(?:.*\n)*?.*;\n/m.exec(src);
+  // The floor: a pattern that matched nothing must FAIL here, never return '' and compare equal to
+  // the other side's ''. Two files that both stopped declaring the constant is not agreement.
+  expect(
+    match,
+    `${rel} no longer declares OPENAPI_POSTURE_NOTICE in the pinned form`,
+  ).not.toBeNull();
+  const declaration = (match as RegExpExecArray)[0];
+  expect(declaration).toContain('OPENAPI_POSTURE_NOTICE');
+  expect(declaration.length).toBeGreaterThan(200);
+  return declaration;
+}
+
+/** Re-join the single-quoted segments of a declaration into the string it declares. */
+function declaredValue(declaration: string): string {
+  expect(declaration).not.toContain("\\'");
+  const segments = [...declaration.matchAll(/'([^'\\]*)'/g)].map((m) => m[1] as string);
+  expect(segments.length).toBeGreaterThan(0);
+  return segments.join('');
+}
+
+describe('OPENAPI_POSTURE_NOTICE — pinned, and pinned identical across both copies', () => {
+  it('is exactly the posture sentence, byte for byte', () => {
+    expect(OPENAPI_POSTURE_NOTICE).toBe(PINNED_NOTICE);
+  });
+
+  it('is declared byte-identically in @rayspec/cli and @rayspec/api-auth', () => {
+    expect(noticeDeclaration(OWN_COPY_REL)).toBe(noticeDeclaration(API_AUTH_COPY_REL));
+  });
+
+  it('both declarations on disk evaluate to the value this module exports', () => {
+    expect(declaredValue(noticeDeclaration(OWN_COPY_REL))).toBe(OPENAPI_POSTURE_NOTICE);
+    expect(declaredValue(noticeDeclaration(API_AUTH_COPY_REL))).toBe(OPENAPI_POSTURE_NOTICE);
+  });
+});
 
 let dir: string;
 let prevCwd: string;
@@ -44,6 +114,45 @@ describe('rayspec openapi', () => {
       // A components object is always present (schemas may be inlined per-response).
       expect(doc.components).toHaveProperty('schemas');
     });
+  });
+
+  /**
+   * THE POSTURE NOTICE. The emitted document is the one artifact a client generator, an API-console
+   * user or a downstream integrator may hold WITHOUT ever seeing this repository's README, its
+   * SECURITY.md, or the boot banner — so it is the one place where a missing posture statement
+   * reaches an audience that has no other copy. Both arms below exist because the description is a
+   * conditional field: it was present only when the product declared one, so the doc that carried
+   * the LEAST context was also the one that carried no warning at all.
+   */
+  it('the generated document states the LOCAL / NOT-internet-facing posture, keeping the declared description', async () => {
+    writeFileSync(
+      join(dir, 'described.product.yaml'),
+      'version: "1.0"\nproduct: { id: d, name: Described, description: "Claims, described." }\n',
+      'utf8',
+    );
+    const r = await runOpenapi(['described.product.yaml']);
+    expect(r.ok).toBe(true);
+    // The declared text SURVIVES — the notice is appended, never a replacement. A posture warning
+    // that ate the product's own description would be traded for the thing it is meant to add.
+    expect(r.openapi?.info.description).toContain('Claims, described.');
+    expect(r.openapi?.info.description).toContain(OPENAPI_POSTURE_NOTICE);
+    expect(OPENAPI_POSTURE_NOTICE).toContain('NOT internet-facing');
+  });
+
+  it('states the posture even when the product declares NO description', async () => {
+    // The discrimination control for the arm above: this used to be the branch that emitted no
+    // `description` key at all.
+    writeFileSync(
+      join(dir, 'plain.product.yaml'),
+      'version: "1.0"\nproduct: { id: p, name: Plain }\n',
+      'utf8',
+    );
+    const r = await runOpenapi(['plain.product.yaml']);
+    expect(r.ok).toBe(true);
+    // Asserted against the literal as well as the constant: `toBe(CONSTANT)` alone would pass with
+    // both sides undefined, which is exactly the state this arm exists to refuse.
+    expect(r.openapi?.info.description).toContain('NOT internet-facing');
+    expect(r.openapi?.info.description).toBe(OPENAPI_POSTURE_NOTICE);
   });
 
   it('emits a valid (empty-paths) document for a product doc with no views', async () => {

@@ -4,6 +4,10 @@ This is a tiny, **synthetic** backend that is the platform's **own** forcing fun
 `extensions[]` pack contributing an **`agents` fragment** — not just stores/handlers/tooling/api. It
 is **NOT** a real product pack; those ship as product code in their own repos.
 
+> **LOCAL / trusted posture / NOT internet-facing** — the separate hardening layer (per-tenant
+> sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure. Never put this behind a
+> public address.
+
 The deployment `rayspec.yaml` is **THIN** — `version` + `metadata` + ONE `extensions[]` ref, and
 **zero** base `agents:`. The whole product surface (a `notes` store, a `lookup_note` tool + its
 handler, and the `note_summarizer` agent that references that tool) lives in a `defineExtension` pack

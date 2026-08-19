@@ -28,7 +28,7 @@
  */
 
 import { closeSync, fstatSync, openSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
 import {
   type AgentRegistry,
@@ -82,6 +82,8 @@ import {
   formatDrift,
   forTenant,
   generateProductSql,
+  MIGRATION_LOCK_NAMESPACE,
+  MIGRATION_LOCK_SLOT,
   makeDb,
   migrationsDir,
 } from '@rayspec/db';
@@ -128,6 +130,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
+import postgres from 'postgres';
 import { stringify as stringifyYaml } from 'yaml';
 import { type AgentTracingPosture, observedAgentTracing } from './agent-tracing.js';
 import { BootConfigError } from './boot-config-error.js';
@@ -390,14 +393,20 @@ export interface BootedServer {
    */
   runCleanupNow?: () => Promise<CleanupResult>;
   /**
-   * the erasure control seam — ERASE a tenant's product data + blobs ON DEMAND (GDPR right-to-erasure), through
-   * the platform-generic `eraseTenant` (product rows via the `forTenant` chokepoint; blobs via the
-   * tenant-bound `BlobStore.deleteTenant`). The actual hard-delete is OPERATOR-GATED fail-closed: it
-   * deletes only when `RAYSPEC_ERASURE_ENABLED === 'true'` (resolved at boot) AND `dryRun` is not set;
-   * otherwise it returns a DRY-RUN preview (counts, ZERO deletes). Returns the structured result so an
-   * operator previews before / verifies after. Undefined for an auth-only / no-product boot (a spec with
-   * zero product stores). NOT internet-facing by itself — an operator/ops wrapper triggers it (pre-hardening;
-   * a tenant self-service erasure route is a later, hardening-adjacent decision).
+   * the erasure control seam — ERASE a tenant's product data + core run-journal/task-engine rows + blobs
+   * ON DEMAND (GDPR right-to-erasure), through the platform-generic `eraseTenant` (rows via the
+   * `forTenant` chokepoint; blobs via the tenant-bound `BlobStore.deleteTenant`). The actual hard-delete
+   * is OPERATOR-GATED fail-closed: it deletes only when `RAYSPEC_ERASURE_ENABLED === 'true'` (resolved at
+   * boot) AND `dryRun` is not set; otherwise it returns a DRY-RUN preview (counts, ZERO deletes). Returns
+   * the structured result so an operator previews before / verifies after. Wired on EVERY boot
+   * `assembleServer` produces, because every one of them mounts the agent-run surface
+   * (`packages/compose/api-auth/src/app.ts:214`) and so accumulates that tenant's run header, journal
+   * steps, raw transcript and event journal — what the document declares changes what else there is to
+   * erase, never whether there is anything. It stays OPTIONAL on this type so an embedder that
+   * assembles a `BootedServer` by hand is not forced to supply one, and so the boot banner can still
+   * report the absence rather than assume it. NOT internet-facing by itself — an operator/ops wrapper
+   * triggers it (pre-hardening; a tenant self-service erasure route is a later, hardening-adjacent
+   * decision).
    *
    * `journalScrub: true` selects the softer content-erasure posture: the raw run-journal payload columns
    * (`journal_steps.output`, `conversation_items.payload`) are NULLed while the billing/exactly-once
@@ -1617,7 +1626,84 @@ export function assembleStaticServer(
 }
 
 /**
- * Apply the committed platform migration chain to the target DB via the REAL programmatic migrator.
+ * A migration-chain apply that FAILED, carrying the one fact the migrator's own error omits: WHICH
+ * migrations were pending, in the order the chain would have applied them.
+ *
+ * The migrator names the failing STATEMENT verbatim and carries the Postgres cause (SQLSTATE +
+ * message) — enough to say what went wrong, not enough to say WHERE in the chain. The tag was
+ * previously recoverable only by hand, and only afterwards, by joining
+ * `drizzle.__drizzle_migrations`'s high-water mark against `drizzle/meta/_journal.json`; that
+ * procedure is now run BEFORE the apply, so an operator reads the answer out of the failure instead
+ * of reconstructing it (`migration-failure.db.test.ts` still pins that the RAW migrator does not
+ * name it, which is why this wrapper has to).
+ *
+ * `pendingTags[0]` is the earliest pending migration and therefore the FIRST candidate for the
+ * failure; the whole list ships because the batch is one transaction, so the failure is a property
+ * of the SET rather than of one file — narrowing it further would mean applying migrations one at a
+ * time, which would trade away the whole-chain atomicity that makes the database unchanged after a
+ * failure. The original migrator error is preserved unwrapped as `cause`.
+ */
+export class MigrationChainError extends Error {
+  /** The migrations that had not been applied when this run started, in chain order. */
+  readonly pendingTags: readonly string[];
+  constructor(pendingTags: readonly string[], cause: unknown) {
+    const listed = pendingTags.length > 0 ? pendingTags.join(', ') : '(none — see the cause)';
+    super(
+      `The platform migration chain failed to apply. Pending when this run started, in chain ` +
+        `order: ${listed}. The whole pending set is applied in ONE transaction, so the database is ` +
+        `UNCHANGED — no migration was recorded and no partial DDL survives. Fix the earliest ` +
+        `pending migration listed above and re-run. Underlying error: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      { cause },
+    );
+    this.name = 'MigrationChainError';
+    this.pendingTags = pendingTags;
+  }
+}
+
+/** One entry of the committed `drizzle/meta/_journal.json`, as the migrator reads it. */
+interface MigrationJournalEntry {
+  readonly when: number;
+  readonly tag: string;
+}
+
+/** The option bag `postgres()` accepts, taken from the driver rather than restated here. */
+type PostgresClientOptions = NonNullable<Parameters<typeof postgres>[1]>;
+
+/**
+ * The committed chain's tags in apply order, filtered to those this database has NOT recorded.
+ *
+ * `drizzle.__drizzle_migrations.created_at` holds each applied migration's journal `when`, so the
+ * MAX of that column is the high-water mark the migrator itself skips below. Absence is the clean-DB
+ * case and is not an error: the table does not exist until the migrator's own bootstrap creates it,
+ * so a missing relation (`42P01`), a missing schema (`3F000`) and an empty table all mean the same
+ * thing — nothing is applied yet, everything is pending. Diagnostic only: a failure to read it must
+ * never fail a boot that would otherwise have succeeded, so any other error also degrades to "all
+ * pending" rather than propagating.
+ */
+async function pendingMigrationTags(db: Db): Promise<string[]> {
+  const entries = (
+    JSON.parse(readFileSync(join(migrationsDir(), 'meta', '_journal.json'), 'utf8')) as {
+      entries: MigrationJournalEntry[];
+    }
+  ).entries;
+  let highWater = Number.NEGATIVE_INFINITY;
+  try {
+    const rows = (await db.$client.unsafe(
+      'SELECT max(created_at)::text AS hw FROM drizzle.__drizzle_migrations',
+    )) as unknown as { hw: string | null }[];
+    const hw = rows[0]?.hw;
+    if (hw !== null && hw !== undefined) highWater = Number(hw);
+  } catch {
+    // Clean database (or an unreadable bookkeeping table): treat the whole chain as pending.
+  }
+  return entries.filter((e) => e.when > highWater).map((e) => e.tag);
+}
+
+/**
+ * Apply the committed platform migration chain to the target DB via the REAL programmatic migrator,
+ * serialized against every other runner by a Postgres advisory lock.
  *
  * This exercises the from-clean-DB migration chain: the same chain `drizzle-kit migrate` / the
  * `gate:migrate-clean` forcing-function apply. The migrator reads `drizzle/meta/_journal.json` + the
@@ -1630,13 +1716,60 @@ export function assembleStaticServer(
  * re-run against an already-migrated DB is a no-op. Bootstraps a CLEAN empty DB AND no-ops
  * on an up-to-date one, so the boot is safe to run repeatedly.
  *
- * Concurrency: the migrator takes NO advisory lock. Two boots racing against the SAME fresh
- * empty DB would both try to apply 0000's non-`IF NOT EXISTS` CREATEs — one wins, the other's
- * transaction aborts cleanly (full rollback, no corruption). A LOCAL single-node boot does not hit
- * this; a future multi-replica deploy would gate migrations on a single runner.
+ * CONCURRENCY. The migrator takes no lock of its own, and its first two statements —
+ * `CREATE SCHEMA IF NOT EXISTS "drizzle"` and `CREATE TABLE IF NOT EXISTS
+ * "drizzle"."__drizzle_migrations"` — are not concurrency-safe: `IF NOT EXISTS` checks the catalogue
+ * and then creates, so two runners started together against a FRESH database both see nothing and
+ * the loser dies on a duplicate-object error before it ever reaches the chain. That is exactly the
+ * shape a deploy that fans out on a first bring-up produces, and it is the one case where "safe to
+ * run repeatedly" would otherwise be false. Serialized, the loser waits, then finds the chain
+ * applied and no-ops. This is the SAME lock `rayspec provision-tenant` used to take around its own
+ * call into here; that outer wrapper is gone, because two sessions of one process taking the same
+ * advisory key would self-deadlock — the key is single-sourced in `@rayspec/db`
+ * (`MIGRATION_LOCK_NAMESPACE`/`MIGRATION_LOCK_SLOT`) and taken in exactly one place: here.
+ *
+ * WHY A DEDICATED CONNECTION, and not `db.$client.begin(…)` around the apply. A transaction-scoped
+ * lock on a POOLED connection holds that connection until the callback returns, while `migrate()`
+ * needs a second one — so the pair deadlocks on any handle whose pool is sized 1. Measured on
+ * Postgres 16.14: pool 4 applies in ~540ms, pool 1 never completes (cut off at 20s). Reserving the
+ * pooled connection and migrating on it instead does not work either — drizzle 0.45.2's postgres-js
+ * driver reads `client.options`, which a `ReservedSql` does not carry (`TypeError: Cannot read
+ * properties of undefined (reading 'parsers')`). So the lock runs on a connection of its own, built
+ * from the same options, and touches the pool not at all: no pool size can deadlock it.
+ *
+ * A SESSION-scoped lock rather than a transaction-scoped one, for the same reason — there is no
+ * enclosing transaction to scope it to. It is released in a `finally` by closing the connection,
+ * and by the connection dying, so a boot killed mid-migration (SIGTERM before the server listens)
+ * never leaves the next boot waiting. `pg_advisory_lock`, not `pg_try_advisory_lock`: a second
+ * runner must WAIT and then no-op on the high-water mark, never fail.
+ *
+ * DIAGNOSABILITY. The pending tags are read BEFORE the apply and a failure is rethrown as a
+ * `MigrationChainError` naming them in chain order. Reading them cannot fail the boot: the probe
+ * degrades to "everything is pending" rather than throwing (see `pendingMigrationTags`).
  */
 export async function applyMigrations(db: Db): Promise<void> {
-  await migrate(db, { migrationsFolder: migrationsDir() });
+  const pending = await pendingMigrationTags(db);
+  // Built from the pool's own RESOLVED options so it targets the same database, with the same
+  // credentials and the same per-connection settings (`search_path` for a schema-scoped handle, TLS,
+  // …), then capped at one connection: this handle exists to hold one lock and nothing else. Feeding
+  // the parsed options back in is postgres-js's own round trip and the cast is only about the TYPES —
+  // `Options` describes what a CALLER may pass, while `sql.options` is the normalized form, where
+  // `host`/`port` have become arrays. Verified by connecting one and asking it: `current_database()`
+  // came back equal to `sql.options.database`.
+  const lockClient = postgres({
+    ...db.$client.options,
+    max: 1,
+    onnotice: () => {},
+  } as unknown as PostgresClientOptions);
+  try {
+    await lockClient`SELECT pg_advisory_lock(${MIGRATION_LOCK_NAMESPACE}::int4, ${MIGRATION_LOCK_SLOT}::int4)`;
+    await migrate(db, { migrationsFolder: migrationsDir() });
+  } catch (err) {
+    throw new MigrationChainError(pending, err);
+  } finally {
+    // Closing the session releases the advisory lock; `end()` waits out the in-flight query first.
+    await lockClient.end({ timeout: 5 });
+  }
 }
 
 /**
@@ -2074,7 +2207,9 @@ export async function assembleServer(
   let fireCronNow: BootedServer['fireCronNow'];
   // M1 control seam: the on-demand cleanup delegate (undefined for an auth-only / no durable-worker boot).
   let runCleanupNow: BootedServer['runCleanupNow'];
-  // the erasure control seam: the on-demand tenant data-erasure delegate (undefined for an auth-only / no-product boot).
+  // the erasure control seam: the on-demand tenant data-erasure delegate. Every branch below assigns
+  // it — the two deploy paths propagate the one their composition built, and the no-document branch
+  // builds its own — because every boot mounts the agent-run surface and so holds erasable run history.
   let eraseTenantNow: BootedServer['eraseTenantNow'];
 
   // Dispatch the injected spec by its PROFILE through the unified `parseAnySpec` — a product-profile
@@ -2152,6 +2287,30 @@ export async function assembleServer(
   } else {
     // Auth-only boot (the platform main line). No engine, no declared routes, no durable worker.
     app = createAuthApp(baseDeps);
+    // …but the agent-run surface IS mounted — `createAuthApp` registers it unconditionally
+    // (`packages/compose/api-auth/src/app.ts:214`), and `serve.ts` calls this document-free shape the
+    // default — so this boot accumulates its tenants' `runs`, `journal_steps`, `conversation_items`
+    // and `run_events` exactly like the deploy paths do, and needs the same operator erasure seam.
+    // There is no product half here at all: no document means no declared stores, and no blob backend
+    // either (one is built only for a document that declares a stream route — `deployDeclaredSpec`,
+    // line 2643 below), so this passes an EMPTY product table map and an empty store list and
+    // `eraseTenant` runs its core half alone. Wiring it does NOT arm it — `config.erasureEnabled` still
+    // decides, and unset means every call is a counts-only preview
+    // (`auth-only-erasure-boot.db.test.ts` arm 7).
+    eraseTenantNow = (
+      tenantId: string,
+      eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
+    ): Promise<EraseResult> =>
+      eraseTenant({
+        db,
+        tenantId,
+        productTables: new Map(),
+        audit: baseDeps.auditStore,
+        enabled: config.erasureEnabled,
+        dryRun: eraseOpts?.dryRun ?? false,
+        journalScrub: eraseOpts?.journalScrub ?? false,
+        stores: [],
+      });
   }
 
   // The deployed spec's declared static frontend mounts. Only a backend-profile (`rayspec`) doc carries
@@ -3375,30 +3534,51 @@ async function deployDeclaredSpec(
   // ── wire the on-demand tenant DATA-ERASURE control seam ──────────────────────────────────────
   // Threads the deployed product tables + stores (for FK-safe ordering), the wired blob backend (built
   // per-target-tenant via blobFactory), the out-of-band AuditStore, and the resolved operator gate into
-  // the platform-generic `eraseTenant`. Present only when the spec declares product stores (an
-  // auth-only / store-less deploy has nothing to erase → the seam stays undefined). NOT mounted on the
-  // public app — the operator triggers it (pre-hardening). The gate is OPERATOR-only (config.erasureEnabled);
-  // unset ⇒ every call is a DRY-RUN preview (counts, ZERO deletes).
-  let eraseTenantNow: BootedServer['eraseTenantNow'];
-  if (specStores.length > 0) {
-    eraseTenantNow = (
-      tenantId: string,
-      eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
-    ): Promise<EraseResult> =>
-      eraseTenant({
-        db,
-        tenantId,
-        productTables,
-        // The blob handle is built bound to the TARGET tenant; eraseTenant calls deleteTenant(tenantId)
-        // with the SAME id (the bound-tenant equality holds). Absent when no blob backend was wired.
-        ...(blobFactory ? { blob: blobFactory(tenantId) } : {}),
-        audit: baseDeps.auditStore,
-        enabled: config.erasureEnabled,
-        dryRun: eraseOpts?.dryRun ?? false,
-        journalScrub: eraseOpts?.journalScrub ?? false,
-        stores: specStores,
-      });
-  }
+  // the platform-generic `eraseTenant`. NOT mounted on the public app — the operator triggers it
+  // (pre-hardening). The gate is OPERATOR-only (config.erasureEnabled); unset ⇒ every call is a DRY-RUN
+  // preview (counts, ZERO deletes).
+  //
+  // WHY IT IS WIRED UNCONDITIONALLY. It used to be built only for a document that declared product
+  // `stores:`, then also for one that declared a `workforce:` — each widening chased the shape whose
+  // data had just been noticed. The shape underneath all of them is simpler: `createAuthApp` registers
+  // the agent-run surface on EVERY boot (`packages/compose/api-auth/src/app.ts:214`), so
+  // `POST /v1/agents/:id/runs` is mounted whether the document declares a store, a workforce, only
+  // `agents:`, or nothing at all — and every run through it writes that tenant's `runs` header, its
+  // `journal_steps` (raw model output), its `conversation_items` (the raw PII transcript) and its
+  // `run_events` journal. A deployment therefore holds erasable subject content regardless of what its
+  // document declares, and nothing in production code deletes an `orgs` row, so the cascade on those
+  // tables is a net nobody pulls. Any condition here is a shape this seam is missing from.
+  //
+  // `eraseTenant` needs nothing from the document to do the core half: it is derived from
+  // `CORE_TENANT_SCOPED_TABLES`, which carries the run-history tables, the workflow journal and the nine
+  // task-engine tables, and every delete is the same `forTenant` tenant-scoped one. The store list
+  // contributes ONLY the FK-safe ordering of the PRODUCT half; empty, that half erases zero rows and
+  // reports `tables: {}` while the core half does the work.
+  //
+  // WIRING IT IS NOT ARMING IT. A defined seam erases nothing: the destructive act stays gated on
+  // `config.erasureEnabled` — `RAYSPEC_ERASURE_ENABLED` resolved at THIS composition root, never a spec
+  // flag — and an unset gate makes every call a DRY-RUN preview (counts, ZERO deletes) with
+  // `dryRunReason:'gate-disabled'`. That is asserted on ground truth for this shape in
+  // `auth-only-erasure-boot.db.test.ts` arm 4 and for a store-less workforce in
+  // `workforce-erasure-boot.db.test.ts` arm 4. NOT mounted on the public app either — the operator
+  // triggers it out of band.
+  const eraseTenantNow: BootedServer['eraseTenantNow'] = (
+    tenantId: string,
+    eraseOpts?: { dryRun?: boolean; journalScrub?: boolean },
+  ): Promise<EraseResult> =>
+    eraseTenant({
+      db,
+      tenantId,
+      productTables,
+      // The blob handle is built bound to the TARGET tenant; eraseTenant calls deleteTenant(tenantId)
+      // with the SAME id (the bound-tenant equality holds). Absent when no blob backend was wired.
+      ...(blobFactory ? { blob: blobFactory(tenantId) } : {}),
+      audit: baseDeps.auditStore,
+      enabled: config.erasureEnabled,
+      dryRun: eraseOpts?.dryRun ?? false,
+      journalScrub: eraseOpts?.journalScrub ?? false,
+      stores: specStores,
+    });
 
   return {
     app: result.app,
@@ -3439,6 +3619,7 @@ async function deployDeclaredSpec(
     ...(durableExecutorIdentity ? { durableExecutorIdentity } : {}),
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
-    ...(eraseTenantNow ? { eraseTenantNow } : {}),
+    // Unconditional, unlike its siblings above: this seam is built for every document shape.
+    eraseTenantNow,
   };
 }

@@ -33,6 +33,7 @@ export {
   type TurnSignalFact,
 } from './context.js';
 export {
+  ApprovalAlreadyResolvedError,
   ApprovalEscalationTargetMissingError,
   DelegationTargetInvalidError,
   EscalationTargetMissingError,

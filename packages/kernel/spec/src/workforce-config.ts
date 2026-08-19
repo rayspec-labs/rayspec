@@ -12,8 +12,14 @@
  * schema, so the twin can never drift silently.
  */
 import type { DeclaredReviewRule } from '@rayspec/core';
-import { durationToMs, type WorkforceRoleName, type WorkforceSpec } from './workforce-grammar.js';
+import {
+  durationToMs,
+  type WorkforceBudgetWindowName,
+  type WorkforceRoleName,
+  type WorkforceSpec,
+} from './workforce-grammar.js';
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export interface WorkforceEmployeeConfig {
   readonly id: string;
   readonly agent: string;
@@ -25,9 +31,11 @@ export interface WorkforceEmployeeConfig {
    * the same rule the lint's cycle/reachability checks certified. Null only for the orchestrator.
    */
   readonly reportsTo: string | null;
-  readonly capabilities: readonly string[];
+  /** The seat's declared policy labels — matched for equality by review/approval rules. */
+  readonly labels: readonly string[];
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export interface WorkforceConfig {
   readonly id: string;
   readonly name: string;
@@ -44,19 +52,25 @@ export interface WorkforceConfig {
   >;
   readonly teams: ReadonlyMap<
     string,
-    { readonly lead: string; readonly members: readonly string[]; readonly maxSize: number }
+    {
+      readonly lead: string;
+      readonly members: readonly string[];
+      /** Null when the declaration omits the optional cap — no runtime path reads it either way. */
+      readonly maxSize: number | null;
+    }
   >;
   /** The declared review rules, in declaration order — directly feedable to DeclaredReviewPolicy. */
   readonly reviewPolicies: readonly DeclaredReviewRule[];
-  readonly approvals: readonly {
+  readonly approvalPolicies: readonly {
     readonly id: string;
-    readonly capabilities: readonly string[];
+    readonly labels: readonly string[];
     readonly approver: 'user';
     readonly timeoutMs: number;
     readonly onTimeout: 'fail' | 'escalate';
   }[];
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig {
   const managerOf = new Map(workforce.departments.map((d) => [d.id, d.manager]));
   const employees = new Map<string, WorkforceEmployeeConfig>(
@@ -74,7 +88,7 @@ export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig
           role: employee.role,
           department: employee.department ?? null,
           reportsTo,
-          capabilities: employee.capabilities,
+          labels: employee.labels,
         },
       ];
     }),
@@ -91,7 +105,10 @@ export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig
       ]),
     ),
     teams: new Map(
-      workforce.teams.map((t) => [t.id, { lead: t.lead, members: t.members, maxSize: t.maxSize }]),
+      workforce.teams.map((t) => [
+        t.id,
+        { lead: t.lead, members: t.members, maxSize: t.maxSize ?? null },
+      ]),
     ),
     reviewPolicies: workforce.reviewPolicies.map((policy) => ({
       id: policy.id,
@@ -106,16 +123,17 @@ export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig
         ...(policy.requireWhen.confidenceBelow !== undefined
           ? { confidenceBelow: policy.requireWhen.confidenceBelow }
           : {}),
-        ...(policy.requireWhen.capabilities !== undefined
-          ? { capabilities: policy.requireWhen.capabilities }
-          : {}),
+        ...(policy.requireWhen.labels !== undefined ? { labels: policy.requireWhen.labels } : {}),
       },
       onReject: policy.onReject,
-      maxRounds: policy.maxRounds,
+      // The DECLARED ceiling (`maxReviewRounds`) feeds the engine's per-review-binding round
+      // counter, which is called `maxRounds` on `DeclaredReviewRule`/`ReviewDecision` and on the
+      // engine's review binding. Two scopes, two nouns; this line is the one place they meet.
+      maxRounds: policy.maxReviewRounds,
     })),
-    approvals: workforce.approvals.map((approval) => ({
+    approvalPolicies: workforce.approvalPolicies.map((approval) => ({
       id: approval.id,
-      capabilities: approval.requireWhen.capabilities,
+      labels: approval.requireWhen.labels,
       approver: approval.approver,
       timeoutMs: durationToMs(approval.timeout),
       onTimeout: approval.onTimeout,
@@ -127,10 +145,17 @@ export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig
  * The engine's declared-budgets INPUT shape (structural twin — see the module header). Absent
  * tiers stay ABSENT rather than defaulted: the engine owns its own defaults, and a derivation that
  * invented values would be a second budget model.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export interface DeclaredEngineBudgets {
-  readonly workforce?: { readonly usd: number; readonly window?: 'hourly' | 'daily' | 'weekly' };
+  readonly workforce?: {
+    readonly usd: number;
+    readonly turns?: number;
+    readonly window?: WorkforceBudgetWindowName;
+  };
   readonly task?: { readonly usd: number; readonly turns: number };
+  /** The ROOT ledger scope's ceilings — one submitted goal's whole task tree, un-windowed. */
+  readonly subtree?: { readonly usd?: number; readonly turns?: number };
   readonly delegation?: { readonly maxDepth?: number; readonly maxPerTask?: number };
   readonly departments?: Readonly<
     Record<
@@ -138,7 +163,7 @@ export interface DeclaredEngineBudgets {
       {
         readonly usd?: number;
         readonly turns?: number;
-        readonly window?: 'hourly' | 'daily' | 'weekly';
+        readonly window?: WorkforceBudgetWindowName;
         readonly maxConcurrentWorkers?: number;
       }
     >
@@ -158,6 +183,7 @@ export interface DeclaredEngineBudgets {
  * the task tier is present, and the lint requires the task tier whenever ANY usd ceiling exists,
  * so a derived object can never trip the engine's own coherence refusal (a usd ceiling with a
  * zero estimate). The drift test on the engine side proves exactly that.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export function deriveWorkforceBudgets(workforce: WorkforceSpec): DeclaredEngineBudgets {
   const budgets = workforce.budgets;
@@ -165,13 +191,14 @@ export function deriveWorkforceBudgets(workforce: WorkforceSpec): DeclaredEngine
   const out: {
     workforce?: DeclaredEngineBudgets['workforce'];
     task?: DeclaredEngineBudgets['task'];
+    subtree?: DeclaredEngineBudgets['subtree'];
     delegation?: DeclaredEngineBudgets['delegation'];
     departments?: Record<
       string,
       {
         usd?: number;
         turns?: number;
-        window?: 'hourly' | 'daily' | 'weekly';
+        window?: WorkforceBudgetWindowName;
         maxConcurrentWorkers?: number;
       }
     >;
@@ -187,35 +214,50 @@ export function deriveWorkforceBudgets(workforce: WorkforceSpec): DeclaredEngine
   if (budgets?.workforce !== undefined) {
     out.workforce = {
       usd: budgets.workforce.usd,
+      ...(budgets.workforce.turns !== undefined ? { turns: budgets.workforce.turns } : {}),
       ...(budgets.workforce.window !== undefined ? { window: budgets.workforce.window } : {}),
     };
   }
   if (budgets?.task !== undefined) {
     out.task = { usd: budgets.task.usd, turns: budgets.task.turns };
   }
-  if (budgets?.delegation !== undefined) {
+  if (budgets?.subtree !== undefined) {
+    out.subtree = {
+      ...(budgets.subtree.usd !== undefined ? { usd: budgets.subtree.usd } : {}),
+      ...(budgets.subtree.turns !== undefined ? { turns: budgets.subtree.turns } : {}),
+    };
+  }
+  // AUTHORED under `execution:` (a structural ceiling, not money); DERIVED into the engine's own
+  // top-level `delegation` slot, which is unchanged. Only the authored placement moved.
+  if (execution?.delegation !== undefined) {
     out.delegation = {
-      ...(budgets.delegation.maxDepth !== undefined
-        ? { maxDepth: budgets.delegation.maxDepth }
+      ...(execution.delegation.maxDepth !== undefined
+        ? { maxDepth: execution.delegation.maxDepth }
         : {}),
-      ...(budgets.delegation.maxPerTask !== undefined
-        ? { maxPerTask: budgets.delegation.maxPerTask }
+      ...(execution.delegation.maxPerTask !== undefined
+        ? { maxPerTask: execution.delegation.maxPerTask }
         : {}),
     };
   }
-  const departmentEntries = workforce.departments.filter((d) => d.budgets !== undefined);
+  // A department contributes an engine entry when it declares EITHER block — the two authored
+  // objects (`budgets:` money, `execution:` slots) collapse into the engine's one per-department
+  // record, exactly as before the split.
+  const departmentEntries = workforce.departments.filter(
+    (d) => d.budgets !== undefined || d.execution !== undefined,
+  );
   if (departmentEntries.length > 0) {
     out.departments = Object.fromEntries(
       departmentEntries.map((d) => {
-        const b = d.budgets as NonNullable<typeof d.budgets>;
+        const b = d.budgets;
+        const e = d.execution;
         return [
           d.id,
           {
-            ...(b.usd !== undefined ? { usd: b.usd } : {}),
-            ...(b.turns !== undefined ? { turns: b.turns } : {}),
-            ...(b.window !== undefined ? { window: b.window } : {}),
-            ...(b.maxConcurrentWorkers !== undefined
-              ? { maxConcurrentWorkers: b.maxConcurrentWorkers }
+            ...(b?.usd !== undefined ? { usd: b.usd } : {}),
+            ...(b?.turns !== undefined ? { turns: b.turns } : {}),
+            ...(b?.window !== undefined ? { window: b.window } : {}),
+            ...(e?.maxConcurrentWorkers !== undefined
+              ? { maxConcurrentWorkers: e.maxConcurrentWorkers }
               : {}),
           },
         ];

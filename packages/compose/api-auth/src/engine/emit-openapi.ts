@@ -9,11 +9,14 @@
  * `createAuthApp` serves at `GET /v1/openapi.json` (engine-only — a product-empty deploy has no
  * declared routes, so the served document carries an EMPTY `paths` object).
  *
- * HONEST SCOPE (do not oversell): the platform's STATIC routes (auth/orgs/oauth/runs)
- * are themselves registered raw (`app.post(...)`, not `createRoute`), so they too are absent from any
- * OpenAPI document today — this module documents the DECLARED routes only, and that is exactly what
- * scoped. A future slice can document the static surface by porting it to `createRoute` (or by
- * an analogous hand-built contribution); that is NOT done here.
+ * HONEST SCOPE (do not oversell): the platform's STATIC routes are themselves registered raw
+ * (`app.post(...)`, not `createRoute`), so they contribute nothing to a document on their own.
+ * THIS module documents the DECLARED routes only. ONE static section is nevertheless described:
+ * `/v1/workforce/*`, by the "analogous hand-built contribution" this paragraph used to name as
+ * future work — `emit-workforce-openapi.ts`, which DECORATES this module's output on its way to
+ * `GET /v1/openapi.json` rather than building a second document. The remaining static surface
+ * (auth / orgs / oauth / runs / subscribe / triggers / reprocess) is STILL absent from every
+ * OpenAPI document, and that is not closed here.
  *
  * PRODUCT-AGNOSTIC: every path, parameter, and schema is DERIVED from the spec + the store columns at
  * runtime — no product route, store, or column name appears in platform source. The emission for
@@ -41,19 +44,117 @@ import { resolveResponseProjection } from './store-projection.js';
 import { CONTROL_KEYS } from './store-query.js';
 import { createBodySchema, NUMERIC_WIRE_RE, updateBodySchema } from './store-validation.js';
 
-/** A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency). */
+/**
+ * THE POSTURE NOTICE both OpenAPI documents carry in `info.description`.
+ *
+ * Two documents describe this runtime and they are built by different code: the one written to a
+ * file by `rayspec openapi` (`@rayspec/cli` `openapi.ts`), and the one THIS module builds, which
+ * `createAuthApp` serves at `GET /v1/openapi.json` (`app.ts`, registered on the engine path). The
+ * served one travels furthest: the generated artifact requires someone to have run the CLI, while
+ * this one is handed to any client of a running deployment that asks — and the read is PUBLIC, so
+ * it is handed over without a credential (`declared-routes.test.ts`, 'the openapi.json read is
+ * PUBLIC'). A consumer holding only that response — a client generator, an API console, a
+ * downstream integrator — has no other copy of this server's posture: not the README, not
+ * SECURITY.md, and not the boot banner, which says the same thing at runtime (`@rayspec/server`
+ * `banner.ts`, the `bootBanner` title line) but only to whoever watched the process start. A
+ * description assembled only from `metadata.description` therefore reached the one audience with no
+ * other copy of the warning, and reached it silently.
+ *
+ * TWO literals, and a test that holds them byte-identical. This paragraph used to say "ONE literal,
+ * deliberately" and forbid a second copy in the CLI. That was FALSE THE DAY IT MERGED: #492 and #493
+ * landed the two copies independently, so the file documented an invariant it did not have. The
+ * copies are `packages/compose/api-auth/src/engine/emit-openapi.ts` (this one, served at
+ * `GET /v1/openapi.json`) and `packages/app/cli/src/openapi.ts` (written to a file by
+ * `rayspec openapi`).
+ *
+ * They are not ONE export because `@rayspec/cli` cannot cheaply reach this package — measured, not
+ * assumed:
+ *   - there is no dependency edge today: importing `@rayspec/api-auth` from `packages/app/cli`
+ *     fails `ERR_MODULE_NOT_FOUND`;
+ *   - adding one would rewrite the `importers` block of `pnpm-lock.yaml`, which `gate:sbom-fresh`
+ *     hashes — forcing a regeneration of `docs/dependency-sbom.json`, the factual backing of
+ *     `THIRD-PARTY-NOTICES.md`;
+ *   - and `openapi.ts` is imported STATICALLY by the CLI entrypoint, so every `rayspec` invocation
+ *     would pay the graph: `@rayspec/spec` + `@rayspec/views-runtime`, which is all that command
+ *     loads today, is 128 modules / ~0.6 s; this package's barrel is 810 modules / ~2.4 s, and
+ *     routing through `@rayspec/server` instead (which re-exports the product-boot graph) is 2261
+ *     modules / ~4.1 s. A four-line string constant does not justify any of that on `rayspec init`.
+ *
+ * So the copies stay, and the DRIFT is what is closed instead: `emit-openapi.test.ts` and
+ * `openapi.test.ts` each byte-pin the value AND read the other file off disk to assert the two
+ * declarations are byte-identical.
+ *
+ * THE PIN IS MIRRORED BECAUSE OF THE BUILD CACHE, not because of CI's lanes — both packages sit in
+ * the SAME lane (`ci.yml` excludes each from lane 1 and includes each in lane 2), so a lane argument
+ * would be false. The real reason is that `turbo.json` declares NO `inputs` for `test`, so a task's
+ * hash covers its own package plus its dependencies — and a file read from OUTSIDE that set is
+ * invisible to it. `@rayspec/cli` depends on `@rayspec/api-auth` (via `@rayspec/server`); nothing
+ * runs the other way. Measured with `turbo run test --dry-run=json`:
+ *
+ *     SOFTEN THE CLI COPY        cli#test  e3a679e0 -> 09a325ae   MOVED
+ *                                api-auth#test  6c934bfb -> 6c934bfb   UNCHANGED
+ *     SOFTEN THIS COPY           api-auth#test  6c934bfb -> 9addba01   MOVED
+ *                                cli#test  e3a679e0 -> e343ed97   MOVED (via ^build)
+ *
+ * So the asymmetry is the point: an edit HERE moves both hashes, but an edit to the CLI copy leaves
+ * this package's hash untouched — a cached PASS would replay and the arm below would never run. The
+ * mirror in `openapi.test.ts` is the only arm whose OWN hash moves for that direction, which is what
+ * makes it load-bearing rather than decorative. Softening either sentence is red; verified by
+ * mutating each copy in turn.
+ *
+ * Appended, never substituted: a declared description is the product's own and survives whole.
+ * `emit-openapi.test.ts` pins both spec branches (declared description, and the branch that used to
+ * emit no `description` key at all), and `declared-routes.test.ts` pins the notice on the SERVED
+ * response body rather than on the builder's return value.
+ *
+ * Unconditional by construction: no env var, request header, query parameter or flag is read on the
+ * way to emitting it, so there is no supported way to serve this document without the notice.
+ */
+export const OPENAPI_POSTURE_NOTICE =
+  'LOCAL / trusted posture / NOT internet-facing — this API is served by a LOCAL, single-node, ' +
+  'pre-external-hardening RaySpec deployment. The separate hardening layer (per-tenant sandbox, ' +
+  'RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put ' +
+  'this behind a public address.';
+
+/**
+ * A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency).
+ *
+ * `tags` and `components` are OPTIONAL and this module never emits either: `buildDeclaredRoutesOpenApi`
+ * returns a document with neither key, which is what keeps its output byte-identical to before they
+ * existed (`emit-openapi-projection.test.ts`, the byte-identity arm). They are declared here because
+ * the PLATFORM section added by `emit-workforce-openapi.ts` — which decorates THIS document on its way
+ * to `GET /v1/openapi.json` — needs both: a tag to carry the section's experimental marking, and a
+ * component to hold the one shared error-envelope schema its ~90 error responses `$ref`.
+ */
 export interface OpenApiDocument {
   openapi: '3.1.0';
   info: { title: string; version: string; description?: string };
+  tags?: OpenApiTag[];
   paths: Record<string, OpenApiPathItem>;
+  components?: { schemas: Record<string, unknown> };
+}
+
+/**
+ * One top-level tag. The open extension member exists for the `x-`-prefixed specification
+ * extensions OpenAPI 3.1 allows on any object — the workforce section marks itself experimental
+ * that way.
+ */
+export interface OpenApiTag {
+  name: string;
+  description?: string;
+  [extension: `x-${string}`]: unknown;
 }
 
 /** One OpenAPI path item: a map of (lowercase) HTTP method → operation. */
-type OpenApiPathItem = Record<string, OpenApiOperation>;
+export type OpenApiPathItem = Record<string, OpenApiOperation>;
 
 /** One OpenAPI operation (the subset we populate). */
-interface OpenApiOperation {
+export interface OpenApiOperation {
   summary: string;
+  /** Section membership. Absent on a declared-route operation; the workforce section sets it. */
+  tags?: string[];
+  /** The `x-`-prefixed specification extensions OpenAPI 3.1 allows on an operation. */
+  [extension: `x-${string}`]: unknown;
   /**
    * Optional operation prose. Emitted ONLY on a store operation whose route carries a NON-EMPTY
    * response projection, where it states the request/response NAMING SPLIT explicitly (query/path
@@ -77,7 +178,7 @@ interface OpenApiOperation {
  * `list` filters + order/after/limit), or a `header` param (the `create` `Idempotency-Key`).
  * `required` defaults to false for the query/header params (all optional); path params set it `true`.
  */
-interface OpenApiParameter {
+export interface OpenApiParameter {
   name: string;
   in: 'path' | 'query' | 'header';
   required?: boolean;
@@ -85,16 +186,29 @@ interface OpenApiParameter {
   schema: Record<string, unknown>;
 }
 
-/** A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay/Retry-After). */
-interface OpenApiHeader {
+/**
+ * A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay/Retry-After —
+ * and, on the workforce section, `X-Experimental`). `schema` is an open JSON-Schema fragment rather
+ * than a fixed `{type:'string'}` so a header whose value is FIXED can say so with `const`, which is
+ * what lets a client generator emit the constant instead of a free string.
+ */
+export interface OpenApiHeader {
   description: string;
-  schema: { type: 'string' };
+  schema: Record<string, unknown>;
 }
 
-interface OpenApiResponse {
+/**
+ * One documented response. `content` is keyed by media type: every declared-route response is
+ * `application/json`, and the workforce section's journal-replay route is `text/event-stream` —
+ * described as the stream it is rather than forced into a JSON shape it does not have.
+ */
+export interface OpenApiResponse {
   description: string;
   headers?: Record<string, OpenApiHeader>;
-  content?: { 'application/json': { schema: Record<string, unknown> } };
+  content?: {
+    'application/json'?: { schema: Record<string, unknown> };
+    'text/event-stream'?: { schema: Record<string, unknown> };
+  };
 }
 
 /**
@@ -938,7 +1052,14 @@ export function buildDeclaredRoutesOpenApi(spec: RaySpec): OpenApiDocument {
     info: {
       title: spec.metadata.name,
       version: spec.version,
-      ...(spec.metadata.description ? { description: spec.metadata.description } : {}),
+      // The posture notice is UNCONDITIONAL — it was the branch with NO declared description that
+      // emitted no `description` key at all, so the document carrying the least context was also
+      // the one carrying no warning. The declared text, when there is one, comes first and survives
+      // whole. Still product-agnostic: the notice is a fixed platform string, derived from no
+      // product name, store or column, so the emission stays a pure function of the spec.
+      description: spec.metadata.description
+        ? `${spec.metadata.description}\n\n${OPENAPI_POSTURE_NOTICE}`
+        : OPENAPI_POSTURE_NOTICE,
     },
     paths,
   };

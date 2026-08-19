@@ -19,12 +19,23 @@
  * TENANT RECONCILIATION lives here, not in the route: tasks must land under the deployment task
  * tenant — the only tenant the dispatcher serves — so a foreign request tenant or an unknown
  * workforce id yields `not_found` (the route's uniform 404), mirroring the manual-trigger seam.
+ *
+ * OPERATOR ADMISSION CONTROL lives here too, and for the same reason it is not in the route: it has
+ * to be in the SAME transaction as the inserts to mean anything. A paused or halted workforce
+ * admits no new roots — see the `assertWorkforceAcceptsWork` call below, which is this
+ * transaction's first statement.
  */
 import type { WorkforceGoalIntake, WorkforceGoalOutcome } from '@rayspec/api-auth';
 import type { ExecutionPlan, OrchestrationStrategy } from '@rayspec/core';
+import { SEAM_MAX_PLAN_STEPS } from '@rayspec/core';
 import { type Db, forTenant } from '@rayspec/db';
 import type { WorkforceConfig } from '@rayspec/spec';
-import { createRootTask, MAX_TASK_DEPENDENCIES, MAX_TASK_TITLE_CHARS } from '@rayspec/tasks';
+import {
+  assertWorkforceAcceptsWork,
+  createRootTask,
+  MAX_TASK_DEPENDENCIES,
+  MAX_TASK_TITLE_CHARS,
+} from '@rayspec/tasks';
 
 export interface WorkforceGoalIntakeDeps {
   /** The WORKER pool handle (never the HTTP pool) — the same pool the dispatcher runs on. */
@@ -47,6 +58,16 @@ export interface WorkforceGoalIntakeDeps {
  */
 function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
   if (plan.steps.length === 0) return 'the plan carries no steps';
+  // A plan is created as sibling roots inside ONE transaction, so an unbounded plan is an unbounded
+  // write from a single submitted goal — the one way this seam can cost more than the goal that
+  // asked for it. The ceiling is checked FIRST so an oversized plan is refused before the per-step
+  // walk, and it is the seam kit's own constant so an out-of-tree strategy can self-check against
+  // the same number the intake enforces. Real decomposition past this width belongs to the
+  // orchestrator's own turns via `delegate_task`, where each new task passes the dispatch boundary
+  // and draws on its own budget.
+  if (plan.steps.length > SEAM_MAX_PLAN_STEPS) {
+    return `the plan carries ${plan.steps.length} steps (the bound is ${SEAM_MAX_PLAN_STEPS})`;
+  }
   for (const [index, step] of plan.steps.entries()) {
     const employee = config.employees.get(step.owner);
     if (!employee) {
@@ -102,6 +123,23 @@ export function buildWorkforceGoalIntake(deps: WorkforceGoalIntakeDeps): Workfor
       // inside the engine sees them. A throw anywhere aborts everything — zero rows.
       const tdb = forTenant(deps.db, deps.tenantId);
       const created = await tdb.transaction(async (tx) => {
+        // OPERATOR CONTROL, FIRST STATEMENT IN THE TRANSACTION. A paused workforce (a halt pauses
+        // too) admits no new roots: the reserve pass and `#claimTurn` already stop a root from
+        // RUNNING, but neither stops one from being CREATED, and a root created behind an
+        // operator's back makes `haltWorkforce`'s affected count untrue and starts work on resume
+        // that the operator believed they had stopped.
+        //
+        // POSITION IS LOAD-BEARING, both ways. It is inside the transaction so the `paused` read
+        // and the inserts are one atomic unit under the runtime row's lock — the refusal cannot be
+        // overtaken by a pause that commits mid-plan, and a submission that wins the race commits
+        // BEFORE that pause, so a halt's roots scan still sees it. And it is before the LOOP, not
+        // inside it, so a refusal never depends on the rollback to undo a partly-written plan.
+        // `assertWorkforceAcceptsWork` carries the two-case argument in full.
+        //
+        // It also fixes this transaction's lock order at `workforce_runtime` -> `workforce_tasks`,
+        // the documented rank (task-scheduler.ts names this call site as the fourth composite
+        // runtime+tasks transaction, and the only one outside that file).
+        await assertWorkforceAcceptsWork(tx, deps.config.id);
         const taskIds: string[] = [];
         const tasks: { taskId: string; owner: string; title: string }[] = [];
         for (const step of plan.steps) {
@@ -119,7 +157,10 @@ export function buildWorkforceGoalIntake(deps: WorkforceGoalIntakeDeps): Workfor
             ...(input.priority !== undefined ? { priority: input.priority } : {}),
           });
           taskIds.push(task.taskId);
-          tasks.push({ taskId: task.taskId, owner: task.owner, title: task.title });
+          // The DECLARED title, not the row read-back: `createRootTask` stores exactly `step.title`
+          // (validated non-empty above), and the column is nullable only so erasure can scrub it —
+          // a task created one statement ago has nothing erased.
+          tasks.push({ taskId: task.taskId, owner: task.owner, title: step.title });
         }
         return tasks;
       });

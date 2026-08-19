@@ -27,6 +27,8 @@ import {
   windowStartFor,
 } from '@rayspec/tasks';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { ERASED_CONTENT } from './prompt.js';
+import { TOOLSETS_BY_ROLE } from './roles.js';
 
 /** Page caps — a snapshot is a bounded view, never a partition materialized into memory. */
 export const SNAPSHOT_SUBTREE_LIMIT = 100;
@@ -91,6 +93,20 @@ export interface WorkforceReadSnapshot {
    */
   readonly delegationsFromTask: number;
   /**
+   * The questions of the approvals on THIS task a human has already resolved (`approved` or
+   * `rejected`) — the planner's `resolvedApprovalQuestions`, read here so `request_approval` can
+   * refuse a re-ask INSIDE the turn rather than let the seat burn one discovering the rule.
+   *
+   * ADVISORY, exactly like `delegationsFromTask` above: the enforcement re-reads it under the task
+   * lock. A stale read here can only ever let a request through to the engine's own refusal; it can
+   * never invent one, because a row only ever ENTERS this set (a decided approval is terminal —
+   * `decideApproval` compare-and-swaps on `status = 'pending'`).
+   *
+   * EMPTY for a role whose toolset carries no `request_approval` (worker, reviewer) — the read is
+   * gated on that, so an empty list here means "nothing can ask", never "nothing was decided".
+   */
+  readonly resolvedApprovalQuestions: readonly string[];
+  /**
    * The declared ceilings, resolved off the runtime row — every role, every turn (the scaffolding
    * presents headroom and limits as facts before the model runs; a single-row read). The row
    * exists for any declared workforce (boot upserts it) and for any dispatched one (the scheduler
@@ -111,7 +127,10 @@ const TERMINAL = ['completed', 'failed', 'cancelled'];
 function summarize(row: TaskRecord): TaskSummary {
   return {
     taskId: row.taskId,
-    title: row.title,
+    // A NULL title means the tenant's content was erased by `journalScrub` (migration 0013) while
+    // its ledger and structure were retained. The snapshot is a RENDERING, so it names that
+    // explicitly rather than emitting an empty string an operator would read as an untitled task.
+    title: row.title ?? ERASED_CONTENT,
     status: row.status,
     statusReason: row.statusReason,
     owner: row.owner,
@@ -338,6 +357,32 @@ export async function buildWorkforceSnapshot(
     .where(eq(schema.workforceDelegations.parentTaskId, task.taskId))) as Array<{ count: number }>;
   const delegationsFromTask = delegationCount[0]?.count ?? 0;
 
+  // THE DECISIONS THIS TASK ALREADY HOLDS — the planner's `resolvedApprovalQuestions`, read the
+  // same way (`workforce_approvals` keyed by `taskId`) and filtered to the two statuses that carry
+  // a human's answer. `timed_out`/`escalated` are the timeout chain's machinery, not an answer, and
+  // are excluded here for the same reason the engine excludes them. A scrubbed row contributes
+  // nothing (`question IS NULL`, migration 0013). Advisory: the enforcement re-reads under the lock.
+  //
+  // READ ONLY FOR THE ROLES THAT CAN ASK, the same predicate `computeTurnFacts` gates the approval
+  // rule on (facts.ts) — a worker or reviewer is never offered `request_approval`, so nothing on
+  // its turn can consult this. That matters more here than there: `workforce_approvals` carries no
+  // (tenant, task) index, so this is the one snapshot read that cannot be answered from a narrow
+  // index scan, and worker turns are the common case. Adding an index would be a migration.
+  let resolvedApprovalQuestions: string[] = [];
+  if (TOOLSETS_BY_ROLE[employee.role].includes('request_approval')) {
+    const rows = (await tdb
+      .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
+      .where(
+        and(
+          eq(schema.workforceApprovals.taskId, task.taskId),
+          inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
+        ),
+      )) as { question: string | null }[];
+    resolvedApprovalQuestions = rows
+      .map((row) => row.question)
+      .filter((q): q is string => q !== null);
+  }
+
   return {
     task,
     parentTask,
@@ -348,6 +393,7 @@ export async function buildWorkforceSnapshot(
     activeTeamIds,
     ancestorOwners,
     delegationsFromTask,
+    resolvedApprovalQuestions,
     budgets,
     dependencyResults,
   };

@@ -43,6 +43,30 @@ const here = dirname(fileURLToPath(import.meta.url));
 const TSX = join(here, 'node_modules', '.bin', 'tsx');
 const SERVE = join(here, 'serve.ts');
 
+/**
+ * Per-test timeout for both arms below, DERIVED from the bound that should decide the outcome.
+ *
+ * Each arm's subject is a REAL `tsx` cold start of this wrapper's whole dependency tree, in a child
+ * process. That is seconds of work, not milliseconds: measured on an unloaded developer machine it is
+ * 8.3s / 9.2s / 13.0s across three consecutive runs, and it is slower still when several test suites
+ * share the box. Vitest's per-test default is 5000ms, so the enclosing `it` used to expire while the
+ * child was still starting — a timeout that measured the harness rather than the wrapper. The
+ * `spawnSync` call already carries its own `timeout: 120_000`, and THAT is the bound that should fire
+ * on a genuine hang: when it does, the arm still receives `status` and `stderr` and asserts on them,
+ * so a wrapper that fails to refuse is reported as a wrong refusal with its output attached. When the
+ * outer bound fires first, that result is discarded and all anyone learns is "timed out".
+ *
+ * So the outer bound must strictly EXCEED the inner one, with headroom for the mkdtemp / write / rm
+ * around it: 120s + 10s. It is deliberately per-test rather than a package-wide `testTimeout` — a
+ * package-wide raise would hand every future test in this example the same long leash, and the next
+ * genuinely hung one would take two minutes to fail instead of five seconds.
+ *
+ * Same cause and same remedy as the note in root `package.json` (`//test`), which raised the CLI's
+ * `testTimeout` so an in-process `plan` cold start could not trip the 5000ms default under full-suite
+ * CPU load. No assertion is relaxed here: every `expect` below is unchanged.
+ */
+const COLD_START_TIMEOUT_MS = 130_000;
+
 /** The first demand the wrapper makes — reached only when NO `.env` supplied it. */
 const DATABASE_REFUSAL = 'required env var DATABASE_URL is not set';
 /** The demand AFTER the three secrets — reached only when a `.env` DID supply them. */
@@ -84,21 +108,29 @@ function boot(extraEnv: NodeJS.ProcessEnv = {}): { status: number | null; stderr
 }
 
 describe('serve.ts — the local .env is loaded through the shipped loader', () => {
-  it('RAYSPEC_SKIP_DOTENV=1 reads no .env at all', () => {
-    const { status, stderr } = boot({ RAYSPEC_SKIP_DOTENV: '1' });
+  it(
+    'RAYSPEC_SKIP_DOTENV=1 reads no .env at all',
+    () => {
+      const { status, stderr } = boot({ RAYSPEC_SKIP_DOTENV: '1' });
 
-    expect(status).toBe(1);
-    expect(stderr).toContain(DATABASE_REFUSAL);
-    // Ordering, not just outcome: nothing supplied the secrets, so the boot never reached the
-    // demand the arm below stops on.
-    expect(stderr).not.toContain(SPEC_PATH_REFUSAL);
-  });
+      expect(status).toBe(1);
+      expect(stderr).toContain(DATABASE_REFUSAL);
+      // Ordering, not just outcome: nothing supplied the secrets, so the boot never reached the
+      // demand the arm below stops on.
+      expect(stderr).not.toContain(SPEC_PATH_REFUSAL);
+    },
+    COLD_START_TIMEOUT_MS,
+  );
 
-  it('the invoking directory ./.env is a candidate', () => {
-    const { status, stderr } = boot();
+  it(
+    'the invoking directory ./.env is a candidate',
+    () => {
+      const { status, stderr } = boot();
 
-    expect(status).toBe(1);
-    expect(stderr).toContain(SPEC_PATH_REFUSAL);
-    expect(stderr).not.toContain(DATABASE_REFUSAL);
-  });
+      expect(status).toBe(1);
+      expect(stderr).toContain(SPEC_PATH_REFUSAL);
+      expect(stderr).not.toContain(DATABASE_REFUSAL);
+    },
+    COLD_START_TIMEOUT_MS,
+  );
 });

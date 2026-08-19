@@ -8,6 +8,32 @@ mechanism (and usually the test) that enforces it; a claim without one is a bug 
 [spec reference](./spec-reference.md#workforce-experimental)); its grammar and behavior may
 change without notice.
 
+**How this page cites code, and why it names no line numbers.** Every citation below is a file plus
+the SYMBOL, function or test title to look for — never a file with a line range bolted onto it. That
+is a deliberate downgrade. A line number looks more precise than a file name and is checked less,
+because the number suppresses the instinct to go and read; and it goes wrong silently, since the line
+still exists and still holds code. An audit of this page's twelve line-numbered citations found
+**six** pointing at the wrong thing, and the failure mode is the near-miss rather than the obvious
+miss: one landed on `decideApproval`'s journal write while the sentence was about the approval
+*sweep*, and one was attributed to `runSweep` while pointing 84 lines above where `runSweep` is
+declared. Both look right if you check that the cited lines are in range and contain plausible code.
+A fifth rotted **inside the branch that fixed the other four**, from that branch's own edits to the
+cited file. `gate:no-archaeology` and `gate:skill-drift` do not read this page, and an injected
+citation naming a real suite and a line number past the end of it is caught by neither — so a number
+here would be a claim with no mechanism behind it, which is the one thing this page says it will not
+print. A symbol survives every edit that does not rename it, and a rename is a change a reader can
+follow.
+
+**What re-verifies this page, every run.** [Appendix A](#appendix-a--citation-ledger) pins every
+file and symbol named below to the text it must still contain, and
+`packages/kernel/workforce-tools/src/architecture-drift.test.ts` checks that ledger in BOTH
+directions: a pinned symbol that moved or was renamed is red, and so is a citation added to this
+prose that nothing pins. The same suite refuses a line number anywhere on this page, refuses a bare
+filename that resolves to more than one file in the tree, and refuses a line-pinned reference *to*
+this page from anywhere in the source tree. There is one line-number exception, and it earns it by
+being value-checked like every other row: a citation into a released migration file, which is never
+edited and so cannot rot.
+
 ## The one rule everything else follows from
 
 **A wait is a row, never a process.** A task that is delegating, under review, or waiting for a
@@ -172,9 +198,69 @@ task dies gets the review released rather than stranded, and a review task's own
 never policy-reviewed — review depth is structurally one.
 
 Approvals: `request_approval` parks the task at zero cost with the DECLARED window and fate
-bound at request time (the rule matched by the employee's capabilities). A decision carries the
+bound at request time (the approval policy matched by the employee's labels). A decision carries the
 VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
 for asserting an identity. The timeout sweep gives every hung approval its declared fate.
+
+**A decision a human already resolved cannot be re-opened by asking again.** A seat woken by its
+own approval could re-request the identical decision, indefinitely as far as structure went — turn
+budget and approval timeout bounded it, nothing capped it. The cap is on REPETITION, not on the
+action: a second approval on one task is legitimate when it is a *different* decision (and the
+timeout sweep's escalation re-issue opens one by design), so the planner refuses only a question
+this task already carries a human answer to — `approved` or `rejected`, never the `timed_out` and
+`escalated` rows that carry no answer. Identity is the question, trimmed, whitespace-collapsed and
+case-folded. **Keying on the question string makes this cap neither sound nor complete, and the two
+failures do not cost the same.** A REWORDED question reads as a different decision and is not capped
+— nothing content-free separates a genuinely new authorization from the same one rephrased — which
+costs one human decision that need not have been asked for. The mirror is the harmful one: two
+GENUINELY DIFFERENT authorizations that share a question string are capped, because generic phrasings
+collide ("Proceed?" about the migration and "Proceed?" about the announcement are one decision to
+this predicate). That refusal takes the tool-error fate, so a seat that asks again believing its
+question is right does not merely lose the authorization — **the task fails and its work is lost**.
+Both directions are pinned, the false positive including its terminal outcome, in
+`packages/kernel/tasks/src/approval-rerequest.db.test.ts`. A decision identity the seat states
+explicitly would fix both; that is a grammar change and is not this. Enforced twice on purpose:
+`planTurnOutcome`
+(`packages/kernel/tasks/src/intent-applier.ts`) is the authority and catches every caller, taking
+the requeue-once-then-fail tool-error fate; the `request_approval` tool
+(`packages/kernel/workforce-tools/src/toolset.ts`) refuses first with a typed
+`ApprovalAlreadyResolvedError` so the seat can end the turn a different way instead of burning it.
+Proof: `packages/kernel/tasks/src/approval-rerequest.db.test.ts`, which pins both what the cap
+refuses and what it must not — including that a genuinely different question still parks.
+
+**The engine keeps the authorization it writes.** An approval's `approver` and a review's
+`reviewer` are journaled as accountability facts, so the door compares them against the deciding
+principal rather than trusting `store:write` alone
+(`packages/kernel/tasks/src/decision-authority.ts`; matrix in `decision-authority.db.test.ts`):
+
+- `approver: user` — the deployment's human operator surface, and the only value the declared
+  grammar admits — is the OPEN sentinel: any permitted principal decides it, exactly as before.
+  This is the shipped single-operator posture and the regression guard pins it.
+- A row that NAMES a principal binds to it. The case that actually arises is the escalation: when
+  an `onTimeout: escalate` request times out, the sweep closes it and re-issues it to the
+  requester's DECLARED superior (`approver: <employeeId>`, journaled as
+  `workforce.approval.requested`). Only that principal may resolve it — the operator whose
+  inaction caused the escalation cannot. The refusal is a 403 naming who the row names, and it
+  writes nothing at all.
+- **Break-glass** keeps an unavailable decider from wedging a deployment, and takes two
+  independent things so it can never happen by accident: the request must ASK (`override: true`,
+  or `--override` on the CLI) and the principal must HOLD `workforce:override` (an `owner`/`admin`
+  permission, deliberately never grantable to an API key — the override exists to record which
+  *human* contradicted a named human). The journal then carries `overriddenApprover` /
+  `overriddenReviewer`, so the trail says what happened instead of leaving `decided_by` to
+  contradict the recorded decider silently.
+
+At the HTTP door this means an escalated approval is **always** reached through break-glass, not
+usually: a principal authenticates as `user:<id>` / `api-key:<id>` and a named approver is a
+declared employee id, so the two namespaces are structurally disjoint and the comparison cannot
+match. That is the deliberate fail-closed reading — open core carries no principal-to-employee
+binding, and the honest answer to "we cannot verify this caller is `ops_lead`" is to demand the
+override and record it. There is no second route for an approval: `decideApproval` has exactly one
+caller (the HTTP door), no tool decides an approval, and the escalation dispatches no turn — so an
+escalated approval ends either in a break-glass decision or, when its window expires, in the
+terminal `fail` fate the re-issued request carries. (A named *reviewer* is the different case: a
+review verdict does arrive through that reviewer's own dispatched turn, where the actor IS the
+employee id and `apply-intents.ts` already re-checks it.)
 
 ## Budget scopes
 
@@ -226,7 +312,7 @@ result to review (which is what a low number is for), but a turn that reports `0
 rule, and a `submit_result` with no confidence at all does not trip it (the rule keys on a present
 number below the threshold). This is the deliberate exception to "model output is never authority":
 the self-report is an INPUT to a declared rule, never a bypass of one — the reviewer, the max rounds
-and the reject→rework loop are all enforced regardless, and the `firesOnCapabilities` branch of the
+and the reject→rework loop are all enforced regardless, and the `firesOnLabels` branch of the
 same policy fires UNCONDITIONALLY on the declared labels, with no number to dodge.
 
 ## Crash safety
@@ -242,6 +328,266 @@ and reaper suites — rather than by an empirical mid-turn process kill; there i
 and both acceptance e2e tests land their SIGKILL at a park. The
 engine-level guards that make it all true: the workflow-id claim, the receipt idempotency, and the
 one-writer transition monopoly above.
+
+A crash is not the only way a turn stops making progress, and the durable engine's own status
+cannot see the other one. A worker whose process is up and whose turn workflow is genuinely PENDING
+but whose body is WEDGED — a hung socket, a deadlocked dependency — reaches neither release path:
+not the turn's final transaction, which it never gets to, and not the reaper, which asked the
+engine and was told the workflow was alive. Such a row held its `maxConcurrentWorkers` slot and its
+budget reservation indefinitely, and because the `task`/`root` ledger scopes are un-windowed the
+stranded estimate never rolled over. Every claim therefore now stamps a LEASE
+(`workforce_tasks.claim_expires_at`, written in the same compare-and-swap that takes the claim and
+cleared by every exit from `working`), and the sweep reaps an expired claim through the identical
+path as a dead one — same re-queue, same release of exactly what the claim reserved, in the window
+it reserved it in — journaling `queueReason: 'turn_lease_expired'` so the two diagnoses stay
+distinguishable. The default lease is 30 minutes and is deliberately far above any plausible
+healthy turn: the shipped examples' whole-TASK wall clocks are 30m and 45m, and a task is many
+turns. A turn reaped while still running cannot corrupt anything — its final application is
+refused over the successor's claim by the claim-ownership check — so the residual cost of an
+over-eager lease is duplicated work, which is why the default errs long rather than short.
+`packages/workflow/durable-dbos/src/task-scheduler.db.test.ts` proves both halves: a wedged
+PENDING turn is reaped with its reservation returned, and a live turn inside its lease survives
+every sweep.
+
+What the lease does **not** do, stated plainly: it releases the row and the money, not the
+operating-system resource. Nothing kills the wedged body — there is no safe way to interrupt
+arbitrary handler code mid-call — so the wedged execution keeps its slot on the turn queue until it
+returns, throws, or the process restarts. What the reap recovers is the task (dispatchable again),
+the workforce `maxConcurrentWorkers` slot (counted off `working` rows), and the budget reservation,
+which is the only one of the three that leaked permanently. A deployment whose workers wedge often
+wants a smaller turn-queue concurrency or a timeout inside the handler, not a shorter lease.
+
+## Upgrade and rollback notes
+
+Read this before an upgrade or an emergency, and read the limitations as literally as the
+guarantees — three of the six entries below are constraints, not features, and each names the test
+that would go red if the constraint silently changed.
+
+**This release carries ONE migration: `0013_workforce_dedupe_lease_and_scrub`.** It adds three
+NULLABLE columns (`workforce_reviews.turn_number`, `workforce_approvals.turn_number`,
+`workforce_tasks.claim_expires_at`), two PARTIAL unique indexes, and relaxes five `text NOT NULL`
+content columns to accept NULL so `journalScrub` can erase content while retaining the budget
+ledger. It cannot fail on a populated database and needs no backfill: a nullable column cannot be
+violated by an existing row, `DROP NOT NULL` never fails on data, and because `turn_number` is a new
+column every pre-existing row holds NULL — and NULLs are distinct for uniqueness — so both unique
+indexes constrain ZERO existing rows. (That last property comes from the key being new and all-NULL,
+not from the indexes being partial; a total unique index on the same column would create just as
+cleanly.) Rolling the binary back is safe: older releases never read the new columns, and a relaxed
+`NOT NULL` is a superset of what they wrote. No operator action is required.
+Pinned by the `0013` block in `packages/kernel/db/scripts/shadow-dryrun.sh` and by
+`gate:migrate-clean`'s zero-drift cross-check against `schema.ts`.
+
+**Migrations are forward-only.** There are no down-migration files, no `drizzle-kit drop` script,
+and no claim anywhere that a schema change can be reversed. Recovery from a bad migration is a
+reviewed FORWARD migration. The chain is applied by the real programmatic migrator at every boot and
+is idempotent, so repeated boots are safe (`boot-migrator-concurrency.db.test.ts`, *"a THIRD boot
+over the finished database is a clean no-op"*).
+
+**The emergency lever is the feature flag, and it preserves your data.** Unset
+`RAYSPEC_EXPERIMENTAL_WORKFORCE` and the next boot refuses the whole `workforce:` section with the
+typed code `experimental_section_disabled` — no authoring, no dispatch. It does **not** touch a
+single durable row: the flag is read in one place and enforced at the spec parse only, and nothing
+in the task engine consults it. `serve-workforce-flag.db.test.ts` proves this end to end against a
+database holding live work — a flag-ON deployment writes tasks in seven distinct (status, reason)
+shapes, transitions, signals, approvals, reviews, messages, delegations, ledger rows and journal
+entries in both `run_events` namespaces; the flag-OFF boot refuses; every one of the nine tables and
+both namespaces is then **byte-identical** (an md5 over the ordered full row text, not just a count);
+and re-enabling the flag lets a parked task resume on the exact CAS version it was parked at.
+
+What the lever does NOT do: it does not remove the tables, it does not stop time on deadlines or
+approval timeouts, and it is not a schema rollback. Nothing sweeps while the deployment refuses to
+boot, and the timeout predicate is ABSOLUTE rather than elapsed-since-resume —
+`sweepApprovalTimeouts` selects `pending` approvals on `lt(timeoutAt, now)`
+(`packages/kernel/tasks/src/approvals.ts`, that function's own `where`) — so every window that
+expired during the outage
+is due the moment you turn the flag back on, and the declared fates fire then.
+
+**The boot migrator is SERIALIZED, so a fan-out on a first bring-up no longer costs a boot** — but
+do not read that as multi-replica *upgrade* safety. `applyMigrations` takes a Postgres advisory lock
+(`pg_advisory_lock`, session-scoped, on a connection of its own) around the whole apply, on a key
+`@rayspec/db` owns and every runner in this repo shares. It is the same lock
+`rayspec provision-tenant` used to take around its own call; that outer wrapper is gone, because two
+sessions of one process holding the same key would wait on each other.
+
+What is PINNED, and what to design against (`boot-migrator-concurrency.db.test.ts`):
+
+- **Two concurrent runners both succeed.** Zero rejections, not "at most one" — the database ends
+  fully migrated, structurally complete, with no duplicate bookkeeping rows, and the advisory lock is
+  released afterwards. This is the assertion that would have failed before the lock: the
+  certification host produced a loser on **every** run, always SQLSTATE `23505` raised from the
+  migrator's very first statement, `CREATE SCHEMA IF NOT EXISTS "drizzle"` — the check-then-create
+  window in its own bootstrap. Pinned at pool size **1**, which is also what pins that the lock does
+  not consume a pooled connection: a transaction-scoped lock on the pool would deadlock there.
+- **A runner that meets another's objects still aborts cleanly and records nothing.** The lock
+  removes the race; it does not make the migrator forgiving, and an operator who migrates by another
+  route (`drizzle-kit migrate`, psql) takes no lock at all. Staged deterministically — `orgs` is
+  `0000`'s first non-`IF NOT EXISTS` CREATE, so a runner arriving second dies exactly there — the
+  abort carries SQLSTATE `42P07` (duplicate_table), `drizzle.__drizzle_migrations` records **zero**
+  rows, and `journal_steps` (created *before* `orgs` in the same batch) does not exist afterwards. So
+  the whole-batch rollback is observed rather than inferred: there is no half-applied migration for
+  an operator to reason about, and the next boot re-applies from the top rather than resuming a
+  fiction.
+
+What the lock does NOT do: it is not a schema-migration protocol. A rolling deploy whose old and new
+binaries expect different schemas is unaffected by it, and nothing serializes this chain against a
+runner that does not take the same key. **Run migrations from one runner** remains the operational
+advice; what changed is that a deploy script that fans out on a first bring-up converges instead of
+losing a boot. The advisory-locked shape and its race arm are also exercised for
+`rayspec provision-tenant` in `tenant-provision.db.test.ts` (*"two concurrent runs against a FRESH,
+unmigrated database"*).
+
+**A migration that cannot apply is fail-closed, and the failure names the pending tags.** The
+migrator throws, the process exits non-zero, the whole pending set rolls back, and
+`drizzle.__drizzle_migrations` does not record the failed migration
+(`migration-failure.db.test.ts`). The migrator's own error text quotes the failing STATEMENT verbatim
+and carries the Postgres cause (SQLSTATE + message) — but **not** the failing tag. So
+`applyMigrations` computes the pending tags *before* it applies anything, by joining
+`SELECT max(created_at) FROM drizzle.__drizzle_migrations` (a journal `when`) against
+`packages/kernel/db/drizzle/meta/_journal.json`, and rethrows a `MigrationChainError` naming them in
+chain order with the original error as its `cause`. The earliest listed tag is the first candidate;
+the whole list
+ships because the pending set is one transaction, so the failure belongs to the set rather than to
+one file. Reading a raw migrator error from `drizzle-kit migrate` or psql, run that same join by
+hand — it is the procedure the wrapper mechanized.
+
+**Upgrading a database whose rows predate the declaration marker.** The redeploy gate refuses to
+strand live work on a removed workforce, employee, department or team, and it decides "this
+workforce was declared" from `workforce_runtime.budgets.declaredAt`, which only a declaring boot
+writes. A workforce declared by a boot that ran **before** that marker existed carries none, so a
+removal or rename made between that boot and the next declaring boot is **not** caught. There is no
+safe backfill: for a runtime row the current document does not declare, no boot can tell "declared,
+then removed" from "the engine created it under `/v1/workforce`", and guessing would make a
+legitimate engine-only deployment refuse to boot over tasks nobody declared. The window closes by
+itself on the next boot that still declares the workforce, and both halves are pinned in
+`workforce-boot.db.test.ts` ("PRE-MARKER WINDOW…" and "the window CLOSES at the next declaring
+boot…").
+
+So the upgrade order is: **boot once with the workforce still fully declared**, then make removals in
+a later deploy. That one boot is enough, and it cannot quietly not-happen: the stamp needs a durable
+worker and a task tenant, and BOTH of those are themselves refusals rather than conditions — a
+`workforce:` section without `deployment.durableWorker: true` is rejected at the parse with a typed
+`schema_violation` (`workforce-lint.ts`, its `THE DURABLE WORKER` block; pinned by
+`workforce-parse.negative.test.ts`, *"rejects a workforce on a deployment without a durable
+worker"*), and a declared workforce with `RAYSPEC_CRON_TENANT_ID` unset aborts the boot
+(`composition-root.ts`, `deployDeclaredSpec`'s
+`effectiveSpec.workforce !== undefined && !config.cronTenantId` guard; pinned by
+`serve-workforce-flag.db.test.ts`). A deploy that declares a workforce and comes up has therefore
+stamped it.
+
+## Backup and restore
+
+**The core ships no backup tool** — no scheduler, no snapshot command, no continuous WAL archiving,
+and no point-in-time recovery. `packages/compose/api-auth/src/engine/deploy.ts` says so at the
+deploy boundary, in its `ROLLBACK / RECOVERY — FORWARD-FIX ONLY` docblock ("Backup/PITR is
+deferred"), and nothing in this repo emits or reads a dump. What a
+self-hoster runs is stock Postgres.
+
+What this page can promise is narrower, and it is tested: the shipped **workforce task graph and its
+journal** survive one `pg_dump`/`pg_restore` round trip **byte-for-byte**, and the restored database
+**resumes**. That scope is exact and is the scope the census measures — the nine `workforce_*` tables
+plus both `run_events` namespaces, for one tenant — not "the whole database": the other core platform
+tables (`orgs`, `users`, `sessions`, `runs`, `journal_steps`, `conversation_items`, `tenant_events`)
+are carried by the same dump but are not what this page's oracle checks.
+`backup-restore.db.test.ts` is that proof end to end, against a database holding a
+`queued` task, a turn in flight, three parks (an approval wait, a review wait, and the structural
+`awaiting_children` one), the three terminal shapes, and their transitions, signals, delegations,
+approvals, reviews, messages, ledger rows and journal entries in **both** `run_events` namespaces.
+
+### The two commands
+
+```bash
+# BACK UP — against a LIVE deployment. pg_dump reads inside one repeatable-read snapshot, so a turn
+# that commits while the dump runs is either wholly in it or wholly out of it, never half of each.
+# That is Postgres's guarantee, not one this repo adds.
+pg_dump -Fc -d "$DATABASE_URL" -f "workforce-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+# RESTORE — into a database that does not exist yet. Never on top of the live one.
+psql "$ADMIN_DATABASE_URL" -c 'CREATE DATABASE rayspec_restored'
+pg_restore --exit-on-error --no-owner --no-privileges \
+  -d "postgres://…@…/rayspec_restored" workforce-….dump
+```
+
+Then point `DATABASE_URL` at the restored database and boot normally. `--no-owner --no-privileges`
+let the restore land under whatever role the new host uses instead of failing on a role that does
+not exist there.
+
+**What `--exit-on-error` does, and what it does not do.** It does **not** rescue the exit code:
+`pg_restore` exits **1** when it hits an error either way, so `$?` is a reliable signal with or
+without the flag — check it, and do not skip checking it because the flag is present. What the flag
+changes is **where the restore stops**, and therefore how quickly you can name what went wrong.
+Measured against `pg_restore` 16.13, restoring a three-table dump into a database where the first
+table already existed:
+
+| | exit | what landed |
+|---|---|---|
+| clean restore, either way (the control) | 0 | everything |
+| error, **without** the flag | 1 | everything it could — it presses on, then reports the damage as a single `warning: errors ignored on restore: 2` at the end of a long log |
+| error, **with** the flag | 1 | it halts at the first failure, so the two later tables were **never created at all** |
+
+So the flag leaves you with *less*, on purpose: an obviously incomplete database and an error
+message sitting at the point of failure, rather than a nearly-complete one whose one missing piece is
+summarized in a line that scrolls past. For a task graph that is the trade you want — a restore that
+is visibly unfinished is recoverable, and one you believe is complete is not. Pass the flag, and
+still check `$?`.
+
+### The two values that decide whether the restore is usable
+
+Every row surviving is the easy half, and it is not the half that goes wrong. Two counters decide
+whether the restored graph can be *worked*, and both compare equal to "the table has the right
+number of rows":
+
+- **`workforce_tasks.version`** — the optimistic CAS token `applyTransition` compare-and-swaps on.
+  Lose it and every row is present while no parked task can ever be claimed again.
+- **`workforce_tasks.last_event_seq` and `workforce_runtime.last_event_seq`** — the journal sequence
+  HEADs. Allocation rides the owning row's own counter — in
+  `packages/kernel/tasks/src/events.ts`, the `lastEventSeq + N`
+  UPDATE that each appender runs before its insert (one for a task stream, one for the workforce
+  control stream) — and `run_events` carries `UNIQUE(tenant_id, run_id, seq)`
+  (`0004_run_events.sql:36`, a line number that is safe to cite because a released migration file is
+  never edited). A restore that reset a counter would not
+  fail at restore time; it would fail on the very next append, as a duplicate key, in the last place
+  an operator would look.
+
+`backup-restore.db.test.ts` asserts both on their own terms rather than leaving a row-count
+comparison to imply them, and it carries the negative arms that give those assertions teeth: a
+restore with the version reset, a restore with a journal head lost (which reds with SQLSTATE `23505`
+on `run_events_tenant_run_seq_idx`), and a restore missing one table's rows.
+
+### What the restore does, and what it does not carry
+
+| | |
+|---|---|
+| **All nine `workforce_*` tables and both `run_events` namespaces** | Byte-identical — the oracle is an md5 over the ordered full row text, not a count. |
+| **The applied-migration ledger** (`drizzle.__drizzle_migrations`) | Travels with the dump, so the restored deployment's boot migrator is a no-op rather than an attempt to re-apply the whole chain. |
+| **A `queued` task** | Dispatches on the restored database through the shipped reserve pass. |
+| **A park** | Stays parked, at the version it was parked at. The structural `awaiting_children` park has no operator exit at all, and it does not acquire one across a restore. |
+| **A terminal task** | Untouched, whole-row. |
+| **A turn IN FLIGHT at dump time** | Comes back as a `working` row whose workflow no longer exists — see below. It is re-queued, not stranded. |
+| **The DBOS system database** | **NOT in the dump.** It is a separate database (`executor.ts`, the `systemDatabaseUrl` option), so a dump of the application database does not contain it, and the restored deployment starts with an empty one. |
+| **Secrets** | Not in the database at all. Restoring under freshly minted secrets has consequences for copied API keys and issued tokens — see [Restore and key rotation](./ARCHITECTURE.md#restore-and-key-rotation). |
+
+**Why the missing DBOS system database is safe, and what it costs.** A claim is an application row,
+so it travels; the workflow behind it does not. On the restored deployment the sweep asks the engine
+whether the claim's workflow id is still live, finds it absent, and treats absent the same as dead:
+it re-queues the task through the one status door and releases the claim's budget reservation in the
+same transaction (`task-scheduler.ts`, the reap loop inside `runSweep` — the re-queue that stamps
+`turn_reaped`). A fresh dispatch of the same turn is safe because
+turn handlers are effect-free and the receipt guards double application — the same property that
+makes crash recovery safe. The cost is one repeated turn's model spend, and the reap is journaled:
+the re-queue carries `queueReason: turn_reaped`, so an operator can see afterwards which tasks the
+restore re-ran rather than resumed. `backup-restore.db.test.ts` seeds exactly this shape — a claim
+minted with the shipped `taskTurnWorkflowId` — and asserts the reap, the reason, and that the same
+sweep leaves a not-yet-due approval alone.
+
+**Restoring is not a rollback.** The dump carries the schema it was taken at, and the boot migrator
+described above then applies whatever is still pending — forward, because there are no
+down-migrations to apply (the same `packages/compose/api-auth/src/engine/deploy.ts` docblock). So
+restoring an older dump under a newer
+deployment moves the schema *towards* that deployment and never backwards. It also does not soften
+the redeploy gate: the restored rows are live work, and `assertWorkforceSpecCompatible`
+(`workforce-boot.ts`) reads them at the next boot and refuses a document that would strand any
+of them, naming the stranded task ids — pinned by `workforce-boot.db.test.ts`, which asserts the
+refusal carries `WorkforceSpecChangeError` and the stranded task id.
 
 ## Honest scope
 
@@ -266,6 +612,101 @@ are exactly the enforced ones named above.
 - **[Spec reference → workforce](./spec-reference.md#workforce-experimental)** — the grammar and
   every validation rule.
 - **[Workforce events](./workforce-events.md)** — the journal vocabulary, versioned.
+- **[Workforce forward compatibility](./workforce-compatibility.md)** — what the experimental
+  marking means: what may change, what is enforced today, and every marking with the test that
+  keeps it there.
 - **[Workforce tools](./workforce-tools.md)** — the role toolsets and the result contract.
+- **[Workforce extension seams](./workforce-extension-seams.md)** — the five replaceable interfaces,
+  what each may decide, and what refuses an implementation that reaches past it.
+- **[Workforce threat model](./workforce-threat-model.md)** — every untrusted intake surface, its
+  validation chokepoint, and the test that proves the defence (or the statement that none exists).
 - **[CLI reference → workforce](./cli-reference.md#workforce--operate-the-durable-task-engine-of-a-running-deployment)**
   — the operator console.
+
+## Appendix A — citation ledger
+
+Every file this page names is pinned below to the text it must still contain, and
+`packages/kernel/workforce-tools/src/architecture-drift.test.ts` checks the ledger on every run.
+The left column is a repo-relative path; the right column is the symbol, docblock heading, test
+title or literal the sentence citing that file rests on.
+
+**Both directions are checked, and that is the point.** Ledger → code catches a renamed export or a
+function that moved house, and the failure names the file the text now lives in. Prose → ledger —
+every file and every symbol this page names must appear here — is what stops a citation being added
+to the page with nothing behind it, which is how a hand-curated list quietly falls behind the prose
+it was written for. Ledger → prose is checked too: a row nothing on this page references is a pin
+that has outlived its sentence.
+
+**It fails closed.** An emptied ledger, or a rewording that produced no citations at all, is RED
+rather than vacuously green — "the property holds" and "the scan stopped finding anything" read
+identically without that arm.
+
+**One line-numbered row, and it earns the exception by being value-checked.** A released migration
+file is never edited, so a line in it cannot rot; the guard still checks that the cited line contains
+the recorded text rather than merely existing.
+
+```text
+# file                                                         | the text that file must still contain
+packages/app/cli/src/workforce-story-e2e.db.test.ts            | runs the ten-step story on the shipped starter example, survives the kill, and renders the tree
+packages/app/server/src/backup-restore.db.test.ts              | fail-the-fix: a restore that lost `last_event_seq` collides on the very next append
+packages/app/server/src/backup-restore.db.test.ts              | the turn that was in flight when the dump was taken is REAPED and re-queued, not stranded
+packages/app/server/src/boot-migrator-concurrency.db.test.ts   | 42P07
+packages/app/server/src/boot-migrator-concurrency.db.test.ts   | a THIRD boot over the finished database is a clean no-op
+packages/app/server/src/composition-root.ts                    | applyMigrations
+packages/app/server/src/composition-root.ts                    | deployDeclaredSpec
+packages/app/server/src/composition-root.ts                    | effectiveSpec.workforce !== undefined && !config.cronTenantId
+packages/app/server/src/composition-root.ts                    | MigrationChainError
+packages/app/server/src/migration-failure.db.test.ts           | the failing TAG is recoverable — the one thing the error itself does not carry
+packages/app/server/src/serve-workforce-flag.db.test.ts        | the flag-OFF boot refuses at the parse and every durable row is byte-identical
+packages/app/server/src/tenant-provision.db.test.ts            | two concurrent runs against a FRESH, unmigrated database
+packages/app/server/src/workforce-boot.db.test.ts              | PRE-MARKER WINDOW
+packages/app/server/src/workforce-boot.db.test.ts              | the window CLOSES at the next declaring boot
+packages/app/server/src/workforce-boot.ts                      | assertWorkforceSpecCompatible
+packages/app/server/src/workforce-boot.ts                      | WorkforceSpecChangeError
+packages/app/server/src/workforce-recall.db.test.ts            | ADVERSARIAL: an identical twin workforce in another tenant leaks nothing
+packages/app/server/src/workforce-turn-validation.db.test.ts   | a forged escalateTo cannot ride in through the tool arguments
+packages/compose/api-auth/src/cleanup/erase-tenant.ts          | journalScrub
+packages/compose/api-auth/src/engine/deploy.ts                 | ROLLBACK / RECOVERY — FORWARD-FIX ONLY
+packages/kernel/db/drizzle/0004_run_events.sql:36              | CREATE UNIQUE INDEX "run_events_tenant_run_seq_idx"
+packages/kernel/db/drizzle/meta/_journal.json                  | "when"
+packages/kernel/db/scripts/shadow-dryrun.sh                    | ASSERT 0013 end state
+packages/kernel/db/src/schema.ts                               | claim_expires_at
+packages/kernel/spec/src/workforce-lint.ts                     | THE DURABLE WORKER
+packages/kernel/spec/src/workforce-parse.negative.test.ts      | rejects a workforce on a deployment without a durable worker
+packages/kernel/tasks/src/apply-intents.ts                     | actor: task.owner
+packages/kernel/tasks/src/apply-intents.ts                     | applyTurnOutcome
+packages/kernel/tasks/src/apply-transition.ts                  | applyTransition
+packages/kernel/tasks/src/approval-rerequest.db.test.ts        | a DIFFERENT decision on the same task still parks — and the count SEES the second row
+packages/kernel/tasks/src/approvals.ts                         | decideApproval
+packages/kernel/tasks/src/approvals.ts                         | decidedBy
+packages/kernel/tasks/src/approvals.ts                         | overriddenApprover
+packages/kernel/tasks/src/approvals.ts                         | sweepApprovalTimeouts
+packages/kernel/tasks/src/budget.db.test.ts                    | a denial mutates nothing — no ledger rows exist after a denied first authorize
+packages/kernel/tasks/src/decision-authority.db.test.ts        | break-glass decides a named row AND the journal records that an override happened
+packages/kernel/tasks/src/decision-authority.ts                | ANY_AUTHENTICATED_DECIDER = 'user'
+packages/kernel/tasks/src/events.ts                            | lastEventSeq
+packages/kernel/tasks/src/intent-applier.ts                    | escalateTo
+packages/kernel/tasks/src/intent-applier.ts                    | planTurnOutcome
+packages/kernel/tasks/src/reviews.ts                           | overriddenReviewer
+packages/kernel/tasks/src/signals.ts                           | manual_unblock
+packages/kernel/tasks/src/transitions.property.test.ts         | terminal at most once, never left; every working-entry from queued
+packages/kernel/workforce-tools/src/architecture-drift.test.ts | every ledger row is anchored in the prose — the pin set cannot run ahead of the page
+packages/kernel/workforce-tools/src/context.test.ts            | an untrusted recall hit cannot forge the data-boundary line
+packages/kernel/workforce-tools/src/context.ts                 | assembleTurnInput
+packages/kernel/workforce-tools/src/context.ts                 | GoalExceedsContextBudgetError
+packages/kernel/workforce-tools/src/facts.ts                   | computeTurnFacts
+packages/kernel/workforce-tools/src/facts.ts                   | confidenceBelow
+packages/kernel/workforce-tools/src/facts.ts                   | firesOnLabels
+packages/kernel/workforce-tools/src/resolve-target.ts          | assertManagerMayTarget
+packages/kernel/workforce-tools/src/role-privilege.test.ts     | the toolset is a function of the TASK owner alone — two roles never blend
+packages/kernel/workforce-tools/src/toolset-semantics.test.ts  | a manager reaches own department members and led-team members — nothing else
+packages/kernel/workforce-tools/src/toolset.ts                 | ApprovalAlreadyResolvedError
+packages/workflow/durable-dbos/src/executor.ts                 | systemDatabaseUrl
+packages/workflow/durable-dbos/src/task-scheduler.db.test.ts   | a LIVE turn INSIDE its lease is never reaped, however many sweeps run
+packages/workflow/durable-dbos/src/task-scheduler.db.test.ts   | a WEDGED turn — DBOS still PENDING — is reaped once its claim lease expires, and its reservation goes back
+packages/workflow/durable-dbos/src/task-scheduler.ts           | DEFAULT_TURN_LEASE_MS
+packages/workflow/durable-dbos/src/task-scheduler.ts           | maxConcurrentWorkers
+packages/workflow/durable-dbos/src/task-scheduler.ts           | runSweep
+packages/workflow/durable-dbos/src/task-scheduler.ts           | taskTurnWorkflowId
+scripts/check-state-machine-exhaustive.mjs                     | the transition gate is the ONLY status writer
+```

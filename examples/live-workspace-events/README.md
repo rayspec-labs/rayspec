@@ -5,6 +5,10 @@ reflect *everything happening in the workspace*: a change made by any request mu
 open client. This example is the whole loop — handlers **announce** with `init.emit`, clients hold one
 `GET /v1/subscribe` connection open, and nobody polls.
 
+> **LOCAL / trusted posture / NOT internet-facing** — the separate hardening layer (per-tenant
+> sandbox, RLS, KMS-DEK, DPoP) is the gate before any external exposure. Never put this behind a
+> public address.
+
 - `live-workspace-events.rayspec.yaml` — the authored backend document (`deployment.eventBus`, one
   store, two `{handler}` routes, one declarative read). No agents, no credentials: it boots with
   nothing but a database.

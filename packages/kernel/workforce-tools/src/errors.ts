@@ -63,6 +63,27 @@ export class ApprovalEscalationTargetMissingError extends WorkforceToolError {
   }
 }
 
+/**
+ * The seat is re-asking a decision a human ALREADY RESOLVED on this task (approved or rejected).
+ *
+ * The engine refuses this too (`planTurnOutcome`, @rayspec/tasks) and that arm is the authority —
+ * it catches every caller, toolset or not. THIS arm exists so the seat finds out INSIDE the turn,
+ * while it can still call a different turn-ending tool: the engine's refusal lands only after the
+ * turn ended, takes the requeue-once-then-fail fate, and a seat told nothing simply asks again and
+ * fails its task. The message therefore names the decision it already holds and the legitimate
+ * moves, and nothing else — the question is already in this turn's own context.
+ */
+export class ApprovalAlreadyResolvedError extends WorkforceToolError {
+  constructor(question: string) {
+    super(
+      `a human has already decided '${question}' on this task — a resolved approval may not be ` +
+        're-requested. Act on the decision you already hold (the wake that re-queued this task ' +
+        'carries it), or ask about a genuinely different decision.',
+    );
+    this.name = 'ApprovalAlreadyResolvedError';
+  }
+}
+
 export class EscalationTargetMissingError extends WorkforceToolError {
   constructor(employeeId: string) {
     super(
