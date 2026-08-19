@@ -608,6 +608,24 @@ erase the core half and silently leave every product row behind. So it reads the
 same environment `rayspec-serve` does and **applies the committed migration
 chain** to `DATABASE_URL` on the way, exactly like every other boot.
 
+That cuts both ways, and the rest of what a boot does is worth knowing before you
+run this against production:
+
+- It is a **real boot of the whole deployment**, so a document declaring
+  `deployment.durableWorker: true` **launches a durable worker** for the life of
+  the command (drained on the way out). If a server is already serving that
+  database, this is a *second* worker against it for that window.
+- It honours **`RAYSPEC_UPDATE_MIGRATION`** (and `RAYSPEC_UPDATE_ALLOWLIST`) exactly
+  as `rayspec-serve` and `rayspec deploy --apply-migration` do, because it builds
+  its boot options from the same shared builder. If that variable is set in the
+  environment you run the erase from, **the erase applies that delta too**. Unset
+  it unless you mean it.
+- It reads `RAYSPEC_SPEC_PATH`, so it deploys whatever document that names. Point
+  it at the same document the deployment runs.
+
+If none of that is wanted, run it from an environment that has only the three boot
+secrets and `DATABASE_URL` set.
+
 Every attempt — including one the gate refuses — writes a `tenant_erase_requested`
 row to `auth_audit` **before** anything is deleted, carrying the target org, what
 was requested, the resolved gate, the stated `--reason` and the observed invoker

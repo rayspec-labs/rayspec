@@ -12,8 +12,8 @@
  *
  *   1. ACCEPT CONTROL — the seeded tenant really does hold run history, so the counts the later arms
  *      assert on are a fixture and not an empty enumeration that would pass vacuously.
- *   2. THE GATE'S FIVE NEAR-MISSES, THROUGH THE NEW SURFACE. `unset`, `"TRUE"`, `"1"`, `"yes"`,
- *      `"True"` — each driven as a GENUINE erase request (`dryRun: false`, i.e. the operator supplied
+ *   2. THE GATE'S FIVE NEAR-MISSES, THROUGH THE NEW SURFACE. `unset`, "TRUE", "1", "yes", "True" —
+ *      each driven as a GENUINE erase request (`dryRun: false`, i.e. the operator supplied
  *      `--confirm`). Every one must come back `mode:'dry-run'`, `dryRunReason:'gate-disabled'` with a
  *      non-zero would-delete count, and AFTER ALL FIVE the row census must be unchanged. This is the
  *      arm that fails against any convenience that resolves the gate anywhere but the composition root.
@@ -22,18 +22,22 @@
  *      the gate on, the ONLY thing standing between this call and the deletes is the dry-run flag, so
  *      this is where that flag is actually proven — the negative assertion is falsifiable here
  *      because a mutation that plants a deletion into the preview path makes it fire.
- *   4. ARMED AND CONFIRMED ⇒ IT REALLY DELETES. `mode:'deleted'`, tenant A's four run-history tables
- *      go to zero.
- *   5. THE CROSS-TENANT WITNESS — tenant B is untouched by all seven calls above.
- *   6. THE JOURNAL RECORDS ATTEMPTS THE GATE REFUSED. After the five near-misses, `auth_audit` holds
+ *   4. THE JOURNAL RECORDS ATTEMPTS THE GATE REFUSED. After the five near-misses, `auth_audit` holds
  *      five `tenant_erase_requested` rows for tenant A and ZERO `tenant_data_erased` — the trace that
  *      exists for nobody today, since `eraseTenant`'s own record is written only on the delete path.
  *      Their `meta` carries the operator's stated reason and the RESOLVED gate (`false`), never the
  *      raw environment string.
- *   7. BOTH RECORDS SURVIVE THE ERASURE THEY DESCRIBE. After the real delete, the request rows AND
+ *   5. THE JOURNAL IS WRITTEN *BEFORE* THE SEAM — the ORDERING arm. With the audit table taken away,
+ *      a gate-armed, confirm-correct erasure aborts as `AUDIT_FAILED` and the census does not move.
+ *      Move the append after the seam and this is the arm that reddens; without it, "before anything
+ *      is deleted" is a sentence nothing checks. It is also the only coverage of `AUDIT_FAILED`.
+ *   6. ARMED AND CONFIRMED ⇒ IT REALLY DELETES. `mode:'deleted'`, tenant A's four run-history tables
+ *      go to zero.
+ *   7. THE CROSS-TENANT WITNESS — tenant B is untouched by every call above.
+ *   8. BOTH RECORDS SURVIVE THE ERASURE THEY DESCRIBE. After the real delete, the request rows AND
  *      the `tenant_data_erased` row are still readable — `auth_audit` is a global/auth table that
  *      tenant erasure deliberately does not touch, which is what makes the trail worth anything.
- *   8. AN UNREACHABLE DATABASE FAILS CLOSED as `BOOT_FAILED` — never a swallowed error that would
+ *   9. AN UNREACHABLE DATABASE FAILS CLOSED as `BOOT_FAILED` — never a swallowed error that would
  *      read, to an operator and to a script, as a successful preview of an empty tenant.
  *
  * DB ISOLATION: a whole throwaway DATABASE, dropped on teardown. No document is set, so no durable
@@ -85,7 +89,7 @@ if (requireDb && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARM_COUNT = 8;
+const ARM_COUNT = 9;
 
 describe('rayspec tenant erase — the operator path to the erasure seam', () => {
   const maybe = baseUrl ? it : it.skip;
@@ -234,7 +238,7 @@ describe('rayspec tenant erase — the operator path to the erasure seam', () =>
   });
 
   maybe(
-    '2. all FIVE non-`true` gate values refuse a CONFIRMED erasure, and nothing is removed',
+    '2. all FIVE non-exact gate values refuse a CONFIRMED erasure, and nothing is removed',
     async () => {
       const before = await counts(TENANT_A);
       for (const value of NEAR_MISSES) {
@@ -306,7 +310,61 @@ describe('rayspec tenant erase — the operator path to the erasure seam', () =>
   });
 
   maybe(
-    '5. armed AND confirmed ⇒ the run history is really gone',
+    '5. the journal is written BEFORE the seam: an unwritable trail aborts with the data intact',
+    async () => {
+      // THIS IS THE ORDERING ARM, and it is the only thing that makes "before anything is deleted"
+      // a property rather than a sentence. A review moved `appendTenantErasureRequested` to AFTER
+      // the seam call and the rest of this suite stayed green — the row still existed by the time
+      // any arm looked, so nothing could tell the two orderings apart.
+      //
+      // Taking the audit table away separates them, and the SIGNAL IS THE CODE. Written first, the
+      // append fails and the command aborts as `AUDIT_FAILED` — this module's own refusal, raised
+      // before the seam is called at all. Moved after, the seam runs first and the failure that
+      // surfaces is a different one entirely, so the assertion below stops matching.
+      //
+      // BE PRECISE ABOUT WHAT THIS PROVES, because the tempting claim is too strong. Measured
+      // against the moved-append mutation, the rows survived it too — `eraseTenant` has its OWN
+      // structurally-mandatory audit-before-delete guard writing to the SAME table, and that guard
+      // caught it. So this arm does NOT show "the record is the only thing between the call and the
+      // data"; the honest statement is narrower and is the one the threat model makes: THIS
+      // command's record precedes THIS command's seam call, and an unwritable trail aborts with the
+      // data intact. The census assertion is real, and it is defence in depth over the inner guard
+      // rather than a replacement for it.
+      //
+      // It doubles as the only coverage of the AUDIT_FAILED path, which nothing else exercised.
+      //
+      // The gate is ARMED and the request is CONFIRMED here deliberately: both of the command's own
+      // safeties are switched off, so the journal is the last one it owns.
+      const before = await counts(TENANT_A);
+      for (const t of RUN_HISTORY_TABLES) expect(before[t]).toBeGreaterThan(0);
+      const sql = (db as Db).$client;
+
+      setGate('true');
+      await sql.unsafe('ALTER TABLE auth_audit RENAME TO auth_audit_hidden');
+      let code = '';
+      try {
+        await eraseTenantData({
+          orgId: TENANT_A,
+          dryRun: false,
+          journalScrub: false,
+          reason: REASON,
+        });
+      } catch (e) {
+        code = (e as { code?: string }).code ?? '';
+        expect((e as Error).name).toBe('TenantEraseCommandError');
+      } finally {
+        await sql.unsafe('ALTER TABLE auth_audit_hidden RENAME TO auth_audit');
+      }
+      expect(code, 'the unwritable journal did not abort the erasure').toBe('AUDIT_FAILED');
+      // The whole point: the data is still there.
+      expect(await counts(TENANT_A)).toEqual(before);
+      armsRan++;
+    },
+    120_000,
+  );
+
+  maybe(
+    '6. armed AND confirmed ⇒ the run history is really gone',
     async () => {
       setGate('true');
       const report = await eraseTenantData({
@@ -326,13 +384,13 @@ describe('rayspec tenant erase — the operator path to the erasure seam', () =>
     120_000,
   );
 
-  maybe('6. the cross-tenant witness is untouched by all seven calls', async () => {
+  maybe('7. the cross-tenant witness is untouched by every call above', async () => {
     const b = await counts(TENANT_B);
     for (const t of RUN_HISTORY_TABLES) expect(b[t]).toBeGreaterThan(0);
     armsRan++;
   });
 
-  maybe('7. both audit records survive the erasure they describe', async () => {
+  maybe('8. both audit records survive the erasure they describe', async () => {
     const requested = await auditRows(TENANT_A, 'tenant_erase_requested');
     // Six refused/preview attempts + the one that deleted.
     expect(requested).toHaveLength(NEAR_MISSES.length + 2);
@@ -347,7 +405,7 @@ describe('rayspec tenant erase — the operator path to the erasure seam', () =>
   });
 
   maybe(
-    '8. an unreachable database FAILS CLOSED as BOOT_FAILED — never a report of an erasure that did not run',
+    '9. an unreachable database FAILS CLOSED as BOOT_FAILED — never a report of an erasure that did not run',
     async () => {
       // A boot that cannot reach its database must not resolve. The failure mode this guards against
       // is not an exception (the driver supplies one) but a swallowed one: a `catch` that returned a

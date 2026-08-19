@@ -144,6 +144,65 @@ describe('a refused invocation never reaches the seam', () => {
     expect(state.calls).toEqual([]);
   });
 
+  /**
+   * THE COMPARISON IS EXACT, AND THAT IS ASSERTED AGAINST THE NEAR MISSES — not against a wholly
+   * different UUID.
+   *
+   * A review found this hole and it is the sharpest kind: the arm above passes against a comparison
+   * that is `startsWith`, `includes`, a case-fold, or a length-truncated compare, because
+   * `OTHER_ID` fails all of those too. So the arm proved "the confirm is looked at", never "the
+   * confirm must be the WHOLE id". For the one control whose entire job is to make an irreversible
+   * act deliberate, "looked at" is not the property — a single character passing a confirmation
+   * dialog is the classic form of this bug.
+   *
+   * So the values below are the confirmation's equivalent of the operator gate's five near-misses:
+   * every one is a string a loosened comparison would accept and an exact one must refuse.
+   */
+  const CONFIRM_NEAR_MISSES: readonly { readonly label: string; readonly value: string }[] = [
+    { label: 'one character (a startsWith/prefix compare accepts this)', value: '5' },
+    { label: 'a proper prefix', value: ORG_ID.slice(0, ORG_ID.length - 1) },
+    { label: 'the first block only', value: ORG_ID.split('-')[0] as string },
+    { label: 'a proper suffix (an endsWith compare accepts this)', value: ORG_ID.slice(1) },
+    { label: 'a substring (an includes compare accepts this)', value: ORG_ID.slice(4, 20) },
+    { label: 'the id with one extra character', value: `${ORG_ID}0` },
+    {
+      label: 'the id upper-cased (a case-folding compare accepts this)',
+      value: ORG_ID.toUpperCase(),
+    },
+    { label: 'the empty string is a PREVIEW, never a confirmation', value: '' },
+  ];
+
+  it.each(
+    CONFIRM_NEAR_MISSES,
+  )('a --confirm that is $label never reaches the seam as an erasure', async ({ value }) => {
+    // The empty string is the one member that is not an ERROR — it is the absent-confirm case, so
+    // it must fall through to a PREVIEW. Both outcomes are "this did not erase anything", which is
+    // the property under test; what must never happen is a `dryRun: false` call.
+    try {
+      await runTenantErase(['--org-id', ORG_ID, '--confirm', value, '--reason', REASON], {
+        eraseImpl: spyImpl,
+      });
+    } catch (e) {
+      expect(e).toBeInstanceOf(TenantCliError);
+    }
+    for (const call of state.calls) {
+      expect(call.dryRun, `--confirm ${JSON.stringify(value)} produced an ERASE request`).toBe(
+        true,
+      );
+    }
+  });
+
+  it('ACCEPT CONTROL — the exact id IS accepted, so the arms above are not refusing everything', async () => {
+    // Without this, a parser that refused every --confirm would satisfy the whole table above.
+    const out = await runTenantErase(
+      ['--org-id', ORG_ID, '--confirm', ORG_ID, '--reason', REASON],
+      { eraseImpl: spyImpl },
+    );
+    expect(out.requested).toBe('erase');
+    expect(state.calls).toHaveLength(1);
+    expect(state.calls[0]).toMatchObject({ dryRun: false });
+  });
+
   it('refuses --confirm without --reason, having called nothing', async () => {
     await expect(
       runTenantErase(['--org-id', ORG_ID, '--confirm', ORG_ID], { eraseImpl: spyImpl }),

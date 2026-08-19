@@ -180,6 +180,13 @@ Four things about it are worth stating plainly before you run it:
   them — a direct-to-database shortcut would erase the core half and silently leave every product row
   behind. So it resolves the **same three boot secrets** a `rayspec-serve` start does, reads the same
   environment, and **applies the committed migration chain** to `DATABASE_URL` on the way.
+- **Everything else a boot does, it also does.** Its options come from the shared
+  `assembleOptsFromEnv`, so a document with `deployment.durableWorker: true` launches a durable
+  worker for the life of the command (drained on close — a *second* worker against that database if
+  one is already serving it), and `RAYSPEC_UPDATE_MIGRATION`/`RAYSPEC_UPDATE_ALLOWLIST` are honoured
+  exactly as they are for `rayspec-serve`: set in the environment you erase from, the erase applies
+  that delta too. Run it from an environment carrying only the boot secrets and `DATABASE_URL`
+  unless you mean otherwise.
 - **Two independent keys, and neither one alone deletes anything.** `--confirm <org-id>` must repeat
   `--org-id` exactly (a mismatch is refused before anything boots; without it the run passes
   `dryRun: true` and cannot delete under any setting), **and** `RAYSPEC_ERASURE_ENABLED` must be

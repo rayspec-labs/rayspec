@@ -181,6 +181,16 @@ export async function eraseTenantData(input: TenantEraseInput): Promise<TenantEr
       journalScrub: input.journalScrub,
     });
     return { gate: server.housekeeping.erasureEnabled, auditRequestId, result };
+  } catch (err) {
+    // The THIRD library-error path, and it was the one left bare. `eraseTenant` fail-closes on an
+    // absent org and can surface a driver error from inside the delete transaction, so this is no
+    // less likely to quote a connection string back than the other two — and a caller that reads
+    // `code` would otherwise get whatever `name` the thrown value happened to carry.
+    throw new TenantEraseCommandError(
+      'ERASE_FAILED',
+      `The erasure seam refused or failed for org '${input.orgId}'. The attempt is recorded in ` +
+        `auth_audit under request id ${auditRequestId}. Reported: ${redactBootSecrets(oneLine(err), config)}`,
+    );
   } finally {
     await auditDb.$client.end().catch(() => {});
     await server.close().catch(() => {});
