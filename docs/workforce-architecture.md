@@ -9,20 +9,30 @@ mechanism (and usually the test) that enforces it; a claim without one is a bug 
 change without notice.
 
 **How this page cites code, and why it names no line numbers.** Every citation below is a file plus
-the SYMBOL, function or test title to look for — never `file.ts:120-134`. That is a deliberate
-downgrade. A line number looks more precise than a file name and is checked less, because the number
-suppresses the instinct to go and read; and it goes wrong silently, since the line still exists and
-still holds code. An audit of this page's twelve line-numbered citations found **six** pointing at
-the wrong thing, and the failure mode is the near-miss rather than the obvious miss: one landed on
-`decideApproval`'s journal write while the sentence was about the approval *sweep*, and one was
-attributed to `runSweep` while pointing 84 lines above where `runSweep` is declared. Both look right
-if you check that the cited lines are in range and contain plausible code. A fifth rotted **inside
-the branch that fixed the other four**, from that branch's own edits to the cited file.
-Nothing re-verifies this page per commit — `gate:no-archaeology` and `gate:skill-drift` do not read
-it, and an injected `task-scheduler.db.test.ts:99999` is caught by neither — so a number here is a
-claim with no mechanism behind it, which is the one thing this page says it will not print. A symbol
-survives every edit that does not rename it, and a rename is a change a reader can follow. The one
-exception is a citation into a released migration file, which is never edited and so cannot rot.
+the SYMBOL, function or test title to look for — never a file with a line range bolted onto it. That
+is a deliberate downgrade. A line number looks more precise than a file name and is checked less,
+because the number suppresses the instinct to go and read; and it goes wrong silently, since the line
+still exists and still holds code. An audit of this page's twelve line-numbered citations found
+**six** pointing at the wrong thing, and the failure mode is the near-miss rather than the obvious
+miss: one landed on `decideApproval`'s journal write while the sentence was about the approval
+*sweep*, and one was attributed to `runSweep` while pointing 84 lines above where `runSweep` is
+declared. Both look right if you check that the cited lines are in range and contain plausible code.
+A fifth rotted **inside the branch that fixed the other four**, from that branch's own edits to the
+cited file. `gate:no-archaeology` and `gate:skill-drift` do not read this page, and an injected
+citation naming a real suite and a line number past the end of it is caught by neither — so a number
+here would be a claim with no mechanism behind it, which is the one thing this page says it will not
+print. A symbol survives every edit that does not rename it, and a rename is a change a reader can
+follow.
+
+**What re-verifies this page, every run.** [Appendix A](#appendix-a--citation-ledger) pins every
+file and symbol named below to the text it must still contain, and
+`packages/kernel/workforce-tools/src/architecture-drift.test.ts` checks that ledger in BOTH
+directions: a pinned symbol that moved or was renamed is red, and so is a citation added to this
+prose that nothing pins. The same suite refuses a line number anywhere on this page, refuses a bare
+filename that resolves to more than one file in the tree, and refuses a line-pinned reference *to*
+this page from anywhere in the source tree. There is one line-number exception, and it earns it by
+being value-checked like every other row: a citation into a released migration file, which is never
+edited and so cannot rot.
 
 ## The one rule everything else follows from
 
@@ -407,7 +417,7 @@ migrator throws, the process exits non-zero, the whole pending set rolls back, a
 and carries the Postgres cause (SQLSTATE + message) — but **not** the failing tag. So
 `applyMigrations` computes the pending tags *before* it applies anything, by joining
 `SELECT max(created_at) FROM drizzle.__drizzle_migrations` (a journal `when`) against
-`drizzle/meta/_journal.json`, and rethrows a `MigrationChainError` naming them in chain order with
+`packages/kernel/db/drizzle/meta/_journal.json`, and rethrows a `MigrationChainError` naming them in chain order with
 the original error as its `cause`. The earliest listed tag is the first candidate; the whole list
 ships because the pending set is one transaction, so the failure belongs to the set rather than to
 one file. Reading a raw migrator error from `drizzle-kit migrate` or psql, run that same join by
@@ -502,7 +512,7 @@ number of rows":
 - **`workforce_tasks.version`** — the optimistic CAS token `applyTransition` compare-and-swaps on.
   Lose it and every row is present while no parked task can ever be claimed again.
 - **`workforce_tasks.last_event_seq` and `workforce_runtime.last_event_seq`** — the journal sequence
-  HEADs. Allocation rides the owning row's own counter — in `events.ts`, the `lastEventSeq + N`
+  HEADs. Allocation rides the owning row's own counter — in `packages/kernel/tasks/src/events.ts`, the `lastEventSeq + N`
   UPDATE that each appender runs before its insert (one for a task stream, one for the workforce
   control stream) — and `run_events` carries `UNIQUE(tenant_id, run_id, seq)`
   (`0004_run_events.sql:36`, a line number that is safe to cite because a released migration file is
@@ -543,7 +553,7 @@ sweep leaves a not-yet-due approval alone.
 
 **Restoring is not a rollback.** The dump carries the schema it was taken at, and the boot migrator
 described above then applies whatever is still pending — forward, because there are no
-down-migrations to apply (the same `deploy.ts` docblock). So restoring an older dump under a newer
+down-migrations to apply (the same `packages/compose/api-auth/src/engine/deploy.ts` docblock). So restoring an older dump under a newer
 deployment moves the schema *towards* that deployment and never backwards. It also does not soften
 the redeploy gate: the restored rows are live work, and `assertWorkforceSpecCompatible`
 (`workforce-boot.ts`) reads them at the next boot and refuses a document that would strand any
@@ -583,3 +593,88 @@ are exactly the enforced ones named above.
   validation chokepoint, and the test that proves the defence (or the statement that none exists).
 - **[CLI reference → workforce](./cli-reference.md#workforce--operate-the-durable-task-engine-of-a-running-deployment)**
   — the operator console.
+
+## Appendix A — citation ledger
+
+Every file this page names is pinned below to the text it must still contain, and
+`packages/kernel/workforce-tools/src/architecture-drift.test.ts` checks the ledger on every run.
+The left column is a repo-relative path; the right column is the symbol, docblock heading, test
+title or literal the sentence citing that file rests on.
+
+**Both directions are checked, and that is the point.** Ledger → code catches a renamed export or a
+function that moved house, and the failure names the file the text now lives in. Prose → ledger —
+every file and every symbol this page names must appear here — is what stops a citation being added
+to the page with nothing behind it, which is how a hand-curated list quietly falls behind the prose
+it was written for. Ledger → prose is checked too: a row nothing on this page references is a pin
+that has outlived its sentence.
+
+**It fails closed.** An emptied ledger, or a rewording that produced no citations at all, is RED
+rather than vacuously green — "the property holds" and "the scan stopped finding anything" read
+identically without that arm.
+
+**One line-numbered row, and it earns the exception by being value-checked.** A released migration
+file is never edited, so a line in it cannot rot; the guard still checks that the cited line contains
+the recorded text rather than merely existing.
+
+```text
+# file                                                         | the text that file must still contain
+packages/app/cli/src/workforce-story-e2e.db.test.ts            | runs the ten-step story on the shipped starter example, survives the kill, and renders the tree
+packages/app/server/src/backup-restore.db.test.ts              | fail-the-fix: a restore that lost `last_event_seq` collides on the very next append
+packages/app/server/src/backup-restore.db.test.ts              | the turn that was in flight when the dump was taken is REAPED and re-queued, not stranded
+packages/app/server/src/boot-migrator-concurrency.db.test.ts   | 42P07
+packages/app/server/src/boot-migrator-concurrency.db.test.ts   | a THIRD boot over the finished database is a clean no-op
+packages/app/server/src/composition-root.ts                    | applyMigrations
+packages/app/server/src/composition-root.ts                    | deployDeclaredSpec
+packages/app/server/src/composition-root.ts                    | effectiveSpec.workforce !== undefined && !config.cronTenantId
+packages/app/server/src/composition-root.ts                    | MigrationChainError
+packages/app/server/src/migration-failure.db.test.ts           | the failing TAG is recoverable — the one thing the error itself does not carry
+packages/app/server/src/serve-workforce-flag.db.test.ts        | the flag-OFF boot refuses at the parse and every durable row is byte-identical
+packages/app/server/src/tenant-provision.db.test.ts            | two concurrent runs against a FRESH, unmigrated database
+packages/app/server/src/workforce-boot.db.test.ts              | PRE-MARKER WINDOW
+packages/app/server/src/workforce-boot.db.test.ts              | the window CLOSES at the next declaring boot
+packages/app/server/src/workforce-boot.ts                      | assertWorkforceSpecCompatible
+packages/app/server/src/workforce-boot.ts                      | WorkforceSpecChangeError
+packages/app/server/src/workforce-recall.db.test.ts            | ADVERSARIAL: an identical twin workforce in another tenant leaks nothing
+packages/app/server/src/workforce-turn-validation.db.test.ts   | a forged escalateTo cannot ride in through the tool arguments
+packages/compose/api-auth/src/cleanup/erase-tenant.ts          | journalScrub
+packages/compose/api-auth/src/engine/deploy.ts                 | ROLLBACK / RECOVERY — FORWARD-FIX ONLY
+packages/kernel/db/drizzle/0004_run_events.sql:36              | CREATE UNIQUE INDEX "run_events_tenant_run_seq_idx"
+packages/kernel/db/drizzle/meta/_journal.json                  | "when"
+packages/kernel/db/scripts/shadow-dryrun.sh                    | ASSERT 0013 end state
+packages/kernel/db/src/schema.ts                               | claim_expires_at
+packages/kernel/spec/src/workforce-lint.ts                     | THE DURABLE WORKER
+packages/kernel/spec/src/workforce-parse.negative.test.ts      | rejects a workforce on a deployment without a durable worker
+packages/kernel/tasks/src/apply-intents.ts                     | actor: task.owner
+packages/kernel/tasks/src/apply-intents.ts                     | applyTurnOutcome
+packages/kernel/tasks/src/apply-transition.ts                  | applyTransition
+packages/kernel/tasks/src/approvals.ts                         | decideApproval
+packages/kernel/tasks/src/approvals.ts                         | decidedBy
+packages/kernel/tasks/src/approvals.ts                         | overriddenApprover
+packages/kernel/tasks/src/approvals.ts                         | sweepApprovalTimeouts
+packages/kernel/tasks/src/budget.db.test.ts                    | a denial mutates nothing — no ledger rows exist after a denied first authorize
+packages/kernel/tasks/src/decision-authority.db.test.ts        | break-glass decides a named row AND the journal records that an override happened
+packages/kernel/tasks/src/decision-authority.ts                | ANY_AUTHENTICATED_DECIDER = 'user'
+packages/kernel/tasks/src/events.ts                            | lastEventSeq
+packages/kernel/tasks/src/intent-applier.ts                    | escalateTo
+packages/kernel/tasks/src/reviews.ts                           | overriddenReviewer
+packages/kernel/tasks/src/signals.ts                           | manual_unblock
+packages/kernel/tasks/src/transitions.property.test.ts         | terminal at most once, never left; every working-entry from queued
+packages/kernel/workforce-tools/src/architecture-drift.test.ts | every ledger row is anchored in the prose — the pin set cannot run ahead of the page
+packages/kernel/workforce-tools/src/context.test.ts            | an untrusted recall hit cannot forge the data-boundary line
+packages/kernel/workforce-tools/src/context.ts                 | assembleTurnInput
+packages/kernel/workforce-tools/src/context.ts                 | GoalExceedsContextBudgetError
+packages/kernel/workforce-tools/src/facts.ts                   | computeTurnFacts
+packages/kernel/workforce-tools/src/facts.ts                   | confidenceBelow
+packages/kernel/workforce-tools/src/facts.ts                   | firesOnLabels
+packages/kernel/workforce-tools/src/resolve-target.ts          | assertManagerMayTarget
+packages/kernel/workforce-tools/src/role-privilege.test.ts     | the toolset is a function of the TASK owner alone — two roles never blend
+packages/kernel/workforce-tools/src/toolset-semantics.test.ts  | a manager reaches own department members and led-team members — nothing else
+packages/workflow/durable-dbos/src/executor.ts                 | systemDatabaseUrl
+packages/workflow/durable-dbos/src/task-scheduler.db.test.ts   | a LIVE turn INSIDE its lease is never reaped, however many sweeps run
+packages/workflow/durable-dbos/src/task-scheduler.db.test.ts   | a WEDGED turn — DBOS still PENDING — is reaped once its claim lease expires, and its reservation goes back
+packages/workflow/durable-dbos/src/task-scheduler.ts           | DEFAULT_TURN_LEASE_MS
+packages/workflow/durable-dbos/src/task-scheduler.ts           | maxConcurrentWorkers
+packages/workflow/durable-dbos/src/task-scheduler.ts           | runSweep
+packages/workflow/durable-dbos/src/task-scheduler.ts           | taskTurnWorkflowId
+scripts/check-state-machine-exhaustive.mjs                     | the transition gate is the ONLY status writer
+```
