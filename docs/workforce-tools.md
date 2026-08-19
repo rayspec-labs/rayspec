@@ -52,6 +52,15 @@ transcript is how the runtime knows an ending was attempted, and the check norma
 recorded tool name because adapters disagree on it (one records the bridged
 `mcp__rayspec__<tool>` form verbatim; the others record the neutral name).
 
+`request_approval` carries one refusal beyond its schema: a decision this task already holds a
+human answer to (`approved` or `rejected`) may not be asked again. A genuinely different question
+still parks, and the rows the timeout chain leaves behind (`timed_out`, `escalated`) carry no
+answer and block nothing — the cap is on repeating a settled decision, not on asking for one.
+The tool refuses first, so a seat that hits it can still end the turn a different way; the engine
+refuses independently, so no caller escapes it. Identity is the question with surrounding and
+repeated whitespace collapsed and case folded, which means a REWORDED question counts as a new
+decision and is not capped. See `docs/workforce-architecture.md` → "Parks and their exits" for why.
+
 A delegation may declare its children's `priority` (the closed `low`–`urgent` set): dispatch
 ordering within the tenant honors it, deliberately — urgency is part of what a hand-off says —
 and it steers ORDER only, inside the same budgets and ceilings as everything else; a self-styled
