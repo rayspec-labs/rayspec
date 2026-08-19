@@ -317,6 +317,74 @@ describe.skipIf(!hasDb)('/v1/workforce status — budget reporting truth', () =>
     expect(tiers.some((t) => t.scopeKind === 'department')).toBe(false);
   });
 
+  /**
+   * THE BOUNDARY, on both axes. A scope consumed to EXACTLY its ceiling admits nothing further —
+   * `authorizeTurn` denies at `consumed + estimate > ceiling` and at `settledTurns + 1 > turns` —
+   * so it is exhausted AT the line, not one turn past it. The arms above all over-settle, where
+   * `>` and `>=` agree; without this test a `>` reports `exhausted: false` for a scope that is
+   * dead, which is finding L2-1 rebuilt inside its own fix. The TURNS axis is not an afterthought:
+   * turns are counted one integer at a time, so landing exactly on a turns ceiling is the ORDINARY
+   * case, not the corner one. Each tier's verdict is cross-checked against a real `authorizeTurn`
+   * denial in the same test, so `exhausted` is a fact about the engine and not a label.
+   */
+  it('a tier consumed to EXACTLY its ceiling reads exhausted — usd and turns alike', async () => {
+    const a = await principal('wf-bt-boundary@example.test', 'Org WF BT Boundary');
+    const tdb = forTenant(h.db, a.orgId);
+    const raw = {
+      workforce: { usd: 5, window: 'daily' },
+      departments: {
+        edgeturns: { turns: 1, window: 'daily' },
+        edgeusd: { usd: 0.001, window: 'daily' },
+      },
+      execution: { estimateUsdPerTurn: 0.0005 },
+    } as const;
+    const budgets = workforceBudgetsSchema.parse(raw);
+    await ensureWorkforceRuntime(tdb, 'wf', raw);
+
+    for (const [department, actualUsd] of [
+      ['edgeusd', 0.001],
+      ['edgeturns', 0.0001],
+    ] as const) {
+      const task = await createRootTask(tdb, {
+        workforceId: 'wf',
+        title: `Work for ${department}`,
+        goal: 'Land exactly on the line.',
+        owner: 'principal_eng',
+        requestedBy: 'user',
+        department,
+      });
+      const proposed = {
+        taskId: task.taskId,
+        rootTaskId: task.taskId,
+        workforceId: 'wf',
+        department,
+        estimateUsd: 0.0005,
+      };
+      expect((await authorizeTurn(tdb, budgets, proposed)).allowed).toBe(true);
+      await tdb.transaction((tx) => settleTurn(tx, budgets, { ...proposed, actualUsd }));
+      // The engine's own verdict on the same scope: nothing further may be dispatched.
+      const next = await authorizeTurn(tdb, budgets, proposed);
+      expect(next.allowed, `${department} must admit nothing once it sits ON its ceiling`).toBe(
+        false,
+      );
+    }
+
+    const tiers = await readStatus(a.token).then((b) => b.budgetTiers);
+    const usdEdge = tiers.find((t) => t.scopeId === 'edgeusd') as StatusBudgetTier;
+    const turnsEdge = tiers.find((t) => t.scopeId === 'edgeturns') as StatusBudgetTier;
+    expect(usdEdge.consumedUsd).toBe(0.001);
+    expect(usdEdge.headroomUsd).toBe(0);
+    expect(usdEdge.exhausted, 'consumed === ceiling admits nothing, so it IS exhausted').toBe(true);
+    expect(turnsEdge.ceilingTurns).toBe(1);
+    expect(turnsEdge.consumedTurns).toBe(1);
+    expect(turnsEdge.ceilingUsd).toBeNull();
+    expect(
+      turnsEdge.exhausted,
+      'a turns ceiling reached exactly is exhausted — and it has no usd ceiling at all, so the ' +
+        'verdict cannot be coming from the money axis',
+    ).toBe(true);
+  });
+
   it('status carries blockedOnBudget — the parks a tier enumeration can never see', async () => {
     const a = await principal('wf-bt-blocked@example.test', 'Org WF BT Blocked');
     const tdb = forTenant(h.db, a.orgId);
