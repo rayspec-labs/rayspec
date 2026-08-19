@@ -284,4 +284,157 @@ describe.skipIf(!hasDb)('budget ledger (db)', () => {
       expect(Number(root[0]?.reserved_usd)).toBe(0.1);
     });
   });
+
+  /**
+   * THE DEPARTMENT TIER, AGAINST A DATABASE AND UNDER A RACE (B-015 clause 2).
+   *
+   * Every arm above this one leaves `proposal()`'s `department` at its `null` default, so the
+   * department scope is never even PUSHED onto the check list (`ledgerScopesFor` adds it only
+   * `if (proposed.department !== null)`). The tier's only existing coverage is in the pure-unit
+   * file — lock order, the absent case, the undeclared-but-visible case — none of which touches
+   * Postgres and none of which contends. So the third of the four ledger tiers had never had its
+   * check-then-reserve window closed by anything an executing test observed.
+   *
+   * WHAT MAKES THE DEPARTMENT TIER ITS OWN CASE rather than a rename of the workforce one:
+   *   - it is WINDOWED (`windowStartFor(dep?.window ?? 'daily', now)`) where task and root carry
+   *     the epoch sentinel, so its ledger key includes a bucket the other two contended rows do
+   *     not have — a mis-bucketing splits the very row the ceiling is supposed to share, and the
+   *     race would then admit every racer while every individual assertion still looked right;
+   *   - it sits at SCOPE_RANK 2, between root and workforce, so it is also the tier that proves
+   *     the canonical lock order holds with a windowed row in the middle of it.
+   *
+   * DETERMINISM: every arm passes an explicit `now`. The default would take the wall clock, and a
+   * suite that races across a UTC midnight would split its own contended row and pass while
+   * proving nothing.
+   */
+  describe('a DECLARED department ceiling binds against real rows, and holds under contention', () => {
+    // Deliberately the ONLY declared ceiling. With no workforce and no subtree tier, a denial can
+    // come from nowhere else — the CONTROL arm below is what turns that from a claim into a check.
+    const budgets = workforceBudgetsSchema.parse({
+      departments: { growth: { usd: 3 } },
+      execution: { estimateUsdPerTurn: 1 },
+    });
+    /** One fixed instant, so every racer lands in ONE daily bucket. */
+    const NOW = new Date('2026-08-14T13:00:00Z');
+    const inGrowth = (taskId: string) => proposal(taskId, 1, { department: 'growth' });
+
+    async function departmentRows(): Promise<
+      Array<{ scope_id: string; reserved_usd: string; settled_turns: number; window_start: Date }>
+    > {
+      return (await db.$client.unsafe(
+        "SELECT scope_id, reserved_usd, settled_turns, window_start FROM workforce_budget_ledger WHERE scope_kind = 'department' ORDER BY scope_id, window_start;",
+      )) as unknown as Array<{
+        scope_id: string;
+        reserved_usd: string;
+        settled_turns: number;
+        window_start: Date;
+      }>;
+    }
+
+    it('CONTROL — the SAME budgets deny nothing when the proposal names no department', async () => {
+      const tdb = forTenant(db, TENANT_A);
+      // Four turns at estimate 1 against a `usd: 3` ceiling — past it twice over. Every one is
+      // admitted, because a departmentless proposal never reaches the department scope at all.
+      for (const id of ['t1', 't2', 't3', 't4']) {
+        expect(
+          (await authorizeTurn(tdb, budgets, proposal(id, 1), NOW)).allowed,
+          `${id} was denied with no department declared on the proposal`,
+        ).toBe(true);
+      }
+      expect(await departmentRows()).toHaveLength(0);
+    });
+
+    it('admits exactly the affordable turns, then denies with the typed DEPARTMENT scope', async () => {
+      const tdb = forTenant(db, TENANT_A);
+      expect((await authorizeTurn(tdb, budgets, inGrowth('t1'), NOW)).allowed).toBe(true);
+      expect((await authorizeTurn(tdb, budgets, inGrowth('t2'), NOW)).allowed).toBe(true);
+      expect((await authorizeTurn(tdb, budgets, inGrowth('t3'), NOW)).allowed).toBe(true);
+      const fourth = await authorizeTurn(tdb, budgets, inGrowth('t4'), NOW);
+      expect(fourth.allowed).toBe(false);
+      if (!fourth.allowed) {
+        // The SCOPE is the load-bearing half: a denial that fired at the wrong tier would still
+        // report `allowed: false`, and this suite's other arms would not notice.
+        expect(fourth.denial).toMatchObject({
+          scopeKind: 'department',
+          scopeId: 'growth',
+          ceiling: { kind: 'usd', limit: 3 },
+          consumed: 3,
+        });
+      }
+    });
+
+    it('holds under CONCURRENT spend: 6 racers, usd 3, estimate 1 — exactly 3 admitted', async () => {
+      const race = Array.from({ length: 6 }, (_, i) =>
+        authorizeTurn(forTenant(db, TENANT_A), budgets, inGrowth(`t${i}`), NOW),
+      );
+      const results = await Promise.all(race);
+      expect(results.filter((r) => r.allowed)).toHaveLength(3);
+      expect(results.filter((r) => !r.allowed)).toHaveLength(3);
+      // Every denial is the DEPARTMENT's. Three refusals could otherwise be three refusals for
+      // three different reasons, which is not what a ceiling holding means.
+      for (const denied of results.filter((r) => !r.allowed)) {
+        if (!denied.allowed) {
+          expect(denied.denial).toMatchObject({ scopeKind: 'department', scopeId: 'growth' });
+        }
+      }
+      // ONE row, not six: the windowed key bucketed every racer together. Six rows would mean the
+      // ceiling was never shared, and the "exactly 3" above would have been an accident.
+      const rows = await departmentRows();
+      expect(
+        rows,
+        'the department ledger split into more than one row — the racers did not contend on one ceiling',
+      ).toHaveLength(1);
+      expect(Number(rows[0]?.reserved_usd)).toBe(3);
+      expect(rows[0]?.settled_turns).toBe(3);
+    });
+
+    it('one department’s spend leaves ANOTHER department’s headroom untouched', async () => {
+      const tdb = forTenant(db, TENANT_A);
+      const twoDepartments = workforceBudgetsSchema.parse({
+        departments: { growth: { usd: 1 }, ops: { usd: 1 } },
+        execution: { estimateUsdPerTurn: 1 },
+      });
+      expect(
+        (await authorizeTurn(tdb, twoDepartments, proposal('g1', 1, { department: 'growth' }), NOW))
+          .allowed,
+      ).toBe(true);
+      expect(
+        (await authorizeTurn(tdb, twoDepartments, proposal('g2', 1, { department: 'growth' }), NOW))
+          .allowed,
+        'growth was still admitting past its own ceiling',
+      ).toBe(false);
+      // `ops` is exhausted by nothing: the ceilings are per-scope-id, not a shared pool.
+      expect(
+        (await authorizeTurn(tdb, twoDepartments, proposal('o1', 1, { department: 'ops' }), NOW))
+          .allowed,
+        "growth's spend consumed ops's headroom — the department scope id is not binding",
+      ).toBe(true);
+      expect((await departmentRows()).map((r) => r.scope_id)).toEqual(['growth', 'ops']);
+    });
+
+    it('the department tier is WINDOWED: a new UTC day is a new row with its own headroom', async () => {
+      const tdb = forTenant(db, TENANT_A);
+      const daily = workforceBudgetsSchema.parse({
+        departments: { growth: { usd: 1 } },
+        execution: { estimateUsdPerTurn: 1 },
+      });
+      const day1 = new Date('2026-08-14T09:00:00Z');
+      const day2 = new Date('2026-08-15T09:00:00Z');
+      expect((await authorizeTurn(tdb, daily, inGrowth('t1'), day1)).allowed).toBe(true);
+      expect((await authorizeTurn(tdb, daily, inGrowth('t2'), day1)).allowed).toBe(false);
+      // The next day's bucket has its own row and its own headroom. This is what distinguishes the
+      // department tier from task/root, which carry the epoch sentinel and never roll over — and it
+      // is what the single-row assertion in the race arm above is implicitly relying on.
+      expect(
+        (await authorizeTurn(tdb, daily, inGrowth('t3'), day2)).allowed,
+        'the second day was denied against the first day’s spend — the department key is not windowed',
+      ).toBe(true);
+      const rows = await departmentRows();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => new Date(r.window_start).toISOString())).toEqual([
+        '2026-08-14T00:00:00.000Z',
+        '2026-08-15T00:00:00.000Z',
+      ]);
+    });
+  });
 });

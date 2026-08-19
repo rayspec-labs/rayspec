@@ -20,6 +20,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { applyTurnOutcome } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import {
+  ApprovalAlreadyDecidedError,
   ApprovalApproverMismatchError,
   ApprovalNotFoundError,
   decideApproval,
@@ -458,5 +459,245 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
       `SELECT verdict FROM workforce_reviews WHERE id = '${review.id}';`,
     )) as unknown as { verdict: string | null }[];
     expect(rows[0]?.verdict).toBeNull();
+  });
+
+  // ── the CAS under REAL concurrency (B-015 clause 1) ──────────────────────────────────────────
+  //
+  // WHY HERE, in the authority suite. `approvals.ts`'s own protocol note states that the authority
+  // gate "cannot be the race arbiter and does not try to be: the `status = 'pending'`
+  // compare-and-swap below is still the only thing that admits one winner (two authorized racers
+  // both read `pending`, both CAS, and the loser lands in the same already-decided branch as
+  // before)". That sentence is a claim about a race, and until these arms nothing in the tree ran
+  // one: every `decideApproval` call in every suite was a sequential `await`, so the CAS was only
+  // ever exercised on the trivially-serialized path where the second call reads a decided row.
+  //
+  // The REVIEW twin is already covered this way (reviews.db.test.ts, "two RACING verdicts on one
+  // review admit exactly one") and this is deliberately the same shape, for the same reason its
+  // comment gives: BOTH racers are the row's own named approver. Racing two unrelated principals
+  // would be refused by the authority gate BEFORE the CAS ever ran, which would quietly stop
+  // testing the CAS while still producing a green "exactly one winner".
+  //
+  // WHAT "EXACTLY ONE WINNER" DOES NOT SAY, and why the arms below say more. A count of one
+  // fulfilled promise is ALSO satisfied by neither racer succeeding (0 wins is not 1, but a suite
+  // asserting only `losses.length >= 1`, or only that the row is no longer pending, would pass on a
+  // double refusal). So the row is read back and matched against the WINNER's own return value, the
+  // journal is counted, and the wake is asserted: the winner must have actually won, not merely
+  // been the only one that did not lose.
+  //
+  // ── WHY THERE IS A BARRIER, and why a bare `Promise.allSettled` was NOT enough ───────────────
+  //
+  // `decideApproval` can refuse a second decision in TWO different places, and only one of them is
+  // the CAS:
+  //   (A) the PRE-CAS read (`if (named.status !== 'pending')`) — reached when the second call's
+  //       opening SELECT happens AFTER the first call committed;
+  //   (B) the POST-CAS branch (`if (!approval)`) — reached only when both calls read `pending` and
+  //       then contend on the UPDATE.
+  // Both throw the SAME `ApprovalAlreadyDecidedError`, so the outcome cannot tell them apart.
+  //
+  // A plain `Promise.allSettled` of two calls therefore lands on (A) or (B) depending on host
+  // timing, and a run that lands on (A) is green while testing nothing about the compare-and-swap.
+  // This was not a hypothetical: the first draft of these arms WAS a plain `allSettled`, and a
+  // mutation that made branch (B) throw a different error class LEFT BOTH ARMS GREEN — the loser
+  // had never reached (B). The barrier below removes the timing dependency.
+  //
+  // HOW IT WORKS. A separate connection holds `SELECT … FOR UPDATE` on the approval row. A plain
+  // SELECT does not block against a row lock, so both racers walk their opening read (both see
+  // `pending`) and then park on their UPDATE. Releasing the lock then lets exactly one UPDATE match
+  // `status = 'pending'`.
+  //
+  // ── HOW THE ARMING IS OBSERVED, and why the OBVIOUS observation is not enough ────────────────
+  //
+  // The tempting check is "neither promise settled while the lock was held". That condition is
+  // NECESSARY but not SUFFICIENT, and the difference is not academic: a racer that never got a
+  // POOLED CONNECTION also does not settle. So on a small enough pool the check passes while one
+  // racer never reached the database at all — and it passes for the wrong reason, which is the
+  // exact defect these arms exist to rule out. Verified rather than reasoned: at `maxPoolSize: 1`
+  // the branch-(B) mutation SURVIVES a settled-flag guard, because the starved racer looks
+  // identical to a parked one.
+  //
+  // So the arming is observed from the DATABASE side instead, through `pg_blocking_pids()`: count
+  // the backends whose blocker set contains THIS barrier's own backend. That is sufficient, because
+  // the only lock this transaction holds is the approval row's, a plain SELECT never waits on it,
+  // and every write `decideApproval` performs after the CAS is downstream of it — so a backend
+  // blocked by this one is a backend sitting on the compare-and-swap UPDATE, at branch (B), and
+  // nowhere else. A racer starved of a connection has no backend and cannot be counted; a racer
+  // that exited through branch (A) is not blocked and cannot be counted either.
+  //
+  // The count is therefore independent of `maxPoolSize`, and the arm fails loudly instead of
+  // passing quietly if the pool is ever too small to run this race. The query is issued on the
+  // barrier's OWN connection, so observing costs no pool slot.
+  describe('two RACING decisions on one approval (the CAS, not the authority gate)', () => {
+    /** Both racers must be observed on the CAS within this budget, or the arm fails rather than hangs. */
+    const ARMING_TIMEOUT_MS = 10_000;
+    const ARMING_POLL_MS = 25;
+
+    type Decision = Awaited<ReturnType<typeof decideApproval>>;
+
+    /** The full decided-row projection — `approvalRow` above does not carry `decision`. */
+    async function decidedRow(
+      id: string,
+    ): Promise<{ status: string; decision: string | null; decided_by: string | null }> {
+      const rows = (await db.$client.unsafe(
+        `SELECT status, decision, decided_by FROM workforce_approvals WHERE id = '${id}';`,
+      )) as unknown as { status: string; decision: string | null; decided_by: string | null }[];
+      return rows[0] as { status: string; decision: string | null; decided_by: string | null };
+    }
+
+    /**
+     * Race an approve against a reject on ONE approval, both as the row's own named approver, with
+     * both provably parked at the CAS before either is allowed through.
+     *
+     * Told apart by their DECISION, not by their actor: racing two different principals would be
+     * refused by the authority gate BEFORE the CAS ever ran — the same reason
+     * `reviews.db.test.ts`'s racing-verdict arm gives for using one reviewer twice.
+     */
+    async function racedDecision(approvalId: string): Promise<{
+      results: PromiseSettledResult<Decision>[];
+      /**
+       * How many backends were observed BLOCKED BY THE BARRIER'S OWN BACKEND — i.e. sitting on the
+       * compare-and-swap UPDATE. Two means the race armed. Anything less means a racer never got
+       * there (starved of a pooled connection, or gone through branch (A)), and the run proves
+       * nothing about the CAS.
+       */
+      onTheCas: number;
+    }> {
+      let settled!: Promise<PromiseSettledResult<Decision>[]>;
+      let onTheCas = 0;
+
+      await db.$client.begin(async (sql) => {
+        await sql.unsafe(
+          `SELECT id FROM workforce_approvals WHERE id = '${approvalId}' FOR UPDATE;`,
+        );
+
+        const approve = decideApproval(tdb(), {
+          approvalId,
+          decision: 'approve',
+          decidedBy: 'ops_lead',
+        });
+        const reject = decideApproval(tdb(), {
+          approvalId,
+          decision: 'reject',
+          decidedBy: 'ops_lead',
+          reason: 'not now',
+        });
+        settled = Promise.allSettled([approve, reject]);
+
+        // Poll on the barrier's own connection until both racers are visibly waiting on the lock it
+        // holds — counting the whole WAIT TREE rooted at this backend, not just its direct waiters.
+        //
+        // The recursion is load-bearing and was found empirically, by this guard failing rather
+        // than passing. With two backends queued on one row, Postgres does not report both as
+        // blocked by the row's holder: the first waiter takes the TUPLE lock while it waits for the
+        // holder's transaction, so `pg_blocking_pids()` reports the SECOND waiter as blocked by the
+        // FIRST. A direct-blockers-only count therefore reads 1 where the truth is 2 — measured, on
+        // PostgreSQL 16.14: the arm failed `expected 1 to be 2` before the recursion was added.
+        //
+        // Scoped by `pg_backend_pid()` at the root, so the tree can only contain backends waiting
+        // (directly or transitively) on THIS barrier. No other suite, file, or database on the
+        // server can enter it, and a racer that never got a pooled connection has no backend to
+        // enter it with.
+        const deadline = Date.now() + ARMING_TIMEOUT_MS;
+        for (;;) {
+          // `pg_stat_activity` is SNAPSHOTTED PER TRANSACTION, and this poll runs inside the
+          // barrier's transaction — so without this the loop re-reads the snapshot taken on its
+          // FIRST iteration, before either racer had blocked, and reports 0 forever. Also found by
+          // this guard failing rather than passing: the arm sat at `expected +0 to be 2` for the
+          // full timeout while the racers were, in fact, correctly parked.
+          await sql.unsafe('SELECT pg_stat_clear_snapshot();');
+          const rows = (await sql.unsafe(
+            `WITH RECURSIVE waiters AS (
+               SELECT a.pid
+                 FROM pg_stat_activity a
+                WHERE a.pid <> pg_backend_pid()
+                  AND pg_backend_pid() = ANY(pg_blocking_pids(a.pid))
+               UNION
+               SELECT a.pid
+                 FROM pg_stat_activity a
+                 JOIN waiters w ON w.pid = ANY(pg_blocking_pids(a.pid))
+                WHERE a.pid <> pg_backend_pid()
+             )
+             SELECT count(*)::int AS c FROM waiters;`,
+          )) as unknown as Array<{ c: number }>;
+          onTheCas = (rows[0] as { c: number }).c;
+          if (onTheCas >= 2 || Date.now() >= deadline) break;
+          await new Promise((resolve) => setTimeout(resolve, ARMING_POLL_MS));
+        }
+      });
+
+      return { results: await settled, onTheCas };
+    }
+
+    /** The arming assertion both arms share — stated once so neither can drift from the other. */
+    function expectArmed(onTheCas: number): void {
+      expect(
+        onTheCas,
+        'the race did not arm: fewer than two backends were waiting on the barrier’s row lock, ' +
+          'so at least one racer never reached the compare-and-swap (it exited through the PRE-CAS ' +
+          'read, or never got a pooled connection). Nothing in this run is evidence about the CAS',
+      ).toBe(2);
+    }
+
+    it('admits exactly one — and the STORED row is the winner’s, never the loser’s', async () => {
+      const { row } = await pendingApproval('ops_lead');
+
+      const { results, onTheCas } = await racedDecision(row.id);
+
+      // THE RACE ARMED — observed, not assumed. Without this the assertions below are green on a
+      // run where the second caller never contended at all (see the branch note above the describe).
+      expectArmed(onTheCas);
+
+      const wins = results.filter((r) => r.status === 'fulfilled');
+      const losses = results.filter((r) => r.status === 'rejected');
+      expect(wins).toHaveLength(1);
+      expect(losses).toHaveLength(1);
+      expect((losses[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        ApprovalAlreadyDecidedError,
+      );
+
+      // THE WINNER ACTUALLY WON. Anchored on the fulfilled promise's own value rather than on a
+      // literal, so this cannot pass by both racers failing and it cannot pass by the row landing
+      // on a status neither of them asked for.
+      const winner = (wins[0] as PromiseFulfilledResult<Decision>).value;
+      expect(winner.status).toMatch(/^(approved|rejected)$/);
+      expect(
+        await decidedRow(row.id),
+        'the stored approval is not the winning decision — the CAS admitted one caller but the row ' +
+          'carries the other, or a blend of the two',
+      ).toEqual({
+        status: winner.status,
+        decision: winner.decision,
+        decided_by: 'ops_lead',
+      });
+    });
+
+    it('the LOSER changes nothing: one decision event, one signal, one wake', async () => {
+      const { task, row } = await pendingApproval('ops_lead');
+
+      const { results, onTheCas } = await racedDecision(row.id);
+      expectArmed(onTheCas);
+      const winner = (
+        results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<Decision>
+      ).value;
+
+      // A refusal writes NOTHING — the suite's standing rule, applied to the racing loser rather
+      // than to the unauthorized caller. Counting the journal and the signals is what catches a
+      // loser that half-wrote: the row check alone cannot see a second event or a second delivery.
+      expect(
+        await eventCount(task.taskId, 'workforce.approval.decided'),
+        'the losing racer journaled a decision it did not make',
+      ).toBe(1);
+      expect(await signalCount(task.taskId), 'the losing racer delivered a second wake').toBe(1);
+
+      const events = (await db.$client.unsafe(
+        `SELECT data FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.approval.decided';`,
+      )) as unknown as { data: Record<string, unknown> }[];
+      expect(events[0]?.data).toMatchObject({ decision: winner.decision, decidedBy: 'ops_lead' });
+
+      // …and the ONE decision that landed did the whole job: the task is off its approval park.
+      const woke = await db.$client.unsafe(
+        `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${task.taskId}';`,
+      );
+      expect(woke[0]).toMatchObject({ status: 'queued', status_reason: null });
+    });
   });
 });
