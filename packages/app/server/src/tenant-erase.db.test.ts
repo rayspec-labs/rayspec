@@ -33,6 +33,8 @@
  *   7. BOTH RECORDS SURVIVE THE ERASURE THEY DESCRIBE. After the real delete, the request rows AND
  *      the `tenant_data_erased` row are still readable — `auth_audit` is a global/auth table that
  *      tenant erasure deliberately does not touch, which is what makes the trail worth anything.
+ *   8. AN UNREACHABLE DATABASE FAILS CLOSED as `BOOT_FAILED` — never a swallowed error that would
+ *      read, to an operator and to a script, as a successful preview of an empty tenant.
  *
  * DB ISOLATION: a whole throwaway DATABASE, dropped on teardown. No document is set, so no durable
  * worker is launched and no scheduler pass can race the assertions. Each call boots and closes its
@@ -83,7 +85,7 @@ if (requireDb && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARM_COUNT = 7;
+const ARM_COUNT = 8;
 
 describe('rayspec tenant erase — the operator path to the erasure seam', () => {
   const maybe = baseUrl ? it : it.skip;
@@ -343,6 +345,35 @@ describe('rayspec tenant erase — the operator path to the erasure seam', () =>
     expect((erased[0] as { meta: Record<string, unknown> }).meta.mode).toBe('deleted');
     armsRan++;
   });
+
+  maybe(
+    '8. an unreachable database FAILS CLOSED as BOOT_FAILED — never a report of an erasure that did not run',
+    async () => {
+      // A boot that cannot reach its database must not resolve. The failure mode this guards against
+      // is not an exception (the driver supplies one) but a swallowed one: a `catch` that returned a
+      // zero-count report would read to an operator, and to a script, as "there was nothing to
+      // erase" — indistinguishable from a successful preview of an empty tenant. So the arm asserts
+      // the CODE, not merely that something threw.
+      //
+      // Deliberately NOT also an assertion that the message carries no secret: postgres reports
+      // `connect ECONNREFUSED host:port` and nothing more, so such an assertion would pass whether
+      // or not `redactBootSecrets` ran — measured, by removing the redaction and watching it stay
+      // green. The redactor is proven directly in `tenant-erase.test.ts`, where a mutation to it
+      // cannot hide.
+      const saved = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = 'postgres://erase-user:erase-secret-pass@127.0.0.1:1/nope';
+      try {
+        await expect(
+          eraseTenantData({ orgId: TENANT_B, dryRun: true, journalScrub: false }),
+        ).rejects.toMatchObject({ name: 'TenantEraseCommandError', code: 'BOOT_FAILED' });
+      } finally {
+        if (saved === undefined) delete process.env.DATABASE_URL;
+        else process.env.DATABASE_URL = saved;
+      }
+      armsRan++;
+    },
+    120_000,
+  );
 
   maybe('ran-guard — every arm above actually executed', () => {
     expect(armsRan).toBe(ARM_COUNT);

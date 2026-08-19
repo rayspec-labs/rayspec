@@ -41,7 +41,12 @@ import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 import { AuditStore, type EraseResult } from '@rayspec/api-auth';
 import { makeDb } from '@rayspec/db';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+  type ServerConfig,
+} from './composition-root.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
 
 /** A fail-closed erasure abort. `code` is a documented namespace this command's callers may match on. */
@@ -101,7 +106,17 @@ export interface TenantEraseReport {
 export async function eraseTenantData(input: TenantEraseInput): Promise<TenantEraseReport> {
   const now = new Date();
 
-  const config = loadServerConfig();
+  // The boot-config abort is the SHIPPED refusal text — it names the variables and, for a broken file
+  // mount, the path, but never a byte of content (the boot-secret suite pins that), so it is safe to
+  // surface verbatim. It is given its own code because "the environment is not sufficient to boot" is
+  // a different thing for an operator to fix than "the boot itself failed".
+  let config: ServerConfig;
+  try {
+    config = loadServerConfig();
+  } catch (err) {
+    throw new TenantEraseCommandError('BOOT_CONFIG_INVALID', oneLine(err));
+  }
+
   let server: BootedServer;
   try {
     server = await assembleServer(config, assembleOptsFromEnv(config));
@@ -110,7 +125,7 @@ export async function eraseTenantData(input: TenantEraseInput): Promise<TenantEr
       'BOOT_FAILED',
       'Assembling the deployment failed, so nothing was previewed or erased. This command boots the ' +
         'same composition root `rayspec-serve` does (it binds no port), because the product-store ' +
-        `order and the blob backend come from the deployed document. Reported: ${oneLine(err)}`,
+        `order and the blob backend come from the deployed document. Reported: ${redactBootSecrets(oneLine(err), config)}`,
     );
   }
 
@@ -156,7 +171,7 @@ export async function eraseTenantData(input: TenantEraseInput): Promise<TenantEr
     throw new TenantEraseCommandError(
       'AUDIT_FAILED',
       `Recording the erasure attempt for org '${input.orgId}' failed, so the attempt was abandoned ` +
-        `before the seam was called — no preview and no delete. Reported: ${oneLine(err)}`,
+        `before the seam was called — no preview and no delete. Reported: ${redactBootSecrets(oneLine(err), config)}`,
     );
   }
 
@@ -184,4 +199,29 @@ function safeUser(): string {
 /** A driver/library error collapsed to one line so an operator's JSON stays one object. */
 function oneLine(err: unknown): string {
   return (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Blank out the resolved boot secrets if a driver or library quoted one back at us.
+ *
+ * The same posture `runTenantEnsure`'s `redactSecrets` takes, for the same reason: a connection
+ * string carries a password, and a failure deep in a driver is exactly the moment nobody is auditing
+ * what an error string happens to contain. Enforced on the way out rather than assumed of every
+ * dependency — and it has to happen HERE, because the CLI above never holds these values and so
+ * cannot strip them.
+ *
+ * EXPORTED FOR ITS OWN PROOF. The failure this defends against is one no *shipped* driver error is
+ * known to produce today (a refused connection reports `connect ECONNREFUSED host:port` and nothing
+ * more), so a suite that drove a real failure through it would pass whether or not the stripping
+ * happened — a vacuous arm dressed as a proof. It is a pure function of a string and the resolved
+ * config, so `tenant-erase.test.ts` proves it directly instead, with an accept control.
+ */
+export function redactBootSecrets(message: string, config: ServerConfig): string {
+  return message
+    .split(config.databaseUrl)
+    .join('<DATABASE_URL>')
+    .split(config.apiKeyPepper)
+    .join('<RAYSPEC_API_KEY_PEPPER>')
+    .split(config.jwtSigningKeyPem)
+    .join('<RAYSPEC_JWT_SIGNING_KEY>');
 }
