@@ -209,9 +209,18 @@ action: a second approval on one task is legitimate when it is a *different* dec
 timeout sweep's escalation re-issue opens one by design), so the planner refuses only a question
 this task already carries a human answer to — `approved` or `rejected`, never the `timed_out` and
 `escalated` rows that carry no answer. Identity is the question, trimmed, whitespace-collapsed and
-case-folded; a REWORDED question is a different decision by construction and is deliberately not
-capped, because nothing content-free separates a genuinely new authorization from the same one
-rephrased. Enforced twice on purpose: `planTurnOutcome`
+case-folded. **Keying on the question string makes this cap neither sound nor complete, and the two
+failures do not cost the same.** A REWORDED question reads as a different decision and is not capped
+— nothing content-free separates a genuinely new authorization from the same one rephrased — which
+costs one human decision that need not have been asked for. The mirror is the harmful one: two
+GENUINELY DIFFERENT authorizations that share a question string are capped, because generic phrasings
+collide ("Proceed?" about the migration and "Proceed?" about the announcement are one decision to
+this predicate). That refusal takes the tool-error fate, so a seat that asks again believing its
+question is right does not merely lose the authorization — **the task fails and its work is lost**.
+Both directions are pinned, the false positive including its terminal outcome, in
+`packages/kernel/tasks/src/approval-rerequest.db.test.ts`. A decision identity the seat states
+explicitly would fix both; that is a grammar change and is not this. Enforced twice on purpose:
+`planTurnOutcome`
 (`packages/kernel/tasks/src/intent-applier.ts`) is the authority and catches every caller, taking
 the requeue-once-then-fail tool-error fate; the `request_approval` tool
 (`packages/kernel/workforce-tools/src/toolset.ts`) refuses first with a typed

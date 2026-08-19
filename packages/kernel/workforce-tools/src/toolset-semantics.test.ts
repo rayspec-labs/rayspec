@@ -378,6 +378,21 @@ describe('escalation and reviews', () => {
     );
   });
 
+  it('the STORED side is normalized too, not only the asked side', () => {
+    // REACHABLE, not hypothetical: the engine writes the question VERBATIM as the model wrote it
+    // (`openApproval`), so a first request carrying stray spacing or shouting is what lands in the
+    // row — and this arm is then the only thing standing between the seat and a re-ask the engine
+    // would refuse a turn later. Normalizing only the asked side diverges in exactly the direction
+    // the tool arm exists to prevent: the tool would wave the request through and the seat would
+    // burn the turn discovering the engine's refusal.
+    const { call } = turnFor('cmo', {
+      resolvedApprovalQuestions: ['   PUBLISH   the\tstatement?  '],
+    });
+    expect(() => call('request_approval', { question: 'Publish the statement?' })).toThrow(
+      ApprovalAlreadyResolvedError,
+    );
+  });
+
   it('a genuinely different decision passes the tool door untouched', () => {
     const { call, collector } = turnFor('cmo', {
       resolvedApprovalQuestions: ['Publish the statement?'],

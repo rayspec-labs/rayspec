@@ -214,11 +214,25 @@ export type DelegationRejectionReason = (typeof DELEGATION_REJECTION_REASONS)[nu
  * spacing or capitalization is still the same decision. `options` is deliberately NOT part of the
  * identity: re-asking "Ship?" with the choices relabelled is the same decision.
  *
- * HONEST LIMIT: a REWORDED question is a different decision by construction and is not capped.
- * There is no content-free way to separate "a genuinely new authorization" from "the same one,
- * rephrased", and refusing the action outright would break the legitimate case above. The reworded
- * case stays bounded by what already bounds it — the turn budget, the approval timeout, and the
- * requeue-once-then-fail fate a repeat offence takes.
+ * THE LIMITS, BOTH DIRECTIONS. Keying on the question string makes this cap neither sound nor
+ * complete, and the two failures do not cost the same:
+ *
+ *   - FALSE NEGATIVE — a REWORDED question reads as a different decision and is not capped. There
+ *     is no content-free way to separate "a genuinely new authorization" from "the same one,
+ *     rephrased", and refusing the action outright would break the legitimate case above. Cost: a
+ *     second human decision that should not have been asked for. Still bounded by the turn budget,
+ *     the approval timeout, and the requeue-once-then-fail fate.
+ *   - FALSE POSITIVE — two GENUINELY DIFFERENT authorizations that happen to share one question
+ *     string are capped. Generic phrasings collide: "Proceed?" about the migration and "Proceed?"
+ *     about the announcement are one decision to this predicate. **This is the harmful direction.**
+ *     The refusal takes the tool-error fate, so a seat that believes its question is right and asks
+ *     again on the next turn does not merely lose the authorization — the task FAILS and its work
+ *     is lost. The false negative lets extra work through; this one destroys work.
+ *
+ * Both are pinned in `approval-rerequest.db.test.ts` under "THE TWO KNOWN LIMITS", the false
+ * positive including its terminal outcome, so neither can be quietly forgotten. A future fix wants
+ * a decision identity the seat states explicitly (a decision key) rather than a smarter guess at
+ * what two prose questions mean; that is a grammar change and deliberately out of scope here.
  *
  * SHARED, deliberately: the toolset's own refusal (workforce-tools) normalizes through THIS
  * function, so the rule a seat is refused by at the tool door is the rule the engine enforces.

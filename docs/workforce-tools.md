@@ -57,9 +57,17 @@ human answer to (`approved` or `rejected`) may not be asked again. A genuinely d
 still parks, and the rows the timeout chain leaves behind (`timed_out`, `escalated`) carry no
 answer and block nothing — the cap is on repeating a settled decision, not on asking for one.
 The tool refuses first, so a seat that hits it can still end the turn a different way; the engine
-refuses independently, so no caller escapes it. Identity is the question with surrounding and
-repeated whitespace collapsed and case folded, which means a REWORDED question counts as a new
-decision and is not capped. See `docs/workforce-architecture.md` → "Parks and their exits" for why.
+refuses independently, so no caller escapes it.
+
+Identity is the question with surrounding and repeated whitespace collapsed and case folded — a
+string comparison, with both of that method's failures. A REWORDED question counts as a new decision
+and is not capped. **And the mirror, which matters more when authoring prompts: two genuinely
+different authorizations that share one question string are treated as one, and a seat that re-asks
+rather than rephrasing loses its task to the tool-error fate.** So write approval questions that
+name their subject — "Proceed?" asked twice about different things is one decision here, while
+"Proceed with the migration?" and "Proceed with the announcement?" are two. See
+`docs/workforce-architecture.md` → "Parks and their exits" for why the cap keys on the question at
+all.
 
 A delegation may declare its children's `priority` (the closed `low`–`urgent` set): dispatch
 ordering within the tenant honors it, deliberately — urgency is part of what a hand-off says —

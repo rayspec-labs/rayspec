@@ -504,6 +504,33 @@ describe.skipIf(!hasDb)('the toolset → engine seam (db)', () => {
     expect(await approvalCount(task.taskId)).toBe(2);
   });
 
+  it('the snapshot skips a SCRUBBED decided row, never dereferencing the erased question', async () => {
+    // `workforce_approvals.question` is nullable ONLY so erasure can scrub it (migration 0013),
+    // which keeps the tenant's ledger and structure while dropping content. Without the null filter
+    // in `buildWorkforceSnapshot`, the normalizer is handed `null` and the TURN DIES on a TypeError
+    // — a scrubbed tenant could not request an approval at all. A comment asserted this; nothing
+    // enforced it.
+    const task = await workingChildOf('mgr');
+    await db.$client.unsafe(
+      `INSERT INTO workforce_approvals (tenant_id, task_id, question, options, approver, status, on_timeout)
+         VALUES ('${TENANT}', '${task.taskId}', NULL, '[]'::jsonb, 'user', 'approved', 'fail');`,
+    );
+    const mgr = config.employees.get('mgr');
+    if (!mgr) throw new Error('fixture employee missing');
+    const view = await buildWorkforceSnapshot(tdb(), config, task, mgr);
+    expect(view.resolvedApprovalQuestions).toEqual([]);
+
+    // And the turn still runs end to end rather than throwing.
+    const { outcome, thrown } = await runTurn(task, (invoke) => {
+      invoke('request_approval', { question: 'Ship the announcement?' });
+    });
+    expect(thrown).toBeNull();
+    expect(outcome.task).toMatchObject({
+      status: 'waiting_for_user',
+      statusReason: 'approval_pending',
+    });
+  });
+
   it('the snapshot reads the decided questions ONLY for roles that can ask', async () => {
     // The read is gated on the same predicate `computeTurnFacts` gates the approval rule on, so a
     // worker's snapshot carries an empty list even when its task holds a decided approval. Two

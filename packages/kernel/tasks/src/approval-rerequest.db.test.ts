@@ -228,10 +228,60 @@ describe.skipIf(!hasDb)('the approval re-request cap (db)', () => {
     expect(await requestedEvents(root.taskId)).toBe(2);
   });
 
-  it('a REWORDED question is not capped — the deliberate, documented limit of the cap', async () => {
+  // ---- THE TWO KNOWN LIMITS, both pinned. The cap keys on the question STRING, so it is neither
+  // sound nor complete, and the two failures are not symmetric in cost.
+
+  it('KNOWN LIMIT, false NEGATIVE: a REWORDED question is not capped — extra work gets through', async () => {
     const root = await grantedThenClaim('approve');
     const second = await turn(root.taskId, 2, ask('Should I ship the announcement?'));
     expect(second.plan?.kind).toBe('request_approval');
+    expect(await approvals(root.taskId)).toHaveLength(2);
+  });
+
+  it('KNOWN LIMIT, false POSITIVE: two DIFFERENT decisions sharing one question string are capped', async () => {
+    // The harmful direction, and the reason it is pinned rather than merely mentioned. Generic
+    // phrasings collide: a seat that asks "Proceed?" about the migration, gets it granted, and then
+    // needs "Proceed?" about the announcement — a genuinely different authorization — is REFUSED,
+    // because the decision's identity is its question string and nothing else.
+    const root = await grantedThenClaim('approve', 'Proceed?');
+    const second = await turn(root.taskId, 2, ask('Proceed?'));
+    expect(second.plan?.kind).toBe('invalid_intent');
+    expect(await approvals(root.taskId)).toHaveLength(1);
+  });
+
+  it('KNOWN LIMIT, false POSITIVE: and a seat that insists on it DESTROYS the task', async () => {
+    // The cost asymmetry, made explicit. The false negative lets extra work through; THIS one ends
+    // in `failed`, with the task's work lost, because the tool-error fate is requeue-once-then-fail
+    // and the seat has no way to rephrase its way out if it believes the question is right.
+    const root = await grantedThenClaim('approve', 'Proceed?');
+    await turn(root.taskId, 2, ask('Proceed?'));
+    expect(await taskRow(root.taskId)).toMatchObject({
+      status: 'queued',
+      status_reason: 'tool_error',
+    });
+    await claim(root.taskId, await version(root.taskId), 3);
+    const third = await turn(root.taskId, 3, ask('Proceed?'));
+    expect(third.plan).toMatchObject({ kind: 'invalid_intent', fate: 'fail' });
+    expect((await taskRow(root.taskId)).status).toBe('failed');
+  });
+
+  it('a SCRUBBED row (erased question) is skipped, never dereferenced', async () => {
+    // `question` is nullable ONLY so erasure can scrub it (migration 0013), and a scrubbed tenant
+    // keeps its ledger and structure. Both readers filter the nulls out; without that filter the
+    // normalizer is handed `null` and the turn dies on a TypeError instead of planning — a scrubbed
+    // tenant would be unable to request an approval at all. Three code comments asserted this and
+    // nothing enforced it, so here is the mechanism.
+    const root = await newWorkingRoot();
+    await db.$client.unsafe(
+      `INSERT INTO workforce_approvals (tenant_id, task_id, question, options, approver, status, on_timeout)
+         VALUES ('${TENANT_A}', '${root.taskId}', NULL, '[]'::jsonb, 'user', 'approved', 'fail');`,
+    );
+    const out = await turn(root.taskId, 1, ask(QUESTION));
+    expect(out.plan?.kind).toBe('request_approval');
+    expect(await taskRow(root.taskId)).toMatchObject({
+      status: 'waiting_for_user',
+      status_reason: 'approval_pending',
+    });
     expect(await approvals(root.taskId)).toHaveLength(2);
   });
 
