@@ -88,6 +88,7 @@ function effectiveReportsTo(
   return null;
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export function lintWorkforce(spec: RaySpec): SpecError[] {
   const workforce = spec.workforce;
   if (workforce === undefined) return [];
@@ -850,6 +851,8 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
  * scoped by node and no node's path covers `workforce.…`, so the code is excluded from
  * `SuppressibleWarningCode` and an acknowledgement of it is refused at parse. Telling an author to
  * suppress this would name a mechanism the grammar does not have.
+ *
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export function lintWorkforceWarnings(spec: RaySpec): SpecWarning[] {
   const workforce = spec.workforce;

@@ -19,6 +19,7 @@ import {
   type WorkforceSpec,
 } from './workforce-grammar.js';
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export interface WorkforceEmployeeConfig {
   readonly id: string;
   readonly agent: string;
@@ -34,6 +35,7 @@ export interface WorkforceEmployeeConfig {
   readonly labels: readonly string[];
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export interface WorkforceConfig {
   readonly id: string;
   readonly name: string;
@@ -68,6 +70,7 @@ export interface WorkforceConfig {
   }[];
 }
 
+/** @experimental — see docs/workforce-compatibility.md. */
 export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig {
   const managerOf = new Map(workforce.departments.map((d) => [d.id, d.manager]));
   const employees = new Map<string, WorkforceEmployeeConfig>(
@@ -142,6 +145,7 @@ export function deriveWorkforceConfig(workforce: WorkforceSpec): WorkforceConfig
  * The engine's declared-budgets INPUT shape (structural twin — see the module header). Absent
  * tiers stay ABSENT rather than defaulted: the engine owns its own defaults, and a derivation that
  * invented values would be a second budget model.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export interface DeclaredEngineBudgets {
   readonly workforce?: {
@@ -179,6 +183,7 @@ export interface DeclaredEngineBudgets {
  * the task tier is present, and the lint requires the task tier whenever ANY usd ceiling exists,
  * so a derived object can never trip the engine's own coherence refusal (a usd ceiling with a
  * zero estimate). The drift test on the engine side proves exactly that.
+ * @experimental — see docs/workforce-compatibility.md.
  */
 export function deriveWorkforceBudgets(workforce: WorkforceSpec): DeclaredEngineBudgets {
   const budgets = workforce.budgets;

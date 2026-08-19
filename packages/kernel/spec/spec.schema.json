@@ -1392,7 +1392,10 @@
         "orchestrator",
         "employees"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "title": "workforce (EXPERIMENTAL — not part of the frozen v1.0 grammar)",
+      "description": "EXPERIMENTAL. This section is NOT part of the frozen v1.0 grammar. A document that declares `workforce:` is refused at parse with `experimental_section_disabled` unless RAYSPEC_EXPERIMENTAL_WORKFORCE is set to an opt-in value. While it is experimental its shape, its validation rules and its behaviour may change in any release, including a patch release, and no deprecation period is promised. See docs/workforce-compatibility.md.",
+      "x-rayspec-experimental": true
     },
     "managed": {
       "type": "object",

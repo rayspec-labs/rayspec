@@ -83,5 +83,7 @@ shipped endpoint serves it.
 ## See also
 
 - **[Workforce architecture](./workforce-architecture.md)** — the lifecycle these events narrate.
+- **[Workforce forward compatibility](./workforce-compatibility.md)** — what the EXPERIMENTAL
+  marking above means, and what the `v` stamp is and is not a promise of.
 - **[Spec reference → workforce](./spec-reference.md#workforce-experimental)** — the grammar.
 - **[Workforce tools](./workforce-tools.md)** — the toolsets whose calls become these events.
