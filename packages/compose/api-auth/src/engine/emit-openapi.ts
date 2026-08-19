@@ -135,8 +135,9 @@ export interface OpenApiDocument {
 }
 
 /**
- * One top-level tag. The open extension member exists for `x-`-prefixed specification extensions
- * (OpenAPI 3.1 §4.9) — the workforce section marks itself experimental that way.
+ * One top-level tag. The open extension member exists for the `x-`-prefixed specification
+ * extensions OpenAPI 3.1 allows on any object — the workforce section marks itself experimental
+ * that way.
  */
 export interface OpenApiTag {
   name: string;
@@ -152,7 +153,7 @@ export interface OpenApiOperation {
   summary: string;
   /** Section membership. Absent on a declared-route operation; the workforce section sets it. */
   tags?: string[];
-  /** `x-`-prefixed specification extensions (OpenAPI 3.1 §4.9). */
+  /** The `x-`-prefixed specification extensions OpenAPI 3.1 allows on an operation. */
   [extension: `x-${string}`]: unknown;
   /**
    * Optional operation prose. Emitted ONLY on a store operation whose route carries a NON-EMPTY
