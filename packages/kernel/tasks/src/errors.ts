@@ -78,6 +78,27 @@ export class WorkforceBudgetsInvalidError extends Error {
   }
 }
 
+/**
+ * New work was submitted to a workforce whose operator has PAUSED it (a halt pauses too, so this
+ * covers both). Admission control, not a row-integrity refusal: the goal is well-formed and the
+ * caller is entitled to submit it — the workforce is simply not accepting work right now. The lever
+ * is `POST /v1/workforce/:id/resume`, after which the same submission succeeds.
+ *
+ * Thrown BEFORE the first insert, inside the submitting transaction, so a refused submission leaves
+ * ZERO rows and no journal entry. Fail-closed.
+ */
+export class WorkforcePausedError extends Error {
+  readonly workforceId: string;
+  constructor(workforceId: string) {
+    super(
+      `workforce '${workforceId}' is paused — it is not accepting new work, so this submission ` +
+        'created nothing. Resume the workforce and re-submit. Fail-closed.',
+    );
+    this.name = 'WorkforcePausedError';
+    this.workforceId = workforceId;
+  }
+}
+
 /** The named workforce has no runtime row (never initialized under this tenant). */
 export class WorkforceUnknownError extends Error {
   readonly workforceId: string;

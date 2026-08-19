@@ -12,8 +12,15 @@ import {
 } from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
-import { MAX_TASK_DEPENDENCIES, MAX_TASK_TITLE_CHARS } from '@rayspec/tasks';
-import { makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
+import {
+  haltWorkforce,
+  MAX_TASK_DEPENDENCIES,
+  MAX_TASK_TITLE_CHARS,
+  pauseWorkforce,
+  resumeWorkforce,
+  WorkforcePausedError,
+} from '@rayspec/tasks';
+import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildWorkforceGoalIntake } from './workforce-goal-intake.js';
 
@@ -350,5 +357,117 @@ describe.skipIf(!hasDb)('the goal intake (db)', () => {
     expect(foreignWorkforce).toEqual({ outcome: 'not_found' });
     expect(inputs).toHaveLength(0); // the strategy never saw either
     expect(await taskRows()).toHaveLength(0);
+  });
+
+  /**
+   * OPERATOR CONTROL AT THE INTAKE DOOR.
+   *
+   * `pauseWorkforce` stops the reserve pass and makes `#claimTurn` refuse the claim, so a root born
+   * into a paused workforce never RUNS. It is still wrong to create one: `haltWorkforce`'s
+   * `affectedTaskCount` and its "every non-terminal task" claim become untrue for that row, and a
+   * later resume starts work the operator believed they had stopped. These arms hold the door.
+   *
+   * The gate reads `paused`, NOT `halt_reason` — `resumeWorkforce` clears the former and never the
+   * latter, so a `halt_reason` gate would shut intake forever after one halt. The resume arm is what
+   * fails if anyone "tightens" the predicate that way; it is a guard on the fix, not a defect proof.
+   */
+  describe('a paused or halted workforce admits NO new roots', () => {
+    const tdb = () => forTenant(db as unknown as Db, TENANT);
+
+    /** The runtime row is truncated per test, so a workforce is un-paused unless an arm pauses it. */
+    async function runtimeRow(): Promise<{ paused: boolean; halt_reason: string | null }> {
+      const rows = (await db.$client.unsafe(
+        `SELECT paused, halt_reason FROM workforce_runtime WHERE workforce_id = 'intake_wf';`,
+      )) as unknown as Array<{ paused: boolean; halt_reason: string | null }>;
+      const row = rows[0];
+      if (!row) throw new Error('no runtime row for intake_wf');
+      return row;
+    }
+
+    function oneStep(): OrchestrationStrategy {
+      return scripted({
+        steps: [{ title: 'A', goal: 'a', owner: 'dev', department: null, dependsOn: [] }],
+      }).strategy;
+    }
+
+    it('refuses a goal submitted to a HALTED workforce, and creates ZERO rows', async () => {
+      await haltWorkforce(tdb(), {
+        workforceId: 'intake_wf',
+        actor: 'user:op',
+        reason: 'incident',
+        drainTimeoutMs: 5_000,
+      });
+      expect(await runtimeRow()).toMatchObject({ paused: true, halt_reason: 'incident' });
+
+      await expect(
+        intakeWith(oneStep()).submitGoal({
+          tenantId: TENANT,
+          workforceId: 'intake_wf',
+          goal: 'work the operator halted',
+          requestedBy: 'user:u1',
+        }),
+      ).rejects.toBeInstanceOf(WorkforcePausedError);
+
+      // The whole point: an operator who halted must not find new roots waiting on resume.
+      expect(await taskRows()).toHaveLength(0);
+    });
+
+    it('refuses a goal submitted to a merely PAUSED workforce, and creates ZERO rows', async () => {
+      await pauseWorkforce(tdb(), { workforceId: 'intake_wf', actor: 'user:op' });
+      // A plain pause sets NO halt_reason — this is the arm a `halt_reason` gate would fail.
+      expect(await runtimeRow()).toMatchObject({ paused: true, halt_reason: null });
+
+      await expect(
+        intakeWith(oneStep()).submitGoal({
+          tenantId: TENANT,
+          workforceId: 'intake_wf',
+          goal: 'work while paused',
+          requestedBy: 'user:u1',
+        }),
+      ).rejects.toBeInstanceOf(WorkforcePausedError);
+      expect(await taskRows()).toHaveLength(0);
+    });
+
+    it('admits a goal again after RESUME, even though halt_reason still records the halt', async () => {
+      await haltWorkforce(tdb(), {
+        workforceId: 'intake_wf',
+        actor: 'user:op',
+        reason: 'incident',
+        drainTimeoutMs: 5_000,
+      });
+      await resumeWorkforce(tdb(), { workforceId: 'intake_wf', actor: 'user:op' });
+      // `resumeWorkforce` writes paused/paused_at/paused_by and NOTHING else: the halt's record
+      // survives its own resume. A gate keyed on it would leave this workforce permanently shut.
+      expect(await runtimeRow()).toMatchObject({ paused: false, halt_reason: 'incident' });
+
+      const result = await intakeWith(oneStep()).submitGoal({
+        tenantId: TENANT,
+        workforceId: 'intake_wf',
+        goal: 'work after the operator said go',
+        requestedBy: 'user:u1',
+      });
+      expect(result.outcome).toBe('created');
+      expect(await taskRows()).toHaveLength(1);
+    });
+
+    it('refuses a MULTI-STEP plan at the gate, leaving ZERO rows — not a half-born plan', async () => {
+      await pauseWorkforce(tdb(), { workforceId: 'intake_wf', actor: 'user:op' });
+      const { strategy } = scripted({
+        steps: [
+          { title: 'Research', goal: 'r', owner: 'dev', department: null, dependsOn: [] },
+          { title: 'Draft', goal: 'd', owner: 'dev', department: null, dependsOn: [0] },
+          { title: 'Merge', goal: 'm', owner: 'lead', department: null, dependsOn: [0, 1] },
+        ],
+      });
+      await expect(
+        intakeWith(strategy).submitGoal({
+          tenantId: TENANT,
+          workforceId: 'intake_wf',
+          goal: 'a three-step plan into a paused workforce',
+          requestedBy: 'user:u1',
+        }),
+      ).rejects.toBeInstanceOf(WorkforcePausedError);
+      expect(await taskRows()).toHaveLength(0);
+    });
   });
 });

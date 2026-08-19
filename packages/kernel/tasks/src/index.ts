@@ -89,6 +89,7 @@ export {
   TaskRowCorruptError,
   TaskVersionConflictError,
   WorkforceBudgetsInvalidError,
+  WorkforcePausedError,
   WorkforceUnknownError,
 } from './errors.js';
 export {
@@ -141,6 +142,7 @@ export {
   reviewVerdictSchema,
 } from './reviews.js';
 export {
+  assertWorkforceAcceptsWork,
   ensureWorkforceRuntime,
   isReservedWorkforceSegment,
   RESERVED_WORKFORCE_SEGMENTS,
