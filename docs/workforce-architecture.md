@@ -417,8 +417,9 @@ migrator throws, the process exits non-zero, the whole pending set rolls back, a
 and carries the Postgres cause (SQLSTATE + message) — but **not** the failing tag. So
 `applyMigrations` computes the pending tags *before* it applies anything, by joining
 `SELECT max(created_at) FROM drizzle.__drizzle_migrations` (a journal `when`) against
-`packages/kernel/db/drizzle/meta/_journal.json`, and rethrows a `MigrationChainError` naming them in chain order with
-the original error as its `cause`. The earliest listed tag is the first candidate; the whole list
+`packages/kernel/db/drizzle/meta/_journal.json`, and rethrows a `MigrationChainError` naming them in
+chain order with the original error as its `cause`. The earliest listed tag is the first candidate;
+the whole list
 ships because the pending set is one transaction, so the failure belongs to the set rather than to
 one file. Reading a raw migrator error from `drizzle-kit migrate` or psql, run that same join by
 hand — it is the procedure the wrapper mechanized.
@@ -512,7 +513,8 @@ number of rows":
 - **`workforce_tasks.version`** — the optimistic CAS token `applyTransition` compare-and-swaps on.
   Lose it and every row is present while no parked task can ever be claimed again.
 - **`workforce_tasks.last_event_seq` and `workforce_runtime.last_event_seq`** — the journal sequence
-  HEADs. Allocation rides the owning row's own counter — in `packages/kernel/tasks/src/events.ts`, the `lastEventSeq + N`
+  HEADs. Allocation rides the owning row's own counter — in
+  `packages/kernel/tasks/src/events.ts`, the `lastEventSeq + N`
   UPDATE that each appender runs before its insert (one for a task stream, one for the workforce
   control stream) — and `run_events` carries `UNIQUE(tenant_id, run_id, seq)`
   (`0004_run_events.sql:36`, a line number that is safe to cite because a released migration file is
@@ -553,7 +555,8 @@ sweep leaves a not-yet-due approval alone.
 
 **Restoring is not a rollback.** The dump carries the schema it was taken at, and the boot migrator
 described above then applies whatever is still pending — forward, because there are no
-down-migrations to apply (the same `packages/compose/api-auth/src/engine/deploy.ts` docblock). So restoring an older dump under a newer
+down-migrations to apply (the same `packages/compose/api-auth/src/engine/deploy.ts` docblock). So
+restoring an older dump under a newer
 deployment moves the schema *towards* that deployment and never backwards. It also does not soften
 the redeploy gate: the restored rows are live work, and `assertWorkforceSpecCompatible`
 (`workforce-boot.ts`) reads them at the next boot and refuses a document that would strand any
