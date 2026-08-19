@@ -130,6 +130,7 @@ interface StatusBody {
   paused: boolean;
   tasks: Record<string, number>;
   queueDepth: number;
+  budgetExhausted: boolean;
   blockedOnBudget: number;
   budget: { ceilingUsd: number; consumedUsd: number; headroomUsd: number } | null;
   budgetTiers: StatusBudgetTier[];
@@ -383,6 +384,106 @@ describe.skipIf(!hasDb)('/v1/workforce status — budget reporting truth', () =>
       'a turns ceiling reached exactly is exhausted — and it has no usd ceiling at all, so the ' +
         'verdict cannot be coming from the money axis',
     ).toBe(true);
+  });
+
+  /**
+   * THE HEADLINE, and the reason this suite exists at all. The L2-1 defect was never that the fact
+   * was unavailable — `workforce events` carried the denying scope, its ceiling and its consumption
+   * the whole time. It was that the SUMMARY said 99.86 % open. A fix that answers "is this
+   * workforce stalled on money" only to a reader who iterates `budgetTiers` and compares two
+   * numbers has reproduced the defect at a smaller radius. `budgetExhausted` is therefore a scalar
+   * sitting beside `paused`, and these three arms pin BOTH halves of its disjunction as
+   * load-bearing — each half is the only thing that answers one real scenario.
+   */
+  describe('budgetExhausted — the one field an operator must not have to look for', () => {
+    it('is TRUE when a subordinate ceiling is spent, even with NOTHING parked yet', async () => {
+      const a = await principal('wf-bt-headline-a@example.test', 'Org WF BT Headline A');
+      await exhaustEngDepartment(a.orgId);
+      const body = await readStatus(a.token);
+      // The doomed-but-not-yet-dead case. No task has been denied a dispatch and parked, so the
+      // consequence signal is CORRECTLY zero — and the workforce tier is 99.9 % open. The tier
+      // half of the disjunction is the only thing that can answer here.
+      expect(body.blockedOnBudget).toBe(0);
+      expect(body.budget?.headroomUsd ?? 0).toBeGreaterThan(WORKFORCE_CEILING_USD * 0.99);
+      expect(
+        body.budgetExhausted,
+        'a spent department ceiling with an empty queue reads healthy — the next goal submitted ' +
+          'into eng is already refused and the summary says nothing',
+      ).toBe(true);
+    });
+
+    it('is TRUE when a task is parked on budget by a tier the enumeration cannot reach', async () => {
+      const a = await principal('wf-bt-headline-b@example.test', 'Org WF BT Headline B');
+      const tdb = forTenant(h.db, a.orgId);
+      // A TASK-tier ceiling: one ledger row per task, so `budgetTiers` never lists it — by design
+      // (this route may not materialize the tenant's task partition). Nothing here declares a
+      // department or workforce ceiling that can exhaust, so `budgetTiers` is all-clear and the
+      // parked-task half of the disjunction is the only thing that can answer.
+      const raw = {
+        workforce: { usd: 100, window: 'daily' },
+        task: { usd: 0.01, turns: 20 },
+        execution: { estimateUsdPerTurn: 0.0005 },
+      } as const;
+      await ensureWorkforceRuntime(tdb, 'wf', raw);
+      const task = await createRootTask(tdb, {
+        workforceId: 'wf',
+        title: 'Denied at its own task ceiling',
+        goal: 'Ship the release.',
+        owner: 'principal_eng',
+        requestedBy: 'user',
+      });
+      const queued = await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: queued.version,
+        to: 'blocked',
+        reason: 'budget_exhausted',
+        actor: 'scheduler',
+      });
+      const body = await readStatus(a.token);
+      expect(
+        body.budgetTiers.some((t) => t.exhausted),
+        'no ENUMERATED tier is exhausted here — that is the point of this arm',
+      ).toBe(false);
+      expect(body.blockedOnBudget).toBe(1);
+      expect(
+        body.budgetExhausted,
+        'work is parked on money and the headline calls the workforce healthy',
+      ).toBe(true);
+    });
+
+    it('CONTROL: is FALSE on a workforce whose declared ceilings are all untouched', async () => {
+      const a = await principal('wf-bt-headline-c@example.test', 'Org WF BT Headline C');
+      const tdb = forTenant(h.db, a.orgId);
+      await ensureWorkforceRuntime(tdb, 'wf', RAW_BUDGETS);
+      const task = await createRootTask(tdb, {
+        workforceId: 'wf',
+        title: 'Perfectly ordinary work',
+        goal: 'Ship the release.',
+        owner: 'principal_eng',
+        requestedBy: 'user',
+        department: 'eng',
+      });
+      await applyTransition(tdb, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      const body = await readStatus(a.token);
+      // Real declared ceilings ARE present and enumerated — the flag is false because nothing is
+      // spent, not because there is nothing to be spent.
+      expect(body.budgetTiers.length).toBe(2);
+      expect(
+        body.budgetExhausted,
+        'a constant-true flag is worse than no flag: it trains an operator to ignore it',
+      ).toBe(false);
+    });
   });
 
   it('status carries blockedOnBudget — the parks a tier enumeration can never see', async () => {

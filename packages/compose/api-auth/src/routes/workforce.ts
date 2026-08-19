@@ -399,7 +399,7 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
   // ── reads ─────────────────────────────────────────────────────────────────────────────────────
 
   // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, and the
-  // budget picture (`budget`, `budgetTiers`, `blockedOnBudget`).
+  // budget picture (`budgetExhausted`, `budget`, `budgetTiers`, `blockedOnBudget`).
   // Registered BEFORE the task routes so a workforce id is never shadowed by a fixed segment.
   //
   // THE SECOND THING A CONSUMER MUST NOT GET WRONG (the first is below): `budget` is the
@@ -588,6 +588,27 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
           ceiling !== null
             ? (budgetTiers.find((t) => t.scopeKind === 'workforce')?.consumedUsd ?? 0)
             : 0;
+
+        // THE HEADLINE. One scalar, beside `paused`, because the original defect was NOT that the
+        // fact was unavailable — it was legible in `workforce events` the whole time — it was that
+        // the SUMMARY read 99.86 % open while the workforce was dead. A truth an operator has to
+        // find by scanning an array and comparing two numbers is the same defect wearing a
+        // different shape, so the array is the detail and this is the answer.
+        //
+        // A DISJUNCTION, and each half is load-bearing:
+        //  - a tier at or past its ceiling catches the DOOMED-BUT-NOT-YET-DEAD case (the ceiling is
+        //    spent, the queue happens to be empty, so nothing is parked and the next goal is
+        //    already refused);
+        //  - a task parked on budget catches the tiers this route cannot enumerate at all (task and
+        //    subtree — one ledger row per task and per submitted goal).
+        // Drop either half and there is a real workforce this flag calls healthy.
+        //
+        // WHAT IT DOES NOT SAY: not "the workforce is dead". An exhausted ceiling on a department
+        // nothing is currently working in is true, reportable, and survivable. It says A CEILING
+        // SOMEWHERE IS SPENT — `budgetTiers` says which, `blockedOnBudget` says how much work is
+        // already stopped, and the task journal says which scope refused a given task.
+        const budgetExhausted = budgetTiers.some((t) => t.exhausted) || blockedOnBudget > 0;
+
         return c.json(
           {
             workforceId,
@@ -600,6 +621,9 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             tasks: byStatus,
             queueDepth: byStatus.queued ?? 0,
             oldestQueuedAt,
+            // "Is a declared ceiling spent?" — the one field an operator must not have to look
+            // for. See its derivation above for what it does and does not claim.
+            budgetExhausted,
             // The CONSEQUENCE signal, tier-agnostic: how many tasks are parked on an exhausted
             // ceiling RIGHT NOW, whichever scope refused them — including the task and subtree
             // scopes `budgetTiers` cannot enumerate. It says THAT work is dead, never WHICH

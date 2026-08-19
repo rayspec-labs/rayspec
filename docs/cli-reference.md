@@ -809,17 +809,26 @@ it into tasks and the reply lists them. Every call is its own submission —
 there is no idempotency key on this surface yet, so a retry after a lost
 reply creates a second root; check `tasks` before retrying when that matters.
 
-`status` answers **"is this workforce stalled on money"** two ways, because
-neither answer alone is enough. `budgetTiers` lists every tier that *declares*
-a ceiling and whose cardinality the declaration bounds — the workforce, and each
-declared department — with that tier's own `consumedUsd`, `headroomUsd` and
-`exhausted`. `blockedOnBudget` counts the tasks parked `blocked(budget_exhausted)`
-right now, whichever scope refused them, and is the only signal that speaks for
-the per-task and per-subtree ceilings, which are one ledger row per task and per
-submitted goal and are therefore **never** enumerated here. So a subtree ceiling
-fully spent with nothing queued is still not visible in this summary; `workforce
-events <task-id>` is where the denying scope is named. The legacy `budget` block
-is unchanged and still reports the whole-workforce tier only.
+`status` answers **"is a declared ceiling spent?"** in one field:
+**`budgetExhausted`**, a boolean beside `paused`. Read that first — it is true
+when any enumerated tier sits at or past its ceiling **or** any task is parked
+`blocked(budget_exhausted)`, and each half catches a case the other cannot. It
+says a ceiling *somewhere* is spent; it does not say the workforce is dead (an
+exhausted ceiling on a department nothing is working in is survivable). Two
+fields say which and how bad:
+
+- `budgetTiers` lists every tier that *declares* a ceiling and whose cardinality
+  the declaration bounds — the workforce, and each declared department — with
+  that tier's own `consumedUsd`, `headroomUsd` and `exhausted`.
+- `blockedOnBudget` counts the tasks parked `blocked(budget_exhausted)` right
+  now, whichever scope refused them. It is the only signal that speaks for the
+  per-task and per-subtree ceilings, which are one ledger row per task and per
+  submitted goal and are therefore **never** enumerated here.
+
+So a subtree ceiling fully spent with nothing queued raises no tier row — but
+the first task it denies moves `blockedOnBudget` and `budgetExhausted`.
+`workforce events <task-id>` is where the denying scope is named. The legacy
+`budget` block is unchanged and still reports the whole-workforce tier only.
 
 A tier's `consumedUsd` is **unclamped and can exceed its `ceilingUsd`** — a
 ceiling bounds what may be *dispatched*, not what may be *settled*, so the turn
