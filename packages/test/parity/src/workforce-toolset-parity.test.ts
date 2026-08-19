@@ -140,6 +140,7 @@ function toolsetShape(backend: string, workerBackend: string, employeeId: string
     departmentTasks: [],
     workforceState: null,
     pendingReview: null,
+    resolvedApprovalQuestions: [],
   };
   const tools = buildRoleToolset({
     employee,

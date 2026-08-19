@@ -446,6 +446,23 @@ export async function applyTurnOutcome(
     const delegationRows = await tx
       .select(schema.workforceDelegations, { id: schema.workforceDelegations.id })
       .where(eq(schema.workforceDelegations.parentTaskId, input.taskId));
+    // THE APPROVALS A HUMAN ALREADY RESOLVED on this task — the re-request cap's input, read the
+    // same way its siblings above are: on the table, under this transaction, never on a promise.
+    // ONLY the decided statuses: `timed_out`/`escalated` are the timeout chain's own machinery and
+    // carry no human answer, and counting them would refuse the very request the sweep re-issued
+    // (approvals.ts:299-345). A scrubbed row (`question IS NULL`, migration 0013) contributes
+    // nothing — erasure removes the content, and a cap can only compare content it still has.
+    const resolvedApprovalRows = (await tx
+      .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
+      .where(
+        and(
+          eq(schema.workforceApprovals.taskId, input.taskId),
+          inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
+        ),
+      )) as { question: string | null }[];
+    const resolvedApprovalQuestions = resolvedApprovalRows
+      .map((row) => row.question)
+      .filter((q): q is string => q !== null);
 
     // The trusted channel is validated BEFORE it can steer a plan — a malformed value is a caller
     // bug (the composition builds it, never the model) and refuses loudly rather than degrading to
@@ -496,6 +513,7 @@ export async function applyTurnOutcome(
       maxDelegationsPerTask: input.budgets.delegation?.maxPerTask ?? null,
       maxReviewRounds: input.budgets.execution.maxReviewRounds ?? null,
       reviewRoundsUsed: reviewRows.length,
+      resolvedApprovalQuestions,
       priorToolError,
       matchedReviewPolicy,
       createdChildren,

@@ -92,6 +92,17 @@ export interface WorkforceReadSnapshot {
    */
   readonly delegationsFromTask: number;
   /**
+   * The questions of the approvals on THIS task a human has already resolved (`approved` or
+   * `rejected`) — the planner's `resolvedApprovalQuestions`, read here so `request_approval` can
+   * refuse a re-ask INSIDE the turn rather than let the seat burn one discovering the rule.
+   *
+   * ADVISORY, exactly like `delegationsFromTask` above: the enforcement re-reads it under the task
+   * lock. A stale read here can only ever let a request through to the engine's own refusal; it can
+   * never invent one, because a row only ever ENTERS this set (a decided approval is terminal —
+   * `decideApproval` compare-and-swaps on `status = 'pending'`).
+   */
+  readonly resolvedApprovalQuestions: readonly string[];
+  /**
    * The declared ceilings, resolved off the runtime row — every role, every turn (the scaffolding
    * presents headroom and limits as facts before the model runs; a single-row read). The row
    * exists for any declared workforce (boot upserts it) and for any dispatched one (the scheduler
@@ -342,6 +353,23 @@ export async function buildWorkforceSnapshot(
     .where(eq(schema.workforceDelegations.parentTaskId, task.taskId))) as Array<{ count: number }>;
   const delegationsFromTask = delegationCount[0]?.count ?? 0;
 
+  // THE DECISIONS THIS TASK ALREADY HOLDS — the planner's `resolvedApprovalQuestions`, read the
+  // same way (`workforce_approvals` keyed by `taskId`) and filtered to the two statuses that carry
+  // a human's answer. `timed_out`/`escalated` are the timeout chain's machinery, not an answer, and
+  // are excluded here for the same reason the engine excludes them. A scrubbed row contributes
+  // nothing (`question IS NULL`, migration 0013). Advisory: the enforcement re-reads under the lock.
+  const resolvedApprovalRows = (await tdb
+    .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
+    .where(
+      and(
+        eq(schema.workforceApprovals.taskId, task.taskId),
+        inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
+      ),
+    )) as { question: string | null }[];
+  const resolvedApprovalQuestions = resolvedApprovalRows
+    .map((row) => row.question)
+    .filter((q): q is string => q !== null);
+
   return {
     task,
     parentTask,
@@ -352,6 +380,7 @@ export async function buildWorkforceSnapshot(
     activeTeamIds,
     ancestorOwners,
     delegationsFromTask,
+    resolvedApprovalQuestions,
     budgets,
     dependencyResults,
   };

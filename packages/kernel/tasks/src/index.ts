@@ -110,6 +110,7 @@ export {
   ESCALATION_REASONS,
   type EscalationReason,
   invalidIntentPlan,
+  normalizeApprovalQuestion,
   type PlanTurnInput,
   planTurnOutcome,
   type ToolErrorFate,

@@ -18,6 +18,8 @@
  *     ancestor owners — each a CLOSED rejection reason, no override flag anywhere;
  *   - an approval with `onTimeout: 'escalate'` must NAME its escalation target — there is no
  *     implicit "next approver up" to guess at;
+ *   - an approval a human already RESOLVED on this task may not be re-requested: the repetition is
+ *     refused (same task, same question), while a genuinely different question still passes;
  *   - review rounds are a ceiling: a request past `maxReviewRounds` parks for a human instead of
  *     looping;
  *   - a malformed intent (or malformed result) never completes a task: it re-queues once with the
@@ -202,6 +204,29 @@ export const DELEGATION_REJECTION_REASONS = [
 
 export type DelegationRejectionReason = (typeof DELEGATION_REJECTION_REASONS)[number];
 
+/**
+ * THE IDENTITY OF AN APPROVAL DECISION — the key the re-request cap compares on.
+ *
+ * A seat may legitimately need a SECOND human authorization on one task (circumstances change and a
+ * genuinely different decision is needed), so the cap is on REPETITION, never on the action: the
+ * same task may not re-ask a decision a human has already resolved. The decision's identity is its
+ * QUESTION — trimmed, internal whitespace collapsed, case-folded — so a re-ask that differs only in
+ * spacing or capitalization is still the same decision. `options` is deliberately NOT part of the
+ * identity: re-asking "Ship?" with the choices relabelled is the same decision.
+ *
+ * HONEST LIMIT: a REWORDED question is a different decision by construction and is not capped.
+ * There is no content-free way to separate "a genuinely new authorization" from "the same one,
+ * rephrased", and refusing the action outright would break the legitimate case above. The reworded
+ * case stays bounded by what already bounds it — the turn budget, the approval timeout, and the
+ * requeue-once-then-fail fate a repeat offence takes.
+ *
+ * SHARED, deliberately: the toolset's own refusal (workforce-tools) normalizes through THIS
+ * function, so the rule a seat is refused by at the tool door is the rule the engine enforces.
+ */
+export function normalizeApprovalQuestion(question: string): string {
+  return question.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
 /** What a malformed/rejected turn outcome does to the task: one retry, then failure. */
 export type ToolErrorFate = 'requeue' | 'fail';
 
@@ -299,6 +324,18 @@ export interface PlanTurnInput {
   readonly maxReviewRounds: number | null;
   /** Review rounds this task has already consumed. */
   readonly reviewRoundsUsed: number;
+  /**
+   * The questions of the approvals on THIS task a human has already RESOLVED — the rows carrying a
+   * decision (`approved` or `rejected`). Counted on the approvals table under the task lock, never
+   * on a promise, exactly like `existingDelegationCount`. Raw as stored; the planner normalizes
+   * (`normalizeApprovalQuestion`), so the comparison is testable in this pure module.
+   *
+   * `timed_out` and `escalated` are deliberately EXCLUDED. They are the timeout chain's own
+   * machinery, not a human's answer to the question: the sweep resolves the original to `escalated`
+   * and re-issues the SAME question to the escalation target (approvals.ts:299-345). Counting them
+   * would make the engine refuse the request its own sweep just re-opened.
+   */
+  readonly resolvedApprovalQuestions: readonly string[];
   /** True when the immediately preceding turn already ended in `tool_error` re-queue. */
   readonly priorToolError: boolean;
   /** True when a pending `cancel` signal was consumed at this turn's boundary. */
@@ -388,6 +425,19 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
       if (intent.onTimeout === 'escalate' && intent.escalateTo === undefined) {
         return invalidIntentPlan(
           "request_approval with onTimeout 'escalate' must name escalateTo — there is no implicit escalation target. Fail-closed.",
+          input.priorToolError,
+        );
+      }
+      // THE RE-REQUEST CAP. A decision a human already resolved on this task may not be re-opened
+      // by emitting the intent again: the seat holds the answer, and parking the task would summon
+      // a human to decide something a human already decided. A DIFFERENT question still passes —
+      // the cap is on repetition, not on the action (see `normalizeApprovalQuestion`).
+      const asked = normalizeApprovalQuestion(intent.question);
+      if (input.resolvedApprovalQuestions.some((q) => normalizeApprovalQuestion(q) === asked)) {
+        return invalidIntentPlan(
+          'this task already carries a human decision on that exact question — a resolved approval ' +
+            'may not be re-requested. Act on the decision you hold, or ask about a different one. ' +
+            'Fail-closed.',
           input.priorToolError,
         );
       }

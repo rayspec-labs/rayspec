@@ -11,6 +11,7 @@ import { deterministicChildTaskId, workerResultSchema } from '@rayspec/tasks';
 import { describe, expect, it } from 'vitest';
 import { TurnCollector } from './collector.js';
 import {
+  ApprovalAlreadyResolvedError,
   ApprovalEscalationTargetMissingError,
   DelegationTargetInvalidError,
   ManagerTargetForbiddenError,
@@ -322,6 +323,77 @@ describe('escalation and reviews', () => {
       onTimeout: 'escalate',
       escalateTo: 'lead',
     });
+  });
+
+  // ---- the re-request cap, model-facing half (finding L-1) ------------------------------------
+  // The ENGINE's refusal is the authority (intent-applier.ts) and lands after the turn ended; this
+  // arm exists so the seat learns inside the turn and can still end with a different tool instead
+  // of burning it — and, on the next offence, failing its task.
+
+  it('re-requesting a decision this task already carries is refused at the tool door', () => {
+    const { call, collector } = turnFor('cmo', {
+      resolvedApprovalQuestions: ['Publish the statement?'],
+    });
+    expect(() => call('request_approval', { question: 'Publish the statement?' })).toThrow(
+      ApprovalAlreadyResolvedError,
+    );
+    expect(collector.finish().intent).toBeNull();
+  });
+
+  it('the refusal is RECORDED, so the turn takes the tool-error fate and is not a free yield', () => {
+    // Distinct from the assertion above: `refuseEnding` both records AND throws. A bare `throw`
+    // would still satisfy "it throws", while leaving the turn indistinguishable from one that
+    // never ended — the composition yields, the task re-dispatches, and a deterministic refusal
+    // loops for free. This is the assertion that pins the RECORD.
+    const { call, collector } = turnFor('cmo', {
+      resolvedApprovalQuestions: ['Publish the statement?'],
+    });
+    expect(() => call('request_approval', { question: 'Publish the statement?' })).toThrow(
+      ApprovalAlreadyResolvedError,
+    );
+    expect(collector.finish().malformed).not.toBeNull();
+  });
+
+  it('a valid ending LATER in the same turn clears the refusal — routing around costs nothing', () => {
+    const { call, collector } = turnFor('cmo', {
+      resolvedApprovalQuestions: ['Publish the statement?'],
+    });
+    expect(() => call('request_approval', { question: 'Publish the statement?' })).toThrow(
+      ApprovalAlreadyResolvedError,
+    );
+    call('submit_result', { status: 'completed', summary: 'Published.', confidence: 0.9 });
+    const collected = collector.finish();
+    expect(collected.intent).toMatchObject({ kind: 'complete' });
+    expect(collected.malformed).toBeNull();
+  });
+
+  it.each([
+    ['  Publish the statement?  '],
+    ['PUBLISH THE STATEMENT?'],
+    ['Publish   the\tstatement?'],
+  ])('a re-ask differing only in whitespace/case is refused too: %s', (variant) => {
+    const { call } = turnFor('cmo', { resolvedApprovalQuestions: ['Publish the statement?'] });
+    expect(() => call('request_approval', { question: variant })).toThrow(
+      ApprovalAlreadyResolvedError,
+    );
+  });
+
+  it('a genuinely different decision passes the tool door untouched', () => {
+    const { call, collector } = turnFor('cmo', {
+      resolvedApprovalQuestions: ['Publish the statement?'],
+    });
+    call('request_approval', { question: 'Also notify legal?' });
+    expect(collector.finish().intent).toMatchObject({
+      kind: 'request_approval',
+      question: 'Also notify legal?',
+    });
+  });
+
+  it('the refusal names the decision the seat already holds', () => {
+    const { call } = turnFor('cmo', { resolvedApprovalQuestions: ['Publish the statement?'] });
+    expect(() => call('request_approval', { question: 'Publish the statement?' })).toThrow(
+      /already decided 'Publish the statement\?'/,
+    );
   });
 });
 
