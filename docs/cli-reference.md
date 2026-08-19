@@ -32,10 +32,12 @@ The commands split into three groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
-- A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
-  database `DATABASE_URL` names (and applies the committed migration chain to
-  it), so it is deliberately *not* under `dev`, which is local-only. It prints no
-  secret value: a minted invite token goes to a file and nowhere else.
+- A **production-mutating `tenant` group** — `tenant ensure` and `tenant erase`.
+  These write to the database `DATABASE_URL` names (and apply the committed
+  migration chain to it), so the group is deliberately *not* under `dev`, which
+  is local-only. Neither prints a secret value: a minted invite token goes to a
+  file and nowhere else. `tenant erase` is the one **irreversible** command the
+  CLI has, and it carries two independent safeties for that reason.
 - A clearly separated **local-dev, mutating `dev` group** — `dev gen-secrets`,
   `dev db`, `dev bootstrap-tenant`. These deliberately write a secrets file,
   create a database, or provision a tenant.
@@ -525,6 +527,111 @@ Steps 1 and 3 can run against the same `DATABASE_URL` with no server in between,
 and step 1 is safe to re-run. `RAYSPEC_TENANT_BOOTSTRAP_ENABLED` stays unset
 throughout — `POST /v1/auth/bootstrap-tenant` is never registered on the
 deployment at all.
+
+---
+
+## `tenant erase`
+
+```
+rayspec tenant erase --org-id <uuid> [--confirm <uuid> --reason <text>] [--journal-scrub]
+```
+
+**Previews** — or, with a matching `--confirm`, actually **performs** — the
+irreversible erasure of one tenant's data: its product-store rows, its core run
+journal, raw transcript and task-engine rows, and its blobs. The organization
+*shell* survives; only its data goes. Like `tenant ensure`, **no HTTP route
+exists for this in any posture** — it is the operator entry point to the
+erasure control seam the platform has always carried, and it mounts nothing.
+
+### Two keys, and neither one alone deletes anything
+
+| key | what it is | what happens without it |
+| --- | --- | --- |
+| `--confirm <uuid>` (+ `--reason <text>`) | the **explicit ask**. `--confirm` must repeat `--org-id` *exactly* — you type the id of the thing you are destroying. A mismatch is a usage error (exit `2`) raised before anything boots or connects. | the run is a **counts-only preview**. It cannot delete under any setting. |
+| `RAYSPEC_ERASURE_ENABLED=true` | the **operator gate**, resolved at the composition root by a strict comparison against the exact string `true`. | the run comes back as a counts-only preview with `dryRunReason: "gate-disabled"`. `TRUE`, `True`, `1` and `yes` all resolve to **false**. |
+
+The shape is deliberately the one the task engine's break-glass uses — an
+explicit ask on the request *plus* an authority that is not part of the request —
+because erasure is strictly worse than break-glass: break-glass contradicts one
+recorded decision, erasure destroys every record there is to contradict.
+
+Be honest about what the gate is and is not. An operator who can run this command
+can also set the variable in their own shell, and could already `TRUNCATE` the
+database they hold the connection string for. The gate is a **deployment-posture**
+control — it is what stops the accidental and the scripted invocation, and it is
+meaningful when the command runs in an environment whose variables the platform
+sets rather than the invoker. What the command buys over `psql` is that it erases
+*correctly* (tenant-scoped through the same chokepoint every other delete uses,
+FK-safe child-first ordering, blobs included, all row deletes in one transaction)
+and *auditably*.
+
+### Reading the result
+
+The JSON's `mode` is the **seam's own outcome**, never inferred from the flags,
+and `gate` is the **resolved** boolean — an operator who set `TRUE` sees `false`
+here, not the string they typed. So:
+
+| what happened | `ok` | exit |
+| --- | --- | --- |
+| preview asked for, preview returned | `true` | `0` |
+| erasure asked for, rows deleted (`mode: "deleted"`) | `true` | `0` |
+| erasure asked for, **nothing deleted** (the gate refused) | `false` | `1` |
+
+The last row is the point: a script cannot read a gate-refused erasure as a
+success.
+
+```json
+{
+  "ok": false,
+  "command": "tenant erase",
+  "orgId": "3f0d0c8a-2a7e-4f2c-9a1b-6d5e4c3b2a10",
+  "requested": "erase",
+  "gate": false,
+  "mode": "dry-run",
+  "dryRunReason": "gate-disabled",
+  "tables": {},
+  "totalRows": 0,
+  "coreTables": { "runs": 6, "journal_steps": 18, "conversation_items": 31, "run_events": 85 },
+  "coreTotalRows": 140,
+  "blobs": "no-backend",
+  "auditRequestId": "9c2b1e6d-4a3f-4c58-8b7d-0e1f2a3b4c5d",
+  "errors": [{ "code": "ERASURE_GATE_DISABLED", "message": "…" }]
+}
+```
+
+### What it does to the database, and what it journals
+
+It **boots the deployment** to do the work (binding no port), because the
+product-store delete order and the blob backend come from the deployed document
+and only the composition root knows them — a direct-to-database shortcut would
+erase the core half and silently leave every product row behind. So it reads the
+same environment `rayspec-serve` does and **applies the committed migration
+chain** to `DATABASE_URL` on the way, exactly like every other boot.
+
+Every attempt — including one the gate refuses — writes a `tenant_erase_requested`
+row to `auth_audit` **before** anything is deleted, carrying the target org, what
+was requested, the resolved gate, the stated `--reason` and the observed invoker
+(OS user, host, pid; not an authenticated principal, which is why `--reason` is
+required). A real deletion additionally writes the seam's own `tenant_data_erased`
+row. `auth_audit` is a global table that tenant erasure does not touch, so both
+records **survive the erasure they describe**.
+
+`--journal-scrub` selects the softer posture: the raw content columns are NULLed
+while the billing/idempotency ledger rows are kept.
+
+### The operator sequence
+
+```bash
+# 1. Look first. No --confirm, so this cannot delete under any setting.
+rayspec tenant erase --org-id "$ORG_ID"
+
+# 2. Arm the deployment gate deliberately, then ask, naming the id and the reason.
+RAYSPEC_ERASURE_ENABLED=true \
+  rayspec tenant erase --org-id "$ORG_ID" --confirm "$ORG_ID" \
+    --reason "subject erasure request TCK-4711"
+```
+
+Step 2 exits `1` and changes nothing if the gate is not exactly `true`.
 
 ---
 

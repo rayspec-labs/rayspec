@@ -18,6 +18,11 @@
  *                                 route). Applies the committed migration chain. Emits ONE JSON
  *                                 object carrying no secret material; an owner-invite token, when one
  *                                 is minted, is written to a mode-600 file and printed nowhere.
+ *   rayspec tenant erase …       The destructive counterpart — PREVIEW, or with a matching --confirm
+ *                                 PERFORM, the irreversible erasure of one tenant's data. Two keys:
+ *                                 --confirm must repeat --org-id (plus --reason), AND the operator
+ *                                 gate RAYSPEC_ERASURE_ENABLED must be exactly "true"; anything else
+ *                                 is a counts-only preview. Journals every attempt before acting.
  *
  * LOCAL-DEV, MUTATING (`dev` group — deliberately creates a dev DB / writes secret files; distinct
  * from the diagnostic floor above):
@@ -203,6 +208,35 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 to a 1-hour lifetime (--invite-ttl-seconds overrides, clamped to
                                 5min-30d). --reissue-owner-invite revokes the outstanding invite and
                                 mints a replacement (for a lost token). Emits ONE JSON object.`,
+      },
+      {
+        name: 'tenant erase',
+        block: `  rayspec tenant erase --org-id <uuid> [--confirm <uuid> --reason <text>] [--journal-scrub]
+                                PREVIEW — or, with a matching --confirm, actually PERFORM — the
+                                IRREVERSIBLE erasure of that tenant's data: its product-store rows,
+                                its core run journal / raw transcript / task-engine rows, and its
+                                blobs. The organization SHELL itself survives; only its data goes.
+                                This is the operator entry point to the erasure control seam, and it
+                                mounts no HTTP route.
+                                TWO KEYS, both required for anything to be deleted. (1) --confirm must
+                                repeat --org-id EXACTLY, and --reason <text> must say why; without
+                                --confirm the run is a counts-only PREVIEW that cannot delete under
+                                any setting. (2) the operator gate RAYSPEC_ERASURE_ENABLED must be
+                                EXACTLY the string "true" in the environment this command boots from —
+                                unset, "TRUE", "1" or "yes" all resolve to false and the run comes
+                                back as a preview.
+                                It BOOTS the deployment to do it (binding no port), because the
+                                product-store delete order and the blob backend come from the deployed
+                                document — so it reads the same environment rayspec-serve does and
+                                APPLIES THE COMMITTED MIGRATION CHAIN to DATABASE_URL on the way.
+                                --journal-scrub selects the softer posture: raw content columns are
+                                NULLed and the billing/idempotency ledger rows are kept.
+                                Emits ONE JSON object whose "mode" is the seam's own outcome, never
+                                inferred from the flags: a CONFIRMED run that did not delete is
+                                ok:false and exit 1 naming the gate, so a script cannot read a refused
+                                erasure as a success. Every attempt is journalled to auth_audit
+                                (tenant_erase_requested) BEFORE anything is deleted, including the
+                                attempts the gate refuses.`,
       },
     ],
   },
