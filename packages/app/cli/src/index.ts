@@ -351,14 +351,27 @@ function emit(obj: unknown): Promise<void> {
  */
 function emitExperimentalBanner(result: { experimental?: readonly string[] }): Promise<void> {
   if (!result.experimental || result.experimental.length === 0) return Promise.resolve();
-  const sections = result.experimental.map((s) => `'${s}:'`).join(', ');
-  return writeDrained(
-    process.stderr,
+  return writeDrained(process.stderr, experimentalBannerText(result.experimental));
+}
+
+/**
+ * The banner's TEXT, split out from the write so one literal serves both the emitter and the
+ * documentation drift-lock.
+ *
+ * `docs/cli-reference.md` quotes this banner in a fenced block. A hand-copied quote drifts \u2014
+ * it already had, on the `\u2019` in "section's", which a reader would never notice and no test
+ * could see while the doc held its own copy of the words. `workforce-experimental-banner.test.ts`
+ * now builds the expected text from THIS function and requires the fence to contain it verbatim,
+ * so the two cannot disagree again.
+ */
+export function experimentalBannerText(sections: readonly string[]): string {
+  const named = sections.map((s) => `'${s}:'`).join(', ');
+  return (
     '==================================================================\n' +
-      `  EXPERIMENTAL: this document declares ${sections}.\n` +
-      '  Enabled by RAYSPEC_EXPERIMENTAL_WORKFORCE. The section\u2019s grammar\n' +
-      '  and behavior may change without notice. Not a stability surface.\n' +
-      '==================================================================\n',
+    `  EXPERIMENTAL: this document declares ${named}.\n` +
+    '  Enabled by RAYSPEC_EXPERIMENTAL_WORKFORCE. The section\u2019s grammar\n' +
+    '  and behavior may change without notice. Not a stability surface.\n' +
+    '==================================================================\n'
   );
 }
 

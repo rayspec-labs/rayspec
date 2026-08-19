@@ -171,23 +171,44 @@ describe(`${PAGE_PATH} — the evidence ledgers`, () => {
 
   it('every citation resolves AND the cited line CONTAINS the recorded text', () => {
     // The whole point: an in-range citation is not a verified one. Only the VALUE settles it.
+    //
+    // COLLECT-THEN-ASSERT, deliberately — this was a `for` loop of `expect()`, which throws on the
+    // FIRST bad entry and reports it as though it were the only one. It is not a style preference:
+    // the last time this ledger drifted the loop named ONE rotted pin while fourteen were rotted,
+    // and the program has now paid for one-at-a-time rediscovery across four separate rounds
+    // (`planning/knowledge/repo-facts.md` → "ONE RED IS NOT ONE DEFECT"). A guard that
+    // under-reports its own findings turns every fix into a new full verification cycle, so the
+    // whole ledger is walked and every failure is reported in one run.
+    const failures: string[] = [];
     for (const entry of codeEntries) {
       const lines = textOf(entry.path).split('\n');
-      expect(
-        entry.line,
-        `${entry.citation}: line ${entry.line} is past the end of the file (${lines.length} lines)`,
-      ).toBeLessThanOrEqual(lines.length);
-      expect(
-        entry.expected.length,
-        `${entry.citation}: the ledger records no expected text`,
-      ).toBeGreaterThan(0);
+      if (entry.line > lines.length) {
+        failures.push(
+          `${entry.citation}: line ${entry.line} is past the end of the file (${lines.length} lines)`,
+        );
+        continue;
+      }
+      if (entry.expected.length === 0) {
+        failures.push(`${entry.citation}: the ledger records no expected text`);
+        continue;
+      }
       const actual = lines[entry.line - 1] ?? '';
-      expect(
-        actual.includes(entry.expected),
-        `${entry.citation} has ROTTED.\n  expected the line to contain: ${entry.expected}\n` +
-          `  the line actually reads:      ${actual.trim()}`,
-      ).toBe(true);
+      if (!actual.includes(entry.expected)) {
+        // Where the token DOES live now, so a re-pin does not need a second tool to find out.
+        const found = lines
+          .map((l, i) => (l.includes(entry.expected) ? i + 1 : 0))
+          .filter((n) => n > 0);
+        failures.push(
+          `${entry.citation} has ROTTED.\n  expected the line to contain: ${entry.expected}\n` +
+            `  the line actually reads:      ${actual.trim()}\n` +
+            `  the text is now at line(s):   ${found.length > 0 ? found.join(', ') : '(nowhere in the file)'}`,
+        );
+      }
     }
+    expect(
+      failures,
+      `${failures.length} of ${codeEntries.length} ledger entries have rotted:\n\n${failures.join('\n\n')}\n`,
+    ).toEqual([]);
   });
 
   it('every citation in the PROSE is in the ledger — none is verified by nothing', () => {

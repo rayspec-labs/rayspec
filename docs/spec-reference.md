@@ -2047,6 +2047,11 @@ mechanics, [workforce tools](./workforce-tools.md) for what each role can do, an
 off). The refusal is the typed `experimental_section_disabled` error naming the section, never a
 silent ignore — an experimental section can never leak into a surface that has not chosen to
 carry it. A document WITHOUT the section parses byte-identically whether or not the flag is set.
+The exported JSON-Schema says so too: `properties.workforce` in
+`packages/kernel/spec/spec.schema.json` carries `"x-rayspec-experimental": true` alongside a
+`description` naming the flag and the refusal code, so a consumer holding only the artifact is not
+misled into reading the section as part of the frozen grammar. What the marking does and does not
+promise is enumerated in [workforce forward compatibility](./workforce-compatibility.md).
 Declaring the section additionally requires a durable worker (`deployment.durableWorker: true`) —
 a document that declares `workforce:` without it is refused at PARSE/LINT with a typed
 `schema_violation` (the composition root also backstops the same coupling at boot). Separately, the
@@ -3043,6 +3048,8 @@ deployment_overrides:
 - **[Workforce architecture](./workforce-architecture.md)**, **[events](./workforce-events.md)**,
   **[tools](./workforce-tools.md)** — the experimental `workforce` section's runtime, journal
   contract, and role toolsets.
+- **[Workforce forward compatibility](./workforce-compatibility.md)** — what the experimental
+  marking means: what may change, what is enforced today, and the test behind each statement.
 - **[CLI reference](./cli-reference.md)** — `doctor`, `plan`, and `openapi`
   validate and preview a spec.
 - **[Architecture](./ARCHITECTURE.md)** — how a spec becomes a running backend.
