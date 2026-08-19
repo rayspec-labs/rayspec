@@ -28,9 +28,18 @@
  * those cannot drift), but the bespoke response envelopes — `status`, the three `cost` shapes,
  * `pause`/`resume`, `signal`, `halt`/`cancel`, `verdict`, `goals` — are hand-written, and nothing
  * here compares them to the handler's own `c.json(...)` literal. Status codes are SPOT-CHECKED:
- * five are OBSERVED against the running server (401, 501, two 400s, 404) and asserted to be
- * documented; the rest are hand-derived from `mapEngineError` by reading, so a newly-added
- * `mapEngineError` branch does not go red here.
+ * SEVEN are OBSERVED against the running server (401; the fail-closed 501; a 400 on an
+ * off-vocabulary status filter; a 400 on the goals `Idempotency-Key` refusal; a 404 on an unknown
+ * task id; a 404 on a tenantless credential; and a 429 from the SHIPPED goal-submit quota) and
+ * asserted to be documented. The rest are hand-derived from `mapEngineError` by reading, so a
+ * newly-added `mapEngineError` branch does not go red here.
+ *
+ * TWO OF THOSE ARMS EXIST BECAUSE THE FIRST DRAFT OF THE DOCUMENT WAS WRONG, and every structural
+ * arm stayed green through both errors — which is exactly what the paragraph above predicts. The
+ * draft claimed a `Retry-After` header on the goals 429 (this route sends none; the hint is
+ * `error.details.retryAfterMs`), and it omitted the 404 that `enforcePermission` raises for a
+ * tenantless credential on all sixteen routes. Both corrections are now OBSERVED rather than merely
+ * reworded. Treat the hand-written half as documentation, not as a contract with a mechanism.
  *
  * SERVED, NOT SOURCED. The document under test is fetched with `fetch()` from a REAL
  * `serve({ fetch: app.fetch })` listener on a loopback port — the pattern
@@ -284,6 +293,19 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     }
   });
 
+  it('every operationId in the WHOLE document is unique — a generator names its methods from these', () => {
+    // OpenAPI requires document-wide uniqueness, and a client generator derives one method name per
+    // operationId. A collision between a workforce operation and a DECLARED product operation would
+    // silently drop one method from the generated client — so this arm scans the whole document, not
+    // just the workforce section.
+    const ids: string[] = [];
+    for (const item of Object.values(doc.paths)) {
+      for (const op of Object.values(item)) ids.push(op.operationId);
+    }
+    expect(ids.length, 'the document declares no operations at all').toBeGreaterThan(16);
+    expect([...new Set(ids)].sort()).toEqual([...ids].sort());
+  });
+
   it('every documented path parameter is declared required, and matches the path template', () => {
     for (const { path, method, op } of workforceOperations(doc)) {
       const templated = [...path.matchAll(/\{([^}/]+)\}/g)].map((m) => m[1] as string);
@@ -485,6 +507,100 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     });
     expect(res.status).toBe(404);
     expect(operationAt(doc, 'GET', '/v1/workforce/tasks/{id}').responses['404']).toBeTruthy();
+  });
+
+  it('OBSERVED 404 on a LIST route: a tenantless credential is refused before the handler', async () => {
+    // The second correction the handlers forced (see the 429 arm for the first). `resolveTenant`
+    // sets `tenantId` only from a principal that HAS an org and does NOT refuse one that does not;
+    // `enforcePermission` then throws NOT_FOUND. So a valid, org-less credential gets a 404 from the
+    // MIDDLEWARE on all sixteen routes — including the four list routes, which have no resource to
+    // miss and had carried no 404 at all. Registering without switching to an org is exactly that
+    // principal.
+    const reg = await jsonRequest(h.app, 'POST', '/v1/auth/register', {
+      body: { email: 'wf-openapi-tenantless@example.test', password: 'a-long-enough-password' },
+    });
+    const orgless = (await reg.json()).accessToken as string;
+    const res = await fetch(`${base}/v1/workforce/tasks`, {
+      headers: { authorization: `Bearer ${orgless}` },
+    });
+    expect(res.status).toBe(404);
+    // …and the document says so on a route whose 404 comes ONLY from this path.
+    const listOp = operationAt(doc, 'GET', '/v1/workforce/tasks');
+    expect(listOp.responses['404'], 'the list route documents no 404').toBeTruthy();
+    expect(listOp.responses['404']?.description).toMatch(/not scoped to a tenant/i);
+    // Universal: every workforce operation carries a 404, because every one runs the same gate.
+    for (const { path, method, op } of workforceOperations(doc)) {
+      expect(op.responses['404'], `${method} ${path} documents no 404`).toBeTruthy();
+    }
+  });
+
+  it('OBSERVED 429: the goal quota answers 429 with `details.retryAfterMs` and NO Retry-After header', async () => {
+    // THIS ARM EXISTS BECAUSE THE FIRST DRAFT OF THE DOCUMENT GOT IT WRONG. It documented a
+    // `Retry-After` response header on this 429 — plausible, because three sibling surfaces really
+    // do send one (the declared-route limiter, the run surface, the playback middleware). This route
+    // does not: it throws a `RATE_LIMITED` ApiError and `onError` maps that to the envelope alone,
+    // putting the hint in `error.details.retryAfterMs`. A generated client that backed off on the
+    // header would have read `null`. So the correction is OBSERVED here rather than merely reworded.
+    //
+    // Its own workforce id, so this bucket cannot interact with the Idempotency-Key arm's.
+    const fire = () =>
+      fetch(`${base}/v1/workforce/quota-probe/goals`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ goal: 'probe the quota' }),
+      });
+    let throttled: Response | undefined;
+    // The real shipped policy is 30 per 60s (`DEFAULT_POLICIES['goal-submit']`); this drives the
+    // REAL limiter rather than an injected tiny one, so the arm proves the shipped behaviour.
+    for (let i = 0; i < 40 && throttled === undefined; i += 1) {
+      const res = await fire();
+      if (res.status === 429) throttled = res;
+      else await res.text();
+    }
+    expect(throttled, 'the goal-submit quota never engaged').toBeDefined();
+    expect(throttled?.headers.get('retry-after'), 'this route sends no Retry-After').toBeNull();
+    const envelope = (await (throttled as Response).json()) as {
+      error: { code: string; details?: { retryAfterMs?: number } };
+    };
+    expect(envelope.error.code).toBe('RATE_LIMITED');
+    expect(typeof envelope.error.details?.retryAfterMs).toBe('number');
+
+    // …and the document says exactly that, header absence included.
+    const op = operationAt(doc, 'POST', '/v1/workforce/{workforceId}/goals');
+    const documented = op.responses['429'];
+    expect(documented).toBeTruthy();
+    expect(documented?.description).toMatch(/retryAfterMs/);
+    expect(Object.keys(documented?.headers ?? {})).toEqual([WORKFORCE_EXPERIMENTAL_HEADER]);
+  });
+
+  it('OBSERVED headers: the two list routes differ on X-Result-Truncated, and the document says which', async () => {
+    // The response headers are the other place a hand-written document can quietly over-claim (see
+    // the 429 arm). These two routes are DELIBERATELY different and the document distinguishes them,
+    // so a blanket "always present" claim on either would fail here.
+    //
+    // `approvals` sets it UNCONDITIONALLY — 'false' on a page that did not fill.
+    const approvals = await fetch(`${base}/v1/workforce/approvals`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(approvals.status).toBe(200);
+    expect(approvals.headers.get('x-result-truncated')).toBe('false');
+    const approvalsDoc = operationAt(doc, 'GET', '/v1/workforce/approvals').responses['200'];
+    expect(Object.keys(approvalsDoc?.headers ?? {})).toContain('X-Result-Truncated');
+    expect(approvalsDoc?.description).toBeTruthy();
+
+    // `tasks` sets it ONLY when the page filled to `limit`, so an unfilled page carries NO header —
+    // and the document's header entry says exactly that rather than promising it unconditionally.
+    const tasks = await fetch(`${base}/v1/workforce/tasks`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(tasks.status).toBe(200);
+    expect(
+      tasks.headers.get('x-result-truncated'),
+      'an unfilled task page sends no flag',
+    ).toBeNull();
+    const tasksHeaders = (operationAt(doc, 'GET', '/v1/workforce/tasks').responses['200']
+      ?.headers ?? {}) as Record<string, { description?: string }>;
+    expect(tasksHeaders['X-Result-Truncated']?.description).toMatch(/only when/i);
   });
 
   it('the typed 504 drain timeout is documented on BOTH routes that can drain', () => {

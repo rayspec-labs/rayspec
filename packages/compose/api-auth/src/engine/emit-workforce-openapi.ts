@@ -41,10 +41,17 @@
  *     - the bespoke response envelopes — `status`, the three `cost` shapes, `pause`/`resume`,
  *       `signal`, `halt`/`cancel`, `verdict`, `goals`. These are assembled inline by the handlers
  *       (`c.json({...})`), not from a schema, so there is no object to derive them from;
- *     - the per-operation status-code SETS. Five are cross-checked against a running server by
+ *     - the per-operation status-code SETS. Seven are cross-checked against a running server by
  *       `workforce-openapi.db.test.ts`; the rest are read off `mapEngineError`.
  *   `workforce-openapi.db.test.ts` states this split in its own header. Do not let a later edit
  *   quietly upgrade the second list into a claim it has not earned.
+ *
+ *   TWO ERRORS ALREADY SHIPPED INTO THIS FILE'S FIRST DRAFT AND WERE CAUGHT BY READING THE
+ *   HANDLERS, not by a red test — a `Retry-After` header on the goals 429 that this route does not
+ *   send, and a missing 404 on the four list routes (`enforcePermission` refuses a tenantless
+ *   credential with one, before any handler runs). Both are now observed. That is the hand-written
+ *   half behaving exactly as the paragraph above warns; expect the next edit to be able to do it
+ *   again, and re-read the handler rather than the neighbouring entry.
  *
  * THE ONE STRUCTURAL GUARANTEE: the path/method set here is compared, BOTH DIRECTIONS, against
  * Hono's own registration table (`app.routes`) by `workforce-openapi.db.test.ts`. A route added to
@@ -457,13 +464,36 @@ const SSE_STREAM_SCHEMA = {
 
 const UNAUTHENTICATED =
   'Missing or invalid credential. Uniform — it never reveals whether the resource exists.';
+/**
+ * The shared 403. Deliberately does NOT promise `details` — `enforcePermission` names the missing
+ * permission only at the scope-gap site; a LIVE-MEMBERSHIP failure (a principal removed from the
+ * tenant since its token was minted) throws a BARE `forbidden()`, because labelling that a missing
+ * permission would misdescribe it. A client must handle a 403 with no `details` at all.
+ */
 const FORBIDDEN =
-  'Authenticated, but the principal lacks the required permission (`store:read` on a read, ' +
-  '`store:write` on a mutation). The envelope names the missing permission.';
+  'Authenticated, but not permitted: the principal lacks `store:read` (reads) or `store:write` ' +
+  '(mutations), or its membership in this tenant is no longer live. `details.missing_permission` ' +
+  'is present ONLY on the scope-gap form — a revoked-membership 403 is deliberately bare, so do ' +
+  'not depend on it. The two decision doors add a THIRD form: see their own 403.';
 const NOT_IMPLEMENTED =
   'This deployment wires no durable task dispatcher, so the WHOLE `/v1/workforce/*` surface is ' +
   'fail-closed. A decision accepted here would be a silent trap — a re-queued task nothing runs.';
-const NOT_FOUND = 'Unknown, or belongs to another tenant. Uniform — no existence leak.';
+/**
+ * The TENANTLESS 404, which every route on this surface can answer.
+ *
+ * `enforcePermission` (`http/middleware.ts`) throws `NOT_FOUND` when no tenant is established —
+ * `resolveTenant` sets `tenantId` only from a principal that HAS an org, and does not itself refuse
+ * one that does not. So a credential that is valid but not scoped to an org gets a 404 from the
+ * middleware chain, BEFORE any handler runs, on all sixteen routes. The four list routes have no
+ * resource to miss and would otherwise have carried no 404 at all, which would have been an
+ * under-claim; the builder therefore adds this to EVERY operation and a route with a more specific
+ * 404 (an unknown task, review, approval or workforce) overrides the text.
+ */
+const NOT_FOUND_TENANTLESS =
+  'The credential is valid but is not scoped to a tenant, so the permission gate refuses before any ' +
+  'handler runs. Switch the session to an organization first. Uniform — no existence leak.';
+
+const NOT_FOUND = `Unknown, or belongs to another tenant. ${NOT_FOUND_TENANTLESS}`;
 const TOO_LARGE =
   "The request body exceeds the deployment's JSON byte cap; nothing was read or written.";
 const RESERVED_SEGMENT =
@@ -491,10 +521,18 @@ interface OperationSpec {
     readonly mediaType?: 'application/json' | 'text/event-stream';
     readonly headers?: Record<string, OpenApiHeader>;
   };
-  /** status → prose. The shared 401/403/501 are added for every operation; these are the extras. */
+  /**
+   * status → prose. The shared 401/403/501 are added for every operation; these are the extras.
+   *
+   * There is DELIBERATELY no per-error-status header hook. The first draft of this module had one,
+   * and its only user was a `Retry-After` on the goals route's 429 — which this surface does not
+   * send. `onError` (`app.ts`) maps a `RATE_LIMITED` `ApiError` to the envelope and sets no header;
+   * only the declared-route limiter, the run surface and the playback middleware set `Retry-After`,
+   * and the goals route is none of them. The hook went with the false header, so a later edit cannot
+   * reintroduce an unobserved response header cheaply. `workforce-openapi.db.test.ts` OBSERVES the
+   * real 429 and asserts the header is absent.
+   */
   readonly errors: Readonly<Record<string, string>>;
-  /** Extra headers on one specific error status (the goals route's `Retry-After` on 429). */
-  readonly errorHeaders?: Readonly<Record<string, Record<string, OpenApiHeader>>>;
 }
 
 /** Path parameters, DERIVED from the path template so they can never disagree with it. */
@@ -530,13 +568,19 @@ function buildOperation(spec: OperationSpec): OpenApiOperation {
   const errors: Record<string, string> = {
     '401': UNAUTHENTICATED,
     '403': FORBIDDEN,
+    // Universal on this surface — see `NOT_FOUND_TENANTLESS`. Listed BEFORE the per-route errors so
+    // a route with a more specific 404 (an unknown task / review / approval / workforce) overrides
+    // the text, and the four list routes still carry one.
+    '404': NOT_FOUND_TENANTLESS,
     ...spec.errors,
     '501': NOT_IMPLEMENTED,
   };
   for (const [status, description] of Object.entries(errors)) {
     responses[status] = {
       description,
-      headers: headersFor(spec.errorHeaders?.[status]),
+      // The experimental marking and NOTHING else: it is the one response header this surface's
+      // middleware sets unconditionally, and the only one a test observes on an error response.
+      headers: headersFor(),
       content: { 'application/json': { schema: { ...ERROR_SCHEMA_REF } } },
     };
   }
@@ -619,7 +663,11 @@ const OPERATIONS: readonly OperationSpec[] = [
       {
         name: 'limit',
         in: 'query',
-        description: `Page size. Clamped to [1, ${MAX_PAGE}].`,
+        description:
+          `Page size. An out-of-range or unparseable value is CLAMPED to [1, ${MAX_PAGE}], not ` +
+          'refused — this route answers no 400 for a large `limit`, so a client that sends one gets ' +
+          `200 with at most ${MAX_PAGE} rows. The bounds below describe the ACCEPTED range, not a ` +
+          'rejection rule.',
         schema: { type: 'integer', minimum: 1, maximum: MAX_PAGE, default: DEFAULT_PAGE },
       },
     ],
@@ -845,6 +893,11 @@ const OPERATIONS: readonly OperationSpec[] = [
     success: { status: '200', description: 'The decided approval row.', schema: APPROVAL_ROW },
     errors: {
       '400': 'The body is malformed or carries an unknown field.',
+      '403':
+        `${FORBIDDEN} On THIS route a third form is possible: the approval names a DIFFERENT ` +
+        'approver, and `details.approver` carries that name so the refusal is actionable (route it ' +
+        'to that principal, or re-send with `override: true` if you hold `workforce:override`). ' +
+        'Asking to override WITHOUT that permission is also a 403 — and nothing was decided.',
       '404': NOT_FOUND,
       '409': 'The approval is already decided.',
       '413': TOO_LARGE,
@@ -867,6 +920,10 @@ const OPERATIONS: readonly OperationSpec[] = [
     },
     errors: {
       '400': 'The body is malformed or carries an unknown field.',
+      '403':
+        `${FORBIDDEN} On THIS route a third form is possible: the review names a DIFFERENT ` +
+        'reviewer, and `details.reviewer` carries that name. Asking to override without holding ' +
+        '`workforce:override` is also a 403 — and nothing was written.',
       '404': NOT_FOUND,
       '409':
         'The review already carries a verdict, the task is no longer waiting for a review, or the ' +
@@ -898,15 +955,15 @@ const OPERATIONS: readonly OperationSpec[] = [
       '404': 'No such workforce on this deployment, or it belongs to another tenant.',
       '409': 'The workforce is paused and is not accepting new work. Resume it, then re-submit.',
       '413': TOO_LARGE,
-      '429': 'Per (tenant, workforce) submission quota exceeded. Nothing was read or dispatched.',
+      '429':
+        'Per (tenant, workforce) submission quota exceeded. The throttle runs BEFORE the body read, ' +
+        'so nothing was read and nothing was dispatched. The retry hint is `error.details.' +
+        'retryAfterMs` IN THE ENVELOPE — this route does NOT send a `Retry-After` header. Two sibling ' +
+        'surfaces do (the declared-route limiter and the run surface), so a client that assumes the ' +
+        'header from those would back off on a value that is not there.',
       '500':
         'The orchestration strategy produced a plan the intake refused — a server-side ' +
         'configuration defect, not something the caller can fix. The detail stays in the server logs.',
-    },
-    errorHeaders: {
-      '429': {
-        'Retry-After': { description: 'Seconds to wait before re-submitting.', schema: str },
-      },
     },
   },
   {
@@ -1002,6 +1059,12 @@ export function withWorkforceSection(doc: OpenApiDocument): OpenApiDocument {
         [EXPERIMENTAL_EXTENSION_KEY]: true,
       },
     ],
+    // The workforce section wins a path collision, which MATCHES RUNTIME: `registerWorkforceRoutes`
+    // runs BEFORE `registerDeclaredRoutes` in `createAuthApp`, and Hono resolves in registration
+    // order — so a declared `api[]` route that claimed a `/v1/workforce/*` path would be unreachable
+    // anyway (`RESERVED_ROUTE_PREFIXES` guards the static frontend mounts, not declared api paths).
+    // Documenting the reachable operation is the honest choice; documenting the shadowed one would
+    // describe a route no request can reach.
     paths: { ...doc.paths, ...paths },
     components: {
       ...(doc.components ?? {}),
