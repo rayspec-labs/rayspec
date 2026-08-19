@@ -817,6 +817,15 @@ command that releases it. When that advisory read is itself refused, the reply
 says so in `signalParkedError` rather than omitting the key: a silently missing
 advisory would be indistinguishable from "nothing is parked".
 
+A third key, **`signalParkedTruncated`**, answers the question the other two
+cannot: *is this list complete?* The advisory follows the server's pagination
+cursor across every page, so it is normally `false`. It is `true` only when the
+walk hit its own page ceiling, and then the list is **partial** — there are
+parked tasks it did not reach, and clearing the ones it shows will not clear
+them all. The key is always present, never omitted when false, because an
+absent key cannot be told apart from a `false` one, and a partial list that
+looks complete is worse than no list: it ends the search at the wrong place.
+
 `signal` is that release. It delivers one **operator** wake signal to a parked
 task: `user_reply` answers the reasonless "a human decides" park (review rounds
 spent, an escalated budget) and a pending clarification; `budget_raised` answers
