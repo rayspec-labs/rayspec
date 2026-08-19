@@ -149,6 +149,7 @@ export function emptySnapshot(
     activeTeamIds: [],
     ancestorOwners: [],
     delegationsFromTask: 0,
+    resolvedApprovalQuestions: [],
     budgets: NO_BUDGETS,
     dependencyResults: null,
     ...over,

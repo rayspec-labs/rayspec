@@ -1,13 +1,15 @@
 /**
  * The planner's every branch — this module carries the 100%-branch threshold, so each decision
  * path is pinned by a test: the cancel override, every fan-out rejection reason (and the ceilings
- * being absent), the escalate-without-target refusal, review-round exhaustion, both tool-error
- * fates, and the strictness of the intent/result schemas at every level.
+ * being absent), the escalate-without-target refusal, the approval RE-REQUEST cap and its question
+ * normalizer, review-round exhaustion, both tool-error fates, and the strictness of the
+ * intent/result schemas at every level.
  */
 import { describe, expect, it } from 'vitest';
 import { delegationChildSpecSchema } from './create-task.js';
 import {
   invalidIntentPlan,
+  normalizeApprovalQuestion,
   type PlanTurnInput,
   planTurnOutcome,
   turnIntentSchema,
@@ -30,6 +32,7 @@ function input(over: Partial<PlanTurnInput> = {}): PlanTurnInput {
     maxDelegationsPerTask: null,
     maxReviewRounds: null,
     reviewRoundsUsed: 0,
+    resolvedApprovalQuestions: [],
     priorToolError: false,
     pendingCancel: false,
     matchedReviewPolicy: null,
@@ -195,6 +198,127 @@ describe('approval planning', () => {
       }),
     );
     expect(plan).toMatchObject({ kind: 'request_approval', onTimeout: 'fail', escalateTo: null });
+  });
+});
+
+describe('the approval re-request cap (L-1)', () => {
+  const ask = (question: string) =>
+    turnIntentSchema.parse({ kind: 'request_approval', question, timeoutMs: 60_000 });
+
+  it('refuses a question a human already resolved on this task', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: ask('Ship the announcement?'),
+        resolvedApprovalQuestions: ['Ship the announcement?'],
+      }),
+    );
+    expect(plan).toMatchObject({ kind: 'invalid_intent', fate: 'requeue' });
+    expect((plan as { detail: string }).detail).toContain('already carries a human decision');
+  });
+
+  it('a DIFFERENT question still passes — the cap is on repetition, not on the action', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: ask('Also notify legal?'),
+        resolvedApprovalQuestions: ['Ship the announcement?'],
+      }),
+    );
+    expect(plan).toMatchObject({ kind: 'request_approval', question: 'Also notify legal?' });
+  });
+
+  it('with no resolved decisions on the task, nothing is refused', () => {
+    const plan = planTurnOutcome(
+      input({ intent: ask('Ship the announcement?'), resolvedApprovalQuestions: [] }),
+    );
+    expect(plan).toMatchObject({ kind: 'request_approval' });
+  });
+
+  // ---- the NORMALIZER, exercised independently of the membership check ------------------------
+  // These four arms are what mutation M2 (normalize -> identity) attacks; the exact-match arm above
+  // stays green under M2, which is the proof they are different predicates.
+  it.each([
+    ['leading/trailing whitespace', '  Ship the announcement?  '],
+    ['collapsed internal whitespace', 'Ship   the\tannouncement?'],
+    ['case', 'SHIP THE ANNOUNCEMENT?'],
+    ['all three at once', '  ship   THE\nannouncement?  '],
+  ])('a re-ask differing only in %s is still the same decision', (_label, variant) => {
+    const plan = planTurnOutcome(
+      input({ intent: ask(variant), resolvedApprovalQuestions: ['Ship the announcement?'] }),
+    );
+    expect(plan).toMatchObject({ kind: 'invalid_intent' });
+  });
+
+  it('normalization applies to the STORED side too, not only the asked side', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: ask('Ship the announcement?'),
+        resolvedApprovalQuestions: ['   SHIP   the announcement?  '],
+      }),
+    );
+    expect(plan).toMatchObject({ kind: 'invalid_intent' });
+  });
+
+  it('a reworded question is NOT capped — the documented, deliberate limit', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: ask('Should I ship the announcement?'),
+        resolvedApprovalQuestions: ['Ship the announcement?'],
+      }),
+    );
+    expect(plan).toMatchObject({ kind: 'request_approval' });
+  });
+
+  it('the second consecutive offence FAILS the task rather than requeueing forever', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: ask('Ship the announcement?'),
+        resolvedApprovalQuestions: ['Ship the announcement?'],
+        priorToolError: true,
+      }),
+    );
+    expect(plan).toMatchObject({ kind: 'invalid_intent', fate: 'fail' });
+  });
+
+  it('the cap runs AFTER the escalate-target refusal — the more specific detail wins', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: turnIntentSchema.parse({
+          kind: 'request_approval',
+          question: 'Ship the announcement?',
+          timeoutMs: 60_000,
+          onTimeout: 'escalate',
+        }),
+        resolvedApprovalQuestions: ['Ship the announcement?'],
+      }),
+    );
+    expect((plan as { detail: string }).detail).toContain('must name escalateTo');
+  });
+
+  it('a pending cancel still overrides the cap — cancellation outranks every intent', () => {
+    const plan = planTurnOutcome(
+      input({
+        intent: ask('Ship the announcement?'),
+        resolvedApprovalQuestions: ['Ship the announcement?'],
+        pendingCancel: true,
+      }),
+    );
+    expect(plan).toEqual({ kind: 'cancelled' });
+  });
+});
+
+describe('normalizeApprovalQuestion', () => {
+  it.each([
+    ['  padded  ', 'padded'],
+    ['MiXeD CaSe', 'mixed case'],
+    ['a\t\tb\n c', 'a b c'],
+    ['already normal', 'already normal'],
+  ])('%s -> %s', (raw, expected) => {
+    expect(normalizeApprovalQuestion(raw)).toBe(expected);
+  });
+
+  it('is idempotent — normalizing a normalized question changes nothing', () => {
+    const once = normalizeApprovalQuestion('  Ship   THE announcement?  ');
+    expect(normalizeApprovalQuestion(once)).toBe(once);
   });
 });
 

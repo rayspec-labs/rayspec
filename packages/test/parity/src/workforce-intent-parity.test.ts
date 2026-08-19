@@ -169,6 +169,10 @@ function runScript(
     departmentTasks: [],
     workforceState: null,
     pendingReview: overrides.pendingReview ?? null,
+    // The re-request cap's advisory input. Empty here on purpose: the parity fixture asserts the
+    // SHAPE of a first request, identically across backends — the cap's own behaviour is proven in
+    // toolset-semantics.test.ts and approval-rerequest.db.test.ts, not by a four-way transcript.
+    resolvedApprovalQuestions: [],
   };
   const collector = new TurnCollector({
     tenantId: task.tenantId,
