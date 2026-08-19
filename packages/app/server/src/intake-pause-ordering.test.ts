@@ -52,7 +52,7 @@
  * Nothing was relaxed to add it: the exact-text and exactly-once rules are untouched, which is why
  * S1 and S3 still red.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
@@ -61,8 +61,10 @@ import { describe, expect, it } from 'vitest';
 const here = resolve(fileURLToPath(import.meta.url), '..');
 const SOURCE = resolve(here, 'workforce-goal-intake.ts');
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// SOURCE MASKING — what makes "the marker is CODE" a checkable claim.
+// [SOURCE-MASKER v2 BEGIN] — every copy of this block is pinned byte-identical; see the sameness
+// arm at the bottom of this file, which finds the copies on disk rather than trusting a list.
+//
+// WHAT MAKES "THE MARKER IS CODE" A CHECKABLE CLAIM.
 //
 // TWO PASSES, AND THE ORDER IS WHAT MAKES THEM EXACT:
 //
@@ -75,21 +77,22 @@ const SOURCE = resolve(here, 'workforce-goal-intake.ts');
 //      slashes because JavaScript reads those as a comment too. A comment-FIRST pass is the one
 //      that gets `'https://example.com'` wrong.
 //
-// PASS 2 IS NOT REDUNDANT WITH THE AST. `forEachChild` never visits punctuation tokens, so a
-// comment that is leading trivia of a bare `}` is unreachable from an AST walk — and that is
-// exactly the shape of the S2 mutation this file exists to refuse. An AST-only masker would look
-// correct and still be defeated.
+// BOTH PASSES ARE LOAD-BEARING, and that was measured rather than assumed: an AST-only masker is
+// defeated by exactly the substitution shape these scans exist to refuse, because `forEachChild`
+// never visits punctuation tokens and so never reaches a comment that is leading trivia of a bare
+// `}`; a comment-first masker breaks on `'https://…'`. Neither pass can be dropped.
+//
+// THE TWO CONSTRUCTS AN AST WALK STILL CANNOT REACH ARE CLOSED BY MECHANISM, NOT BY ARGUMENT:
+//
+//   - A SHEBANG is trivia no node carries. It can only sit at offset 0, and is masked as a span.
+//   - CONFLICT MARKERS are reported as parse diagnostics (measured: 3 for a two-way conflict), and
+//     this REFUSES any source that produces a diagnostic at all. A mis-parse under-masks, and
+//     under-masking is the direction that leaves a hole open while looking fixed.
 //
 // IT ERRS TOWARD OVER-MASKING, DELIBERATELY. Spans are taken at full extent including delimiters,
 // and an unterminated comment masks to end of file. Over-masking makes a guard go RED for the
 // wrong reason — loud, and survivable. Under-masking would leave the hole open while looking
 // fixed, which is silent. Given the choice, this instrument takes the loud failure.
-//
-// Duplicated verbatim in @rayspec/durable-dbos `claim-pause-ordering.test.ts` and @rayspec/tasks
-// `intake-gate-lock.test.ts`: the three guards live in three packages with no shared test-utility
-// package between them, and each copy carries its OWN battery, so a copy that drifts reddens in
-// its own lane rather than relying on a parity check nobody runs.
-// ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /** Node kinds whose text is DATA, never executable code. */
 const MASKED_LITERAL_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
@@ -103,17 +106,26 @@ const MASKED_LITERAL_KINDS: ReadonlySet<ts.SyntaxKind> = new Set([
 ]);
 
 /** Every `[from, to)` span of `source` whose text is a comment or a literal — never code. */
-function maskedSpans(source: string): ReadonlyArray<readonly [number, number]> {
+function maskedSpans(
+  source: string,
+  scriptKind: ts.ScriptKind = ts.ScriptKind.TS,
+): ReadonlyArray<readonly [number, number]> {
   const spans: Array<readonly [number, number]> = [];
 
   // PASS 1 — literals, from the parser.
-  const parsed = ts.createSourceFile(
-    'scan.ts',
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
+  const parsed = ts.createSourceFile('scan.ts', source, ts.ScriptTarget.Latest, true, scriptKind);
+  // FAIL CLOSED on a source the parser could not read: a mis-parse under-masks. `parseDiagnostics`
+  // is not on the public `SourceFile` type, so it is read defensively — if the field ever
+  // disappears the check degrades to a no-op instead of throwing on every file.
+  const diagnostics = (parsed as unknown as { parseDiagnostics?: readonly unknown[] })
+    .parseDiagnostics;
+  if (Array.isArray(diagnostics) && diagnostics.length > 0) {
+    throw new Error(
+      `source masking REFUSED a file the TypeScript parser reported ${diagnostics.length} ` +
+        'syntax diagnostic(s) in (conflict markers do exactly this). A mis-parse under-masks, ' +
+        'which is the silent direction, so this throws rather than guessing.',
+    );
+  }
   const walk = (node: ts.Node): void => {
     if (MASKED_LITERAL_KINDS.has(node.kind)) spans.push([node.getStart(parsed), node.getEnd()]);
     node.forEachChild(walk);
@@ -129,6 +141,11 @@ function maskedSpans(source: string): ReadonlyArray<readonly [number, number]> {
     }
   }
   const blanked = chars.join('');
+  // The shebang, which is trivia the AST never surfaces and which can only sit at offset 0.
+  if (blanked.startsWith('#!')) {
+    const firstLine = blanked.indexOf('\n');
+    spans.push([0, firstLine < 0 ? blanked.length : firstLine]);
+  }
   let cursor = 0;
   while (cursor < blanked.length) {
     const slash = blanked.indexOf('/', cursor);
@@ -152,10 +169,14 @@ function maskedSpans(source: string): ReadonlyArray<readonly [number, number]> {
 }
 
 /** A code-position test over one source text, with the parse done once. */
-function codeMask(source: string): (offset: number) => boolean {
-  const spans = maskedSpans(source);
+function codeMask(
+  source: string,
+  scriptKind: ts.ScriptKind = ts.ScriptKind.TS,
+): (offset: number) => boolean {
+  const spans = maskedSpans(source, scriptKind);
   return (offset) => !spans.some(([from, to]) => offset >= from && offset < to);
 }
+// [SOURCE-MASKER v2 END]
 
 /** A sliced region of a source file, plus the code-position test for the file it came from. */
 interface MethodScan {
@@ -387,5 +408,73 @@ describe('maskedSpans — the adversarial battery for the instrument itself', ()
         true,
       );
     }
+  });
+});
+
+/**
+ * THE MASKER IS COPIED INTO EVERY SCAN THAT NEEDS IT, SO THE COPIES ARE PINNED HERE.
+ *
+ * The scans live in different packages and there is no shared test-utility package between them, so
+ * the block above is duplicated rather than imported. Duplication without enforcement is how a
+ * load-bearing instrument rots in one place and nobody notices, so this arm DISCOVERS the copies on
+ * disk by their sentinel — it is not a hand-maintained list, and a fifth copy added tomorrow is
+ * covered the day it lands. The floor (`>= 4`) is what makes a sentinel rename red rather than
+ * vacuously green: a rule that finds nothing must not read as a rule that found no drift.
+ */
+const MASKER_OPEN = '// [SOURCE-MASKER v2 BEGIN]';
+const MASKER_CLOSE = '// [SOURCE-MASKER v2 END]';
+
+/** Every `*.test.ts` under `packages/` that carries the masker block, with the block itself. */
+function maskerCopies(): ReadonlyArray<{ readonly file: string; readonly block: string }> {
+  const packagesRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
+  const found: Array<{ file: string; block: string }> = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dist') {
+        continue;
+      }
+      const full = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.test.ts')) continue;
+      const text = readFileSync(full, 'utf8');
+      // The FIRST sentinel pair is the real block: the constants above sit below it in every copy.
+      const open = text.indexOf(MASKER_OPEN);
+      if (open < 0) continue;
+      const close = text.indexOf(MASKER_CLOSE, open);
+      expect(close, `${full} opens the masker block and never closes it`).toBeGreaterThan(open);
+      found.push({ file: full.slice(packagesRoot.length + 1), block: text.slice(open, close) });
+    }
+  };
+  walk(packagesRoot);
+  return found.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+describe('the source masker — every copy of it, byte-identical', () => {
+  it('is carried by at least the four scans that need it, and this file is one of them', () => {
+    const copies = maskerCopies();
+    expect(
+      copies.length,
+      'the masker sentinel found fewer copies than the scans that carry it — a rename that hides ' +
+        'the block would otherwise make this arm vacuously green',
+    ).toBeGreaterThanOrEqual(4);
+    const self = fileURLToPath(import.meta.url);
+    expect(
+      copies.some((copy) => self.endsWith(copy.file)),
+      'the discovery did not find THIS file, so it is not actually scanning where it thinks',
+    ).toBe(true);
+  });
+
+  it('has not drifted — all copies are byte-identical', () => {
+    const copies = maskerCopies();
+    const distinct = new Set(copies.map((copy) => copy.block));
+    expect(
+      distinct.size,
+      'THE MASKER HAS DRIFTED ACROSS ITS COPIES. It is duplicated because the scans live in ' +
+        'packages with no shared test-utility package between them; that is only safe while the ' +
+        `copies are identical. Copies found: ${copies.map((copy) => copy.file).join(', ')}`,
+    ).toBe(1);
   });
 });
