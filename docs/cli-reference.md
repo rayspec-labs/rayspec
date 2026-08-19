@@ -837,6 +837,18 @@ one turn's actual cost). `headroomUsd` is floored at zero and therefore cannot
 show that overrun on its own. See
 [spec reference → `budgets`](./spec-reference.md#budgets).
 
+**`headroomUsd` is unspent ceiling, not dispatchable headroom.** Authorization
+compares `consumed + estimateUsdPerTurn` to the ceiling, so the last per-turn
+reservation of every usd ceiling cannot be spent: a tier reading
+`headroomUsd: 0.04` refuses every dispatch when `estimateUsdPerTurn` is `0.05`.
+That band is the ordinary end state, not an edge case — the estimate is an
+upper bound on average turn cost, so spend usually stops short of the ceiling
+rather than past it. Read `exhausted` for the yes/no (it mirrors the engine's
+admission rule, and it is what `budgetExhausted` is built from); subtract the
+`estimateUsdPerTurn` reported on the same response for the quantity. Both
+answer for the next single-turn dispatch — a delegation reserves one estimate
+per child, so a fan-out is refused earlier still.
+
 `cost --by employee|department` groups
 the roll-up server-side, and the payload names its basis honestly:
 `department` reads the enforcing ledger's settlement buckets, while `employee`

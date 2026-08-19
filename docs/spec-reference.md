@@ -2118,8 +2118,18 @@ next authorization sees `consumed > ceiling` and denies — never a silent trunc
 *over-settlement lands once and the NEXT authorize is the denial — never a truncation*). Declare a
 ceiling with the cost of one turn of headroom if the number is a hard commercial limit. The overrun
 is visible, not inferred: `GET /v1/workforce/{id}/status` reports each declared tier's `consumedUsd`
-UNCLAMPED beside its `ceilingUsd` (its `headroomUsd` is floored at zero, since what may still be
-dispatched is never negative).
+UNCLAMPED beside its `ceilingUsd`.
+
+**A ceiling also stops admitting BEFORE it is spent, and the gap is one turn's reservation.**
+Authorization compares `consumed + estimateUsdPerTurn` to the ceiling, so the last
+`estimateUsdPerTurn` of every usd ceiling is unspendable: a scope with four cents of ceiling left
+refuses every dispatch when a turn reserves five. Because the estimate is derived as
+`task.usd / task.turns` — an *upper* bound on average turn cost — consumption normally halts inside
+that band rather than over the line, so this is the ordinary end state, not an edge case. On the
+status view, `headroomUsd` is UNSPENT CEILING (`ceiling - consumed`, floored at zero), **not what
+may still be dispatched**; the field that answers dispatchability is `exhausted`, which mirrors the
+engine's admission rule, and `estimateUsdPerTurn` is reported alongside so the difference is
+computable rather than folklore.
 
 ```yaml
 budgets:

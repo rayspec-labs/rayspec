@@ -485,6 +485,10 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
         // and can never exhaust; it still accrues a ledger row (spend visibility is not
         // conditional on enforcement) and its spend belongs to `cost --by department`, not here.
         const now = new Date();
+        // The per-turn reservation every authorize adds before comparing to a ceiling. One value
+        // per workforce (the dispatcher and every intent applier read this same field), so it is
+        // emitted once on the response rather than repeated on each tier.
+        const estimateUsdPerTurn = budgets.execution.estimateUsdPerTurn;
         const declaredTiers: Array<{
           scopeKind: 'workforce' | 'department';
           scopeId: string;
@@ -558,21 +562,41 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             // UNCLAMPED, ON PURPOSE. A ceiling bounds what may be DISPATCHED, not what may be
             // SETTLED: the denial fires when the NEXT turn would exceed, so the turn already in
             // flight settles above the line and is never aborted. `consumedUsd > ceilingUsd` is
-            // how that one-turn overrun reaches an operator — `headroomUsd` below is floored at
-            // zero (it answers "what may still be dispatched", which is never negative) and so
-            // reads an identical `0` whether consumption stopped exactly at the ceiling or went
-            // past it.
+            // how that one-turn overrun reaches an operator.
             consumedUsd: tierConsumedUsd,
+            // UNSPENT CEILING — `ceiling - consumed`, floored at zero. It is NOT "what may still be
+            // dispatched", and the difference is not academic: the engine admits at
+            // `consumed + estimate <= ceiling`, so the last `estimateUsdPerTurn` of every ceiling is
+            // unspendable. A scope can sit here with `headroomUsd: 0.04` and refuse every dispatch
+            // because a turn reserves `0.05`. `exhausted` below is the field that answers
+            // dispatchability; subtract `estimateUsdPerTurn` (emitted on the response) from this to
+            // get the spend a client can still expect to place.
             headroomUsd:
               tier.ceilingUsd !== null ? Math.max(tier.ceilingUsd - tierConsumedUsd, 0) : null,
             ceilingTurns: tier.ceilingTurns,
             // Dispatched turns — counted at authorize, not at settlement (@rayspec/tasks
             // `authorizeTurn`), which is what makes a turns ceiling bound concurrency.
             consumedTurns: tierConsumedTurns,
-            // `>=`, not `>`: a scope consumed to exactly its ceiling admits nothing further, so it
-            // is exhausted at the boundary, not one turn past it.
+            // THE ENGINE'S OWN ADMISSION RULE, mirrored — not a "spent the ceiling" heuristic.
+            // `authorizeTurn` admits a usd scope at `consumed + estimate <= ceiling` and a turns
+            // scope at `settledTurns + 1 <= ceilingTurns`; `exhausted` is the negation of each, so
+            // it means exactly THIS SCOPE WILL REFUSE THE NEXT DISPATCH.
+            //
+            // The estimate term is the whole point. It is derived from a document as
+            // `task.usd / task.turns` — an UPPER bound on average turn cost — so real consumption
+            // normally halts SHORT of the ceiling, inside a reservation band one estimate wide
+            // where the ledger still shows unspent ceiling and nothing can run. A
+            // `consumed >= ceiling` test reports `false` for every scope in that band, which is the
+            // ordinary case, not the corner one. (It also still covers the over-settled case: with
+            // a positive estimate, `consumed >= ceiling` implies `consumed + estimate > ceiling`.)
+            //
+            // LIMIT, stated rather than implied away: this answers for the next SINGLE-turn
+            // dispatch. A delegation reserves `children x estimate` in one authorize
+            // (@rayspec/tasks `apply-intents`), so a fan-out is refused strictly earlier than this
+            // flag turns true.
             exhausted:
-              (tier.ceilingUsd !== null && tierConsumedUsd >= tier.ceilingUsd) ||
+              (tier.ceilingUsd !== null &&
+                tierConsumedUsd + estimateUsdPerTurn > tier.ceilingUsd) ||
               (tier.ceilingTurns !== null && tierConsumedTurns >= tier.ceilingTurns),
           };
         });
@@ -621,9 +645,15 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             tasks: byStatus,
             queueDepth: byStatus.queued ?? 0,
             oldestQueuedAt,
-            // "Is a declared ceiling spent?" — the one field an operator must not have to look
-            // for. See its derivation above for what it does and does not claim.
+            // "Will a declared ceiling refuse the next dispatch?" — the one field an operator must
+            // not have to look for. See its derivation above for what it does and does not claim.
             budgetExhausted,
+            // The per-turn reservation. Emitted because `headroomUsd` is UNSPENT CEILING, and the
+            // gap between that and what may actually still be dispatched is exactly this number.
+            // A client is never required to use it to answer "is this scope dead" — `exhausted`
+            // and `budgetExhausted` already do, correctly — it is here for the quantity: how much
+            // of the reported headroom is unreachable, and how far a ceiling must be raised.
+            estimateUsdPerTurn,
             // The CONSEQUENCE signal, tier-agnostic: how many tasks are parked on an exhausted
             // ceiling RIGHT NOW, whichever scope refused them — including the task and subtree
             // scopes `budgetTiers` cannot enumerate. It says THAT work is dead, never WHICH
