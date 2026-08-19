@@ -190,7 +190,20 @@ export async function assertDependenciesResolvable(
   }
 }
 
-/** Create a root task in `planned` and journal its creation. */
+/**
+ * Create a root task in `planned` and journal its creation.
+ *
+ * THIS PRIMITIVE DOES NOT ENFORCE OPERATOR ADMISSION CONTROL, deliberately: it validates that a row
+ * is WELL-FORMED (bounds, resolvable dependencies, a reachable workforce id), which is a property of
+ * the row, while "is this workforce accepting work right now?" is a property of the operator's
+ * control state that a row cannot know. Keeping it out also keeps this usable for constructing
+ * states — including the paused and halted ones the control suites must set up.
+ *
+ * SO THE OBLIGATION SITS ON THE CALLER: a production caller that mints roots from an outside
+ * request MUST call `assertWorkforceAcceptsWork` (runtime.ts) first, in the SAME transaction, or a
+ * paused or halted workforce will quietly accept new work. Today there is exactly one such caller —
+ * @rayspec/server workforce-goal-intake.ts — and it does. A second one must too.
+ */
 export async function createRootTask(
   tdb: TenantDb,
   input: CreateRootTaskInput,
