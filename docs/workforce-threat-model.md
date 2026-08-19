@@ -671,6 +671,37 @@ whether there is anything.
 on `RAYSPEC_ERASURE_ENABLED`, resolved at the composition root and never a spec flag, and an unset
 gate makes every call a counts-only DRY-RUN preview.
 
+**And an operator can reach it.** A capability with no path to use it is the same defect one layer
+up: until the `rayspec tenant erase` verb, the seam was reachable only by an embedder holding the
+boot handle, and exercising it meant writing a private wrapper. The verb is a CLI command and
+deliberately **not** an HTTP route — an erasure route would be a tenant self-service surface, which
+this page's own posture defers to external-exposure hardening, and it would cap the authorization at
+"a credential the network can carry". The command's floor is possession of `DATABASE_URL` and the
+platform boot secrets. Above that floor it fails closed twice, independently: `--confirm` must
+repeat the target org id exactly (a mismatch is refused before anything boots, and without
+`--confirm` the run passes `dryRun: true` and cannot delete under any setting), **and** the same
+`RAYSPEC_ERASURE_ENABLED` gate must be exactly `true`. The reported `mode` is the seam's own, never
+inferred from the flags, so a confirmed run the gate refused is a non-zero exit naming the gate
+rather than a success a script would believe. Every attempt — including the refused ones, which
+`eraseTenant`'s own record never covers — is journalled to `auth_audit` as
+`tenant_erase_requested` before anything is deleted, and `auth_audit` is a global table erasure does
+not touch, so the record survives the erasure it describes.
+
+**PROVEN** — the gate through the new surface,
+`packages/app/server/src/tenant-erase.db.test.ts`, `2. all FIVE non-exact gate values refuse a
+CONFIRMED erasure, and nothing is removed`; the dry-run flag's own arm with the gate ON,
+`packages/app/server/src/tenant-erase.db.test.ts`, `3. gate ARMED but a PREVIEW asked for ⇒ counts
+only, and the census does not move`; the refused-attempt trail,
+`packages/app/server/src/tenant-erase.db.test.ts`, `4. the journal recorded every REFUSED attempt,
+with the resolved gate`; **the ORDERING** — that the command's record precedes the command's own
+seam call, proven by taking the audit table away and watching a gate-armed, confirm-correct erasure
+abort with the census unmoved (defence in depth over `eraseTenant`'s own audit-before-delete guard,
+not a replacement for it) — `packages/app/server/src/tenant-erase.db.test.ts`, `5. the journal is
+written BEFORE the seam: an unwritable trail aborts with the data intact`; and the confirmation key's
+exactness against prefixes, suffixes, substrings and case,
+`packages/app/cli/src/tenant/erase.test.ts`, `a --confirm that is $label never reaches the seam as
+an erasure`.
+
 **PROVEN** — `packages/app/server/src/auth-only-erasure-boot.db.test.ts`, `2. the tenant-erasure
 control seam is WIRED on a declared-agents auth-only boot`; the same suite's no-document case,
 `packages/app/server/src/auth-only-erasure-boot.db.test.ts`, `7. a boot with NO document at all
@@ -964,6 +995,7 @@ a promise. The material changes:
 | **F-8** `requestedBy` skips the neutralizer | **closed** — §6.2 |
 | `employees[].capabilities` | renamed to `labels`, `SafeIdentifier`-constrained, and the unheld-label rule is now a lint **error** — §5 |
 | erasure is not wired for a store-less workforce | **closed** — §6.5 |
+| the erasure seam has no operator entry point (no route, no CLI verb) | **closed** — the `rayspec tenant erase` verb, two independent fail-closed keys and a journalled attempt, §6.5 |
 
 The inventory also carries an in-place correction of its own (a citation that did not support the
 claim built on it). That correction stands; it is the reason this page's citations are guarded by a
@@ -1216,6 +1248,11 @@ packages/app/server/src/banner.test.ts | the exported constants ARE the shipped 
 packages/app/server/src/banner.test.ts | the STATIC-PROFILE boot banner carries the SAME warning, byte-identically
 packages/app/server/src/workforce-erasure-boot.db.test.ts | 2. the tenant-erasure control seam is WIRED on a store-less workforce boot
 packages/app/server/src/erase-tenant.db.test.ts | 14. a FULL erase (not scrub) still removes the WHOLE task graph, budget ledger included
+packages/app/server/src/tenant-erase.db.test.ts | 2. all FIVE non-exact gate values refuse a CONFIRMED erasure, and nothing is removed
+packages/app/server/src/tenant-erase.db.test.ts | 3. gate ARMED but a PREVIEW asked for ⇒ counts only, and the census does not move
+packages/app/server/src/tenant-erase.db.test.ts | 4. the journal recorded every REFUSED attempt, with the resolved gate
+packages/app/server/src/tenant-erase.db.test.ts | 5. the journal is written BEFORE the seam: an unwritable trail aborts with the data intact
+packages/app/cli/src/tenant/erase.test.ts | a --confirm that is $label never reaches the seam as an erasure
 packages/kernel/workforce-tools/src/threat-model-drift.test.ts | every citation resolves AND the cited line CONTAINS the recorded text
 packages/app/server/src/auth-only-erasure-boot.db.test.ts | 2. the tenant-erasure control seam is WIRED on a declared-agents auth-only boot
 packages/app/server/src/auth-only-erasure-boot.db.test.ts | 7. a boot with NO document at all wires the seam too, and still previews

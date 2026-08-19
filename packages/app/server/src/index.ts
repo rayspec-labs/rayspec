@@ -12,6 +12,10 @@
  * inject an AgentBackendsFactory for a spec-with-agents boot.
  */
 
+// The erasure result types, re-exported from api-auth for the same reason `DeployError` and
+// `DriftFinding` are above: server already depends on api-auth, so a consumer of `eraseTenantData`
+// (the CLI) can name the shape it gets back without a direct api-auth dependency.
+export type { EraseBlobOutcome, EraseDryRunReason, EraseResult } from '@rayspec/api-auth';
 // The UPDATE flow: re-export the deploy-migration seam types a wrapper needs to build the
 // `updateMigrations` input for `assembleServer` + assert `deploy()`'s block. These originate in
 // @rayspec/api-auth (deploy.ts, a frozen-surface file — consumed via its EXPORTS only, never edited); the
@@ -148,6 +152,16 @@ export { loadLocalDotenvIfPresent } from './read-env.js';
 // (packages/app/cli/src/deploy.ts) reuses it instead of duplicating the opts logic; lives in serve-opts.ts
 // (not the self-executing bin) so re-exporting it here drags in no entrypoint side effect.
 export { assembleOptsFromEnv } from './serve-opts.js';
+// The OPERATOR tenant data-ERASURE path — the shipped entry point to the `eraseTenantNow` control
+// seam, exported so the `rayspec tenant erase` CLI can reach it. Like `provisionTenant` it mounts NO
+// route in any posture: the destructive capability stays off the internet-facing app, and the
+// operator gate (`RAYSPEC_ERASURE_ENABLED`) is untouched by it.
+export {
+  eraseTenantData,
+  TenantEraseCommandError,
+  type TenantEraseInput,
+  type TenantEraseReport,
+} from './tenant-erase.js';
 // The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
 // handoff that leaves no platform user behind. It lives in the composition root because it is the only
 // package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach
