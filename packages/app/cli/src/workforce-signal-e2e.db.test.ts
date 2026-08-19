@@ -432,6 +432,28 @@ describe.skipIf(!baseUrl)('the signal-parked task an operator could not release'
     );
     expect(stillBlocked[0]?.status_reason).toBe('awaiting_children');
 
+    // ── and the lever that DOES answer it: cancel, through the real CLI ───────────────────────
+    // The park above is exactly the one `signal` refuses. If the console stopped here, the docs
+    // would be telling the operator to cancel a child the console cannot cancel — this arm is why
+    // `cancel` ships in the same PR as `signal` rather than the next one.
+    const cancelled = await runWorkforce([
+      'cancel',
+      root.taskId,
+      '--reason',
+      'trap closed',
+      ...FLAGS,
+    ]);
+    expect(cancelled.ok, `cancel refused: ${JSON.stringify(cancelled)}`).toBe(true);
+    expect(cancelled.command).toBe('workforce cancel');
+    const cascade = cancelled.result as { cancelled: string[]; signalled: string[] };
+    expect(cascade.cancelled, 'the cascade cancelled nothing').toContain(root.taskId);
+
+    const afterCancel = (await (sql as ReturnType<typeof postgres>)`
+      SELECT status FROM workforce_tasks WHERE task_id = ${root.taskId}`) as unknown as {
+      status: string;
+    }[];
+    expect(afterCancel[0]?.status, 'a cancelled task did not reach a terminal').toBe('cancelled');
+
     storyArmsRan++;
   }, 180_000);
 

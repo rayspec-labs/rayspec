@@ -39,6 +39,7 @@ interface Route {
   readonly match: (url: string) => boolean;
   readonly body: unknown;
   readonly status?: number;
+  readonly headers?: Record<string, string>;
 }
 
 /** Stub the global fetch and RECORD every call (url, method, parsed body) for assertion. */
@@ -59,7 +60,7 @@ function stubFetch(routes: Route[]): Call[] {
     if (!route) throw new Error(`unstubbed fetch: ${url}`);
     return new Response(JSON.stringify(route.body), {
       status: route.status ?? 200,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(route.headers ?? {}) },
     });
   }) as typeof fetch);
   return calls;
@@ -305,5 +306,149 @@ describe('workforce approvals list — the parked tasks it can no longer stay si
     const result = await runWorkforce(['approvals', 'list', ...FLAGS]);
     expect(result.signalParked).toEqual([]);
     expect(result.signalParkedError).toBeUndefined();
+    // Always present, never inferred from absence — see the truncation arms below.
+    expect(result.signalParkedTruncated).toBe(false);
+  });
+
+  // ── the advisory must be COMPLETE, not merely non-empty ────────────────────────────────────
+  // A partial list that looks complete is worse than no list: it ends the operator's search at the
+  // wrong place. The first version of this advisory read ONE page and dropped the rest silently.
+
+  it('follows the cursor across EVERY page — a second page is not left behind', async () => {
+    const pageTwoRow = { ...parkedRow, taskId: 'p2-0000-4000-8000-000000000002' };
+    const calls = stubFetch([
+      { match: (url) => url.includes('/v1/workforce/approvals'), body: [] },
+      {
+        // page 2 — matched first, because the cursor query is the more specific URL
+        match: (url) => url.includes('/v1/workforce/tasks?') && url.includes('cursor=c1'),
+        body: [pageTwoRow],
+      },
+      {
+        match: (url) => url.includes('/v1/workforce/tasks?'),
+        body: [parkedRow],
+        headers: { 'x-result-truncated': 'true', 'x-next-cursor': 'c1' },
+      },
+    ]);
+    const result = await runWorkforce(['approvals', 'list', ...FLAGS]);
+    const advertised = (result.signalParked as { taskId: string }[]).map((p) => p.taskId);
+    expect(advertised, 'a page beyond the first was dropped').toEqual([TASK, pageTwoRow.taskId]);
+    expect(result.signalParkedTruncated).toBe(false);
+    expect(calls.filter((c) => c.url.includes('/v1/workforce/tasks?'))).toHaveLength(2);
+  });
+
+  it('a walk that hits its page ceiling SAYS SO rather than implying completeness', async () => {
+    // The server never stops claiming there is more. The walk is bounded, so the answer is
+    // honestly partial — and the reply has to admit it.
+    const calls = stubFetch([
+      { match: (url) => url.includes('/v1/workforce/approvals'), body: [] },
+      {
+        match: (url) => url.includes('/v1/workforce/tasks?'),
+        body: [parkedRow],
+        headers: { 'x-result-truncated': 'true', 'x-next-cursor': 'always-more' },
+      },
+    ]);
+    const result = await runWorkforce(['approvals', 'list', ...FLAGS]);
+    expect(result.signalParkedTruncated, 'a bounded-out walk reported itself complete').toBe(true);
+    // The bound is real, not a runaway.
+    expect(calls.filter((c) => c.url.includes('/v1/workforce/tasks?')).length).toBe(1000);
+  });
+
+  // ── the predicate must FAIL CLOSED ─────────────────────────────────────────────────────────
+  // A wrong instruction is worse than none: advertising a park `user_reply` cannot answer sends
+  // the operator to a command that will come back {delivered:true, woke:false}.
+
+  it('a row with NO statusReason field is NOT advertised — absent is unknown, not reasonless', async () => {
+    const { statusReason: _dropped, ...noReasonField } = parkedRow;
+    stubFetch([
+      { match: (url) => url.includes('/v1/workforce/approvals'), body: [] },
+      { match: (url) => url.includes('/v1/workforce/tasks?'), body: [noReasonField] },
+    ]);
+    const result = await runWorkforce(['approvals', 'list', ...FLAGS]);
+    expect(
+      result.signalParked,
+      'a row whose reason was never serialized was advertised as reasonless',
+    ).toEqual([]);
+  });
+
+  it('a row whose status is not waiting_for_user is not advertised even if the server sent it', async () => {
+    // The query already filters by status; this is the fail-closed re-check for a server that
+    // ignored it. Without it, a filter regression one layer down becomes a wrong instruction here.
+    stubFetch([
+      { match: (url) => url.includes('/v1/workforce/approvals'), body: [] },
+      {
+        match: (url) => url.includes('/v1/workforce/tasks?'),
+        body: [{ ...parkedRow, status: 'blocked', statusReason: null }],
+      },
+    ]);
+    const result = await runWorkforce(['approvals', 'list', ...FLAGS]);
+    expect(result.signalParked).toEqual([]);
+  });
+});
+
+describe('workforce cancel — the lever for the parks a signal may NOT release', () => {
+  const CASCADE = { cancelled: ['t-1', 't-2'], signalled: ['t-3'] };
+  const cancelRoute: Route = {
+    match: (url) => url.includes('/cancel'),
+    body: CASCADE,
+    status: 202,
+  };
+
+  it('is a recognised subcommand and POSTs the task id to /cancel', async () => {
+    const calls = stubFetch([cancelRoute]);
+    const result = await runWorkforce(['cancel', TASK, ...FLAGS]);
+    expect(result).toMatchObject({ ok: true, command: 'workforce cancel' });
+    expect(calls).toHaveLength(1);
+    const call = calls[0] as Call;
+    expect(call.method).toBe('POST');
+    expect(call.url).toBe(`http://127.0.0.1:9/v1/workforce/tasks/${TASK}/cancel`);
+  });
+
+  it('relays the cascade body untranslated — cancelled and signalled are different facts', async () => {
+    // A `working` target absorbs the cancel at its own turn boundary rather than being killed, so
+    // it lands in `signalled`. Collapsing the two lists would report stopped work that is running.
+    stubFetch([cancelRoute]);
+    const result = await runWorkforce(['cancel', TASK, ...FLAGS]);
+    expect(result.result).toEqual(CASCADE);
+  });
+
+  it('--reason rides the body; absent means an empty object, not a null reason', async () => {
+    const calls = stubFetch([cancelRoute]);
+    await runWorkforce(['cancel', TASK, '--reason', 'superseded by the rework', ...FLAGS]);
+    expect((calls[0] as Call).body).toEqual({ reason: 'superseded by the rework' });
+    calls.length = 0;
+    await runWorkforce(['cancel', TASK, ...FLAGS]);
+    expect((calls[0] as Call).body).toEqual({});
+  });
+
+  it('an explicitly EMPTY --reason is usage, and sends nothing', async () => {
+    const calls = stubFetch([cancelRoute]);
+    await expect(runWorkforce(['cancel', TASK, '--reason', '', ...FLAGS])).rejects.toThrow(
+      /--reason was given but empty/,
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('zero or two positionals are refused', async () => {
+    stubFetch([cancelRoute]);
+    await expect(runWorkforce(['cancel', ...FLAGS])).rejects.toThrow(/exactly one task id/);
+    await expect(runWorkforce(['cancel', TASK, 'second', ...FLAGS])).rejects.toThrow(
+      /exactly one task id/,
+    );
+  });
+
+  it('a route refusal is relayed ok:false with the server envelope untranslated', async () => {
+    stubFetch([
+      {
+        match: (url) => url.includes('/cancel'),
+        status: 404,
+        body: { error: { code: 'not_found', message: 'No such task.' } },
+      },
+    ]);
+    const result = await runWorkforce(['cancel', TASK, ...FLAGS]);
+    expect(result).toEqual({
+      ok: false,
+      command: 'workforce cancel',
+      errors: [{ code: 'not_found', message: 'No such task.' }],
+    });
   });
 });

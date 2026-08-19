@@ -211,7 +211,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     commands: [
       {
         name: 'workforce',
-        block: `  rayspec workforce <status|submit|tasks|task|approvals|signal|cost|events|pause|resume|halt> [flags]
+        block: `  rayspec workforce <status|submit|tasks|task|approvals|signal|cancel|cost|events|pause|resume|halt> [flags]
                                 The operator console for the durable task engine, speaking to a
                                 RUNNING deployment over its authenticated HTTP API. Shared flags on
                                 every subcommand: --url <base> (else RAYSPEC_URL, else a single
@@ -266,6 +266,15 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                                                 releasable this way — cancel the
                                                                 child instead. --signal-key is the
                                                                 delivery's idempotency key.
+                                  cancel <task-id> [--reason <text>]
+                                                                cancel a task and its subtree — the
+                                                                lever for the parks signal may NOT
+                                                                release (a fan-out join, an
+                                                                escalation, a deadline_exceeded
+                                                                block). A working turn is never
+                                                                killed mid-flight: the reply's
+                                                                cancelled[] moved now, signalled[]
+                                                                will absorb it at a turn boundary.
                                   cost [--window 24h|7d] [--by employee|department]
                                                                 settled/reserved roll-up (grouped
                                                                 server-side when --by is given)
