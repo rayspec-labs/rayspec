@@ -16,7 +16,11 @@
  * WHY BOTH DIRECTIONS. A hand-curated pin list is checked once; a guard is checked every run,
  * including on the merge that moved the code. Checking only ledger → code lets the prose grow new
  * citations that nothing verifies; checking only prose → ledger lets the ledger keep pins for
- * sentences the page no longer makes. The two sets are asserted EQUAL.
+ * sentences the page no longer makes. So three arms close the loop, and the precise claim is:
+ * every FILE and every SYMBOL the prose names has a ledger row, AND every ledger row is anchored by
+ * a file or a token the prose still names. Not literal set equality — one file legitimately carries
+ * several rows, and a symbol's row may pin a file the page never names — but no member of either
+ * side is unaccounted for.
  *
  * WHY IT FAILS CLOSED. A reworded page that produced zero citations, or an emptied ledger, would
  * otherwise be reported green by a guard that had simply stopped finding anything — "the property
