@@ -58,6 +58,28 @@
  * re-executed turn from exhausting a budget it already paid.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * ⚠ AUDITABILITY — WHAT IS RECORDED, AND THE ONE INFERENCE YOU MUST NOT DRAW FROM IT.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * Every call through this capability is journaled by the central `dispatchTool` chokepoint, which
+ * records exactly ONE step per dispatch on every terminal path: on success the tool's opaque-wrapped
+ * output (so `{ path, bytesWritten, created }` is recorded verbatim), and on a refusal — a jail breach
+ * or an exceeded bound — a step with `status: 'error'` carrying the typed message. So WHAT was written,
+ * and WHAT was refused, is durably recorded.
+ *
+ * WHAT IS **NOT** RECORDED: which SEAT, on which TASK, on which TURN. A reader who sees "journaled"
+ * will hear "attributable", and that inference is WRONG here — block it explicitly rather than let the
+ * word carry it. A journal step is keyed by the run's id, a workforce turn mints that id internally and
+ * discards it, and the workforce task journal records the DBOS workflow id instead — so no key joins a
+ * tool step back to the seat that made the call.
+ *
+ * THIS GAP IS PRE-EXISTING AND REPO-WIDE, NOT CREATED HERE: it is true of EVERY tool-step row, for
+ * every capability. What is fair to say is that this capability makes it CONSPICUOUS — "a file was
+ * written" is a far weaker audit line than "seat X on task Y wrote this file", and a filesystem
+ * capability is where the difference bites. Closing it means extending the frozen workforce event
+ * vocabulary, which is a decision with its own review; it is tracked separately and deliberately not
+ * folded in here.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
  * NOT TENANT-PARTITIONED — a SHARED, deployment-static output root (v1 is one-deployment-one-tenant).
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * Exactly like `FsSource`, and for the same reason: the root is something the DEPLOYER put on the box,

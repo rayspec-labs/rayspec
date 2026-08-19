@@ -59,6 +59,16 @@
  * deployment; v1 is one-deployment-one-tenant, so there is no per-tenant partition (per-tenant output
  * roots are a later, hardening-adjacent concern). The factory therefore takes no tenant argument. A
  * handler that needs per-tenant writable storage uses `BlobStore`, which IS tenant-prefixed.
+ *
+ * ⚠ AUDITABILITY, AND THE INFERENCE TO BLOCK. The dispatch chokepoint journals one step per call —
+ * the tool's `{ path, bytesWritten, created }` verbatim on success, a `status: 'error'` step with the
+ * typed message on a refusal. So WHAT was written and WHAT was refused is recorded. WHICH SEAT wrote
+ * it is NOT: nothing joins a tool-step row to a seat, task or turn. "Journaled" here does not mean
+ * "attributable", and the word should not be allowed to imply it. That gap is PRE-EXISTING and
+ * repo-wide (every tool step, every capability), not introduced by this file — but this is the
+ * capability that makes it conspicuous, because "a file was written" is a far weaker audit line than
+ * "seat X on task Y wrote this file". Closing it means extending the frozen workforce event
+ * vocabulary and is tracked as its own decision. See the `FsSink` contract for the full statement.
  */
 
 import { constants as fsConstants, realpathSync, statSync } from 'node:fs';

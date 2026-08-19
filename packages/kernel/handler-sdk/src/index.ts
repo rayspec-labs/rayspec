@@ -402,6 +402,15 @@ export interface HandlerInit {
    * WHOLE-FILE WRITE ONLY (no append, no delete, no move). That is forced, not simplified: a workforce
    * turn re-executes on recovery and the composition refuses any declared tool whose `idempotent` flag
    * is `false`, so only a write whose replay leaves the same end state can be offered to a seat at all.
+   *
+   * ⚠ AUDITABILITY — every write AND every refusal is journaled by the central `dispatchTool`
+   * chokepoint (the tool's `{ path, bytesWritten, created }` verbatim on success; a `status: 'error'`
+   * step carrying the typed message on a jail breach or an exceeded bound). But it records WHAT was
+   * written, NOT WHICH SEAT wrote it: no key joins a tool step back to a seat, task or turn. Do not
+   * read "journaled" as "attributable". The gap is PRE-EXISTING and repo-wide — true of every
+   * tool-step row for every capability — but a filesystem capability is where it bites hardest, since
+   * "a file was written" is a far weaker audit line than "seat X on task Y wrote this file". See
+   * `FsSink` for the full statement.
    */
   readonly fsSink?: FsSink;
   /**
