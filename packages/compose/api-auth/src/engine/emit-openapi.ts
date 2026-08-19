@@ -9,11 +9,14 @@
  * `createAuthApp` serves at `GET /v1/openapi.json` (engine-only — a product-empty deploy has no
  * declared routes, so the served document carries an EMPTY `paths` object).
  *
- * HONEST SCOPE (do not oversell): the platform's STATIC routes (auth/orgs/oauth/runs)
- * are themselves registered raw (`app.post(...)`, not `createRoute`), so they too are absent from any
- * OpenAPI document today — this module documents the DECLARED routes only, and that is exactly what
- * scoped. A future slice can document the static surface by porting it to `createRoute` (or by
- * an analogous hand-built contribution); that is NOT done here.
+ * HONEST SCOPE (do not oversell): the platform's STATIC routes are themselves registered raw
+ * (`app.post(...)`, not `createRoute`), so they contribute nothing to a document on their own.
+ * THIS module documents the DECLARED routes only. ONE static section is nevertheless described:
+ * `/v1/workforce/*`, by the "analogous hand-built contribution" this paragraph used to name as
+ * future work — `emit-workforce-openapi.ts`, which DECORATES this module's output on its way to
+ * `GET /v1/openapi.json` rather than building a second document. The remaining static surface
+ * (auth / orgs / oauth / runs / subscribe / triggers / reprocess) is STILL absent from every
+ * OpenAPI document, and that is not closed here.
  *
  * PRODUCT-AGNOSTIC: every path, parameter, and schema is DERIVED from the spec + the store columns at
  * runtime — no product route, store, or column name appears in platform source. The emission for
@@ -113,19 +116,44 @@ export const OPENAPI_POSTURE_NOTICE =
   'RLS, KMS-DEK, DPoP) is the gate before any external exposure and is not built yet. Never put ' +
   'this behind a public address.';
 
-/** A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency). */
+/**
+ * A minimal OpenAPI 3.1 document shape (only the parts we emit — no external type dependency).
+ *
+ * `tags` and `components` are OPTIONAL and this module never emits either: `buildDeclaredRoutesOpenApi`
+ * returns a document with neither key, which is what keeps its output byte-identical to before they
+ * existed (`emit-openapi-projection.test.ts`, the byte-identity arm). They are declared here because
+ * the PLATFORM section added by `emit-workforce-openapi.ts` — which decorates THIS document on its way
+ * to `GET /v1/openapi.json` — needs both: a tag to carry the section's experimental marking, and a
+ * component to hold the one shared error-envelope schema its ~90 error responses `$ref`.
+ */
 export interface OpenApiDocument {
   openapi: '3.1.0';
   info: { title: string; version: string; description?: string };
+  tags?: OpenApiTag[];
   paths: Record<string, OpenApiPathItem>;
+  components?: { schemas: Record<string, unknown> };
+}
+
+/**
+ * One top-level tag. The open extension member exists for `x-`-prefixed specification extensions
+ * (OpenAPI 3.1 §4.9) — the workforce section marks itself experimental that way.
+ */
+export interface OpenApiTag {
+  name: string;
+  description?: string;
+  [extension: `x-${string}`]: unknown;
 }
 
 /** One OpenAPI path item: a map of (lowercase) HTTP method → operation. */
-type OpenApiPathItem = Record<string, OpenApiOperation>;
+export type OpenApiPathItem = Record<string, OpenApiOperation>;
 
 /** One OpenAPI operation (the subset we populate). */
-interface OpenApiOperation {
+export interface OpenApiOperation {
   summary: string;
+  /** Section membership. Absent on a declared-route operation; the workforce section sets it. */
+  tags?: string[];
+  /** `x-`-prefixed specification extensions (OpenAPI 3.1 §4.9). */
+  [extension: `x-${string}`]: unknown;
   /**
    * Optional operation prose. Emitted ONLY on a store operation whose route carries a NON-EMPTY
    * response projection, where it states the request/response NAMING SPLIT explicitly (query/path
@@ -149,7 +177,7 @@ interface OpenApiOperation {
  * `list` filters + order/after/limit), or a `header` param (the `create` `Idempotency-Key`).
  * `required` defaults to false for the query/header params (all optional); path params set it `true`.
  */
-interface OpenApiParameter {
+export interface OpenApiParameter {
   name: string;
   in: 'path' | 'query' | 'header';
   required?: boolean;
@@ -157,16 +185,29 @@ interface OpenApiParameter {
   schema: Record<string, unknown>;
 }
 
-/** A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay/Retry-After). */
-interface OpenApiHeader {
+/**
+ * A documented response header (X-Next-Cursor/X-Result-Truncated/Idempotency-Replay/Retry-After —
+ * and, on the workforce section, `X-Experimental`). `schema` is an open JSON-Schema fragment rather
+ * than a fixed `{type:'string'}` so a header whose value is FIXED can say so with `const`, which is
+ * what lets a client generator emit the constant instead of a free string.
+ */
+export interface OpenApiHeader {
   description: string;
-  schema: { type: 'string' };
+  schema: Record<string, unknown>;
 }
 
-interface OpenApiResponse {
+/**
+ * One documented response. `content` is keyed by media type: every declared-route response is
+ * `application/json`, and the workforce section's journal-replay route is `text/event-stream` —
+ * described as the stream it is rather than forced into a JSON shape it does not have.
+ */
+export interface OpenApiResponse {
   description: string;
   headers?: Record<string, OpenApiHeader>;
-  content?: { 'application/json': { schema: Record<string, unknown> } };
+  content?: {
+    'application/json'?: { schema: Record<string, unknown> };
+    'text/event-stream'?: { schema: Record<string, unknown> };
+  };
 }
 
 /**
