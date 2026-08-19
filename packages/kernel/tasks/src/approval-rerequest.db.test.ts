@@ -151,7 +151,10 @@ describe.skipIf(!hasDb)('the approval re-request cap (db)', () => {
     await decideApproval(tdb(), {
       approvalId: (row as { id: string }).id,
       decision,
-      decidedBy: 'api-key:be09f824-5900-4641-bf9b-89b1a4a29c3f',
+      // A deciding principal in the shape the route derives (`api-key:<id>`), built from the
+      // test-tenant UUID pattern so it is self-evidently a fixture. It was briefly a real id copied
+      // out of the live acceptance report; gitleaks caught that, correctly.
+      decidedBy: 'api-key:00000000-0000-4000-8000-00000000000a',
       ...(decision === 'reject' ? { reason: 'No.' } : {}),
     });
     expect((await taskRow(root.taskId)).status).toBe('queued');
