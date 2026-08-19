@@ -587,8 +587,21 @@ export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps)
             // normally halts SHORT of the ceiling, inside a reservation band one estimate wide
             // where the ledger still shows unspent ceiling and nothing can run. A
             // `consumed >= ceiling` test reports `false` for every scope in that band, which is the
-            // ordinary case, not the corner one. (It also still covers the over-settled case: with
-            // a positive estimate, `consumed >= ceiling` implies `consumed + estimate > ceiling`.)
+            // ordinary case, not the corner one.
+            //
+            // THE MIRROR IS UNCONDITIONAL, not "usually right". A zero estimate cannot coexist with
+            // a usd ceiling here: `resolveWorkforceBudgets` (called at the top of this handler)
+            // REFUSES every such shape with `WorkforceBudgetsInvalidError` — the fail-closed
+            // coherence rule in @rayspec/tasks `workforceBudgetsSchema`. The only shapes it accepts
+            // with a zero estimate are turns-only, where `ceilingUsd` is null and this disjunct is
+            // guarded off. So whenever the left operand is evaluated, the estimate is positive.
+            //
+            // The comparison is also STRUCTURALLY identical to the engine's, not merely equivalent:
+            // `authorizeTurn` evaluates `settled + reserved + estimate > ceiling`, and
+            // `tierConsumedUsd` is built as `settled + reserved` in that same order, so both sides
+            // reduce to `((settled + reserved) + estimate)`. IEEE-754 addition is order-sensitive,
+            // and a re-association such as `settled + (reserved + estimate)` would agree almost
+            // always and disagree exactly on the float boundaries this flag exists to get right.
             //
             // LIMIT, stated rather than implied away: this answers for the next SINGLE-turn
             // dispatch. A delegation reserves `children x estimate` in one authorize

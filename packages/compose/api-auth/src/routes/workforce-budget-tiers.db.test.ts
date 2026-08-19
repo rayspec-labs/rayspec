@@ -274,8 +274,9 @@ describe.skipIf(!hasDb)('/v1/workforce status — budget reporting truth', () =>
     expect(engTier.consumedTurns).toBe(2);
     // UNCLAMPED — this is the field that carries the L2-3 overrun onto the operator surface.
     expect(engTier.consumedUsd).toBeGreaterThan(DEPARTMENT_CEILING_USD);
-    // …while headroom stays clamped, which is right for "what may still be dispatched" and is
-    // precisely why it cannot express the overrun on its own.
+    // …while headroom stays clamped at zero and so cannot express the overrun on its own. (An
+    // earlier revision of this line called that "what may still be dispatched" — the retracted
+    // phrase this file's own header exists to correct. `headroomUsd` is UNSPENT CEILING.)
     expect(engTier.headroomUsd).toBe(0);
 
     const wf = tiers.find((t) => t.scopeKind === 'workforce');
