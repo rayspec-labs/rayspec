@@ -15,7 +15,7 @@ Its shape, its validation rules, its event payloads, its HTTP surface and its CL
 may change in **any** release, including a patch release, and **no deprecation period is
 promised**. Nothing on this page walks that back.
 
-What *is* promised is that you will never meet the section by accident, and that the five
+What *is* promised is that you will never meet the section by accident, and that the six
 surfaces enumerated below each say so — each with a test that turns red if the marking is
 deleted. Surfaces that do **not** carry a marking are named too, rather than left for you
 to discover.
@@ -43,7 +43,7 @@ many.
 
 ## Where the marking appears, and what keeps it there
 
-Five surfaces, each with the test or gate that turns red if the marking is deleted. A
+Six surfaces, each with the test or gate that turns red if the marking is deleted. A
 marking nothing pins is a marking that can vanish silently, which is why every row below
 has a right-hand column.
 
@@ -52,12 +52,13 @@ has a right-hand column.
 | **JSON Schema** | `properties.workforce` in `packages/kernel/spec/spec.schema.json` and on the backend arm of `version-1.0.schema.json` carries `"x-rayspec-experimental": true` plus a `title` and `description` saying so | `gate:spec-schema` byte-compares both committed artifacts against a re-derivation from the grammar; `packages/kernel/spec/src/workforce-experimental-marking.test.ts` asserts the keywords on the **committed files**, not only on the exporter |
 | **TypeScript** | every exported symbol of `workforce-grammar.ts`, `workforce-config.ts`, `workforce-lint.ts` and the event vocabulary in `@rayspec/tasks`' `events.ts` carries an `@experimental` TSDoc tag, which your editor shows on hover | `workforce-experimental-marking.test.ts` (spec) and `events-experimental-marking.test.ts` (tasks) assert the tag **per exported symbol** — in the source and again in the emitted `dist/*.d.ts`, the file an installed package actually hands your IDE — and cross-check that the two scans reached the same symbol set |
 | **HTTP** | every response from a `/v1/workforce/*` route carries `X-Experimental: workforce`, including the fail-closed `501` and an unauthenticated `401` | `packages/compose/api-auth/src/routes/workforce-experimental-header.db.test.ts` drives real requests through the app, with a negative control (a non-workforce route must not carry it) and a structural check that no route in the module sits outside the marked prefix; `cors.test.ts` pins the header into the CORS `exposeHeaders` list, without which a browser client could not read it |
+| **OpenAPI** | the served `GET /v1/openapi.json` describes all 16 `/v1/workforce/*` routes under a `workforce` tag that carries `"x-rayspec-experimental": true` — the same keyword the JSON Schema uses — and repeats the keyword on **every operation**, so a client generator that ignores tags still sees it. Each response also documents the `X-Experimental` header above | `packages/compose/api-auth/src/engine/workforce-openapi.db.test.ts` fetches the document from a **booted server over a real socket** and asserts the marking on the tag and on every operation, with a negative control (a declared product route carries neither). Its headline arm compares the documented path/method set against Hono's own route table **in both directions**, so a route added without a document entry — or a document entry whose route was removed — goes red |
 | **CLI** | `doctor` and `plan` over a document that declares the section print an unmissable banner to **stderr** — `EXPERIMENTAL: this document declares 'workforce:'` — while stdout stays exactly one JSON object carrying `"experimental": ["workforce"]`; the `rayspec workforce` group is marked in `docs/cli-reference.md` | `packages/app/cli/src/workforce-experimental-banner.test.ts` drives the real entry point, asserts the banner reaches stderr and only stderr, and pins the reference-doc note |
 | **Events** | `docs/workforce-events.md` states the vocabulary is experimental, and every event payload carries `v: 1` (`WORKFORCE_EVENT_VERSION`) so a later change is detectable | `packages/kernel/tasks/src/events-experimental-marking.test.ts` pins the paragraph and the version constant |
 
 ### What is NOT marked
 
-Three surfaces carry no experimental marking today. They are listed because a table of five
+Three surfaces carry no experimental marking today. They are listed because a table of six
 marked surfaces invites the reading that everything is marked, and that reading would be
 wrong:
 
@@ -122,7 +123,18 @@ run:
 This page covers the **declared-contract** surface of `workforce:`: the grammar in
 `@rayspec/spec` (`workforce-grammar.ts`, `workforce-config.ts`, `workforce-lint.ts`), the
 journal event vocabulary in `@rayspec/tasks` (`events.ts`), the `/v1/workforce/*` HTTP
-routes and the `rayspec workforce` CLI group.
+routes — and the OpenAPI document that describes them, served at `GET /v1/openapi.json` —
+and the `rayspec workforce` CLI group.
+
+**A note on how far that document's guarantees reach.** Its paths and methods are pinned to
+the router in both directions, and its request bodies and task/approval/review row schemas
+are *derived* from the same Zod schemas and database columns the handlers use, so none of
+those can drift. Its bespoke response envelopes (the `status`, `cost`, `pause`, `halt`,
+`signal`, `verdict` and `goals` shapes) and most of its status-code sets are hand-written,
+with five status codes cross-checked against a running server. Read it as an accurate map
+of *which* routes exist and what they accept; treat the hand-written envelopes as very good
+documentation rather than as a mechanically enforced contract. The suite that draws that
+line names it in its own header.
 
 It does **not** speak for the rest of `@rayspec/tasks`' runtime API (`pauseWorkforce`,
 `decideApproval`, the scheduler and its seams). Those symbols are engine internals of the
@@ -135,10 +147,12 @@ Nothing is scheduled and nothing is promised. There is no mechanism in this repo
 that emits a notice, a deprecation warning, or a migration when the marking is removed —
 so this page does not claim one. What will happen is that this page changes, and the
 markings the table above pins are what a consumer can watch: the `x-rayspec-experimental`
-keyword disappearing from `spec.schema.json`, the `@experimental` tags disappearing from
-the published type declarations, and the `X-Experimental` response header disappearing
-from `/v1/workforce/*`. Each of those is a diff you can detect mechanically, which is
-more than a promise would be worth.
+keyword disappearing from `spec.schema.json` **and from the `workforce` tag of the served
+`GET /v1/openapi.json`**, the `@experimental` tags disappearing from the published type
+declarations, and the `X-Experimental` response header disappearing from
+`/v1/workforce/*`. Each of those is a diff you can detect mechanically, which is
+more than a promise would be worth — and the OpenAPI one you can detect without a
+checkout, by diffing two fetches of the document.
 
 ## See also
 
