@@ -266,8 +266,8 @@ scheduler and asserting on rows and journal events, not on the toolset's return 
 the pre-built snapshot (`packages/kernel/workforce-tools/src/toolset.ts:619`, used at
 `packages/kernel/workforce-tools/src/toolset.ts:631`), and the snapshot only offers one when the
 parent's park binding names **this** task as the dispatched review task
-(`packages/kernel/workforce-tools/src/snapshot.ts:191`) **and** the row is undecided **and** its
-recorded reviewer is this employee (`packages/kernel/workforce-tools/src/snapshot.ts:202`).
+(`packages/kernel/workforce-tools/src/snapshot.ts:195`) **and** the row is undecided **and** its
+recorded reviewer is this employee (`packages/kernel/workforce-tools/src/snapshot.ts:206`).
 
 **Who may be *asked* for a review is also bounded**: the allowed set is the declared policies
 covering the caller, their own superior holding a decision role, or `user`
@@ -482,7 +482,7 @@ against the deployed declaration, and re-checked by the kernel:
 | delegation target, manager scope | `packages/kernel/workforce-tools/src/resolve-target.ts:109`, own-department members at `packages/kernel/workforce-tools/src/resolve-target.ts:126`; `team:` refused outright at `packages/kernel/workforce-tools/src/resolve-target.ts:116` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `a manager reaches own department members and led-team members — nothing else`, and `the led-team grant exists exactly where the task IS that team's work` |
 | escalation target | `packages/kernel/workforce-tools/src/toolset.ts:586` — the reporting edge, never arguments | `packages/app/server/src/workforce-turn-validation.db.test.ts`, `a forged escalateTo cannot ride in through the tool arguments` |
 | reviewer | `packages/kernel/workforce-tools/src/toolset.ts:442` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `request_review refuses a reviewer outside the caller scope — no org-wide routing` |
-| review id | `packages/kernel/workforce-tools/src/snapshot.ts:202` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `submit_review takes its reviewId from the SNAPSHOT` |
+| review id | `packages/kernel/workforce-tools/src/snapshot.ts:206` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `submit_review takes its reviewId from the SNAPSHOT` |
 | message recipient | `packages/kernel/workforce-tools/src/toolset.ts:705` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
 | approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:533`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
 | tenant | server-derived (`packages/compose/api-auth/src/http/middleware.ts:150`) | `packages/app/server/src/workforce-goal-intake.db.test.ts`, `reconciles tenant and workforce BEFORE the strategy runs` |
@@ -1019,8 +1019,8 @@ packages/kernel/workforce-tools/src/memory.ts:38 | export const RECALL_HIT_TEXT_
 packages/kernel/workforce-tools/src/memory.ts:39 | export const RECALL_MAX_HITS = 10;
 packages/kernel/workforce-tools/src/memory.ts:147 | if (query.workforceId !== undefined && query.workforceId !== this.#scope.workforceId) {
 packages/kernel/workforce-tools/src/memory.ts:162 | const completedRows = (await this.#tdb
-packages/kernel/workforce-tools/src/snapshot.ts:191 | binding.data.reviewTaskId === task.taskId &&
-packages/kernel/workforce-tools/src/snapshot.ts:202 | review.verdict === null && review.reviewer === employee.id
+packages/kernel/workforce-tools/src/snapshot.ts:195 | binding.data.reviewTaskId === task.taskId &&
+packages/kernel/workforce-tools/src/snapshot.ts:206 | review.verdict === null && review.reviewer === employee.id
 packages/kernel/workforce-tools/src/resolve-target.ts:64 | const employee = config.employees.get(target.id);
 packages/kernel/workforce-tools/src/resolve-target.ts:109 | export function assertManagerMayTarget(
 packages/kernel/workforce-tools/src/resolve-target.ts:116 | if (target.kind === 'team') {
