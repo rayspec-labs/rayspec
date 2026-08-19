@@ -85,15 +85,28 @@ const WORKFORCE_CEILING_USD = 2;
 const ESTIMATE_USD = 0.0005;
 const ACTUAL_USD = 0.0006117;
 
+/**
+ * `ops` is the CEILING-LESS DEPARTMENT and it is not decoration. A department declaring only
+ * `execution:` (no `budgets:`) lands on the runtime row as `{ maxConcurrentWorkers }` with no
+ * `usd` and no `turns` — see `deriveWorkforceBudgets` in @rayspec/spec, which contributes an
+ * entry for EITHER authored block. Such a department enforces no money ceiling and can never
+ * exhaust, so it must not appear among the tiers. Without it in this fixture the "declared
+ * ceiling only" filter is never executed at all, and a mutant that drops the filter survives —
+ * which is exactly what happened on the first mutation run (M2), before `ops` existed.
+ */
 const RAW_BUDGETS = {
   workforce: { usd: WORKFORCE_CEILING_USD, window: 'daily' },
-  departments: { eng: { usd: DEPARTMENT_CEILING_USD, window: 'daily' } },
+  departments: {
+    eng: { usd: DEPARTMENT_CEILING_USD, window: 'daily' },
+    ops: { maxConcurrentWorkers: 2 },
+  },
   execution: { estimateUsdPerTurn: ESTIMATE_USD },
 } as const;
 
 /** The SAME declaration minus the department ceiling — the control the emitter must not pad. */
 const RAW_BUDGETS_NO_DEPARTMENT_CEILING = {
   workforce: { usd: WORKFORCE_CEILING_USD, window: 'daily' },
+  departments: { ops: { maxConcurrentWorkers: 2 } },
   execution: { estimateUsdPerTurn: ESTIMATE_USD },
 } as const;
 
@@ -259,6 +272,14 @@ describe.skipIf(!hasDb)('/v1/workforce status — budget reporting truth', () =>
     expect(wf, 'the workforce tier must appear in the enumeration too').toBeDefined();
     expect((wf as StatusBudgetTier).exhausted).toBe(false);
     expect((wf as StatusBudgetTier).scopeId).toBe('wf');
+
+    // EXACTLY these two, in this order. `ops` declares `maxConcurrentWorkers` and no money
+    // ceiling: it enforces no spend, can never exhaust, and a row for it would be a permanent
+    // `exhausted: false` with a null ceiling — noise in the one summary that must stay readable.
+    expect(tiers.map((t) => `${t.scopeKind}/${t.scopeId}`)).toEqual([
+      'workforce/wf',
+      'department/eng',
+    ]);
   });
 
   it('CONTROL: a workforce declaring NO department ceiling emits NO department tier', async () => {
