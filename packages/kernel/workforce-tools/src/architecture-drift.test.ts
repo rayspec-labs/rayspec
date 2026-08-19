@@ -367,10 +367,8 @@ describe(`${PAGE_PATH} — the citation ledger`, () => {
     ).toBe(1);
     const blank = ledgerRows.filter((row) => row.token.length === 0).map((row) => row.raw);
     expect(blank, 'these ledger rows record no text, so they check nothing').toEqual([]);
-    const seen = new Set<string>();
-    const duplicated = ledgerRows
-      .map((row) => `${row.raw} | ${row.token}`)
-      .filter((key) => (seen.has(key) ? true : (seen.add(key), false)));
+    const keys = ledgerRows.map((row) => `${row.raw} | ${row.token}`);
+    const duplicated = keys.filter((key, at) => keys.indexOf(key) !== at);
     expect(duplicated, 'these ledger rows are duplicates — one of each is dead weight').toEqual([]);
   });
 
