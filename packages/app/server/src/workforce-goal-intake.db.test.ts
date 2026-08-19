@@ -13,6 +13,7 @@ import {
 import type { Db } from '@rayspec/db';
 import { deriveWorkforceConfig, WorkforceSpec } from '@rayspec/spec';
 import {
+  ensureWorkforceRuntime,
   haltWorkforce,
   MAX_TASK_DEPENDENCIES,
   MAX_TASK_TITLE_CHARS,
@@ -448,6 +449,140 @@ describe.skipIf(!hasDb)('the goal intake (db)', () => {
       });
       expect(result.outcome).toBe('created');
       expect(await taskRows()).toHaveLength(1);
+    });
+
+    /**
+     * THE LOCK, OBSERVED FROM THE DATABASE — not assumed from the fact that a helper was called.
+     *
+     * Every arm above stays green if the gate silently stops LOCKING: swap the upsert for a plain
+     * read and a serial test still sees `paused = true`, because nothing in a serial test races.
+     * The completeness argument is a LOCK argument, so it has to be pinned as one, the way #502
+     * pinned the identical blind spot in `#claimTurn`.
+     *
+     * Construction, with real Postgres row locks and no injected seams:
+     *
+     *   T_hold (a held-open transaction):  UPDATE workforce_runtime SET paused = true    -- NOT committed
+     *   main:                              submitGoal(...)  -- started, NOT awaited
+     *                                        -> the gate's upsert BLOCKS on T_hold's row lock
+     *   main:  poll pg_stat_activity until a backend is blocked BY T_HOLD'S OWN PID
+     *          (pg_blocking_pids, so unrelated traffic cannot satisfy the wait)
+     *   main:  while it is blocked, read pg_locks for that backend
+     *   T_hold: COMMIT  ->  the gate re-reads under the lock, sees `paused`, refuses, zero rows
+     *
+     * Two independent facts fall out, and they fail for different reasons:
+     *
+     *   1. THE GATE TAKES THE LOCK. An unlocked read never blocks — it would read the pre-pause
+     *      committed row, admit the goal and resolve. So a dropped lock cannot reach the assertions.
+     *   2. THE RANK IS `workforce_runtime` -> `workforce_tasks`. While blocked on the runtime row
+     *      the transaction must hold NO lock on `workforce_tasks` — a gate placed after the first
+     *      insert would already hold `RowExclusiveLock` there, which is the inversion the lock-rank
+     *      docblock in task-scheduler.ts forbids for the fourth composite transaction.
+     *
+     * NOT covered here, stated so the coverage is not overclaimed: moving the gate OUT of the
+     * transaction entirely still blocks and still refuses in this construction, because the refusal
+     * is serialized either way. That direction is a STATEMENT ORDERING and is pinned as one, in
+     * `intake-pause-ordering.test.ts`.
+     */
+    it('TAKES the runtime row lock, and holds NO task lock while it waits', async () => {
+      await ensureWorkforceRuntime(tdb(), 'intake_wf');
+
+      let commitHolder!: () => void;
+      const holderMayCommit = new Promise<void>((resolve) => {
+        commitHolder = resolve;
+      });
+      let holderPid = 0;
+      let signalHolderReady!: () => void;
+      const holderReady = new Promise<void>((resolve) => {
+        signalHolderReady = resolve;
+      });
+
+      // T_hold — pauses the workforce and sits on the runtime row's exclusive lock, uncommitted.
+      const holder = db.$client.begin(async (tx) => {
+        const [row] = (await tx.unsafe('SELECT pg_backend_pid() AS pid;')) as unknown as Array<{
+          pid: number;
+        }>;
+        holderPid = Number(row?.pid);
+        await tx.unsafe(
+          "UPDATE workforce_runtime SET paused = true WHERE workforce_id = 'intake_wf';",
+        );
+        signalHolderReady();
+        await holderMayCommit;
+      });
+      await holderReady;
+      expect(holderPid, 'the holder must report a real backend pid').toBeGreaterThan(0);
+
+      // Started, deliberately NOT awaited: it must be in flight and blocked while we inspect it.
+      const settled = intakeWith(oneStep())
+        .submitGoal({
+          tenantId: TENANT,
+          workforceId: 'intake_wf',
+          goal: 'a goal racing a pause that has not committed yet',
+          requestedBy: 'user:u1',
+        })
+        .then(
+          (ok) => ({ kind: 'resolved' as const, ok }),
+          (err: unknown) => ({ kind: 'rejected' as const, err }),
+        );
+
+      // Wait for a backend blocked BY THE HOLDER specifically. Everything from here to the commit
+      // runs inside try/finally: an assertion that throws must still release the holder, or its
+      // transaction keeps the runtime row locked and every later arm in this file wedges on it
+      // until its own timeout — noise that would bury the real failure. (Observed exactly that on
+      // the first R1 run, which is why this is a `finally` and not a trailing statement.)
+      let blockedPid = 0;
+      let taskLockModes: string[] = [];
+      try {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const rows = (await db.$client.unsafe(
+            `SELECT pid FROM pg_stat_activity
+               WHERE datname = current_database()
+                 AND ${holderPid} = ANY(pg_blocking_pids(pid));`,
+          )) as unknown as Array<{ pid: number }>;
+          if (rows.length > 0) {
+            blockedPid = Number(rows[0]?.pid);
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        if (blockedPid > 0) {
+          const rows = (await db.$client.unsafe(
+            `SELECT l.mode FROM pg_locks l
+               JOIN pg_class c ON c.oid = l.relation
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE l.pid = ${blockedPid}
+                AND c.relname = 'workforce_tasks'
+                AND n.nspname = 'rayspec_test_tasks';`,
+          )) as unknown as Array<{ mode: string }>;
+          taskLockModes = rows.map((l) => l.mode);
+        }
+      } finally {
+        commitHolder();
+        await holder;
+      }
+
+      expect(
+        blockedPid,
+        'THE GATE DID NOT BLOCK on the uncommitted pause, so it is NOT holding the runtime row ' +
+          'lock. An unlocked read leaves the ordering half of the proof gone while every serial ' +
+          'arm still passes — which is exactly the refactor this arm exists to catch.',
+      ).toBeGreaterThan(0);
+
+      // THE RANK: blocked on workforce_runtime, it must not already hold workforce_tasks.
+      expect(
+        taskLockModes,
+        'THE LOCK RANK IS INVERTED: the intake already holds a lock on `workforce_tasks` while it ' +
+          'waits for `workforce_runtime`. The gate must run BEFORE the first task write, so this ' +
+          'transaction takes runtime -> tasks and stays a prefix of every path it can race.',
+      ).toEqual([]);
+
+      const outcome = await settled;
+      expect(outcome.kind, 'the gate must refuse once the pause it waited for is committed').toBe(
+        'rejected',
+      );
+      if (outcome.kind !== 'rejected') throw new Error('unreachable');
+      expect(outcome.err).toBeInstanceOf(WorkforcePausedError);
+      expect(await taskRows()).toHaveLength(0);
     });
 
     it('refuses a MULTI-STEP plan at the gate, leaving ZERO rows — not a half-born plan', async () => {
