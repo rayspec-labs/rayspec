@@ -106,12 +106,12 @@ untrimmably** into the owning employee's turn input.
    `packages/compose/api-auth/src/http/middleware.ts:150` reads `principal?.orgId` and
    `packages/compose/api-auth/src/http/middleware.ts:174` sets it as the request tenant.
 2. **A supplied `Idempotency-Key` is refused, not ignored**
-   (`packages/compose/api-auth/src/routes/workforce.ts:1001`). This route mints a fresh billed root
+   (`packages/compose/api-auth/src/routes/workforce.ts:1024`). This route mints a fresh billed root
    per call; silently dropping the header would be a lost-write trap.
-3. **Rate limit before the body read** (`packages/compose/api-auth/src/routes/workforce.ts:1013`),
+3. **Rate limit before the body read** (`packages/compose/api-auth/src/routes/workforce.ts:1036`),
    keyed `(tenant, workforce)` — the cost-DoS bound on loop-minting billed roots.
 4. **Strict body, byte-capped goal**
-   (`packages/compose/api-auth/src/routes/workforce.ts:205`, `refine(withinGoalBytes, …)`). The cap
+   (`packages/compose/api-auth/src/routes/workforce.ts:219`, `refine(withinGoalBytes, …)`). The cap
    is in **bytes**, deliberately: a character cap would admit a multibyte goal that then bricks
    every dispatch against a byte-denominated turn-input budget.
 5. **Tenant and workforce reconciliation before the strategy runs**
@@ -125,7 +125,7 @@ untrimmably** into the owning employee's turn input.
    `packages/app/server/src/workforce-goal-intake.ts:116`, **before** the transaction at
    `packages/app/server/src/workforce-goal-intake.ts:125`, so a refused plan writes zero rows.
 7. `requestedBy` is stamped from the verified principal
-   (`packages/compose/api-auth/src/routes/workforce.ts:1031`), never read from the body.
+   (`packages/compose/api-auth/src/routes/workforce.ts:1054`), never read from the body.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -338,7 +338,7 @@ remainder (`packages/kernel/tasks/src/decision-authority.ts:64`), so the
 2. the principal must **hold** `workforce:override`
    (`packages/kernel/auth-core/src/authz.ts:46`), checked through the same permission gate the
    route's `store:write` middleware used (`packages/compose/api-auth/src/routes/workforce.ts:126`),
-   and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:886`) so
+   and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:909`) so
    an unauthorized ask is a named 403 rather than a silent downgrade.
 
 The permission is **owner/admin only** — granted in the owner table
@@ -381,7 +381,7 @@ cross-tenant arm asserts **404** (not 403), the missing-permission arm asserts a
 
 **Only three of the nine signal kinds may be posted from outside**
 (`packages/kernel/tasks/src/signals.ts:65`, enforced on the route at
-`packages/compose/api-auth/src/routes/workforce.ts:168`). The other six are **mechanism** kinds,
+`packages/compose/api-auth/src/routes/workforce.ts:182`). The other six are **mechanism** kinds,
 each written by the code that establishes the fact it reports — accepting them from a request would
 let a caller assert that fact by hand.
 
@@ -486,7 +486,7 @@ against the deployed declaration, and re-checked by the kernel:
 | message recipient | `packages/kernel/workforce-tools/src/toolset.ts:691` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
 | approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:519`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
 | tenant | server-derived (`packages/compose/api-auth/src/http/middleware.ts:150`) | `packages/app/server/src/workforce-goal-intake.db.test.ts`, `reconciles tenant and workforce BEFORE the strategy runs` |
-| `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:1031`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:259`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
+| `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:1054`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:259`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
 
 **No privilege inheritance.** The toolset is keyed on the **task owner** alone and indexed by that
 employee's declared role; nothing in the call chain carries a parent's role, agent, or tool list.
@@ -621,8 +621,8 @@ and the final application stays receipt-idempotent (§7.3).
 `actorFrom` (`packages/compose/api-auth/src/routes/workforce.ts:95`) reads the authenticated
 principal and returns `user:<id>` / `api-key:<id>`, with a closed sentinel rather than a guessable
 identity; `requireAuth()` runs before every caller. It is the sole source of `actor` / `decidedBy`
-on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:892` on the
-approval-decide route, `packages/compose/api-auth/src/routes/workforce.ts:966` on the
+on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:915` on the
+approval-decide route, `packages/compose/api-auth/src/routes/workforce.ts:989` on the
 review-verdict route, and the signal/cancel/pause/resume/halt routes). The route is named beside
 each line because `actor: actorFrom(c),` is not a distinctive string — it appears eight times in
 this file — so a line number alone would not tell a re-pinner which one was meant. The client cannot even *attempt* the assertion: every mutating body is a `z.strictObject`,
@@ -774,7 +774,7 @@ employee id cannot be one.
    door, not a fallback.** The "the named superior decides it" path the escalation fate advertises
    is unreachable end to end.
 2. `decideApproval` has exactly one production caller, the HTTP route
-   (`packages/compose/api-auth/src/routes/workforce.ts:888`). There is no in-engine approval
+   (`packages/compose/api-auth/src/routes/workforce.ts:911`). There is no in-engine approval
    decision path. So consequence 1 has no exception.
 3. **An api-key-only deployment cannot resolve an escalated approval at all.**
    `workforce:override` is not api-key-grantable by design, so a machine credential can decide every
@@ -1093,15 +1093,15 @@ packages/kernel/tasks/src/index.ts:46 | LedgerCostPolicy,
 packages/compose/api-auth/src/routes/workforce.ts:95 | function actorFrom(c: Context<AppEnv>): string {
 packages/compose/api-auth/src/routes/workforce.ts:120 | async function breakGlassAuthorized(
 packages/compose/api-auth/src/routes/workforce.ts:126 | await enforcePermission(deps, c, 'workforce:override');
-packages/compose/api-auth/src/routes/workforce.ts:168 | kind: operatorSignalKindSchema,
-packages/compose/api-auth/src/routes/workforce.ts:205 | refine(withinGoalBytes
-packages/compose/api-auth/src/routes/workforce.ts:886 | const override = await breakGlassAuthorized(deps, c, body.override);
-packages/compose/api-auth/src/routes/workforce.ts:888 | const approval = await decideApproval(tdb, {
-packages/compose/api-auth/src/routes/workforce.ts:892 | decidedBy: actorFrom(c),
-packages/compose/api-auth/src/routes/workforce.ts:966 | actor: actorFrom(c),
-packages/compose/api-auth/src/routes/workforce.ts:1001 | if (c.req.header('Idempotency-Key') !== undefined) {
-packages/compose/api-auth/src/routes/workforce.ts:1013 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
-packages/compose/api-auth/src/routes/workforce.ts:1031 | requestedBy: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:182 | kind: operatorSignalKindSchema,
+packages/compose/api-auth/src/routes/workforce.ts:219 | refine(withinGoalBytes
+packages/compose/api-auth/src/routes/workforce.ts:909 | const override = await breakGlassAuthorized(deps, c, body.override);
+packages/compose/api-auth/src/routes/workforce.ts:911 | const approval = await decideApproval(tdb, {
+packages/compose/api-auth/src/routes/workforce.ts:915 | decidedBy: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:989 | actor: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:1024 | if (c.req.header('Idempotency-Key') !== undefined) {
+packages/compose/api-auth/src/routes/workforce.ts:1036 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
+packages/compose/api-auth/src/routes/workforce.ts:1054 | requestedBy: actorFrom(c),
 packages/compose/api-auth/src/http/middleware.ts:150 | const serverOrg = principal?.orgId;
 packages/compose/api-auth/src/http/middleware.ts:174 | if (serverOrg) c.set('tenantId', serverOrg);
 packages/app/server/src/workforce-goal-intake.ts:59 | function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {

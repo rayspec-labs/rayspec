@@ -302,6 +302,15 @@ as a deterministic client contract.
   internal engine compatibility target instead — see the
   [spec reference version note](./spec-reference.md#a-note-on-versions).
 
+- **This command's document is not the served one.** A running deployment serves its own
+  at `GET /v1/openapi.json`, built from the deployed document's declared routes *and* —
+  unlike this command's output — the platform's experimental `/v1/workforce/*` control
+  section, tagged `workforce` and marked `"x-rayspec-experimental": true`. If you are
+  generating a client for the workforce control surface, fetch the served document; this
+  command cannot emit it (it refuses backend-profile documents outright, and the workforce
+  routes are platform routes rather than declared ones). See
+  [workforce compatibility](./workforce-compatibility.md#where-the-marking-appears-and-what-keeps-it-there).
+
 - **Exit:** `0` on success, `1` on an invalid/non-product/unreadable spec.
 
 ---
