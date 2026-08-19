@@ -127,18 +127,32 @@ async function breakGlassAuthorized(
   return true;
 }
 
-const DEFAULT_PAGE = 50;
-const MAX_PAGE = 200;
+/**
+ * The paging + drain constants and the request schemas below are EXPORTED, not module-private, for
+ * exactly one reason: `engine/emit-workforce-openapi.ts` builds this surface's OpenAPI section from
+ * THEM rather than from a retyped copy. A documented default, cap or request shape that disagrees
+ * with what the handler enforces would be a contract wider than its mechanism — the one failure
+ * mode this surface cannot afford — so the document derives from the same objects the routes use.
+ * Nothing outside that emitter imports them, and none is re-exported from the package barrel.
+ */
+export const DEFAULT_PAGE = 50;
+export const MAX_PAGE = 200;
 
 /** The tree read's hard row cap — the ceiling of RENDERABLE output, not a paging economics
  * number. Past it the response is a truncated prefix with the header flag set. */
-const TREE_MAX_TASKS = 500;
+export const TREE_MAX_TASKS = 500;
 
 /** The approval rows' closed status vocabulary (the filter refuses free text, like the task list). */
-const APPROVAL_STATUSES = ['pending', 'approved', 'rejected', 'timed_out', 'escalated'] as const;
+export const APPROVAL_STATUSES = [
+  'pending',
+  'approved',
+  'rejected',
+  'timed_out',
+  'escalated',
+] as const;
 
 /** The drain window an HTTP pause may hold the request for; past it → 504 (the pause holds). */
-const HTTP_DRAIN_TIMEOUT_MS = 25_000;
+export const HTTP_DRAIN_TIMEOUT_MS = 25_000;
 
 /**
  * The reserved segments come from the engine (`@rayspec/tasks`), which also refuses them where a
@@ -160,7 +174,7 @@ function workforceIdParam(c: Context<AppEnv>): string {
   return workforceId;
 }
 
-const signalRequestSchema = z.strictObject({
+export const signalRequestSchema = z.strictObject({
   // OPERATOR kinds only. A mechanism kind posted from here would assert by hand the very fact its
   // park is waiting to observe — releasing a fan-out join with the children still running, or an
   // escalation park its child never answered. Those parks are structural on every engine door;
@@ -174,17 +188,17 @@ const signalRequestSchema = z.strictObject({
   signalKey: z.string().min(1).max(200).optional(),
 });
 
-const cancelRequestSchema = z.strictObject({
+export const cancelRequestSchema = z.strictObject({
   reason: z.string().min(1).max(500).optional(),
 });
 
-const decideRequestSchema = approvalDecisionSchema;
+export const decideRequestSchema = approvalDecisionSchema;
 
-const pauseRequestSchema = z.strictObject({
+export const pauseRequestSchema = z.strictObject({
   drain: z.boolean().default(false),
 });
 
-const haltRequestSchema = z.strictObject({
+export const haltRequestSchema = z.strictObject({
   reason: z.string().min(1).max(500),
 });
 
@@ -201,7 +215,7 @@ const haltRequestSchema = z.strictObject({
 const MAX_GOAL_BYTES = MAX_TASK_TEXT_BYTES;
 const withinGoalBytes = (text: string) => Buffer.byteLength(text, 'utf8') <= MAX_GOAL_BYTES;
 
-const goalRequestSchema = z.strictObject({
+export const goalRequestSchema = z.strictObject({
   goal: z.string().min(1).refine(withinGoalBytes, `goal must be at most ${MAX_GOAL_BYTES} bytes`),
   description: z
     .string()
@@ -366,12 +380,21 @@ function decodeCursor(raw: string): { id: string } {
  * running deployment's base URL never meets that gate — they meet these routes, and until now the
  * routes said nothing about their own stability.
  *
- * A header rather than an OpenAPI tag, because there is no OpenAPI document describing these
- * routes: `rayspec openapi` emits the PRODUCT-PROFILE view surface (and refuses a backend-profile
- * document), and the served `GET /v1/openapi.json` is derived from the spec's DECLARED `api[]`.
- * `/v1/workforce/*` are platform routes, present in neither, and no zod-openapi document route is
- * registered. A tag on a document that does not describe these routes would be a marking nobody
- * can fetch.
+ * A HEADER **AND** AN OPENAPI TAG — the header first, and it is not superseded.
+ *
+ * This constant shipped as a header alone because at the time no OpenAPI document described these
+ * routes, so a tag would have been a marking nobody could fetch. That is no longer true:
+ * `engine/emit-workforce-openapi.ts` now describes the whole section in the SERVED
+ * `GET /v1/openapi.json`, carrying `x-rayspec-experimental` on the section tag AND on every
+ * operation — which is the only marking a CLIENT GENERATOR can see, because a generator reads the
+ * document and never makes a request. (`rayspec openapi` still emits the PRODUCT-PROFILE view
+ * surface and still refuses a backend-profile document; that is unchanged.)
+ *
+ * The two are complementary, and neither replaces the other. The header reaches the caller who
+ * never fetches a document — including the fail-closed 501 and the unauthenticated 401, responses
+ * that carry no body to read a marking from. The document reaches the toolchain that never makes a
+ * request. The document also DESCRIBES this header on every response, so the two cannot disagree
+ * about whether it is sent.
  *
  * DISTINCT FROM `OPENAPI_POSTURE_NOTICE`, which states the DEPLOYMENT posture (local / trusted /
  * not internet-facing) of the whole API. This states the STABILITY of one section. Two different

@@ -32,10 +32,12 @@ The commands split into three groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
-- A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
-  database `DATABASE_URL` names (and applies the committed migration chain to
-  it), so it is deliberately *not* under `dev`, which is local-only. It prints no
-  secret value: a minted invite token goes to a file and nowhere else.
+- A **production-mutating `tenant` group** — `tenant ensure` and `tenant erase`.
+  These write to the database `DATABASE_URL` names (and apply the committed
+  migration chain to it), so the group is deliberately *not* under `dev`, which
+  is local-only. Neither prints a secret value: a minted invite token goes to a
+  file and nowhere else. `tenant erase` is the one **irreversible** command the
+  CLI has, and it carries two independent safeties for that reason.
 - A clearly separated **local-dev, mutating `dev` group** — `dev gen-secrets`,
   `dev db`, `dev bootstrap-tenant`. These deliberately write a secrets file,
   create a database, or provision a tenant.
@@ -300,6 +302,15 @@ as a deterministic client contract.
   internal engine compatibility target instead — see the
   [spec reference version note](./spec-reference.md#a-note-on-versions).
 
+- **This command's document is not the served one.** A running deployment serves its own
+  at `GET /v1/openapi.json`, built from the deployed document's declared routes *and* —
+  unlike this command's output — the platform's experimental `/v1/workforce/*` control
+  section, tagged `workforce` and marked `"x-rayspec-experimental": true`. If you are
+  generating a client for the workforce control surface, fetch the served document; this
+  command cannot emit it (it refuses backend-profile documents outright, and the workforce
+  routes are platform routes rather than declared ones). See
+  [workforce compatibility](./workforce-compatibility.md#where-the-marking-appears-and-what-keeps-it-there).
+
 - **Exit:** `0` on success, `1` on an invalid/non-product/unreadable spec.
 
 ---
@@ -528,6 +539,129 @@ deployment at all.
 
 ---
 
+## `tenant erase`
+
+```
+rayspec tenant erase --org-id <uuid> [--confirm <uuid> --reason <text>] [--journal-scrub]
+```
+
+**Previews** — or, with a matching `--confirm`, actually **performs** — the
+irreversible erasure of one tenant's data: its product-store rows, its core run
+journal, raw transcript and task-engine rows, and its blobs. The organization
+*shell* survives; only its data goes. Like `tenant ensure`, **no HTTP route
+exists for this in any posture** — it is the operator entry point to the
+erasure control seam the platform has always carried, and it mounts nothing.
+
+### Two keys, and neither one alone deletes anything
+
+| key | what it is | what happens without it |
+| --- | --- | --- |
+| `--confirm <uuid>` (+ `--reason <text>`) | the **explicit ask**. `--confirm` must repeat `--org-id` *exactly* — you type the id of the thing you are destroying. A mismatch is a usage error (exit `2`) raised before anything boots or connects. | the run is a **counts-only preview**. It cannot delete under any setting. |
+| `RAYSPEC_ERASURE_ENABLED=true` | the **operator gate**, resolved at the composition root by a strict comparison against the exact string `true`. | the run comes back as a counts-only preview with `dryRunReason: "gate-disabled"`. `TRUE`, `True`, `1` and `yes` all resolve to **false**. |
+
+The shape is deliberately the one the task engine's break-glass uses — an
+explicit ask on the request *plus* an authority that is not part of the request —
+because erasure is strictly worse than break-glass: break-glass contradicts one
+recorded decision, erasure destroys every record there is to contradict.
+
+Be honest about what the gate is and is not. An operator who can run this command
+can also set the variable in their own shell, and could already `TRUNCATE` the
+database they hold the connection string for. The gate is a **deployment-posture**
+control — it is what stops the accidental and the scripted invocation, and it is
+meaningful when the command runs in an environment whose variables the platform
+sets rather than the invoker. What the command buys over `psql` is that it erases
+*correctly* (tenant-scoped through the same chokepoint every other delete uses,
+FK-safe child-first ordering, blobs included, all row deletes in one transaction)
+and *auditably*.
+
+### Reading the result
+
+The JSON's `mode` is the **seam's own outcome**, never inferred from the flags,
+and `gate` is the **resolved** boolean — an operator who set `TRUE` sees `false`
+here, not the string they typed. So:
+
+| what happened | `ok` | exit |
+| --- | --- | --- |
+| preview asked for, preview returned | `true` | `0` |
+| erasure asked for, rows deleted (`mode: "deleted"`) | `true` | `0` |
+| erasure asked for, **nothing deleted** (the gate refused) | `false` | `1` |
+
+The last row is the point: a script cannot read a gate-refused erasure as a
+success.
+
+```json
+{
+  "ok": false,
+  "command": "tenant erase",
+  "orgId": "3f0d0c8a-2a7e-4f2c-9a1b-6d5e4c3b2a10",
+  "requested": "erase",
+  "gate": false,
+  "mode": "dry-run",
+  "dryRunReason": "gate-disabled",
+  "tables": {},
+  "totalRows": 0,
+  "coreTables": { "runs": 6, "journal_steps": 18, "conversation_items": 31, "run_events": 85 },
+  "coreTotalRows": 140,
+  "blobs": "no-backend",
+  "auditRequestId": "9c2b1e6d-4a3f-4c58-8b7d-0e1f2a3b4c5d",
+  "errors": [{ "code": "ERASURE_GATE_DISABLED", "message": "…" }]
+}
+```
+
+### What it does to the database, and what it journals
+
+It **boots the deployment** to do the work (binding no port), because the
+product-store delete order and the blob backend come from the deployed document
+and only the composition root knows them — a direct-to-database shortcut would
+erase the core half and silently leave every product row behind. So it reads the
+same environment `rayspec-serve` does and **applies the committed migration
+chain** to `DATABASE_URL` on the way, exactly like every other boot.
+
+That cuts both ways, and the rest of what a boot does is worth knowing before you
+run this against production:
+
+- It is a **real boot of the whole deployment**, so a document declaring
+  `deployment.durableWorker: true` **launches a durable worker** for the life of
+  the command (drained on the way out). If a server is already serving that
+  database, this is a *second* worker against it for that window.
+- It honours **`RAYSPEC_UPDATE_MIGRATION`** (and `RAYSPEC_UPDATE_ALLOWLIST`) exactly
+  as `rayspec-serve` and `rayspec deploy --apply-migration` do, because it builds
+  its boot options from the same shared builder. If that variable is set in the
+  environment you run the erase from, **the erase applies that delta too**. Unset
+  it unless you mean it.
+- It reads `RAYSPEC_SPEC_PATH`, so it deploys whatever document that names. Point
+  it at the same document the deployment runs.
+
+If none of that is wanted, run it from an environment that has only the three boot
+secrets and `DATABASE_URL` set.
+
+Every attempt — including one the gate refuses — writes a `tenant_erase_requested`
+row to `auth_audit` **before** anything is deleted, carrying the target org, what
+was requested, the resolved gate, the stated `--reason` and the observed invoker
+(OS user, host, pid; not an authenticated principal, which is why `--reason` is
+required). A real deletion additionally writes the seam's own `tenant_data_erased`
+row. `auth_audit` is a global table that tenant erasure does not touch, so both
+records **survive the erasure they describe**.
+
+`--journal-scrub` selects the softer posture: the raw content columns are NULLed
+while the billing/idempotency ledger rows are kept.
+
+### The operator sequence
+
+```bash
+# 1. Look first. No --confirm, so this cannot delete under any setting.
+rayspec tenant erase --org-id "$ORG_ID"
+
+# 2. Arm the deployment gate deliberately, then ask, naming the id and the reason.
+RAYSPEC_ERASURE_ENABLED=true \
+  rayspec tenant erase --org-id "$ORG_ID" --confirm "$ORG_ID" \
+    --reason "subject erasure request TCK-4711"
+```
+
+Step 2 exits `1` and changes nothing if the gate is not exactly `true`.
+
+---
+
 ## `dev gen-secrets`
 
 ```
@@ -723,6 +857,8 @@ rayspec workforce task <id> [transport flags]
 rayspec workforce approvals list [transport flags]
 rayspec workforce approvals approve <id> [--reason <text>] [--override] [transport flags]
 rayspec workforce approvals reject <id> --reason <text> [--override] [transport flags]
+rayspec workforce signal <task-id> --kind <manual_unblock|budget_raised|user_reply> [--payload <json>] [--signal-key <key>] [transport flags]
+rayspec workforce cancel <task-id> [--reason <text>] [transport flags]
 rayspec workforce cost [--window 24h|7d] [--by employee|department] [transport flags]
 rayspec workforce events <task-id> [transport flags]
 rayspec workforce pause [--drain] --workforce <id> [transport flags]
@@ -746,8 +882,9 @@ fail-closed at every step:
 - **Authentication**: an API key from `--api-key` or `RAYSPEC_API_KEY`, sent
   exactly as the HTTP API expects it. Read commands (`status`, `tasks`, `task`,
   `approvals list`, `cost`, `events`) need **`store:read`**; every mutating
-  command (`submit`, `approvals approve`/`reject`, `pause`/`resume`/`halt`)
-  needs **`store:write`**, matching the route permissions. A key without the
+  command (`submit`, `approvals approve`/`reject`, `signal`, `cancel`,
+  `pause`/`resume`/`halt`) needs **`store:write`**, matching the route
+  permissions. A key without the
   permission gets the route's 403 verbatim — the CLI adds **no local
   authorization logic of its own**, because two authorization implementations
   is one too many.
@@ -802,6 +939,64 @@ plus the resolved budgets). Without `--root`, exactly one root task is the
 unambiguous pick; zero or several is an error naming the options. `--status`
 and `--owner` stay with the flat list — a filtered tree would render holes as
 work that never happened.
+
+**Not every task waiting on a human is an approval.** When a review spends its
+declared round budget, the engine parks the task for a person to decide rather
+than looping — and that park carries **no approval row**, because there is no
+approval to decide. `approvals list` therefore cannot show it. So the command
+reports it alongside, under a **separate** `signalParked` key (the `approvals`
+array keeps exactly the shape `approvals approve <id>` consumes — an id you read
+out of it is always one that command can act on), each entry carrying the exact
+command that releases it. When that advisory read is itself refused, the reply
+says so in `signalParkedError` rather than omitting the key: a silently missing
+advisory would be indistinguishable from "nothing is parked".
+
+A third key, **`signalParkedTruncated`**, answers the question the other two
+cannot: *is this list complete?* The advisory follows the server's pagination
+cursor across every page, so it is normally `false`. It is `true` only when the
+walk hit its own page ceiling, and then the list is **partial** — there are
+parked tasks it did not reach, and clearing the ones it shows will not clear
+them all. The key is always present, never omitted when false, because an
+absent key cannot be told apart from a `false` one, and a partial list that
+looks complete is worse than no list: it ends the search at the wrong place.
+
+`signal` is that release. It delivers one **operator** wake signal to a parked
+task: `user_reply` answers the reasonless "a human decides" park (review rounds
+spent, an escalated budget) and a pending clarification; `budget_raised` answers
+a task blocked on an exhausted budget; `manual_unblock` answers the ordinary
+blocked reasons that have a real lever behind them. Those three are the whole
+set — the engine's other signal kinds are written by the mechanism that
+establishes the fact they report (the fan-in join, the escalation reply, the
+verdict route), and posting one by hand would assert that fact instead of
+observing it, so the route refuses them and so does this command. **Structural
+parks are not releasable this way at all**: a fan-out join and an escalation
+wait on a child task's terminal, which an override does not change — the lever
+there is `cancel` below, so the child's terminal satisfies the park through the
+park's own path. `--payload` is a JSON object carried to the waking turn;
+`--signal-key` is the delivery's idempotency key (the engine dedupes on task and
+key, so a re-send under the same key collapses into one delivery — absent, every
+call is its own delivery).
+
+The reply carries **two** booleans, and they answer different questions.
+`delivered` says the signal was recorded; `woke` says it also released a park.
+`{"delivered":true,"woke":false}` is a **success** (exit 0): the signal is on
+record and pending, but the kind does not answer the park this task is actually
+sitting in, so nothing moved — that is what a `manual_unblock` sent at a fan-out
+join looks like. `{"delivered":false,"woke":false}` is a re-send collapsing
+against a `--signal-key` already used. Read `woke`, not the exit code, to know
+whether the task is running again.
+
+`cancel` is the other lever — for exactly the parks `signal` may not release. It
+cancels the task and its subtree, and it is the documented rescue in three
+places: a fan-out join, an escalation (cancel the child that the park waits on),
+and a `deadline_exceeded` block, which `manual_unblock` refuses because an
+unblock there would re-park against the same instant on the very next pass. **A
+working turn is never killed mid-flight**: the engine delivers a cancel the
+target absorbs at its own turn boundary. That is why the reply has two lists —
+`cancelled` (rows moved now) and `signalled` (rows that will absorb it) — and
+both are relayed exactly as the engine reported them, because "it has stopped"
+and "it is scheduled to stop" are different facts. `--reason` is optional and is
+journalled with the cancellation.
 
 `submit` hands one goal to the declared workforce (`--priority` takes `low`,
 `normal`, `high` or `urgent`); the deployment's orchestration strategy shapes

@@ -18,6 +18,11 @@
  *                                 route). Applies the committed migration chain. Emits ONE JSON
  *                                 object carrying no secret material; an owner-invite token, when one
  *                                 is minted, is written to a mode-600 file and printed nowhere.
+ *   rayspec tenant erase …       The destructive counterpart — PREVIEW, or with a matching --confirm
+ *                                 PERFORM, the irreversible erasure of one tenant's data. Two keys:
+ *                                 --confirm must repeat --org-id (plus --reason), AND the operator
+ *                                 gate RAYSPEC_ERASURE_ENABLED must be exactly "true"; anything else
+ *                                 is a counts-only preview. Journals every attempt before acting.
  *
  * LOCAL-DEV, MUTATING (`dev` group — deliberately creates a dev DB / writes secret files; distinct
  * from the diagnostic floor above):
@@ -204,6 +209,35 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 5min-30d). --reissue-owner-invite revokes the outstanding invite and
                                 mints a replacement (for a lost token). Emits ONE JSON object.`,
       },
+      {
+        name: 'tenant erase',
+        block: `  rayspec tenant erase --org-id <uuid> [--confirm <uuid> --reason <text>] [--journal-scrub]
+                                PREVIEW — or, with a matching --confirm, actually PERFORM — the
+                                IRREVERSIBLE erasure of that tenant's data: its product-store rows,
+                                its core run journal / raw transcript / task-engine rows, and its
+                                blobs. The organization SHELL itself survives; only its data goes.
+                                This is the operator entry point to the erasure control seam, and it
+                                mounts no HTTP route.
+                                TWO KEYS, both required for anything to be deleted. (1) --confirm must
+                                repeat --org-id EXACTLY, and --reason <text> must say why; without
+                                --confirm the run is a counts-only PREVIEW that cannot delete under
+                                any setting. (2) the operator gate RAYSPEC_ERASURE_ENABLED must be
+                                EXACTLY the string "true" in the environment this command boots from —
+                                unset, "TRUE", "1" or "yes" all resolve to false and the run comes
+                                back as a preview.
+                                It BOOTS the deployment to do it (binding no port), because the
+                                product-store delete order and the blob backend come from the deployed
+                                document — so it reads the same environment rayspec-serve does and
+                                APPLIES THE COMMITTED MIGRATION CHAIN to DATABASE_URL on the way.
+                                --journal-scrub selects the softer posture: raw content columns are
+                                NULLed and the billing/idempotency ledger rows are kept.
+                                Emits ONE JSON object whose "mode" is the seam's own outcome, never
+                                inferred from the flags: a CONFIRMED run that did not delete is
+                                ok:false and exit 1 naming the gate, so a script cannot read a refused
+                                erasure as a success. Every attempt is journalled to auth_audit
+                                (tenant_erase_requested) BEFORE anything is deleted, including the
+                                attempts the gate refuses.`,
+      },
     ],
   },
   {
@@ -211,7 +245,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
     commands: [
       {
         name: 'workforce',
-        block: `  rayspec workforce <status|submit|tasks|task|approvals|cost|events|pause|resume|halt> [flags]
+        block: `  rayspec workforce <status|submit|tasks|task|approvals|signal|cancel|cost|events|pause|resume|halt> [flags]
                                 The operator console for the durable task engine, speaking to a
                                 RUNNING deployment over its authenticated HTTP API. Shared flags on
                                 every subcommand: --url <base> (else RAYSPEC_URL, else a single
@@ -238,7 +272,13 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                                                 (status, confidence, cost per node;
                                                                 --json for the machine shape)
                                   task <id>                     one task
-                                  approvals list                the pending inbox
+                                  approvals list                the pending inbox, PLUS a
+                                                                signalParked advisory: tasks parked
+                                                                on a human that carry no approval
+                                                                row (review rounds spent), each
+                                                                with the command that releases it.
+                                                                A refused advisory read is reported
+                                                                as signalParkedError, never dropped.
                                   approvals approve <id> [--reason <text>] [--override]
                                   approvals reject <id> --reason <text> [--override]
                                                                 --override is the BREAK-GLASS ask on
@@ -249,6 +289,29 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                                                 authority: the route ANDs it with the
                                                                 workforce:override permission and
                                                                 journals the override.
+                                  signal <task-id> --kind manual_unblock|budget_raised|user_reply
+                                         [--payload <json>] [--signal-key <key>]
+                                                                deliver ONE operator wake signal to
+                                                                a parked task (user_reply releases
+                                                                the "a human decides" park a spent
+                                                                review budget leaves behind). Those
+                                                                three kinds are the whole set; the
+                                                                engine's others are written by the
+                                                                mechanism that establishes the fact
+                                                                they report. Structural parks (a
+                                                                fan-out join, an escalation) are not
+                                                                releasable this way — cancel the
+                                                                child instead. --signal-key is the
+                                                                delivery's idempotency key.
+                                  cancel <task-id> [--reason <text>]
+                                                                cancel a task and its subtree — the
+                                                                lever for the parks signal may NOT
+                                                                release (a fan-out join, an
+                                                                escalation, a deadline_exceeded
+                                                                block). A working turn is never
+                                                                killed mid-flight: the reply's
+                                                                cancelled[] moved now, signalled[]
+                                                                will absorb it at a turn boundary.
                                   cost [--window 24h|7d] [--by employee|department]
                                                                 settled/reserved roll-up (grouped
                                                                 server-side when --by is given)

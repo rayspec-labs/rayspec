@@ -27,6 +27,7 @@ import { ZodError } from 'zod';
 import type { AppDeps, AppEnv } from './app-context.js';
 import { buildAgentRegistry } from './engine/build-agent-registry.js';
 import { buildDeclaredRoutesOpenApi } from './engine/emit-openapi.js';
+import { withWorkforceSection } from './engine/emit-workforce-openapi.js';
 import { registerDeclaredRoutes } from './engine/register-declared-routes.js';
 import { clientIpFromContext } from './http/client-ip.js';
 import { authenticate, requestId, securityHeaders } from './http/middleware.js';
@@ -243,7 +244,20 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
     // `paths`). Registered on the engine path only; the platform main line (no engine) serves none.
     // It is a public, non-sensitive structural read (no secrets; OpenAPI docs are conventionally
     // open) — registered BEFORE the declared routes so a declared route can never shadow it.
-    const openApiDoc = buildDeclaredRoutesOpenApi(effectiveDeps.engine.spec);
+    //
+    // The SAME document also describes the platform's `/v1/workforce/*` control section, added by
+    // `withWorkforceSection` as a pure decoration of the declared-routes document. One document, one
+    // URL: an integrator who fetches this gets the control surface too, marked experimental in the
+    // document itself (`x-rayspec-experimental`) as well as by the `X-Experimental` response header
+    // those routes already send. The workforce routes are registered unconditionally above, so the
+    // section is unconditional too — on a deployment with no dispatcher seam every one of them
+    // answers the 501 the section documents.
+    //
+    // SCOPE, stated rather than implied: this registration is inside the ENGINE branch, so an
+    // auth-only boot (no spec at all) still serves no document — the same as before this section
+    // existed. Every deployed workforce has a spec, so every deployment that HAS these routes
+    // running also serves their description.
+    const openApiDoc = withWorkforceSection(buildDeclaredRoutesOpenApi(effectiveDeps.engine.spec));
     app.get('/v1/openapi.json', (c) =>
       c.json(openApiDoc as unknown as Record<string, unknown>, 200),
     );

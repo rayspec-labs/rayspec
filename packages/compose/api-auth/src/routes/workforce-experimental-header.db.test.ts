@@ -1,13 +1,15 @@
 /**
  * `/v1/workforce/*` says it is EXPERIMENTAL on the wire.
  *
- * WHY A HEADER AND NOT AN OPENAPI TAG. There is no OpenAPI document that describes these routes.
- * The CLI's `rayspec openapi` emits the PRODUCT-PROFILE view surface and refuses a backend-profile
- * document outright; the served `GET /v1/openapi.json` is derived from the spec's DECLARED `api[]`
- * routes. `/v1/workforce/*` are platform routes and appear in neither (`git grep workforce` over
- * `app/cli/src/openapi.ts` and `engine/emit-openapi.ts` returns nothing), and no zod-openapi
- * document route is registered. A tag on a document that does not describe these routes would be a
- * marking nobody can fetch. The response header is the one marking an integrator actually receives.
+ * WHY A HEADER **AS WELL AS** AN OPENAPI TAG. This suite was written when no OpenAPI document
+ * described these routes, so the header was the ONLY marking an integrator could receive. The
+ * served `GET /v1/openapi.json` now carries the whole section (`engine/emit-workforce-openapi.ts`,
+ * pinned by `engine/workforce-openapi.db.test.ts`), marked with `x-rayspec-experimental` on the tag
+ * and on every operation. The header is NOT superseded by that and this suite is NOT redundant: a
+ * document reaches a client GENERATOR, which never makes a request, while the header reaches a
+ * CALLER — including the two responses below that carry no body at all to read a marking from, the
+ * fail-closed 501 and the unauthenticated 401. The CLI's `rayspec openapi` still emits the
+ * PRODUCT-PROFILE view surface and still refuses a backend-profile document; that is unchanged.
  *
  * NOT THE POSTURE NOTICE. `OPENAPI_POSTURE_NOTICE` states the DEPLOYMENT posture (local / trusted /
  * not internet-facing) of the whole API. This states the STABILITY of one section. Different claims,

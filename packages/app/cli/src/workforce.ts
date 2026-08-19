@@ -15,9 +15,15 @@
  *   workforce tasks [--status] [--owner]       flat task list
  *   workforce tasks --tree [--root <task-id>] [--json]   render one whole subtree as text
  *   workforce task <id>                        one task
- *   workforce approvals list                   the pending inbox
+ *   workforce approvals list                   the pending inbox, plus the SIGNAL-PARKED tasks
+ *                                               that carry no approval row (see runApprovals)
  *   workforce approvals approve <id> [--reason] [--override]
  *   workforce approvals reject <id> --reason <text> [--override]
+ *   workforce signal <task-id> --kind <manual_unblock|budget_raised|user_reply>
+ *                              [--payload <json>] [--signal-key <key>]
+ *                                               release a task parked on a human
+ *   workforce cancel <task-id> [--reason <text>]  cancel a task and its subtree — the
+ *                                              lever for parks a signal may NOT release
  *   workforce cost [--window 24h] [--by employee|department]   settled/reserved roll-up
  *   workforce events <task-id>                 the task's journal replay (parsed SSE frames)
  *   workforce pause [--drain] --workforce <id>
@@ -109,7 +115,7 @@ export async function runWorkforce(args: readonly string[]): Promise<WorkforceRe
   const rest = args.slice(1);
   if (sub === undefined) {
     throw new WorkforceCliError(
-      'missing workforce subcommand (expected `status`, `submit`, `tasks`, `task`, `approvals`, `cost`, `events`, `pause`, `resume`, or `halt`)',
+      'missing workforce subcommand (expected `status`, `submit`, `tasks`, `task`, `approvals`, `signal`, `cancel`, `cost`, `events`, `pause`, `resume`, or `halt`)',
     );
   }
   switch (sub) {
@@ -123,6 +129,10 @@ export async function runWorkforce(args: readonly string[]): Promise<WorkforceRe
       return runTask(rest);
     case 'approvals':
       return runApprovals(rest);
+    case 'signal':
+      return runSignal(rest);
+    case 'cancel':
+      return runCancel(rest);
     case 'cost':
       return runCost(rest);
     case 'events':
@@ -135,7 +145,7 @@ export async function runWorkforce(args: readonly string[]): Promise<WorkforceRe
       return runHalt(rest);
     default:
       throw new WorkforceCliError(
-        `unknown workforce subcommand ${JSON.stringify(sub)} (expected \`status\`, \`submit\`, \`tasks\`, \`task\`, \`approvals\`, \`cost\`, \`events\`, \`pause\`, \`resume\`, or \`halt\`)`,
+        `unknown workforce subcommand ${JSON.stringify(sub)} (expected \`status\`, \`submit\`, \`tasks\`, \`task\`, \`approvals\`, \`signal\`, \`cancel\`, \`cost\`, \`events\`, \`pause\`, \`resume\`, or \`halt\`)`,
       );
   }
 }
@@ -318,6 +328,94 @@ async function runTask(args: readonly string[]): Promise<WorkforceResult> {
   return outcome('workforce task', res, { task: res.body });
 }
 
+/**
+ * The signal kinds an OPERATOR may post, mirroring `OPERATOR_SIGNAL_KINDS` (@rayspec/tasks) — the
+ * same closed set the route's own body schema enforces. Repeated here as a USAGE check only, in
+ * the idiom `--priority` and `--by` already use: it can NARROW what the route accepts, never
+ * widen it, and it is not a local authorization decision (the CLI makes none). The rest of the
+ * engine's signal kinds are MECHANISM kinds — `child_completed` is written by the fan-in,
+ * `escalated` by the escalation reply — and posting one by hand would assert the very fact the
+ * park it releases is waiting to observe. That is refused at the route; refusing it here too just
+ * turns a 400 round-trip into a local error that names the set.
+ */
+const OPERATOR_SIGNAL_KINDS = ['manual_unblock', 'budget_raised', 'user_reply'] as const;
+
+/**
+ * The status a task parked ON A HUMAN sits in. Paired with a NULL `statusReason` this is the
+ * reasonless park — review rounds spent, an escalated budget — whose exit is a `user_reply`
+ * signal and which writes NO approval row, so it appears nowhere in the approvals inbox. A
+ * `waiting_for_user` row that DOES carry a reason (`approval_pending`) has its own decision path
+ * and is deliberately not advertised here: `user_reply` does not answer it.
+ */
+const SIGNAL_PARK_STATUS = 'waiting_for_user';
+
+/**
+ * Is this row the REASONLESS `waiting_for_user` park — the one `user_reply` answers?
+ *
+ * Both halves fail CLOSED, because the cost of a false positive here is not a missing row but a
+ * WRONG INSTRUCTION: the advisory would hand the operator `--kind user_reply` for a park that kind
+ * does not answer, and a confidently wrong next step is worse than none — which is the whole lesson
+ * of this item.
+ *
+ *   - `statusReason` must be EXPLICITLY `null`. A row that does not carry the field at all is
+ *     ABSENT, which is *unknown*, not *reasonless*; treating the two alike would advertise every
+ *     `waiting_for_user` row, `approval_pending` ones included, the moment the field stopped being
+ *     serialized.
+ *   - `status` is re-checked even though the query already filters on it, so a server that ignored
+ *     the `status=` parameter cannot get unrelated rows advertised.
+ *
+ * The predicate is exactly `WAKES.user_reply`'s own (`@rayspec/tasks` signals.ts): status
+ * `waiting_for_user`, reason `null`. That is what makes the emitted `release:` command correct for
+ * EVERY producer of this park — the two rounds-exhausted paths, the budget escalation, and the
+ * failed review task — and not just for the one a test happens to reproduce.
+ */
+function isSignalParked(row: Record<string, unknown>): boolean {
+  return row.status === SIGNAL_PARK_STATUS && row.statusReason === null;
+}
+
+interface SignalParkedTask {
+  readonly taskId: string;
+  readonly title: unknown;
+  readonly owner: unknown;
+  readonly workforceId: unknown;
+  /** The exact command that releases this task — the half of the fix that makes the verb findable. */
+  readonly release: string;
+}
+
+/**
+ * The signal-parked tasks the approvals inbox structurally cannot show. Reads the EXISTING task
+ * list route (no new surface, no contract change) and filters client-side on `isSignalParked`.
+ *
+ * It walks EVERY page through `listAllTasks`, following the server's own `X-Next-Cursor` contract.
+ * A single-page read was the first version and it was wrong in the worst available way: past one
+ * page the operator got a present, non-empty, PARTIAL advisory with nothing saying so — a list that
+ * looks complete and is not is worse than no list, because it ends the search. `truncated` (only
+ * true past `MAX_TASK_PAGES`) rides out so even the bounded extreme is stated rather than implied.
+ *
+ * A refusal is RETURNED, never swallowed. An advisory that vanishes when its read is refused is
+ * indistinguishable from "nothing is parked" — which is precisely the silence this command exists
+ * to break.
+ */
+async function signalParkedAdvisory(
+  t: WorkforceTransport,
+): Promise<{ parked: SignalParkedTask[]; truncated: boolean } | { error: WorkforceApiResult }> {
+  const { rows, truncated, error } = await listAllTasks(
+    t,
+    `&status=${encodeURIComponent(SIGNAL_PARK_STATUS)}`,
+  );
+  if (error) return { error };
+  const parked = rows
+    .filter((row) => isSignalParked(row as unknown as Record<string, unknown>))
+    .map((row) => ({
+      taskId: String(row.taskId),
+      title: row.title,
+      owner: row.owner,
+      workforceId: row.workforceId,
+      release: `rayspec workforce signal ${String(row.taskId)} --kind user_reply`,
+    }));
+  return { parked, truncated };
+}
+
 async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
   const action = args[0];
   const rest = args.slice(1);
@@ -325,7 +423,25 @@ async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
     const { values } = parse(rest);
     const t = await transportFrom(values);
     const res = await workforceRequest(t, 'GET', '/v1/workforce/approvals?status=pending');
-    return outcome('workforce approvals list', res, { approvals: res.body });
+    if (res.status < 200 || res.status >= 300) {
+      return outcome('workforce approvals list', res, {});
+    }
+    // The inbox alone is a HALF-TRUTH: a review that spends its rounds parks its task on a human
+    // and writes no approval row, so this list is empty while a task waits forever. The advisory
+    // rides alongside — a SIBLING key, so the `approvals` array keeps the exact shape
+    // `approvals approve <id>` consumes; an id from it must never be one that command cannot act on.
+    const advisory = await signalParkedAdvisory(t);
+    return {
+      ok: true,
+      command: 'workforce approvals list',
+      approvals: res.body,
+      ...('parked' in advisory
+        ? // `signalParkedTruncated` is ALWAYS present, like `tasks`' own `truncated`: an absent
+          // key cannot be told apart from `false`, and "is this list complete?" is exactly the
+          // question a partial advisory must not leave the operator guessing at.
+          { signalParked: advisory.parked, signalParkedTruncated: advisory.truncated }
+        : { signalParkedError: errorsFrom(advisory.error) }),
+    };
   }
   if (action === 'approve' || action === 'reject') {
     // `--override` is the BREAK-GLASS ask. It carries no authority of its own: the route ANDs it
@@ -365,6 +481,116 @@ async function runApprovals(args: readonly string[]): Promise<WorkforceResult> {
   throw new WorkforceCliError(
     `unknown approvals action ${JSON.stringify(action)} (expected \`list\`, \`approve\`, or \`reject\`)`,
   );
+}
+
+/**
+ * Deliver ONE operator wake signal to a parked task — the console's release for a task waiting on
+ * a human that carries no approval to decide (review rounds spent, an escalated budget). It is the
+ * same door `POST /v1/workforce/tasks/:id/signal` has always been: the engine still decides whether
+ * the kind ANSWERS the park the task actually sits in, so a structural park (a fan-out join, an
+ * escalation waiting on its child) is refused there exactly as it is on every internal door. This
+ * verb adds no new authority — it types an existing one.
+ *
+ * `--signal-key` is the delivery's idempotency key: the engine dedupes on (task, key), so a
+ * re-send under the same key collapses. Absent, the route mints a fresh key and each call is its
+ * own delivery.
+ */
+async function runSignal(args: readonly string[]): Promise<WorkforceResult> {
+  const { values, positionals } = parse(
+    args,
+    { kind: { type: 'string' }, payload: { type: 'string' }, 'signal-key': { type: 'string' } },
+    true,
+  );
+  const taskId = positionals[0];
+  if (taskId === undefined || positionals.length !== 1) {
+    throw new WorkforceCliError(
+      'expected exactly one task id: `workforce signal <task-id> --kind <kind>`',
+    );
+  }
+  if (typeof values.kind !== 'string' || values.kind.length === 0) {
+    throw new WorkforceCliError(
+      "missing --kind (an operator signal names what it answers: 'manual_unblock', " +
+        "'budget_raised' or 'user_reply'; a task parked on a human with no approval to decide " +
+        'is released by user_reply)',
+    );
+  }
+  if (!(OPERATOR_SIGNAL_KINDS as readonly string[]).includes(values.kind)) {
+    throw new WorkforceCliError(
+      "--kind takes 'manual_unblock', 'budget_raised' or 'user_reply'. The engine's other signal " +
+        'kinds are written by the mechanism that establishes the fact they report (the fan-in, the ' +
+        'escalation reply, the verdict route) and are refused on this door.',
+    );
+  }
+  // Parsed and shape-checked HERE, so a typo is a usage error naming the shape rather than a
+  // round-trip that spends a request to learn the same thing.
+  let payload: Record<string, unknown> | undefined;
+  if (typeof values.payload === 'string') {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(values.payload);
+    } catch (e) {
+      throw new WorkforceCliError(
+        `--payload is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new WorkforceCliError('--payload must be a JSON object (e.g. \'{"note":"…"}\')');
+    }
+    payload = parsed as Record<string, unknown>;
+  }
+  const t = await transportFrom(values);
+  const res = await workforceRequest(
+    t,
+    'POST',
+    `/v1/workforce/tasks/${encodeURIComponent(taskId)}/signal`,
+    {
+      kind: values.kind,
+      ...(payload !== undefined ? { payload } : {}),
+      ...(typeof values['signal-key'] === 'string' ? { signalKey: values['signal-key'] } : {}),
+    },
+  );
+  return outcome('workforce signal', res, { result: res.body });
+}
+
+/**
+ * Cancel a task and its subtree — the lever for the parks a signal deliberately CANNOT release.
+ *
+ * `signal` above answers a park; this answers the ones no operator signal may. A fan-out join and
+ * an escalation both wait on a CHILD TASK's terminal, which an override does not change (invariant
+ * 4.10, `@rayspec/tasks` signals.ts): the only sound lever is to cancel the child, so its terminal
+ * satisfies the park through the park's OWN path rather than erasing the exit. It is likewise the
+ * documented rescue for a `deadline_exceeded` block, which `manual_unblock` refuses because an
+ * unblock there re-parks against the same instant on the very next pass.
+ *
+ * A working turn is NEVER killed mid-flight: the engine delivers a `cancel` signal the target
+ * absorbs at its own turn boundary. That is why the reply has two lists — `cancelled` (rows moved
+ * now) and `signalled` (rows that will absorb it) — and both are relayed exactly as the cascade
+ * reported them, because "it is scheduled to stop" and "it has stopped" are different facts.
+ *
+ * `--reason` is OPTIONAL here, mirroring the route's own schema. `halt` requires one because the
+ * halt ROUTE requires one; requiring it here would be the CLI inventing policy the door does not
+ * have. An explicitly empty `--reason` is still refused — the route's `min(1)` would reject it, so
+ * naming it locally beats spending a round trip to learn the same thing.
+ */
+async function runCancel(args: readonly string[]): Promise<WorkforceResult> {
+  const { values, positionals } = parse(args, { reason: { type: 'string' } }, true);
+  const taskId = positionals[0];
+  if (taskId === undefined || positionals.length !== 1) {
+    throw new WorkforceCliError('expected exactly one task id: `workforce cancel <task-id>`');
+  }
+  if (typeof values.reason === 'string' && values.reason.length === 0) {
+    throw new WorkforceCliError(
+      '--reason was given but empty: drop the flag, or give the cancellation a reason worth journalling',
+    );
+  }
+  const t = await transportFrom(values);
+  const res = await workforceRequest(
+    t,
+    'POST',
+    `/v1/workforce/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { ...(typeof values.reason === 'string' ? { reason: values.reason } : {}) },
+  );
+  return outcome('workforce cancel', res, { result: res.body });
 }
 
 async function runCost(args: readonly string[]): Promise<WorkforceResult> {

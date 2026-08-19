@@ -106,12 +106,12 @@ untrimmably** into the owning employee's turn input.
    `packages/compose/api-auth/src/http/middleware.ts:150` reads `principal?.orgId` and
    `packages/compose/api-auth/src/http/middleware.ts:174` sets it as the request tenant.
 2. **A supplied `Idempotency-Key` is refused, not ignored**
-   (`packages/compose/api-auth/src/routes/workforce.ts:1193`). This route mints a fresh billed root
+   (`packages/compose/api-auth/src/routes/workforce.ts:1216`). This route mints a fresh billed root
    per call; silently dropping the header would be a lost-write trap.
-3. **Rate limit before the body read** (`packages/compose/api-auth/src/routes/workforce.ts:1205`),
+3. **Rate limit before the body read** (`packages/compose/api-auth/src/routes/workforce.ts:1228`),
    keyed `(tenant, workforce)` — the cost-DoS bound on loop-minting billed roots.
 4. **Strict body, byte-capped goal**
-   (`packages/compose/api-auth/src/routes/workforce.ts:205`, `refine(withinGoalBytes, …)`). The cap
+   (`packages/compose/api-auth/src/routes/workforce.ts:219`, `refine(withinGoalBytes, …)`). The cap
    is in **bytes**, deliberately: a character cap would admit a multibyte goal that then bricks
    every dispatch against a byte-denominated turn-input budget.
 5. **Tenant and workforce reconciliation before the strategy runs**
@@ -125,7 +125,7 @@ untrimmably** into the owning employee's turn input.
    `packages/app/server/src/workforce-goal-intake.ts:116`, **before** the transaction at
    `packages/app/server/src/workforce-goal-intake.ts:125`, so a refused plan writes zero rows.
 7. `requestedBy` is stamped from the verified principal
-   (`packages/compose/api-auth/src/routes/workforce.ts:1223`), never read from the body.
+   (`packages/compose/api-auth/src/routes/workforce.ts:1246`), never read from the body.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -338,7 +338,7 @@ remainder (`packages/kernel/tasks/src/decision-authority.ts:64`), so the
 2. the principal must **hold** `workforce:override`
    (`packages/kernel/auth-core/src/authz.ts:46`), checked through the same permission gate the
    route's `store:write` middleware used (`packages/compose/api-auth/src/routes/workforce.ts:126`),
-   and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:1078`) so
+   and run **before** the engine call (`packages/compose/api-auth/src/routes/workforce.ts:1101`) so
    an unauthorized ask is a named 403 rather than a silent downgrade.
 
 The permission is **owner/admin only** — granted in the owner table
@@ -381,7 +381,7 @@ cross-tenant arm asserts **404** (not 403), the missing-permission arm asserts a
 
 **Only three of the nine signal kinds may be posted from outside**
 (`packages/kernel/tasks/src/signals.ts:65`, enforced on the route at
-`packages/compose/api-auth/src/routes/workforce.ts:168`). The other six are **mechanism** kinds,
+`packages/compose/api-auth/src/routes/workforce.ts:182`). The other six are **mechanism** kinds,
 each written by the code that establishes the fact it reports — accepting them from a request would
 let a caller assert that fact by hand.
 
@@ -486,7 +486,7 @@ against the deployed declaration, and re-checked by the kernel:
 | message recipient | `packages/kernel/workforce-tools/src/toolset.ts:691` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
 | approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:519`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
 | tenant | server-derived (`packages/compose/api-auth/src/http/middleware.ts:150`) | `packages/app/server/src/workforce-goal-intake.db.test.ts`, `reconciles tenant and workforce BEFORE the strategy runs` |
-| `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:1223`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:259`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
+| `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:1246`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:259`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
 
 **No privilege inheritance.** The toolset is keyed on the **task owner** alone and indexed by that
 employee's declared role; nothing in the call chain carries a parent's role, agent, or tool list.
@@ -621,8 +621,8 @@ and the final application stays receipt-idempotent (§7.3).
 `actorFrom` (`packages/compose/api-auth/src/routes/workforce.ts:95`) reads the authenticated
 principal and returns `user:<id>` / `api-key:<id>`, with a closed sentinel rather than a guessable
 identity; `requireAuth()` runs before every caller. It is the sole source of `actor` / `decidedBy`
-on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:1084` on the
-approval-decide route, `packages/compose/api-auth/src/routes/workforce.ts:1158` on the
+on every mutating route (`packages/compose/api-auth/src/routes/workforce.ts:1107` on the
+approval-decide route, `packages/compose/api-auth/src/routes/workforce.ts:1181` on the
 review-verdict route, and the signal/cancel/pause/resume/halt routes). The route is named beside
 each line because `actor: actorFrom(c),` is not a distinctive string — it appears eight times in
 this file — so a line number alone would not tell a re-pinner which one was meant. The client cannot even *attempt* the assertion: every mutating body is a `z.strictObject`,
@@ -670,6 +670,37 @@ whether there is anything.
 **Wiring is not arming.** A defined seam erases nothing by existing: the destructive act stays gated
 on `RAYSPEC_ERASURE_ENABLED`, resolved at the composition root and never a spec flag, and an unset
 gate makes every call a counts-only DRY-RUN preview.
+
+**And an operator can reach it.** A capability with no path to use it is the same defect one layer
+up: until the `rayspec tenant erase` verb, the seam was reachable only by an embedder holding the
+boot handle, and exercising it meant writing a private wrapper. The verb is a CLI command and
+deliberately **not** an HTTP route — an erasure route would be a tenant self-service surface, which
+this page's own posture defers to external-exposure hardening, and it would cap the authorization at
+"a credential the network can carry". The command's floor is possession of `DATABASE_URL` and the
+platform boot secrets. Above that floor it fails closed twice, independently: `--confirm` must
+repeat the target org id exactly (a mismatch is refused before anything boots, and without
+`--confirm` the run passes `dryRun: true` and cannot delete under any setting), **and** the same
+`RAYSPEC_ERASURE_ENABLED` gate must be exactly `true`. The reported `mode` is the seam's own, never
+inferred from the flags, so a confirmed run the gate refused is a non-zero exit naming the gate
+rather than a success a script would believe. Every attempt — including the refused ones, which
+`eraseTenant`'s own record never covers — is journalled to `auth_audit` as
+`tenant_erase_requested` before anything is deleted, and `auth_audit` is a global table erasure does
+not touch, so the record survives the erasure it describes.
+
+**PROVEN** — the gate through the new surface,
+`packages/app/server/src/tenant-erase.db.test.ts`, `2. all FIVE non-exact gate values refuse a
+CONFIRMED erasure, and nothing is removed`; the dry-run flag's own arm with the gate ON,
+`packages/app/server/src/tenant-erase.db.test.ts`, `3. gate ARMED but a PREVIEW asked for ⇒ counts
+only, and the census does not move`; the refused-attempt trail,
+`packages/app/server/src/tenant-erase.db.test.ts`, `4. the journal recorded every REFUSED attempt,
+with the resolved gate`; **the ORDERING** — that the command's record precedes the command's own
+seam call, proven by taking the audit table away and watching a gate-armed, confirm-correct erasure
+abort with the census unmoved (defence in depth over `eraseTenant`'s own audit-before-delete guard,
+not a replacement for it) — `packages/app/server/src/tenant-erase.db.test.ts`, `5. the journal is
+written BEFORE the seam: an unwritable trail aborts with the data intact`; and the confirmation key's
+exactness against prefixes, suffixes, substrings and case,
+`packages/app/cli/src/tenant/erase.test.ts`, `a --confirm that is $label never reaches the seam as
+an erasure`.
 
 **PROVEN** — `packages/app/server/src/auth-only-erasure-boot.db.test.ts`, `2. the tenant-erasure
 control seam is WIRED on a declared-agents auth-only boot`; the same suite's no-document case,
@@ -743,7 +774,7 @@ employee id cannot be one.
    door, not a fallback.** The "the named superior decides it" path the escalation fate advertises
    is unreachable end to end.
 2. `decideApproval` has exactly one production caller, the HTTP route
-   (`packages/compose/api-auth/src/routes/workforce.ts:1080`). There is no in-engine approval
+   (`packages/compose/api-auth/src/routes/workforce.ts:1103`). There is no in-engine approval
    decision path. So consequence 1 has no exception.
 3. **An api-key-only deployment cannot resolve an escalated approval at all.**
    `workforce:override` is not api-key-grantable by design, so a machine credential can decide every
@@ -964,6 +995,7 @@ a promise. The material changes:
 | **F-8** `requestedBy` skips the neutralizer | **closed** — §6.2 |
 | `employees[].capabilities` | renamed to `labels`, `SafeIdentifier`-constrained, and the unheld-label rule is now a lint **error** — §5 |
 | erasure is not wired for a store-less workforce | **closed** — §6.5 |
+| the erasure seam has no operator entry point (no route, no CLI verb) | **closed** — the `rayspec tenant erase` verb, two independent fail-closed keys and a journalled attempt, §6.5 |
 
 The inventory also carries an in-place correction of its own (a citation that did not support the
 claim built on it). That correction stands; it is the reason this page's citations are guarded by a
@@ -1061,15 +1093,15 @@ packages/kernel/tasks/src/index.ts:46 | LedgerCostPolicy,
 packages/compose/api-auth/src/routes/workforce.ts:95 | function actorFrom(c: Context<AppEnv>): string {
 packages/compose/api-auth/src/routes/workforce.ts:120 | async function breakGlassAuthorized(
 packages/compose/api-auth/src/routes/workforce.ts:126 | await enforcePermission(deps, c, 'workforce:override');
-packages/compose/api-auth/src/routes/workforce.ts:168 | kind: operatorSignalKindSchema,
-packages/compose/api-auth/src/routes/workforce.ts:205 | refine(withinGoalBytes
-packages/compose/api-auth/src/routes/workforce.ts:1078 | const override = await breakGlassAuthorized(deps, c, body.override);
-packages/compose/api-auth/src/routes/workforce.ts:1080 | const approval = await decideApproval(tdb, {
-packages/compose/api-auth/src/routes/workforce.ts:1084 | decidedBy: actorFrom(c),
-packages/compose/api-auth/src/routes/workforce.ts:1158 | actor: actorFrom(c),
-packages/compose/api-auth/src/routes/workforce.ts:1193 | if (c.req.header('Idempotency-Key') !== undefined) {
-packages/compose/api-auth/src/routes/workforce.ts:1205 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
-packages/compose/api-auth/src/routes/workforce.ts:1223 | requestedBy: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:182 | kind: operatorSignalKindSchema,
+packages/compose/api-auth/src/routes/workforce.ts:219 | refine(withinGoalBytes
+packages/compose/api-auth/src/routes/workforce.ts:1101 | const override = await breakGlassAuthorized(deps, c, body.override);
+packages/compose/api-auth/src/routes/workforce.ts:1103 | const approval = await decideApproval(tdb, {
+packages/compose/api-auth/src/routes/workforce.ts:1107 | decidedBy: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:1181 | actor: actorFrom(c),
+packages/compose/api-auth/src/routes/workforce.ts:1216 | if (c.req.header('Idempotency-Key') !== undefined) {
+packages/compose/api-auth/src/routes/workforce.ts:1228 | const { allowed, retryAfterMs } = await deps.rateLimiter.checkAsync(
+packages/compose/api-auth/src/routes/workforce.ts:1246 | requestedBy: actorFrom(c),
 packages/compose/api-auth/src/http/middleware.ts:150 | const serverOrg = principal?.orgId;
 packages/compose/api-auth/src/http/middleware.ts:174 | if (serverOrg) c.set('tenantId', serverOrg);
 packages/app/server/src/workforce-goal-intake.ts:59 | function planRefusal(plan: ExecutionPlan, config: WorkforceConfig): string | null {
@@ -1216,6 +1248,11 @@ packages/app/server/src/banner.test.ts | the exported constants ARE the shipped 
 packages/app/server/src/banner.test.ts | the STATIC-PROFILE boot banner carries the SAME warning, byte-identically
 packages/app/server/src/workforce-erasure-boot.db.test.ts | 2. the tenant-erasure control seam is WIRED on a store-less workforce boot
 packages/app/server/src/erase-tenant.db.test.ts | 14. a FULL erase (not scrub) still removes the WHOLE task graph, budget ledger included
+packages/app/server/src/tenant-erase.db.test.ts | 2. all FIVE non-exact gate values refuse a CONFIRMED erasure, and nothing is removed
+packages/app/server/src/tenant-erase.db.test.ts | 3. gate ARMED but a PREVIEW asked for ⇒ counts only, and the census does not move
+packages/app/server/src/tenant-erase.db.test.ts | 4. the journal recorded every REFUSED attempt, with the resolved gate
+packages/app/server/src/tenant-erase.db.test.ts | 5. the journal is written BEFORE the seam: an unwritable trail aborts with the data intact
+packages/app/cli/src/tenant/erase.test.ts | a --confirm that is $label never reaches the seam as an erasure
 packages/kernel/workforce-tools/src/threat-model-drift.test.ts | every citation resolves AND the cited line CONTAINS the recorded text
 packages/app/server/src/auth-only-erasure-boot.db.test.ts | 2. the tenant-erasure control seam is WIRED on a declared-agents auth-only boot
 packages/app/server/src/auth-only-erasure-boot.db.test.ts | 7. a boot with NO document at all wires the seam too, and still previews
