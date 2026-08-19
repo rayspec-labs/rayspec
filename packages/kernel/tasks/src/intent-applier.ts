@@ -332,8 +332,8 @@ export interface PlanTurnInput {
    *
    * `timed_out` and `escalated` are deliberately EXCLUDED. They are the timeout chain's own
    * machinery, not a human's answer to the question: the sweep resolves the original to `escalated`
-   * and re-issues the SAME question to the escalation target (approvals.ts:299-345). Counting them
-   * would make the engine refuse the request its own sweep just re-opened.
+   * and re-issues the SAME question to the escalation target (the escalate branch of
+   * `sweepApprovalTimeouts`). Counting them would refuse the request its own sweep just re-opened.
    */
   readonly resolvedApprovalQuestions: readonly string[];
   /** True when the immediately preceding turn already ended in `tool_error` re-queue. */
