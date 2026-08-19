@@ -446,23 +446,6 @@ export async function applyTurnOutcome(
     const delegationRows = await tx
       .select(schema.workforceDelegations, { id: schema.workforceDelegations.id })
       .where(eq(schema.workforceDelegations.parentTaskId, input.taskId));
-    // THE APPROVALS A HUMAN ALREADY RESOLVED on this task — the re-request cap's input, read the
-    // same way its siblings above are: on the table, under this transaction, never on a promise.
-    // ONLY the decided statuses: `timed_out`/`escalated` are the timeout chain's own machinery and
-    // carry no human answer, and counting them would refuse the very request the sweep re-issued
-    // (approvals.ts:299-345). A scrubbed row (`question IS NULL`, migration 0013) contributes
-    // nothing — erasure removes the content, and a cap can only compare content it still has.
-    const resolvedApprovalRows = (await tx
-      .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
-      .where(
-        and(
-          eq(schema.workforceApprovals.taskId, input.taskId),
-          inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
-        ),
-      )) as { question: string | null }[];
-    const resolvedApprovalQuestions = resolvedApprovalRows
-      .map((row) => row.question)
-      .filter((q): q is string => q !== null);
 
     // The trusted channel is validated BEFORE it can steer a plan — a malformed value is a caller
     // bug (the composition builds it, never the model) and refuses loudly rather than degrading to
@@ -501,6 +484,37 @@ export async function applyTurnOutcome(
           Array.isArray(target.ancestryPath) &&
           (target.ancestryPath as string[]).includes(input.taskId),
       };
+    }
+
+    // THE APPROVALS A HUMAN ALREADY RESOLVED on this task — the re-request cap's input, counted on
+    // the table under this transaction, never on a promise, exactly like the review and delegation
+    // pre-reads above.
+    //
+    // READ ONLY FOR THE INTENT THAT CONSULTS IT, the same way `cancelTarget` is, and for a sharper
+    // reason than tidiness: `workforce_approvals` carries no (tenant, task) index — its indexes
+    // serve the status inbox and the timeout sweep — so this is the one pre-read here that cannot
+    // be answered from a narrow index scan. Gating it keeps that cost off every turn that is not a
+    // `request_approval`, which is nearly all of them. Adding an index would be a migration, and
+    // the planner treats an empty list identically to no list, so the gate is behaviour-neutral.
+    //
+    // ONLY the decided statuses. `timed_out`/`escalated` are the timeout chain's own machinery and
+    // carry no human answer; counting them would make the engine refuse the very request its own
+    // sweep re-issued (approvals.ts, the escalate branch). A scrubbed row (`question IS NULL`,
+    // migration 0013) contributes nothing — erasure removes the content, and a cap can only compare
+    // content it still has.
+    let resolvedApprovalQuestions: string[] = [];
+    if (parsedIntent.success && parsedIntent.data.kind === 'request_approval') {
+      const rows = (await tx
+        .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
+        .where(
+          and(
+            eq(schema.workforceApprovals.taskId, input.taskId),
+            inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
+          ),
+        )) as { question: string | null }[];
+      resolvedApprovalQuestions = rows
+        .map((row) => row.question)
+        .filter((q): q is string => q !== null);
     }
 
     const planInput = {
