@@ -191,16 +191,45 @@ const PROSE_FILE_RE =
   /`([A-Za-z0-9_./-]*[A-Za-z0-9_-]\.(?:ts|tsx|mts|cts|mjs|cjs|js|sql|sh|json|yml|yaml|md))(?::(\d+(?:-\d+)?))?`/g;
 
 /**
+ * A line citation in ANY shape — NOT only a backticked one.
+ *
+ * The page promises the guard "refuses a line number anywhere on this page", and for a while that
+ * sentence was false: the scan above requires backticks, so a citation typed as plain prose, or one
+ * hidden in a markdown link's `#L12-L20` anchor, sailed past a guard whose whole subject is claims
+ * nothing enforces. Three shapes were measured passing GREEN before these two patterns existed.
+ *
+ * So the refusal reads the raw page, backticks or not, and covers both spellings a line gets pinned
+ * in markdown: `path.ts:12` and a blob anchor. Widening the arm was the right direction rather than
+ * narrowing the sentence — on this page especially, the promise is the thing worth keeping true.
+ */
+const PROSE_LINE_CITATION_RE =
+  /[A-Za-z0-9_./-]*[A-Za-z0-9_-]\.(?:ts|tsx|mts|cts|mjs|cjs|js|sql|sh|json|yml|yaml|md):\d+(?:-\d+)?/g;
+const PROSE_LINE_ANCHOR_RE = /#L\d+(?:-L?\d+)?/g;
+
+/**
  * Every backticked identifier written in MIXED CASE — at least one upper and one lower, no
  * separators. That shape is what makes the set MACHINE-DECIDABLE, which is the only reason the arm
  * below can demand a pin for the WHOLE set instead of for a hand-picked subset of it.
  *
- * THE BOUND, NAMED. Four families of backticked token fall outside deliberately, because none of
- * them is a symbol a reader would go looking for in a file: `snake_case` columns and status
- * literals (`awaiting_children`), `UPPER_SNAKE` constants and env vars, all-caps words that are not
- * identifiers at all (`SIGKILL`, `NULL`, a SQLSTATE), and anything containing a space or bracket.
- * A cited symbol that somehow used one of those spellings would be checked by nothing here — that
- * is a real gap, it is bounded, and it is written down rather than left to be discovered.
+ * THE BOUND, MEASURED — and it is wider than a first reading suggests.
+ *
+ * Of 190 backticked tokens in the prose, 38 are file citations (covered by their own arms) and 23
+ * are mixed-case bare identifiers, which this arm requires a ledger row for. The remaining 129 fall
+ * outside it, in SIX measured families: whitespace (33), punctuation or brackets (17), DOTTED names
+ * (11), an `_` or `-` separator (37), no lowercase (4), no uppercase (27).
+ *
+ * An earlier version of this comment said "four families", and claimed none of them was a symbol a
+ * reader would go looking for in a file. BOTH HALVES WERE WRONG, and measurably so:
+ * `workforce.approval.requested`, `manual_unblock`, `run_events_tenant_run_seq_idx`,
+ * `workforce_tasks.claim_expires_at` and 36 others are greppable identifiers a reader absolutely
+ * would chase — 40 such tokens sit on this page unpinned. Five excluded tokens ARE pinned, but only
+ * because some ledger row happens to use one as its text; nothing requires it.
+ *
+ * So the honest statement is: this arm binds MIXED-CASE BARE IDENTIFIERS, and the separator-bearing
+ * names — event names, table columns, status literals, env vars — are covered only where someone
+ * chose to pin them. Extending the arm to those shapes is a real improvement available to whoever
+ * wants it; it is left undone for scope, NOT because the gap is harmless. A stated limit that is
+ * wrong is worse than none, because it tells the next reader to stop looking.
  */
 const PROSE_IDENT_RE = /`([A-Za-z][A-Za-z0-9]{2,})`/g;
 const isMixedCase = (token: string): boolean => /[a-z]/.test(token) && /[A-Z]/.test(token);
@@ -250,6 +279,15 @@ function textOf(path: string): string | null {
  * Anything that is not a bare identifier — a test title, a docblock heading, a fragment of code with
  * spaces or punctuation — is matched as a substring, which is correct for it: the page quotes those
  * as prose and the source wraps them differently.
+ *
+ * A SECOND BOUND, MEASURED. This reads RAW SOURCE, so a pin stays green if the old name survives
+ * anywhere in the file — including in a comment or a string literal. Rename only a declaration and
+ * leave its docblock talking about the old name, and ledger → code does not notice. Audited across
+ * all 28 bare-identifier rows: 27 carry their token OUTSIDE comments and strings, so a real rename
+ * reds them; the lone exception is `schema.ts | claim_expires_at`, where a string literal IS the
+ * correct home (drizzle names the column that way). Stripping comments before matching would trade
+ * this LOUD-but-narrow miss for a SILENT one — a symbol legitimately named only in prose would start
+ * reading as absent — so the behaviour is kept and the bound is stated instead.
  */
 const BARE_IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 function carries(text: string, token: string): boolean {
@@ -550,8 +588,15 @@ describe(`${PAGE_PATH} — the citation ledger`, () => {
    * would not print line numbers and nothing stopped one being typed. The single exception is a
    * citation into a released migration file, which cannot rot because the file is never edited —
    * and it is still checked BY VALUE above, so the exception is a pinned row rather than a hole.
+   *
+   * ANY SHAPE, not just the backticked one. A bare-prose `path.ts:12` and a markdown `#L12-L20`
+   * blob anchor are line pins too, and both passed this arm while it read only backticked tokens.
+   *
+   * The permitted set is DERIVED from the ledger rather than hard-coded, which gives the exception a
+   * fail-closed property nobody designed on purpose: empty the ledger and the migration citation
+   * stops being permitted too, so the page's one line number is re-refused rather than grandfathered.
    */
-  it('this page prints no line number, except the one the ledger value-checks', () => {
+  it('this page prints no line number in any shape, except the one the ledger value-checks', () => {
     const permitted = new Set(
       ledgerRows
         .filter((row) => row.line !== undefined)
@@ -560,9 +605,11 @@ describe(`${PAGE_PATH} — the citation ledger`, () => {
           `${basename(row.path)}:${String(row.line)}`,
         ]),
     );
-    const offenders = proseCitations
-      .filter((c) => c.line !== undefined)
-      .map((c) => `${c.file}:${c.line as string}`)
+    const found = [
+      ...[...prose.matchAll(PROSE_LINE_CITATION_RE)].map((m) => m[0]),
+      ...[...prose.matchAll(PROSE_LINE_ANCHOR_RE)].map((m) => m[0]),
+    ];
+    const offenders = [...new Set(found)]
       .filter((citation) => !permitted.has(citation))
       .map(
         (citation) =>
