@@ -13,6 +13,12 @@ deployment posture in the README's [Security posture](../README.md#security-post
 section: one **trusted, self-hosted, single node**, pre-external-hardening. Read
 that first.
 
+It also describes the **product profile only**. The backend profile's
+experimental `workforce:` section is not part of this closed surface and carries
+no v1 stability at all — it is refused at parse unless
+`RAYSPEC_EXPERIMENTAL_WORKFORCE` is set, and what its marking does and does not
+promise is in [workforce forward compatibility](./workforce-compatibility.md).
+
 ## One deployment, one tenant
 
 A v1 deployment serves **exactly one tenant** (the deployment org). Every workflow

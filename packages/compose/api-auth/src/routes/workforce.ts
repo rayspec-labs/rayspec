@@ -359,7 +359,43 @@ function decodeCursor(raw: string): { id: string } {
   }
 }
 
+/**
+ * THE EXPERIMENTAL MARKING THIS SURFACE PUTS ON THE WIRE.
+ *
+ * `RAYSPEC_EXPERIMENTAL_WORKFORCE` gates AUTHORING and BOOT. An integrator holding nothing but a
+ * running deployment's base URL never meets that gate — they meet these routes, and until now the
+ * routes said nothing about their own stability.
+ *
+ * A header rather than an OpenAPI tag, because there is no OpenAPI document describing these
+ * routes: `rayspec openapi` emits the PRODUCT-PROFILE view surface (and refuses a backend-profile
+ * document), and the served `GET /v1/openapi.json` is derived from the spec's DECLARED `api[]`.
+ * `/v1/workforce/*` are platform routes, present in neither, and no zod-openapi document route is
+ * registered. A tag on a document that does not describe these routes would be a marking nobody
+ * can fetch.
+ *
+ * DISTINCT FROM `OPENAPI_POSTURE_NOTICE`, which states the DEPLOYMENT posture (local / trusted /
+ * not internet-facing) of the whole API. This states the STABILITY of one section. Two different
+ * claims; neither substitutes for the other.
+ *
+ * Listed in `createAuthApp`'s CORS `exposeHeaders` — it is not a CORS-safelisted response header,
+ * so without that a browser `fetch` client could not read it, and a marking that ships but cannot
+ * be seen is not a marking.
+ */
+export const WORKFORCE_EXPERIMENTAL_HEADER = 'X-Experimental';
+export const WORKFORCE_EXPERIMENTAL_HEADER_VALUE = 'workforce';
+
 export function registerWorkforceRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
+  // The marking rides EVERY response from this prefix — including the fail-closed 501 and an
+  // unauthenticated 401, which are exactly the responses a marking usually misses and exactly the
+  // callers who have no body to read it from. Applied POST-`next()` (the `securityHeaders` shape),
+  // registered here rather than in `createAuthApp` so a route added to THIS function cannot be
+  // added without it; the structural assertion in `workforce-experimental-header.db.test.ts` keeps
+  // every path in this module under the globbed prefix.
+  app.use('/v1/workforce/*', async (c, next) => {
+    await next();
+    c.header(WORKFORCE_EXPERIMENTAL_HEADER, WORKFORCE_EXPERIMENTAL_HEADER_VALUE);
+  });
+
   // ── reads ─────────────────────────────────────────────────────────────────────────────────────
 
   // GET /v1/workforce/:workforceId/status — control state, task counts, queue depth, headroom.

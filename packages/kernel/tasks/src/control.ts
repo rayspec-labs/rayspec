@@ -33,10 +33,37 @@ export interface CancelCascadeOutcome {
 /** A cascade re-reads and retries a bounded number of times rather than 500ing on a lost race. */
 const CASCADE_RETRIES = 3;
 
+/**
+ * A cascade's outcome PLUS the one fact its caller cannot re-derive afterwards: whether the target
+ * was ALREADY TERMINAL at the instant this call held its row lock.
+ *
+ * Stated explicitly rather than inferred from an empty outcome. Empty currently does mean terminal
+ * — a live target always pushes ITSELF (the signal below, or the cancel below that) — but nothing
+ * enforces that, and both directions of drift are silent skips: a future path that returns
+ * non-empty on a terminal target stops the halt re-routing, and one that returns empty on a LIVE
+ * target re-routes into `cancelSubtreeUnderTerminalRoot`, whose non-terminal guard then returns
+ * empty as well. A flag set beside the branch it describes cannot drift away from it.
+ *
+ * INTERNAL. The public `cancelTaskCascade` projects it away, so the exported surface is unchanged
+ * and no caller of the public cancel verb can start branching on a halt-internal fact.
+ */
+interface CascadeAttempt extends CancelCascadeOutcome {
+  readonly targetWasTerminal: boolean;
+}
+
+/** The public cancel verb. See `attemptCancelTaskCascade` for the body and its contract. */
 export async function cancelTaskCascade(
   tdb: TenantDb,
   input: { readonly taskId: string; readonly actor: string; readonly reason?: string },
 ): Promise<CancelCascadeOutcome> {
+  const { cancelled, signalled } = await attemptCancelTaskCascade(tdb, input);
+  return { cancelled, signalled };
+}
+
+async function attemptCancelTaskCascade(
+  tdb: TenantDb,
+  input: { readonly taskId: string; readonly actor: string; readonly reason?: string },
+): Promise<CascadeAttempt> {
   // A cancel races the reserve pass by construction — the pass rewrites `planned`/`queued` rows
   // every few seconds — so a lost compare-and-swap re-reads and retries (the `transitionWithRetry`
   // pattern approvals.ts establishes), on a FRESH transaction because the losing one is spent.
@@ -59,11 +86,16 @@ export async function cancelTaskCascade(
         if (!isTaskStatus(task.status)) {
           throw new TaskRowCorruptError(input.taskId, `status '${task.status}'`);
         }
-        if (isTerminalStatus(task.status)) return { cancelled: [], signalled: [] };
+        // THE ONE PLACE `targetWasTerminal` IS TRUE, and it is decided on the LOCKED row — the
+        // caller's own pre-lock read of this task may be arbitrarily stale (see `haltWorkforce`).
+        if (isTerminalStatus(task.status)) {
+          return { cancelled: [], signalled: [], targetWasTerminal: true };
+        }
 
-        const outcome: { cancelled: string[]; signalled: string[] } = {
+        const outcome: { cancelled: string[]; signalled: string[]; targetWasTerminal: boolean } = {
           cancelled: [],
           signalled: [],
+          targetWasTerminal: false,
         };
         if (task.status === 'working') {
           // Never kill a turn mid-flight: the target absorbs the cancel at its own boundary (and
@@ -303,6 +335,62 @@ async function cancelSubtreeUnderTerminalRoot(
 }
 
 /**
+ * Cancel a root the halt's scan read as LIVE — and handle the case where it is not live any more.
+ *
+ * The scan's read is UNLOCKED (`haltWorkforce` below reads roots with a plain select), so the
+ * branch it picks can be stale by the time the cascade holds the row. A root that reaches a
+ * terminal status in that window hits `attemptCancelTaskCascade`'s terminal early return, which is
+ * BEFORE `cancelDescendants` — so the halt would move on having done nothing for that subtree
+ * while believing it had handled it. That is the same subtree loss `cancelSubtreeUnderTerminalRoot`
+ * exists to prevent, arrived at through a race instead of through a stale scan; the halt reaches
+ * descendants only through their root, so it is the whole subtree at every depth.
+ *
+ * The window is reachable, not theoretical: `sweepApprovalTimeouts` (approvals.ts) is NOT
+ * pause-gated and drives a task parked on an overdue approval to `failed`, and the drain above
+ * waits only on `working` rows — so a root parked `waiting_for_user(approval_pending)` can go
+ * terminal at any point during a halt. `#failOnDecidedDependency` (task-scheduler.ts) is a second
+ * such producer.
+ *
+ * WHY THIS CLOSES THE WINDOW RATHER THAN NARROWING IT. `attemptCancelTaskCascade` decides on the
+ * row it holds under `lockRootFirst`'s `FOR UPDATE`, and every writer of a task's status is
+ * `applyTransition`, whose compare-and-swap takes that same exclusive row lock and holds it to
+ * commit. Two transactions writing one row have a total order, so at the instant the cascade reads
+ * the root there are exactly two cases and no third:
+ *
+ *   1. NON-TERMINAL — it cancels or signals the root and cascades to the descendants inside that
+ *      same transaction, under that same lock. Nothing is left to re-check.
+ *   2. TERMINAL — it reports `targetWasTerminal` having written nothing, and the subtree is
+ *      cancelled by the re-route below, which re-takes the root lock and re-reads. The root is
+ *      STILL terminal there: terminal is absorbing (every terminal row of `ALLOWED_TRANSITIONS` is
+ *      all-false, and the exhaustiveness gate fails the build if that changes), so no writer
+ *      between the two transactions can move it back out. The re-route therefore lands on exactly
+ *      the path #501 established for a root that was terminal all along.
+ *
+ * It is a SECOND transaction rather than a re-entry into the first because case 2's row is
+ * absorbing — the fact the re-route depends on cannot expire while it waits.
+ *
+ * The residual, stated rather than implied: this is a claim about the roots the scan READ. A root
+ * created after that read is not visited by this halt, and closing that needs a pause gate on root
+ * creation, which is not this function's to take. And the descendant set the re-route cancels is
+ * final only because nothing can go `working` after the drain — `#claimTurn` refuses the
+ * `queued -> working` claim while the runtime row says `paused`, and `applyTurnOutcome` (the only
+ * path that inserts children) refuses a task that is not `working`. Removing that refusal re-opens
+ * this alongside the drain.
+ */
+async function cancelLiveRoot(
+  tdb: TenantDb,
+  input: { readonly root: TaskRecord; readonly actor: string; readonly reason: string },
+): Promise<CancelCascadeOutcome> {
+  const attempt = await attemptCancelTaskCascade(tdb, {
+    taskId: input.root.taskId,
+    actor: input.actor,
+    reason: input.reason,
+  });
+  if (!attempt.targetWasTerminal) return attempt;
+  return cancelSubtreeUnderTerminalRoot(tdb, { root: input.root, actor: input.actor });
+}
+
+/**
  * Pause with drain, then cancel every non-terminal task ROOT-FIRST (cascades cannot race their
  * parents). Drained first, never killed mid-turn: with the drain complete nothing is `working`, so
  * the cascade transitions parked rows only. The halt event carries the affected count.
@@ -317,6 +405,12 @@ async function cancelSubtreeUnderTerminalRoot(
  * which takes the same locks in the same order and leaves the root row itself untouched: the scan
  * reads roots only, so skipping one skips its live descendants too, and "every non-terminal task"
  * is a claim about the WORKFORCE, not about its roots.
+ *
+ * The read below is UNLOCKED, so the branch it picks is a HYPOTHESIS, not a fact: a root that goes
+ * terminal between this read and the cascade's lock is neither already-terminal nor still-live.
+ * `cancelLiveRoot` is where that is resolved — on the LOCKED row, by re-routing rather than by
+ * trusting the read. Deciding here from a re-read would only move the same window; deciding there
+ * cannot, because the decision and the lock are the same instant.
  */
 export async function haltWorkforce(
   tdb: TenantDb,
@@ -346,11 +440,7 @@ export async function haltWorkforce(
     if (!isTaskStatus(root.status)) continue;
     const cascade = isTerminalStatus(root.status)
       ? await cancelSubtreeUnderTerminalRoot(tdb, { root, actor: input.actor })
-      : await cancelTaskCascade(tdb, {
-          taskId: root.taskId,
-          actor: input.actor,
-          reason: input.reason,
-        });
+      : await cancelLiveRoot(tdb, { root, actor: input.actor, reason: input.reason });
     outcome.cancelled.push(...cascade.cancelled);
     outcome.signalled.push(...cascade.signalled);
   }

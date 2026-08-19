@@ -39,7 +39,7 @@ import { registerReprocessRoutes } from './routes/reprocess.js';
 import { registerRunsRoutes } from './routes/runs.js';
 import { registerSubscribeRoutes } from './routes/subscribe.js';
 import { registerTriggerRoutes } from './routes/triggers.js';
-import { registerWorkforceRoutes } from './routes/workforce.js';
+import { registerWorkforceRoutes, WORKFORCE_EXPERIMENTAL_HEADER } from './routes/workforce.js';
 
 /** A ContentfulStatusCode-compatible cast for Hono's c.json status arg. */
 type HttpStatus = Parameters<Context['json']>[1];
@@ -179,12 +179,15 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
         // header (which are only
         // Cache-Control/Content-Language/Content-Length/Content-Type/Expires/Last-Modified/Pragma), so
         // each must be listed here or the browser hides it from `fetch`-based clients.
+        // `X-Experimental` joins them for the same reason: `/v1/workforce/*` marks every response
+        // with it, and a browser client that cannot READ the marking has not been marked.
         exposeHeaders: [
           'X-Request-Id',
           'X-Next-Cursor',
           'X-Result-Truncated',
           'Idempotency-Replay',
           'Retry-After',
+          WORKFORCE_EXPERIMENTAL_HEADER,
         ],
         maxAge: 600,
       }),

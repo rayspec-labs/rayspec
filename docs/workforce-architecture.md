@@ -573,6 +573,9 @@ are exactly the enforced ones named above.
 - **[Spec reference → workforce](./spec-reference.md#workforce-experimental)** — the grammar and
   every validation rule.
 - **[Workforce events](./workforce-events.md)** — the journal vocabulary, versioned.
+- **[Workforce forward compatibility](./workforce-compatibility.md)** — what the experimental
+  marking means: what may change, what is enforced today, and every marking with the test that
+  keeps it there.
 - **[Workforce tools](./workforce-tools.md)** — the role toolsets and the result contract.
 - **[Workforce extension seams](./workforce-extension-seams.md)** — the five replaceable interfaces,
   what each may decide, and what refuses an implementation that reaches past it.
