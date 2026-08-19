@@ -187,19 +187,28 @@ const PROSE_FILE_RE =
   /`([A-Za-z0-9_./-]*[A-Za-z0-9_-]\.(?:ts|tsx|mts|cts|mjs|cjs|js|sql|sh|json|yml|yaml|md))(?::(\d+(?:-\d+)?))?`/g;
 
 /**
- * Every backticked identifier written in camelCase or PascalCase. That casing is what makes the set
- * MACHINE-DECIDABLE: a `snake_case` table column, a status literal like `queued`, a SQLSTATE and an
- * `UPPER_SNAKE` env var all fall outside it, so the arm below can demand a pin for the whole set
- * rather than for a hand-picked subset of it.
+ * Every backticked identifier written in MIXED CASE — at least one upper and one lower, no
+ * separators. That shape is what makes the set MACHINE-DECIDABLE, which is the only reason the arm
+ * below can demand a pin for the WHOLE set instead of for a hand-picked subset of it.
+ *
+ * THE BOUND, NAMED. Four families of backticked token fall outside deliberately, because none of
+ * them is a symbol a reader would go looking for in a file: `snake_case` columns and status
+ * literals (`awaiting_children`), `UPPER_SNAKE` constants and env vars, all-caps words that are not
+ * identifiers at all (`SIGKILL`, `NULL`, a SQLSTATE), and anything containing a space or bracket.
+ * A cited symbol that somehow used one of those spellings would be checked by nothing here — that
+ * is a real gap, it is bounded, and it is written down rather than left to be discovered.
  */
-const PROSE_IDENT_RE = /`([A-Za-z][A-Za-z0-9]*(?:[A-Z][A-Za-z0-9]*)+)`/g;
+const PROSE_IDENT_RE = /`([A-Za-z][A-Za-z0-9]{2,})`/g;
+const isMixedCase = (token: string): boolean => /[a-z]/.test(token) && /[A-Z]/.test(token);
 
 const proseCitations = [...prose.matchAll(PROSE_FILE_RE)].map((m) => ({
   file: m[1] as string,
   line: m[2],
 }));
 const proseFiles = [...new Set(proseCitations.map((c) => c.file))];
-const proseIdents = [...new Set([...prose.matchAll(PROSE_IDENT_RE)].map((m) => m[1] as string))];
+const proseIdents = [
+  ...new Set([...prose.matchAll(PROSE_IDENT_RE)].map((m) => m[1] as string).filter(isMixedCase)),
+];
 
 const ledgerPaths = new Set(ledgerRows.map((row) => row.path));
 const ledgerTokens = new Set(ledgerRows.map((row) => row.token));
@@ -429,15 +438,29 @@ describe(`${PAGE_PATH} — the citation ledger`, () => {
    * nothing, which is how a hand-curated pin list falls behind the prose it was written for.
    */
   it('every file the PROSE cites is pinned in the ledger', () => {
-    const unpinned = proseFiles
-      .filter((file) =>
-        file.includes('/') ? !ledgerPaths.has(file) : !ledgerByBase.has(basename(file)),
-      )
-      .map(
-        (file) =>
-          `${JSON.stringify(file)} is cited on the page but pinned by no ledger row, so nothing checks it.\n` +
-          `  Add a row: <repo-relative path> | <the text that file must still contain>.`,
-      );
+    const unpinned: string[] = [];
+    for (const file of proseFiles) {
+      if (file.includes('/')) {
+        if (!ledgerPaths.has(file)) {
+          unpinned.push(
+            `${JSON.stringify(file)} is cited on the page but pinned by no ledger row, so nothing checks it.\n` +
+              '  Add a row: <repo-relative path> | <the text that file must still contain>.',
+          );
+        }
+        continue;
+      }
+      // A bare name resolves through the ledger's basenames. It must land on exactly ONE row's
+      // path: two ledger rows sharing a basename would make the citation ambiguous on the LEDGER
+      // side even where the arm below proves it unambiguous in the tree.
+      const pinned = ledgerByBase.get(basename(file)) ?? [];
+      if (pinned.length !== 1) {
+        unpinned.push(
+          `${JSON.stringify(file)} resolves to ${pinned.length} ledger row path(s)${pinned.length > 0 ? `: ${pinned.join(', ')}` : ''}.\n` +
+            '  A bare citation must map to exactly one pinned path. Add the row, or write the full\n' +
+            '  repo-relative path on the page so the pin is unambiguous.',
+        );
+      }
+    }
     expect(
       unpinned,
       `${unpinned.length} citation(s) on the page are verified by nothing:\n\n${unpinned.join('\n\n')}\n`,
