@@ -591,6 +591,64 @@ describe.skipIf(!hasDb)('/v1/workforce status — budget reporting truth', () =>
   });
 
   /**
+   * THE OTHER EDGE OF THE BAND — a scope with EXACTLY one turn left is NOT exhausted.
+   *
+   * The failure mode opposite to the band: crying wolf. The engine admits at
+   * `consumed + estimate <= ceiling`, so a scope whose unspent ceiling is exactly one estimate
+   * still admits one more turn. A predicate using `>=` instead of `>` would call it dead a turn
+   * early — an operator raising a ceiling that did not need raising, and a `budgetExhausted` that
+   * fires on a healthy workforce.
+   *
+   * The engine is asked to agree, in the same test and AFTER the status read, so the verdict is
+   * checked against the real admission rule rather than against my arithmetic.
+   */
+  it('a scope with EXACTLY one turn of ceiling left is NOT exhausted — the band has two edges', async () => {
+    const a = await principal('wf-bt-lastturn@example.test', 'Org WF BT LastTurn');
+    const tdb = forTenant(h.db, a.orgId);
+    const raw = {
+      departments: { eng: { usd: 0.001, window: 'daily' } },
+      task: { usd: 5, turns: 100 },
+      execution: { estimateUsdPerTurn: 0.0005 },
+    } as const;
+    const budgets = workforceBudgetsSchema.parse(raw);
+    await ensureWorkforceRuntime(tdb, 'wf', raw);
+    const task = await createRootTask(tdb, {
+      workforceId: 'wf',
+      title: 'One turn left',
+      goal: 'Ship the release.',
+      owner: 'principal_eng',
+      requestedBy: 'user',
+      department: 'eng',
+    });
+    const proposed = {
+      taskId: task.taskId,
+      rootTaskId: task.taskId,
+      workforceId: 'wf',
+      department: 'eng',
+      estimateUsd: 0.0005,
+    };
+    expect((await authorizeTurn(tdb, budgets, proposed)).allowed).toBe(true);
+    await tdb.transaction((tx) => settleTurn(tx, budgets, { ...proposed, actualUsd: 0.0005 }));
+
+    const body = await readStatus(a.token);
+    const eng = body.budgetTiers.find((t) => t.scopeId === 'eng') as StatusBudgetTier;
+    expect(eng.consumedUsd).toBeCloseTo(0.0005, 10);
+    expect(eng.headroomUsd, 'unspent ceiling is exactly one turn').toBeCloseTo(0.0005, 10);
+    expect(
+      eng.exhausted,
+      'a scope that can still run one turn is not exhausted — calling it dead a turn early sends ' +
+        'an operator to raise a ceiling that is fine, and fires budgetExhausted on a healthy run',
+    ).toBe(false);
+    expect(body.budgetExhausted).toBe(false);
+
+    // THE ENGINE AGREES, asked after the fact so the flag is checked against the real rule.
+    expect(
+      (await authorizeTurn(tdb, budgets, proposed)).allowed,
+      'the engine admits exactly here — `consumed + estimate <= ceiling` holds with equality',
+    ).toBe(true);
+  });
+
+  /**
    * A DEPARTMENTS-ONLY document — the case top-level `budgetTiers` exists for.
    *
    * `budget` is null exactly when no whole-workforce usd ceiling is declared, which is why the
