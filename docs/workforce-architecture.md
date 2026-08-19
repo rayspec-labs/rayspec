@@ -202,6 +202,23 @@ bound at request time (the approval policy matched by the employee's labels). A 
 VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
 for asserting an identity. The timeout sweep gives every hung approval its declared fate.
 
+**A decision a human already resolved cannot be re-opened by asking again.** A seat woken by its
+own approval could re-request the identical decision, indefinitely as far as structure went — turn
+budget and approval timeout bounded it, nothing capped it. The cap is on REPETITION, not on the
+action: a second approval on one task is legitimate when it is a *different* decision (and the
+timeout sweep's escalation re-issue opens one by design), so the planner refuses only a question
+this task already carries a human answer to — `approved` or `rejected`, never the `timed_out` and
+`escalated` rows that carry no answer. Identity is the question, trimmed, whitespace-collapsed and
+case-folded; a REWORDED question is a different decision by construction and is deliberately not
+capped, because nothing content-free separates a genuinely new authorization from the same one
+rephrased. Enforced twice on purpose: `planTurnOutcome`
+(`packages/kernel/tasks/src/intent-applier.ts`) is the authority and catches every caller, taking
+the requeue-once-then-fail tool-error fate; the `request_approval` tool
+(`packages/kernel/workforce-tools/src/toolset.ts`) refuses first with a typed
+`ApprovalAlreadyResolvedError` so the seat can end the turn a different way instead of burning it.
+Proof: `packages/kernel/tasks/src/approval-rerequest.db.test.ts`, which pins both what the cap
+refuses and what it must not — including that a genuinely different question still parks.
+
 **The engine keeps the authorization it writes.** An approval's `approver` and a review's
 `reviewer` are journaled as accountability facts, so the door compares them against the deciding
 principal rather than trusting `store:write` alone
@@ -650,6 +667,7 @@ packages/kernel/spec/src/workforce-parse.negative.test.ts      | rejects a workf
 packages/kernel/tasks/src/apply-intents.ts                     | actor: task.owner
 packages/kernel/tasks/src/apply-intents.ts                     | applyTurnOutcome
 packages/kernel/tasks/src/apply-transition.ts                  | applyTransition
+packages/kernel/tasks/src/approval-rerequest.db.test.ts        | a DIFFERENT decision on the same task still parks — and the count SEES the second row
 packages/kernel/tasks/src/approvals.ts                         | decideApproval
 packages/kernel/tasks/src/approvals.ts                         | decidedBy
 packages/kernel/tasks/src/approvals.ts                         | overriddenApprover
@@ -659,6 +677,7 @@ packages/kernel/tasks/src/decision-authority.db.test.ts        | break-glass dec
 packages/kernel/tasks/src/decision-authority.ts                | ANY_AUTHENTICATED_DECIDER = 'user'
 packages/kernel/tasks/src/events.ts                            | lastEventSeq
 packages/kernel/tasks/src/intent-applier.ts                    | escalateTo
+packages/kernel/tasks/src/intent-applier.ts                    | planTurnOutcome
 packages/kernel/tasks/src/reviews.ts                           | overriddenReviewer
 packages/kernel/tasks/src/signals.ts                           | manual_unblock
 packages/kernel/tasks/src/transitions.property.test.ts         | terminal at most once, never left; every working-entry from queued
@@ -672,6 +691,7 @@ packages/kernel/workforce-tools/src/facts.ts                   | firesOnLabels
 packages/kernel/workforce-tools/src/resolve-target.ts          | assertManagerMayTarget
 packages/kernel/workforce-tools/src/role-privilege.test.ts     | the toolset is a function of the TASK owner alone — two roles never blend
 packages/kernel/workforce-tools/src/toolset-semantics.test.ts  | a manager reaches own department members and led-team members — nothing else
+packages/kernel/workforce-tools/src/toolset.ts                 | ApprovalAlreadyResolvedError
 packages/workflow/durable-dbos/src/executor.ts                 | systemDatabaseUrl
 packages/workflow/durable-dbos/src/task-scheduler.db.test.ts   | a LIVE turn INSIDE its lease is never reaped, however many sweeps run
 packages/workflow/durable-dbos/src/task-scheduler.db.test.ts   | a WEDGED turn — DBOS still PENDING — is reaped once its claim lease expires, and its reservation goes back
