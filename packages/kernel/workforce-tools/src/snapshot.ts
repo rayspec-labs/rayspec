@@ -28,6 +28,7 @@ import {
 } from '@rayspec/tasks';
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { ERASED_CONTENT } from './prompt.js';
+import { TOOLSETS_BY_ROLE } from './roles.js';
 
 /** Page caps — a snapshot is a bounded view, never a partition materialized into memory. */
 export const SNAPSHOT_SUBTREE_LIMIT = 100;
@@ -100,6 +101,9 @@ export interface WorkforceReadSnapshot {
    * lock. A stale read here can only ever let a request through to the engine's own refusal; it can
    * never invent one, because a row only ever ENTERS this set (a decided approval is terminal —
    * `decideApproval` compare-and-swaps on `status = 'pending'`).
+   *
+   * EMPTY for a role whose toolset carries no `request_approval` (worker, reviewer) — the read is
+   * gated on that, so an empty list here means "nothing can ask", never "nothing was decided".
    */
   readonly resolvedApprovalQuestions: readonly string[];
   /**
@@ -358,17 +362,26 @@ export async function buildWorkforceSnapshot(
   // a human's answer. `timed_out`/`escalated` are the timeout chain's machinery, not an answer, and
   // are excluded here for the same reason the engine excludes them. A scrubbed row contributes
   // nothing (`question IS NULL`, migration 0013). Advisory: the enforcement re-reads under the lock.
-  const resolvedApprovalRows = (await tdb
-    .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
-    .where(
-      and(
-        eq(schema.workforceApprovals.taskId, task.taskId),
-        inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
-      ),
-    )) as { question: string | null }[];
-  const resolvedApprovalQuestions = resolvedApprovalRows
-    .map((row) => row.question)
-    .filter((q): q is string => q !== null);
+  //
+  // READ ONLY FOR THE ROLES THAT CAN ASK, the same predicate `computeTurnFacts` gates the approval
+  // rule on (facts.ts) — a worker or reviewer is never offered `request_approval`, so nothing on
+  // its turn can consult this. That matters more here than there: `workforce_approvals` carries no
+  // (tenant, task) index, so this is the one snapshot read that cannot be answered from a narrow
+  // index scan, and worker turns are the common case. Adding an index would be a migration.
+  let resolvedApprovalQuestions: string[] = [];
+  if (TOOLSETS_BY_ROLE[employee.role].includes('request_approval')) {
+    const rows = (await tdb
+      .select(schema.workforceApprovals, { question: schema.workforceApprovals.question })
+      .where(
+        and(
+          eq(schema.workforceApprovals.taskId, task.taskId),
+          inArray(schema.workforceApprovals.status, ['approved', 'rejected']),
+        ),
+      )) as { question: string | null }[];
+    resolvedApprovalQuestions = rows
+      .map((row) => row.question)
+      .filter((q): q is string => q !== null);
+  }
 
   return {
     task,

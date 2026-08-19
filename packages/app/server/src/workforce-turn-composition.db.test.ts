@@ -19,15 +19,18 @@ import {
   applyTransition,
   applyTurnOutcome,
   createRootTask,
+  decideApproval,
   ensureWorkforceRuntime,
   insertChildTask,
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
 import {
+  ApprovalAlreadyResolvedError,
   buildRoleToolset,
   buildWorkforceSnapshot,
   ManagerTargetForbiddenError,
+  TOOLSETS_BY_ROLE,
   TurnCollector,
 } from '@rayspec/workforce-tools';
 import { eq } from 'drizzle-orm';
@@ -402,5 +405,121 @@ describe.skipIf(!hasDb)('the toolset → engine seam (db)', () => {
       reason: 'delegation_cycle',
     });
     expect((await rowsUnder(working.taskId))[0]).toEqual({ children: 0, delegations: 0 });
+  });
+
+  // ---- the approval re-request cap, COMPOSED (finding L-1) -------------------------------------
+  // The kernel suite proves the engine refuses and the toolset suite proves the tool refuses. This
+  // is the only place the two run together on real rows: the snapshot the composition builds is
+  // what feeds the tool's refusal, and this is what catches a cap whose two halves each look right
+  // in isolation but never meet — a snapshot field that is never populated, say.
+
+  /** Drive `owner`'s task to an approval, have a human decide it, and re-claim for the next turn. */
+  async function approvalDecidedOn(
+    owner: string,
+    question: string,
+    decision: 'approve' | 'reject',
+  ): Promise<TaskRecord> {
+    const task = await workingChildOf(owner);
+    await runTurn(task, (invoke) => {
+      invoke('request_approval', { question });
+    });
+    const pending = (await db.$client.unsafe(
+      `SELECT id FROM workforce_approvals WHERE task_id = '${task.taskId}' AND status = 'pending';`,
+    )) as unknown as { id: string }[];
+    await decideApproval(tdb(), {
+      approvalId: pending[0]?.id as string,
+      decision,
+      decidedBy: 'user:00000000-0000-4000-8000-0000000000d1',
+      ...(decision === 'reject' ? { reason: 'No.' } : {}),
+    });
+    const rows = (await tdb()
+      .select(schema.workforceTasks)
+      .where(eq(schema.workforceTasks.taskId, task.taskId))) as TaskRecord[];
+    const woken = rows[0] as TaskRecord;
+    expect(woken.status).toBe('queued');
+    return applyTransition(tdb(), {
+      taskId: woken.taskId,
+      expectedVersion: woken.version,
+      to: 'working',
+      actor: 'scheduler',
+      turnId: turnIdFor(woken.taskId, woken.turnsUsed + 1),
+    });
+  }
+
+  async function approvalCount(taskId: string): Promise<number> {
+    const rows = (await db.$client.unsafe(
+      `SELECT count(*)::int AS c FROM workforce_approvals WHERE task_id = '${taskId}';`,
+    )) as unknown as { c: number }[];
+    return rows[0]?.c as number;
+  }
+
+  it('re-requesting a GRANTED decision is refused at the tool and lands on the tool-error fate', async () => {
+    const task = await approvalDecidedOn('mgr', 'Ship the announcement?', 'approve');
+    const { outcome, thrown } = await runTurn(task, (invoke) => {
+      invoke('request_approval', { question: 'Ship the announcement?' });
+    });
+    expect(thrown).toBeInstanceOf(ApprovalAlreadyResolvedError);
+    expect(outcome.plan?.kind).toBe('invalid_intent');
+    expect(outcome.task).toMatchObject({ status: 'queued', statusReason: 'tool_error' });
+    expect(await approvalCount(task.taskId)).toBe(1);
+  });
+
+  it('the seat can route around it in the SAME turn — the refusal costs the turn nothing', async () => {
+    const task = await approvalDecidedOn('mgr', 'Ship the announcement?', 'approve');
+    const { outcome, thrown } = await runTurn(task, (invoke) => {
+      // The chokepoint hands this back to the model as a tool error; a real seat then picks
+      // another ending. `runTurn` catches the throw exactly as the chokepoint does.
+      try {
+        invoke('request_approval', { question: 'Ship the announcement?' });
+      } catch {
+        /* the model reads the refusal and moves on */
+      }
+      invoke('submit_result', { status: 'completed', summary: 'Shipped.', confidence: 0.9 });
+    });
+    expect(thrown).toBeNull();
+    expect(outcome.plan?.kind).toBe('complete');
+    expect(outcome.task?.status).toBe('completed');
+    expect(await approvalCount(task.taskId)).toBe(1);
+  });
+
+  it('a REJECTED decision is refused the same way', async () => {
+    const task = await approvalDecidedOn('mgr', 'Ship the announcement?', 'reject');
+    const { thrown } = await runTurn(task, (invoke) => {
+      invoke('request_approval', { question: '  SHIP the   announcement?  ' });
+    });
+    expect(thrown).toBeInstanceOf(ApprovalAlreadyResolvedError);
+    expect(await approvalCount(task.taskId)).toBe(1);
+  });
+
+  it('a genuinely DIFFERENT decision still parks, and the second row is written', async () => {
+    const task = await approvalDecidedOn('mgr', 'Ship the announcement?', 'approve');
+    const { outcome, thrown } = await runTurn(task, (invoke) => {
+      invoke('request_approval', { question: 'Also notify legal?' });
+    });
+    expect(thrown).toBeNull();
+    expect(outcome.task).toMatchObject({
+      status: 'waiting_for_user',
+      statusReason: 'approval_pending',
+    });
+    expect(await approvalCount(task.taskId)).toBe(2);
+  });
+
+  it('the snapshot reads the decided questions ONLY for roles that can ask', async () => {
+    // The read is gated on the same predicate `computeTurnFacts` gates the approval rule on, so a
+    // worker's snapshot carries an empty list even when its task holds a decided approval. Two
+    // things ride on this: the unindexed read stays off worker turns, and a seat is never handed a
+    // fact its own toolset cannot act on.
+    const managerTask = await approvalDecidedOn('mgr', 'Ship the announcement?', 'approve');
+    const mgr = config.employees.get('mgr');
+    const dev = config.employees.get('dev');
+    if (!mgr || !dev) throw new Error('fixture employees missing');
+
+    const managerView = await buildWorkforceSnapshot(tdb(), config, managerTask, mgr);
+    expect(managerView.resolvedApprovalQuestions).toEqual(['Ship the announcement?']);
+
+    // The SAME task row, read as a worker: `request_approval` is not in the worker toolset.
+    const workerView = await buildWorkforceSnapshot(tdb(), config, managerTask, dev);
+    expect(workerView.resolvedApprovalQuestions).toEqual([]);
+    expect(TOOLSETS_BY_ROLE.worker).not.toContain('request_approval');
   });
 });
