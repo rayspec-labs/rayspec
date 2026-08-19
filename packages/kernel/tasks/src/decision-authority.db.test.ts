@@ -502,13 +502,34 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
   //
   // HOW IT WORKS. A separate connection holds `SELECT … FOR UPDATE` on the approval row. A plain
   // SELECT does not block against a row lock, so both racers walk their opening read (both see
-  // `pending`) and then park on their UPDATE. The barrier is held long enough to OBSERVE that —
-  // neither promise may settle while it is held — which is the arm's proof that both racers are
-  // parked at the compare-and-swap rather than one of them having already exited through (A).
-  // Releasing the lock then lets exactly one UPDATE match `status = 'pending'`.
+  // `pending`) and then park on their UPDATE. Releasing the lock then lets exactly one UPDATE match
+  // `status = 'pending'`.
+  //
+  // ── HOW THE ARMING IS OBSERVED, and why the OBVIOUS observation is not enough ────────────────
+  //
+  // The tempting check is "neither promise settled while the lock was held". That condition is
+  // NECESSARY but not SUFFICIENT, and the difference is not academic: a racer that never got a
+  // POOLED CONNECTION also does not settle. So on a small enough pool the check passes while one
+  // racer never reached the database at all — and it passes for the wrong reason, which is the
+  // exact defect these arms exist to rule out. Verified rather than reasoned: at `maxPoolSize: 1`
+  // the branch-(B) mutation SURVIVES a settled-flag guard, because the starved racer looks
+  // identical to a parked one.
+  //
+  // So the arming is observed from the DATABASE side instead, through `pg_blocking_pids()`: count
+  // the backends whose blocker set contains THIS barrier's own backend. That is sufficient, because
+  // the only lock this transaction holds is the approval row's, a plain SELECT never waits on it,
+  // and every write `decideApproval` performs after the CAS is downstream of it — so a backend
+  // blocked by this one is a backend sitting on the compare-and-swap UPDATE, at branch (B), and
+  // nowhere else. A racer starved of a connection has no backend and cannot be counted; a racer
+  // that exited through branch (A) is not blocked and cannot be counted either.
+  //
+  // The count is therefore independent of `maxPoolSize`, and the arm fails loudly instead of
+  // passing quietly if the pool is ever too small to run this race. The query is issued on the
+  // barrier's OWN connection, so observing costs no pool slot.
   describe('two RACING decisions on one approval (the CAS, not the authority gate)', () => {
-    /** Long enough for both racers to take a pooled connection, BEGIN, read, and park on the UPDATE. */
-    const BARRIER_MS = 400;
+    /** Both racers must be observed on the CAS within this budget, or the arm fails rather than hangs. */
+    const ARMING_TIMEOUT_MS = 10_000;
+    const ARMING_POLL_MS = 25;
 
     type Decision = Awaited<ReturnType<typeof decideApproval>>;
 
@@ -532,13 +553,16 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
      */
     async function racedDecision(approvalId: string): Promise<{
       results: PromiseSettledResult<Decision>[];
-      /** Observed WHILE the row lock was held: false means that racer exited without reaching the CAS. */
-      parkedAtTheCas: { approve: boolean; reject: boolean };
+      /**
+       * How many backends were observed BLOCKED BY THE BARRIER'S OWN BACKEND — i.e. sitting on the
+       * compare-and-swap UPDATE. Two means the race armed. Anything less means a racer never got
+       * there (starved of a pooled connection, or gone through branch (A)), and the run proves
+       * nothing about the CAS.
+       */
+      onTheCas: number;
     }> {
-      let approveSettled = false;
-      let rejectSettled = false;
       let settled!: Promise<PromiseSettledResult<Decision>[]>;
-      let parkedAtTheCas!: { approve: boolean; reject: boolean };
+      let onTheCas = 0;
 
       await db.$client.begin(async (sql) => {
         await sql.unsafe(
@@ -556,36 +580,71 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
           decidedBy: 'ops_lead',
           reason: 'not now',
         });
-        // Mark settlement on BOTH outcomes — a rejection is exactly the case being ruled out here,
-        // and `.then(onFulfilled, onRejected)` also keeps the rejection handled.
-        const mark = (p: Promise<Decision>, set: () => void) => void p.then(set, set);
-        mark(approve, () => {
-          approveSettled = true;
-        });
-        mark(reject, () => {
-          rejectSettled = true;
-        });
         settled = Promise.allSettled([approve, reject]);
 
-        await new Promise((resolve) => setTimeout(resolve, BARRIER_MS));
-        parkedAtTheCas = { approve: !approveSettled, reject: !rejectSettled };
+        // Poll on the barrier's own connection until both racers are visibly waiting on the lock it
+        // holds — counting the whole WAIT TREE rooted at this backend, not just its direct waiters.
+        //
+        // The recursion is load-bearing and was found empirically, by this guard failing rather
+        // than passing. With two backends queued on one row, Postgres does not report both as
+        // blocked by the row's holder: the first waiter takes the TUPLE lock while it waits for the
+        // holder's transaction, so `pg_blocking_pids()` reports the SECOND waiter as blocked by the
+        // FIRST. A direct-blockers-only count therefore reads 1 where the truth is 2 — measured, on
+        // PostgreSQL 16.14: the arm failed `expected 1 to be 2` before the recursion was added.
+        //
+        // Scoped by `pg_backend_pid()` at the root, so the tree can only contain backends waiting
+        // (directly or transitively) on THIS barrier. No other suite, file, or database on the
+        // server can enter it, and a racer that never got a pooled connection has no backend to
+        // enter it with.
+        const deadline = Date.now() + ARMING_TIMEOUT_MS;
+        for (;;) {
+          // `pg_stat_activity` is SNAPSHOTTED PER TRANSACTION, and this poll runs inside the
+          // barrier's transaction — so without this the loop re-reads the snapshot taken on its
+          // FIRST iteration, before either racer had blocked, and reports 0 forever. Also found by
+          // this guard failing rather than passing: the arm sat at `expected +0 to be 2` for the
+          // full timeout while the racers were, in fact, correctly parked.
+          await sql.unsafe('SELECT pg_stat_clear_snapshot();');
+          const rows = (await sql.unsafe(
+            `WITH RECURSIVE waiters AS (
+               SELECT a.pid
+                 FROM pg_stat_activity a
+                WHERE a.pid <> pg_backend_pid()
+                  AND pg_backend_pid() = ANY(pg_blocking_pids(a.pid))
+               UNION
+               SELECT a.pid
+                 FROM pg_stat_activity a
+                 JOIN waiters w ON w.pid = ANY(pg_blocking_pids(a.pid))
+                WHERE a.pid <> pg_backend_pid()
+             )
+             SELECT count(*)::int AS c FROM waiters;`,
+          )) as unknown as Array<{ c: number }>;
+          onTheCas = (rows[0] as { c: number }).c;
+          if (onTheCas >= 2 || Date.now() >= deadline) break;
+          await new Promise((resolve) => setTimeout(resolve, ARMING_POLL_MS));
+        }
       });
 
-      return { results: await settled, parkedAtTheCas };
+      return { results: await settled, onTheCas };
+    }
+
+    /** The arming assertion both arms share — stated once so neither can drift from the other. */
+    function expectArmed(onTheCas: number): void {
+      expect(
+        onTheCas,
+        'the race did not arm: fewer than two backends were waiting on the barrier’s row lock, ' +
+          'so at least one racer never reached the compare-and-swap (it exited through the PRE-CAS ' +
+          'read, or never got a pooled connection). Nothing in this run is evidence about the CAS',
+      ).toBe(2);
     }
 
     it('admits exactly one — and the STORED row is the winner’s, never the loser’s', async () => {
       const { row } = await pendingApproval('ops_lead');
 
-      const { results, parkedAtTheCas } = await racedDecision(row.id);
+      const { results, onTheCas } = await racedDecision(row.id);
 
-      // THE RACE ARMED. Without this the arms below are green on a run where the second caller
-      // never contended at all (see the branch note above the describe).
-      expect(
-        parkedAtTheCas,
-        'a racer settled while the approval row was still locked — it exited through the PRE-CAS ' +
-          'read instead of contending on the compare-and-swap, so this run proves nothing about it',
-      ).toEqual({ approve: true, reject: true });
+      // THE RACE ARMED — observed, not assumed. Without this the assertions below are green on a
+      // run where the second caller never contended at all (see the branch note above the describe).
+      expectArmed(onTheCas);
 
       const wins = results.filter((r) => r.status === 'fulfilled');
       const losses = results.filter((r) => r.status === 'rejected');
@@ -614,8 +673,8 @@ describe.skipIf(!hasDb)('the decision door enforces the recorded decider (db)', 
     it('the LOSER changes nothing: one decision event, one signal, one wake', async () => {
       const { task, row } = await pendingApproval('ops_lead');
 
-      const { results, parkedAtTheCas } = await racedDecision(row.id);
-      expect(parkedAtTheCas).toEqual({ approve: true, reject: true });
+      const { results, onTheCas } = await racedDecision(row.id);
+      expectArmed(onTheCas);
       const winner = (
         results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<Decision>
       ).value;
