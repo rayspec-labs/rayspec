@@ -102,7 +102,9 @@ file mount buys.
   those. `tenant ensure` resolves exactly two secrets, `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER`,
   through the same resolver with the same precedence and the same fail-closed abort. It deliberately
   does **not** ask for `RAYSPEC_JWT_SIGNING_KEY`: it mints no JWT, so a provisioning job never has to
-  carry the platform signing key.
+  carry the platform signing key. `rayspec tenant erase` is the opposite case and is called out here
+  so the difference is not a surprise: it BOOTS the composition root (see *Erasing a deployment's
+  tenant data*), so it resolves **all three** boot secrets exactly as `rayspec-serve` does.
 - **The local development wrapper is both:** `examples/local-boot` requires all three *plain*
   variables of its own accord, because it provisions a throwaway dev database from `DATABASE_URL`
   before the resolver is ever reached — so a `_FILE`-only environment fails there first, early and
@@ -160,6 +162,44 @@ A window exists between the reservation and the human redeeming the invite in wh
 has **zero members**. Nothing can act inside it — every principal path requires a membership — but
 the product boot gate checks only that the org exists and is not soft-deleted, so a reserved
 organization is bootable before it is claimed.
+
+## Erasing a deployment's tenant data
+
+The destructive counterpart is `rayspec tenant erase`, which this package also backs
+(`eraseTenantData`). It is the operator entry point to the `BootedServer.eraseTenantNow` control
+seam — the seam is wired on every boot, and before this verb existed it was reachable only by an
+embedder holding the boot handle. Like `tenant ensure` it mounts **no HTTP route in any posture**: an
+erasure route would be a tenant self-service surface, which is deferred to external-exposure
+hardening.
+
+Four things about it are worth stating plainly before you run it:
+
+- **It BOOTS this package's composition root** (binding no port and serving nothing), rather than
+  talking to the database directly the way `provisionTenant` does. The FK-safe product-store delete
+  order and the blob backend come from the deployed document, and only the composition root knows
+  them — a direct-to-database shortcut would erase the core half and silently leave every product row
+  behind. So it resolves the **same three boot secrets** a `rayspec-serve` start does, reads the same
+  environment, and **applies the committed migration chain** to `DATABASE_URL` on the way.
+- **Everything else a boot does, it also does.** Its options come from the shared
+  `assembleOptsFromEnv`, so a document with `deployment.durableWorker: true` launches a durable
+  worker for the life of the command (drained on close — a *second* worker against that database if
+  one is already serving it), and `RAYSPEC_UPDATE_MIGRATION`/`RAYSPEC_UPDATE_ALLOWLIST` are honoured
+  exactly as they are for `rayspec-serve`: set in the environment you erase from, the erase applies
+  that delta too. Run it from an environment carrying only the boot secrets and `DATABASE_URL`
+  unless you mean otherwise.
+- **Two independent keys, and neither one alone deletes anything.** `--confirm <org-id>` must repeat
+  `--org-id` exactly (a mismatch is refused before anything boots; without it the run passes
+  `dryRun: true` and cannot delete under any setting), **and** `RAYSPEC_ERASURE_ENABLED` must be
+  exactly the string `true` — `TRUE`, `True`, `1` and `yes` all resolve to `false` at the composition
+  root and produce a counts-only preview.
+- **The reported `mode` is the seam's own**, never inferred from the flags, and the reported `gate` is
+  the resolved boolean. A confirmed run that deleted nothing exits non-zero naming the gate, so a
+  script cannot read a refusal as a success.
+- **Every attempt is journalled before anything is deleted**, as `tenant_erase_requested` in
+  `auth_audit`, carrying the request kind, the resolved gate, the operator's stated `--reason` and the
+  observed invoker. That covers the attempts the gate refused, which the seam's own
+  `tenant_data_erased` record never does. `auth_audit` is a global table tenant erasure does not
+  touch, so the record survives the erasure it describes.
 
 ## Migration application
 
