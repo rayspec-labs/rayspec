@@ -17,12 +17,21 @@
  * The positive control (`W1`) is what stops the whole file from passing vacuously: if `write` did
  * nothing at all, every negative arm would still pass and W1 would not.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FsSink } from '@rayspec/handler-sdk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  __assertRealDirUnderRootForTest,
   FsSinkConfigError,
   FsSinkJailError,
   FsSinkQuotaError,
@@ -206,6 +215,66 @@ describe('FsSink — the path jail (each arm names the guard whose removal must 
     const r = await s.write('deeply/nested/dir/note.txt', enc('ok'));
     expect(r.path).toBe('deeply/nested/dir/note.txt');
     expect(readFileSync(join(root, 'deeply/nested/dir/note.txt'), 'utf8')).toBe('ok');
+  });
+});
+
+describe('FsSink — the parent re-assert, pinned DIRECTLY because no staged escape reaches it', () => {
+  // WHY THIS DESCRIBE EXISTS, stated plainly. In every escape the suite above can stage
+  // deterministically, `jailPath`'s own layer-5 assert refuses the path BEFORE control reaches the
+  // parent re-assert — its `deepestExisting` walk finds a symlinked ancestor whether or not the leaf
+  // exists (that is exactly what C5 and C5b prove). So the re-assert is a TOCTOU backstop: it earns its
+  // place only when a parent absent at jail time is created as, or swapped for, a symlink in the window
+  // before the open, and staging that means racing the filesystem.
+  //
+  // The choice is therefore between a security-critical branch that NO test can redden and a direct
+  // pin on its logic. This is the direct pin. What it does NOT establish — and what is not claimed
+  // anywhere — is an end-to-end proof of the race itself.
+
+  // The function's contract is that `realRoot` is ALREADY resolved — which is how the impl calls it
+  // (the factory `realpathSync`s the root once at build time). The tests must honour that contract, and
+  // on macOS they visibly must: `tmpdir()` is itself a symlink (`/var/…` -> `/private/var/…`), so an
+  // unresolved root compares unequal to every resolved child. Caught by R1/R2 failing on the first run.
+  const realRoot = (): string => realpathSync(root);
+
+  it('R1 accepts a directory that really is under the root', async () => {
+    mkdirSync(join(root, 'nested/dir'), { recursive: true });
+    await expect(
+      __assertRealDirUnderRootForTest(realRoot(), join(root, 'nested/dir'), 'nested/dir/x.txt'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('R2 accepts the root itself (the boundary case `realDir === realRoot`)', async () => {
+    await expect(
+      __assertRealDirUnderRootForTest(realRoot(), root, 'x.txt'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('R3 REFUSES a directory that resolves, via a symlink, OUTSIDE the root', async () => {
+    // The shape the backstop exists for: the path is lexically inside, and only resolving it leaves.
+    symlinkSync(outsideDir, join(root, 'escape'));
+    await expect(
+      __assertRealDirUnderRootForTest(realRoot(), join(root, 'escape'), 'escape/x.txt'),
+    ).rejects.toThrow(FsSinkJailError);
+  });
+
+  it('R4 REFUSES a sibling whose path merely PREFIXES the root (the segment boundary, not a bare startsWith)', async () => {
+    // `/…/out-evil` starts with `/…/out` as a STRING but is not under it as a PATH. A comparison
+    // written as a bare `startsWith(realRoot)` — without the separator — would accept this one.
+    const sibling = `${root}-evil`;
+    mkdirSync(sibling, { recursive: true });
+    await expect(__assertRealDirUnderRootForTest(realRoot(), sibling, 'x.txt')).rejects.toThrow(
+      FsSinkJailError,
+    );
+  });
+
+  it('R5 REFUSES a directory that cannot be resolved at all (fail-closed, never fail-open)', async () => {
+    await expect(
+      __assertRealDirUnderRootForTest(
+        realRoot(),
+        join(root, 'does/not/exist'),
+        'does/not/exist/x.txt',
+      ),
+    ).rejects.toThrow(FsSinkJailError);
   });
 });
 

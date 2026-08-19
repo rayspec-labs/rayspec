@@ -122,8 +122,20 @@ function toPosixRelative(root: string, absolute: string): string {
  * Assert that an EXISTING directory resolves (after following symlinks) to a location strictly under
  * the real root. This is layer 4's re-verification: at jail time the directory may not have existed, so
  * the realpath assert could only reach a higher ancestor.
+ *
+ * ⚠ HONEST NOTE ON WHAT PINS THIS. In every escape a test can stage DETERMINISTICALLY, `jailPath`'s
+ * own layer-5 assert has already refused the path before control reaches here — its `deepestExisting`
+ * walk finds the symlinked ancestor whether or not the leaf exists. So this re-assert is a TOCTOU
+ * BACKSTOP: it earns its place only when a parent that did not exist at jail time is created as, or
+ * swapped for, a symlink in the window before the open, which a test cannot stage without racing the
+ * filesystem. Rather than leave a security-critical branch that no test can redden, it is EXPORTED and
+ * pinned directly (`__assertRealDirUnderRootForTest`) — the mutation battery mutates its comparison and
+ * watches that arm fire. What is NOT claimed: an end-to-end proof of the race itself. The same is true
+ * of `O_NOFOLLOW` on the leaf open, whose deterministic twin is the `lstat` refusal above it; the
+ * battery proves that layer's independence by mutating the `lstat` away and confirming the symlink arm
+ * stays RED.
  */
-async function assertRealDirUnderRoot(
+export async function assertRealDirUnderRoot(
   realRoot: string,
   dir: string,
   callerPath: string,
@@ -349,3 +361,10 @@ export function makeFsSinkFactory(root: string, quota?: FsSinkQuotaConfig): FsSi
   const realRoot = realpathSync(absRoot);
   return (): FsSink => makeFsSink(absRoot, realRoot, resolved);
 }
+
+/**
+ * The parent-directory re-assert, exported for the fail-the-fix unit test that pins it. It asserts the
+ * EXACT logic the impl runs; see the docblock on `assertRealDirUnderRoot` for why it needs a direct pin
+ * rather than an end-to-end one.
+ */
+export { assertRealDirUnderRoot as __assertRealDirUnderRootForTest };
