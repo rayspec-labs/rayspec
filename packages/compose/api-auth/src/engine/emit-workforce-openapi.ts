@@ -285,6 +285,47 @@ const REVIEW_ROW = rowSchema(
 
 // --- the bespoke response envelopes (HAND-WRITTEN — see the module header) ----------------------
 
+/**
+ * MERGE NOTE FOR WHOEVER LANDS THE BUDGET-REPORTING BRANCH ON TOP OF THIS ONE — read this before
+ * silencing the red it will give you.
+ *
+ * That branch adds THREE top-level fields to `GET /v1/workforce/{workforceId}/status`:
+ * `budgetExhausted`, `blockedOnBudget` and `budgetTiers`. They do NOT exist on this branch, so they
+ * are deliberately absent from `STATUS_RESPONSE` — documenting a field the handler does not send is
+ * an over-promise, and this file's own mutation battery (M12) proves the `LIVE ENVELOPES` arm reds
+ * on exactly that. The arm will red on merge; that is the mechanism working, not a defect. Add the
+ * three fields here and it goes green.
+ *
+ * ADD THE SEMANTICS TOO, NOT JUST THE KEYS. `LIVE ENVELOPES` compares TOP-LEVEL KEY NAMES only, so
+ * everything below is invisible to it — the document is the only place these can live, and every
+ * one is an overclaim waiting to happen:
+ *
+ *   - `consumedUsd` is NOT bounded by `ceilingUsd`. The denial fires when the NEXT turn's
+ *     reservation would cross the line, so the turn already in flight is never aborted and settles
+ *     above the ceiling by at most its own cost.
+ *   - `headroomUsd` FLOORS AT 0, so 0 means "at OR PAST", never "exactly at". The unclamped
+ *     `consumedUsd` beside it is the only field that distinguishes the two.
+ *   - `consumedTurns` counts DISPATCHED turns, metered at AUTHORIZE; `consumedUsd` is metered at
+ *     SETTLEMENT. They move at different moments — do not let the schema imply they move together.
+ *   - `exhausted` is `>=`, not `>`. Landing exactly on a turns ceiling is the ORDINARY case, since
+ *     turns increment by one.
+ *   - `budgetExhausted` is `any tier exhausted` OR `blockedOnBudget > 0`. The disjunction is
+ *     load-bearing: the tier half catches a spent ceiling with an empty queue, the parked half
+ *     catches the `task` and `subtree` scopes. It means "a declared ceiling somewhere is spent",
+ *     NOT "this workforce is dead".
+ *   - `blockedOnBudget` counts PARKS, not CAUSES — it does not say which tier refused. That is in
+ *     the journal (`workforce.budget.exceeded` carries scopeKind/scopeId/ceiling/consumed).
+ *
+ * AND THE ONE THAT IS AN OVERCLAIM BY OMISSION: `budgetTiers` enumerates only the tiers whose
+ * cardinality the DECLARATION bounds — the workforce and each declared department. The `task` and
+ * `subtree` scopes are NEVER in it, because they are one ledger row per task and per submitted
+ * goal. So `budgetTiers` is NOT a complete list of the ceilings that can refuse work, and a client
+ * that renders it as "here are your budgets" will mislead an operator whose runs are being denied
+ * by a scope the array never shows. Say that in the field's own description rather than leaving it
+ * inferable from the `scopeKind` enum, and say that `budgetExhausted` + `blockedOnBudget` are what
+ * cover those two invisible scopes. The same caveat already applies to `budget` below and is
+ * written there.
+ */
 const STATUS_RESPONSE = object(
   {
     workforceId: str,
@@ -320,7 +361,15 @@ const STATUS_RESPONSE = object(
         ]),
       ),
       description:
-        'Headroom on the CURRENT workforce budget window; null when no ceiling is declared.',
+        'Headroom on the CURRENT workforce budget window; null when no whole-workforce usd ceiling ' +
+        'is declared. NOT A COMPLETE PICTURE OF WHAT CAN REFUSE WORK: this is the WORKFORCE tier ' +
+        'alone. The engine also enforces `department`, `task` and `subtree` ceilings, and any of ' +
+        'them can park a task with none of it visible here — a null `budget` does NOT mean "no ' +
+        'ceiling can stop this workforce". `consumedUsd` is NOT bounded by `ceilingUsd`: a ceiling ' +
+        'bounds what may be DISPATCHED, not what may be SETTLED, so a turn already in flight ' +
+        'settles above it by at most its own cost. `headroomUsd` is floored at 0, so 0 means "at ' +
+        'OR PAST the ceiling", never "exactly at it" — the unclamped `consumedUsd` beside it is ' +
+        'what distinguishes the two.',
     },
   },
   [
@@ -988,6 +1037,14 @@ const OPERATIONS: readonly OperationSpec[] = [
       '404': 'No such workforce on this deployment, or it belongs to another tenant.',
       '409': 'The workforce is paused and is not accepting new work. Resume it, then re-submit.',
       '413': TOO_LARGE,
+      // FINDING, recorded rather than fixed — the contract is FROZEN in this slice, so this
+      // documents what the route DOES, not what it arguably should do. Three sibling throttled
+      // surfaces set a real `Retry-After` header (`engine/route-rate-limit.ts`, `routes/runs.ts`,
+      // `media/playback-middleware.ts`); this one does not, because it throws a `RATE_LIMITED`
+      // `ApiError` and `onError` builds the envelope without touching headers. A client that
+      // generalises from the siblings backs off on a header that is always absent. Adding the
+      // header here would be a ROUTE BEHAVIOUR CHANGE and is deliberately out of scope; the
+      // inconsistency across sibling surfaces is worth someone's attention on its own.
       '429':
         'Per (tenant, workforce) submission quota exceeded. The throttle runs BEFORE the body read, ' +
         'so nothing was read and nothing was dispatched. The retry hint is `error.details.' +
