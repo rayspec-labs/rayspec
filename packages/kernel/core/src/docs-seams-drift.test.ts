@@ -29,7 +29,7 @@ const CITATIONS: ReadonlyArray<readonly [string, string]> = [
   ['packages/app/server/src/workforce-goal-intake.ts:59', 'function planRefusal'],
   ['packages/app/server/src/workforce-goal-intake.ts:68', 'SEAM_MAX_PLAN_STEPS'],
   ['packages/app/server/src/workforce-goal-intake.ts:110', 'strategy.plan'],
-  ['packages/kernel/workforce-tools/src/toolset.ts:849', 'TOOLSETS_BY_ROLE['],
+  ['packages/kernel/workforce-tools/src/toolset.ts:916', 'TOOLSETS_BY_ROLE['],
   ['packages/app/server/src/workforce-turn-handlers.ts:139', 'buildRoleToolset'],
   ['packages/app/server/src/workforce-turn-handlers.ts:187', 'memory.search'],
   ['packages/app/server/src/workforce-turn-handlers.ts:73', 'memoryProviderFor'],

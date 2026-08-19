@@ -1178,6 +1178,25 @@ export async function applyTurnOutcome(
           break;
         }
         case 'fail': {
+          // PERSIST THE MESSAGE BEFORE THE TRANSITION, and the ordering is the whole point: the
+          // terminal `workforce.task.failed` event reads its `resultSummary` off THIS column
+          // (apply-transition.ts), so a write afterwards would journal `null` and the operator's
+          // only record of WHY would be gone. Until this write existed, `plan.message` was
+          // constructed and then referenced by nothing — a failed task carried no reason, no result
+          // and no journal text, which is a worse operator surface than the mislabelled
+          // `completed` it replaces.
+          //
+          // The stored `status` is written BY THE ENGINE from the typed intent it is applying, not
+          // read from a model's claim — it agrees with the row's real status by construction. Same
+          // shape a `complete` stores, so every reader of `result` (the parent's `childResults`
+          // merge, the read tools, the API) sees one contract and no one needs a second branch.
+          // `confidence` is deliberately left NULL: a failure has no confidence to report, and
+          // inventing one would feed the review-policy predicates a number nobody stated.
+          await tx
+            .update(schema.workforceTasks, {
+              result: { status: 'failed', summary: plan.message },
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
           finalTask = await applyTransition(tx, {
             taskId: task.taskId,
             expectedVersion: task.version,

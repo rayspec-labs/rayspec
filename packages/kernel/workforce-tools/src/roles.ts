@@ -19,6 +19,7 @@ export type ToolName =
   | 'get_workforce_state'
   | 'list_department_tasks'
   | 'list_open_tasks'
+  | 'report_failure'
   | 'request_approval'
   | 'request_clarification'
   | 'request_review'
@@ -32,6 +33,7 @@ export const TURN_ENDING_TOOLS: ReadonlySet<ToolName> = new Set([
   'cancel_task',
   'delegate_task',
   'escalate',
+  'report_failure',
   'request_approval',
   'request_clarification',
   'request_review',
@@ -79,6 +81,14 @@ export function isTurnEndingToolName(recordedName: string): boolean {
   return TURN_ENDING_TOOLS.has(neutral as ToolName);
 }
 
+/**
+ * `report_failure` is on EVERY role, deliberately, and it is the one tool whose absence was itself
+ * the defect: with no failure verb offered, a seat that could not do its work had `submit_result`
+ * as its only ending, the engine writes `completed` there as a literal, and an honest refusal was
+ * recorded as a success. Withholding it from any single role would re-open exactly that hole for
+ * that role — including the orchestrator, which carries no `escalate` (it reports to no one) and
+ * would otherwise have no honest way to end a root task it cannot finish.
+ */
 export const TOOLSETS_BY_ROLE: Readonly<Record<EmployeeRole, readonly ToolName[]>> = Object.freeze({
   orchestrator: [
     'create_task',
@@ -86,6 +96,7 @@ export const TOOLSETS_BY_ROLE: Readonly<Record<EmployeeRole, readonly ToolName[]
     'request_review',
     'request_approval',
     'submit_result',
+    'report_failure',
     'cancel_task',
     'get_workforce_state',
     'get_task',
@@ -99,6 +110,7 @@ export const TOOLSETS_BY_ROLE: Readonly<Record<EmployeeRole, readonly ToolName[]
     'request_review',
     'request_approval',
     'submit_result',
+    'report_failure',
     'escalate',
     'list_department_tasks',
     'send_message',
@@ -107,6 +119,7 @@ export const TOOLSETS_BY_ROLE: Readonly<Record<EmployeeRole, readonly ToolName[]
   worker: [
     'get_task',
     'submit_result',
+    'report_failure',
     'request_clarification',
     'request_review',
     'escalate',
@@ -115,6 +128,7 @@ export const TOOLSETS_BY_ROLE: Readonly<Record<EmployeeRole, readonly ToolName[]
   reviewer: [
     'get_task',
     'submit_result',
+    'report_failure',
     'request_clarification',
     'request_review',
     'escalate',

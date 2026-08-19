@@ -76,6 +76,37 @@ describe('schemas are strict and closed', () => {
     expect(workerResultSchema.safeParse(RESULT).success).toBe(true);
   });
 
+  it('the result status carries no authority, so the two values that claimed one are gone', () => {
+    // `failed` and `needs_clarification` decided NOTHING: a `complete` transitions the task to
+    // `completed` whatever this field says. They are refused here so a seat cannot narrate an
+    // outcome the engine will contradict — the real channels are the `fail` intent (the
+    // `report_failure` tool) and `request_clarification`.
+    for (const status of ['failed', 'needs_clarification']) {
+      expect(workerResultSchema.safeParse({ ...RESULT, status }).success, status).toBe(false);
+      expect(
+        turnIntentSchema.safeParse({ kind: 'complete', result: { ...RESULT, status } }).success,
+        `${status} must not reach the engine through a complete intent either`,
+      ).toBe(false);
+    }
+    // The caveat value STAYS: it qualifies a result the engine accepted, it does not claim a status.
+    expect(workerResultSchema.safeParse({ ...RESULT, status: 'partial' }).success).toBe(true);
+    expect(workerResultSchema.shape.status.options).toEqual(['completed', 'partial']);
+  });
+
+  it('a fail intent still demands a non-empty message — an unexplained failure is refused', () => {
+    expect(turnIntentSchema.safeParse({ kind: 'fail', message: '' }).success).toBe(false);
+    expect(turnIntentSchema.safeParse({ kind: 'fail' }).success).toBe(false);
+    expect(turnIntentSchema.safeParse({ kind: 'fail', message: 'x', extra: 1 }).success).toBe(
+      false,
+    );
+    // Deliberately UNCAPPED at the engine edge (the tool caps the model's side): this arm also
+    // carries handler/scheduler diagnostics, and a cap here would turn a long stack trace into a
+    // malformed intent — an undiagnosable failure in place of a diagnosable one.
+    expect(turnIntentSchema.safeParse({ kind: 'fail', message: 'x'.repeat(50_000) }).success).toBe(
+      true,
+    );
+  });
+
   it('an approval intent requires the enforced-fate window (timeoutMs)', () => {
     expect(
       turnIntentSchema.safeParse({ kind: 'request_approval', question: 'Ship it?' }).success,

@@ -41,7 +41,7 @@ Two properties hold across all five and are checked directly against the interfa
 
 **On granting tools.** No seam has a tool surface. A turn's native toolset is derived from the
 employee's declared role — `TOOLSETS_BY_ROLE[employee.role]`
-(`packages/kernel/workforce-tools/src/toolset.ts:849`), assembled at
+(`packages/kernel/workforce-tools/src/toolset.ts:916`), assembled at
 `packages/app/server/src/workforce-turn-handlers.ts:139`. The one indirect influence is real and
 worth stating precisely: an `OrchestrationStrategy` chooses which declared seat owns a step, and a
 seat's role determines its toolset. So a strategy selects among the toolsets the workforce already

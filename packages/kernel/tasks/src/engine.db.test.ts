@@ -150,6 +150,244 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(counts[0]).toMatchObject({ transitions: 3, completed_events: 1, turns: 1 });
   });
 
+  /**
+   * THE FAILURE CHANNEL, end to end. Until the `report_failure` tool existed
+   * (@rayspec/workforce-tools), nothing a seat could call produced this intent, so a seat that
+   * could not do its work ended with `submit_result` — and `case 'complete'` writes `completed` as
+   * a LITERAL. An honest refusal was recorded as a success. These arms pin the whole path on
+   * durable artifacts: the row, the transition log, the journal, and what the failure does to the
+   * tasks around it.
+   */
+  describe('a turn that fails on purpose', () => {
+    const MESSAGE = 'The workspace is mounted read-only, so no artifact can be written.';
+
+    it('lands failed with the transition row, the stored reason and the journal entry', async () => {
+      const root = await driveToWorking(await newRoot());
+      const out = await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE }, 0.1);
+      expect(out.plan).toEqual({ kind: 'fail', message: MESSAGE });
+      expect(out.task?.status).toBe('failed');
+      expect(out.task?.completedAt).not.toBeNull();
+
+      // THE ROW: the failure explains itself. `plan.message` used to be constructed and read by
+      // nothing, so a failed task carried no reason, no result and no journal text — a worse
+      // operator surface than the mislabelled `completed` it replaces.
+      const row = (await db.$client.unsafe(
+        `SELECT status, status_reason, result->>'summary' AS summary, result->>'status' AS result_status, confidence
+           FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as {
+        status: string;
+        status_reason: string | null;
+        summary: string;
+        result_status: string;
+        confidence: string | null;
+      }[];
+      expect(row[0]).toMatchObject({
+        status: 'failed',
+        // No closed status reason fits a seat's own refusal, and none is invented: `tool_error`,
+        // `dependency_failed` and `quarantined` each name a DIFFERENT cause. The reason column
+        // stays null and the message carries the why.
+        status_reason: null,
+        summary: MESSAGE,
+        result_status: 'failed',
+      });
+      // A failure has no confidence to report, and inventing one would feed the review-policy
+      // predicates a number nobody stated.
+      expect(row[0]?.confidence).toBeNull();
+
+      // THE TRANSITION LOG: queued -> working -> failed, the last one stamped with the turn.
+      const log = (await db.$client.unsafe(
+        `SELECT from_status, to_status, actor, turn_number FROM workforce_task_transitions
+           WHERE task_id = '${root.taskId}' ORDER BY created_at;`,
+      )) as unknown as {
+        from_status: string;
+        to_status: string;
+        actor: string;
+        turn_number: number | null;
+      }[];
+      expect(log.map((r) => `${r.from_status}->${r.to_status}`)).toEqual([
+        'planned->queued',
+        'queued->working',
+        'working->failed',
+      ]);
+      expect(log[2]).toMatchObject({ actor: 'coordinator', turn_number: 1 });
+
+      // THE JOURNAL: the terminal event carries the summary, which is only true because the row is
+      // written BEFORE the transition — `applyTransition` reads `resultSummary` off the column.
+      const events = (await db.$client.unsafe(
+        `SELECT type, data FROM run_events WHERE run_id = '${root.taskId}'
+           AND type IN ('workforce.task.failed', 'workforce.task.completed', 'workforce.task.turn_ended')
+           ORDER BY seq;`,
+      )) as unknown as { type: string; data: Record<string, unknown> }[];
+      const failed = events.filter((e) => e.type === 'workforce.task.failed');
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.data).toMatchObject({ resultSummary: MESSAGE, statusReason: null });
+      expect(events.some((e) => e.type === 'workforce.task.completed')).toBe(false);
+      expect(events.find((e) => e.type === 'workforce.task.turn_ended')?.data).toMatchObject({
+        outcome: 'fail',
+      });
+      // A failure is not a routing decision, so no classification rides with it.
+      expect(
+        'classification' in
+          (events.find((e) => e.type === 'workforce.task.turn_ended')?.data ?? {}),
+      ).toBe(false);
+    });
+
+    it('is receipt-idempotent — a re-executed turn body fails the task exactly once', async () => {
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE }, 0.1);
+      const replay = await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE }, 0.1);
+      expect(replay.alreadyApplied).toBe(true);
+      const counts = await db.$client.unsafe(
+        `SELECT
+           (SELECT count(*)::int FROM workforce_task_transitions WHERE task_id = '${root.taskId}') AS transitions,
+           (SELECT count(*)::int FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.failed') AS failed_events,
+           (SELECT cost_usd FROM workforce_tasks WHERE task_id = '${root.taskId}') AS cost;`,
+      );
+      expect(counts[0]).toMatchObject({ transitions: 3, failed_events: 1 });
+      expect(Number(counts[0]?.cost)).toBe(0.1);
+    });
+
+    it('a task that already reached terminal cannot be failed again — refused, nothing written', async () => {
+      // The only status a turn can be applied from is `working` (the claim stamps it), and every
+      // NON-terminal status carries a legal `-> failed` edge in ALLOWED_TRANSITIONS. So the one
+      // illegal shape this ending can take is a task that is already terminal, and the refusal is
+      // the claim check rather than the transition table.
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, { kind: 'complete', result: RESULT });
+      await expect(turn(root.taskId, 2, { kind: 'fail', message: MESSAGE })).rejects.toBeInstanceOf(
+        TurnStateError,
+      );
+      const row = await db.$client.unsafe(
+        `SELECT status, result->>'summary' AS summary,
+                (SELECT count(*)::int FROM workforce_task_transitions WHERE task_id = '${root.taskId}') AS transitions
+           FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(row[0]).toMatchObject({ status: 'completed', summary: 'Done.', transitions: 3 });
+    });
+
+    it('a cancel signal racing the same turn boundary wins — the task cancels, it does not fail', async () => {
+      const root = await driveToWorking(await newRoot());
+      await deliverSignal(tdb(), {
+        taskId: root.taskId,
+        kind: 'cancel',
+        signalKey: `cancel:${root.taskId}`,
+        payload: {},
+        actor: 'user',
+      });
+      const out = await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE });
+      // The planner's cancel override is unconditional and applies to THIS ending like any other:
+      // the turn ran to its natural end, but its outcome is the cancellation.
+      expect(out.plan).toEqual({ kind: 'cancelled' });
+      const row = await db.$client.unsafe(
+        `SELECT status, status_reason, result FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(row[0]).toMatchObject({
+        status: 'cancelled',
+        status_reason: 'cancelled_by_user',
+        // The failure message is NOT written: the fail branch never ran.
+        result: null,
+      });
+    });
+
+    it('a failing child settles its delegation and wakes the parent — a failure is not a parent failure', async () => {
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, {
+        kind: 'fan_out',
+        children: [
+          { title: 'A', goal: 'Do A.', owner: 'worker-1' },
+          { title: 'B', goal: 'Do B.', owner: 'worker-2' },
+        ],
+      });
+      const children = (await db.$client.unsafe(
+        `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY task_id;`,
+      )) as unknown as { task_id: string }[];
+      expect(children).toHaveLength(2);
+      const [first, second] = children as [{ task_id: string }, { task_id: string }];
+
+      await driveChildToWorking(first.task_id, 1);
+      await turn(first.task_id, 1, { kind: 'complete', result: RESULT });
+      // The parent is still parked — the join is on ALL of its bound children.
+      expect(
+        (
+          await db.$client.unsafe(
+            `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+          )
+        )[0]?.status,
+      ).toBe('blocked');
+
+      await driveChildToWorking(second.task_id, 1);
+      await turn(second.task_id, 1, { kind: 'fail', message: MESSAGE });
+
+      // The join counts TERMINAL children, `failed` included, so the parent wakes and decides for
+      // itself what a failed child means. A child failure never fails its parent by machinery —
+      // `dependency_failed` is a DECLARED-dependency mechanism (task-scheduler.ts) and no child can
+      // carry a dependency, so it cannot fire here.
+      const parent = await db.$client.unsafe(
+        `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(parent[0]).toMatchObject({ status: 'queued' });
+      expect(parent[0]?.status_reason).not.toBe('dependency_failed');
+      expect(
+        (
+          await db.$client.unsafe(
+            `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.dependency_failed';`,
+          )
+        )[0]?.c,
+      ).toBe(0);
+
+      // The opening delegation record settles on the child's real outcome, not on a hopeful one.
+      const settled = (await db.$client.unsafe(
+        `SELECT child_task_id, status FROM workforce_delegations WHERE parent_task_id = '${root.taskId}' ORDER BY child_task_id;`,
+      )) as unknown as { child_task_id: string; status: string }[];
+      expect(settled.map((r) => r.status).sort()).toEqual(['completed', 'failed']);
+
+      // And the parent's next turn can READ why: the child's stored result carries the message.
+      const childRow = await db.$client.unsafe(
+        `SELECT status, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${second.task_id}';`,
+      );
+      expect(childRow[0]).toMatchObject({ status: 'failed', summary: MESSAGE });
+    });
+
+    it('a REVIEWER that fails releases the reviewed task instead of stranding it forever', async () => {
+      // The sharp case: `waiting_for_review` appears in no wake set and no sweep covers it, so its
+      // only exit besides the verdict is `releaseAbandonedReview`, which runs from
+      // `afterTaskTerminal` — the call the fail branch makes. A reviewer that could honestly not
+      // review would otherwise park its subject permanently.
+      const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+      await completeUnderPolicy(root.taskId, 1);
+      const reviewer = await reviewerChildOf(root.taskId);
+      await driveChildToWorking(reviewer.task_id, 1);
+      const out = await turn(reviewer.task_id, 1, {
+        kind: 'fail',
+        message: 'The work under review is not in a language I can read.',
+      });
+      expect(out.task?.status).toBe('failed');
+
+      const released = await db.$client.unsafe(
+        `SELECT status, status_reason, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(released[0]).toMatchObject({
+        status: 'waiting_for_user',
+        status_reason: null,
+        // The reviewed work survives — the human sees what the reviewer never judged.
+        summary: 'Done.',
+      });
+      const abandoned = (await db.$client.unsafe(
+        `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.abandoned';`,
+      )) as unknown as { data: { reviewTaskStatus: string; outcome: string } }[];
+      expect(abandoned).toHaveLength(1);
+      expect(abandoned[0]?.data).toMatchObject({
+        reviewTaskStatus: 'failed',
+        outcome: 'waiting_for_user',
+      });
+      // No verdict is fabricated for a review nobody gave.
+      const review = await db.$client.unsafe(
+        `SELECT verdict FROM workforce_reviews WHERE task_id = '${root.taskId}';`,
+      );
+      expect(review[0]).toMatchObject({ verdict: null });
+    });
+  });
+
   it('fan-out opens the children, records the delegations, parks the parent — idempotently', async () => {
     const root = await driveToWorking(await newRoot());
     const intent = {

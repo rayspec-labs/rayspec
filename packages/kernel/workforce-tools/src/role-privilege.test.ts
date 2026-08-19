@@ -42,6 +42,7 @@ describe('the exact toolset per role', () => {
         'request_review',
         'request_approval',
         'submit_result',
+        'report_failure',
         'cancel_task',
         'get_workforce_state',
         'get_task',
@@ -60,6 +61,7 @@ describe('the exact toolset per role', () => {
         'request_review',
         'request_approval',
         'submit_result',
+        'report_failure',
         'escalate',
         'list_department_tasks',
         'send_message',
@@ -73,6 +75,7 @@ describe('the exact toolset per role', () => {
       [
         'get_task',
         'submit_result',
+        'report_failure',
         'request_clarification',
         'request_review',
         'escalate',
@@ -86,6 +89,7 @@ describe('the exact toolset per role', () => {
       [
         'get_task',
         'submit_result',
+        'report_failure',
         'request_clarification',
         'request_review',
         'escalate',
@@ -93,6 +97,46 @@ describe('the exact toolset per role', () => {
         'submit_review',
       ].sort(),
     );
+  });
+});
+
+describe('a description never advertises what the seat cannot reach', () => {
+  it('no tool description names a native tool that role does not carry', () => {
+    // The `delegate_task` rule, generalized into a guard. Its docblock records the cost of the
+    // instance: the manager arm advertised `department:<id>`, which a lint-clean document makes
+    // unreachable from a manager, and discovering the refusal cost a turn. A description is
+    // model-facing text about what to do next, so naming an ending the caller cannot call is the
+    // same defect wearing a different tool's name. The `report_failure` description is the reason
+    // this guard exists now: it contrasts itself with `escalate`, which the orchestrator lacks.
+    const allNames = [...new Set(EMPLOYEE_ROLES.flatMap((r) => TOOLSETS_BY_ROLE[r]))];
+    for (const role of EMPLOYEE_ROLES) {
+      const employee = {
+        ...(fixtureConfig().employees.get('dev') as WorkforceEmployeeConfig),
+        role,
+      };
+      const task = fixtureTask({ owner: employee.id });
+      const tools = buildRoleToolset({
+        employee,
+        config: fixtureConfig(),
+        task,
+        snapshot: emptySnapshot(task),
+        collector: new TurnCollector({
+          tenantId: task.tenantId,
+          taskId: task.taskId,
+          turnNumber: 1,
+        }),
+      });
+      const carried = new Set(tools.map((t) => t.spec.name));
+      for (const tool of tools) {
+        const named = allNames.filter(
+          (n) => n !== tool.spec.name && new RegExp(`\\b${n}\\b`).test(tool.spec.description ?? ''),
+        );
+        expect(
+          named.filter((n) => !carried.has(n)),
+          `${role}/${tool.spec.name} points at a tool this seat cannot call`,
+        ).toEqual([]);
+      }
+    }
   });
 });
 

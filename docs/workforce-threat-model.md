@@ -153,11 +153,11 @@ seat's prompt.
 **Chokepoints.**
 
 - Recipient must be `user` or a **declared** employee:
-  `packages/kernel/workforce-tools/src/toolset.ts:705`.
+  `packages/kernel/workforce-tools/src/toolset.ts:772`.
 - Body length capped at `MAX_MESSAGE_BODY_CHARS`:
-  `packages/kernel/workforce-tools/src/toolset.ts:153`.
+  `packages/kernel/workforce-tools/src/toolset.ts:169`.
 - At most `MAX_MESSAGES_PER_TURN` buffered per turn
-  (`packages/kernel/workforce-tools/src/toolset.ts:699`), and the engine caps the same channel
+  (`packages/kernel/workforce-tools/src/toolset.ts:766`), and the engine caps the same channel
   independently at `packages/kernel/tasks/src/intent-applier.ts:40`.
 - At render, the body passes the neutralizer:
   `packages/kernel/workforce-tools/src/context.ts:618`.
@@ -228,14 +228,14 @@ fields; the keyed block drops highest-task-id-first with an explicit marker
 1. **Ajv at the dispatch chokepoint.** `dispatchTool` runs its validate-in only when the tool
    carries `inputSchema` (`packages/kernel/platform/src/dispatch.ts:318`). Every native tool gets
    one **structurally**, bound at the single return of the toolset builder
-   (`packages/kernel/workforce-tools/src/toolset.ts:856`) — so a tool added to the table above it
+   (`packages/kernel/workforce-tools/src/toolset.ts:923`) — so a tool added to the table above it
    cannot miss the pass, and the schema the model is *shown* is by construction the schema its
    arguments are checked against.
 2. **A per-tool zod `strictObject`**, through `parseEnding`
-   (`packages/kernel/workforce-tools/src/toolset.ts:168`), which **records the refusal**
-   (`packages/kernel/workforce-tools/src/toolset.ts:171`) before it throws.
+   (`packages/kernel/workforce-tools/src/toolset.ts:184`), which **records the refusal**
+   (`packages/kernel/workforce-tools/src/toolset.ts:187`) before it throws.
 3. **The engine's own discriminated union** over the resulting intent
-   (`packages/kernel/tasks/src/intent-applier.ts:116`).
+   (`packages/kernel/tasks/src/intent-applier.ts:134`).
 
 **What the engine receives on a refusal is a typed sentinel, never the model's arguments**
 (`packages/kernel/workforce-tools/src/collector.ts:35`, selected at
@@ -263,16 +263,16 @@ scheduler and asserting on rows and journal events, not on the toolset's return 
 **Trust: U0 for a model verdict, U1 for an HTTP verdict.**
 
 **The model side never chooses which review it decides.** `submit_review` takes the review id from
-the pre-built snapshot (`packages/kernel/workforce-tools/src/toolset.ts:619`, used at
-`packages/kernel/workforce-tools/src/toolset.ts:631`), and the snapshot only offers one when the
+the pre-built snapshot (`packages/kernel/workforce-tools/src/toolset.ts:686`, used at
+`packages/kernel/workforce-tools/src/toolset.ts:698`), and the snapshot only offers one when the
 parent's park binding names **this** task as the dispatched review task
 (`packages/kernel/workforce-tools/src/snapshot.ts:195`) **and** the row is undecided **and** its
 recorded reviewer is this employee (`packages/kernel/workforce-tools/src/snapshot.ts:206`).
 
 **Who may be *asked* for a review is also bounded**: the allowed set is the declared policies
 covering the caller, their own superior holding a decision role, or `user`
-(`packages/kernel/workforce-tools/src/toolset.ts:442`), and the caller is removed from it
-(`packages/kernel/workforce-tools/src/toolset.ts:449`).
+(`packages/kernel/workforce-tools/src/toolset.ts:458`), and the caller is removed from it
+(`packages/kernel/workforce-tools/src/toolset.ts:465`).
 
 **The HTTP side** parses a strict body (`packages/kernel/tasks/src/reviews.ts:145`), enforces the
 recorded reviewer (`packages/kernel/tasks/src/reviews.ts:196`, refusal at
@@ -305,10 +305,10 @@ be satisfied at all; see §7.2.
 accountability trail is the asset.
 
 **The request side cannot choose its approver.** `request_approval` hardcodes
-`approver: 'user'` (`packages/kernel/workforce-tools/src/toolset.ts:533`); the window and the
+`approver: 'user'` (`packages/kernel/workforce-tools/src/toolset.ts:549`); the window and the
 timeout fate come from the declared rule; and an escalating rule on a seat with no superior is
 refused up front rather than sent to the planner
-(`packages/kernel/workforce-tools/src/toolset.ts:511`).
+(`packages/kernel/workforce-tools/src/toolset.ts:527`).
 
 **The only writer of a *named* approver is the timeout sweep**, which re-issues an escalating
 request to the requester's declared superior
@@ -480,11 +480,11 @@ against the deployed declaration, and re-checked by the kernel:
 |---|---|---|
 | delegation target (employee) | `packages/kernel/workforce-tools/src/resolve-target.ts:64` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `resolves employee:, department: (manager) and team: (lead) to their owners` |
 | delegation target, manager scope | `packages/kernel/workforce-tools/src/resolve-target.ts:109`, own-department members at `packages/kernel/workforce-tools/src/resolve-target.ts:126`; `team:` refused outright at `packages/kernel/workforce-tools/src/resolve-target.ts:116` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `a manager reaches own department members and led-team members — nothing else`, and `the led-team grant exists exactly where the task IS that team's work` |
-| escalation target | `packages/kernel/workforce-tools/src/toolset.ts:586` — the reporting edge, never arguments | `packages/app/server/src/workforce-turn-validation.db.test.ts`, `a forged escalateTo cannot ride in through the tool arguments` |
-| reviewer | `packages/kernel/workforce-tools/src/toolset.ts:442` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `request_review refuses a reviewer outside the caller scope — no org-wide routing` |
+| escalation target | `packages/kernel/workforce-tools/src/toolset.ts:602` — the reporting edge, never arguments | `packages/app/server/src/workforce-turn-validation.db.test.ts`, `a forged escalateTo cannot ride in through the tool arguments` |
+| reviewer | `packages/kernel/workforce-tools/src/toolset.ts:458` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `request_review refuses a reviewer outside the caller scope — no org-wide routing` |
 | review id | `packages/kernel/workforce-tools/src/snapshot.ts:206` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `submit_review takes its reviewId from the SNAPSHOT` |
-| message recipient | `packages/kernel/workforce-tools/src/toolset.ts:705` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
-| approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:533`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
+| message recipient | `packages/kernel/workforce-tools/src/toolset.ts:772` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
+| approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:549`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
 | tenant | server-derived (`packages/compose/api-auth/src/http/middleware.ts:150`) | `packages/app/server/src/workforce-goal-intake.db.test.ts`, `reconciles tenant and workforce BEFORE the strategy runs` |
 | `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:1246`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:259`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
 
@@ -516,7 +516,7 @@ Two changes since the earlier inventory matter here:
 (`packages/kernel/spec/src/workforce-lint.ts:236`) and again at dispatch composition
 (`packages/kernel/workforce-tools/src/toolset.ts:75`, called at
 `packages/app/server/src/workforce-turn-handlers.ts:157`), both through one shared predicate that
-normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:80`, over the set at
+normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:81`, over the set at
 `packages/kernel/core/src/workforce-ids.ts:42`). See §6.4 for what happens *behind* those doors.
 
 **A declared agent tool with `idempotent: false` is refused on workforce turns**
@@ -1032,19 +1032,19 @@ packages/kernel/workforce-tools/src/context.ts:657 | omitted: hit ceiling
 packages/kernel/workforce-tools/src/context.ts:679 | sanitizeConfig(input.employee.id)
 packages/kernel/workforce-tools/src/context.ts:712 | throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
 packages/kernel/workforce-tools/src/toolset.ts:75 | export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): void {
-packages/kernel/workforce-tools/src/toolset.ts:153 | body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
-packages/kernel/workforce-tools/src/toolset.ts:168 | const parseEnding = <T>(schema: z.ZodType<T>, args: unknown): T => {
-packages/kernel/workforce-tools/src/toolset.ts:171 | collector.recordMalformed(args, parsed.error.message);
-packages/kernel/workforce-tools/src/toolset.ts:442 | const allowed = new Set<string>([
-packages/kernel/workforce-tools/src/toolset.ts:449 | allowed.delete(employee.id);
-packages/kernel/workforce-tools/src/toolset.ts:511 | if (onTimeout === 'escalate' && employee.reportsTo === null) {
-packages/kernel/workforce-tools/src/toolset.ts:533 | approver: 'user',
-packages/kernel/workforce-tools/src/toolset.ts:586 | const superior = employee.reportsTo;
-packages/kernel/workforce-tools/src/toolset.ts:619 | const pending = snapshot.pendingReview;
-packages/kernel/workforce-tools/src/toolset.ts:631 | reviewId: pending.reviewId,
-packages/kernel/workforce-tools/src/toolset.ts:699 | if (collector.messageCount >= MAX_MESSAGES_PER_TURN) {
-packages/kernel/workforce-tools/src/toolset.ts:705 | if (recipient !== 'user' && !config.employees.has(recipient)) {
-packages/kernel/workforce-tools/src/toolset.ts:856 | inputSchema: handlers[name].spec.parameters
+packages/kernel/workforce-tools/src/toolset.ts:169 | body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+packages/kernel/workforce-tools/src/toolset.ts:184 | const parseEnding = <T>(schema: z.ZodType<T>, args: unknown): T => {
+packages/kernel/workforce-tools/src/toolset.ts:187 | collector.recordMalformed(args, parsed.error.message);
+packages/kernel/workforce-tools/src/toolset.ts:458 | const allowed = new Set<string>([
+packages/kernel/workforce-tools/src/toolset.ts:465 | allowed.delete(employee.id);
+packages/kernel/workforce-tools/src/toolset.ts:527 | if (onTimeout === 'escalate' && employee.reportsTo === null) {
+packages/kernel/workforce-tools/src/toolset.ts:549 | approver: 'user',
+packages/kernel/workforce-tools/src/toolset.ts:602 | const superior = employee.reportsTo;
+packages/kernel/workforce-tools/src/toolset.ts:686 | const pending = snapshot.pendingReview;
+packages/kernel/workforce-tools/src/toolset.ts:698 | reviewId: pending.reviewId,
+packages/kernel/workforce-tools/src/toolset.ts:766 | if (collector.messageCount >= MAX_MESSAGES_PER_TURN) {
+packages/kernel/workforce-tools/src/toolset.ts:772 | if (recipient !== 'user' && !config.employees.has(recipient)) {
+packages/kernel/workforce-tools/src/toolset.ts:923 | inputSchema: handlers[name].spec.parameters
 packages/kernel/workforce-tools/src/memory.ts:36 | export const RECALL_SCAN_LIMIT = 200;
 packages/kernel/workforce-tools/src/memory.ts:37 | export const RECALL_MAX_AGE_MS = 30 * 24 * 3_600_000;
 packages/kernel/workforce-tools/src/memory.ts:38 | export const RECALL_HIT_TEXT_MAX_CHARS = 300;
@@ -1085,7 +1085,7 @@ packages/kernel/tasks/src/signals.ts:160 | const WAKES: Readonly<Record<SignalKi
 packages/kernel/tasks/src/signals.ts:192 | const BUDGET_ESCALATION_PARKS: readonly Park[] = Object.freeze([
 packages/kernel/tasks/src/signals.ts:218 | function answersPark(kind: SignalKind, status: string, statusReason: string | null): boolean {
 packages/kernel/tasks/src/intent-applier.ts:40 | export const MAX_MESSAGES_PER_TURN = 20;
-packages/kernel/tasks/src/intent-applier.ts:116 | export const turnIntentSchema = z.discriminatedUnion('kind', [
+packages/kernel/tasks/src/intent-applier.ts:134 | export const turnIntentSchema = z.discriminatedUnion('kind', [
 packages/kernel/tasks/src/create-task.ts:106 | export const childTaskSpecSchema = z.strictObject({
 packages/kernel/tasks/src/create-task.ts:259 | requestedBy: parent.owner,
 packages/kernel/tasks/src/budget.ts:551 | export class LedgerCostPolicy implements CostPolicy {
@@ -1143,7 +1143,7 @@ packages/kernel/db/src/tenant-db.ts:208 | const tenantPredicate = eq(tenantColum
 packages/kernel/db/src/schema.ts:68 | id: uuid('id').defaultRandom().primaryKey(),
 packages/kernel/db/src/schema.ts:1151 | export const CORE_TENANT_SCOPED_TABLES = [
 packages/kernel/core/src/workforce-ids.ts:42 | export const RESERVED_WORKFORCE_TOOL_NAMES: ReadonlySet<string> = new Set([
-packages/kernel/core/src/workforce-ids.ts:80 | export function isReservedWorkforceToolSpelling(name: string): boolean {
+packages/kernel/core/src/workforce-ids.ts:81 | export function isReservedWorkforceToolSpelling(name: string): boolean {
 packages/kernel/core/src/worker-selector.ts:53 | export interface WorkerSelector {
 packages/kernel/core/src/cost-policy.ts:53 | export interface CostPolicy {
 packages/kernel/core/src/approval-provider.ts:45 | export interface ApprovalProvider {

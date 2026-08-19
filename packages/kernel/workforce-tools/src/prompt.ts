@@ -65,6 +65,9 @@ export const ROLE_GUIDANCE: Readonly<Record<EmployeeRole, string>> = Object.free
     '- request_review — demand an independent look at a result that exists.',
     '- request_approval — hand a human the decision when an action needs sign-off, or when you',
     '  cannot responsibly proceed.',
+    '- report_failure — record that this goal cannot be met and end it FAILED. You report to no',
+    '  one, so this is your honest ending when no delegation, review or human decision can move',
+    '  it; never dress a failure up as a submitted result.',
     'The review and approval rules in force above are enforced by the runtime no matter what your',
     'turn submits — treat them as facts, not suggestions.',
   ].join('\n'),
@@ -78,6 +81,8 @@ export const ROLE_GUIDANCE: Readonly<Record<EmployeeRole, string>> = Object.free
     "- request_review — route a member's result to the declared reviewer.",
     '- request_approval — hand a human a decision that needs sign-off.',
     '- escalate — hand the task back up when it is outside your scope, context or capabilities.',
+    '- report_failure — record that this task cannot be done at all and end it FAILED. Escalate',
+    '  instead whenever someone above you might still move it; this one ends the work.',
     'The review and approval rules in force above are enforced by the runtime no matter what your',
     'turn submits — treat them as facts, not suggestions.',
   ].join('\n'),
@@ -89,19 +94,31 @@ export const ROLE_GUIDANCE: Readonly<Record<EmployeeRole, string>> = Object.free
     '  the reply.',
     '- request_review — ask for an independent look before you commit to a result.',
     '- escalate — hand the task up when it is outside your scope, context or capabilities.',
+    '- report_failure — say plainly that the work could not be done, and end the task FAILED.',
+    '  Never submit a result that describes a failure: a submitted result COMPLETES the task, so',
+    '  a failure reported that way is recorded as a success. Escalate if your superior might',
+    '  still unblock you; report_failure when the work is over. Partial work is submit_result',
+    "  with status 'partial'.",
   ].join('\n'),
   reviewer: [
     'You review the work of other employees. When this task exists to decide a review (the',
     'pending review and the work under review are in your read tools), end the turn with',
     'submit_review: an accept or reject verdict with concrete reasons and, on reject, the',
     'required changes a rework can act on. On any other task you contribute like anyone else',
-    '(submit_result, request_clarification, request_review, escalate).',
+    '(submit_result, report_failure, request_clarification, request_review, escalate) — and a',
+    'failure is reported with report_failure, never as a submitted result.',
   ].join('\n'),
 });
 
-/** The closing line, byte-identical to what the composition rendered before the sectioned
- * assembly existed — the one-turn-ending-tool rule, stated last so it is the freshest fact. */
+/**
+ * The closing line — the one-turn-ending-tool rule, stated last so it is the freshest fact.
+ *
+ * The list must name EVERY member of `TURN_ENDING_TOOLS`, and that is now a test rather than a
+ * comment (`prompt-drift.test.ts`): this string was hand-maintained beside a table it is supposed
+ * to mirror, so a tool added to the table left the reminder quietly stale — a seat told about eight
+ * endings when nine exist reaches for the eight it was told about.
+ */
 export const TURN_ENDING_REMINDER =
-  'End your turn with exactly ONE turn-ending tool call (submit_result, delegate_task, ' +
-  'request_review, request_approval, request_clarification, escalate, submit_review or ' +
-  'cancel_task — whichever your toolset offers).';
+  'End your turn with exactly ONE turn-ending tool call (submit_result, report_failure, ' +
+  'delegate_task, request_review, request_approval, request_clarification, escalate, ' +
+  'submit_review or cancel_task — whichever your toolset offers).';

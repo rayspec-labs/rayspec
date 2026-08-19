@@ -49,6 +49,7 @@ export const RESERVED_WORKFORCE_TOOL_NAMES: ReadonlySet<string> = new Set([
   'get_workforce_state',
   'list_department_tasks',
   'list_open_tasks',
+  'report_failure',
   'request_approval',
   'request_clarification',
   'request_review',
