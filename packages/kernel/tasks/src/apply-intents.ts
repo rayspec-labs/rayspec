@@ -1184,18 +1184,27 @@ export async function applyTurnOutcome(
           // only record of WHY would be gone. Until this write existed, `plan.message` was
           // constructed and then referenced by nothing — a failed task carried no reason, no result
           // and no journal text, which is a worse operator surface than the mislabelled
-          // `completed` it replaces.
+          // `completed` it replaces. (The ordering is not a standing hazard: moving this write
+          // below the transition reddens the `resultSummary` assertion in engine.db.test.ts.)
           //
-          // The stored `status` is written BY THE ENGINE from the typed intent it is applying, not
-          // read from a model's claim — it agrees with the row's real status by construction. Same
-          // shape a `complete` stores, so every reader of `result` (the parent's `childResults`
-          // merge, the read tools, the API) sees one contract and no one needs a second branch.
-          // `confidence` is deliberately left NULL: a failure has no confidence to report, and
-          // inventing one would feed the review-policy predicates a number nobody stated.
+          // THE SUMMARY AND NOTHING ELSE. A first cut also stored `status: 'failed'` here and the
+          // state-machine gate refused the file — correctly, and not merely as a regex accident:
+          //   - `result` is the column `workerResultSchema` governs, and that schema's status enum
+          //     is `['completed','partial']` — so a stored `status: 'failed'` was a value the
+          //     column's own contract rejects, and nothing would have caught it, because NOTHING
+          //     re-parses a stored result through that schema (its only non-test use is the intent
+          //     path in @rayspec/workforce-tools);
+          //   - it was a SECOND copy of a fact the status column already owns. `mergeChildResults`
+          //     (join.ts) hands a waiting parent `status: child.status` straight off the row, so the
+          //     parent already reads `failed` from the authority. Two copies can disagree; one
+          //     cannot.
+          // Every reader of this column duck-types `'summary' in result` and takes it when it is a
+          // string (apply-transition.ts, workforce-tools context.ts + memory.ts), so a summary-only
+          // payload satisfies all of them. `confidence` is deliberately absent: a failure has none
+          // to report, and inventing one would feed the review-policy predicates a number nobody
+          // stated.
           await tx
-            .update(schema.workforceTasks, {
-              result: { status: 'failed', summary: plan.message },
-            })
+            .update(schema.workforceTasks, { result: { summary: plan.message } })
             .where(eq(schema.workforceTasks.taskId, task.taskId));
           finalTask = await applyTransition(tx, {
             taskId: task.taskId,

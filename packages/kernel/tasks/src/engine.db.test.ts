@@ -172,13 +172,12 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       // nothing, so a failed task carried no reason, no result and no journal text — a worse
       // operator surface than the mislabelled `completed` it replaces.
       const row = (await db.$client.unsafe(
-        `SELECT status, status_reason, result->>'summary' AS summary, result->>'status' AS result_status, confidence
+        `SELECT status, status_reason, result, confidence
            FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
       )) as unknown as {
         status: string;
         status_reason: string | null;
-        summary: string;
-        result_status: string;
+        result: unknown;
         confidence: string | null;
       }[];
       expect(row[0]).toMatchObject({
@@ -187,9 +186,12 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         // `dependency_failed` and `quarantined` each name a DIFFERENT cause. The reason column
         // stays null and the message carries the why.
         status_reason: null,
-        summary: MESSAGE,
-        result_status: 'failed',
       });
+      // THE SUMMARY AND NOTHING ELSE, asserted as an EXACT object rather than a field probe — the
+      // point is what is absent. A `status` key here would be a second copy of a fact the status
+      // column owns (and a value `workerResultSchema` no longer admits); the state-machine gate
+      // refuses that shape in this file, and it is right to.
+      expect(row[0]?.result).toEqual({ summary: MESSAGE });
       // A failure has no confidence to report, and inventing one would feed the review-policy
       // predicates a number nobody stated.
       expect(row[0]?.confidence).toBeNull();

@@ -241,7 +241,10 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     expect(applied.plan).toEqual({ kind: 'fail', message });
     const row = await rowOf(task.taskId);
     expect(row).toMatchObject({ status: 'failed', status_reason: null });
-    expect(row.result).toEqual({ status: 'failed', summary: message });
+    // THE SUMMARY AND NOTHING ELSE. No `status` key rides in the result payload: the status column
+    // owns that fact, `workerResultSchema` (which governs this column) no longer admits `failed`
+    // anyway, and a second copy is a second thing that can disagree.
+    expect(row.result).toEqual({ summary: message });
     // The turn journals as a failure and carries no classification: giving up is not a routing
     // decision, and `dev` is not a decision seat in the first place.
     expect(await turnEndedPayload(task.taskId)).toMatchObject({ outcome: 'fail' });
@@ -260,8 +263,8 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     // Kept deliberately as a live demonstration rather than as prose. `submit_result` transitions
     // to `completed` as a LITERAL, so honest failure prose in a result payload is recorded as
     // success — which is exactly what `report_failure` above exists to give the seat instead. If
-    // this arm ever changes outcome, the engine started reading `result.status`, and that is the
-    // §4.1 violation the narrowing was chosen to avoid.
+    // this arm ever changes outcome, the engine started reading `result.status` — which is model
+    // prose deciding a task's status, the exact thing the narrowing was chosen to avoid.
     const task = await workingTaskFor('dev');
     const { applied } = await runTurn(task, [
       {
