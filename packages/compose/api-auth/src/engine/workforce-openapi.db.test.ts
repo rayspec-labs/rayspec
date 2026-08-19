@@ -22,24 +22,41 @@
  * router scan must find at least the 16 routes that exist today, or the arm fails before it ever
  * reaches the comparison.
  *
- * WHAT THIS SUITE DOES NOT ENFORCE — stated, not implied away. The loop above closes on PATHS and
- * METHODS. It does NOT close on response body shape: the row schemas and every request body are
- * DERIVED (from the drizzle table columns and from the very Zod schemas the handlers parse, so
- * those cannot drift), but the bespoke response envelopes — `status`, the three `cost` shapes,
- * `pause`/`resume`, `signal`, `halt`/`cancel`, `verdict`, `goals` — are hand-written, and nothing
- * here compares them to the handler's own `c.json(...)` literal. Status codes are SPOT-CHECKED:
- * SEVEN are OBSERVED against the running server (401; the fail-closed 501; a 400 on an
- * off-vocabulary status filter; a 400 on the goals `Idempotency-Key` refusal; a 404 on an unknown
- * task id; a 404 on a tenantless credential; and a 429 from the SHIPPED goal-submit quota) and
- * asserted to be documented. The rest are hand-derived from `mapEngineError` by reading, so a
- * newly-added `mapEngineError` branch does not go red here.
+ * THE SECOND LOOP: THE RESPONSE BODIES. The path/method loop pins WHICH routes exist and says
+ * nothing about what they RETURN, and the success envelopes are hand-written — so a handler that
+ * added, removed or renamed a field would leave the published contract silently wrong. That is not
+ * an abstract risk: it was reported live by another branch adding two fields to the `status`
+ * response, and this document is about to be handed to a workforce that will generate a UI FROM IT,
+ * so a wrong document becomes wrong code.
  *
- * TWO OF THOSE ARMS EXIST BECAUSE THE FIRST DRAFT OF THE DOCUMENT WAS WRONG, and every structural
- * arm stayed green through both errors — which is exactly what the paragraph above predicts. The
- * draft claimed a `Retry-After` header on the goals 429 (this route sends none; the hint is
+ * `LIVE ENVELOPES` closes it BEHAVIOURALLY. It drives eleven reachable 2xx responses against the
+ * booted server with real seeded engine state, takes each response's OWN top-level key set, and
+ * asserts SET EQUALITY against the documented schema's `required` list — so a field the handler
+ * returns and the document omits is RED, and so is a field the document lists and the handler
+ * omits. `LIVE ROW SHAPES` does the same for the three list routes and the single-row read, against
+ * non-empty seeded pages, so the table-derived row schemas are checked against what
+ * `c.json(rows)` actually serializes rather than only against the columns.
+ *
+ * WHAT REMAINS UNCHECKED — stated, not implied away:
+ *
+ *   1. NESTED shapes. Both live arms compare TOP-LEVEL keys only. A change inside
+ *      `status.budget`, `tree.budgets`, a `cost` group, or a `goals` task entry does NOT go red.
+ *   2. TWO envelopes are unreachable without deeper engine state and are transcription-only:
+ *      the review-verdict 200 (`{reviewId, verdict, taskId, taskStatus}`) and the 504 drain-timeout
+ *      body. The approval-decide 200 is the approval ROW, whose shape IS covered by the inbox probe.
+ *   3. STATUS CODES are spot-checked, not derived. SEVEN are OBSERVED against the running server
+ *      (401; the fail-closed 501; a 400 on an off-vocabulary status filter; a 400 on the goals
+ *      `Idempotency-Key` refusal; a 404 on an unknown task id; a 404 on a tenantless credential; a
+ *      429 from the SHIPPED goal-submit quota). The rest are hand-derived from `mapEngineError` by
+ *      reading, so a newly-added `mapEngineError` branch does not go red here.
+ *   4. FIELD TYPES are not compared — only key sets. A field whose type changed stays green.
+ *
+ * TWO ARMS EXIST BECAUSE THE FIRST DRAFT OF THE DOCUMENT WAS WRONG, and every structural arm stayed
+ * green through both errors — which is exactly what item 3 predicts. The draft claimed a
+ * `Retry-After` header on the goals 429 (this route sends none; the hint is
  * `error.details.retryAfterMs`), and it omitted the 404 that `enforcePermission` raises for a
  * tenantless credential on all sixteen routes. Both corrections are now OBSERVED rather than merely
- * reworded. Treat the hand-written half as documentation, not as a contract with a mechanism.
+ * reworded.
  *
  * SERVED, NOT SOURCED. The document under test is fetched with `fetch()` from a REAL
  * `serve({ fetch: app.fetch })` listener on a loopback port — the pattern
@@ -53,9 +70,15 @@ import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
-import { schema } from '@rayspec/db';
+import { forTenant, schema } from '@rayspec/db';
 import { parseSpec, type RaySpec, WORKFORCE_EXPERIMENTAL_SCHEMA_ANNOTATION } from '@rayspec/spec';
-import { OPERATOR_SIGNAL_KINDS, TASK_PRIORITIES, TASK_STATUSES } from '@rayspec/tasks';
+import {
+  createRootTask,
+  ensureWorkforceRuntime,
+  OPERATOR_SIGNAL_KINDS,
+  TASK_PRIORITIES,
+  TASK_STATUSES,
+} from '@rayspec/tasks';
 import { getTableColumns } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
@@ -111,6 +134,11 @@ const agentRegistry: AgentRegistry = new Map<string, AgentRegistryEntry>([
     },
   ],
 ]);
+
+/** The workforce the read probes and the goals probe address (never paused or halted). */
+const PROBE_WORKFORCE = 'envelope-probe';
+/** A SECOND workforce, used only by pause/resume/halt, so a halt cannot affect the reads above. */
+const CONTROL_WORKFORCE = 'control-probe';
 
 /** The extension keyword, taken from the JSON-Schema annotation so there is exactly ONE spelling. */
 const EXPERIMENTAL_KEY = Object.keys(WORKFORCE_EXPERIMENTAL_SCHEMA_ANNOTATION).find((k) =>
@@ -197,6 +225,12 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
   let base: string;
   let doc: Doc;
   let token: string;
+  /** Seeded engine state the live-envelope probes read and mutate. See `ENVELOPE_PROBES`. */
+  let seeded: {
+    readonly treeTaskId: string;
+    readonly cancelTaskId: string;
+    readonly signalTaskId: string;
+  };
 
   beforeAll(async () => {
     const port = await new Promise<number>((r) => {
@@ -215,7 +249,15 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       // Both workforce seams wired: without them every route is a fail-closed 501 and the
       // OBSERVED-status arms could not reach the refusals they cross-check.
       workforce: { kick: () => {} },
-      workforceGoalIntake: { submitGoal: async () => ({ outcome: 'not_found' as const }) },
+      // Returns `created` so the goals route's OWN 202 envelope (`{ workforceId, tasks }`) is
+      // reachable for the live-envelope probe. The seam is a stand-in for the orchestration
+      // strategy, but the envelope under test is assembled by the ROUTE, not by this stub.
+      workforceGoalIntake: {
+        submitGoal: async () => ({
+          outcome: 'created' as const,
+          tasks: [{ taskId: 'probe-task', owner: 'probe-owner', title: 'probe title' }],
+        }),
+      },
     });
     // The seam-LESS posture, for the observed 501. Same routes, no dispatcher.
     hNoSeam = await createHarness({
@@ -245,6 +287,48 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
       headers: { authorization: `Bearer ${t0}` },
     });
     token = (await sw.json()).accessToken as string;
+
+    // ── seed the minimum engine state the LIVE-ENVELOPE probes need ────────────────────────────
+    // Seeded through the ENGINE's own creation surface (`createRootTask`) and the tenant chokepoint,
+    // never by hand-writing a response: the point of those probes is to compare the document against
+    // what the HANDLERS actually serialize, so the rows must be real rows.
+    const tdb = forTenant(h.db, orgId);
+    await ensureWorkforceRuntime(tdb, PROBE_WORKFORCE);
+    await ensureWorkforceRuntime(tdb, CONTROL_WORKFORCE);
+    const root = (title: string) =>
+      createRootTask(tdb, {
+        workforceId: PROBE_WORKFORCE,
+        title,
+        goal: `${title} goal`,
+        owner: 'user',
+        requestedBy: 'user:seed',
+      });
+    // Three separate roots so a MUTATING probe (cancel) cannot change what a READ probe (tree) sees,
+    // whatever order they run in.
+    const [treeTask, cancelTask, signalTask] = await Promise.all([
+      root('tree probe'),
+      root('cancel probe'),
+      root('signal probe'),
+    ]);
+    seeded = {
+      treeTaskId: treeTask.taskId,
+      cancelTaskId: cancelTask.taskId,
+      signalTaskId: signalTask.taskId,
+    };
+    // One approval and one review row so the two inbox routes return a NON-EMPTY page — an empty
+    // array would make their item-shape check vacuous.
+    await tdb.insert(schema.workforceApprovals, {
+      taskId: treeTask.taskId,
+      question: 'Proceed?',
+      approver: 'user',
+      status: 'pending',
+      onTimeout: 'fail',
+    });
+    await tdb.insert(schema.workforceReviews, {
+      taskId: treeTask.taskId,
+      reviewer: 'user',
+      round: 1,
+    });
   });
 
   afterAll(async () => {
@@ -252,6 +336,17 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     await h.close();
     await hNoSeam.close();
   });
+
+  /** One authenticated request at the BOOTED server. `body === undefined` sends no body at all. */
+  async function authed(path: string, method = 'GET', body?: unknown): Promise<Response> {
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+    if (body !== undefined) headers['content-type'] = 'application/json';
+    return fetch(`${base}${path}`, {
+      method,
+      headers,
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+  }
 
   // ── A. served and fetchable ──────────────────────────────────────────────────────────────────
 
@@ -325,6 +420,24 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     expect(tag, 'the served document declares no workforce tag').toBeTruthy();
     expect((tag as Record<string, unknown>)[EXPERIMENTAL_KEY]).toBe(true);
     expect(tag?.description).toMatch(/EXPERIMENTAL/);
+  });
+
+  it('the tag tells a consumer WHICH PARTS of this document are mechanically verified', () => {
+    // A generated client is built by someone with no access to this repository's test suite, so the
+    // only place they can learn how far the document's guarantees reach is the document. Both halves
+    // must be there: what is checked, and — the half that is easy to drop — what is not.
+    const tag = (doc.tags ?? []).find((t) => t.name === WORKFORCE_OPENAPI_TAG);
+    const text = tag?.description ?? '';
+    expect(text, 'the tag does not say what is CHECKED').toMatch(/CHECKED/);
+    expect(text, 'the tag does not say what is NOT checked').toMatch(/NOT CHECKED/);
+    // Name the two loops that exist and the three gaps that remain, so a later edit that removes a
+    // mechanism (or adds one) has to touch this sentence too.
+    for (const phrase of [/paths and\s+methods/i, /TOP-LEVEL field names/i]) {
+      expect(text, `the tag omits a CHECKED mechanism: ${phrase}`).toMatch(phrase);
+    }
+    for (const phrase of [/nested/i, /TYPES/, /status codes/i]) {
+      expect(text, `the tag omits a NOT-CHECKED gap: ${phrase}`).toMatch(phrase);
+    }
   });
 
   it('EVERY workforce operation carries the tag AND its own experimental keyword', () => {
@@ -601,6 +714,199 @@ describeDb('the served OpenAPI document describes /v1/workforce/*', () => {
     const tasksHeaders = (operationAt(doc, 'GET', '/v1/workforce/tasks').responses['200']
       ?.headers ?? {}) as Record<string, { description?: string }>;
     expect(tasksHeaders['X-Result-Truncated']?.description).toMatch(/only when/i);
+  });
+
+  // ── H. THE LIVE-ENVELOPE LOOP — the document's success bodies vs the handlers' real bytes ─────
+
+  it('LIVE ENVELOPES: every reachable 2xx body has EXACTLY the documented top-level keys', async () => {
+    /**
+     * THE HALF OF THE LOOP THAT USED TO BE OPEN.
+     *
+     * The path/method arm above pins WHICH routes exist. It says nothing about what they RETURN, and
+     * the bespoke envelopes are hand-written — so a handler that added, removed or renamed a field
+     * left the published contract silently wrong, and the contract is about to be handed to a
+     * workforce that will generate a UI from it. A wrong document becomes wrong code.
+     *
+     * This arm closes it BEHAVIOURALLY rather than statically: it drives each route against the
+     * BOOTED server with real seeded engine state, takes the response's own top-level key set, and
+     * asserts SET EQUALITY against the documented schema's `required` list. Both directions fail:
+     *
+     *   - a field the handler returns and the document omits  → RED (the document under-describes);
+     *   - a field the document lists and the handler omits    → RED (the document over-promises).
+     *
+     * Every bespoke envelope schema marks all of its properties `required` and sets
+     * `additionalProperties: false`, which is what makes set equality the right comparison rather
+     * than a subset check. NESTED shapes are NOT compared — only the top level (see the residual
+     * note at the end of this file's header).
+     */
+    const probes: {
+      readonly name: string;
+      readonly method: string;
+      readonly path: string;
+      readonly status: string;
+      readonly send: () => Promise<Response>;
+    }[] = [
+      {
+        name: 'status',
+        method: 'GET',
+        path: '/v1/workforce/{workforceId}/status',
+        status: '200',
+        send: () => authed(`/v1/workforce/${PROBE_WORKFORCE}/status`),
+      },
+      {
+        name: 'cost (default, per ledger scope)',
+        method: 'GET',
+        path: '/v1/workforce/cost',
+        status: '200',
+        send: () => authed('/v1/workforce/cost'),
+      },
+      {
+        name: 'cost (by=department)',
+        method: 'GET',
+        path: '/v1/workforce/cost',
+        status: '200',
+        send: () => authed('/v1/workforce/cost?by=department'),
+      },
+      {
+        name: 'cost (by=employee)',
+        method: 'GET',
+        path: '/v1/workforce/cost',
+        status: '200',
+        send: () => authed('/v1/workforce/cost?by=employee'),
+      },
+      {
+        name: 'tree',
+        method: 'GET',
+        path: '/v1/workforce/tasks/{id}/tree',
+        status: '200',
+        send: () => authed(`/v1/workforce/tasks/${seeded.treeTaskId}/tree`),
+      },
+      {
+        name: 'goals',
+        method: 'POST',
+        path: '/v1/workforce/{workforceId}/goals',
+        status: '202',
+        send: () =>
+          authed('/v1/workforce/goal-envelope/goals', 'POST', { goal: 'probe the shape' }),
+      },
+      {
+        name: 'signal',
+        method: 'POST',
+        path: '/v1/workforce/tasks/{id}/signal',
+        status: '202',
+        send: () =>
+          authed(`/v1/workforce/tasks/${seeded.signalTaskId}/signal`, 'POST', {
+            kind: 'manual_unblock',
+          }),
+      },
+      {
+        name: 'cancel',
+        method: 'POST',
+        path: '/v1/workforce/tasks/{id}/cancel',
+        status: '202',
+        send: () => authed(`/v1/workforce/tasks/${seeded.cancelTaskId}/cancel`, 'POST', {}),
+      },
+      // The three control verbs run LAST and on their OWN workforce, in pause → resume → halt order:
+      // a halt drains and cancels, so running it first would change what the reads above observe.
+      {
+        name: 'pause',
+        method: 'POST',
+        path: '/v1/workforce/{workforceId}/pause',
+        status: '200',
+        send: () => authed(`/v1/workforce/${CONTROL_WORKFORCE}/pause`, 'POST', {}),
+      },
+      {
+        name: 'resume',
+        method: 'POST',
+        path: '/v1/workforce/{workforceId}/resume',
+        status: '200',
+        send: () => authed(`/v1/workforce/${CONTROL_WORKFORCE}/resume`, 'POST'),
+      },
+      {
+        name: 'halt',
+        method: 'POST',
+        path: '/v1/workforce/{workforceId}/halt',
+        status: '200',
+        send: () => authed(`/v1/workforce/${CONTROL_WORKFORCE}/halt`, 'POST', { reason: 'probe' }),
+      },
+    ];
+
+    // Non-vacuity: if this list ever shrinks to nothing the arm must fail, not sweep over zero.
+    expect(probes.length, 'no envelope probes').toBeGreaterThanOrEqual(11);
+
+    for (const probe of probes) {
+      const res = await probe.send();
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(res.status, `${probe.name}: ${JSON.stringify(body)}`).toBe(Number(probe.status));
+
+      const op = operationAt(doc, probe.method, probe.path);
+      const schemaNode = op.responses[probe.status]?.content?.['application/json']?.schema as
+        | {
+            required?: string[];
+            oneOf?: { required?: string[]; properties?: Record<string, { const?: unknown }> }[];
+          }
+        | undefined;
+      expect(schemaNode, `${probe.name}: no documented ${probe.status} JSON schema`).toBeTruthy();
+
+      // `cost` documents THREE shapes as a `oneOf`; pick the branch by the discriminating `by`
+      // field the handler actually returned, so each branch is checked against its own response.
+      const documented =
+        schemaNode?.required ??
+        schemaNode?.oneOf?.find((branch) =>
+          body.by === undefined
+            ? branch.properties?.by === undefined
+            : branch.properties?.by?.const === body.by,
+        )?.required;
+      expect(documented, `${probe.name}: no documented required-key list`).toBeTruthy();
+
+      expect(Object.keys(body).sort(), `${probe.name} — ${probe.method} ${probe.path}`).toEqual(
+        [...(documented as string[])].sort(),
+      );
+    }
+  });
+
+  it('LIVE ROW SHAPES: the three list routes return rows with EXACTLY the documented properties', async () => {
+    // The row schemas are DERIVED from the drizzle tables, so they cannot drift from the columns —
+    // but "the columns" and "what `c.json(rows)` serializes" are still two different things (a
+    // projection, a redaction or a `.select({...})` narrowing would break them apart). Each list is
+    // seeded with at least one row, so an empty page cannot make this vacuous.
+    const lists: { name: string; path: string; docPath: string }[] = [
+      { name: 'tasks', path: '/v1/workforce/tasks', docPath: '/v1/workforce/tasks' },
+      { name: 'approvals', path: '/v1/workforce/approvals', docPath: '/v1/workforce/approvals' },
+      { name: 'reviews', path: '/v1/workforce/reviews', docPath: '/v1/workforce/reviews' },
+    ];
+    for (const list of lists) {
+      const res = await authed(list.path);
+      expect(res.status).toBe(200);
+      const rows = (await res.json()) as Record<string, unknown>[];
+      expect(
+        rows.length,
+        `${list.name}: seeded page came back empty — the check would be vacuous`,
+      ).toBeGreaterThan(0);
+      const op = operationAt(doc, 'GET', list.docPath);
+      const items = (
+        op.responses['200']?.content?.['application/json']?.schema as {
+          items?: { properties?: Record<string, unknown> };
+        }
+      )?.items;
+      expect(
+        items?.properties,
+        `${list.name}: documented 200 is not an array of objects`,
+      ).toBeTruthy();
+      expect(Object.keys(rows[0] as object).sort(), `${list.name} row`).toEqual(
+        Object.keys(items?.properties ?? {}).sort(),
+      );
+    }
+    // The single-row read serves the SAME shape as the list, from a different handler.
+    const one = await authed(`/v1/workforce/tasks/${seeded.treeTaskId}`);
+    expect(one.status).toBe(200);
+    const row = (await one.json()) as Record<string, unknown>;
+    const props = (
+      operationAt(doc, 'GET', '/v1/workforce/tasks/{id}').responses['200']?.content?.[
+        'application/json'
+      ]?.schema as { properties?: Record<string, unknown> }
+    )?.properties;
+    expect(Object.keys(row).sort()).toEqual(Object.keys(props ?? {}).sort());
   });
 
   it('the typed 504 drain timeout is documented on BOTH routes that can drain', () => {

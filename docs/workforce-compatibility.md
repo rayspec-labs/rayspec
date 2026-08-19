@@ -126,21 +126,34 @@ journal event vocabulary in `@rayspec/tasks` (`events.ts`), the `/v1/workforce/*
 routes — and the OpenAPI document that describes them, served at `GET /v1/openapi.json` —
 and the `rayspec workforce` CLI group.
 
-**A note on how far that document's guarantees reach.** Its paths and methods are pinned to
-the router in both directions, and its request bodies and task/approval/review row schemas
-are *derived* from the same Zod schemas and database columns the handlers use, so none of
-those can drift. Its bespoke response envelopes (the `status`, `cost`, `pause`, `halt`,
-`signal`, `verdict` and `goals` shapes) and most of its status-code sets are hand-written,
-with seven status codes cross-checked against a running server. Read it as an accurate map
-of *which* routes exist and what they accept; treat the hand-written envelopes as very good
-documentation rather than as a mechanically enforced contract. The suite that draws that
-line names it in its own header.
+**A note on how far that document's guarantees reach.** Two things are pinned in *both*
+directions against the running system, so neither can drift silently:
 
-That distinction is not theoretical. The document's **first draft carried two false
-claims** — a `Retry-After` header on the goals `429` that the route does not send, and a
-missing `404` on the four list routes — and every structural arm stayed green through
-both. They were caught by reading the handlers, and are now observed rather than merely
-reworded. Expect the hand-written half to be able to do it again.
+- **which routes exist** — the documented path/method set is compared against Hono's own
+  route table, so a route added without a document entry, or a document entry whose route
+  was removed, turns the suite red;
+- **what a successful call returns** — eleven 2xx responses are fetched from a booted
+  server with real seeded engine state, and each response's own top-level key set is
+  compared for equality against the documented one. A field a handler starts returning
+  without a document entry is red; so is a field the document promises and the handler
+  does not send. The three list routes and the single-row read are checked the same way
+  against non-empty pages, which catches a narrowed `SELECT` that the column-derived
+  schemas cannot see.
+
+Request bodies and the task/approval/review row schemas are additionally *derived* from
+the same Zod schemas and database columns the handlers use.
+
+**What is still not checked**, and you should read the document accordingly: nested shapes
+(only top-level keys are compared, so a change inside `status.budget`, `tree.budgets`, a
+`cost` group or a `goals` task entry is invisible to the suite); field *types*, as opposed
+to field names; the review-verdict body and the `504` drain-timeout body, which the suite
+cannot reach; and most status codes — seven are observed against a running server, the rest
+are read off the error mapping by hand.
+
+That last line is not theoretical. The document's **first draft carried two false claims** —
+a `Retry-After` header on the goals `429` that the route does not send, and a missing `404`
+on the four list routes — and every structural arm stayed green through both. They were
+caught by reading the handlers, and are now observed rather than merely reworded.
 
 It does **not** speak for the rest of `@rayspec/tasks`' runtime API (`pauseWorkforce`,
 `decideApproval`, the scheduler and its seams). Those symbols are engine internals of the

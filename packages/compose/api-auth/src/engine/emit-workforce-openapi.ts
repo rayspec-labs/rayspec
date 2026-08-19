@@ -37,14 +37,25 @@
  *     - the error body, from the platform's own `ErrorEnvelope` Zod, emitted ONCE into
  *       `components.schemas.Error` and `$ref`ed by every non-2xx response.
  *
- *   HAND-WRITTEN (can drift; nothing here catches it):
+ *   HAND-WRITTEN, BUT CROSS-CHECKED AGAINST REAL RESPONSES:
  *     - the bespoke response envelopes — `status`, the three `cost` shapes, `pause`/`resume`,
- *       `signal`, `halt`/`cancel`, `verdict`, `goals`. These are assembled inline by the handlers
- *       (`c.json({...})`), not from a schema, so there is no object to derive them from;
- *     - the per-operation status-code SETS. Seven are cross-checked against a running server by
- *       `workforce-openapi.db.test.ts`; the rest are read off `mapEngineError`.
- *   `workforce-openapi.db.test.ts` states this split in its own header. Do not let a later edit
- *   quietly upgrade the second list into a claim it has not earned.
+ *       `signal`, `halt`/`cancel`, `goals`. These are assembled inline by the handlers
+ *       (`c.json({...})`), so there is no object to derive them from — but
+ *       `workforce-openapi.db.test.ts`'s `LIVE ENVELOPES` arm drives each one against a BOOTED
+ *       server with real seeded engine state and asserts SET EQUALITY between the response's own
+ *       top-level keys and this file's `required` list. Adding a field to a handler without adding
+ *       it here goes RED, and so does the reverse. `LIVE ROW SHAPES` does the same for the list
+ *       routes, which catches a wire/column divergence (a narrowed `.select`) that the table
+ *       derivation above cannot see.
+ *
+ *   STILL UNCHECKED (say it; do not let a later edit quietly upgrade it):
+ *     - NESTED shapes. Both live arms compare TOP-LEVEL keys only, so a change inside
+ *       `status.budget`, `tree.budgets`, a `cost` group or a `goals` task entry stays green;
+ *     - FIELD TYPES — key sets are compared, not types;
+ *     - the review-verdict 200 and the 504 drain-timeout body, which need engine state the suite
+ *       does not reach. (The approval-decide 200 is the approval ROW, covered by the inbox probe.);
+ *     - the per-operation status-code SETS. Seven are cross-checked against a running server;
+ *       the rest are read off `mapEngineError`.
  *
  *   TWO ERRORS ALREADY SHIPPED INTO THIS FILE'S FIRST DRAFT AND WERE CAUGHT BY READING THE
  *   HANDLERS, not by a red test — a `Retry-After` header on the goals 429 that this route does not
@@ -53,10 +64,13 @@
  *   half behaving exactly as the paragraph above warns; expect the next edit to be able to do it
  *   again, and re-read the handler rather than the neighbouring entry.
  *
- * THE ONE STRUCTURAL GUARANTEE: the path/method set here is compared, BOTH DIRECTIONS, against
- * Hono's own registration table (`app.routes`) by `workforce-openapi.db.test.ts`. A route added to
- * `routes/workforce.ts` without an entry here goes RED, and so does an entry here whose route was
- * removed. That is a real loop, and it is the only one — see the split above.
+ * TWO STRUCTURAL LOOPS, both in `workforce-openapi.db.test.ts`:
+ *   1. the PATH/METHOD set here is compared, BOTH DIRECTIONS, against Hono's own registration table
+ *      (`app.routes`) — a route added to `routes/workforce.ts` without an entry here goes RED, and
+ *      so does an entry here whose route was removed;
+ *   2. the SUCCESS-BODY top-level key set is compared, BOTH DIRECTIONS, against the bytes eleven
+ *      real requests bring back from a booted server.
+ * Neither reaches nested shapes or field types. Read the split above before adding a claim.
  *
  * DELIBERATELY NOT DOCUMENTED: `X-Request-Id`. The platform echoes it broadly, but this module only
  * documents headers whose presence on THIS surface is pinned by a test, and that one is not. An
@@ -120,14 +134,30 @@ type ExperimentalExtensionKey = Extract<
 >;
 const EXPERIMENTAL_EXTENSION_KEY: ExperimentalExtensionKey = 'x-rayspec-experimental';
 
-/** The tag's prose. States the stability claim; it does NOT restate the deployment posture. */
+/**
+ * The tag's prose. States the stability claim; it does NOT restate the deployment posture.
+ *
+ * It also states HOW MUCH OF THIS SECTION IS MECHANICALLY VERIFIED. A generated client is built by
+ * someone who has no access to this repository's test suite, so "which parts of this document are
+ * checked against the running server" is knowledge they can only get from the document itself.
+ * Shipping the verification posture inside the artifact is the difference between a contract and a
+ * claim — and this section's own history says the difference matters: its first draft named a
+ * response header the route does not send.
+ */
 const WORKFORCE_TAG_DESCRIPTION =
   'EXPERIMENTAL — the durable task-engine control surface. These routes are NOT part of the frozen ' +
   'v1.0 API. While the section is experimental its paths, request and response shapes, status codes ' +
   'and behaviour may change in any release, including a patch release, and no deprecation period is ' +
   'promised. Every response from this prefix also carries the ' +
-  `\`${WORKFORCE_EXPERIMENTAL_HEADER}: ${WORKFORCE_EXPERIMENTAL_HEADER_VALUE}\` header. See ` +
-  'docs/workforce-compatibility.md.';
+  `\`${WORKFORCE_EXPERIMENTAL_HEADER}: ${WORKFORCE_EXPERIMENTAL_HEADER_VALUE}\` header.\n\n` +
+  'HOW MUCH OF THIS SECTION IS VERIFIED, so you know what to trust. CHECKED against the running ' +
+  'server, in both directions, by a test that fails if they disagree: (a) the set of paths and ' +
+  'methods, against the router itself; (b) the TOP-LEVEL field names of each successful response, ' +
+  'against real responses from a booted server. Also derived from the code rather than transcribed: ' +
+  'every request body schema, and the task / approval / review row schemas. NOT CHECKED — treat as ' +
+  'documentation rather than as contract: nested object shapes, field TYPES (only names are ' +
+  'compared), and most status codes (seven are observed; the rest are transcribed from the error ' +
+  'mapping). See docs/workforce-compatibility.md.';
 
 /** Every non-2xx body on this surface is the platform's closed error envelope. */
 const ERROR_SCHEMA_REF = { $ref: '#/components/schemas/Error' } as const;
