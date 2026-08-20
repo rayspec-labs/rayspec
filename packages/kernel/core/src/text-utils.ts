@@ -1,9 +1,10 @@
 /**
- * Text utilities — UAX-29 word tokenization + a contiguous token-run subset check.
+ * Text utilities — UAX-29 word tokenization, a contiguous token-run subset check, and the tree's
+ * ONE surrogate-safe truncation guard.
  *
- * Two product-neutral pure functions for any task that needs script-uniform, language-neutral word
- * tokens or a "does this cited text appear verbatim inside that text" predicate (e.g. retrieval,
- * extraction, citation validation).
+ * Product-neutral pure functions for any task that needs script-uniform, language-neutral word
+ * tokens, a "does this cited text appear verbatim inside that text" predicate (e.g. retrieval,
+ * extraction, citation validation), or a length cap that cannot corrupt the text it caps.
  *
  * The segmenter: we use the platform `Intl.Segmenter` with `granularity:'word'` — the Unicode UAX-29
  * default word-boundary algorithm. It is language-neutral and carries no language model. We segment with
@@ -68,4 +69,67 @@ export function tokenRunSubset(needle: string, haystack: string): boolean {
     if (match) return true;
   }
   return false;
+}
+
+/** A UTF-16 HIGH surrogate in final position — the only orphan a prefix cut can create. */
+const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
+
+/**
+ * THE TREE'S ONE TRUNCATION GUARD. A prefix of `text` at most `maxCodeUnits` UTF-16 code units long
+ * that NEVER ends on a surrogate this cut orphaned.
+ *
+ * ── THE HAZARD ────────────────────────────────────────────────────────────────────────────────────
+ * `String.prototype.slice` cuts UTF-16 CODE UNITS, not code points. A non-BMP ("astral") character —
+ * every emoji, every CJK extension ideograph, every historic script — is TWO code units, a HIGH
+ * surrogate (U+D800–U+DBFF) followed by a LOW one (U+DC00–U+DFFF). A cut landing between them keeps
+ * the high half and drops its partner, and a lone surrogate is not valid Unicode text.
+ *
+ * Where the result is only DISPLAYED that is mangled text. Where it is written to a **`jsonb`**
+ * column it is a write PostgreSQL REFUSES OUTRIGHT — `22P02`, "Unicode low surrogate must follow a
+ * high surrogate" — and if that write sits inside a transaction, the whole transaction rolls back.
+ * Both jsonb sites in this tree have been observed doing exactly that, on real Postgres:
+ * `@rayspec/tasks` `task-locks.ts` (the escalation-reply signal payload, which rolled back the
+ * SUPERIOR'S OWN completion and stranded the parked caller) and `apply-intents.ts` (the failure
+ * summary). The guard exists because both of those were found the hard way.
+ *
+ * ── THE CONTRACT ──────────────────────────────────────────────────────────────────────────────────
+ *  - The result is always a PREFIX of `text` — this function only ever removes from the end.
+ *  - Its length is always `<= maxCodeUnits`. Dropping the orphan only shortens it, so a caller that
+ *    appends a marker or an ellipsis keeps whatever ceiling it computed from `maxCodeUnits`.
+ *  - It NEVER emits an unpaired surrogate THAT IT CREATED.
+ *
+ * ── WHAT IT DELIBERATELY DOES NOT DO: it does not SCRUB ───────────────────────────────────────────
+ * A lone surrogate ALREADY present in `text` is passed through untouched, including when `text` is
+ * at or under the cap and is returned by identity. This is a decision, not an oversight, and there
+ * is a test named for it.
+ *
+ * The reason is that a scrubbing truncation guard would be PARTIAL while reading as TOTAL: every
+ * caller returns its input verbatim when it is short enough, so scrubbing here would protect only
+ * the over-the-cap branch while inviting the conclusion that the string is now safe to write. Making
+ * it total would mean scrubbing the whole string on every call — i.e. becoming an input sanitizer,
+ * which belongs ONCE at the boundary where untrusted text enters, not four times at truncation
+ * sites. A model emitting a lone surrogate directly is a real and separate question; this function
+ * fixes CUTS, not INPUTS, and says so rather than half-answering both.
+ *
+ * ── WHY ONLY THE TRAILING HIGH HALF IS CHECKED ────────────────────────────────────────────────────
+ * Every caller takes a PREFIX (`slice(0, n)`). A prefix cut can only orphan the HIGH half — the low
+ * half is what gets dropped. A leading lone LOW surrogate cannot be produced by a cut starting at
+ * index 0, so a leading check would be dead code at every call site and a first step toward the
+ * scrub above.
+ *
+ * ── THE CALLERS (all four; a fifth truncation site should call this, not re-derive it) ────────────
+ *  - `@rayspec/workforce-tools` `memory.ts` `clampText` — recall hit text, ellipsis-terminated.
+ *  - `@rayspec/workforce-tools` `context.ts` `truncateToBytes` — a UTF-8 BYTE budget, so it settles
+ *    its own length first and passes that length here.
+ *  - `@rayspec/tasks` `task-locks.ts` — the escalation-reply signal payload (**jsonb**).
+ *  - `@rayspec/tasks` `apply-intents.ts` — the failure summary (**jsonb**).
+ *
+ * @param maxCodeUnits a non-negative code-unit ceiling; a negative value clamps to 0 (empty).
+ */
+export function truncateCodeUnits(text: string, maxCodeUnits: number): string {
+  // NOTHING WAS CUT ⇒ NOTHING TO REPAIR. This early return is what makes the pass-through contract
+  // above true rather than aspirational: an orphan the caller supplied survives it untouched.
+  if (text.length <= maxCodeUnits) return text;
+  const sliced = text.slice(0, Math.max(maxCodeUnits, 0));
+  return TRAILING_HIGH_SURROGATE_RE.test(sliced) ? sliced.slice(0, -1) : sliced;
 }

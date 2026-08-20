@@ -314,6 +314,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
   tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
 
+- **An escalation answered with a long emoji-bearing summary rolled back the superior's own
+  completion and stranded the parked caller.** When a superior finished an escalation task, the fan-in
+  bounded the `escalated` signal payload with `summary.slice(0, 500)` — and `slice` cuts UTF-16 **code
+  units**, not characters. Every emoji (and every other non-BMP character) is a surrogate PAIR of two
+  units, so a cut landing between the halves kept the high surrogate and dropped its partner. The
+  signal payload column is `jsonb`, where a lone surrogate is not mangled text but a write PostgreSQL
+  **refuses**: `22P02`, *"Unicode low surrogate must follow a high surrogate."*
+  That throw happened inside the turn's transaction, so it took everything with it — the superior's
+  own `working -> completed` transition, its terminal journal event and its cost settlement all rolled
+  back, while the caller stayed parked in `blocked(escalated)` with no exit left but an operator
+  cancel. Nothing bounded the input either: a result `summary` is `z.string().min(1)` with no maximum,
+  so any summary past 500 units with an emoji at the cut reached it. **Reachable on the shipped code
+  path, not in theory** — the arm that pins it drives a real escalate/complete pair against real
+  Postgres and reproduces the exact `22P02` when the guard is removed.
+  **The fix is one shared guard, not a fourth private copy.** The tree truncates in four places, and
+  the two that had grown a correct surrogate check had grown it by copy-and-paste, each comment
+  pointing at the others. That is what produced this bug: the two sites written without the check were
+  written by people who had no way to inherit it. `truncateCodeUnits` now lives in `@rayspec/core` —
+  the one package all four callers already depend on, and a dependency-graph leaf, so no import cycle
+  is possible — and carries the hazard, the contract and the caller list in one place. Recall-hit
+  clamping, turn-context byte trimming, the failure summary and the escalation reply all call it, so a
+  fifth truncation site inherits the guard instead of re-deriving it.
+  **It repairs cuts, it does not scrub inputs, and that is deliberate.** A lone surrogate already
+  present in the caller's string passes through untouched — including when the string is short enough
+  that nothing is cut at all. Scrubbing inside a truncation helper would protect only the over-the-cap
+  branch while reading as though it made the string safe to write, and whole-string sanitization
+  belongs once at the boundary where untrusted text enters, not at four truncation sites. Behaviour at
+  the two already-correct sites is unchanged.
+  **The proof, and why the old tests could not give it.** Every truncation test in the tree used
+  `'x'.repeat(n)` — pure BMP, one code unit per character, so its cut can *never* land inside a
+  surrogate pair. Those tests were green for the entire time the code was broken, which is the failure
+  mode rather than an anecdote about it. Every truncation arm now uses a non-BMP fixture and asserts
+  that the fixture really does put a surrogate at the cut **before** asserting anything else, so a
+  fixture that stops being astral fails loudly instead of passing vacuously.
+
 ### Documentation
 
 - **`docs/workforce-architecture.md` no longer cites code by line number — six of its twelve
