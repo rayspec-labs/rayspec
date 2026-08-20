@@ -81,7 +81,7 @@ const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
  * ── THE HAZARD ────────────────────────────────────────────────────────────────────────────────────
  * `String.prototype.slice` cuts UTF-16 CODE UNITS, not code points. A non-BMP ("astral") character —
  * every emoji, every CJK extension ideograph, every historic script — is TWO code units, a HIGH
- * surrogate (U+D800–U+DBFF) followed by a LOW one (U+DC00–U+DFFF). A cut landing between them keeps
+ * surrogate (`\uD800`–`\uDBFF`) followed by a LOW one (`\uDC00`–`\uDFFF`). A cut between them keeps
  * the high half and drops its partner, and a lone surrogate is not valid Unicode text.
  *
  * Where the result is only DISPLAYED that is mangled text. Where it is written to a **`jsonb`**
