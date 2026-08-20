@@ -337,8 +337,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import cycle is possible — and carries the hazard, the contract and the caller list in one place.
   Recall-hit clamping, turn-context byte trimming, the failure summary, the escalation reply, the
   machine-composed `Review:` / `Escalation:` child titles and the confined selection rationale all
-  call it, so the next truncation site inherits the guard instead of re-deriving it. Three of those
-  had no surrogate handling at all before this change.
+  call it, so the next truncation site inherits the guard instead of re-deriving it. **Four** of them
+  had no surrogate handling at all before this change: the escalation reply above, plus three more
+  found by the sweep — the two child titles and the selection rationale.
   **One copy survives, deliberately and labelled.** `SingleTaskPlanStrategy`'s step-title trim keeps
   its own predicate, because a seam interface module may import **nothing** — an out-of-tree
   implementer reads one self-contained file to learn the whole contract, and `seam-wiring.test.ts`

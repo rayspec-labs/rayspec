@@ -94,14 +94,26 @@ const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
  *
  * ── THE CONTRACT ──────────────────────────────────────────────────────────────────────────────────
  *  - The result is always a PREFIX of `text` — this function only ever removes from the end.
- *  - Its length is always `<= maxCodeUnits`. Dropping the orphan only shortens it, so a caller that
- *    appends a marker or an ellipsis keeps whatever ceiling it computed from `maxCodeUnits`.
+ *  - Its length is always `<= Math.max(maxCodeUnits, 0)`. Dropping the orphan only shortens it, so a
+ *    caller that appends a marker or an ellipsis keeps whatever ceiling it computed from
+ *    `maxCodeUnits`. (The `max(…, 0)` is not pedantry: a NEGATIVE cap returns the empty string,
+ *    whose length is 0 — which is not `<= maxCodeUnits`. No caller passes one; see `@param`.)
  *  - It NEVER emits an unpaired surrogate THAT IT CREATED.
  *
  * ── WHAT IT DELIBERATELY DOES NOT DO: it does not SCRUB ───────────────────────────────────────────
- * A lone surrogate ALREADY present in `text` is passed through untouched, including when `text` is
+ * A lone surrogate ALREADY present in `text` is passed through untouched — including when `text` is
  * at or under the cap and is returned by identity. This is a decision, not an oversight, and there
  * is a test named for it.
+ *
+ * **With one unavoidable exception, stated because the unqualified sentence above is not quite
+ * true:** a caller-supplied orphan sitting at the LAST KEPT INDEX of a real cut IS dropped —
+ * `truncateCodeUnits('ab\uD83D!', 3)` is `'ab'`, not `'ab\uD83D'`. At that position the two cases are
+ * INDISTINGUISHABLE: nothing here can tell an orphan the caller supplied from one this cut created,
+ * because both look like a trailing high surrogate in a string that was just shortened. Dropping is
+ * the safe direction (it can only ever shorten, and it never leaves an invalid write), and it is
+ * pinned by the arm *"the guard fires ONLY on a real cut"*. Everywhere else in the string a
+ * caller-supplied orphan survives, which is what the test file means by *"an orphan away from the
+ * cut point survives"*.
  *
  * The reason is that a scrubbing truncation guard would be PARTIAL while reading as TOTAL: every
  * caller returns its input verbatim when it is short enough, so scrubbing here would protect only
