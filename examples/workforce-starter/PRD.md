@@ -29,10 +29,12 @@ it on the same database, and the story continues where it stood.
    confidence numbers.
 4. An engineering submission below confidence 0.8 trips `eng_quality`: the runtime routes it to
    `qa` no matter what the turn asked for. A rejection produces rework; the ceiling is 2 rounds.
-5. Publishing work carries the `public_statement` label (the copywriter drafts under it; the
-   growth manager — the seat that answers for public output and holds `request_approval` — asks
-   for the sign-off). The growth stream parks in `waiting_for_user` at zero cost until a human
-   decides (2h window, then `fail`).
+5. Publishing work carries the `public_statement` label, and the label is a GATE: a seat holding
+   it cannot complete a task without a human decision, whether or not it ever asks. The copywriter
+   drafts under it — its result is stored and the task parks — and the growth manager, which holds
+   the same label *and* `request_approval`, both asks for a sign-off on the wording and has its own
+   merge gated in turn. Every one of those waits is a row at zero cost until a human decides (2h
+   window, then `fail` — which on a gate costs a finished result, not just an unanswered question).
 6. When every stream lands, `lead` wakes with the results keyed by child task id and submits the
    synthesis; the root completes.
 

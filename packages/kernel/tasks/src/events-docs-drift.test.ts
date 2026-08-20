@@ -70,6 +70,27 @@ describe('docs/workforce-events.md', () => {
       );
     }
   });
+
+  it('locks the fields that distinguish a POLICY-GATED approval from a seat’s own request', () => {
+    // The approval events carry TWO shapes for the same type, and the difference is the whole
+    // meaning: a seat ASKED a question, or a declared `approvalPolicies` rule INTERCEPTED a
+    // completion and is holding finished work. A consumer that cannot tell them apart reads an
+    // authorization decision as a routine wake. The engine emits these from approval-gate.ts and
+    // approvals.ts; nothing else in this suite would notice if the page stopped mentioning them.
+    // The VALUE is pinned with the key on the two flags, not just the key name: `policy` and
+    // `gatedCompletion` are presence-flags whose only legal value is `true`, and a page that
+    // documented them as merely "present" would leave a consumer guessing at a boolean it might
+    // read as false. `policyId` carries a value and is pinned by name alone.
+    const page = read('docs/workforce-events.md');
+    const requested = rowFor(page, 'workforce.approval.requested');
+    for (const token of ['`policy: true`', '`policyId`']) {
+      expect(requested, `approval.requested omits ${token}`).toContain(token);
+    }
+    const decided = rowFor(page, 'workforce.approval.decided');
+    expect(decided, 'approval.decided omits `gatedCompletion: true`').toContain(
+      '`gatedCompletion: true`',
+    );
+  });
 });
 
 describe('docs/workforce-tools.md (the result contract the engine owns)', () => {

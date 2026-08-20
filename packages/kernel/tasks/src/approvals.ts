@@ -246,8 +246,9 @@ export async function decideApproval(
           ...(overrode ? { overriddenApprover: approval.approver } : {}),
           // PRESENT ONLY ON A GATED COMPLETION — this decision did not merely answer a question,
           // it decided whether finished work ships. An operator reading the trail must be able to
-          // tell the two apart.
-          ...(gated !== null ? { gatedCompletion: true, outcome: input.decision } : {}),
+          // tell the two apart. WHAT was decided is already `decision` two lines up; a second copy
+          // computed from the same input could never disagree with it and would only be noise.
+          ...(gated !== null ? { gatedCompletion: true } : {}),
         },
       },
     ]);
