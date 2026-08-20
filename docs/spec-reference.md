@@ -2271,10 +2271,12 @@ what remains live, and the error message says which case you are in:
   is refused too rather than passed over as a redundant clause;
 - **no other label is held**, and a `reviewPolicies[]` rule declares no other selector — it can no
   longer demand review at all;
-- **no other label is held**, on an `approvalPolicies[]` rule — the policy covers no seat. Note what
-  this does *not* mean: `request_approval` is offered by ROLE, not by rule match, so a covered seat
-  can still park. What is lost is the declared window and fate (the request falls back to a 72-hour
-  timeout with `fail`) and the turn-frame line telling the seat it was covered.
+- **no other label is held**, on an `approvalPolicies[]` rule — the policy covers no seat, and what
+  is lost is **the gate**: no completion is intercepted, so the seat ships without the human
+  decision the rule was written to require. (Before the rule bound, a typo here cost only the
+  declared window and fate; it now costs the control itself, which is the strongest reason this is
+  an ERROR rather than a warning.) `request_approval` is still offered by ROLE, not by rule match,
+  so the seat can also *ask* for sign-off — but asking is the seat's choice and the gate is not.
 
 The EFFECTIVE reporting edge is `reportsTo`, else the declared department's manager; the
 resulting graph must be acyclic (`reporting_cycle`) and every chain must reach the orchestrator
@@ -2352,15 +2354,49 @@ approvalPolicies:
     onTimeout: fail           # fail | escalate
 ```
 
-Named for its sibling `reviewPolicies`: both are declared policy RULE SETS.
+Named for its sibling `reviewPolicies`: both are declared policy RULE SETS, and both **intercept a
+completion no matter what the turn asked for**.
 
-The declared window and fate for `request_approval`: when a covered employee (first matching
-rule by declared label) asks for sign-off, the task parks in
-`waiting_for_user(approval_pending)` at zero cost — no process attached, no budget consumed —
-until a human decides over the HTTP surface or `rayspec workforce approvals approve|reject`. A
-hung approval always has an enforced fate: the timeout sweep applies `onTimeout` (`fail`, or
+**`requireWhen` requires.** A covered employee (first matching rule by declared label) cannot
+complete a task without a human decision. The completing turn's result is stored on the task row,
+an approval is opened, and the task parks in `blocked(approval_pending)` — no process attached, no
+budget consumed — until a human decides over the HTTP surface or
+`rayspec workforce approvals approve|reject`:
+
+- **`approve`** completes the task, with the stored result exactly as it was submitted. The seat is
+  **not** re-dispatched: it already finished, and what the human authorised is the bytes on the row.
+- **`reject`** parks the task in `waiting_for_user` with the result still stored, released by a
+  `user_reply`. It is deliberately not a rework loop (approvals carry no round counter, so a rework
+  fate would be unbounded) and deliberately not a failure (a rejection says "you are not authorised
+  to release this", not "your work is wrong").
+
+**Both places a task can complete are gated.** A worked task reaches `completed` at exactly two
+sites — a turn's `complete` intent, and a review verdict of `accept`, which never re-enters the
+planner. A matched `reviewPolicies` rule DIVERTS every completion from the first to the second, so
+the matched approval rule is carried on the review park's binding and the `accept` verdict opens
+the approval instead of completing. **Review runs first, approval second**: review verifies the work
+product and may send it back, approval authorises release of the *verified* product. Because
+`reviewPolicies[].requireWhen.confidenceBelow` is matched against a number the submitting turn
+writes about itself, gating only the first site would have let a covered seat choose whether it was
+gated by choosing a confidence; `approvalPolicies` matching reads only the deployed document and the
+seat's declared labels, so it cannot be steered that way.
+
+**`request_approval` is unchanged and still independent.** The tool is offered by ROLE, so an
+uncovered seat can still ask for sign-off (parking in `waiting_for_user(approval_pending)` at zero
+cost), and a covered seat holds both: the policy gates its completions whether or not it ever calls
+the tool. Role and rule remain two axes.
+
+A hung approval always has an enforced fate: the timeout sweep applies `onTimeout` (`fail`, or
 `escalate` up the requester's reporting edge — which is why an `escalate` rule covering the
-orchestrator seat, who reports to no one, is refused).
+orchestrator seat, who reports to no one, is refused at lint).
+
+> **`onTimeout: fail` costs more on a policy than on a request — the word did not change and its
+> price did.** On a `request_approval` the task had produced nothing, so the fate cost an
+> unanswered question. On a policy-gated completion the task is holding a finished result, and the
+> sweep fails the task: the stored bytes stay on the row, but the release never happens and the task
+> is terminal. That is deliberate — a release nobody authorised does not ship — but declare
+> `onTimeout: fail` on an approval policy knowing it can end finished work, and prefer a window long
+> enough that a human actually sees it.
 
 > **`onTimeout: escalate` reaches a narrower audience than it reads — `doctor` says so.**
 > An escalated request is re-issued naming the requester's superior, a declared **employee id**,

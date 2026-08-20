@@ -12,7 +12,6 @@ import { type DeclaredReviewRule, reviewRuleAppliesTo } from '@rayspec/core';
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
 import type { TaskRecord } from '@rayspec/tasks';
 import { type MatchedApprovalRule, matchApprovalRule } from './review-policy.js';
-import { TOOLSETS_BY_ROLE } from './roles.js';
 import type { WorkforceReadSnapshot } from './snapshot.js';
 
 /** One declared review rule that COVERS this employee, in declaration order (first match wins). */
@@ -158,9 +157,13 @@ export function computeTurnFacts(input: {
   return {
     legalTargets: legalTargetsFor(config, employee, snapshot, depthRemaining),
     reviewRules: applicableReviewRules(config.reviewPolicies, employee),
-    approvalRule: TOOLSETS_BY_ROLE[employee.role].includes('request_approval')
-      ? matchApprovalRule(config, employee)
-      : null,
+    // COMPUTED FOR EVERY SEAT, not only the ones holding `request_approval`. It used to be gated
+    // on the toolset, on the reasoning that "a fact a seat cannot act on is not a fact for its
+    // turn" — sound while an approval policy only decorated a request the seat chose to make. A
+    // matched rule now INTERCEPTS the seat's completion whatever its role, so the rule is a fact
+    // ABOUT the seat rather than about its tools, and a covered worker that is not told is a turn
+    // frame withholding the one thing that will happen to its result.
+    approvalRule: matchApprovalRule(config, employee),
     budget: {
       workforceCeilingUsd: budgets.workforce?.usd ?? null,
       workforceConsumedUsd: stateBudget?.consumedUsd ?? null,

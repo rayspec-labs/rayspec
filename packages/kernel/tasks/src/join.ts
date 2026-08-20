@@ -31,23 +31,57 @@ export const fanOutJoinPolicySchema = z.strictObject({
 });
 
 /**
+ * THE APPROVAL GATE a declared `approvalPolicies` rule imposes on a completion — the matched rule
+ * as the ENGINE sees it.
+ *
+ * It lives here, beside the park binding, for the reason `maxRounds` does: the kernel is
+ * deliberately roster-free and cannot read the workforce document, so a fact from that document
+ * reaches a later decision point ONLY by riding the binding on the task's own row. The composition
+ * computes it (`matchApprovalRule` over the employee's declared labels — never over anything the
+ * turn wrote) and hands it to the engine on the trusted channel; the engine writes it here.
+ *
+ * `escalateTo` is NOT a grammar field: `WorkforceApprovalPolicySpec` declares no escalation target,
+ * and the composition resolves it from the employee's `reportsTo` reporting edge exactly as the
+ * `request_approval` tool door does. `null` means the seat has no superior, and the planner then
+ * degrades an `escalate` fate to `fail` rather than refusing the completion.
+ */
+export const approvalGateSchema = z.strictObject({
+  /** The DECLARED rule's id — journaled, so an operator can see which policy gated a release. */
+  id: z.string().min(1),
+  /** v1 pins this to the deployment's human operator surface; carried, never re-hardcoded. */
+  approver: z.string().min(1),
+  timeoutMs: z.number().int().positive(),
+  onTimeout: z.enum(['fail', 'escalate']),
+  /** Resolved from the reporting edge by the composition; null when the seat has no superior. */
+  escalateTo: z.string().min(1).nullable(),
+});
+
+export type ApprovalGate = z.output<typeof approvalGateSchema>;
+
+/**
  * What the COLUMN may carry — one binding per park the engine can leave a task sitting in:
  *
  *   - `all`         the FAN-OUT binding, naming the children that fan-out opened;
  *   - `escalation`  the one child that carries the caller's escalation, so `blocked(escalated)` is
  *                   answered by exactly that child's terminal and by nothing else;
  *   - `review`      the pending review a `waiting_for_review` park waits on: which review row, the
- *                   dispatched review task (when there is one), and the ROUND CEILING the matched
- *                   policy declared — the verdict path's only way to know a ceiling that lives in a
- *                   document the kernel deliberately cannot read.
+ *                   dispatched review task (when there is one), the ROUND CEILING the matched
+ *                   policy declared, and the APPROVAL GATE a completing verdict must open instead
+ *                   of completing — all facts that live in a document the kernel deliberately
+ *                   cannot read, and that the verdict path would otherwise never see;
+ *   - `approval`    the pending approval a `blocked(approval_pending)` park waits on when the park
+ *                   holds a FINISHED, stored result: the decision route completes the task on
+ *                   `approve` rather than merely waking it, so it must know WHICH approval
+ *                   authorises this release and refuse any other.
  *
  * `childTaskIds` stays OPTIONAL in the SCHEMA (the column is jsonb and a row could carry anything)
  * but is not optional in MEANING: every fan-out this engine writes names its children, and a park
  * that names none waits on nothing. There is deliberately no whole-child fallback — that reading is
- * the bug the binding exists to fix.
+ * the bug the binding exists to fix. `approvalId` is optional on the same terms and read the same
+ * fail-closed way: a park that cannot say which approval it waits on releases nothing.
  */
 export const joinPolicySchema = z.strictObject({
-  policy: z.enum(['all', 'escalation', 'review']),
+  policy: z.enum(['all', 'escalation', 'review', 'approval']),
   /** `all` only: the children THAT fan-out opened — the round the join waits on. */
   childTaskIds: z.array(z.string().min(1)).optional(),
   /** `escalation` only: the one child whose terminal answers the park. */
@@ -58,6 +92,13 @@ export const joinPolicySchema = z.strictObject({
   reviewTaskId: z.string().min(1).nullable().optional(),
   /** `review` only: the matched policy's own round ceiling; absent when no policy declared one. */
   maxRounds: z.number().int().positive().optional(),
+  /**
+   * `review` only: the approval gate an ACCEPT verdict must open instead of completing. Absent when
+   * no approval policy covers the seat — review then completes the task as it always has.
+   */
+  approvalGate: approvalGateSchema.optional(),
+  /** `approval` only: the pending approval row whose `approve` releases this stored result. */
+  approvalId: z.string().min(1).optional(),
 });
 
 export type JoinPolicy = z.output<typeof joinPolicySchema>;
@@ -99,6 +140,12 @@ export function isJoinSatisfied(policy: JoinPolicy, children: readonly TaskRecor
         policy.reviewTaskId !== null &&
         children.some((c) => c.taskId === policy.reviewTaskId && terminal(c))
       );
+    case 'approval':
+      // An approval park is answered by the DECISION route (approvals.ts) or by the timeout sweep,
+      // never by a child's terminal — and it is not an `awaiting_children` park, so this branch is
+      // never consulted for it. No child satisfies it, which is the honest answer rather than a
+      // fallback that could release a gate nobody decided.
+      return false;
   }
 }
 

@@ -27,7 +27,7 @@
  */
 import { z } from 'zod';
 import { type DelegationChildSpec, delegationChildSpecSchema } from './create-task.js';
-import { fanOutJoinPolicySchema, type JoinPolicy } from './join.js';
+import { type ApprovalGate, fanOutJoinPolicySchema, type JoinPolicy } from './join.js';
 
 /**
  * Message caps. A body is DATA addressed to a later turn's context, and up to
@@ -279,12 +279,25 @@ export type TurnPlan =
       readonly onTimeout: 'fail' | 'escalate';
       readonly escalateTo: string | null;
     }
-  | { readonly kind: 'request_review'; readonly reviewer: string; readonly round: number }
+  | {
+      readonly kind: 'request_review';
+      readonly reviewer: string;
+      readonly round: number;
+      /**
+       * The approval gate covering this seat, carried onto the review park's binding so an ACCEPT
+       * verdict opens the gate instead of completing. Null when no approval policy covers the seat.
+       * A MODEL-INITIATED review reaches the same completion write a policy-intercepted one does,
+       * so it carries the gate for the same reason.
+       */
+      readonly approval: ApprovalGate | null;
+    }
   | {
       /** A review demanded WITH a dispatched reviewer turn — the application opens the child. */
       readonly kind: 'request_review_dispatch';
       readonly reviewer: string;
       readonly round: number;
+      /** See `request_review.approval`. */
+      readonly approval: ApprovalGate | null;
     }
   | {
       /**
@@ -304,6 +317,28 @@ export type TurnPlan =
        * budgets' half of it.
        */
       readonly maxRounds: number;
+      /**
+       * REVIEW RUNS FIRST, APPROVAL SECOND. When both policies cover the seat this carries the
+       * approval gate onto the review park's binding, so the verdict's `accept` opens the approval
+       * rather than completing. Review verifies the product; approval authorises release of the
+       * VERIFIED product — approving first and reworking after would invalidate the authorisation
+       * the human just gave.
+       */
+      readonly approval: ApprovalGate | null;
+    }
+  | {
+      /**
+       * A schema-valid result whose completion a MATCHED APPROVAL POLICY intercepts: the result is
+       * stored, an approval is opened, and the task parks in `blocked(approval_pending)` instead of
+       * completing. The human's `approve` is what releases it — policy overrides what the turn
+       * asked for, exactly as `complete_with_review` does.
+       *
+       * NOT reachable together with `complete_with_review`: a matched review policy diverts the
+       * completion to the review park, and the gate rides THAT binding instead.
+       */
+      readonly kind: 'complete_with_approval';
+      readonly result: WorkerResult;
+      readonly approval: ApprovalGate;
     }
   | {
       readonly kind: 'review_rounds_exhausted';
@@ -384,6 +419,20 @@ export interface PlanTurnInput {
     readonly maxRounds: number;
   } | null;
   /**
+   * The TRUSTED approval-policy match covering this task's seat — computed by the caller's trusted
+   * layer from the DECLARED rules and the employee's DECLARED labels, and from nothing the turn
+   * produced. Null when no declared rule covers the seat.
+   *
+   * THE ASYMMETRY WITH `matchedReviewPolicy` IS THE POINT. A review rule may key on
+   * `confidenceBelow`, a number the submitting turn wrote about itself, so which review rule fires
+   * is partly self-reported. `matchApprovalRule` (workforce-tools review-policy.ts) reads the
+   * config and the employee's labels and takes no result argument at all — so no model output can
+   * steer whether this gate applies. That is what closes the hole a planner-only fix would leave:
+   * a seat covered by BOTH policies cannot pick which chokepoint it faces by picking a number,
+   * because both chokepoints end at this same gate.
+   */
+  readonly matchedApprovalRule: ApprovalGate | null;
+  /**
    * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated by the
    * executor, applied atomically with the turn whatever its ending intent. They occupy the depth
    * tier a fan-out child would, and the ones that are HAND-OFFS (owner differs from the task's
@@ -414,6 +463,27 @@ export function invalidIntentPlan(detail: string, priorToolError: boolean): Turn
   return { kind: 'invalid_intent', detail, fate: toolErrorFate(priorToolError) };
 }
 
+/**
+ * THE GATE AS IT WILL BE ENFORCED — the matched rule with its `escalate` fate DEGRADED to `fail`
+ * when no escalation target resolved.
+ *
+ * The `request_approval` path answers an escalate-with-no-target with `invalid_intent`, whose
+ * tool-error fate is requeue-once-then-FAIL (see the module header). That is right for a REQUEST —
+ * the task had produced nothing and the refusal costs a question. It is wrong here: an intercepted
+ * completion holds a stored, finished result, and destroying it because the seat happens to have no
+ * superior (an orchestrator has none, by the lint's own requirement) would make a declared gate
+ * more destructive than no gate at all. Degrading matches what the timeout sweep already does
+ * defensively for a row that carries `escalate` with no target (approvals.ts), so the fate a
+ * document declares is never GUESSED at, only narrowed to the terminal one.
+ */
+function enforceableGate(rule: ApprovalGate | null): ApprovalGate | null {
+  if (rule === null) return null;
+  if (rule.onTimeout === 'escalate' && rule.escalateTo === null) {
+    return { ...rule, onTimeout: 'fail' };
+  }
+  return rule;
+}
+
 export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   if (input.pendingCancel) return { kind: 'cancelled' };
   const bufferedRejection = rejectBufferedCreates(input);
@@ -424,7 +494,16 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
   switch (intent.kind) {
     case 'complete': {
       const policy = input.matchedReviewPolicy;
-      if (policy === null) return { kind: 'complete', result: intent.result };
+      const gate = enforceableGate(input.matchedApprovalRule);
+      // NO REVIEW POLICY: the approval gate is the only thing between this result and `completed`.
+      // A matched rule INTERCEPTS the completion the way a review rule does — the result is stored,
+      // the task parks, and a human's decision releases it. This is the arm that makes
+      // `requireWhen` require.
+      if (policy === null) {
+        return gate === null
+          ? { kind: 'complete', result: intent.result }
+          : { kind: 'complete_with_approval', result: intent.result, approval: gate };
+      }
       // Policy OVERRIDES what the turn asked for: a matched rule intercepts the completion. The
       // effective ceiling is the tighter of the rule's own rounds and the execution-wide one; a
       // result that arrives with the rounds already spent is STORED and a human decides.
@@ -433,12 +512,17 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
           ? Math.min(policy.maxRounds, input.maxReviewRounds)
           : policy.maxRounds;
       if (input.reviewRoundsUsed >= effectiveMax) {
+        // NO GATE HERE, and that is a fact about the path rather than an omission: this park never
+        // completes the task. It stores the result and waits for a human, and the completion it
+        // eventually takes comes back through `case 'complete'` above, where the gate applies.
         return {
           kind: 'review_rounds_exhausted',
           reviewer: policy.reviewer,
           result: intent.result,
         };
       }
+      // REVIEW FIRST, APPROVAL SECOND: the gate rides the review park's binding, so the verdict
+      // path opens it on `accept` instead of completing.
       return {
         kind: 'complete_with_review',
         result: intent.result,
@@ -446,6 +530,7 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
         dispatchReviewer: policy.dispatchReviewer,
         round: input.reviewRoundsUsed + 1,
         maxRounds: effectiveMax,
+        approval: gate,
       };
     }
     case 'fan_out': {
@@ -488,9 +573,13 @@ export function planTurnOutcome(input: PlanTurnInput): TurnPlan {
         return { kind: 'review_rounds_exhausted', reviewer: intent.reviewer, result: null };
       }
       const round = input.reviewRoundsUsed + 1;
+      // A MODEL-INITIATED review reaches the SAME completion write a policy-intercepted one does
+      // (the verdict path's `accept`), so it carries the approval gate for the same reason. Leaving
+      // it off here would let a covered seat escape its gate by asking for review itself.
+      const approval = enforceableGate(input.matchedApprovalRule);
       return intent.dispatchReviewer
-        ? { kind: 'request_review_dispatch', reviewer: intent.reviewer, round }
-        : { kind: 'request_review', reviewer: intent.reviewer, round };
+        ? { kind: 'request_review_dispatch', reviewer: intent.reviewer, round, approval }
+        : { kind: 'request_review', reviewer: intent.reviewer, round, approval };
     }
     case 'submit_review':
       return {

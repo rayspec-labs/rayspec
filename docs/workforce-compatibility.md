@@ -92,6 +92,20 @@ minor or patch — with no deprecation window and no compatibility shim:
 - the `rayspec workforce` CLI commands, their flags and their JSON output;
 - the database tables behind all of it.
 
+**And the MEANING of a key may change, not only its spelling.** That is the widest item on the
+list and the easiest to overlook, so it gets a recorded instance rather than a bare assertion:
+
+- **`approvalPolicies[].requireWhen` now REQUIRES.** Through the previous release the engine never
+  read approval policies. A matched rule supplied the declared window and fate for a
+  `request_approval` the seat chose to make, and nothing compelled the ask — so a seat holding the
+  policy's label could complete its labelled task with no approval row ever written. A matched rule
+  now **intercepts the completion**: the result is stored, an approval is opened, and the task parks
+  in `blocked(approval_pending)` until a human decides. The grammar is byte-identical — no key was
+  added, removed or renamed — and every previously valid document still parses. What changed is what
+  a valid document *does*, which is exactly the kind of change this section's experimental status
+  permits and this page exists to record. Details and the two decision outcomes:
+  [spec reference → `approvalPolicies`](./spec-reference.md#approvalpolicies).
+
 There is no mechanism in this repository that prevents any of these, and this page will
 not pretend otherwise.
 

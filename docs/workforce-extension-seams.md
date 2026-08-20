@@ -41,8 +41,8 @@ Two properties hold across all five and are checked directly against the interfa
 
 **On granting tools.** No seam has a tool surface. A turn's native toolset is derived from the
 employee's declared role — `TOOLSETS_BY_ROLE[employee.role]`
-(`packages/kernel/workforce-tools/src/toolset.ts:916`), assembled at
-`packages/app/server/src/workforce-turn-handlers.ts:139`. The one indirect influence is real and
+(`packages/kernel/workforce-tools/src/toolset.ts:919`), assembled at
+`packages/app/server/src/workforce-turn-handlers.ts:140`. The one indirect influence is real and
 worth stating precisely: an `OrchestrationStrategy` chooses which declared seat owns a step, and a
 seat's role determines its toolset. So a strategy selects among the toolsets the workforce already
 declared; it cannot invent a seat, and it cannot change what a seat's role is allowed to call.
@@ -92,8 +92,8 @@ budget; the ceiling exists to stop a runaway, not to express a recommended plan 
 returns nothing and retains nothing, on purpose, so every consumer is tested against an empty recall.
 
 **Wired, with one qualification.** It is called at
-`packages/app/server/src/workforce-turn-handlers.ts:187`; the injection point is the
-`memoryProviderFor` (`:73`) dependency. The composition root does not pass it
+`packages/app/server/src/workforce-turn-handlers.ts:188`; the injection point is the
+`memoryProviderFor` (`:74`) dependency. The composition root does not pass it
 (`packages/app/server/src/composition-root.ts:3493` calls `buildWorkforceTurnHandlers` without it),
 so a boot always gets the shipped `TaskHistoryMemoryProvider` — the seam is injectable by an embedder
 that composes the turn handlers itself, not by configuration.
@@ -102,7 +102,7 @@ that composes the turn handlers itself, not by configuration.
 neutralization has to match the document being rendered into:
 
 - **Hit text cannot forge structure.** Each hit renders through `sanitizeUntrusted`
-  (`packages/kernel/workforce-tools/src/context.ts:657`), which strips every line-boundary and
+  (`packages/kernel/workforce-tools/src/context.ts:662`), which strips every line-boundary and
   control character, so a hit cannot begin a line and therefore cannot place a column-0 section
   header or a forged data-boundary line. Driven by `'C1: an untrusted recall hit cannot forge the
   data-boundary line'` in `context.test.ts`, which asserts exactly one boundary line and exactly one
@@ -110,9 +110,9 @@ neutralization has to match the document being rendered into:
 - **The section is byte-bounded and droppable.** `SECTION_BUDGETS.recall` is 4096 bytes
   (`packages/kernel/workforce-tools/src/context.ts:76`), and recall is section 7 — the first thing
   dropped when the whole input is over ceiling
-  (`packages/kernel/workforce-tools/src/context.ts:702-703`).
+  (`packages/kernel/workforce-tools/src/context.ts:707-708`).
 - **The hit COUNT is capped** at `SEAM_MAX_MEMORY_HITS = 64` before rendering
-  (`packages/kernel/workforce-tools/src/context.ts:647`), with the drop announced under its own
+  (`packages/kernel/workforce-tools/src/context.ts:652`), with the drop announced under its own
   marker. This exists because the byte-budget loop re-measures the whole block once per dropped hit:
   the budget was always honored, but honoring it cost time quadratic in what the provider returned.
   Measured on this checkout before the cap: 1 000 hits rendered in 0.2 ms, 5 000 in 1.2 s, and 20 000
@@ -156,7 +156,7 @@ implementation over the approval rows; it does not travel through this interface
 ### `ReviewPolicy` — a default without a seam
 
 `packages/kernel/core/src/review-policy.ts:69`, default `DeclaredReviewPolicy` (`:80`). It is
-constructed from the declared config at `packages/kernel/workforce-tools/src/review-policy.ts:76`
+constructed from the declared config at `packages/kernel/workforce-tools/src/review-policy.ts:98`
 and there is **no injection point** — a deployment cannot replace it. It is listed here so its
 absence from the seam set is a stated fact rather than an omission.
 

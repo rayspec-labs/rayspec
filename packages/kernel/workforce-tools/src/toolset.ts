@@ -546,7 +546,10 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           kind: 'request_approval',
           question,
           options: options ?? [],
-          approver: 'user',
+          // From the MATCHED RULE where there is one — the same accountability fact the engine
+          // writes onto a gated completion's approval row. `'user'` remains the fallback for an
+          // uncovered seat, whose request no declared rule stands behind.
+          approver: rule?.approver ?? 'user',
           timeoutMs: rule?.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
           onTimeout,
           ...(onTimeout === 'escalate' && employee.reportsTo !== null

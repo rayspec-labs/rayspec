@@ -157,6 +157,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`workforce.approvalPolicies[].requireWhen` now REQUIRES — a declared approval policy gates a
+  completion instead of decorating a request.** BEHAVIOURAL and BREAKING for any deployment that
+  declares an approval policy, though **no document changes**: the grammar is byte-identical, every
+  previously valid spec still parses, and what changed is what a valid spec *does*. Recorded in
+  `docs/workforce-compatibility.md`, which the `workforce:` section's experimental status is what
+  permits it.
+  *What it did before.* Nothing in the engine read `approvalPolicies`. A matched rule supplied the
+  declared window and fate for a `request_approval` **the seat chose to make**, plus a turn-frame
+  line telling the seat it was covered — so a seat holding the policy's label could complete its
+  labelled task with zero approval rows written, and the shipped examples' own comments ("the
+  manager cannot ship the UI without a human decision") described something that did not happen.
+  *What it does now.* A matched rule INTERCEPTS the completion, exactly as `reviewPolicies` already
+  did: the submitted result is stored on the task row, an approval is opened, and the task parks in
+  `blocked(approval_pending)`. `approve` completes the task with those exact bytes and fans in to
+  the parent — the seat is **not** re-dispatched, because it has already finished and what the human
+  authorised is what is on the row. `reject` parks the task in `waiting_for_user` with the result
+  intact, released by a `user_reply`; it is deliberately neither a rework loop (approvals carry no
+  round counter, so that fate would be unbounded) nor a failure (a rejection withholds authorisation
+  rather than condemning the work).
+  *Both completion chokepoints, because either alone is not a gate.* A worked task reaches
+  `completed` at exactly two sites — a turn's `complete` intent, and a review verdict of `accept`,
+  which never re-enters the planner. A matched review policy DIVERTS every completion from the
+  first to the second, so a gate on the planner alone would leave every review-covered seat ungated.
+  The shipped `workforce-maintainers` example already declares one seat under both policies with a
+  `confidenceBelow: 0.85` review trigger — **a number the model writes about itself** — so that hole
+  would have let a seat pick whether it was gated by picking a confidence. The matched rule
+  therefore also rides the review park's binding (every `bindReviewPark` call site, including a
+  model-initiated `request_review`), and an `accept` opens the approval instead of completing.
+  Review runs first and approval second: review verifies the product, approval authorises release of
+  the *verified* product.
+  *`onTimeout` costs more here than on a request.* The sweep is unchanged, but its `fail` fate now
+  lands on a task holding a finished result: the stored bytes stay on the row and the release never
+  happens. `escalate` re-issues to the seat's reporting edge and re-binds the park to the re-issued
+  request (without which the superior's approval would fall through to an ordinary wake and
+  re-dispatch the seat); an `escalate` rule whose seat has no superior degrades to `fail` rather
+  than refusing the completion and destroying the work.
+  *Transition table.* `blocked -> completed` is a new cell in `ALLOWED_TRANSITIONS` — the only edge
+  into `completed` that is neither `working` nor `waiting_for_review`, and the only one whose driver
+  is a human decision. It exists solely for this release path; the normative matrix in
+  `status.test.ts` moved with it and still admits no extras.
+  *No migration, no grammar change, no new event type.* The park binding is `join_policy` (jsonb),
+  the stored result uses the columns `complete_with_review` already writes, and the interception
+  journals the existing `workforce.approval.requested` with `policy: true` and `policyId` added to
+  its payload.
+
 - **`report_failure` is a reserved workforce tool name — a declared agent tool may no longer be
   called that.** BREAKING for a spec that used the name: `RESERVED_WORKFORCE_TOOL_NAMES`
   (`@rayspec/core`) gains `report_failure`, so an agent bound to a workforce employee that declares

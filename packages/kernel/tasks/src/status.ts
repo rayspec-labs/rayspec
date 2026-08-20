@@ -94,9 +94,21 @@ type TransitionRow = Readonly<Record<TaskStatus, boolean>>;
  *   working → failed        the turn failed terminally
  *   working → cancelled     a cancel signal absorbed at the turn boundary
  *   blocked → queued        any wake signal
- *   blocked → waiting_for_user     escalation to a human (incl. block-and-escalate exhaustion)
+ *   blocked → waiting_for_user     escalation to a human (incl. block-and-escalate exhaustion, and
+ *                           a REJECTED approval gate: the work stands, the release does not)
+ *   blocked → completed     THE APPROVAL GATE, and nothing else. A declared `approvalPolicies` rule
+ *                           intercepts a completion: the result is stored, the task parks in
+ *                           `blocked(approval_pending)`, and a human's `approve` releases it
+ *                           (approvals.ts `decideApproval`, under the park's own binding). It is
+ *                           the ONLY cell in this table whose driver is a human decision rather
+ *                           than a turn or a mechanism, and the only edge into `completed` that
+ *                           does not come from `working` or `waiting_for_review`. Without it a
+ *                           declared gate could park a completion and never release it — which is
+ *                           why `requireWhen` could not previously require anything at all.
  *   blocked → failed        an enforced fate (quarantine retry budget spent; `dependency_failed`;
- *                           an escalated approval's own timeout, whose park is the blocked one)
+ *                           an escalated approval's own timeout, whose park is the blocked one;
+ *                           an approval gate's `onTimeout: fail`, which now costs a finished
+ *                           result rather than an unanswered question — see docs/spec-reference.md)
  *   blocked → cancelled     cancel cascade
  *   waiting_for_review → queued    reviewer rejected and the policy says rework
  *   waiting_for_review → blocked   the review round itself hit a ceiling
@@ -152,7 +164,8 @@ export const ALLOWED_TRANSITIONS: Readonly<Record<TaskStatus, TransitionRow>> = 
     blocked: false,
     waiting_for_review: false,
     waiting_for_user: true,
-    completed: false,
+    // THE APPROVAL GATE's release, and nothing else — see the row-by-row justification above.
+    completed: true,
     failed: true,
     cancelled: true,
   }),

@@ -44,6 +44,11 @@ import { schema, type TenantDb } from '@rayspec/db';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
+import {
+  bindGatedCompletionPark,
+  journalGateApprovalRequested,
+  openGateApproval,
+} from './approval-gate.js';
 import { probeSpend, settleTurn, type WorkforceBudgets } from './budget.js';
 import { delegationChildSpecSchema, insertChildTask } from './create-task.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
@@ -59,7 +64,7 @@ import {
   turnClassificationSchema,
   turnIntentSchema,
 } from './intent-applier.js';
-import { joinPolicySchema } from './join.js';
+import { type ApprovalGate, approvalGateSchema, joinPolicySchema } from './join.js';
 import {
   applyReviewVerdictInTx,
   ReviewAlreadyDecidedError,
@@ -104,6 +109,19 @@ export const turnReviewPolicySchema = z.strictObject({
 });
 
 export type TurnReviewPolicy = z.output<typeof turnReviewPolicySchema>;
+
+/**
+ * The strict shape of the trusted approval-policy channel (`ApplyTurnInput.approvalPolicy`) — the
+ * DECLARED rule covering this task's seat, matched by the composition over the employee's declared
+ * labels and over nothing the turn produced.
+ *
+ * Single-sourced from the park binding's own vocabulary (join.ts) rather than re-spelled here: the
+ * value travels channel -> planner -> park binding -> verdict/decision path unchanged, and a second
+ * copy of the shape is exactly the drift this engine keeps paying for.
+ */
+export const turnApprovalPolicySchema = approvalGateSchema;
+
+export type TurnApprovalPolicy = z.output<typeof turnApprovalPolicySchema>;
 
 // The caps live in the pure planner (the lower module) so the intent schema can enforce the same
 // body limit on `request_clarification`; re-exported here so the package surface is unchanged.
@@ -190,6 +208,14 @@ export interface ApplyTurnInput {
    * a malformed channel is a caller bug and a hard typed refusal.
    */
   readonly reviewPolicy?: unknown;
+  /**
+   * The TRUSTED approval-policy match covering this task's seat, computed by the dispatching
+   * composition from the DECLARED rules and the employee's DECLARED labels — never from model
+   * output, and (unlike the review channel) never from the submitted result either, so nothing the
+   * turn writes can steer whether the gate applies. Validated strictly here; a malformed channel is
+   * a caller bug and a hard typed refusal, exactly like `reviewPolicy`.
+   */
+  readonly approvalPolicy?: unknown;
   /**
    * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated
    * strictly here, applied atomically with the turn's ending intent. Slots 0..k-1 of this turn's
@@ -453,6 +479,10 @@ export async function applyTurnOutcome(
     // "no policy fired".
     const matchedReviewPolicy =
       input.reviewPolicy === undefined ? null : turnReviewPolicySchema.parse(input.reviewPolicy);
+    const matchedApprovalRule =
+      input.approvalPolicy === undefined
+        ? null
+        : turnApprovalPolicySchema.parse(input.approvalPolicy);
 
     // The buffered creates ride a TRUSTED channel too — validated strictly before they can plan.
     const createdChildren = z.array(delegationChildSpecSchema).parse(input.createdChildren ?? []);
@@ -531,6 +561,7 @@ export async function applyTurnOutcome(
       resolvedApprovalQuestions,
       priorToolError,
       matchedReviewPolicy,
+      matchedApprovalRule,
       createdChildren,
       cancelTarget,
     };
@@ -700,6 +731,42 @@ export async function applyTurnOutcome(
           await afterTaskTerminal(tx, finalTask);
           break;
         }
+        case 'complete_with_approval': {
+          // THE APPROVAL GATE (approval-gate.ts): a declared `approvalPolicies` rule intercepts the
+          // completion the way a review rule does. The RESULT IS STORED on this row — the human
+          // reads it, and the release must authorise exactly the bytes they saw, which is why the
+          // seat is NOT re-dispatched to "finish" — and the task parks in
+          // `blocked(approval_pending)` until `decideApproval` releases it.
+          //
+          // NOT a single-row plan (`SINGLE_ROW_PLANS` above deliberately omits it): the park's own
+          // fates reach a SECOND task row — `approve` completes and fans in to the parent,
+          // `onTimeout: fail` fails and fans in — so the root-first locks are already held here.
+          await tx
+            .update(schema.workforceTasks, {
+              result: plan.result,
+              confidence: String(plan.result.confidence),
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          const approvalId = await openGateApproval(
+            tx,
+            task,
+            plan.approval,
+            // The turn number IS the durable dedupe key here, exactly as it is for `openApproval`:
+            // a whole-turn re-execution collides on the partial UNIQUE and converges on the row the
+            // first application wrote, so a replay binds the park to the approval that exists.
+            input.turnNumber,
+          );
+          await bindGatedCompletionPark(tx, task.taskId, approvalId);
+          await journalGateApprovalRequested(tx, task, approvalId, plan.approval);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'blocked',
+            reason: 'approval_pending',
+            ...stamp,
+          });
+          break;
+        }
         case 'fan_out': {
           const probe = await probeSpend(
             tx,
@@ -819,10 +886,15 @@ export async function applyTurnOutcome(
           );
           // A model-initiated review answers to the EXECUTION ceiling alone — no declared policy
           // stands behind it, so the binding carries none and the verdict path uses the budgets'.
+          //
+          // THE APPROVAL GATE RIDES IT ANYWAY, and that is the point: this park's `accept` verdict
+          // reaches the SAME completion write a policy-intercepted park's does. A covered seat that
+          // asks for review ITSELF must not thereby escape its declared gate.
           await bindReviewPark(tx, task.taskId, {
             reviewId,
             reviewTaskId: null,
             maxRounds: null,
+            approvalGate: plan.approval,
           });
           await appendTaskEvents(tx, task.taskId, [
             {
@@ -915,10 +987,15 @@ export async function applyTurnOutcome(
           // BIND the park: which review answers it, which task was dispatched to decide it, and the
           // DECLARED policy's own round ceiling. The verdict path takes the tighter of that and the
           // execution ceiling — it is the only way a document the kernel cannot read reaches it.
+          // REVIEW FIRST, APPROVAL SECOND: when a declared approval policy also covers this seat,
+          // the gate rides the binding so the verdict's `accept` opens the approval instead of
+          // completing. Review verifies the product; approval authorises release of the VERIFIED
+          // product — the reverse order would have a human sign off on a result that then changed.
           await bindReviewPark(tx, task.taskId, {
             reviewId,
             reviewTaskId,
             maxRounds: plan.kind === 'complete_with_review' ? plan.maxRounds : null,
+            approvalGate: plan.approval,
           });
           await appendTaskEvents(tx, task.taskId, [
             {
@@ -1307,6 +1384,19 @@ export async function applyTurnOutcome(
           finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
           break;
         }
+        default: {
+          // EXHAUSTIVENESS, made a compile error rather than a silent corruption. Nothing else
+          // catches a missed plan kind: `TurnPlan` is a union, this switch had no `default`, and
+          // `finalTask` is legitimately `TaskRecord | null` — so an unhandled kind used to COMPILE
+          // and return `task: null`, leaving the row `working` with its turn already settled and
+          // its receipt written. The state-machine gate does not cover plan kinds (it covers the
+          // status table and the update monopoly), so this is the only structural guard there is.
+          const unhandled: never = plan;
+          throw new TurnStateError(
+            task.taskId,
+            `an unhandled turn plan '${(unhandled as TurnPlan).kind}'`,
+          );
+        }
       }
     }
 
@@ -1386,15 +1476,25 @@ export async function applyTurnOutcome(
 
 /**
  * BIND a `waiting_for_review` park to the review it waits on, on the same row the park lives on
- * (`joinPolicy`, the park-binding column — see join.ts). Three facts nothing else can supply later:
+ * (`joinPolicy`, the park-binding column — see join.ts). Four facts nothing else can supply later:
  * WHICH review answers the park, WHICH task was dispatched to decide it (null when a human does),
- * and the DECLARED policy's round ceiling — a ceiling that lives in a document the kernel is
- * deliberately roster-free about, and which the verdict path would otherwise never see.
+ * the DECLARED policy's round ceiling, and the DECLARED APPROVAL GATE an `accept` verdict must open
+ * instead of completing — all of them living in a document the kernel is deliberately roster-free
+ * about, and none of which the verdict path could otherwise see.
+ *
+ * EVERY caller passes the gate, not only the policy-intercepted one: a review park's `accept` is
+ * the second completion chokepoint whichever tool opened the park, so a model-initiated
+ * `request_review` by a covered seat must carry it too or the gate is escapable by asking.
  */
 async function bindReviewPark(
   tx: TenantDb,
   taskId: string,
-  binding: { reviewId: string; reviewTaskId: string | null; maxRounds: number | null },
+  binding: {
+    reviewId: string;
+    reviewTaskId: string | null;
+    maxRounds: number | null;
+    approvalGate: ApprovalGate | null;
+  },
 ): Promise<void> {
   await tx
     .update(schema.workforceTasks, {
@@ -1403,6 +1503,7 @@ async function bindReviewPark(
         reviewId: binding.reviewId,
         reviewTaskId: binding.reviewTaskId,
         ...(binding.maxRounds !== null ? { maxRounds: binding.maxRounds } : {}),
+        ...(binding.approvalGate !== null ? { approvalGate: binding.approvalGate } : {}),
       },
     })
     .where(eq(schema.workforceTasks.taskId, taskId));

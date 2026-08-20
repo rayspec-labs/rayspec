@@ -42,16 +42,33 @@ export interface MatchedReviewPolicy {
 
 export interface MatchedApprovalRule {
   readonly id: string;
+  /**
+   * WHO the declared rule names as the decider. v1 pins it to `'user'`
+   * (`WorkforceApprovalPolicySpec.approver`, a `z.literal`), so this carries a constant today — and
+   * it is carried rather than re-derived because the engine now WRITES it onto the approval row it
+   * opens for a gated completion. Re-hardcoding `'user'` at a third site is the drift this codebase
+   * keeps paying for; the trusted channel carries its own accountability fact instead.
+   */
+  readonly approver: 'user';
   readonly timeoutMs: number;
   readonly onTimeout: 'fail' | 'escalate';
 }
 
 /**
  * The declared approval policy covering this employee's labels, or null. ONE predicate with
- * two consumers — the `request_approval` handler (which binds the matched window and fate onto
- * the intent) and the turn scaffolding (which presents the same rule as a fact before the model
- * runs) — so what a turn is told and what its request gets can never diverge. First declared
- * match wins, like the review rules.
+ * THREE consumers — the `request_approval` handler (which binds the matched window and fate onto
+ * the intent), the turn scaffolding (which presents the same rule as a fact before the model
+ * runs), and the composition's trusted approval channel (which carries it to the engine, where it
+ * INTERCEPTS a completion) — so what a turn is told, what its request gets, and what the engine
+ * enforces can never diverge. First declared match wins, like the review rules.
+ *
+ * IT READS NO TURN OUTPUT, and that is the property the whole gate rests on. The signature takes a
+ * config and an employee: the match is a function of the DEPLOYED DOCUMENT and the seat's DECLARED
+ * labels only. Contrast `matchReviewPolicy` below, which reads `result.confidence` — a number the
+ * submitting turn wrote about itself, and therefore a heuristic rather than a control (see this
+ * module's header). Because the approval match cannot be steered, a seat covered by both policies
+ * cannot choose whether it is gated by choosing a confidence: both review outcomes and the direct
+ * completion end at this same rule.
  */
 export function matchApprovalRule(
   config: WorkforceConfig,
@@ -61,7 +78,12 @@ export function matchApprovalRule(
     candidate.labels.some((label) => employee.labels.includes(label)),
   );
   if (!rule) return null;
-  return { id: rule.id, timeoutMs: rule.timeoutMs, onTimeout: rule.onTimeout };
+  return {
+    id: rule.id,
+    approver: rule.approver,
+    timeoutMs: rule.timeoutMs,
+    onTimeout: rule.onTimeout,
+  };
 }
 
 /** Evaluate the declared rules against a completing turn's result; null when no rule fires. */

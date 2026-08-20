@@ -1033,6 +1033,12 @@ describe('workforce semantic lint — the escalation-reachability advisory', () 
  * unheld label acquires a holder is a redeploy, which re-runs this lint. The old advisory's premise
  * ("the label may arrive later") was false for exactly that reason.
  *
+ * AND BOTH MATCHERS NOW GATE. `matchApprovalRule` is no longer read only by the tool door: the
+ * composition carries it to the engine, where a matched rule INTERCEPTS a completion the way a
+ * review rule does (`packages/kernel/tasks` approval-gate.ts). So an unheld approval label costs a
+ * CONTROL, not a window — which is what cell 6 below asserts, and what it used to assert the
+ * opposite of.
+ *
  * THE REFUSAL IS UNIFORM; THE CONSEQUENCE IS NOT. Every unheld entry is refused — it is a typo
  * either way — but the message must state what remains LIVE, and that is a property of the
  * declaration, not of the label. Two inputs decide it, and both were got wrong once:
@@ -1190,15 +1196,22 @@ describe('policy labels must be HELD by some declared employee', () => {
     expect(held).toMatch(/only this entry is dead/);
     expect(held).not.toMatch(/covers no seat/);
 
-    // 6. NO sibling held: the policy covers nobody. The message must NOT claim work can no longer
-    // park — `request_approval` is offered by ROLE (workforce-tools roles.ts) and the handler
-    // falls back to a 72h/fail window, so the seat still parks; the DECLARED window is what is lost.
+    // 6. NO sibling held: the policy covers nobody, and what is lost is THE GATE — an approval
+    // policy intercepts a completion (packages/kernel/tasks approval-gate.ts), so a selector nobody
+    // holds means nothing requires a human decision before a covered seat completes. The message
+    // must still NOT claim the seat can no longer ask: `request_approval` is offered by ROLE
+    // (workforce-tools roles.ts), so role and rule remain two axes and only one is compulsory.
+    //
+    // THIS ASSERTION USED TO DEMAND `/72h\/fail/`, from the era when the engine never read approval
+    // policies and a dead selector cost only the declared window. Corrected in place rather than
+    // annotated: a stale expectation that still passes is how a false claim survives a rewrite.
     const alone = consequenceOf(
       WORKFORCE_BASE.replace(APPROVAL_WHEN, 'requireWhen: { labels: [ghost_label] }'),
       'approvalPolicies[0].requireWhen.labels[0]',
     );
     expect(alone).toMatch(/covers no seat/);
-    expect(alone).toMatch(/72h\/fail/);
+    expect(alone).toMatch(/gates no completion/);
+    expect(alone).toMatch(/request_approval is still\s+offered by role/);
   });
 
   it('a held sibling does not suppress the refusal — both halves asserted', () => {

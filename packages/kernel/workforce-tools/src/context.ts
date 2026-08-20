@@ -425,20 +425,25 @@ function renderPolicies(input: TurnInputFacts): string {
     );
   }
 
-  // The approval line renders ONLY for seats whose toolset carries request_approval: for a
-  // worker, "none declared" would be a false statement about the document (a rule may well cover
-  // its labels — the seat just cannot act on it), and naming the rule would advertise a tool the
-  // runtime refuses. A fact a seat cannot act on is not a fact for its turn.
-  if (TOOLSETS_BY_ROLE[input.employee.role].includes('request_approval')) {
-    if (facts.approvalRule !== null) {
-      lines.push(
-        `Approval rule covering you: ${sanitizeConfig(facts.approvalRule.id)} — request_approval ` +
-          `runs on its declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
-          `${sanitizeConfig(facts.approvalRule.onTimeout)}).`,
-      );
-    } else {
-      lines.push('Approval rule covering you: none declared for your labels.');
-    }
+  // THE APPROVAL LINE RENDERS FOR EVERY COVERED SEAT, whatever its role. It used to render only
+  // for seats holding `request_approval`, because a rule a seat could not invoke was a fact it
+  // could not act on. A matched rule now GATES the seat's completion regardless of its toolset, so
+  // withholding it from a covered worker would hide the one thing that is going to happen to its
+  // result. The ROLE still decides the second sentence — whether the seat may also ask on its own
+  // initiative — so no turn is told about a tool the runtime will refuse it.
+  const mayRequestApproval = TOOLSETS_BY_ROLE[input.employee.role].includes('request_approval');
+  if (facts.approvalRule !== null) {
+    lines.push(
+      `Approval rule covering you: ${sanitizeConfig(facts.approvalRule.id)} — your completion ` +
+        'parks for a human decision no matter what your turn submits; the runtime enforces it, on ' +
+        `its declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
+        `${sanitizeConfig(facts.approvalRule.onTimeout)}).` +
+        (mayRequestApproval ? ' request_approval asks on the same window, before you finish.' : ''),
+    );
+  } else if (mayRequestApproval) {
+    // Only meaningful for a seat that could have used one: for an uncovered worker the absence of
+    // a rule changes nothing about its turn, and "none declared" would be noise.
+    lines.push('Approval rule covering you: none declared for your labels.');
   }
   return lines.join('\n');
 }
