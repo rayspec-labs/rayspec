@@ -143,12 +143,24 @@ async function lockGatedCompletionPark(
     .where(eq(schema.workforceTasks.taskId, approval.taskId))) as TaskRecord[];
   const snapshot = rows[0];
   if (!snapshot) return null;
+  // THE FAST PATH, and it is an OPTIMISATION rather than the control — said out loud because a
+  // mutation battery asked. Nearly every decision that reaches this door answers a seat's own
+  // `request_approval`, whose park carries no `approval` binding at all; this read costs nothing
+  // and lets those skip the root-first locks entirely. Removing it changes no outcome, only how
+  // many rows a routine decision locks. The check BELOW is the one that decides correctness.
   if (gatedCompletionApprovalId(snapshot) !== approval.id) return null;
   const task = await lockRootFirst(tx, snapshot);
-  // RE-CHECK UNDER THE LOCK. A racer (the timeout sweep, an operator unblock, a cancel cascade) may
-  // have moved the task while we waited. Fail-closed to the ordinary decision path: the approval
-  // still resolves and still journals, and nothing completes a task whose park is gone. The CAS
-  // below remains the race arbiter for the approval row itself.
+  // RE-CHECK UNDER THE LOCK — THIS is the control. A racer (the timeout sweep, an operator unblock,
+  // a cancel cascade, the escalation re-bind) may have moved the task or repointed its binding
+  // while we waited, and only a read under the lock is authoritative. Fail-closed to the ordinary
+  // decision path: the approval still resolves and still journals, and nothing completes a task
+  // whose park is gone or whose park is waiting on a DIFFERENT approval. The CAS below remains the
+  // race arbiter for the approval row itself.
+  //
+  // The two identity checks are therefore deliberate defence in depth, and the suite proves the
+  // PROPERTY rather than either check: mutating one of them alone survives (the other catches it),
+  // mutating both reds `an approval the park does NOT name releases nothing`. Neither is proven
+  // individually necessary, and that is the honest description of a redundant pair.
   if (task.status !== 'blocked' || task.statusReason !== 'approval_pending') return null;
   if (gatedCompletionApprovalId(task) !== approval.id) return null;
   return task;
