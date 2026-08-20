@@ -105,6 +105,19 @@ type TransitionRow = Readonly<Record<TaskStatus, boolean>>;
  *                           does not come from `working` or `waiting_for_review`. Without it a
  *                           declared gate could park a completion and never release it — which is
  *                           why `requireWhen` could not previously require anything at all.
+ *                           READ "AND NOTHING ELSE" AS A CLAIM ABOUT CALL SITES, NOT AS A PROPERTY
+ *                           THIS TABLE ENFORCES. Before this cell existed the table itself refused
+ *                           every `blocked -> completed`; it no longer does, and any caller passing
+ *                           `reason: null` now satisfies it (a non-null reason is still refused,
+ *                           since no entry in REASON_RULES targets `completed`). What keeps the
+ *                           claim true is the surrounding discipline — `applyTransition` is the
+ *                           sole status writer, enforced statically by
+ *                           `scripts/check-state-machine-exhaustive.mjs`, and the four sites that
+ *                           write `to: 'completed'` are individually accounted for (three run only
+ *                           on a `working` or `waiting_for_review` row; the fourth is this gate's
+ *                           release, guarded under its own lock in `lockGatedCompletionPark`).
+ *                           `status.test.ts` pins that no OTHER park gained this edge; it does not,
+ *                           and cannot, pin who uses this one.
  *   blocked → failed        an enforced fate (quarantine retry budget spent; `dependency_failed`;
  *                           an escalated approval's own timeout, whose park is the blocked one;
  *                           an approval gate's `onTimeout: fail`, which now costs a finished

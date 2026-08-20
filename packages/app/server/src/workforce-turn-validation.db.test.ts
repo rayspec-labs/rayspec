@@ -74,6 +74,56 @@ const DECLARED = WorkforceSpec.parse({
 
 const config = deriveWorkforceConfig(DECLARED);
 
+/**
+ * A SECOND document, declared separately rather than by adding an approval rule to `DECLARED`,
+ * because covering `dev` or `mgr` above would gate half the completions in this file and the arms
+ * that assert `status: 'completed'` would start asserting the approval park instead. The seams under
+ * test are the same; only the deployed document differs.
+ *
+ * `mgr_docs` carries the label the rule names and reports to `lead` — which is where the channel's
+ * `escalateTo` must come from, since `WorkforceApprovalPolicySpec` has no such field. `writer` is
+ * the CONTROL: same department, no label, therefore covered by nothing.
+ */
+const GATED_DECLARED = WorkforceSpec.parse({
+  id: 'publishing',
+  name: 'Publishing',
+  orchestrator: 'lead',
+  departments: [
+    {
+      id: 'docs',
+      name: 'Docs',
+      manager: 'mgr_docs',
+      mission: 'Say true things.',
+      members: ['writer'],
+    },
+  ],
+  employees: [
+    { id: 'lead', agent: 'a', title: 'Lead', role: 'orchestrator' },
+    {
+      id: 'mgr_docs',
+      agent: 'a',
+      title: 'Docs manager',
+      department: 'docs',
+      reportsTo: 'lead',
+      role: 'manager',
+      labels: ['public_statement'],
+    },
+    { id: 'writer', agent: 'a', title: 'W', department: 'docs', role: 'worker' },
+    { id: 'qa', agent: 'a', title: 'Q', reportsTo: 'lead', role: 'reviewer' },
+  ],
+  approvalPolicies: [
+    {
+      id: 'public_statement_signoff',
+      requireWhen: { labels: ['public_statement'] },
+      approver: 'user',
+      timeout: '1d',
+      onTimeout: 'escalate',
+    },
+  ],
+});
+
+const gatedConfig = deriveWorkforceConfig(GATED_DECLARED);
+
 describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition → engine (db)', () => {
   let db: ReturnType<typeof makeTestDb>;
 
@@ -690,5 +740,171 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     }
     // Nothing was dropped by the reordering: declared + native = the whole offered list.
     expect(nativeNames.length + 1).toBe(offered.length);
+  });
+
+  /**
+   * THE APPROVAL CHANNEL — the COMPOSITION half of the approval gate, which the kernel suites
+   * cannot see and which nothing tested until this block existed.
+   *
+   * The engine's half is pinned in `@rayspec/tasks`: `approval-binding.db.test.ts`'s
+   * `a MODEL-INITIATED request_review by a covered seat is gated too` hands `applyTurnOutcome` an
+   * `approvalPolicy` and proves the resulting review park carries the gate. But the engine can only
+   * bind a gate the composition SENDS it, and which endings receive one is decided here, at
+   * `workforce-turn-handlers.ts`:
+   *
+   *   (collected.intent?.kind === 'complete' || collected.intent?.kind === 'request_review')
+   *     && snapshot.pendingReview === null
+   *
+   * Deleting the `request_review` clause reopens the exact hole this item exists to close — a
+   * covered seat asks for a review of its OWN work, the park is bound with no gate, the `accept`
+   * verdict completes the task, and the declared approval never happens — and it reopens it with a
+   * fully green board: the kernel suites supply the channel themselves, so they cannot notice, and
+   * the CLI story e2e was measured passing against exactly that mutation.
+   *
+   * These arms drive the REAL composition and assert on the channel it computes, so each clause of
+   * that condition has a test that reds when it is removed. The uncovered-seat arm is the control:
+   * a suite that answered "gated" for every seat would prove nothing.
+   */
+  describe('the trusted approval channel — which endings the composition gates', () => {
+    beforeEach(async () => {
+      await ensureWorkforceRuntime(forTenant(db, TENANT), 'publishing', {});
+    });
+
+    /** One turn of `task` through the real composition under the GATED document. */
+    async function gatedTurn(task: TaskRecord, script: TurnScript) {
+      const backend = makeScriptedBackend('openai', () => script);
+      const resolve = buildWorkforceTurnHandlers({
+        db,
+        tenantId: TENANT,
+        config: gatedConfig,
+        registry: () => registryFor(backend),
+        backendForEmployee: () => backend,
+      });
+      const handler = resolve(task.owner);
+      if (!handler) throw new Error(`no handler for owner '${task.owner}'`);
+      const outcome = await handler({ task, childResults: null, signals: [], messages: [] });
+      const applied = await applyTurnOutcome(tdb(), {
+        taskId: task.taskId,
+        turnId: turnIdFor(task.taskId, task.turnsUsed + 1),
+        turnNumber: task.turnsUsed + 1,
+        intent: outcome.intent,
+        ...(outcome.reviewPolicy ? { reviewPolicy: outcome.reviewPolicy } : {}),
+        // The channel under test. Forwarded exactly as `task-scheduler.ts` forwards it, because a
+        // test that dropped it here could not tell a missing channel from an ignored one.
+        ...(outcome.approvalPolicy ? { approvalPolicy: outcome.approvalPolicy } : {}),
+        budgets: NO_BUDGETS,
+      });
+      return { outcome, applied };
+    }
+
+    async function gatedWorkingTask(owner: string): Promise<TaskRecord> {
+      const root = await createRootTask(tdb(), {
+        workforceId: 'publishing',
+        title: 'Announce the release',
+        goal: 'Draft the public announcement.',
+        owner,
+        requestedBy: 'user',
+        department: gatedConfig.employees.get(owner)?.department ?? null,
+      });
+      const queued = await applyTransition(tdb(), {
+        taskId: root.taskId,
+        expectedVersion: root.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      return applyTransition(tdb(), {
+        taskId: root.taskId,
+        expectedVersion: queued.version,
+        to: 'working',
+        actor: 'scheduler',
+        turnId: turnIdFor(root.taskId, 1),
+      });
+    }
+
+    async function joinPolicyOf(taskId: string): Promise<Record<string, unknown> | null> {
+      const rows = (await db.$client.unsafe(
+        `SELECT join_policy FROM workforce_tasks WHERE task_id = '${taskId}';`,
+      )) as unknown as { join_policy: Record<string, unknown> | null }[];
+      return (rows[0] as { join_policy: Record<string, unknown> | null }).join_policy;
+    }
+
+    it('a covered seat ending in REQUEST_REVIEW is handed the gate — the one-tool-call escape, closed at the composition', async () => {
+      const task = await gatedWorkingTask('mgr_docs');
+      const { outcome, applied } = await gatedTurn(task, [{ name: 'request_review', args: {} }]);
+      // The seat asked for a review of its own work. That is a legal ending and stays one.
+      expect(outcome.intent).toMatchObject({ kind: 'request_review' });
+      expect(applied.plan?.kind).toBe('request_review');
+      // THE ASSERTION. The channel carries the matched rule, with `escalateTo` resolved from the
+      // DECLARED reporting edge — `WorkforceApprovalPolicySpec` has no such field, so a null here
+      // would mean the composition, not the document, failed to resolve it.
+      expect(outcome.approvalPolicy).toEqual({
+        id: 'public_statement_signoff',
+        approver: 'user',
+        timeoutMs: 86_400_000,
+        onTimeout: 'escalate',
+        escalateTo: 'lead',
+      });
+    });
+
+    it('...and the park the engine opens CARRIES it, so the accept verdict cannot complete ungated', async () => {
+      // The other end of the same wire, in one test rather than two that meet in the middle: what
+      // the composition computed is what the review park is bound with, on a real row.
+      const task = await gatedWorkingTask('mgr_docs');
+      await gatedTurn(task, [{ name: 'request_review', args: {} }]);
+      expect(await rowOf(task.taskId)).toMatchObject({
+        status: 'waiting_for_review',
+        status_reason: 'review_pending',
+      });
+      const binding = await joinPolicyOf(task.taskId);
+      expect(binding).toMatchObject({
+        policy: 'review',
+        approvalGate: { id: 'public_statement_signoff', escalateTo: 'lead' },
+      });
+    });
+
+    it('the same channel is computed for a plain COMPLETE — the other half of the same condition', async () => {
+      const task = await gatedWorkingTask('mgr_docs');
+      const { outcome, applied } = await gatedTurn(task, [
+        {
+          name: 'submit_result',
+          args: { status: 'completed', summary: 'The announcement.', confidence: 0.95 },
+        },
+      ]);
+      expect(outcome.approvalPolicy).toMatchObject({
+        id: 'public_statement_signoff',
+        escalateTo: 'lead',
+      });
+      // And the engine intercepts rather than completing — the gate binds through the real chain.
+      expect(applied.plan?.kind).toBe('complete_with_approval');
+      expect(await rowOf(task.taskId)).toMatchObject({
+        status: 'blocked',
+        status_reason: 'approval_pending',
+      });
+    });
+
+    it('CONTROL: an UNCOVERED seat in the same department gets no channel and completes normally', async () => {
+      // Without this the block would pass with a composition that gated everything, which is not a
+      // gate — it is a stop. `writer` carries no label, so no rule covers it.
+      const task = await gatedWorkingTask('writer');
+      const { outcome, applied } = await gatedTurn(task, [
+        {
+          name: 'submit_result',
+          args: { status: 'completed', summary: 'Just the draft.', confidence: 0.95 },
+        },
+      ]);
+      expect(outcome.approvalPolicy ?? null).toBeNull();
+      expect(applied.plan?.kind).toBe('complete');
+      expect(await rowOf(task.taskId)).toMatchObject({ status: 'completed' });
+    });
+
+    it('CONTROL: an ending that can never complete a task is NOT given the channel', async () => {
+      // `yield` cannot reach a completion write, so putting a rule on the wire for it would be a
+      // fact no plan reads. This is the arm that keeps the condition a CONDITION rather than a
+      // constant, and it reds if someone "simplifies" it to always compute the rule.
+      const task = await gatedWorkingTask('mgr_docs');
+      const { outcome } = await gatedTurn(task, [{ name: 'get_task', args: {} }]);
+      expect(outcome.intent).toEqual({ kind: 'yield' });
+      expect(outcome.approvalPolicy ?? null).toBeNull();
+    });
   });
 });

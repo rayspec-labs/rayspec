@@ -21,8 +21,19 @@
  * (A third `to: 'completed'` exists — the reviewer's own child task after `submit_review`. It is
  * deliberately NOT gated: that completion records a VERDICT, it does not release a work product,
  * and parking it behind an approval would strand the reviewed task in `waiting_for_review`, a park
- * no signal and no sweep can reach. The composition enforces this upstream by computing no policy
- * channel at all for a task that carries a pending review — the same rule review already uses.)
+ * no signal and no sweep can reach.
+ *
+ * WHAT ENFORCES THAT IS THE ENGINE, not the composition, and the difference matters to anyone
+ * deciding what is safe to remove. `readReviewAssignment` (apply-intents.ts) derives the assignment
+ * from the PARENT's park binding, inside this package, where no composition can influence it; the
+ * planner then refuses a `complete` from such a task outright with `invalid_intent`, BEFORE any
+ * policy is read — pinned by `intent-applier.test.ts`'s `a review CHILD is never gated — its
+ * completion is refused before any policy is read` and `refuses \`complete\` — the reviewed task
+ * would park on a verdict that can never arrive`. A `request_review` from a review child is refused
+ * on the same terms. The composition ALSO computes no policy channel for a task carrying a pending
+ * review (`workforce-turn-handlers.ts`, the same rule review itself uses), and that is genuine
+ * defence in depth — but it is the removable half, and removing it changes no outcome because the
+ * engine has already refused every ending that could reach a gate from such a task.)
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * THE PARK, and why it is `blocked` rather than `waiting_for_user`.

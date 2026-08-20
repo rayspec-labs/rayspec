@@ -143,24 +143,48 @@ async function lockGatedCompletionPark(
     .where(eq(schema.workforceTasks.taskId, approval.taskId))) as TaskRecord[];
   const snapshot = rows[0];
   if (!snapshot) return null;
-  // THE FAST PATH, and it is an OPTIMISATION rather than the control — said out loud because a
-  // mutation battery asked. Nearly every decision that reaches this door answers a seat's own
-  // `request_approval`, whose park carries no `approval` binding at all; this read costs nothing
-  // and lets those skip the root-first locks entirely. Removing it changes no outcome, only how
-  // many rows a routine decision locks. The check BELOW is the one that decides correctness.
+  // THE FAST PATH. Architecturally it is an OPTIMISATION and not the control: it reads a row nobody
+  // has locked, so a racer can invalidate its answer between this line and the next. Nearly every
+  // decision that reaches this door answers a seat's own `request_approval`, whose park carries no
+  // `approval` binding at all, and this read lets those skip the root-first locks entirely.
+  //
+  // BUT DO NOT READ THAT AS "UNTESTED". It is the line the suite's binding-mismatch negative
+  // actually exercises: `an approval the park does NOT name releases nothing` decides a DIFFERENT
+  // approval, so this check answers it and the pair below is never consulted. Measured, not
+  // reasoned — deleting this line ALONE leaves that test green (the under-lock binding check then
+  // catches it), and deleting all three identity checks reds it. So removing this line changes no
+  // outcome the suite can observe, which is a statement about the suite as well as about the code.
   if (gatedCompletionApprovalId(snapshot) !== approval.id) return null;
   const task = await lockRootFirst(tx, snapshot);
-  // RE-CHECK UNDER THE LOCK — THIS is the control. A racer (the timeout sweep, an operator unblock,
-  // a cancel cascade, the escalation re-bind) may have moved the task or repointed its binding
-  // while we waited, and only a read under the lock is authoritative. Fail-closed to the ordinary
-  // decision path: the approval still resolves and still journals, and nothing completes a task
-  // whose park is gone or whose park is waiting on a DIFFERENT approval. The CAS below remains the
-  // race arbiter for the approval row itself.
+  // RE-CHECK UNDER THE LOCK. A racer (the timeout sweep, an operator unblock, a cancel cascade, the
+  // escalation re-bind) may have moved the task or repointed its binding while we waited, and only
+  // a read under the lock is authoritative. Fail-closed to the ordinary decision path: the approval
+  // still resolves and still journals, and nothing completes a task whose park is gone or whose
+  // park is waiting on a DIFFERENT approval. The CAS below remains the race arbiter for the
+  // approval row itself.
   //
-  // The two identity checks are therefore deliberate defence in depth, and the suite proves the
-  // PROPERTY rather than either check: mutating one of them alone survives (the other catches it),
-  // mutating both reds `an approval the park does NOT name releases nothing`. Neither is proven
-  // individually necessary, and that is the honest description of a redundant pair.
+  // THE TWO CHECKS ARE NOT INTERCHANGEABLE, and an earlier version of this comment claimed they
+  // were on the strength of a mutation that survived. What that survival actually showed was a
+  // missing test. Precisely:
+  //
+  //   - THE STATUS CHECK (next line) IS INDIVIDUALLY NECESSARY, and its own state is one the fast
+  //     path cannot catch: `manual_unblock` is permitted on `blocked(approval_pending)`
+  //     (`OPERATOR_UNBLOCKABLE`, signals.ts) and dissolves the park, but NOTHING clears `joinPolicy`
+  //     on a wake — so the row is re-dispatched to `working` still naming a live pending approval.
+  //     Deciding THAT approval passes the fast path and passes the binding check below; only this
+  //     line stands between it and `applyTransition(working -> completed)`, a cell the table has
+  //     always allowed. Deleting it releases a task that is still executing. Pinned by
+  //     `approval-binding.db.test.ts`'s `after manual_unblock RE-DISPATCHES the seat, deciding the
+  //     STILL-BOUND approval cannot complete a WORKING task`, plus its `queued` sibling, which
+  //     fails differently (an illegal transition thrown at an operator) and is asserted separately.
+  //   - THE BINDING CHECK (line after) IS THE ANTI-RACE CONTROL, and no test in this repository
+  //     proves it necessary — deliberately, and this is a stated limit rather than a gap to be
+  //     closed by a cleverer single-threaded test. Inside one transaction the pre-lock read and this
+  //     re-read see the same row, so the only state where this line fires and the fast path did not
+  //     requires a second transaction repointing the binding in between. Nothing here interleaves
+  //     two transactions on these rows, so its mutant survives and is EXPECTED to. Do not delete it
+  //     on the strength of that green; deleting it is safe only under an assumption this suite
+  //     cannot check.
   if (task.status !== 'blocked' || task.statusReason !== 'approval_pending') return null;
   if (gatedCompletionApprovalId(task) !== approval.id) return null;
   return task;

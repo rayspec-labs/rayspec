@@ -315,14 +315,14 @@ field from the same matched rule, through the trusted channel rather than the to
 
 **The only writer of a *named* approver is the timeout sweep**, which re-issues an escalating
 request to the requester's declared superior
-(`packages/kernel/tasks/src/approvals.ts:435`) and journals that name as an accountability fact.
+(`packages/kernel/tasks/src/approvals.ts:459`) and journals that name as an accountability fact.
 
 **The decision door keeps the authorization the engine wrote.** `decideApproval` reads the row and
-compares the server-derived actor against it (`packages/kernel/tasks/src/approvals.ts:217`),
+compares the server-derived actor against it (`packages/kernel/tasks/src/approvals.ts:241`),
 refusing typed when they differ and no authorized override is present
-(`packages/kernel/tasks/src/approvals.ts:219`) — on a plain read, **before** any write, so a
+(`packages/kernel/tasks/src/approvals.ts:243`) — on a plain read, **before** any write, so a
 refusal writes nothing. The `status = 'pending'` compare-and-swap
-(`packages/kernel/tasks/src/approvals.ts:233`) remains the race arbiter, unchanged.
+(`packages/kernel/tasks/src/approvals.ts:257`) remains the race arbiter, unchanged.
 
 **The predicate** is one module (`packages/kernel/tasks/src/decision-authority.ts:60`).
 `'user'` is the **open sentinel** and stays open — it is the deployment's human operator surface
@@ -354,7 +354,7 @@ which no line can cite, so it is pinned by assertion instead — and not merely 
 approver/reviewer, however it is scoped` drives `authorize()` with a key that holds the scope
 explicitly, and again with a key holding **every** scope, and observes the refusal both times.
 The override lands in the journal
-(`packages/kernel/tasks/src/approvals.ts:258`; the review twin at
+(`packages/kernel/tasks/src/approvals.ts:282`; the review twin at
 `packages/kernel/tasks/src/reviews.ts:278`), present *only* when an override actually happened.
 
 | Abuse case | Outcome | Evidence |
@@ -773,7 +773,7 @@ employee id cannot be one.
 **Consequences, stated without softening:**
 
 1. For an approval that names an employee — which is exactly what the escalation sweep mints
-   (`packages/kernel/tasks/src/approvals.ts:435`) — **break-glass is the only route at the HTTP
+   (`packages/kernel/tasks/src/approvals.ts:459`) — **break-glass is the only route at the HTTP
    door, not a fallback.** The "the named superior decides it" path the escalation fate advertises
    is unreachable end to end.
 2. `decideApproval` has exactly one production caller, the HTTP route
@@ -1063,11 +1063,11 @@ packages/kernel/workforce-tools/src/resolve-target.ts:126 | if (ownDepartment?.m
 packages/kernel/workforce-tools/src/collector.ts:35 | export const MALFORMED_TURN_ENDING
 packages/kernel/tasks/src/approvals.ts:85 | export const approvalDecisionSchema = z.strictObject({
 packages/kernel/tasks/src/approvals.ts:94 | override: z.boolean().default(false),
-packages/kernel/tasks/src/approvals.ts:217 | const overrode = !mayDecide(named.approver, input.decidedBy);
-packages/kernel/tasks/src/approvals.ts:219 | throw new ApprovalApproverMismatchError(input.approvalId, named.approver, input.decidedBy);
-packages/kernel/tasks/src/approvals.ts:233 | eq(schema.workforceApprovals.status, 'pending'),
-packages/kernel/tasks/src/approvals.ts:258 | overriddenApprover: approval.approver
-packages/kernel/tasks/src/approvals.ts:435 | approver: escalatedTo,
+packages/kernel/tasks/src/approvals.ts:241 | const overrode = !mayDecide(named.approver, input.decidedBy);
+packages/kernel/tasks/src/approvals.ts:243 | throw new ApprovalApproverMismatchError(input.approvalId, named.approver, input.decidedBy);
+packages/kernel/tasks/src/approvals.ts:257 | eq(schema.workforceApprovals.status, 'pending'),
+packages/kernel/tasks/src/approvals.ts:282 | overriddenApprover: approval.approver
+packages/kernel/tasks/src/approvals.ts:459 | approver: escalatedTo,
 packages/kernel/tasks/src/reviews.ts:155 | export const reviewVerdictSchema = z.strictObject({
 packages/kernel/tasks/src/reviews.ts:206 | const overrode = !mayDecide(pending.reviewer, input.actor);
 packages/kernel/tasks/src/reviews.ts:208 | throw new ReviewReviewerMismatchError(input.reviewId, pending.reviewer, input.actor);

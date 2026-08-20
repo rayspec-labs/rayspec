@@ -709,6 +709,98 @@ describe.skipIf(!hasDb)('a declared approval policy BINDS (db)', () => {
       expect(binding.approvalId).not.toBe(approval.id);
     });
 
+    /**
+     * THE STATE NO OTHER TEST IN THIS SUITE VISITS, and the reason the under-lock STATUS re-check in
+     * `lockGatedCompletionPark` is individually load-bearing rather than half of a redundant pair.
+     *
+     * Both arms below reach the park's identity checks the LONG way. The suite's other negative
+     * (`an approval the park does NOT name releases nothing`) decides a DIFFERENT approval, so the
+     * pre-lock fast path answers it and the under-lock pair is never consulted — measured, not
+     * assumed: deleting only the fast path leaves that test green, and deleting all three identity
+     * checks reds it. These two arms decide the approval the binding STILL NAMES, so the fast path
+     * passes and the STATUS check is the only thing left standing.
+     *
+     * How the state is reached, entirely through documented levers: `manual_unblock` is permitted on
+     * `blocked(approval_pending)` (`OPERATOR_UNBLOCKABLE`, signals.ts) and dissolves the park — but
+     * NOTHING clears `joinPolicy` on a wake, so the row keeps naming a live pending approval through
+     * `queued` and through `working`. A human deciding that approval at that moment presents the
+     * binding check with a binding that genuinely names it.
+     *
+     * Note which cell is involved: `working -> completed` is a transition the table has ALWAYS
+     * allowed, so the `blocked -> completed` cell this branch added is not what stops this. Only the
+     * status check is.
+     */
+    it('after manual_unblock RE-DISPATCHES the seat, deciding the STILL-BOUND approval cannot complete a WORKING task', async () => {
+      const { task, approval } = await gatedAtChokepointA();
+
+      // 1. The operator dissolves the park. The binding is not cleared with it.
+      await deliverSignal(tdb(), {
+        taskId: task.taskId,
+        kind: 'manual_unblock',
+        signalKey: `unblock:${task.taskId}:1`,
+        actor: 'user',
+      });
+      const unblocked = await read(task.taskId);
+      expect(unblocked.status).toBe('queued');
+      // This is what makes the arm meaningful: the fast path and the under-lock BINDING check both
+      // pass from here, because the park's binding really does name this approval.
+      const stillBound = joinPolicySchema.parse(unblocked.joinPolicy);
+      expect(stillBound.policy).toBe('approval');
+      expect(stillBound.approvalId).toBe(approval.id);
+
+      // 2. The scheduler dispatches it. The task is now mid-turn.
+      await toWorking(await read(task.taskId), 2);
+      expect((await read(task.taskId)).status).toBe('working');
+
+      // 3. The human decides THE APPROVAL THE BINDING NAMES, mid-turn.
+      await decideApproval(tdb(), {
+        approvalId: approval.id,
+        decision: 'approve',
+        decidedBy: 'user:00000000-0000-4000-8000-0000000000ff',
+      });
+
+      // FAIL-CLOSED. An approval decision does not complete a task that is not sitting in the gate
+      // park, whatever its binding says. Deleting the status re-check completes it here instead —
+      // an unauthorised release of a task that is still executing.
+      const after = await read(task.taskId);
+      expect(after.status).toBe('working');
+      expect(after.status).not.toBe('completed');
+      // The decision itself still RESOLVED — fail-closed here means "releases nothing", not
+      // "refuses the human". The approval is answered and the record is not left pending.
+      expect((await approvalsOf(task.taskId))[0]?.status).toBe('approved');
+    });
+
+    it('and the same decision on the QUEUED row neither completes it nor throws out of the decision route', async () => {
+      // The arm BEFORE re-dispatch, and it fails differently, which is why it is its own assertion:
+      // `queued -> completed` is `false` in the table, so a release attempted from here would not
+      // ship unapproved work — it would throw `TaskTransitionIllegalError` out of `decideApproval`
+      // and hand an operator a 500 on a decision they were entitled to make. Both are defects and
+      // only one of them is a security defect, so both are pinned.
+      const { task, approval } = await gatedAtChokepointA();
+      await deliverSignal(tdb(), {
+        taskId: task.taskId,
+        kind: 'manual_unblock',
+        signalKey: `unblock:${task.taskId}:1`,
+        actor: 'user',
+      });
+      expect((await read(task.taskId)).status).toBe('queued');
+      expect(joinPolicySchema.parse((await read(task.taskId)).joinPolicy).approvalId).toBe(
+        approval.id,
+      );
+
+      // Resolves, rather than throwing. `await expect(...).resolves` is the assertion — a bare call
+      // would let a throw fail the test with a stack trace instead of a named expectation.
+      await expect(
+        decideApproval(tdb(), {
+          approvalId: approval.id,
+          decision: 'approve',
+          decidedBy: 'user:00000000-0000-4000-8000-0000000000ff',
+        }),
+      ).resolves.toMatchObject({ status: 'approved' });
+      expect((await read(task.taskId)).status).toBe('queued');
+      expect((await read(task.taskId)).status).not.toBe('completed');
+    });
+
     it('a cancel cascade still reaches a gated park — it is not a park with no exit', async () => {
       const { task } = await gatedAtChokepointA();
       const row = await read(task.taskId);
