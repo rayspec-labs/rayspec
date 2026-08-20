@@ -41,8 +41,8 @@ Two properties hold across all five and are checked directly against the interfa
 
 **On granting tools.** No seam has a tool surface. A turn's native toolset is derived from the
 employee's declared role — `TOOLSETS_BY_ROLE[employee.role]`
-(`packages/kernel/workforce-tools/src/toolset.ts:849`), assembled at
-`packages/app/server/src/workforce-turn-handlers.ts:139`. The one indirect influence is real and
+(`packages/kernel/workforce-tools/src/toolset.ts:919`), assembled at
+`packages/app/server/src/workforce-turn-handlers.ts:140`. The one indirect influence is real and
 worth stating precisely: an `OrchestrationStrategy` chooses which declared seat owns a step, and a
 seat's role determines its toolset. So a strategy selects among the toolsets the workforce already
 declared; it cannot invent a seat, and it cannot change what a seat's role is allowed to call.
@@ -53,7 +53,7 @@ declared; it cannot invent a seat, and it cannot change what a seat's role is al
 
 ### `OrchestrationStrategy` — goal to plan
 
-`packages/kernel/core/src/orchestration-strategy.ts:39`. Default: `SingleTaskPlanStrategy` (`:49`) —
+`packages/kernel/core/src/orchestration-strategy.ts:45`. Default: `SingleTaskPlanStrategy` (`:69`) —
 the whole goal as one step for the default owner.
 
 **Wired.** Its production caller is the goal intake
@@ -92,8 +92,8 @@ budget; the ceiling exists to stop a runaway, not to express a recommended plan 
 returns nothing and retains nothing, on purpose, so every consumer is tested against an empty recall.
 
 **Wired, with one qualification.** It is called at
-`packages/app/server/src/workforce-turn-handlers.ts:187`; the injection point is the
-`memoryProviderFor` (`:73`) dependency. The composition root does not pass it
+`packages/app/server/src/workforce-turn-handlers.ts:188`; the injection point is the
+`memoryProviderFor` (`:74`) dependency. The composition root does not pass it
 (`packages/app/server/src/composition-root.ts:3493` calls `buildWorkforceTurnHandlers` without it),
 so a boot always gets the shipped `TaskHistoryMemoryProvider` — the seam is injectable by an embedder
 that composes the turn handlers itself, not by configuration.
@@ -102,7 +102,7 @@ that composes the turn handlers itself, not by configuration.
 neutralization has to match the document being rendered into:
 
 - **Hit text cannot forge structure.** Each hit renders through `sanitizeUntrusted`
-  (`packages/kernel/workforce-tools/src/context.ts:655`), which strips every line-boundary and
+  (`packages/kernel/workforce-tools/src/context.ts:662`), which strips every line-boundary and
   control character, so a hit cannot begin a line and therefore cannot place a column-0 section
   header or a forged data-boundary line. Driven by `'C1: an untrusted recall hit cannot forge the
   data-boundary line'` in `context.test.ts`, which asserts exactly one boundary line and exactly one
@@ -110,15 +110,15 @@ neutralization has to match the document being rendered into:
 - **The section is byte-bounded and droppable.** `SECTION_BUDGETS.recall` is 4096 bytes
   (`packages/kernel/workforce-tools/src/context.ts:76`), and recall is section 7 — the first thing
   dropped when the whole input is over ceiling
-  (`packages/kernel/workforce-tools/src/context.ts:700-701`).
+  (`packages/kernel/workforce-tools/src/context.ts:707-708`).
 - **The hit COUNT is capped** at `SEAM_MAX_MEMORY_HITS = 64` before rendering
-  (`packages/kernel/workforce-tools/src/context.ts:645`), with the drop announced under its own
+  (`packages/kernel/workforce-tools/src/context.ts:652`), with the drop announced under its own
   marker. This exists because the byte-budget loop re-measures the whole block once per dropped hit:
   the budget was always honored, but honoring it cost time quadratic in what the provider returned.
   Measured on this checkout before the cap: 1 000 hits rendered in 0.2 ms, 5 000 in 1.2 s, and 20 000
   in 30.8 s of CPU inside a pure function; the reviewer measured the same shape on different hardware
   (1.0 ms / 1 005.7 ms / 21 381.8 ms). The shipped provider's own ceiling is `RECALL_MAX_HITS = 10`
-  (`packages/kernel/workforce-tools/src/memory.ts:39`), so nothing shipped changes. Driven by
+  (`packages/kernel/workforce-tools/src/memory.ts:45`), so nothing shipped changes. Driven by
   `'caps the hits it will render, whatever the provider returned'`.
 
 ### `WorkerSelector` — assignment
@@ -156,7 +156,7 @@ implementation over the approval rows; it does not travel through this interface
 ### `ReviewPolicy` — a default without a seam
 
 `packages/kernel/core/src/review-policy.ts:69`, default `DeclaredReviewPolicy` (`:80`). It is
-constructed from the declared config at `packages/kernel/workforce-tools/src/review-policy.ts:76`
+constructed from the declared config at `packages/kernel/workforce-tools/src/review-policy.ts:98`
 and there is **no injection point** — a deployment cannot replace it. It is listed here so its
 absence from the seam set is a stated fact rather than an omission.
 
@@ -168,16 +168,16 @@ absence from the seam set is a stated fact rather than an omission.
 the returned value. One rule runs through all of them:
 
 - **AUTHORITY is REFUSED.** An identity, an approval status, a spend decision, a hit's score: wrong
-  means a typed `SeamConfinementError` (`:52`) naming the seam and the property.
+  means a typed `SeamConfinementError` (`:53`) naming the seam and the property.
 - **SIZE is CLAMPED.** A selection rationale, a recall hit count: these decide nothing, and refusing
   on them would hand an extension a denial of service — one oversized string and the turn dies.
 
 | Helper | What it makes structurally impossible | Driven by |
 |---|---|---|
-| `confineWorkerSelector` (`:75`) | Returning a non-candidate; returning someone lacking a required capability; answering on an empty list | `'REFUSES a selection naming someone outside the candidate set'`, `'REFUSES a selection lacking a capability the task requires'`, `'REFUSES an empty candidate list before the inner selector can answer at all'` |
-| `confineCostPolicy` (`:221`) | Turning a baseline denial into an allow — the baseline is asked first and its denial returns verbatim, so the extension is not even consulted. Settlement is the baseline's authoritatively; the extension's own is advisory and its failure cannot roll the ledger back | `'an extension may NOT allow what the baseline denied'`, `'a widened ceiling in the extension changes nothing'`, `'the extension is never consulted once the baseline has denied'`, `"a FAILING baseline settlement surfaces — it is the turn's real settlement"` |
-| `confineApprovalProvider` (`:248`) | Returning any status but `pending`; returning an unparseable timestamp or an unbounded ticket id | `'REFUSES a provider that answers its own question'`, `'REFUSES an unparseable requestedAt'` |
-| `confineMemoryProvider` (`:307`) | Exceeding the caller's limit or the seam ceiling (clamped); returning a hit with a non-finite score or no id (refused) | `'CLAMPS a flood to the seam ceiling'`, `"CLAMPS to the caller's own limit when it is narrower"`, `'REFUSES a malformed hit'` |
+| `confineWorkerSelector` (`:76`) | Returning a non-candidate; returning someone lacking a required capability; answering on an empty list | `'REFUSES a selection naming someone outside the candidate set'`, `'REFUSES a selection lacking a capability the task requires'`, `'REFUSES an empty candidate list before the inner selector can answer at all'` |
+| `confineCostPolicy` (`:224`) | Turning a baseline denial into an allow — the baseline is asked first and its denial returns verbatim, so the extension is not even consulted. Settlement is the baseline's authoritatively; the extension's own is advisory and its failure cannot roll the ledger back | `'an extension may NOT allow what the baseline denied'`, `'a widened ceiling in the extension changes nothing'`, `'the extension is never consulted once the baseline has denied'`, `"a FAILING baseline settlement surfaces — it is the turn's real settlement"` |
+| `confineApprovalProvider` (`:251`) | Returning any status but `pending`; returning an unparseable timestamp or an unbounded ticket id | `'REFUSES a provider that answers its own question'`, `'REFUSES an unparseable requestedAt'` |
+| `confineMemoryProvider` (`:310`) | Exceeding the caller's limit or the seam ceiling (clamped); returning a hit with a non-finite score or no id (refused) | `'CLAMPS a flood to the seam ceiling'`, `"CLAMPS to the caller's own limit when it is narrower"`, `'REFUSES a malformed hit'` |
 
 All named tests live in `packages/kernel/core/src/seam-confinement.test.ts`.
 

@@ -22,9 +22,10 @@ approvals that gate anything public.
   completions, unconditionally.
 - **Documentation** (`mgr_docs`, `release_notes_writer`): reference precision and release
   notes. Low-confidence writing routes to `senior_reviewer` (`confidenceBelow: 0.85`); release
-  notes additionally end in a human approval — the drafts carry `public_statement`, and
-  `mgr_docs` (who holds the label and the `request_approval` tool) asks for the sign-off before
-  anything ships.
+  notes additionally end in a human approval — `release_notes_writer` and `mgr_docs` both carry
+  `public_statement`, and that label GATES their completions: neither can finish a task without a
+  human decision, whether or not either asks. `mgr_docs` also holds `request_approval` and can put
+  a question to the maintainer before it finishes; the gate applies either way.
 - **Competitive Watch** (`mgr_watch`, `market_watcher`): monitoring on a tight department budget
   ($5/day inside the workforce's $60/day) — the ledger blocks the department without touching
   the others.

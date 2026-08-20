@@ -7,6 +7,13 @@
  * defect, not a default. Both paths compare-and-swap on `status = 'pending'`, so two racing
  * deciders (or a decider racing the sweep) admit exactly one winner.
  *
+ * A DECLARED APPROVAL POLICY MAKES THIS DOOR DO MORE THAN WAKE. When the park is a GATED COMPLETION
+ * — a finished, stored result held back by a declared `approvalPolicies` rule (approval-gate.ts) —
+ * `approve` COMPLETES the task here and `reject` parks it for a human, rather than re-queueing the
+ * seat. That is what makes `requireWhen` require: a park whose only exit was a wake could never be
+ * a gate, because the seat would simply run again and complete. It also drags the whole task lock
+ * order into this module, which `decideApproval` takes explicitly and for a stated reason.
+ *
  * THE ROW'S `approver` BINDS ITS DECIDER (decision-authority.ts). `'user'` is the open sentinel —
  * the deployment's human operator surface, what every shipped example declares — and stays open to
  * any permitted principal. A row that NAMES someone is the escalation case the sweep below mints:
@@ -19,6 +26,7 @@ import { and, asc, eq, isNotNull, lt } from 'drizzle-orm';
 import { z } from 'zod';
 import { afterTaskTerminal, lockRootFirst } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
+import { bindGatedCompletionPark, gatedCompletionApprovalId } from './approval-gate.js';
 import { mayDecide } from './decision-authority.js';
 import { TaskVersionConflictError } from './errors.js';
 import { appendTaskEvents } from './events.js';
@@ -104,15 +112,115 @@ export type ApprovalDecisionInput = Omit<z.output<typeof approvalDecisionSchema>
 };
 
 /**
- * Resolve one pending approval and wake its task. The row update, the journal event and the wake
- * signal commit together; the signal key (`approval:<id>`) makes a re-sent decision a no-op.
+ * The task this decision RELEASES, or null when the decision merely wakes one.
+ *
+ * A GATED COMPLETION park (`blocked(approval_pending)` with a `policy: 'approval'` binding naming
+ * this approval — see approval-gate.ts) holds a finished, stored result that only a human decision
+ * can release. Everything else — a seat's own `request_approval`, or a gate park waiting on a
+ * DIFFERENT approval — is decided the way it always was: journal, signal, and let the wake set
+ * re-queue the task.
+ *
+ * THE TASK LOCK ORDER, and why this function exists rather than an inline read. Releasing a gate
+ * reaches a SECOND task row (`afterTaskTerminal` fans in to the parent on `approve`), so the
+ * root-first task locks must be taken BEFORE the approval-row compare-and-swap — `tasks` then
+ * `approvals`, the same direction every turn acquires them (a turn holds its task locks and then
+ * writes approval rows). Taking them the other way round would be an `approvals -> tasks`
+ * acquisition against the turn's `tasks -> approvals`, i.e. a deadlock by design; it is exactly the
+ * hazard reviews.ts's module header exists to prevent, and `applyReviewVerdictInTx` takes its locks
+ * in this same order for this same reason. The plain SELECTs above and inside here take no lock, so
+ * they impose no order of their own.
+ *
+ * A SINGLE-THREADED TEST CANNOT DEMONSTRATE THIS. Nothing in the suite interleaves two
+ * transactions on these rows, so a green run is not evidence about the lock order — the argument
+ * above is, and the protocol is copied from the one path that already had to get it right.
+ */
+async function lockGatedCompletionPark(
+  tx: TenantDb,
+  approval: ApprovalRecord,
+): Promise<TaskRecord | null> {
+  const rows = (await tx
+    .select(schema.workforceTasks)
+    .where(eq(schema.workforceTasks.taskId, approval.taskId))) as TaskRecord[];
+  const snapshot = rows[0];
+  if (!snapshot) return null;
+  // THE FAST PATH. Architecturally it is an OPTIMISATION and not the control: it reads a row nobody
+  // has locked, so a racer can invalidate its answer between this line and the next. Nearly every
+  // decision that reaches this door answers a seat's own `request_approval`, whose park carries no
+  // `approval` binding at all, and this read lets those skip the root-first locks entirely.
+  //
+  // BUT DO NOT READ THAT AS "UNTESTED". It is the line the suite's binding-mismatch negative
+  // actually exercises: `an approval the park does NOT name releases nothing` decides a DIFFERENT
+  // approval, so this check answers it and the pair below is never consulted. Measured, not
+  // reasoned — deleting this line ALONE leaves that test green (the under-lock binding check then
+  // catches it), and deleting all three identity checks reds it. So removing this line changes no
+  // outcome the suite can observe, which is a statement about the suite as well as about the code.
+  if (gatedCompletionApprovalId(snapshot) !== approval.id) return null;
+  const task = await lockRootFirst(tx, snapshot);
+  // RE-CHECK UNDER THE LOCK. A racer (the timeout sweep, an operator unblock, a cancel cascade, the
+  // escalation re-bind) may have moved the task or repointed its binding while we waited, and only
+  // a read under the lock is authoritative. Fail-closed to the ordinary decision path: the approval
+  // still resolves and still journals, and nothing completes a task whose park is gone or whose
+  // park is waiting on a DIFFERENT approval. The CAS below remains the race arbiter for the
+  // approval row itself.
+  //
+  // THE TWO CHECKS ARE NOT INTERCHANGEABLE, and an earlier version of this comment claimed they
+  // were on the strength of a mutation that survived. What that survival actually showed was a
+  // missing test. Precisely:
+  //
+  //   - THE STATUS CHECK (next line) IS INDIVIDUALLY NECESSARY, and its own state is one the fast
+  //     path cannot catch: `manual_unblock` is permitted on `blocked(approval_pending)`
+  //     (`OPERATOR_UNBLOCKABLE`, signals.ts) and dissolves the park, but NOTHING clears `joinPolicy`
+  //     on a wake — so the row is re-dispatched to `working` still naming a live pending approval.
+  //     Deciding THAT approval passes the fast path and passes the binding check below; only this
+  //     line stands between it and `applyTransition(working -> completed)`, a cell the table has
+  //     always allowed. Deleting it releases a task that is still executing. Pinned by
+  //     `approval-binding.db.test.ts`'s `after manual_unblock RE-DISPATCHES the seat, deciding the
+  //     STILL-BOUND approval cannot complete a WORKING task`, plus its `queued` sibling, which
+  //     fails differently (an illegal transition thrown at an operator) and is asserted separately.
+  //   - THE BINDING CHECK (line after) IS THE ANTI-RACE CONTROL, and no test in this repository
+  //     proves it necessary — deliberately, and this is a stated limit rather than a gap to be
+  //     closed by a cleverer single-threaded test. Inside one transaction the pre-lock read and this
+  //     re-read see the same row, so the only state where this line fires and the fast path did not
+  //     requires a second transaction repointing the binding in between. Nothing here interleaves
+  //     two transactions on these rows, so its mutant survives and is EXPECTED to. Do not delete it
+  //     on the strength of that green; deleting it is safe only under an assumption this suite
+  //     cannot check.
+  if (task.status !== 'blocked' || task.statusReason !== 'approval_pending') return null;
+  if (gatedCompletionApprovalId(task) !== approval.id) return null;
+  return task;
+}
+
+/**
+ * Resolve one pending approval and either RELEASE its task or wake it. The row update, the journal
+ * event, any transition and the signal commit together; the signal key (`approval:<id>`) makes a
+ * re-sent decision a no-op.
  *
  * PROTOCOL. The authority gate runs FIRST, on a plain read, so a refusal writes NOTHING — no CAS,
- * no journal-counter UPDATE, no signal. It cannot be the race arbiter and does not try to be: the
- * `status = 'pending'` compare-and-swap below is still the only thing that admits one winner (two
- * authorized racers both read `pending`, both CAS, and the loser lands in the same
+ * no journal-counter UPDATE, no signal, no lock. It cannot be the race arbiter and does not try to
+ * be: the `status = 'pending'` compare-and-swap below is still the only thing that admits one
+ * winner (two authorized racers both read `pending`, both CAS, and the loser lands in the same
  * already-decided branch as before). `approver` is written once at insert and never updated, so
- * reading it outside the CAS is sound.
+ * reading it outside the CAS is sound. THEN the task locks (root-first, before the CAS — see
+ * `lockGatedCompletionPark`), then the CAS, then the journal, then the outcome.
+ *
+ * WHAT A DECISION DOES depends on the park's own BINDING, never on the approval row alone:
+ *
+ *   - a GATED COMPLETION park, `approve` — the task COMPLETES here and fans in to its parent. The
+ *     seat is NOT re-dispatched to "finish": it already finished, the result is stored on the row,
+ *     and the human authorised exactly those bytes. Re-running it would re-spend budget and could
+ *     produce a different result than the one that was signed off.
+ *   - a GATED COMPLETION park, `reject` — the task parks in `waiting_for_user` (reasonless), which
+ *     a `user_reply` releases. NOT rework: no approval round counter exists and the re-request cap
+ *     never sees a `complete` intent, so a rework fate is unbounded by construction. NOT `fail`: a
+ *     rejection is "you are not authorised to release this", not "your work is wrong", and the
+ *     stored result stays for the human who now owns the decision.
+ *   - anything else — the historical behaviour: journal and signal, and the wake set decides.
+ *
+ * THE SIGNAL IS DELIVERED LAST, AFTER any transition. `deliverSignal` records the row always and
+ * re-queues only when the kind ANSWERS the park the task is in (`answersPark`, signals.ts). Ordered
+ * this way the decision is still journalled as a signal a later turn can read, while a released
+ * task — now `completed`, or `waiting_for_user` with no reason — matches no `approval_decided` park
+ * and cannot be spuriously re-queued.
  */
 export async function decideApproval(
   tdb: TenantDb,
@@ -134,6 +242,7 @@ export async function decideApproval(
     if (overrode && input.overrideNamedApprover !== true) {
       throw new ApprovalApproverMismatchError(input.approvalId, named.approver, input.decidedBy);
     }
+    const gated = await lockGatedCompletionPark(tx, named);
     const updated = (await tx
       .update(schema.workforceApprovals, {
         status: input.decision === 'approve' ? 'approved' : 'rejected',
@@ -171,9 +280,37 @@ export async function decideApproval(
           // next write is worse than no claim, so the one case where `decided_by` does NOT match
           // the recorded approver says so, in the journal, naming who was overridden.
           ...(overrode ? { overriddenApprover: approval.approver } : {}),
+          // PRESENT ONLY ON A GATED COMPLETION — this decision did not merely answer a question,
+          // it decided whether finished work ships. An operator reading the trail must be able to
+          // tell the two apart. WHAT was decided is already `decision` two lines up; a second copy
+          // computed from the same input could never disagree with it and would only be noise.
+          ...(gated !== null ? { gatedCompletion: true } : {}),
         },
       },
     ]);
+    if (gated !== null) {
+      if (input.decision === 'approve') {
+        // THE RELEASE. The result is already on the row (the interception stored it), so this is
+        // the completion the turn asked for, authorised.
+        const done = await applyTransition(tx, {
+          taskId: gated.taskId,
+          expectedVersion: gated.version,
+          to: 'completed',
+          actor: input.decidedBy,
+        });
+        await afterTaskTerminal(tx, done);
+      } else {
+        // REJECTED. The work stands and stays stored; the RELEASE does not happen. The reasonless
+        // `waiting_for_user` park is the one a spent review-round budget and an abandoned review
+        // both use, and `user_reply` is its exit (WAKES, signals.ts).
+        await applyTransition(tx, {
+          taskId: gated.taskId,
+          expectedVersion: gated.version,
+          to: 'waiting_for_user',
+          actor: input.decidedBy,
+        });
+      }
+    }
     await deliverSignal(tx, {
       taskId: approval.taskId,
       kind: 'approval_decided',
@@ -224,8 +361,18 @@ async function transitionWithRetry(
 /**
  * Enforce the declared fate of every overdue pending approval. `fail` fails the task parked on the
  * approval — in EITHER of the two parks an approval wait can occupy, the `waiting_for_user` one a
- * request opens and the `blocked` one an escalation moves it to, so the chain's terminal fate lands
- * where the chain actually left the task. `escalate` closes this request, re-issues it to the
+ * request opens and the `blocked` one an escalation moves it to (and a declared approval GATE opens
+ * directly), so the chain's terminal fate lands where the chain actually left the task.
+ *
+ * WHAT `onTimeout: fail` NOW COSTS, said out loud because the word did not change and its price
+ * did: on a `request_approval` the task had produced NOTHING, so the fate cost an unanswered
+ * question. On a GATED COMPLETION (approval-gate.ts) the task holds a finished, stored result, and
+ * failing it throws that release away. That is the fail-CLOSED posture — a release nobody
+ * authorised does not ship — but an operator declaring `onTimeout: fail` on an approval policy is
+ * declaring something more expensive than the same word means on a request, and
+ * `docs/spec-reference.md` says so. It is pinned by a test.
+ *
+ * `escalate` closes this request, re-issues it to the
  * DECLARED escalation target with a fresh window (and that terminal `fail` fate — the chain ends at
  * a human, never in a loop), and moves the task to `blocked(approval_pending)` so the escalated
  * decision wakes it. Concurrency-safe: the per-row `status = 'pending'` compare-and-swap makes two
@@ -316,11 +463,12 @@ export async function sweepApprovalTimeouts(
             escalateTo: null,
           })
           .returning({ id: schema.workforceApprovals.id });
+        const reissuedId = (inserted[0] as { id: string }).id;
         await appendTaskEvents(tx, approval.taskId, [
           {
             type: 'workforce.approval.requested',
             payload: {
-              approvalId: (inserted[0] as { id: string }).id,
+              approvalId: reissuedId,
               taskId: approval.taskId,
               question: approval.question,
               options: approval.options,
@@ -330,7 +478,23 @@ export async function sweepApprovalTimeouts(
             },
           },
         ]);
+        // RE-BIND A GATED COMPLETION PARK to the re-issued request. The park names the ONE approval
+        // that may release it (fail-closed, approval-gate.ts), and the escalation mints a NEW row —
+        // so a binding left naming the escalated-away id would make the superior's `approve` fall
+        // through to the ordinary wake, which re-queues the task and RE-DISPATCHES the seat with a
+        // finished result. The gate would survive its own escalation as a re-run. The chain hands
+        // the same question one hop along; the binding follows it.
+        const parkRows = (await tx
+          .select(schema.workforceTasks)
+          .where(eq(schema.workforceTasks.taskId, approval.taskId))) as TaskRecord[];
+        const parked = parkRows[0];
+        if (parked && gatedCompletionApprovalId(parked) === approval.id) {
+          await bindGatedCompletionPark(tx, approval.taskId, reissuedId);
+        }
         await transitionWithRetry(tx, approval.taskId, async (task) => {
+          // A GATED completion already sits in `blocked(approval_pending)` — the park the escalate
+          // branch moves a request's task INTO — so this guard correctly leaves it where it is, and
+          // `WAKES.approval_decided` covers that park either way.
           if (task.status !== 'waiting_for_user') return;
           await applyTransition(tx, {
             taskId: task.taskId,

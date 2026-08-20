@@ -36,6 +36,7 @@ function input(over: Partial<PlanTurnInput> = {}): PlanTurnInput {
     priorToolError: false,
     pendingCancel: false,
     matchedReviewPolicy: null,
+    matchedApprovalRule: null,
     createdChildren: [],
     cancelTarget: null,
     reviewAssignment: null,
@@ -74,6 +75,37 @@ describe('schemas are strict and closed', () => {
       workerResultSchema.safeParse({ status: 'completed', summary: 'x', confidence: 1.5 }).success,
     ).toBe(false);
     expect(workerResultSchema.safeParse(RESULT).success).toBe(true);
+  });
+
+  it('the result status carries no authority, so the two values that claimed one are gone', () => {
+    // `failed` and `needs_clarification` decided NOTHING: a `complete` transitions the task to
+    // `completed` whatever this field says. They are refused here so a seat cannot narrate an
+    // outcome the engine will contradict — the real channels are the `fail` intent (the
+    // `report_failure` tool) and `request_clarification`.
+    for (const status of ['failed', 'needs_clarification']) {
+      expect(workerResultSchema.safeParse({ ...RESULT, status }).success, status).toBe(false);
+      expect(
+        turnIntentSchema.safeParse({ kind: 'complete', result: { ...RESULT, status } }).success,
+        `${status} must not reach the engine through a complete intent either`,
+      ).toBe(false);
+    }
+    // The caveat value STAYS: it qualifies a result the engine accepted, it does not claim a status.
+    expect(workerResultSchema.safeParse({ ...RESULT, status: 'partial' }).success).toBe(true);
+    expect(workerResultSchema.shape.status.options).toEqual(['completed', 'partial']);
+  });
+
+  it('a fail intent still demands a non-empty message — an unexplained failure is refused', () => {
+    expect(turnIntentSchema.safeParse({ kind: 'fail', message: '' }).success).toBe(false);
+    expect(turnIntentSchema.safeParse({ kind: 'fail' }).success).toBe(false);
+    expect(turnIntentSchema.safeParse({ kind: 'fail', message: 'x', extra: 1 }).success).toBe(
+      false,
+    );
+    // Deliberately UNCAPPED at the engine edge (the tool caps the model's side): this arm also
+    // carries handler/scheduler diagnostics, and a cap here would turn a long stack trace into a
+    // malformed intent — an undiagnosable failure in place of a diagnosable one.
+    expect(turnIntentSchema.safeParse({ kind: 'fail', message: 'x'.repeat(50_000) }).success).toBe(
+      true,
+    );
   });
 
   it('an approval intent requires the enforced-fate window (timeoutMs)', () => {
@@ -329,7 +361,14 @@ describe('review planning', () => {
     const plan = planTurnOutcome(
       input({ intent: review, maxReviewRounds: 2, reviewRoundsUsed: 1 }),
     );
-    expect(plan).toEqual({ kind: 'request_review', reviewer: 'reviewer-1', round: 2 });
+    // `approval: null` — no declared approval policy covers this seat, so the review park's
+    // binding carries no gate and an accept verdict completes the task as it always has (K-002).
+    expect(plan).toEqual({
+      kind: 'request_review',
+      reviewer: 'reviewer-1',
+      round: 2,
+      approval: null,
+    });
   });
 
   it('a request past the round budget parks for a human', () => {
@@ -456,6 +495,7 @@ describe('policy-intercepted completion', () => {
       dispatchReviewer: true,
       round: 1,
       maxRounds: 2,
+      approval: null,
     });
   });
 
@@ -506,6 +546,178 @@ describe('policy-intercepted completion', () => {
         input({ matchedReviewPolicy: { reviewer: 'user', dispatchReviewer: false, maxRounds: 1 } }),
       ),
     ).toMatchObject({ kind: 'complete_with_review', reviewer: 'user', dispatchReviewer: false });
+  });
+});
+
+describe('the approval gate — a declared approval policy BINDS (K-002)', () => {
+  const gate = {
+    id: 'public_statement_signoff',
+    approver: 'user',
+    timeoutMs: 3_600_000,
+    onTimeout: 'fail',
+    escalateTo: null,
+  } as const;
+
+  it('a matched approval rule intercepts a completion with no review policy', () => {
+    expect(planTurnOutcome(input({ matchedApprovalRule: gate }))).toEqual({
+      kind: 'complete_with_approval',
+      result: workerResultSchema.parse(RESULT),
+      approval: gate,
+    });
+  });
+
+  it('NO matched rule still completes — the gate is opt-in by declaration', () => {
+    expect(planTurnOutcome(input())).toEqual({
+      kind: 'complete',
+      result: workerResultSchema.parse(RESULT),
+    });
+  });
+
+  it('the gate is un-steerable: the SAME rule matches at every self-reported confidence', () => {
+    // The property `review-policy.ts` claims for the whole subsystem — "no model output STEERS
+    // which rule matches". `matchApprovalRule` reads labels and the config, never the result, so
+    // the two confidences that pick DIFFERENT review chokepoints pick the SAME approval gate.
+    for (const confidence of [0.5, 0.9]) {
+      expect(
+        planTurnOutcome(
+          input({
+            matchedApprovalRule: gate,
+            intent: turnIntentSchema.parse({
+              kind: 'complete',
+              result: { ...RESULT, confidence },
+            }),
+          }),
+        ),
+      ).toMatchObject({ kind: 'complete_with_approval', approval: gate });
+    }
+  });
+
+  describe('REVIEW RUNS FIRST, and carries the gate to the verdict path (D-052a)', () => {
+    const policy = { reviewer: 'qa', dispatchReviewer: true, maxRounds: 2 };
+
+    it('both policies matched: the completion becomes a REVIEW that carries the approval gate', () => {
+      expect(
+        planTurnOutcome(input({ matchedReviewPolicy: policy, matchedApprovalRule: gate })),
+      ).toEqual({
+        kind: 'complete_with_review',
+        result: workerResultSchema.parse(RESULT),
+        reviewer: 'qa',
+        dispatchReviewer: true,
+        round: 1,
+        maxRounds: 2,
+        approval: gate,
+      });
+    });
+
+    it('a review policy with NO approval rule carries a null gate', () => {
+      expect(planTurnOutcome(input({ matchedReviewPolicy: policy }))).toMatchObject({
+        kind: 'complete_with_review',
+        approval: null,
+      });
+    });
+
+    it('rounds spent parks for a human and needs NO gate — that path never completes', () => {
+      expect(
+        planTurnOutcome(
+          input({ matchedReviewPolicy: policy, matchedApprovalRule: gate, reviewRoundsUsed: 2 }),
+        ),
+      ).toEqual({
+        kind: 'review_rounds_exhausted',
+        reviewer: 'qa',
+        result: workerResultSchema.parse(RESULT),
+      });
+    });
+
+    it('a MODEL-INITIATED request_review carries the gate too — the same verdict completes it', () => {
+      // The third park-binding site. `request_review` parks in `waiting_for_review` exactly as a
+      // policy interception does, and its `accept` verdict reaches the SAME completion write.
+      expect(
+        planTurnOutcome(
+          input({
+            matchedApprovalRule: gate,
+            intent: turnIntentSchema.parse({ kind: 'request_review', reviewer: 'qa' }),
+          }),
+        ),
+      ).toEqual({ kind: 'request_review', reviewer: 'qa', round: 1, approval: gate });
+      expect(
+        planTurnOutcome(
+          input({
+            matchedApprovalRule: gate,
+            intent: turnIntentSchema.parse({
+              kind: 'request_review',
+              reviewer: 'qa',
+              dispatchReviewer: true,
+            }),
+          }),
+        ),
+      ).toEqual({ kind: 'request_review_dispatch', reviewer: 'qa', round: 1, approval: gate });
+    });
+
+    it('an un-gated request_review carries a null gate', () => {
+      expect(
+        planTurnOutcome(
+          input({ intent: turnIntentSchema.parse({ kind: 'request_review', reviewer: 'qa' }) }),
+        ),
+      ).toMatchObject({ kind: 'request_review', approval: null });
+    });
+  });
+
+  describe("onTimeout: 'escalate' with no resolvable target DEGRADES to 'fail' (D-052d)", () => {
+    it('degrades rather than refusing the intent — a finished result is never destroyed for it', () => {
+      // The `request_approval` path answers this with `invalid_intent`, whose tool-error fate is
+      // requeue-once-then-FAIL. Reusing that here would throw away a stored, complete result
+      // because the seat happens to have no superior (an orchestrator has none by lint rule).
+      expect(
+        planTurnOutcome(
+          input({
+            matchedApprovalRule: { ...gate, onTimeout: 'escalate', escalateTo: null },
+          }),
+        ),
+      ).toEqual({
+        kind: 'complete_with_approval',
+        result: workerResultSchema.parse(RESULT),
+        approval: { ...gate, onTimeout: 'fail', escalateTo: null },
+      });
+    });
+
+    it('a resolvable target keeps the declared escalate fate', () => {
+      expect(
+        planTurnOutcome(
+          input({ matchedApprovalRule: { ...gate, onTimeout: 'escalate', escalateTo: 'cto' } }),
+        ),
+      ).toMatchObject({
+        kind: 'complete_with_approval',
+        approval: { onTimeout: 'escalate', escalateTo: 'cto' },
+      });
+    });
+
+    it('the degrade applies on the REVIEW-carried gate as well', () => {
+      expect(
+        planTurnOutcome(
+          input({
+            matchedReviewPolicy: { reviewer: 'qa', dispatchReviewer: false, maxRounds: 2 },
+            matchedApprovalRule: { ...gate, onTimeout: 'escalate', escalateTo: null },
+          }),
+        ),
+      ).toMatchObject({
+        kind: 'complete_with_review',
+        approval: { onTimeout: 'fail' },
+      });
+    });
+  });
+
+  it('a pending cancel still overrides the gate', () => {
+    expect(planTurnOutcome(input({ matchedApprovalRule: gate, pendingCancel: true }))).toEqual({
+      kind: 'cancelled',
+    });
+  });
+
+  it('a review CHILD is never gated — its completion is refused before any policy is read', () => {
+    expect(
+      planTurnOutcome(
+        input({ matchedApprovalRule: gate, reviewAssignment: { reviewId: 'rev_1' } }),
+      ),
+    ).toMatchObject({ kind: 'invalid_intent' });
   });
 });
 
@@ -570,7 +782,7 @@ describe('review dispatch and reviewer verdicts', () => {
           }),
         }),
       ),
-    ).toEqual({ kind: 'request_review_dispatch', reviewer: 'qa', round: 1 });
+    ).toEqual({ kind: 'request_review_dispatch', reviewer: 'qa', round: 1, approval: null });
   });
 
   it('submit_review passes through verbatim', () => {

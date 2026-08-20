@@ -137,6 +137,22 @@ const escalateArgsSchema = z.strictObject({
   detail: z.string().min(1).optional(),
 });
 
+/**
+ * THE FAILURE CHANNEL'S ARGUMENTS. Capped at the message-body limit for the same reason
+ * `request_clarification`'s question is: the message is persisted as the task's result summary and
+ * renders VERBATIM into a waiting parent's next turn (`childResults`), so an uncapped one is the
+ * message cap with an extra step.
+ *
+ * The cap lives HERE and deliberately not on `turnIntentSchema`'s `fail` arm. That arm is also how
+ * the composition reports a handler that threw (`failTurn`, @rayspec/server
+ * workforce-turn-handlers.ts) and how the scheduler reports a turn it could not run — arbitrary
+ * error text, which a capped engine schema would turn into a MALFORMED intent, converting a
+ * diagnosable failure into an undiagnosable one. Model input is capped; machine diagnostics are not.
+ */
+const reportFailureArgsSchema = z.strictObject({
+  message: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+});
+
 const submitReviewArgsSchema = z.strictObject({
   verdict: z.enum(['accept', 'reject']),
   reasons: z.array(z.string().min(1)).optional(),
@@ -225,7 +241,7 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           properties: {
             status: {
               type: 'string',
-              enum: ['completed', 'partial', 'failed', 'needs_clarification'],
+              enum: ['completed', 'partial'],
             },
             summary: { type: 'string', minLength: 1 },
             findings: { type: 'array', items: { type: 'string' } },
@@ -530,7 +546,10 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           kind: 'request_approval',
           question,
           options: options ?? [],
-          approver: 'user',
+          // From the MATCHED RULE where there is one — the same accountability fact the engine
+          // writes onto a gated completion's approval row. `'user'` remains the fallback for an
+          // uncovered seat, whose request no declared rule stands behind.
+          approver: rule?.approver ?? 'user',
           timeoutMs: rule?.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
           onTimeout,
           ...(onTimeout === 'escalate' && employee.reportsTo !== null
@@ -592,6 +611,57 @@ export function buildRoleToolset(input: RoleToolsetInput): NeutralTool[] {
           escalateTo: superior,
           escalateToDepartment: config.employees.get(superior)?.department ?? null,
         });
+      },
+      timeoutMs: TOOL_TIMEOUT_MS,
+      idempotent: true,
+    },
+
+    /**
+     * THE FAILURE CHANNEL — the ending that was reachable by the engine and by nothing a seat could
+     * call. `fail` has always been a legal intent, a legal plan and a legal `working → failed`
+     * transition; no tool produced it, so a seat that could not do its work had only
+     * `submit_result` to end with, and the engine writes `completed` there as a LITERAL. An honest
+     * refusal was therefore recorded as a success.
+     *
+     * IT IS NOT `escalate`, AND THE DESCRIPTION SAYS SO IN THE MODEL'S WORDS, because the two are
+     * the pair a stuck seat chooses between and the wrong choice costs a task: `escalate` parks THIS
+     * task and opens a fresh one for the superior — the work continues elsewhere; `report_failure`
+     * ends this task terminally and nobody picks it up. A seat with a superior who could plausibly
+     * unblock it should escalate; this tool is for a task that is over.
+     *
+     * NO AUTHORITY IS ADDED HERE. The model chooses WHICH typed intent it ends with, exactly as it
+     * always has, and the engine decides what that intent does to the row (`applyTransition`, the
+     * one status writer). Adding this tool DE-escalates: it stops routing a "could not" through a
+     * channel whose only outcome is `completed`.
+     *
+     * The escalate contrast is offered only to a seat that HOLDS `escalate` — same rule
+     * `delegate_task`'s description follows above, for the same reason: naming an ending the caller
+     * cannot reach costs a turn to discover. The orchestrator reports to no one and carries no
+     * `escalate`, which is precisely why it needs this tool most.
+     */
+    report_failure: {
+      spec: {
+        name: 'report_failure',
+        description:
+          'End this turn by recording that this task could not be completed. The task ends ' +
+          'FAILED and nobody takes it further — use it only when the work is genuinely over. ' +
+          (TOOLSETS_BY_ROLE[employee.role].includes('escalate')
+            ? 'If someone above you might still be able to move it, escalate instead; if you '
+            : 'If you ') +
+          "did part of the job, submit_result with status 'partial'. State plainly in `message` " +
+          'what stopped you, so a human reading the failed task knows what to change.',
+        parameters: {
+          type: 'object',
+          properties: {
+            message: { type: 'string', minLength: 1, maxLength: MAX_MESSAGE_BODY_CHARS },
+          },
+          required: ['message'],
+          additionalProperties: false,
+        },
+      },
+      handler: (args) => {
+        const { message } = parseEnding(reportFailureArgsSchema, args);
+        return endTurn({ kind: 'fail', message });
       },
       timeoutMs: TOOL_TIMEOUT_MS,
       idempotent: true,

@@ -197,10 +197,41 @@ decided exactly once (a compare-and-swap on the verdict), a task under review wh
 task dies gets the review released rather than stranded, and a review task's own completion is
 never policy-reviewed — review depth is structurally one.
 
-Approvals: `request_approval` parks the task at zero cost with the DECLARED window and fate
-bound at request time (the approval policy matched by the employee's labels). A decision carries the
-VERIFIED principal as `decidedBy` — the route derives it from the credential; there is no field
-for asserting an identity. The timeout sweep gives every hung approval its declared fate.
+Approvals: a matched policy intercepts a completion too, and this is the half that used to be
+asymmetric. A declared `approvalPolicies` rule covering the seat's labels turns a completion into a
+gate: the result is stored, an approval is opened, and the task parks in
+`blocked(approval_pending)` — the seat is not re-dispatched, because it has already finished and
+what the human authorises is exactly the bytes on the row. `approve` completes the task
+(`decideApproval`, the only edge from a park to `completed` in the transition table); `reject`
+parks it in `waiting_for_user` with the result intact, for a human to decide what happens next.
+`request_approval` still parks the task at zero cost with the same declared window and fate, bound
+at request time. A decision carries the VERIFIED principal as `decidedBy` — the route derives it
+from the credential; there is no field for asserting an identity. The timeout sweep gives every hung
+approval its declared fate.
+
+**Both completion chokepoints are gated, and only closing both is a gate.** A worked task reaches
+`completed` at exactly two sites: the planner's `complete` case and a review verdict's `accept`,
+which never re-enters the planner. A matched review policy DIVERTS every completion from the first
+to the second, so a gate on the planner alone would leave every review-covered seat ungated — and
+because a review rule may trigger on `confidenceBelow`, a number the submitting turn writes about
+itself, a seat under both policies could then pick whether it is gated by picking a number. The
+matched approval rule therefore rides the review park's binding (`bindReviewPark`, the same channel
+`maxRounds` uses to reach a roster-free verdict path), and the verdict's `accept` opens the gate
+instead of completing. Review runs first and approval second by design: review verifies the product,
+approval authorises release of the *verified* product, and the reverse order would leave a human's
+sign-off attached to bytes that then changed. Proof:
+`packages/kernel/tasks/src/approval-binding.db.test.ts` drives one seat through both chokepoints at
+both sides of the review trigger and requires the same park;
+`packages/kernel/workforce-tools/src/approval-gate-match.test.ts` shows on the shipped maintainers
+example that the review match moves with the self-reported confidence while `matchApprovalRule` —
+which takes no result argument at all — does not.
+
+**What `onTimeout` costs is not the same on a policy as on a request.** On a `request_approval` the
+task had produced nothing, so `fail` cost an unanswered question. On a policy-gated completion the
+task holds a finished, stored result, and `fail` throws that release away. The stored bytes remain
+on the row; the completion does not happen. That is the fail-closed posture — a release nobody
+authorised does not ship — but it is a more expensive word than the same word on a request, and
+`docs/spec-reference.md` says so beside the key.
 
 **A decision a human already resolved cannot be re-opened by asking again.** A seat woken by its
 own approval could re-request the identical decision, indefinitely as far as structure went — turn
@@ -666,16 +697,21 @@ packages/app/server/src/workforce-boot.ts                      | WorkforceSpecCh
 packages/app/server/src/workforce-recall.db.test.ts            | ADVERSARIAL: an identical twin workforce in another tenant leaks nothing
 packages/app/server/src/workforce-turn-validation.db.test.ts   | a forged escalateTo cannot ride in through the tool arguments
 packages/compose/api-auth/src/cleanup/erase-tenant.ts          | journalScrub
+docs/spec-reference.md                                        | costs more on a policy than on a request
 packages/compose/api-auth/src/engine/deploy.ts                 | ROLLBACK / RECOVERY — FORWARD-FIX ONLY
 packages/kernel/db/drizzle/0004_run_events.sql:36              | CREATE UNIQUE INDEX "run_events_tenant_run_seq_idx"
 packages/kernel/db/drizzle/meta/_journal.json                  | "when"
 packages/kernel/db/scripts/shadow-dryrun.sh                    | ASSERT 0013 end state
 packages/kernel/db/src/schema.ts                               | claim_expires_at
+packages/kernel/spec/src/workforce-grammar.ts                  | approvalPolicies
+packages/kernel/spec/src/workforce-grammar.ts                  | onTimeout
 packages/kernel/spec/src/workforce-lint.ts                     | THE DURABLE WORKER
 packages/kernel/spec/src/workforce-parse.negative.test.ts      | rejects a workforce on a deployment without a durable worker
 packages/kernel/tasks/src/apply-intents.ts                     | actor: task.owner
 packages/kernel/tasks/src/apply-intents.ts                     | applyTurnOutcome
+packages/kernel/tasks/src/apply-intents.ts                     | bindReviewPark
 packages/kernel/tasks/src/apply-transition.ts                  | applyTransition
+packages/kernel/tasks/src/approval-binding.db.test.ts          | THE HOLE IS CLOSED: an accept verdict opens the approval instead of completing
 packages/kernel/tasks/src/approval-rerequest.db.test.ts        | a DIFFERENT decision on the same task still parks — and the count SEES the second row
 packages/kernel/tasks/src/approvals.ts                         | decideApproval
 packages/kernel/tasks/src/approvals.ts                         | decidedBy
@@ -687,6 +723,7 @@ packages/kernel/tasks/src/decision-authority.ts                | ANY_AUTHENTICAT
 packages/kernel/tasks/src/events.ts                            | lastEventSeq
 packages/kernel/tasks/src/intent-applier.ts                    | escalateTo
 packages/kernel/tasks/src/intent-applier.ts                    | planTurnOutcome
+packages/kernel/tasks/src/join.ts                              | maxRounds
 packages/kernel/tasks/src/reviews.ts                           | overriddenReviewer
 packages/kernel/tasks/src/signals.ts                           | manual_unblock
 packages/kernel/tasks/src/transitions.property.test.ts         | terminal at most once, never left; every working-entry from queued
@@ -697,6 +734,8 @@ packages/kernel/workforce-tools/src/context.ts                 | GoalExceedsCont
 packages/kernel/workforce-tools/src/facts.ts                   | computeTurnFacts
 packages/kernel/workforce-tools/src/facts.ts                   | confidenceBelow
 packages/kernel/workforce-tools/src/facts.ts                   | firesOnLabels
+packages/kernel/workforce-tools/src/approval-gate-match.test.ts | the APPROVAL match does NOT — the same rule at every confidence, for both seats
+packages/kernel/workforce-tools/src/review-policy.ts           | matchApprovalRule
 packages/kernel/workforce-tools/src/resolve-target.ts          | assertManagerMayTarget
 packages/kernel/workforce-tools/src/role-privilege.test.ts     | the toolset is a function of the TASK owner alone — two roles never blend
 packages/kernel/workforce-tools/src/toolset-semantics.test.ts  | a manager reaches own department members and led-team members — nothing else

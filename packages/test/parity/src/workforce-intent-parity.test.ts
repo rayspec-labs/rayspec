@@ -263,6 +263,16 @@ describe('scripted sequences produce byte-identical intents across backends', ()
     });
   });
 
+  it('report_failure produces the byte-identical fail intent on all four worker backends', () => {
+    const { collected } = assertParity(ALL_BACKENDS, 'dev', [
+      ['report_failure', { message: 'The target system is unreachable and no credential exists.' }],
+    ]);
+    expect(collected.intent).toEqual({
+      kind: 'fail',
+      message: 'The target system is unreachable and no credential exists.',
+    });
+  });
+
   it('request_clarification is identical on all four worker backends', () => {
     const { collected } = assertParity(ALL_BACKENDS, 'dev', [
       ['request_clarification', { question: 'Which environment counts?' }],

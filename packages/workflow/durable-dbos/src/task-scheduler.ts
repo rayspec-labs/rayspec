@@ -179,6 +179,25 @@ export interface TaskTurnHandlerOutcome {
     readonly maxRounds: number;
   };
   /**
+   * The TRUSTED approval-policy match covering this task's seat — computed by the dispatching
+   * composition from the DECLARED rules and the employee's DECLARED labels, never from model output
+   * and (unlike `reviewPolicy`) never from the submitted result either, so nothing the turn writes
+   * can steer whether the gate applies. Validated strictly by the engine
+   * (`turnApprovalPolicySchema`). Absent means no declared rule covers the seat.
+   *
+   * `escalateTo` is NOT a grammar field: an approval policy declares no escalation target, so the
+   * composition resolves it from the employee's reporting edge exactly as the `request_approval`
+   * tool door does. Null means the seat has no superior, and the planner then degrades an
+   * `escalate` fate to `fail` rather than destroying a finished result.
+   */
+  readonly approvalPolicy?: {
+    readonly id: string;
+    readonly approver: string;
+    readonly timeoutMs: number;
+    readonly onTimeout: 'fail' | 'escalate';
+    readonly escalateTo: string | null;
+  };
+  /**
    * Children the turn BUFFERED for creation (the non-turn-ending create tools) — applied
    * atomically with the ending intent; validated strictly by the engine.
    */
@@ -1231,6 +1250,9 @@ export class DbosTaskScheduler {
             intent: outcome.intent,
             messages: outcome.messages,
             ...(outcome.reviewPolicy !== undefined ? { reviewPolicy: outcome.reviewPolicy } : {}),
+            ...(outcome.approvalPolicy !== undefined
+              ? { approvalPolicy: outcome.approvalPolicy }
+              : {}),
             ...(outcome.createdChildren !== undefined
               ? { createdChildren: outcome.createdChildren }
               : {}),

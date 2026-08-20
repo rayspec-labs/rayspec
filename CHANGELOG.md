@@ -140,6 +140,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with nothing after the baseline, both fail the gate rather than passing it vacuously. It runs in CI
   beside the other migration gates.
 
+- **A workforce seat can now report that it FAILED, and the record says why.** `report_failure` is a
+  new turn-ending native on every role (`@rayspec/workforce-tools`), taking one `message` capped at
+  the message-body limit. It ends the task `failed` through the one status writer and stores the
+  message as the task's result summary, which the terminal `workforce.task.failed` event carries as
+  `resultSummary`.
+  **Why it was needed:** the typed `fail` intent, its plan and its legal `working -> failed`
+  transition all already existed — no *tool* produced them. A seat that could not do its work had
+  only `submit_result` to end with, and a submitted result completes the task unconditionally, so an
+  honest refusal was recorded as a **success**. `escalate` remains the move when a superior might
+  still unblock the task; `report_failure` is for work that is over.
+  **Not covered, deliberately:** a turn that buffers `send_message` or `create_task` and then calls
+  `report_failure` has those effects discarded, and a failed task does not cancel detached children
+  it opened with `create_task` — both are the pre-existing behaviour of every `failed` producer,
+  documented in `docs/workforce-tools.md` and unchanged here.
+
+### Changed
+
+- **`workforce.approvalPolicies[].requireWhen` now REQUIRES — a declared approval policy gates a
+  completion instead of decorating a request.** BEHAVIOURAL and BREAKING for any deployment that
+  declares an approval policy, though **no document changes**: the grammar is byte-identical, every
+  previously valid spec still parses, and what changed is what a valid spec *does*. Recorded in
+  `docs/workforce-compatibility.md`, which the `workforce:` section's experimental status is what
+  permits it.
+  *What it did before.* Nothing in the engine read `approvalPolicies`. A matched rule supplied the
+  declared window and fate for a `request_approval` **the seat chose to make**, plus a turn-frame
+  line telling the seat it was covered — so a seat holding the policy's label could complete its
+  labelled task with zero approval rows written, and the shipped examples' own comments ("the
+  manager cannot ship the UI without a human decision") described something that did not happen.
+  *What it does now.* A matched rule INTERCEPTS the completion, exactly as `reviewPolicies` already
+  did: the submitted result is stored on the task row, an approval is opened, and the task parks in
+  `blocked(approval_pending)`. `approve` completes the task with those exact bytes and fans in to
+  the parent — the seat is **not** re-dispatched, because it has already finished and what the human
+  authorised is what is on the row. `reject` parks the task in `waiting_for_user` with the result
+  intact, released by a `user_reply`; it is deliberately neither a rework loop (approvals carry no
+  round counter, so that fate would be unbounded) nor a failure (a rejection withholds authorisation
+  rather than condemning the work).
+  *Both completion chokepoints, because either alone is not a gate.* A worked task reaches
+  `completed` at exactly two sites — a turn's `complete` intent, and a review verdict of `accept`,
+  which never re-enters the planner. A matched review policy DIVERTS every completion from the
+  first to the second, so a gate on the planner alone would leave every review-covered seat ungated.
+  The shipped `workforce-maintainers` example already declares one seat under both policies with a
+  `confidenceBelow: 0.85` review trigger — **a number the model writes about itself** — so that hole
+  would have let a seat pick whether it was gated by picking a confidence. The matched rule
+  therefore also rides the review park's binding (every `bindReviewPark` call site, including a
+  model-initiated `request_review`), and an `accept` opens the approval instead of completing.
+  Review runs first and approval second: review verifies the product, approval authorises release of
+  the *verified* product.
+  *`onTimeout` costs more here than on a request.* The sweep is unchanged, but its `fail` fate now
+  lands on a task holding a finished result: the stored bytes stay on the row and the release never
+  happens. `escalate` re-issues to the seat's reporting edge and re-binds the park to the re-issued
+  request (without which the superior's approval would fall through to an ordinary wake and
+  re-dispatch the seat); an `escalate` rule whose seat has no superior degrades to `fail` rather
+  than refusing the completion and destroying the work.
+  *Transition table.* `blocked -> completed` is a new cell in `ALLOWED_TRANSITIONS` — the only edge
+  into `completed` that is neither `working` nor `waiting_for_review`, and the only one whose driver
+  is a human decision. It exists solely for this release path; the normative matrix in
+  `status.test.ts` moved with it and still admits no extras.
+  *No migration, no grammar change, no new event type.* The park binding is `join_policy` (jsonb),
+  the stored result uses the columns `complete_with_review` already writes, and the interception
+  journals the existing `workforce.approval.requested` with `policy: true` and `policyId` added to
+  its payload.
+
+- **`report_failure` is a reserved workforce tool name — a declared agent tool may no longer be
+  called that.** BREAKING for a spec that used the name: `RESERVED_WORKFORCE_TOOL_NAMES`
+  (`@rayspec/core`) gains `report_failure`, so an agent bound to a workforce employee that declares
+  a tool of that name (or its MCP-bridged `mcp__<server>__report_failure` spelling) is now rejected
+  at **author time** with `reserved_tool_name`, where it previously validated. Rename the declared
+  tool. Natives are runtime-provided and cannot be redeclared; this is the same additive tightening
+  the reserved set has taken before.
+
+- **`submit_result`'s `status` enum narrows to `completed` and `partial`.** BREAKING for a turn that
+  sent one of the removed values: `failed` and `needs_clarification` are no longer accepted, and a
+  `submit_result` carrying either is refused at the dispatch validate-in — the turn takes the
+  declared tool-error fate (one re-queue with `tool_error`, failure on a second consecutive offence)
+  instead of completing.
+  **Why:** neither value decided anything. The engine writes `completed` from the intent and never
+  reads `result.status`, so both were prose that read like a decision — `failed` in particular meant
+  a seat's honest "I could not" was filed under a completed task. The real channels are
+  `report_failure` and `request_clarification`, which move the row. `partial` stays: it qualifies a
+  result the engine has accepted rather than claiming a status.
+
 ### Fixed
 
 - **The boot migrator is serialized, and a failed chain now names the pending migrations.**
@@ -277,6 +358,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_events` row per namespace (agent-run, per-task, workforce control), so the post-erase read-back
   is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
   tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
+
+- **An escalation answered with a long emoji-bearing summary rolled back the superior's own
+  completion and stranded the parked caller.** When a superior finished an escalation task, the fan-in
+  bounded the `escalated` signal payload with `summary.slice(0, 500)` — and `slice` cuts UTF-16 **code
+  units**, not characters. Every emoji (and every other non-BMP character) is a surrogate PAIR of two
+  units, so a cut landing between the halves kept the high surrogate and dropped its partner. The
+  signal payload column is `jsonb`, where a lone surrogate is not mangled text but a write PostgreSQL
+  **refuses**: `22P02`, *"Unicode low surrogate must follow a high surrogate."*
+  That throw happened inside the turn's transaction, so it took everything with it — the superior's
+  own `working -> completed` transition, its terminal journal event and its cost settlement all rolled
+  back, while the caller stayed parked in `blocked(escalated)` with no exit left but an operator
+  cancel. Nothing bounded the input either: a result `summary` is `z.string().min(1)` with no maximum,
+  so any summary past 500 units with an emoji at the cut reached it. **Reachable on the shipped code
+  path, not in theory** — the arm that pins it drives a real escalate/complete pair against real
+  Postgres and reproduces the exact `22P02` when the guard is removed.
+  **The fix is one shared guard, not another private copy.** The tree truncates authored text in
+  eight places — seven now call the shared guard and one keeps a labelled copy (below). The ones that
+  had grown a correct surrogate check had grown it by copy-and-paste, each comment pointing at the
+  others. That is what produced this bug: the sites written without the check were written by people
+  who had no way to inherit it. `truncateCodeUnits` now lives in
+  `@rayspec/core` — a package every caller already depends on, and a dependency-graph leaf, so no
+  import cycle is possible — and carries the hazard, the contract and the caller list in one place.
+  Recall-hit clamping, turn-context byte trimming, the failure summary, the escalation reply, the
+  machine-composed `Review:` / `Escalation:` child titles and the confined selection rationale all
+  call it, so the next truncation site inherits the guard instead of re-deriving it. **Four** of them
+  had no surrogate handling at all before this change: the escalation reply above, plus three more
+  found by the sweep — the two child titles and the selection rationale.
+  **One copy survives, deliberately and labelled.** `SingleTaskPlanStrategy`'s step-title trim keeps
+  its own predicate, because a seam interface module may import **nothing** — an out-of-tree
+  implementer reads one self-contained file to learn the whole contract, and `seam-wiring.test.ts`
+  asserts the import list is empty rather than merely asking for it. That rule is worth more than the
+  deduplication, so the copy is named as a copy, points at the canonical guard, and has its own
+  non-BMP test.
+  **It repairs cuts, it does not scrub inputs, and that is deliberate.** A lone surrogate already
+  present in the caller's string passes through untouched — including when the string is short enough
+  that nothing is cut at all. Scrubbing inside a truncation helper would protect only the over-the-cap
+  branch while reading as though it made the string safe to write, and whole-string sanitization
+  belongs once at the boundary where untrusted text enters, not once per truncation site. Behaviour
+  at the sites that were already correct is unchanged.
+  **The proof, and why the old tests could not give it.** Every bound test in the tree used a
+  pure-ASCII repeat — `'x'.repeat(300)`, `'w'.repeat(10_000)` — one UTF-16 code unit per character,
+  so its cut can *never* land inside a surrogate pair. Those tests were green for the entire time the
+  code was broken, which is the failure mode rather than an anecdote about it. Every truncation arm
+  now uses a non-BMP fixture, asserts that the fixture really does put a surrogate at the **last kept
+  index** before asserting anything else, and asserts the result is one unit below the cap — the
+  observable signature that the guard actually fired. A fixture that stops being astral, or that
+  drifts one index off, now fails loudly instead of passing vacuously.
 
 ### Documentation
 

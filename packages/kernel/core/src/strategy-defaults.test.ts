@@ -42,6 +42,37 @@ describe('SingleTaskPlanStrategy', () => {
     expect(plan.steps[0]?.title.length).toBe(200);
     expect(plan.steps[0]?.goal).toBe(goal);
   });
+
+  it('bounds an ASTRAL goal without splitting a pair — the arm above is pure ASCII', async () => {
+    // `'x'.repeat(300)` is pure BMP, so its cut can never land inside a surrogate pair. A submitted
+    // goal is requester-authored text and carries emoji routinely, so the cut position is not
+    // something the engine picks.
+    // The cut is at 197 (the title bound is 200, of which '...' takes three), so the LAST KEPT
+    // index is 196 — the surrogate must sit THERE, not at 197. Getting this off by one produces a
+    // fixture that still contains astral text and still passes a naive "is there a surrogate near
+    // the cut" check while never exercising the guard, so the index is named rather than inlined.
+    const lastKept = 197 - 1;
+    const goal = `${'x'.repeat(lastKept)}${'\u{1F600}'.repeat(60)}`;
+    // The fixture proves itself BEFORE anything else is asserted.
+    expect(goal.length).toBeGreaterThan(200);
+    expect(goal.charCodeAt(lastKept)).toBeGreaterThanOrEqual(0xd800);
+    expect(goal.charCodeAt(lastKept)).toBeLessThanOrEqual(0xdbff);
+
+    const plan = await new SingleTaskPlanStrategy().plan({
+      workforceId: 'wf',
+      goal,
+      requestedBy: 'user',
+      defaultOwner: 'lead',
+    });
+    const title = plan.steps[0]?.title as string;
+    expect(title.isWellFormed()).toBe(true);
+    // 196 kept + '...' — one shorter than the ASCII case, which IS the evidence that the guard
+    // fired on a cut that really landed inside a pair.
+    expect(title.length).toBe(199);
+    expect(title.endsWith('...')).toBe(true);
+    // The GOAL itself is never trimmed — the title bound must not touch it.
+    expect(plan.steps[0]?.goal).toBe(goal);
+  });
 });
 
 describe('CapabilityMatchSelector', () => {

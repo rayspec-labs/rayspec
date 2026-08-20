@@ -124,7 +124,7 @@ describe('computeTurnFacts', () => {
     expect(copy.reviewRules).toEqual([]);
   });
 
-  it('presents the SAME approval rule the request_approval handler will bind — for seats that HOLD the tool', () => {
+  it('presents the SAME approval rule the engine will enforce — for EVERY covered seat', () => {
     // The manager holds both the label and the tool: the rule is a fact for its turns.
     const task = fixtureTask({ owner: 'cmo' });
     const facts = computeTurnFacts({
@@ -136,25 +136,31 @@ describe('computeTurnFacts', () => {
     expect(facts.approvalRule).toEqual(matchApprovalRule(config, employee('cmo')));
     expect(facts.approvalRule).toEqual({
       id: 'public_statement',
+      approver: 'user',
       timeoutMs: 72 * 3_600_000,
       onTimeout: 'escalate',
     });
-    // The copywriter holds the label but is a WORKER — no request_approval in its toolset,
-    // so no approval fact: a turn is never told about a tool the runtime will refuse it.
+    // THE COPYWRITER IS A WORKER AND STILL GETS THE FACT, which is the reverse of what this
+    // assertion used to say. It holds the label but carries no `request_approval`, so while the
+    // policy merely decorated a request the seat chose to make, the rule was something it could
+    // not act on and was withheld. A matched rule now GATES its completion whatever its role, so
+    // withholding it would hide the one thing that is going to happen to its result. What still
+    // depends on the role is whether the seat may ASK — the toolset, not this fact.
     const worker = computeTurnFacts({
       config,
       employee: employee('copy'),
       task: fixtureTask({ owner: 'copy' }),
       snapshot: emptySnapshot(task),
     });
-    expect(worker.approvalRule).toBeNull();
+    expect(worker.approvalRule).toEqual(matchApprovalRule(config, employee('copy')));
+    expect(worker.approvalRule).not.toBeNull();
     const uncovered = computeTurnFacts({
       config,
       employee: employee('mgr'),
       task: fixtureTask({ owner: 'mgr' }),
       snapshot: emptySnapshot(task),
     });
-    expect(uncovered.approvalRule).toBeNull(); // a decision seat NO rule covers
+    expect(uncovered.approvalRule).toBeNull(); // a seat NO rule covers, of any role
   });
 
   it('computes depth remaining from the declared ceiling and the immutable ancestry', () => {

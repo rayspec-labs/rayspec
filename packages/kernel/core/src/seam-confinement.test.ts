@@ -135,6 +135,32 @@ describe('confineWorkerSelector', () => {
     expect(selection.reason.length).toBe(SEAM_MAX_SELECTION_REASON_CHARS);
   });
 
+  it('clamps an ASTRAL rationale without leaving a lone surrogate — the arm above is pure ASCII', async () => {
+    // The clamp above uses `'w'.repeat(10_000)`: every character is ONE UTF-16 code unit, so its
+    // cut can never land inside a surrogate pair. This rationale is extension-authored text and an
+    // extension is free to emit emoji, so the cut position is not something the engine controls.
+    // The surrogate must sit at the LAST KEPT index, not one past it — an off-by-one here yields a
+    // fixture that is still astral, still passes a naive "surrogate near the cut" check, and never
+    // exercises the guard. Named rather than inlined for exactly that reason.
+    const lastKept = SEAM_MAX_SELECTION_REASON_CHARS - 1;
+    const astral = `${'w'.repeat(lastKept)}${'\u{1F600}'.repeat(100)}`;
+    // The fixture proves itself BEFORE anything else is asserted.
+    expect(astral.length).toBeGreaterThan(SEAM_MAX_SELECTION_REASON_CHARS);
+    expect(astral.charCodeAt(lastKept)).toBeGreaterThanOrEqual(0xd800);
+    expect(astral.charCodeAt(lastKept)).toBeLessThanOrEqual(0xdbff);
+
+    const emoji: WorkerSelector = {
+      id: 'emoji',
+      select: () => Promise.resolve({ employeeId: 'alpha', reason: astral }),
+    };
+    const selection = await confineWorkerSelector(emoji).select(TASK, CANDIDATES);
+    expect(selection.reason.isWellFormed()).toBe(true);
+    // One SHORTER than the cap: the guard gave the orphaned high surrogate back. Seeing the
+    // shorter length is the evidence that the cut really landed inside a pair.
+    expect(selection.reason.length).toBe(SEAM_MAX_SELECTION_REASON_CHARS - 1);
+    expect(astral.startsWith(selection.reason)).toBe(true);
+  });
+
   it("passes the inner selector's typed refusal through unchanged", async () => {
     // A non-empty list, so the wrapper's own empty-list pre-check cannot be what refuses: the
     // rejection has to come from the inner selector, and has to arrive with its own type intact.

@@ -78,13 +78,19 @@ export type WorkforceRoleName = z.infer<typeof WorkforceRole>;
  *
  * CONSTRAINED to `SafeIdentifier` rather than an open string, because this token is the SOLE
  * selector for `approvalPolicies[]` and a typo in an open string silently defeats a declared
- * approval gate. Precisely what it defeats, since the loose version of this sentence has already
- * misled once: approval policies are never read by the ENGINE, and `request_approval` is offered by
- * ROLE (`workforce-tools` roles.ts), so an uncovered seat can still park. What a typo costs is the
- * DECLARED window and fate — the handler falls back to `?? 'fail'` and a 72h default
- * (`workforce-tools` toolset.ts) — plus the turn-frame line that tells the seat it is covered. The
- * companion control is the lint's `workforce_label_unheld` ERROR: a label no declared employee
- * holds is refused, not warned about.
+ * approval gate. Precisely what it defeats: an approval policy INTERCEPTS a completion — a covered
+ * seat's result is stored and the task parks until a human decides (`packages/kernel/tasks`
+ * approval-gate.ts) — so a label no seat holds means no completion is gated and the seat ships
+ * without the human decision the rule was written to require.
+ *
+ * THAT SENTENCE PREVIOUSLY SAID THE OPPOSITE — "approval policies are never read by the ENGINE" —
+ * and it was accurate when written. It is corrected here rather than annotated elsewhere, because a
+ * retraction further down does not reach a reader who trusts the sentence where they meet it. What
+ * survives the change is the INDEPENDENCE of the two axes: `request_approval` is offered by ROLE
+ * (`workforce-tools` roles.ts), so an uncovered seat can still ASK for sign-off, and a covered seat
+ * is gated whether or not it ever calls the tool. Role and rule are still two axes; only one of
+ * them is now compulsory. The companion control is the lint's `workforce_label_unheld` ERROR: a
+ * label no declared employee holds is refused, not warned about.
  *
  * `:`/`.` are deliberately NOT admitted: `:` is already this section's delegation separator
  * (`employee:<id>` / `department:<id>` / `team:<id>`), and admitting a namespacing spelling whose

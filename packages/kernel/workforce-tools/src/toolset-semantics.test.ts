@@ -7,7 +7,11 @@
  * returning deterministic ids, and read-tool visibility.
  */
 import type { WorkforceConfig, WorkforceEmployeeConfig } from '@rayspec/spec';
-import { deterministicChildTaskId, workerResultSchema } from '@rayspec/tasks';
+import {
+  deterministicChildTaskId,
+  MAX_MESSAGE_BODY_CHARS,
+  workerResultSchema,
+} from '@rayspec/tasks';
 import { describe, expect, it } from 'vitest';
 import { TurnCollector } from './collector.js';
 import {
@@ -60,7 +64,17 @@ function turnWith(
     if (!tool) throw new Error(`tool '${name}' not offered to '${employeeId}'`);
     return tool.handler(args, new AbortController().signal);
   };
-  return { call, collector, task };
+  const specFor = (name: string) => {
+    const tool = tools.find((t) => t.spec.name === name);
+    if (!tool) throw new Error(`tool '${name}' not offered to '${employeeId}'`);
+    return tool.spec.parameters as Record<string, unknown>;
+  };
+  return { call, collector, task, specFor };
+}
+
+/** The model-facing JSON twin a role is SHOWN for one tool (the dispatch Ajv pass's schema). */
+function toolSpecFor(employeeId: string, name: string): Record<string, unknown> {
+  return turnFor(employeeId).specFor(name);
 }
 
 describe('exactly one turn-ending tool per turn', () => {
@@ -226,6 +240,68 @@ describe('escalation and reviews', () => {
       escalateTo: 'mgr',
       escalateToDepartment: 'eng',
     });
+  });
+
+  it('report_failure records the typed fail intent — the seat gives up authority, never claims it', () => {
+    const { call, collector } = turnFor('dev');
+    expect(call('report_failure', { message: 'The workspace is mounted read-only.' })).toEqual({
+      recorded: true,
+      kind: 'fail',
+    });
+    expect(collector.finish().intent).toEqual({
+      kind: 'fail',
+      message: 'The workspace is mounted read-only.',
+    });
+  });
+
+  it('report_failure is offered to EVERY role — no seat is left without an honest ending', () => {
+    for (const employeeId of ['lead', 'mgr', 'dev', 'qa']) {
+      const { call, collector } = turnFor(employeeId);
+      call('report_failure', { message: `${employeeId} cannot proceed.` });
+      expect(collector.finish().intent, `${employeeId} carries no report_failure`).toMatchObject({
+        kind: 'fail',
+      });
+    }
+  });
+
+  it('report_failure refuses an empty, missing, oversized or extra-keyed message — recorded, not yielded', () => {
+    for (const args of [
+      { message: '' },
+      {},
+      { message: 'x'.repeat(MAX_MESSAGE_BODY_CHARS + 1) },
+      { message: 'ok', status: 'failed' },
+    ]) {
+      const { call, collector } = turnFor('dev');
+      expect(() => call('report_failure', args)).toThrow(WorkforceToolError);
+      const finished = collector.finish();
+      expect(finished.intent, `${JSON.stringify(args).slice(0, 40)} was not refused`).toBeNull();
+      expect(finished.malformed).not.toBeNull();
+    }
+  });
+
+  it('a message exactly at the cap is accepted — the boundary is inclusive', () => {
+    const { call, collector } = turnFor('dev');
+    call('report_failure', { message: 'y'.repeat(MAX_MESSAGE_BODY_CHARS) });
+    expect(collector.finish().intent).toMatchObject({ kind: 'fail' });
+  });
+
+  it('submit_result no longer advertises a status the engine ignores: only completed/partial', () => {
+    const { call, collector } = turnFor('dev');
+    for (const status of ['failed', 'needs_clarification']) {
+      const attempt = turnFor('dev');
+      expect(() =>
+        attempt.call('submit_result', { status, summary: 'Could not do it.', confidence: 0.2 }),
+      ).toThrow(WorkforceToolError);
+      expect(attempt.collector.finish().malformed).not.toBeNull();
+    }
+    call('submit_result', { status: 'partial', summary: 'Half of it.', confidence: 0.78 });
+    expect(collector.finish().intent).toMatchObject({ kind: 'complete' });
+
+    const advertised = toolSpecFor('dev', 'submit_result');
+    expect(
+      (advertised.properties as { status: { enum: string[] } }).status.enum,
+      'the model-facing JSON twin must not advertise what the zod schema refuses',
+    ).toEqual(['completed', 'partial']);
   });
 
   it('submit_review takes its reviewId from the SNAPSHOT; without a pending review it refuses', () => {

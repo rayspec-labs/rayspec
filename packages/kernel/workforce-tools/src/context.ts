@@ -43,7 +43,7 @@
  * unchanged), section 5's header phrase `Completed child results`, and the `- <kind>: <payload>`
  * signal lines. Changing any of these is a fixture-lockstep change, not a wording tweak.
  */
-import { type MemoryHit, SEAM_MAX_MEMORY_HITS } from '@rayspec/core';
+import { type MemoryHit, SEAM_MAX_MEMORY_HITS, truncateCodeUnits } from '@rayspec/core';
 import type { WorkforceEmployeeConfig } from '@rayspec/spec';
 import { MAX_TASK_TEXT_BYTES, type MergedChildResult, type TaskRecord } from '@rayspec/tasks';
 import type { TurnFacts } from './facts.js';
@@ -205,11 +205,13 @@ function truncateToBytes(text: string, maxBytes: number): string {
   while (sliced.length > 0 && bytesOf(sliced) > maxBytes) {
     sliced = sliced.slice(0, -1);
   }
-  // Never end on a split astral pair — a lone high surrogate is mangled text, not a shorter string
-  // (memory.ts's clampText carries the same guard). Dropping it only shrinks the result, so it stays
-  // inside the byte budget.
-  if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
-  return sliced;
+  // Never end on a split astral pair — `truncateCodeUnits` (@rayspec/core) is the shared
+  // truncation guard and carries the hazard, the contract and the caller list. This cut is on a
+  // BYTE budget, so the loop above settles the length and the guard is applied at it; `sliced` is a
+  // STRICT prefix of `text` (the early return proved `text` does not fit), so the guard's
+  // only-on-a-real-cut rule fires here rather than returning by identity. Dropping a unit only
+  // shrinks the result, so it stays inside the byte budget.
+  return truncateCodeUnits(text, sliced.length);
 }
 
 const TRUNCATED_MARKER = '…[truncated: byte budget]';
@@ -423,20 +425,25 @@ function renderPolicies(input: TurnInputFacts): string {
     );
   }
 
-  // The approval line renders ONLY for seats whose toolset carries request_approval: for a
-  // worker, "none declared" would be a false statement about the document (a rule may well cover
-  // its labels — the seat just cannot act on it), and naming the rule would advertise a tool the
-  // runtime refuses. A fact a seat cannot act on is not a fact for its turn.
-  if (TOOLSETS_BY_ROLE[input.employee.role].includes('request_approval')) {
-    if (facts.approvalRule !== null) {
-      lines.push(
-        `Approval rule covering you: ${sanitizeConfig(facts.approvalRule.id)} — request_approval ` +
-          `runs on its declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
-          `${sanitizeConfig(facts.approvalRule.onTimeout)}).`,
-      );
-    } else {
-      lines.push('Approval rule covering you: none declared for your labels.');
-    }
+  // THE APPROVAL LINE RENDERS FOR EVERY COVERED SEAT, whatever its role. It used to render only
+  // for seats holding `request_approval`, because a rule a seat could not invoke was a fact it
+  // could not act on. A matched rule now GATES the seat's completion regardless of its toolset, so
+  // withholding it from a covered worker would hide the one thing that is going to happen to its
+  // result. The ROLE still decides the second sentence — whether the seat may also ask on its own
+  // initiative — so no turn is told about a tool the runtime will refuse it.
+  const mayRequestApproval = TOOLSETS_BY_ROLE[input.employee.role].includes('request_approval');
+  if (facts.approvalRule !== null) {
+    lines.push(
+      `Approval rule covering you: ${sanitizeConfig(facts.approvalRule.id)} — your completion ` +
+        'parks for a human decision no matter what your turn submits; the runtime enforces it, on ' +
+        `its declared window (${windowLabel(facts.approvalRule.timeoutMs)}, then ` +
+        `${sanitizeConfig(facts.approvalRule.onTimeout)}).` +
+        (mayRequestApproval ? ' request_approval asks on the same window, before you finish.' : ''),
+    );
+  } else if (mayRequestApproval) {
+    // Only meaningful for a seat that could have used one: for an uncovered worker the absence of
+    // a rule changes nothing about its turn, and "none declared" would be noise.
+    lines.push('Approval rule covering you: none declared for your labels.');
   }
   return lines.join('\n');
 }

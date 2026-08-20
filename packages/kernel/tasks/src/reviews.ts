@@ -1,8 +1,12 @@
 /**
  * Review verdict application — the engine applies verdicts, never prose. `accept` completes the
- * task; `reject` re-queues it for rework UNTIL the round ceiling is spent, at which point the task
- * parks in `waiting_for_user` — a human decides, rather than an infinite accept/rework loop. The
- * per-review compare-and-swap (`verdict IS NULL`) admits exactly one verdict per round.
+ * task, UNLESS the park's binding carries a declared approval gate, in which case it opens that
+ * approval and parks the task in `blocked(approval_pending)` instead: review verifies the product,
+ * approval authorises its release (approval-gate.ts, which explains why both chokepoints must be
+ * closed together). `reject` re-queues the task for rework UNTIL the round ceiling is spent, at
+ * which point the task parks in `waiting_for_user` — a human decides, rather than an infinite
+ * accept/rework loop. The per-review compare-and-swap (`verdict IS NULL`) admits exactly one
+ * verdict per round.
  *
  * LOCK ORDER: every verdict takes THE TASK LOCK ORDER (apply-intents.ts module header — the
  * reviewed task's ancestors root-first, then the task) BEFORE the review-row compare-and-swap.
@@ -28,6 +32,12 @@ import { schema, type TenantDb } from '@rayspec/db';
 import { and, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
+import {
+  bindGatedCompletionPark,
+  journalGateApprovalRequested,
+  openGateApproval,
+  reviewParkApprovalGate,
+} from './approval-gate.js';
 import type { WorkforceBudgets } from './budget.js';
 import { mayDecide } from './decision-authority.js';
 import { TaskNotFoundError } from './errors.js';
@@ -270,6 +280,38 @@ export async function applyReviewVerdictInTx(
     },
   ]);
   if (outcome === 'completed') {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // THE SECOND COMPLETION CHOKEPOINT. A matched review policy DIVERTS every completion here
+    // (intent-applier.ts's `case 'complete'` — "Policy OVERRIDES what the turn asked for"), and
+    // this path never re-enters the planner. So a declared approval gate written only into the
+    // planner would leave every review-covered seat ungated, and — because a review rule may
+    // trigger on `confidenceBelow`, a number the submitting turn writes about ITSELF — a seat
+    // under both policies could choose whether it is gated by choosing a number. The gate rides
+    // the park's own binding for the same reason `maxRounds` does: this module is deliberately
+    // roster-free and cannot read the document that declared it.
+    //
+    // REVIEW FIRST, APPROVAL SECOND: the work has now been VERIFIED, and what the human authorises
+    // is the release of that verified result. Approving first and reworking after would leave a
+    // human's sign-off attached to bytes that then changed.
+    const gate = reviewParkApprovalGate(task);
+    if (gate !== null) {
+      // `turnNumber: null` — there is no turn here. This runs on the HTTP verdict route or inside
+      // the REVIEWER's turn, and stamping the reviewer's turn number onto the REVIEWED task's
+      // approval would collide with that task's own receipt key. The dedupe is instead the
+      // `verdict IS NULL` compare-and-swap above, which already admitted exactly one accept.
+      const approvalId = await openGateApproval(tx, task, gate, null);
+      await bindGatedCompletionPark(tx, task.taskId, approvalId);
+      await journalGateApprovalRequested(tx, task, approvalId, gate);
+      // The stored result stays exactly as the reviewer accepted it; no fan-in, because the task
+      // is not terminal — the parent's join is still correctly waiting.
+      return applyTransition(tx, {
+        taskId: task.taskId,
+        expectedVersion: task.version,
+        to: 'blocked',
+        reason: 'approval_pending',
+        actor: input.actor,
+      });
+    }
     const done = await applyTransition(tx, {
       taskId: task.taskId,
       expectedVersion: task.version,

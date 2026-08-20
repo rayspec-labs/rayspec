@@ -7,6 +7,7 @@
  * review-row compare-and-swap. One home, no import cycle: both consumers depend on this module and
  * never on each other's write paths.
  */
+import { truncateCodeUnits } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
@@ -35,6 +36,18 @@ export const DELEGATION_STATUSES = [
 export type DelegationStatus = (typeof DELEGATION_STATUSES)[number];
 
 export const delegationStatusSchema = z.enum(DELEGATION_STATUSES);
+
+/**
+ * The code-unit ceiling on the escalation-reply signal payload's `summary`. The payload is a
+ * POINTER, not a copy — the woken caller's next context already carries the superior's full result
+ * through `childResults` — so this is deliberately small.
+ *
+ * Named rather than inlined so the bound can be asserted without re-spelling the number, the way
+ * `MAX_TRUNCATION_MARKER_CHARS` is in apply-intents.ts. Nothing bounds the INPUT:
+ * `workerResultSchema.summary` is `z.string().min(1)` with no `.max()` (intent-applier.ts), so this
+ * cut is reachable with any summary a seat cares to write.
+ */
+export const ESCALATION_SUMMARY_MAX_CHARS = 500;
 
 /**
  * Narrow a terminating task's status to the settlement half of the vocabulary. The three terminal
@@ -178,9 +191,18 @@ export async function afterTaskTerminal(tx: TenantDb, task: TaskRecord): Promise
     // result via `childResults`). Key per escalation child: racing re-executions dedupe on the
     // receipt first and this UNIQUE second, while a later escalation (new turn, new child id)
     // re-arms cleanly.
+    // TRUNCATED THROUGH THE SHARED GUARD, never with a bare `slice`. `slice` cuts UTF-16 CODE
+    // UNITS, and this payload column is `jsonb`: a cut landing inside an astral pair leaves a lone
+    // surrogate, which PostgreSQL REFUSES (`22P02`) rather than storing mangled. That throw is
+    // inside the turn's transaction, so it would roll back the SUPERIOR'S OWN completion and leave
+    // this caller parked with no exit but an operator cancel. Driven on real Postgres; the arm is
+    // named for the cut.
     const summary =
       typeof (task.result as { summary?: unknown } | null)?.summary === 'string'
-        ? ((task.result as { summary: string }).summary.slice(0, 500) as string)
+        ? truncateCodeUnits(
+            (task.result as { summary: string }).summary,
+            ESCALATION_SUMMARY_MAX_CHARS,
+          )
         : null;
     await deliverSignal(tx, {
       taskId: parent.taskId,

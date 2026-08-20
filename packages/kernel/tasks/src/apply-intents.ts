@@ -39,10 +39,16 @@
  * tasks -> ledger -> tasks acquisition, and closes a cycle against any concurrent claim that shares
  * the subtree's `root:` ledger row.
  */
+import { truncateCodeUnits } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
+import {
+  bindGatedCompletionPark,
+  journalGateApprovalRequested,
+  openGateApproval,
+} from './approval-gate.js';
 import { probeSpend, settleTurn, type WorkforceBudgets } from './budget.js';
 import { delegationChildSpecSchema, insertChildTask } from './create-task.js';
 import { TaskNotFoundError, TaskRowCorruptError, TaskVersionConflictError } from './errors.js';
@@ -58,7 +64,7 @@ import {
   turnClassificationSchema,
   turnIntentSchema,
 } from './intent-applier.js';
-import { joinPolicySchema } from './join.js';
+import { type ApprovalGate, approvalGateSchema, joinPolicySchema } from './join.js';
 import {
   applyReviewVerdictInTx,
   ReviewAlreadyDecidedError,
@@ -103,6 +109,19 @@ export const turnReviewPolicySchema = z.strictObject({
 });
 
 export type TurnReviewPolicy = z.output<typeof turnReviewPolicySchema>;
+
+/**
+ * The strict shape of the trusted approval-policy channel (`ApplyTurnInput.approvalPolicy`) — the
+ * DECLARED rule covering this task's seat, matched by the composition over the employee's declared
+ * labels and over nothing the turn produced.
+ *
+ * Single-sourced from the park binding's own vocabulary (join.ts) rather than re-spelled here: the
+ * value travels channel -> planner -> park binding -> verdict/decision path unchanged, and a second
+ * copy of the shape is exactly the drift this engine keeps paying for.
+ */
+export const turnApprovalPolicySchema = approvalGateSchema;
+
+export type TurnApprovalPolicy = z.output<typeof turnApprovalPolicySchema>;
 
 // The caps live in the pure planner (the lower module) so the intent schema can enforce the same
 // body limit on `request_clarification`; re-exported here so the package surface is unchanged.
@@ -189,6 +208,14 @@ export interface ApplyTurnInput {
    * a malformed channel is a caller bug and a hard typed refusal.
    */
   readonly reviewPolicy?: unknown;
+  /**
+   * The TRUSTED approval-policy match covering this task's seat, computed by the dispatching
+   * composition from the DECLARED rules and the employee's DECLARED labels — never from model
+   * output, and (unlike the review channel) never from the submitted result either, so nothing the
+   * turn writes can steer whether the gate applies. Validated strictly here; a malformed channel is
+   * a caller bug and a hard typed refusal, exactly like `reviewPolicy`.
+   */
+  readonly approvalPolicy?: unknown;
   /**
    * Children the turn BUFFERED for creation (the non-turn-ending create tools) — validated
    * strictly here, applied atomically with the turn's ending intent. Slots 0..k-1 of this turn's
@@ -452,6 +479,10 @@ export async function applyTurnOutcome(
     // "no policy fired".
     const matchedReviewPolicy =
       input.reviewPolicy === undefined ? null : turnReviewPolicySchema.parse(input.reviewPolicy);
+    const matchedApprovalRule =
+      input.approvalPolicy === undefined
+        ? null
+        : turnApprovalPolicySchema.parse(input.approvalPolicy);
 
     // The buffered creates ride a TRUSTED channel too — validated strictly before they can plan.
     const createdChildren = z.array(delegationChildSpecSchema).parse(input.createdChildren ?? []);
@@ -530,6 +561,7 @@ export async function applyTurnOutcome(
       resolvedApprovalQuestions,
       priorToolError,
       matchedReviewPolicy,
+      matchedApprovalRule,
       createdChildren,
       cancelTarget,
     };
@@ -699,6 +731,42 @@ export async function applyTurnOutcome(
           await afterTaskTerminal(tx, finalTask);
           break;
         }
+        case 'complete_with_approval': {
+          // THE APPROVAL GATE (approval-gate.ts): a declared `approvalPolicies` rule intercepts the
+          // completion the way a review rule does. The RESULT IS STORED on this row — the human
+          // reads it, and the release must authorise exactly the bytes they saw, which is why the
+          // seat is NOT re-dispatched to "finish" — and the task parks in
+          // `blocked(approval_pending)` until `decideApproval` releases it.
+          //
+          // NOT a single-row plan (`SINGLE_ROW_PLANS` above deliberately omits it): the park's own
+          // fates reach a SECOND task row — `approve` completes and fans in to the parent,
+          // `onTimeout: fail` fails and fans in — so the root-first locks are already held here.
+          await tx
+            .update(schema.workforceTasks, {
+              result: plan.result,
+              confidence: String(plan.result.confidence),
+            })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
+          const approvalId = await openGateApproval(
+            tx,
+            task,
+            plan.approval,
+            // The turn number IS the durable dedupe key here, exactly as it is for `openApproval`:
+            // a whole-turn re-execution collides on the partial UNIQUE and converges on the row the
+            // first application wrote, so a replay binds the park to the approval that exists.
+            input.turnNumber,
+          );
+          await bindGatedCompletionPark(tx, task.taskId, approvalId);
+          await journalGateApprovalRequested(tx, task, approvalId, plan.approval);
+          finalTask = await applyTransition(tx, {
+            taskId: task.taskId,
+            expectedVersion: task.version,
+            to: 'blocked',
+            reason: 'approval_pending',
+            ...stamp,
+          });
+          break;
+        }
         case 'fan_out': {
           const probe = await probeSpend(
             tx,
@@ -818,10 +886,15 @@ export async function applyTurnOutcome(
           );
           // A model-initiated review answers to the EXECUTION ceiling alone — no declared policy
           // stands behind it, so the binding carries none and the verdict path uses the budgets'.
+          //
+          // THE APPROVAL GATE RIDES IT ANYWAY, and that is the point: this park's `accept` verdict
+          // reaches the SAME completion write a policy-intercepted park's does. A covered seat that
+          // asks for review ITSELF must not thereby escape its declared gate.
           await bindReviewPark(tx, task.taskId, {
             reviewId,
             reviewTaskId: null,
             maxRounds: null,
+            approvalGate: plan.approval,
           });
           await appendTaskEvents(tx, task.taskId, [
             {
@@ -897,7 +970,12 @@ export async function applyTurnOutcome(
               input.turnNumber,
               createdChildren.length,
               {
-                title: `Review: ${task.title}`.slice(0, 200),
+                // Through the shared guard: `task.title` is authored text, so this cut can land
+                // inside an astral pair. `workforce_tasks.title` is `text`, not `jsonb`, so the
+                // consequence here is a mangled stored title that then renders into the reviewer's
+                // turn context — not the `22P02` the jsonb sites take. Guarded all the same: there
+                // is no reason for a truncation in this file to be the one that still splits pairs.
+                title: truncateCodeUnits(`Review: ${task.title}`, CHILD_TITLE_MAX_CHARS),
                 goal:
                   `Review the submitted result of task ${task.taskId} (round ${plan.round}) and ` +
                   'return a verdict.',
@@ -909,10 +987,15 @@ export async function applyTurnOutcome(
           // BIND the park: which review answers it, which task was dispatched to decide it, and the
           // DECLARED policy's own round ceiling. The verdict path takes the tighter of that and the
           // execution ceiling — it is the only way a document the kernel cannot read reaches it.
+          // REVIEW FIRST, APPROVAL SECOND: when a declared approval policy also covers this seat,
+          // the gate rides the binding so the verdict's `accept` opens the approval instead of
+          // completing. Review verifies the product; approval authorises release of the VERIFIED
+          // product — the reverse order would have a human sign off on a result that then changed.
           await bindReviewPark(tx, task.taskId, {
             reviewId,
             reviewTaskId,
             maxRounds: plan.kind === 'complete_with_review' ? plan.maxRounds : null,
+            approvalGate: plan.approval,
           });
           await appendTaskEvents(tx, task.taskId, [
             {
@@ -1060,7 +1143,8 @@ export async function applyTurnOutcome(
             break;
           }
           const child = await insertChildTask(tx, task, input.turnNumber, createdChildren.length, {
-            title: `Escalation: ${task.title}`.slice(0, 200),
+            // Through the shared guard, for the same reason as the review child's title above.
+            title: truncateCodeUnits(`Escalation: ${task.title}`, CHILD_TITLE_MAX_CHARS),
             goal:
               `Escalated (${plan.reason}) from task ${task.taskId}: ` +
               `${plan.detail ?? task.goal}`,
@@ -1178,6 +1262,69 @@ export async function applyTurnOutcome(
           break;
         }
         case 'fail': {
+          // PERSIST THE MESSAGE BEFORE THE TRANSITION, and the ordering is the whole point: the
+          // terminal `workforce.task.failed` event reads its `resultSummary` off THIS column
+          // (apply-transition.ts), so a write afterwards would journal `null` and the operator's
+          // only record of WHY would be gone. Until this write existed, `plan.message` was
+          // constructed and then referenced by nothing — a failed task carried no reason, no result
+          // and no journal text, which is a worse operator surface than the mislabelled
+          // `completed` it replaces. (The ordering is not a standing hazard: moving this write
+          // below the transition reddens the `resultSummary` assertion in engine.db.test.ts.)
+          //
+          // THE SUMMARY AND NOTHING ELSE. A first cut also stored `status: 'failed'` here and the
+          // state-machine gate refused the file — correctly, and not merely as a regex accident:
+          //   - `result` is the column `workerResultSchema` governs, and that schema's status enum
+          //     is `['completed','partial']` — so a stored `status: 'failed'` was a value the
+          //     column's own contract rejects, and nothing would have caught it, because NOTHING
+          //     re-parses a stored result through that schema (its only non-test use is the intent
+          //     path in @rayspec/workforce-tools);
+          //   - it was a SECOND copy of a fact the status column already owns. `mergeChildResults`
+          //     (join.ts) hands a waiting parent `status: child.status` straight off the row, so the
+          //     parent already reads `failed` from the authority. Two copies can disagree; one
+          //     cannot.
+          // Every reader of this column duck-types `'summary' in result` and takes it when it is a
+          // string (apply-transition.ts, workforce-tools context.ts + memory.ts), so a summary-only
+          // payload satisfies all of them. `confidence` is deliberately absent: a failure has none
+          // to report, and inventing one would feed the review-policy predicates a number nobody
+          // stated.
+          //
+          // AND IT IS BOUNDED HERE, because this arm is shared with machine producers that the
+          // model-facing cap does not reach. `report_failure` caps `message` at
+          // MAX_MESSAGE_BODY_CHARS at the tool door, but FIVE other sites build a `fail` intent
+          // directly — three in the composition (@rayspec/server workforce-turn-handlers.ts) and
+          // two in the scheduler (@rayspec/durable-dbos task-scheduler.ts) — and one of them
+          // interpolates a raw `err.message` from ANY throw inside a turn handler. A ZodError's
+          // message alone is its whole formatted issue list. Before this write existed the string
+          // was discarded, so its length cost nothing; now it lands in a jsonb column and a journal
+          // row, and an unbounded write is not something to introduce by accident.
+          //
+          // The cap lives HERE and still NOT on `turnIntentSchema`'s `fail` arm: capping the intent
+          // would turn a long diagnostic into a MALFORMED intent and lose the failure entirely,
+          // which is the opposite of the goal. Refuse nothing; store boundedly. The marker is
+          // deliberate — a silently truncated diagnostic is worse than one that says it was cut,
+          // and it names the full length so a reader knows how much is missing.
+          //
+          // TRUNCATED THROUGH THE SHARED GUARD, never with a bare `slice`. `slice` cuts UTF-16 CODE
+          // UNITS, so a cut landing between the halves of an astral pair leaves a lone high
+          // surrogate — and this column is `jsonb`, so that is not mangled text but a write
+          // PostgreSQL refuses outright (`22P02`). The throw would be inside THIS transaction: the
+          // `working -> failed` transition, the journal and the settlement all roll back, the row
+          // stays `working` under its claim, the reaper re-queues it and the same deterministic
+          // error recurs — a task that never settles. The trigger is precisely the producer above,
+          // since model-authored text embedded in a ZodError carries emoji routinely. Observed as a
+          // real `22P02` before the guard existed; the hazard and the pass-through contract are
+          // documented once, on `truncateCodeUnits` in @rayspec/core.
+          //
+          // Dropping one unit only shortens the result, so the stated ceiling of
+          // MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS is unaffected.
+          const head = truncateCodeUnits(plan.message, MAX_MESSAGE_BODY_CHARS);
+          const summary =
+            plan.message.length > MAX_MESSAGE_BODY_CHARS
+              ? `${head}${truncationMarker(plan.message.length)}`
+              : plan.message;
+          await tx
+            .update(schema.workforceTasks, { result: { summary } })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
           finalTask = await applyTransition(tx, {
             taskId: task.taskId,
             expectedVersion: task.version,
@@ -1236,6 +1383,19 @@ export async function applyTurnOutcome(
         case 'invalid_intent': {
           finalTask = await applyToolErrorFate(tx, task, plan.fate, stamp);
           break;
+        }
+        default: {
+          // EXHAUSTIVENESS, made a compile error rather than a silent corruption. Nothing else
+          // catches a missed plan kind: `TurnPlan` is a union, this switch had no `default`, and
+          // `finalTask` is legitimately `TaskRecord | null` — so an unhandled kind used to COMPILE
+          // and return `task: null`, leaving the row `working` with its turn already settled and
+          // its receipt written. The state-machine gate does not cover plan kinds (it covers the
+          // status table and the update monopoly), so this is the only structural guard there is.
+          const unhandled: never = plan;
+          throw new TurnStateError(
+            task.taskId,
+            `an unhandled turn plan '${(unhandled as TurnPlan).kind}'`,
+          );
         }
       }
     }
@@ -1316,15 +1476,25 @@ export async function applyTurnOutcome(
 
 /**
  * BIND a `waiting_for_review` park to the review it waits on, on the same row the park lives on
- * (`joinPolicy`, the park-binding column — see join.ts). Three facts nothing else can supply later:
+ * (`joinPolicy`, the park-binding column — see join.ts). Four facts nothing else can supply later:
  * WHICH review answers the park, WHICH task was dispatched to decide it (null when a human does),
- * and the DECLARED policy's round ceiling — a ceiling that lives in a document the kernel is
- * deliberately roster-free about, and which the verdict path would otherwise never see.
+ * the DECLARED policy's round ceiling, and the DECLARED APPROVAL GATE an `accept` verdict must open
+ * instead of completing — all of them living in a document the kernel is deliberately roster-free
+ * about, and none of which the verdict path could otherwise see.
+ *
+ * EVERY caller passes the gate, not only the policy-intercepted one: a review park's `accept` is
+ * the second completion chokepoint whichever tool opened the park, so a model-initiated
+ * `request_review` by a covered seat must carry it too or the gate is escapable by asking.
  */
 async function bindReviewPark(
   tx: TenantDb,
   taskId: string,
-  binding: { reviewId: string; reviewTaskId: string | null; maxRounds: number | null },
+  binding: {
+    reviewId: string;
+    reviewTaskId: string | null;
+    maxRounds: number | null;
+    approvalGate: ApprovalGate | null;
+  },
 ): Promise<void> {
   await tx
     .update(schema.workforceTasks, {
@@ -1333,12 +1503,39 @@ async function bindReviewPark(
         reviewId: binding.reviewId,
         reviewTaskId: binding.reviewTaskId,
         ...(binding.maxRounds !== null ? { maxRounds: binding.maxRounds } : {}),
+        ...(binding.approvalGate !== null ? { approvalGate: binding.approvalGate } : {}),
       },
     })
     .where(eq(schema.workforceTasks.taskId, taskId));
 }
 
 type Stamp = { actor: string; turnId: string; turnNumber: number };
+
+/**
+ * The suffix a truncated failure summary carries, naming the ORIGINAL length so a reader can see
+ * how much was cut. Exported so the bound can be asserted without re-spelling the string in a test.
+ *
+ * The stored summary is therefore at most `MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS`
+ * characters. A model-authored failure never reaches this: `report_failure` caps `message` at
+ * MAX_MESSAGE_BODY_CHARS at the tool door, so the branch is dead on that path and live only for the
+ * machine producers of a `fail` intent.
+ */
+export function truncationMarker(originalLength: number): string {
+  return `… [truncated — full diagnostic was ${originalLength} characters]`;
+}
+
+/**
+ * The marker's own ceiling. `Number.MAX_SAFE_INTEGER` is 16 digits, which is a hard bound on the
+ * interpolated length for any string JavaScript can hold, so this constant is a fact about the
+ * template rather than a guess.
+ */
+export const MAX_TRUNCATION_MARKER_CHARS = truncationMarker(Number.MAX_SAFE_INTEGER).length;
+
+/**
+ * The code-unit ceiling on a machine-composed child title (`Review: …`, `Escalation: …`). Named
+ * rather than inlined at the two sites so the bound can be asserted without re-spelling it.
+ */
+export const CHILD_TITLE_MAX_CHARS = 200;
 
 /** One retry re-queue, then failed — both with the typed `tool_error` reason. */
 async function applyToolErrorFate(

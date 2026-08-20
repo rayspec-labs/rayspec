@@ -9,11 +9,14 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyBudgetExhausted,
   applyTurnOutcome,
+  CHILD_TITLE_MAX_CHARS,
   DELEGATION_STATUSES,
   lockRootFirst,
   MAX_MESSAGE_BODY_CHARS,
   MAX_MESSAGES_PER_TURN,
+  MAX_TRUNCATION_MARKER_CHARS,
   TurnStateError,
+  truncationMarker,
 } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { ApprovalAlreadyDecidedError, decideApproval, sweepApprovalTimeouts } from './approvals.js';
@@ -23,6 +26,7 @@ import { createRootTask } from './create-task.js';
 import { TaskNotFoundError } from './errors.js';
 import { applyReviewVerdict, ReviewNotForParkError } from './reviews.js';
 import { deliverSignal } from './signals.js';
+import { ESCALATION_SUMMARY_MAX_CHARS } from './task-locks.js';
 import {
   forTenant,
   makeTestDb,
@@ -148,6 +152,431 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
          (SELECT turns_used FROM workforce_tasks WHERE task_id = '${root.taskId}') AS turns;`,
     );
     expect(counts[0]).toMatchObject({ transitions: 3, completed_events: 1, turns: 1 });
+  });
+
+  /**
+   * THE FAILURE CHANNEL, end to end. Until the `report_failure` tool existed
+   * (@rayspec/workforce-tools), nothing a seat could call produced this intent, so a seat that
+   * could not do its work ended with `submit_result` — and `case 'complete'` writes `completed` as
+   * a LITERAL. An honest refusal was recorded as a success. These arms pin the whole path on
+   * durable artifacts: the row, the transition log, the journal, and what the failure does to the
+   * tasks around it.
+   */
+  describe('a turn that fails on purpose', () => {
+    const MESSAGE = 'The workspace is mounted read-only, so no artifact can be written.';
+
+    it('lands failed with the transition row, the stored reason and the journal entry', async () => {
+      const root = await driveToWorking(await newRoot());
+      const out = await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE }, 0.1);
+      expect(out.plan).toEqual({ kind: 'fail', message: MESSAGE });
+      expect(out.task?.status).toBe('failed');
+      expect(out.task?.completedAt).not.toBeNull();
+
+      // THE ROW: the failure explains itself. `plan.message` used to be constructed and read by
+      // nothing, so a failed task carried no reason, no result and no journal text — a worse
+      // operator surface than the mislabelled `completed` it replaces.
+      const row = (await db.$client.unsafe(
+        `SELECT status, status_reason, result, confidence
+           FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as {
+        status: string;
+        status_reason: string | null;
+        result: unknown;
+        confidence: string | null;
+      }[];
+      expect(row[0]).toMatchObject({
+        status: 'failed',
+        // No closed status reason fits a seat's own refusal, and none is invented: `tool_error`,
+        // `dependency_failed` and `quarantined` each name a DIFFERENT cause. The reason column
+        // stays null and the message carries the why.
+        status_reason: null,
+      });
+      // THE SUMMARY AND NOTHING ELSE, asserted as an EXACT object rather than a field probe — the
+      // point is what is absent. A `status` key here would be a second copy of a fact the status
+      // column owns (and a value `workerResultSchema` no longer admits); the state-machine gate
+      // refuses that shape in this file, and it is right to.
+      expect(row[0]?.result).toEqual({ summary: MESSAGE });
+      // A failure has no confidence to report, and inventing one would feed the review-policy
+      // predicates a number nobody stated.
+      expect(row[0]?.confidence).toBeNull();
+
+      // THE TRANSITION LOG: queued -> working -> failed, the last one stamped with the turn.
+      const log = (await db.$client.unsafe(
+        `SELECT from_status, to_status, actor, turn_number FROM workforce_task_transitions
+           WHERE task_id = '${root.taskId}' ORDER BY created_at;`,
+      )) as unknown as {
+        from_status: string;
+        to_status: string;
+        actor: string;
+        turn_number: number | null;
+      }[];
+      expect(log.map((r) => `${r.from_status}->${r.to_status}`)).toEqual([
+        'planned->queued',
+        'queued->working',
+        'working->failed',
+      ]);
+      expect(log[2]).toMatchObject({ actor: 'coordinator', turn_number: 1 });
+
+      // THE JOURNAL: the terminal event carries the summary, which is only true because the row is
+      // written BEFORE the transition — `applyTransition` reads `resultSummary` off the column.
+      const events = (await db.$client.unsafe(
+        `SELECT type, data FROM run_events WHERE run_id = '${root.taskId}'
+           AND type IN ('workforce.task.failed', 'workforce.task.completed', 'workforce.task.turn_ended')
+           ORDER BY seq;`,
+      )) as unknown as { type: string; data: Record<string, unknown> }[];
+      const failed = events.filter((e) => e.type === 'workforce.task.failed');
+      expect(failed).toHaveLength(1);
+      expect(failed[0]?.data).toMatchObject({ resultSummary: MESSAGE, statusReason: null });
+      expect(events.some((e) => e.type === 'workforce.task.completed')).toBe(false);
+      expect(events.find((e) => e.type === 'workforce.task.turn_ended')?.data).toMatchObject({
+        outcome: 'fail',
+      });
+      // A failure is not a routing decision, so no classification rides with it.
+      expect(
+        'classification' in
+          (events.find((e) => e.type === 'workforce.task.turn_ended')?.data ?? {}),
+      ).toBe(false);
+    });
+
+    it('is receipt-idempotent — a re-executed turn body fails the task exactly once', async () => {
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE }, 0.1);
+      const replay = await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE }, 0.1);
+      expect(replay.alreadyApplied).toBe(true);
+      const counts = await db.$client.unsafe(
+        `SELECT
+           (SELECT count(*)::int FROM workforce_task_transitions WHERE task_id = '${root.taskId}') AS transitions,
+           (SELECT count(*)::int FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.failed') AS failed_events,
+           (SELECT cost_usd FROM workforce_tasks WHERE task_id = '${root.taskId}') AS cost;`,
+      );
+      expect(counts[0]).toMatchObject({ transitions: 3, failed_events: 1 });
+      expect(Number(counts[0]?.cost)).toBe(0.1);
+    });
+
+    it('a task that already reached terminal cannot be failed again — refused, nothing written', async () => {
+      // The only status a turn can be applied from is `working` (the claim stamps it), and every
+      // NON-terminal status carries a legal `-> failed` edge in ALLOWED_TRANSITIONS. So the one
+      // illegal shape this ending can take is a task that is already terminal, and the refusal is
+      // the claim check rather than the transition table.
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, { kind: 'complete', result: RESULT });
+      await expect(turn(root.taskId, 2, { kind: 'fail', message: MESSAGE })).rejects.toBeInstanceOf(
+        TurnStateError,
+      );
+      const row = await db.$client.unsafe(
+        `SELECT status, result->>'summary' AS summary,
+                (SELECT count(*)::int FROM workforce_task_transitions WHERE task_id = '${root.taskId}') AS transitions
+           FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(row[0]).toMatchObject({ status: 'completed', summary: 'Done.', transitions: 3 });
+    });
+
+    it('a cancel signal racing the same turn boundary wins — the task cancels, it does not fail', async () => {
+      const root = await driveToWorking(await newRoot());
+      await deliverSignal(tdb(), {
+        taskId: root.taskId,
+        kind: 'cancel',
+        signalKey: `cancel:${root.taskId}`,
+        payload: {},
+        actor: 'user',
+      });
+      const out = await turn(root.taskId, 1, { kind: 'fail', message: MESSAGE });
+      // The planner's cancel override is unconditional and applies to THIS ending like any other:
+      // the turn ran to its natural end, but its outcome is the cancellation.
+      expect(out.plan).toEqual({ kind: 'cancelled' });
+      const row = await db.$client.unsafe(
+        `SELECT status, status_reason, result FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(row[0]).toMatchObject({
+        status: 'cancelled',
+        status_reason: 'cancelled_by_user',
+        // The failure message is NOT written: the fail branch never ran.
+        result: null,
+      });
+    });
+
+    it('a failing child settles its delegation and wakes the parent — a failure is not a parent failure', async () => {
+      const root = await driveToWorking(await newRoot());
+      await turn(root.taskId, 1, {
+        kind: 'fan_out',
+        children: [
+          { title: 'A', goal: 'Do A.', owner: 'worker-1' },
+          { title: 'B', goal: 'Do B.', owner: 'worker-2' },
+        ],
+      });
+      const children = (await db.$client.unsafe(
+        `SELECT task_id FROM workforce_tasks WHERE parent_task_id = '${root.taskId}' ORDER BY task_id;`,
+      )) as unknown as { task_id: string }[];
+      expect(children).toHaveLength(2);
+      const [first, second] = children as [{ task_id: string }, { task_id: string }];
+
+      await driveChildToWorking(first.task_id, 1);
+      await turn(first.task_id, 1, { kind: 'complete', result: RESULT });
+      // The parent is still parked — the join is on ALL of its bound children.
+      expect(
+        (
+          await db.$client.unsafe(
+            `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+          )
+        )[0]?.status,
+      ).toBe('blocked');
+
+      await driveChildToWorking(second.task_id, 1);
+      await turn(second.task_id, 1, { kind: 'fail', message: MESSAGE });
+
+      // The join counts TERMINAL children, `failed` included, so the parent wakes and decides for
+      // itself what a failed child means. A child failure never fails its parent by machinery —
+      // `dependency_failed` is a DECLARED-dependency mechanism (task-scheduler.ts) and no child can
+      // carry a dependency, so it cannot fire here.
+      const parent = await db.$client.unsafe(
+        `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(parent[0]).toMatchObject({ status: 'queued' });
+      expect(parent[0]?.status_reason).not.toBe('dependency_failed');
+      expect(
+        (
+          await db.$client.unsafe(
+            `SELECT count(*)::int AS c FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.dependency_failed';`,
+          )
+        )[0]?.c,
+      ).toBe(0);
+
+      // The opening delegation record settles on the child's real outcome, not on a hopeful one.
+      const settled = (await db.$client.unsafe(
+        `SELECT child_task_id, status FROM workforce_delegations WHERE parent_task_id = '${root.taskId}' ORDER BY child_task_id;`,
+      )) as unknown as { child_task_id: string; status: string }[];
+      expect(settled.map((r) => r.status).sort()).toEqual(['completed', 'failed']);
+
+      // And the parent's next turn can READ why: the child's stored result carries the message.
+      const childRow = await db.$client.unsafe(
+        `SELECT status, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${second.task_id}';`,
+      );
+      expect(childRow[0]).toMatchObject({ status: 'failed', summary: MESSAGE });
+    });
+
+    it('a failing ESCALATION child answers the park, and its message reaches the caller', async () => {
+      // The THIRD child-bound park (join and review are the other two, above). Reviewed for K-001
+      // and found untested for a `failed` child: the branch at task-locks.ts has no status filter,
+      // and existing arms prove it status-agnostic for `completed` and `cancelled`. This is also
+      // the most valuable path the tool opens — a superior answering "this cannot be done" — and it
+      // is the one reader that slices the summary (500 chars) rather than passing it through.
+      const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+      await turn(root.taskId, 1, {
+        kind: 'escalate',
+        reason: 'capability_missing',
+        detail: 'needs a production credential',
+        escalateTo: 'mgr',
+        escalateToDepartment: 'eng',
+      });
+      const rows = (await db.$client.unsafe(
+        `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string; version: number }[];
+      const child = rows[0] as { task_id: string; version: number };
+
+      const queued = await applyTransition(tdb(), {
+        taskId: child.task_id,
+        expectedVersion: child.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await claim(child.task_id, queued.version, 1);
+      const refusal = 'No such credential exists and none can be minted for this environment.';
+      await turn(child.task_id, 1, { kind: 'fail', message: refusal });
+
+      // The caller is released — a failed superior answers the park exactly as a completed one does.
+      const woken = await db.$client.unsafe(
+        `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+
+      // And the REASON travels: before the message was persisted this payload carried `summary:
+      // null`, so the caller woke knowing only that its escalation had ended somehow.
+      const signal = (await db.$client.unsafe(
+        `SELECT kind, payload FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+      )) as unknown as {
+        kind: string;
+        payload: { summary: string | null; status: string; escalationTaskId: string };
+      }[];
+      expect(signal).toHaveLength(1);
+      expect(signal[0]?.kind).toBe('escalated');
+      expect(signal[0]?.payload).toMatchObject({
+        status: 'failed',
+        summary: refusal,
+        escalationTaskId: child.task_id,
+      });
+    });
+
+    it('a failed task does NOT cancel its live detached children — pinned, not endorsed', async () => {
+      // PINNING PRE-EXISTING BEHAVIOUR, deliberately, because this PR is what makes it reachable by
+      // choice: `case 'cancelled'` calls cancelDescendants and `case 'fail'` does not, so a task
+      // that opened detached children with the create tool and then fails leaves them running under
+      // a failed parent. Identical for every other route to `failed` (the tool-error fate, the
+      // approval-timeout sweep), which is exactly why it is not changed here — see the memo's
+      // review-round section for why the cascade is a follow-up and not a one-line fix.
+      const root = await driveToWorking(await newRoot({ owner: 'lead' }));
+      const out = await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        intent: { kind: 'yield' },
+        createdChildren: [{ title: 'Detached', goal: 'Keep working.', owner: 'lead' }],
+        budgets: NO_BUDGETS,
+      });
+      expect(out.task?.status).toBe('queued');
+      const kids = (await db.$client.unsafe(
+        `SELECT task_id, status FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string; status: string }[];
+      expect(kids).toHaveLength(1);
+
+      await claim(root.taskId, (out.task as TaskRecord).version, 2);
+      await turn(root.taskId, 2, { kind: 'fail', message: MESSAGE });
+
+      const after = (await db.$client.unsafe(
+        `SELECT status FROM workforce_tasks WHERE task_id = '${(kids[0] as { task_id: string }).task_id}';`,
+      )) as unknown as { status: string }[];
+      // The child is NOT cancelled. If this ever flips, the cascade was added — update the docs
+      // section and the changelog with it, because both currently document this behaviour.
+      expect(after[0]?.status).toBe('planned');
+      expect(
+        (
+          await db.$client.unsafe(
+            `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+          )
+        )[0]?.status,
+      ).toBe('failed');
+    });
+
+    it('an oversized MACHINE diagnostic is stored bounded and says it was cut', async () => {
+      // The `fail` arm is shared with producers the tool cap cannot reach: the composition's
+      // failTurn and the scheduler's `turn handler for owner 'X' threw: ${err.message}`, which
+      // interpolates an arbitrary throw. Persisting the message made that an unbounded write into a
+      // jsonb column, so the write site bounds it. The engine's `fail` intent stays UNCAPPED on
+      // purpose — capping it would turn a long diagnostic into a malformed intent and lose the
+      // failure entirely.
+      const root = await driveToWorking(await newRoot());
+      const huge = 'x'.repeat(MAX_MESSAGE_BODY_CHARS * 3);
+      const out = await turn(root.taskId, 1, { kind: 'fail', message: huge });
+      // The INTENT was accepted in full — nothing was refused.
+      expect(out.plan).toEqual({ kind: 'fail', message: huge });
+      expect(out.task?.status).toBe('failed');
+
+      const stored = (await db.$client.unsafe(
+        `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { summary: string }[];
+      const summary = (stored[0] as { summary: string }).summary;
+      expect(summary.length).toBeLessThanOrEqual(
+        MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS,
+      );
+      expect(summary.startsWith('x'.repeat(MAX_MESSAGE_BODY_CHARS))).toBe(true);
+      expect(summary.endsWith(truncationMarker(huge.length))).toBe(true);
+      // The journal reads the same bounded column, so it cannot carry the untruncated string either.
+      const failed = (await db.$client.unsafe(
+        `SELECT data->>'resultSummary' AS s FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.failed';`,
+      )) as unknown as { s: string }[];
+      expect(failed[0]?.s).toBe(summary);
+    });
+
+    it('a cut landing INSIDE an astral pair still stores — the bound never emits a lone surrogate', async () => {
+      // THE ARM THE ASCII ONE ABOVE CANNOT BE. `'x'.repeat(...)` is pure BMP, so its cut can never
+      // land between the halves of a surrogate pair — which is exactly why it stayed green while
+      // this branch was broken. A size test written in ASCII cannot catch an encoding bug.
+      //
+      // `slice` cuts UTF-16 code units. With code unit 3999 a HIGH surrogate, the unguarded cut kept
+      // the high half and dropped its low partner, and `jsonb` REFUSES a lone surrogate:
+      // `22P02 invalid input syntax for type json — Unicode low surrogate must follow a high
+      // surrogate`. The throw is inside this transaction, so the transition, journal and settlement
+      // all roll back and the row stays `working` — the reaper re-queues it and the same
+      // deterministic error recurs. A task that never settles is worse than the mislabelled
+      // `completed` this whole item removes, so the failure mode is pinned here, not reasoned about.
+      const root = await driveToWorking(await newRoot());
+      // '\u{1F600}' is one astral code point = two UTF-16 units, so a 3999-char ASCII head puts a
+      // HIGH surrogate at index 3999 — the cut boundary — by construction.
+      const message = `${'x'.repeat(MAX_MESSAGE_BODY_CHARS - 1)}${'\u{1F600}'.repeat(200)}`;
+      expect(message.length).toBeGreaterThan(MAX_MESSAGE_BODY_CHARS);
+      const unitAtCut = message.charCodeAt(MAX_MESSAGE_BODY_CHARS - 1);
+      expect(
+        unitAtCut >= 0xd800 && unitAtCut <= 0xdbff,
+        'the fixture must actually put a high surrogate at the cut, or this arm proves nothing',
+      ).toBe(true);
+
+      const out = await turn(root.taskId, 1, { kind: 'fail', message });
+      // It COMMITTED: before the guard this threw and nothing below was reachable.
+      expect(out.task?.status).toBe('failed');
+
+      const stored = (await db.$client.unsafe(
+        `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { summary: string }[];
+      const summary = (stored[0] as { summary: string }).summary;
+      // The lone high surrogate was dropped rather than stored, so the head is one unit shorter.
+      expect(summary.startsWith('x'.repeat(MAX_MESSAGE_BODY_CHARS - 1))).toBe(true);
+      expect(summary.endsWith(truncationMarker(message.length))).toBe(true);
+      // No unpaired surrogate survives anywhere in the stored value, and no replacement char either
+      // — dropping is not the same as mangling, and both would be wrong.
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(summary),
+      ).toBe(false);
+      expect(summary.includes('�')).toBe(false);
+      // Dropping a unit only shortens, so the stated ceiling still holds.
+      expect(summary.length).toBeLessThanOrEqual(
+        MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS,
+      );
+      // And the journal, which reads this same column, is equally intact.
+      const failedEvent = (await db.$client.unsafe(
+        `SELECT data->>'resultSummary' AS s FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.failed';`,
+      )) as unknown as { s: string }[];
+      expect(failedEvent[0]?.s).toBe(summary);
+    });
+
+    it('a message exactly at the model-facing cap is stored verbatim — the bound is not a trim', async () => {
+      const root = await driveToWorking(await newRoot());
+      const atCap = 'y'.repeat(MAX_MESSAGE_BODY_CHARS);
+      await turn(root.taskId, 1, { kind: 'fail', message: atCap });
+      const stored = (await db.$client.unsafe(
+        `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { summary: string }[];
+      // Every model-authored failure lands here (the tool refuses anything longer), so the
+      // truncation branch is dead on the model path and live only for machine diagnostics.
+      expect(stored[0]?.summary).toBe(atCap);
+    });
+
+    it('a REVIEWER that fails releases the reviewed task instead of stranding it forever', async () => {
+      // The sharp case: `waiting_for_review` appears in no wake set and no sweep covers it, so its
+      // only exit besides the verdict is `releaseAbandonedReview`, which runs from
+      // `afterTaskTerminal` — the call the fail branch makes. A reviewer that could honestly not
+      // review would otherwise park its subject permanently.
+      const root = await driveToWorking(await newRoot({ owner: 'dev' }));
+      await completeUnderPolicy(root.taskId, 1);
+      const reviewer = await reviewerChildOf(root.taskId);
+      await driveChildToWorking(reviewer.task_id, 1);
+      const out = await turn(reviewer.task_id, 1, {
+        kind: 'fail',
+        message: 'The work under review is not in a language I can read.',
+      });
+      expect(out.task?.status).toBe('failed');
+
+      const released = await db.$client.unsafe(
+        `SELECT status, status_reason, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(released[0]).toMatchObject({
+        status: 'waiting_for_user',
+        status_reason: null,
+        // The reviewed work survives — the human sees what the reviewer never judged.
+        summary: 'Done.',
+      });
+      const abandoned = (await db.$client.unsafe(
+        `SELECT data FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.review.abandoned';`,
+      )) as unknown as { data: { reviewTaskStatus: string; outcome: string } }[];
+      expect(abandoned).toHaveLength(1);
+      expect(abandoned[0]?.data).toMatchObject({
+        reviewTaskStatus: 'failed',
+        outcome: 'waiting_for_user',
+      });
+      // No verdict is fabricated for a review nobody gave.
+      const review = await db.$client.unsafe(
+        `SELECT verdict FROM workforce_reviews WHERE task_id = '${root.taskId}';`,
+      );
+      expect(review[0]).toMatchObject({ verdict: null });
+    });
   });
 
   it('fan-out opens the children, records the delegations, parks the parent — idempotently', async () => {
@@ -1386,6 +1815,131 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(signal[0]?.signal_key).toBe(`escalated:${child.task_id}`);
     expect(signal[0]?.payload.status).toBe('completed');
     expect(signal[0]?.payload.summary).toBe('Granted a scoped credential.');
+  });
+
+  it('an escalation reply CUT INSIDE an astral pair still wakes the caller — the bound never emits a lone surrogate', async () => {
+    // THE K-003 DEFECT, driven end to end on the COMPLETION path — the arm above with one thing
+    // changed: the superior's summary is long enough to be cut, and the cut lands INSIDE an astral
+    // pair. `task-locks.ts` bounds the signal payload with a code-unit slice; `slice` cuts UTF-16
+    // CODE UNITS, so such a cut keeps a HIGH surrogate and drops its low partner. The target column
+    // `workforce_task_signals.payload` is `jsonb`, where a lone surrogate is not mangled text but a
+    // write PostgreSQL REFUSES: `22P02`, "Unicode low surrogate must follow a high surrogate".
+    //
+    // That throw is inside applyTurnOutcome's transaction, so the SUPERIOR'S OWN `working ->
+    // completed` transition, its journal event and its settlement all roll back, and the parked
+    // caller is left in `blocked(escalated)` with no exit but an operator cancel. Nothing bounds
+    // the input either: `workerResultSchema.summary` is `z.string().min(1)` with no `.max()`
+    // (intent-applier.ts), so length is no barrier.
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: 'needs a production credential',
+      escalateTo: 'mgr',
+      escalateToDepartment: 'eng',
+    });
+    const rows = (await db.$client.unsafe(
+      `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { task_id: string; version: number }[];
+    const child = rows[0] as { task_id: string; version: number };
+
+    // THE FIXTURE IS ASSERTED BEFORE ANYTHING ELSE, because a fixture that stopped being astral
+    // would prove nothing while still passing: `'x'.repeat(n)` is pure BMP and its cut can NEVER
+    // land inside a pair, which is exactly how the sibling defect in apply-intents.ts shipped green.
+    // The surrogate must sit at the LAST KEPT index, not one past it.
+    const lastKept = ESCALATION_SUMMARY_MAX_CHARS - 1;
+    const summary = `${'x'.repeat(lastKept)}${'\u{1F600}'.repeat(50)}`;
+    expect(summary.length).toBeGreaterThan(ESCALATION_SUMMARY_MAX_CHARS);
+    expect(summary.charCodeAt(lastKept)).toBeGreaterThanOrEqual(0xd800);
+    expect(summary.charCodeAt(lastKept)).toBeLessThanOrEqual(0xdbff);
+
+    const queuedChild = await applyTransition(tdb(), {
+      taskId: child.task_id,
+      expectedVersion: child.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(child.task_id, queuedChild.version, 1);
+    await turn(child.task_id, 1, {
+      kind: 'complete',
+      result: { status: 'completed', summary, confidence: 1 },
+    });
+
+    // The superior's own completion COMMITTED — the defect rolled this back.
+    const superior = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${child.task_id}';`,
+    );
+    expect(superior[0]).toEqual({ status: 'completed' });
+
+    // The caller is released rather than stranded.
+    const woken = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+
+    const signal = (await db.$client.unsafe(
+      `SELECT kind, payload FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as { kind: string; payload: { summary: string; status: string } }[];
+    expect(signal).toHaveLength(1);
+    expect(signal[0]?.kind).toBe('escalated');
+    const stored = signal[0]?.payload.summary as string;
+
+    // The bound still holds, and the stored text carries NO unpaired surrogate in either direction
+    // and NO U+FFFD — dropping the orphan is right, replacing it with a substitution char is not.
+    expect(stored.length).toBeLessThanOrEqual(ESCALATION_SUMMARY_MAX_CHARS);
+    expect(stored).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(stored).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(stored).not.toContain('�');
+    // It is a PREFIX of what the superior wrote — one code unit shorter than the raw cut, and that
+    // unit is the orphaned high surrogate.
+    expect(summary.startsWith(stored)).toBe(true);
+    expect(stored).toBe(summary.slice(0, ESCALATION_SUMMARY_MAX_CHARS - 1));
+  });
+
+  it('a machine-composed child title is bounded WITHOUT splitting an astral pair', async () => {
+    // The third and fourth truncations in this file: `Escalation: <title>` and `Review: <title>`,
+    // both cut at CHILD_TITLE_MAX_CHARS. `workforce_tasks.title` is `text`, not `jsonb`, so an
+    // orphaned surrogate here is stored mangled text rather than the `22P02` the jsonb sites take —
+    // and that title then renders into the child's turn context. A task title is authored text, so
+    // the cut position is not something the engine picks.
+    const prefix = 'Escalation: ';
+    // The surrogate must sit at the LAST KEPT index, not one past it — an off-by-one yields a
+    // fixture that is still astral, still passes a naive "surrogate near the cut" check, and never
+    // exercises the guard. (That mistake was made once on this branch and caught by an arm that
+    // predicted the resulting length; hence the named index and the length assertion below.)
+    // A PARENT title is itself capped at CHILD_TITLE_MAX_CHARS by create-task, so the fixture has
+    // to fit inside that while still pushing the COMPOSED title past it — which the prefix does on
+    // its own. Six astral chars is the most that fits; the emoji run only has to reach the cut.
+    const lastKept = CHILD_TITLE_MAX_CHARS - 1;
+    const parentTitle = `${'t'.repeat(lastKept - prefix.length)}${'\u{1F600}'.repeat(6)}`;
+    expect(parentTitle.length).toBeLessThanOrEqual(CHILD_TITLE_MAX_CHARS);
+    const composed = `${prefix}${parentTitle}`;
+    // The fixture proves itself BEFORE anything else is asserted.
+    expect(composed.length).toBeGreaterThan(CHILD_TITLE_MAX_CHARS);
+    expect(composed.charCodeAt(lastKept)).toBeGreaterThanOrEqual(0xd800);
+    expect(composed.charCodeAt(lastKept)).toBeLessThanOrEqual(0xdbff);
+
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1', title: parentTitle }));
+    await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: 'needs a production credential',
+      escalateTo: 'mgr',
+      escalateToDepartment: 'eng',
+    });
+    const rows = (await db.$client.unsafe(
+      `SELECT title FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { title: string }[];
+    const title = rows[0]?.title as string;
+
+    expect(title.length).toBeLessThanOrEqual(CHILD_TITLE_MAX_CHARS);
+    expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(title).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(title).not.toContain('�');
+    // One SHORTER than the cap — the orphaned high surrogate was given back, which is the evidence
+    // that the cut really landed inside a pair rather than between characters.
+    expect(title.length).toBe(CHILD_TITLE_MAX_CHARS - 1);
+    expect(composed.startsWith(title)).toBe(true);
   });
 
   it('a sibling terminal never releases an escalation park — only the bound escalation child does', async () => {

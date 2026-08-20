@@ -26,7 +26,13 @@
  * computed from the injected `now`, ordering ties break on stable ids, and the same rows with
  * the same query rank identically every time.
  */
-import type { MemoryEntry, MemoryHit, MemoryQuery, WorkforceMemoryProvider } from '@rayspec/core';
+import {
+  type MemoryEntry,
+  type MemoryHit,
+  type MemoryQuery,
+  truncateCodeUnits,
+  type WorkforceMemoryProvider,
+} from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
 import type { TaskRecord } from '@rayspec/tasks';
 import { and, asc, desc, eq, gte, inArray, ne, or, type SQL } from 'drizzle-orm';
@@ -100,10 +106,10 @@ interface Candidate {
 
 function clampText(text: string): string {
   if (text.length <= RECALL_HIT_TEXT_MAX_CHARS) return text;
-  let sliced = text.slice(0, RECALL_HIT_TEXT_MAX_CHARS - 1);
-  // Never cut an astral pair in half — a lone surrogate is mangled text, not a shorter string.
-  if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
-  return `${sliced}…`;
+  // Never cut an astral pair in half — `truncateCodeUnits` (@rayspec/core) is the shared
+  // truncation guard and carries the hazard, the contract and the caller list. The ellipsis takes
+  // the unit the cap gives back, so the result stays within RECALL_HIT_TEXT_MAX_CHARS.
+  return `${truncateCodeUnits(text, RECALL_HIT_TEXT_MAX_CHARS - 1)}…`;
 }
 
 function resultSummary(result: unknown): string | null {
