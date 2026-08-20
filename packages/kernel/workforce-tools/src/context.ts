@@ -205,7 +205,7 @@ function truncateToBytes(text: string, maxBytes: number): string {
   while (sliced.length > 0 && bytesOf(sliced) > maxBytes) {
     sliced = sliced.slice(0, -1);
   }
-  // Never end on a split astral pair — `truncateCodeUnits` (@rayspec/core) is the tree's one
+  // Never end on a split astral pair — `truncateCodeUnits` (@rayspec/core) is the shared
   // truncation guard and carries the hazard, the contract and the caller list. This cut is on a
   // BYTE budget, so the loop above settles the length and the guard is applied at it; `sliced` is a
   // STRICT prefix of `text` (the early return proved `text` does not fit), so the guard's

@@ -1,6 +1,6 @@
 /**
  * Text utilities — UAX-29 word tokenization, a contiguous token-run subset check, and the tree's
- * ONE surrogate-safe truncation guard.
+ * shared surrogate-safe truncation guard.
  *
  * Product-neutral pure functions for any task that needs script-uniform, language-neutral word
  * tokens, a "does this cited text appear verbatim inside that text" predicate (e.g. retrieval,
@@ -75,7 +75,7 @@ export function tokenRunSubset(needle: string, haystack: string): boolean {
 const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
 
 /**
- * THE TREE'S ONE TRUNCATION GUARD. A prefix of `text` at most `maxCodeUnits` UTF-16 code units long
+ * THE SHARED TRUNCATION GUARD. A prefix of `text` at most `maxCodeUnits` UTF-16 code units long
  * that NEVER ends on a surrogate this cut orphaned.
  *
  * ── THE HAZARD ────────────────────────────────────────────────────────────────────────────────────
@@ -107,9 +107,9 @@ const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
  * caller returns its input verbatim when it is short enough, so scrubbing here would protect only
  * the over-the-cap branch while inviting the conclusion that the string is now safe to write. Making
  * it total would mean scrubbing the whole string on every call — i.e. becoming an input sanitizer,
- * which belongs ONCE at the boundary where untrusted text enters, not four times at truncation
- * sites. A model emitting a lone surrogate directly is a real and separate question; this function
- * fixes CUTS, not INPUTS, and says so rather than half-answering both.
+ * which belongs ONCE at the boundary where untrusted text enters, not once per truncation site. A
+ * model emitting a lone surrogate directly is a real and separate question; this function fixes
+ * CUTS, not INPUTS, and says so rather than half-answering both.
  *
  * ── WHY ONLY THE TRAILING HIGH HALF IS CHECKED ────────────────────────────────────────────────────
  * Every caller takes a PREFIX (`slice(0, n)`). A prefix cut can only orphan the HIGH half — the low
@@ -117,12 +117,22 @@ const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
  * index 0, so a leading check would be dead code at every call site and a first step toward the
  * scrub above.
  *
- * ── THE CALLERS (all four; a fifth truncation site should call this, not re-derive it) ────────────
+ * ── THE CALLERS — a NEW truncation site calls this, it does not re-derive it ──────────────────────
  *  - `@rayspec/workforce-tools` `memory.ts` `clampText` — recall hit text, ellipsis-terminated.
  *  - `@rayspec/workforce-tools` `context.ts` `truncateToBytes` — a UTF-8 BYTE budget, so it settles
  *    its own length first and passes that length here.
  *  - `@rayspec/tasks` `task-locks.ts` — the escalation-reply signal payload (**jsonb**).
- *  - `@rayspec/tasks` `apply-intents.ts` — the failure summary (**jsonb**).
+ *  - `@rayspec/tasks` `apply-intents.ts` — the failure summary (**jsonb**), and the two
+ *    machine-composed child titles (`Review: …` / `Escalation: …`, a `text` column — there an
+ *    orphan is stored as U+FFFD rather than refused, which is quieter and not better).
+ *  - `@rayspec/core` `seam-confinement.ts` — the confined selection rationale (extension-authored).
+ *
+ * THE ONE DELIBERATE EXCEPTION: `@rayspec/core` `orchestration-strategy.ts` carries its own copy of
+ * this predicate, because a SEAM INTERFACE MODULE may import nothing at all — `seam-wiring.test.ts`
+ * asserts its import list is empty, so an out-of-tree implementer can read one self-contained file
+ * and know the whole contract. That rule outranks the deduplication. The copy is labelled as a copy,
+ * points back here, and has its own non-BMP test; it is not a fourth SILENT copy of the kind that
+ * produced the defect this guard exists for.
  *
  * @param maxCodeUnits a non-negative code-unit ceiling; a negative value clamps to 0 (empty).
  */

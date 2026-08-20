@@ -106,7 +106,7 @@ interface Candidate {
 
 function clampText(text: string): string {
   if (text.length <= RECALL_HIT_TEXT_MAX_CHARS) return text;
-  // Never cut an astral pair in half — `truncateCodeUnits` (@rayspec/core) is the tree's one
+  // Never cut an astral pair in half — `truncateCodeUnits` (@rayspec/core) is the shared
   // truncation guard and carries the hazard, the contract and the caller list. The ellipsis takes
   // the unit the cap gives back, so the result stays within RECALL_HIT_TEXT_MAX_CHARS.
   return `${truncateCodeUnits(text, RECALL_HIT_TEXT_MAX_CHARS - 1)}…`;

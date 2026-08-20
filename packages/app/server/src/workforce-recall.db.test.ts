@@ -348,8 +348,9 @@ describe.skipIf(!hasDb)('the task-history recall provider (db)', () => {
     // pair. That is not a weak test, it is a test of a different thing — and it is exactly how the
     // sibling defect in @rayspec/tasks shipped green while the code was broken.
     //
-    // `clampText` is the only one of the tree's four truncation sites whose coverage was pure ASCII.
-    // All four now truncate through `truncateCodeUnits` (@rayspec/core).
+    // `clampText` was the only truncation site in the tree with NO astral coverage at all. Every
+    // truncation of authored text now goes through `truncateCodeUnits` (@rayspec/core), which
+    // carries the hazard and the contract, and each site has a non-BMP arm of its own.
     {
       // TWO PARITIES, because with an emoji run the cut index is odd-or-even depending on how long
       // the `[<taskId> · <age>] ` prefix is — and one padding character flips it. Seeding both
