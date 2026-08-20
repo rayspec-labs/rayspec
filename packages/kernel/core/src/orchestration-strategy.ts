@@ -83,8 +83,8 @@ export class SingleTaskPlanStrategy implements OrchestrationStrategy {
           // interface module may import NOTHING (see the module header — the rule is asserted, not
           // merely stated). The rule is worth more than the deduplication: it is what lets an
           // out-of-tree implementer read one self-contained file. So the copy is intentional and
-          // labelled, rather than the fourth silent one that produced the defect this guard exists
-          // for, and `strategy-defaults.test.ts` gives THIS site its own astral arm.
+          // labelled, rather than one more SILENT one of the kind that produced the defect this
+          // guard exists for, and `strategy-defaults.test.ts` gives THIS site its own astral arm.
           title:
             input.goal.length <= TITLE_MAX_CHARS
               ? input.goal

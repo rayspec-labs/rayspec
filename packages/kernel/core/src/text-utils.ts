@@ -131,7 +131,7 @@ const TRAILING_HIGH_SURROGATE_RE = /[\uD800-\uDBFF]$/;
  * this predicate, because a SEAM INTERFACE MODULE may import nothing at all — `seam-wiring.test.ts`
  * asserts its import list is empty, so an out-of-tree implementer can read one self-contained file
  * and know the whole contract. That rule outranks the deduplication. The copy is labelled as a copy,
- * points back here, and has its own non-BMP test; it is not a fourth SILENT copy of the kind that
+ * points back here, and has its own non-BMP test; it is not one more SILENT copy of the kind that
  * produced the defect this guard exists for.
  *
  * @param maxCodeUnits a non-negative code-unit ceiling; a negative value clamps to 0 (empty).
