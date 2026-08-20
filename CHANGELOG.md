@@ -329,9 +329,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path, not in theory** — the arm that pins it drives a real escalate/complete pair against real
   Postgres and reproduces the exact `22P02` when the guard is removed.
   **The fix is one shared guard, not another private copy.** The tree truncates authored text in
-  seven places, and the ones that had grown a correct surrogate check had grown it by copy-and-paste,
-  each comment pointing at the others. That is what produced this bug: the sites written without the
-  check were written by people who had no way to inherit it. `truncateCodeUnits` now lives in
+  eight places — seven now call the shared guard and one keeps a labelled copy (below). The ones that
+  had grown a correct surrogate check had grown it by copy-and-paste, each comment pointing at the
+  others. That is what produced this bug: the sites written without the check were written by people
+  who had no way to inherit it. `truncateCodeUnits` now lives in
   `@rayspec/core` — a package every caller already depends on, and a dependency-graph leaf, so no
   import cycle is possible — and carries the hazard, the contract and the caller list in one place.
   Recall-hit clamping, turn-context byte trimming, the failure summary, the escalation reply, the
@@ -348,14 +349,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   present in the caller's string passes through untouched — including when the string is short enough
   that nothing is cut at all. Scrubbing inside a truncation helper would protect only the over-the-cap
   branch while reading as though it made the string safe to write, and whole-string sanitization
-  belongs once at the boundary where untrusted text enters, not at four truncation sites. Behaviour at
-  the two already-correct sites is unchanged.
-  **The proof, and why the old tests could not give it.** Every truncation test in the tree used
-  `'x'.repeat(n)` — pure BMP, one code unit per character, so its cut can *never* land inside a
-  surrogate pair. Those tests were green for the entire time the code was broken, which is the failure
-  mode rather than an anecdote about it. Every truncation arm now uses a non-BMP fixture and asserts
-  that the fixture really does put a surrogate at the cut **before** asserting anything else, so a
-  fixture that stops being astral fails loudly instead of passing vacuously.
+  belongs once at the boundary where untrusted text enters, not once per truncation site. Behaviour
+  at the sites that were already correct is unchanged.
+  **The proof, and why the old tests could not give it.** Every bound test in the tree used a
+  pure-ASCII repeat — `'x'.repeat(300)`, `'w'.repeat(10_000)` — one UTF-16 code unit per character,
+  so its cut can *never* land inside a surrogate pair. Those tests were green for the entire time the
+  code was broken, which is the failure mode rather than an anecdote about it. Every truncation arm
+  now uses a non-BMP fixture, asserts that the fixture really does put a surrogate at the **last kept
+  index** before asserting anything else, and asserts the result is one unit below the cap — the
+  observable signature that the guard actually fired. A fixture that stops being astral, or that
+  drifts one index off, now fails loudly instead of passing vacuously.
 
 ### Documentation
 
