@@ -17,7 +17,11 @@ import {
   workforceBudgetsSchema,
 } from '@rayspec/tasks';
 import { forTenant, makeTestDb, resetTaskSchema } from '@rayspec/tasks/test-support';
-import { RECALL_MAX_HITS, TaskHistoryMemoryProvider } from '@rayspec/workforce-tools';
+import {
+  RECALL_HIT_TEXT_MAX_CHARS,
+  RECALL_MAX_HITS,
+  TaskHistoryMemoryProvider,
+} from '@rayspec/workforce-tools';
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
@@ -336,6 +340,52 @@ describe.skipIf(!hasDb)('the task-history recall provider (db)', () => {
       workforceId: 'someone_else',
     });
     expect(foreignPin).toEqual([]);
+  });
+
+  it('the text cap never cuts an astral pair in half — the ASCII bound above cannot prove this', async () => {
+    // THE ARM THE ONE ABOVE STRUCTURALLY CANNOT BE. Its fixture is `'x'.repeat(400)`, which is pure
+    // BMP: every character is ONE UTF-16 code unit, so its cut can NEVER land inside a surrogate
+    // pair. That is not a weak test, it is a test of a different thing — and it is exactly how the
+    // sibling defect in @rayspec/tasks shipped green while the code was broken.
+    //
+    // `clampText` was the only truncation site in the tree with NO astral coverage at all. Every
+    // truncation of authored text now goes through `truncateCodeUnits` (@rayspec/core), which
+    // carries the hazard and the contract, and each site has a non-BMP arm of its own.
+    {
+      // TWO PARITIES, because with an emoji run the cut index is odd-or-even depending on how long
+      // the `[<taskId> · <age>] ` prefix is — and one padding character flips it. Seeding both
+      // guarantees at least one row is cut MID-PAIR rather than hoping a single fixture is lucky.
+      for (const pad of ['', 'y']) {
+        await seedCompleted(TENANT_A, {
+          owner: 'dev',
+          department: 'eng',
+          title: `Astral work ${pad}`,
+          goal: 'keyword treasure',
+          summary: `keyword treasure ${pad}${'\u{1F600}'.repeat(300)}`,
+          agedDays: 1,
+        });
+      }
+
+      const hits = await providerFor(TENANT_A).search({ text: 'keyword treasure', limit: 50 });
+      expect(hits).toHaveLength(2);
+      for (const hit of hits) {
+        expect(hit.text.length).toBeLessThanOrEqual(RECALL_HIT_TEXT_MAX_CHARS);
+        // `isWellFormed` is false iff an unpaired surrogate is present, in either direction.
+        expect(hit.text.isWellFormed()).toBe(true);
+        expect(hit.text).not.toContain('�'); // dropping the orphan, never replacing it
+        expect(hit.text.endsWith('…')).toBe(true); // it really was clamped, not merely short
+      }
+
+      // THE FIXTURE PROVES ITSELF. A clamped hit is `truncateCodeUnits(raw, MAX - 1) + '…'`, so its
+      // length is MAX when the cut fell between characters and MAX - 1 when the guard had to give a
+      // unit back. Seeing the shorter length is the observable evidence that a cut really did land
+      // inside a pair here — without it this arm would pass on a fixture that never exercised the
+      // guard at all.
+      expect(hits.map((h) => h.text.length).sort()).toEqual([
+        RECALL_HIT_TEXT_MAX_CHARS - 1,
+        RECALL_HIT_TEXT_MAX_CHARS,
+      ]);
+    }
   });
 
   it('ADVERSARIAL: an identical twin workforce in another tenant leaks nothing', async () => {

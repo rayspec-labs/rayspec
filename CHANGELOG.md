@@ -314,6 +314,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a transition from a known non-zero count to 0 rather than the `0 === 0` it was — with the second
   tenant's rows, including its workforce-shaped journal rows, asserted fully intact throughout.
 
+- **An escalation answered with a long emoji-bearing summary rolled back the superior's own
+  completion and stranded the parked caller.** When a superior finished an escalation task, the fan-in
+  bounded the `escalated` signal payload with `summary.slice(0, 500)` — and `slice` cuts UTF-16 **code
+  units**, not characters. Every emoji (and every other non-BMP character) is a surrogate PAIR of two
+  units, so a cut landing between the halves kept the high surrogate and dropped its partner. The
+  signal payload column is `jsonb`, where a lone surrogate is not mangled text but a write PostgreSQL
+  **refuses**: `22P02`, *"Unicode low surrogate must follow a high surrogate."*
+  That throw happened inside the turn's transaction, so it took everything with it — the superior's
+  own `working -> completed` transition, its terminal journal event and its cost settlement all rolled
+  back, while the caller stayed parked in `blocked(escalated)` with no exit left but an operator
+  cancel. Nothing bounded the input either: a result `summary` is `z.string().min(1)` with no maximum,
+  so any summary past 500 units with an emoji at the cut reached it. **Reachable on the shipped code
+  path, not in theory** — the arm that pins it drives a real escalate/complete pair against real
+  Postgres and reproduces the exact `22P02` when the guard is removed.
+  **The fix is one shared guard, not another private copy.** The tree truncates authored text in
+  eight places — seven now call the shared guard and one keeps a labelled copy (below). The ones that
+  had grown a correct surrogate check had grown it by copy-and-paste, each comment pointing at the
+  others. That is what produced this bug: the sites written without the check were written by people
+  who had no way to inherit it. `truncateCodeUnits` now lives in
+  `@rayspec/core` — a package every caller already depends on, and a dependency-graph leaf, so no
+  import cycle is possible — and carries the hazard, the contract and the caller list in one place.
+  Recall-hit clamping, turn-context byte trimming, the failure summary, the escalation reply, the
+  machine-composed `Review:` / `Escalation:` child titles and the confined selection rationale all
+  call it, so the next truncation site inherits the guard instead of re-deriving it. **Four** of them
+  had no surrogate handling at all before this change: the escalation reply above, plus three more
+  found by the sweep — the two child titles and the selection rationale.
+  **One copy survives, deliberately and labelled.** `SingleTaskPlanStrategy`'s step-title trim keeps
+  its own predicate, because a seam interface module may import **nothing** — an out-of-tree
+  implementer reads one self-contained file to learn the whole contract, and `seam-wiring.test.ts`
+  asserts the import list is empty rather than merely asking for it. That rule is worth more than the
+  deduplication, so the copy is named as a copy, points at the canonical guard, and has its own
+  non-BMP test.
+  **It repairs cuts, it does not scrub inputs, and that is deliberate.** A lone surrogate already
+  present in the caller's string passes through untouched — including when the string is short enough
+  that nothing is cut at all. Scrubbing inside a truncation helper would protect only the over-the-cap
+  branch while reading as though it made the string safe to write, and whole-string sanitization
+  belongs once at the boundary where untrusted text enters, not once per truncation site. Behaviour
+  at the sites that were already correct is unchanged.
+  **The proof, and why the old tests could not give it.** Every bound test in the tree used a
+  pure-ASCII repeat — `'x'.repeat(300)`, `'w'.repeat(10_000)` — one UTF-16 code unit per character,
+  so its cut can *never* land inside a surrogate pair. Those tests were green for the entire time the
+  code was broken, which is the failure mode rather than an anecdote about it. Every truncation arm
+  now uses a non-BMP fixture, asserts that the fixture really does put a surrogate at the **last kept
+  index** before asserting anything else, and asserts the result is one unit below the cap — the
+  observable signature that the guard actually fired. A fixture that stops being astral, or that
+  drifts one index off, now fails loudly instead of passing vacuously.
+
 ### Documentation
 
 - **`docs/workforce-architecture.md` no longer cites code by line number — six of its twelve

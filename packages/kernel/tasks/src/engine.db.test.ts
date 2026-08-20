@@ -9,6 +9,7 @@ import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyBudgetExhausted,
   applyTurnOutcome,
+  CHILD_TITLE_MAX_CHARS,
   DELEGATION_STATUSES,
   lockRootFirst,
   MAX_MESSAGE_BODY_CHARS,
@@ -25,6 +26,7 @@ import { createRootTask } from './create-task.js';
 import { TaskNotFoundError } from './errors.js';
 import { applyReviewVerdict, ReviewNotForParkError } from './reviews.js';
 import { deliverSignal } from './signals.js';
+import { ESCALATION_SUMMARY_MAX_CHARS } from './task-locks.js';
 import {
   forTenant,
   makeTestDb,
@@ -1813,6 +1815,131 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
     expect(signal[0]?.signal_key).toBe(`escalated:${child.task_id}`);
     expect(signal[0]?.payload.status).toBe('completed');
     expect(signal[0]?.payload.summary).toBe('Granted a scoped credential.');
+  });
+
+  it('an escalation reply CUT INSIDE an astral pair still wakes the caller — the bound never emits a lone surrogate', async () => {
+    // THE K-003 DEFECT, driven end to end on the COMPLETION path — the arm above with one thing
+    // changed: the superior's summary is long enough to be cut, and the cut lands INSIDE an astral
+    // pair. `task-locks.ts` bounds the signal payload with a code-unit slice; `slice` cuts UTF-16
+    // CODE UNITS, so such a cut keeps a HIGH surrogate and drops its low partner. The target column
+    // `workforce_task_signals.payload` is `jsonb`, where a lone surrogate is not mangled text but a
+    // write PostgreSQL REFUSES: `22P02`, "Unicode low surrogate must follow a high surrogate".
+    //
+    // That throw is inside applyTurnOutcome's transaction, so the SUPERIOR'S OWN `working ->
+    // completed` transition, its journal event and its settlement all roll back, and the parked
+    // caller is left in `blocked(escalated)` with no exit but an operator cancel. Nothing bounds
+    // the input either: `workerResultSchema.summary` is `z.string().min(1)` with no `.max()`
+    // (intent-applier.ts), so length is no barrier.
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+    await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: 'needs a production credential',
+      escalateTo: 'mgr',
+      escalateToDepartment: 'eng',
+    });
+    const rows = (await db.$client.unsafe(
+      `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { task_id: string; version: number }[];
+    const child = rows[0] as { task_id: string; version: number };
+
+    // THE FIXTURE IS ASSERTED BEFORE ANYTHING ELSE, because a fixture that stopped being astral
+    // would prove nothing while still passing: `'x'.repeat(n)` is pure BMP and its cut can NEVER
+    // land inside a pair, which is exactly how the sibling defect in apply-intents.ts shipped green.
+    // The surrogate must sit at the LAST KEPT index, not one past it.
+    const lastKept = ESCALATION_SUMMARY_MAX_CHARS - 1;
+    const summary = `${'x'.repeat(lastKept)}${'\u{1F600}'.repeat(50)}`;
+    expect(summary.length).toBeGreaterThan(ESCALATION_SUMMARY_MAX_CHARS);
+    expect(summary.charCodeAt(lastKept)).toBeGreaterThanOrEqual(0xd800);
+    expect(summary.charCodeAt(lastKept)).toBeLessThanOrEqual(0xdbff);
+
+    const queuedChild = await applyTransition(tdb(), {
+      taskId: child.task_id,
+      expectedVersion: child.version,
+      to: 'queued',
+      actor: 'scheduler',
+    });
+    await claim(child.task_id, queuedChild.version, 1);
+    await turn(child.task_id, 1, {
+      kind: 'complete',
+      result: { status: 'completed', summary, confidence: 1 },
+    });
+
+    // The superior's own completion COMMITTED — the defect rolled this back.
+    const superior = await db.$client.unsafe(
+      `SELECT status FROM workforce_tasks WHERE task_id = '${child.task_id}';`,
+    );
+    expect(superior[0]).toEqual({ status: 'completed' });
+
+    // The caller is released rather than stranded.
+    const woken = await db.$client.unsafe(
+      `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+    );
+    expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+
+    const signal = (await db.$client.unsafe(
+      `SELECT kind, payload FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+    )) as unknown as { kind: string; payload: { summary: string; status: string } }[];
+    expect(signal).toHaveLength(1);
+    expect(signal[0]?.kind).toBe('escalated');
+    const stored = signal[0]?.payload.summary as string;
+
+    // The bound still holds, and the stored text carries NO unpaired surrogate in either direction
+    // and NO U+FFFD — dropping the orphan is right, replacing it with a substitution char is not.
+    expect(stored.length).toBeLessThanOrEqual(ESCALATION_SUMMARY_MAX_CHARS);
+    expect(stored).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(stored).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(stored).not.toContain('�');
+    // It is a PREFIX of what the superior wrote — one code unit shorter than the raw cut, and that
+    // unit is the orphaned high surrogate.
+    expect(summary.startsWith(stored)).toBe(true);
+    expect(stored).toBe(summary.slice(0, ESCALATION_SUMMARY_MAX_CHARS - 1));
+  });
+
+  it('a machine-composed child title is bounded WITHOUT splitting an astral pair', async () => {
+    // The third and fourth truncations in this file: `Escalation: <title>` and `Review: <title>`,
+    // both cut at CHILD_TITLE_MAX_CHARS. `workforce_tasks.title` is `text`, not `jsonb`, so an
+    // orphaned surrogate here is stored mangled text rather than the `22P02` the jsonb sites take —
+    // and that title then renders into the child's turn context. A task title is authored text, so
+    // the cut position is not something the engine picks.
+    const prefix = 'Escalation: ';
+    // The surrogate must sit at the LAST KEPT index, not one past it — an off-by-one yields a
+    // fixture that is still astral, still passes a naive "surrogate near the cut" check, and never
+    // exercises the guard. (That mistake was made once on this branch and caught by an arm that
+    // predicted the resulting length; hence the named index and the length assertion below.)
+    // A PARENT title is itself capped at CHILD_TITLE_MAX_CHARS by create-task, so the fixture has
+    // to fit inside that while still pushing the COMPOSED title past it — which the prefix does on
+    // its own. Six astral chars is the most that fits; the emoji run only has to reach the cut.
+    const lastKept = CHILD_TITLE_MAX_CHARS - 1;
+    const parentTitle = `${'t'.repeat(lastKept - prefix.length)}${'\u{1F600}'.repeat(6)}`;
+    expect(parentTitle.length).toBeLessThanOrEqual(CHILD_TITLE_MAX_CHARS);
+    const composed = `${prefix}${parentTitle}`;
+    // The fixture proves itself BEFORE anything else is asserted.
+    expect(composed.length).toBeGreaterThan(CHILD_TITLE_MAX_CHARS);
+    expect(composed.charCodeAt(lastKept)).toBeGreaterThanOrEqual(0xd800);
+    expect(composed.charCodeAt(lastKept)).toBeLessThanOrEqual(0xdbff);
+
+    const root = await driveToWorking(await newRoot({ owner: 'worker-1', title: parentTitle }));
+    await turn(root.taskId, 1, {
+      kind: 'escalate',
+      reason: 'capability_missing',
+      detail: 'needs a production credential',
+      escalateTo: 'mgr',
+      escalateToDepartment: 'eng',
+    });
+    const rows = (await db.$client.unsafe(
+      `SELECT title FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+    )) as unknown as { title: string }[];
+    const title = rows[0]?.title as string;
+
+    expect(title.length).toBeLessThanOrEqual(CHILD_TITLE_MAX_CHARS);
+    expect(title).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+    expect(title).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
+    expect(title).not.toContain('�');
+    // One SHORTER than the cap — the orphaned high surrogate was given back, which is the evidence
+    // that the cut really landed inside a pair rather than between characters.
+    expect(title.length).toBe(CHILD_TITLE_MAX_CHARS - 1);
+    expect(composed.startsWith(title)).toBe(true);
   });
 
   it('a sibling terminal never releases an escalation park — only the bound escalation child does', async () => {

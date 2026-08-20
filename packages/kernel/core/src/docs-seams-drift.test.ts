@@ -35,14 +35,14 @@ const CITATIONS: ReadonlyArray<readonly [string, string]> = [
   ['packages/app/server/src/workforce-turn-handlers.ts:73', 'memoryProviderFor'],
   ['packages/app/server/src/composition-root.ts:3506', 'orchestrationStrategy'],
   ['packages/app/server/src/composition-root.ts:3493', 'buildWorkforceTurnHandlers'],
-  ['packages/kernel/core/src/orchestration-strategy.ts:39', 'interface OrchestrationStrategy'],
+  ['packages/kernel/core/src/orchestration-strategy.ts:45', 'interface OrchestrationStrategy'],
   ['packages/kernel/core/src/seam-contracts.ts:61', 'SEAM_MAX_PLAN_STEPS = 64'],
   ['packages/kernel/core/src/memory-provider.ts:34', 'interface WorkforceMemoryProvider'],
-  ['packages/kernel/workforce-tools/src/context.ts:658', 'sanitizeUntrusted(hit.text)'],
+  ['packages/kernel/workforce-tools/src/context.ts:657', 'sanitizeUntrusted(hit.text)'],
   ['packages/kernel/workforce-tools/src/context.ts:76', 'recall: 4_096'],
-  ['packages/kernel/workforce-tools/src/context.ts:703-704', 'const elastic:'],
-  ['packages/kernel/workforce-tools/src/context.ts:648', 'SEAM_MAX_MEMORY_HITS'],
-  ['packages/kernel/workforce-tools/src/memory.ts:39', 'RECALL_MAX_HITS = 10'],
+  ['packages/kernel/workforce-tools/src/context.ts:702-703', 'const elastic:'],
+  ['packages/kernel/workforce-tools/src/context.ts:647', 'SEAM_MAX_MEMORY_HITS'],
+  ['packages/kernel/workforce-tools/src/memory.ts:45', 'RECALL_MAX_HITS = 10'],
   ['packages/kernel/core/src/worker-selector.ts:53', 'interface WorkerSelector'],
   ['packages/kernel/core/src/cost-policy.ts:53', 'interface CostPolicy'],
   ['packages/kernel/tasks/src/budget.ts:551', 'LedgerCostPolicy'],
@@ -60,17 +60,17 @@ const CITATIONS: ReadonlyArray<readonly [string, string]> = [
  * Tokens must be unique here; the suite asserts that rather than trusting it.
  */
 const SHORTHAND: ReadonlyArray<readonly [string, number, string]> = [
-  ['packages/kernel/core/src/orchestration-strategy.ts', 49, 'SingleTaskPlanStrategy'],
+  ['packages/kernel/core/src/orchestration-strategy.ts', 69, 'SingleTaskPlanStrategy'],
   ['packages/kernel/core/src/memory-provider.ts', 45, 'EmptyRecallMemoryProvider'],
   ['packages/kernel/core/src/worker-selector.ts', 63, 'CapabilityMatchSelector'],
   ['packages/kernel/core/src/approval-provider.ts', 57, 'UnroutedApprovalProvider'],
   ['packages/kernel/core/src/review-policy.ts', 80, 'DeclaredReviewPolicy'],
   ['packages/app/server/src/workforce-turn-handlers.ts', 73, 'memoryProviderFor'],
-  ['packages/kernel/core/src/seam-confinement.ts', 52, 'SeamConfinementError'],
-  ['packages/kernel/core/src/seam-confinement.ts', 75, 'confineWorkerSelector'],
-  ['packages/kernel/core/src/seam-confinement.ts', 221, 'confineCostPolicy'],
-  ['packages/kernel/core/src/seam-confinement.ts', 248, 'confineApprovalProvider'],
-  ['packages/kernel/core/src/seam-confinement.ts', 307, 'confineMemoryProvider'],
+  ['packages/kernel/core/src/seam-confinement.ts', 53, 'SeamConfinementError'],
+  ['packages/kernel/core/src/seam-confinement.ts', 76, 'confineWorkerSelector'],
+  ['packages/kernel/core/src/seam-confinement.ts', 224, 'confineCostPolicy'],
+  ['packages/kernel/core/src/seam-confinement.ts', 251, 'confineApprovalProvider'],
+  ['packages/kernel/core/src/seam-confinement.ts', 310, 'confineMemoryProvider'],
 ];
 
 /** The roots a full-path citation may start with. Anything else on the page is an unresolvable form. */

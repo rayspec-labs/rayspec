@@ -43,7 +43,7 @@
  * unchanged), section 5's header phrase `Completed child results`, and the `- <kind>: <payload>`
  * signal lines. Changing any of these is a fixture-lockstep change, not a wording tweak.
  */
-import { type MemoryHit, SEAM_MAX_MEMORY_HITS } from '@rayspec/core';
+import { type MemoryHit, SEAM_MAX_MEMORY_HITS, truncateCodeUnits } from '@rayspec/core';
 import type { WorkforceEmployeeConfig } from '@rayspec/spec';
 import { MAX_TASK_TEXT_BYTES, type MergedChildResult, type TaskRecord } from '@rayspec/tasks';
 import type { TurnFacts } from './facts.js';
@@ -205,14 +205,13 @@ function truncateToBytes(text: string, maxBytes: number): string {
   while (sliced.length > 0 && bytesOf(sliced) > maxBytes) {
     sliced = sliced.slice(0, -1);
   }
-  // Never end on a split astral pair — a lone high surrogate is mangled text, not a shorter string
-  // (memory.ts's clampText carries the same guard, as does the failure-summary truncation in
-  // @rayspec/tasks apply-intents.ts — where the column is `jsonb`, so omitting it is not mangled
-  // text but a write Postgres REFUSES, observed as `22P02`. The fourth site, task-locks.ts's
-  // escalation-summary slice, reproduces that same refusal and is K-003's to fix). Dropping it only
+  // Never end on a split astral pair — `truncateCodeUnits` (@rayspec/core) is the shared
+  // truncation guard and carries the hazard, the contract and the caller list. This cut is on a
+  // BYTE budget, so the loop above settles the length and the guard is applied at it; `sliced` is a
+  // STRICT prefix of `text` (the early return proved `text` does not fit), so the guard's
+  // only-on-a-real-cut rule fires here rather than returning by identity. Dropping a unit only
   // shrinks the result, so it stays inside the byte budget.
-  if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
-  return sliced;
+  return truncateCodeUnits(text, sliced.length);
 }
 
 const TRUNCATED_MARKER = '…[truncated: byte budget]';
