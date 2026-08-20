@@ -20,18 +20,18 @@ check. So a seat's effective tools are its role's set, minus what the task withh
 role sets:
 
 The orchestrator toolset is: `create_task`, `delegate_task`, `request_review`,
-`request_approval`, `submit_result`, `cancel_task`, `get_workforce_state`, `get_task`,
-`list_open_tasks`, `send_message`.
+`request_approval`, `submit_result`, `report_failure`, `cancel_task`, `get_workforce_state`,
+`get_task`, `list_open_tasks`, `send_message`.
 
 The manager toolset is: `get_task`, `create_subtask`, `delegate_task`, `request_review`,
-`request_approval`, `submit_result`, `escalate`, `list_department_tasks`, `send_message`,
-`submit_review`.
+`request_approval`, `submit_result`, `report_failure`, `escalate`, `list_department_tasks`,
+`send_message`, `submit_review`.
 
-The worker toolset is: `get_task`, `submit_result`, `request_clarification`, `request_review`,
-`escalate`, `send_message`.
+The worker toolset is: `get_task`, `submit_result`, `report_failure`, `request_clarification`,
+`request_review`, `escalate`, `send_message`.
 
-The reviewer toolset is: `get_task`, `submit_result`, `request_clarification`,
-`request_review`, `escalate`, `send_message`, `submit_review`.
+The reviewer toolset is: `get_task`, `submit_result`, `report_failure`,
+`request_clarification`, `request_review`, `escalate`, `send_message`, `submit_review`.
 
 Read tools (`get_task`, `get_workforce_state`, `list_open_tasks`, `list_department_tasks`)
 answer from a bounded, role-gated snapshot built once before the run — an orchestrator sees its
@@ -43,8 +43,8 @@ additionally the work under review — and nothing a tool call says can widen th
 
 Exactly ONE turn-ending tool may be called per turn — emission order is the order of record, and
 a second ending is a typed tool error with the first intent standing. The turn-ending tools are:
-`cancel_task`, `delegate_task`, `escalate`, `request_approval`, `request_clarification`,
-`request_review`, `submit_result`, `submit_review`.
+`cancel_task`, `delegate_task`, `escalate`, `report_failure`, `request_approval`,
+`request_clarification`, `request_review`, `submit_result`, `submit_review`.
 
 A turn that attempts an ending the dispatch layer REFUSES (arguments outside the tool's schema)
 takes the declared fate — one typed re-queue, then `failed` — rather than silently yielding; the
@@ -86,7 +86,11 @@ subordinates' work instead of parsing prose. The structured result fields are: `
 `summary`, `findings`, `recommendations`, `artifacts`, `confidence`, `needsFollowUp`,
 `suggestedFollowUp`.
 
-- `status` is a closed enum: `completed`, `partial`, `failed`, `needs_clarification`.
+- `status` is a closed enum: `completed`, `partial`. It is a CAVEAT on an accepted result, never
+  a status claim: a `submit_result` completes the task whichever of the two it carries, because
+  the engine writes `completed` from the intent and never reads this field. A task that did NOT
+  succeed is ended with `report_failure` (below), and a question is asked with
+  `request_clarification` — both real endings with real effects on the row.
 - `confidence` is REQUIRED, a number in [0, 1] — review policies key on it, and a result
   omitting it fails the schema rather than the rule.
 - `artifacts` entries are `{ kind, id, title }` references.
@@ -99,6 +103,48 @@ sentinel, never the model's bytes.
 
 When a parent's turn wakes after a fan-out, it receives its children's FULL structured results
 keyed by child task id — never summaries, never completion-ordered.
+
+## The failure channel
+
+`report_failure` ends the turn by recording that the task could not be done: the task transitions
+`working → failed` through the one status writer, its `message` is stored as the task's result
+summary, and the terminal `workforce.task.failed` event carries that summary into the journal.
+Nothing picks the task up afterwards — `failed` is terminal, and re-opening finished work means a
+new task with `parentTaskId` set.
+
+It exists because the alternative was a lie. A `submit_result` completes the task whatever its
+payload says, so before this tool a seat that could not do its work had no ending that recorded
+that fact, and its honest explanation was filed under a completed task. The engine has always had
+the typed intent and the legal transition; what it lacked was a tool that reached them.
+
+Choosing between the three neighbouring endings:
+
+- **`escalate`** — someone above you may still be able to move this. Your task PARKS and a fresh
+  task carries it to your superior. The work continues.
+- **`report_failure`** — this task is over and it did not succeed. Terminal, for you and for
+  everyone. Use it when no superior, reviewer or human decision changes the outcome.
+- **`submit_result` with `status: 'partial'`** — you did some of the job. The task COMPLETES; the
+  caveat rides in the result payload for the parent to reason over.
+
+What a failure does to the tasks around it follows the ordinary terminal rules, with no special
+case: a parent waiting on a fan-out join is woken when its bound children are terminal, and reads
+this child's `failed` status and message in its next turn's child results; a parent parked
+`waiting_for_review` on a reviewer that fails is released to `waiting_for_user`, because the park's
+only other exit was the verdict that will now never arrive; a parent parked `blocked(escalated)` on
+an escalation child that fails receives the escalation reply, carrying the failure's summary; the
+opening delegation record settles `failed`. A failed task does not fail its parent — what the parent
+does about a failed child is the parent's own decision to take.
+
+Two limits of the ending, stated because a seat reading only the happy path would be misled. Both
+are the long-standing behaviour of every route to `failed`, not something this tool introduces:
+
+- **The turn's buffered effects are discarded.** A turn that calls `send_message` (or a create tool)
+  and then ends with `report_failure` has those effects dropped — the message is never written and
+  the child is never opened. So a note to a human must not be sent this way: put what a human needs
+  to read into the `message`, which is what gets stored and journaled.
+- **A failure does not cancel the task's own live children.** A task that opened detached children
+  with `create_task` and then fails leaves them running; they finish under a `failed` parent and
+  wake nobody. Cancel them first with `cancel_task` if they should not continue.
 
 ## The escalate contract
 
@@ -115,9 +161,9 @@ keyed by child task id — never summaries, never completion-ordered.
    escalation climbs one declared reporting edge, the orchestrator reports to no one (the lint
    requires it), and `escalate` is not in the orchestrator's toolset — so the chain cannot climb
    past that seat. Where it TERMINATES from there is the orchestrator's own turn: it may hand the
-   decision to a human with `request_approval`, or answer with `submit_result` and end the chain
-   itself. "Always terminates at a human" is a choice that seat can make, not a mechanism the
-   runtime imposes.
+   decision to a human with `request_approval`, answer with `submit_result` and end the chain
+   itself, or record with `report_failure` that the goal cannot be met. "Always terminates at a
+   human" is a choice that seat can make, not a mechanism the runtime imposes.
 
 ## See also
 

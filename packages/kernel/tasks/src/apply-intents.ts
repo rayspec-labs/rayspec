@@ -1178,6 +1178,94 @@ export async function applyTurnOutcome(
           break;
         }
         case 'fail': {
+          // PERSIST THE MESSAGE BEFORE THE TRANSITION, and the ordering is the whole point: the
+          // terminal `workforce.task.failed` event reads its `resultSummary` off THIS column
+          // (apply-transition.ts), so a write afterwards would journal `null` and the operator's
+          // only record of WHY would be gone. Until this write existed, `plan.message` was
+          // constructed and then referenced by nothing — a failed task carried no reason, no result
+          // and no journal text, which is a worse operator surface than the mislabelled
+          // `completed` it replaces. (The ordering is not a standing hazard: moving this write
+          // below the transition reddens the `resultSummary` assertion in engine.db.test.ts.)
+          //
+          // THE SUMMARY AND NOTHING ELSE. A first cut also stored `status: 'failed'` here and the
+          // state-machine gate refused the file — correctly, and not merely as a regex accident:
+          //   - `result` is the column `workerResultSchema` governs, and that schema's status enum
+          //     is `['completed','partial']` — so a stored `status: 'failed'` was a value the
+          //     column's own contract rejects, and nothing would have caught it, because NOTHING
+          //     re-parses a stored result through that schema (its only non-test use is the intent
+          //     path in @rayspec/workforce-tools);
+          //   - it was a SECOND copy of a fact the status column already owns. `mergeChildResults`
+          //     (join.ts) hands a waiting parent `status: child.status` straight off the row, so the
+          //     parent already reads `failed` from the authority. Two copies can disagree; one
+          //     cannot.
+          // Every reader of this column duck-types `'summary' in result` and takes it when it is a
+          // string (apply-transition.ts, workforce-tools context.ts + memory.ts), so a summary-only
+          // payload satisfies all of them. `confidence` is deliberately absent: a failure has none
+          // to report, and inventing one would feed the review-policy predicates a number nobody
+          // stated.
+          //
+          // AND IT IS BOUNDED HERE, because this arm is shared with machine producers that the
+          // model-facing cap does not reach. `report_failure` caps `message` at
+          // MAX_MESSAGE_BODY_CHARS at the tool door, but FIVE other sites build a `fail` intent
+          // directly — three in the composition (@rayspec/server workforce-turn-handlers.ts) and
+          // two in the scheduler (@rayspec/durable-dbos task-scheduler.ts) — and one of them
+          // interpolates a raw `err.message` from ANY throw inside a turn handler. A ZodError's
+          // message alone is its whole formatted issue list. Before this write existed the string
+          // was discarded, so its length cost nothing; now it lands in a jsonb column and a journal
+          // row, and an unbounded write is not something to introduce by accident.
+          //
+          // The cap lives HERE and still NOT on `turnIntentSchema`'s `fail` arm: capping the intent
+          // would turn a long diagnostic into a MALFORMED intent and lose the failure entirely,
+          // which is the opposite of the goal. Refuse nothing; store boundedly. The marker is
+          // deliberate — a silently truncated diagnostic is worse than one that says it was cut,
+          // and it names the full length so a reader knows how much is missing.
+          //
+          // NEVER END ON A SPLIT ASTRAL PAIR. `slice` cuts UTF-16 CODE UNITS, so a cut landing
+          // between the halves of an astral pair leaves a lone high surrogate — and this column is
+          // `jsonb`, so unlike the other truncation sites that is not mangled text, it is a write
+          // PostgreSQL refuses outright (`22P02`, "Unicode low surrogate must follow a high
+          // surrogate"). That throw is inside this transaction: the `working -> failed` transition,
+          // the journal and the settlement all roll back, the row stays `working` under its claim,
+          // the reaper re-queues it and the same deterministic error recurs — a task that never
+          // settles, which is a worse outcome than the mislabelled `completed` this whole item
+          // exists to remove. The trigger is precisely the producer above, since model-authored text
+          // embedded in a ZodError carries emoji routinely.
+          //
+          // A DELIBERATELY TEMPORARY LOCAL COPY — extraction is K-003, and this comment is the
+          // cross-reference that a fourth silent copy would not have had.
+          //
+          // There are FOUR truncation sites in this tree. Two carry the guard already:
+          // @rayspec/workforce-tools memory.ts (`clampText`) and context.ts (`truncateToBytes`),
+          // which cross-reference each other. Two did not: this one, and task-locks.ts's 500-unit
+          // escalation-summary slice — which has since been DRIVEN and reproduces the same `22P02`
+          // on the completion path. That one is pre-existing, reachable on the main line today, and
+          // NOT this item's to fix (K-003 owns it, and owns pulling all four onto one predicate).
+          //
+          // Why this is a copy rather than an import, checked rather than assumed:
+          // `clampText` is NOT importable from here. The blocker is not
+          // `gate:delegation-dispatch-boundary` — that gate constrains the TOOLSET layer's OUTBOUND
+          // imports and says nothing about this direction. It is the dependency graph:
+          // workforce-tools declares `@rayspec/tasks` and this package does not declare
+          // workforce-tools, so importing it would create a package cycle.
+          //
+          // Where the shared predicate SHOULD live, for K-003 to act on: `@rayspec/core`. Both
+          // packages already depend on it (no new edge, no cycle), task-locks.ts is in this package
+          // so it is covered too, and the dispatch-boundary gate names `@rayspec/core` among the
+          // specifiers the toolset may import — so a pure string helper there is reachable by all
+          // four sites and boundary-legal. Deliberately NOT created here: that extraction deserves
+          // its own review, not a drive-by inside a failure-channel PR.
+          //
+          // Dropping one unit only shortens the result, so the stated ceiling of
+          // MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS is unaffected.
+          let head = plan.message.slice(0, MAX_MESSAGE_BODY_CHARS);
+          if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
+          const summary =
+            plan.message.length > MAX_MESSAGE_BODY_CHARS
+              ? `${head}${truncationMarker(plan.message.length)}`
+              : plan.message;
+          await tx
+            .update(schema.workforceTasks, { result: { summary } })
+            .where(eq(schema.workforceTasks.taskId, task.taskId));
           finalTask = await applyTransition(tx, {
             taskId: task.taskId,
             expectedVersion: task.version,
@@ -1339,6 +1427,26 @@ async function bindReviewPark(
 }
 
 type Stamp = { actor: string; turnId: string; turnNumber: number };
+
+/**
+ * The suffix a truncated failure summary carries, naming the ORIGINAL length so a reader can see
+ * how much was cut. Exported so the bound can be asserted without re-spelling the string in a test.
+ *
+ * The stored summary is therefore at most `MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS`
+ * characters. A model-authored failure never reaches this: `report_failure` caps `message` at
+ * MAX_MESSAGE_BODY_CHARS at the tool door, so the branch is dead on that path and live only for the
+ * machine producers of a `fail` intent.
+ */
+export function truncationMarker(originalLength: number): string {
+  return `… [truncated — full diagnostic was ${originalLength} characters]`;
+}
+
+/**
+ * The marker's own ceiling. `Number.MAX_SAFE_INTEGER` is 16 digits, which is a hard bound on the
+ * interpolated length for any string JavaScript can hold, so this constant is a fact about the
+ * template rather than a guess.
+ */
+export const MAX_TRUNCATION_MARKER_CHARS = truncationMarker(Number.MAX_SAFE_INTEGER).length;
 
 /** One retry re-queue, then failed — both with the typed `tool_error` reason. */
 async function applyToolErrorFate(

@@ -39,9 +39,27 @@ import { fanOutJoinPolicySchema, type JoinPolicy } from './join.js';
 export const MAX_MESSAGE_BODY_CHARS = 4_000;
 export const MAX_MESSAGES_PER_TURN = 20;
 
-/** The closed structured-result contract. A result that fails this never completes a task. */
+/**
+ * The closed structured-result contract. A result that fails this never completes a task.
+ *
+ * `status` CARRIES NO AUTHORITY and the enum is narrowed to say so. A `complete` intent transitions
+ * the task to `completed` unconditionally (apply-intents.ts, `case 'complete'` — the target is a
+ * literal, and `result.status` is read by nothing in this package), so the two values this enum
+ * used to also offer were prose that read like a decision and decided nothing:
+ *
+ *   - `failed` — a seat's honest "I could not" was recorded as a COMPLETED task. The typed `fail`
+ *     intent below is the real channel, and `report_failure` (@rayspec/workforce-tools) is the tool
+ *     that reaches it. Making the runtime branch on `result.status` instead would be the opposite
+ *     move: model prose setting a task's status.
+ *   - `needs_clarification` — `request_clarification` is a real ending that actually parks the task
+ *     and waits for the reply.
+ *
+ * `partial` STAYS. It is terminal-with-caveat, honestly recorded as `completed`, with the caveat in
+ * the payload — a seat that did some of the job and says so is not making a status claim the engine
+ * has to honour, it is qualifying a result the engine already accepted.
+ */
 export const workerResultSchema = z.strictObject({
-  status: z.enum(['completed', 'partial', 'failed', 'needs_clarification']),
+  status: z.enum(['completed', 'partial']),
   summary: z.string().min(1),
   findings: z.array(z.string()).default([]),
   recommendations: z.array(z.string()).default([]),

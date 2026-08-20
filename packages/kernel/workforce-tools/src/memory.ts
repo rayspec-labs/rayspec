@@ -102,6 +102,12 @@ function clampText(text: string): string {
   if (text.length <= RECALL_HIT_TEXT_MAX_CHARS) return text;
   let sliced = text.slice(0, RECALL_HIT_TEXT_MAX_CHARS - 1);
   // Never cut an astral pair in half — a lone surrogate is mangled text, not a shorter string.
+  // FOUR sites truncate in this tree: this one, context.ts's truncateToBytes, @rayspec/tasks
+  // apply-intents.ts's failure-summary truncation, and @rayspec/tasks task-locks.ts's
+  // escalation-summary slice. The last two write JSONB, where an unpaired surrogate is not mangled
+  // text but a write Postgres REFUSES (`22P02`) — both have been observed doing it. The predicate
+  // cannot be shared today (it would cycle the package graph), so each site copies it; K-003 pulls
+  // all four onto one home in @rayspec/core.
   if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
   return `${sliced}…`;
 }

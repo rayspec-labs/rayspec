@@ -153,14 +153,14 @@ seat's prompt.
 **Chokepoints.**
 
 - Recipient must be `user` or a **declared** employee:
-  `packages/kernel/workforce-tools/src/toolset.ts:705`.
+  `packages/kernel/workforce-tools/src/toolset.ts:772`.
 - Body length capped at `MAX_MESSAGE_BODY_CHARS`:
-  `packages/kernel/workforce-tools/src/toolset.ts:153`.
+  `packages/kernel/workforce-tools/src/toolset.ts:169`.
 - At most `MAX_MESSAGES_PER_TURN` buffered per turn
-  (`packages/kernel/workforce-tools/src/toolset.ts:699`), and the engine caps the same channel
+  (`packages/kernel/workforce-tools/src/toolset.ts:766`), and the engine caps the same channel
   independently at `packages/kernel/tasks/src/intent-applier.ts:40`.
 - At render, the body passes the neutralizer:
-  `packages/kernel/workforce-tools/src/context.ts:618`.
+  `packages/kernel/workforce-tools/src/context.ts:621`.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -180,22 +180,22 @@ seat's prompt.
 - **Scoping is constructor-injected trusted data**, never query input: the scope is built from the
   deployed config and the dispatched task row at
   `packages/app/server/src/workforce-turn-handlers.ts:174`, and a query naming a *different*
-  workforce returns nothing (`packages/kernel/workforce-tools/src/memory.ts:147`).
+  workforce returns nothing (`packages/kernel/workforce-tools/src/memory.ts:153`).
 - Every read runs on the caller's tenant handle
-  (`packages/kernel/workforce-tools/src/memory.ts:162`), so recall cannot cross the tenant.
+  (`packages/kernel/workforce-tools/src/memory.ts:168`), so recall cannot cross the tenant.
 - Bounds: scan `packages/kernel/workforce-tools/src/memory.ts:36`, age window
   `packages/kernel/workforce-tools/src/memory.ts:37`, hit text
   `packages/kernel/workforce-tools/src/memory.ts:38`, hit count
   `packages/kernel/workforce-tools/src/memory.ts:39`.
 - Hit text passes the neutralizer at render:
-  `packages/kernel/workforce-tools/src/context.ts:655`.
+  `packages/kernel/workforce-tools/src/context.ts:658`.
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
 | Cross-tenant recall through an identical twin workforce | nothing leaks, and the empty result is *scoping* rather than luck (tenant B's provider returns the bait) | **PROVEN** — `packages/app/server/src/workforce-recall.db.test.ts`, `ADVERSARIAL: an identical twin workforce in another tenant leaks nothing` |
 | Cross-workforce recall inside one tenant; unbounded prompt growth | pinned and bounded | **PROVEN** — `packages/app/server/src/workforce-recall.db.test.ts`, `holds every bound: the age window, the hit cap, the text cap, and the workforce pin` |
 | Instruction injection through a prior turn's summary | flattened; cannot forge the boundary line | **PROVEN** — `packages/kernel/workforce-tools/src/context.test.ts`, `C1: an untrusted recall hit cannot forge the data-boundary line` |
-| A replacement provider returning a very large hit list | the input is capped **before** the byte-budget shrink loop, so the work is bounded by the ceiling rather than by what the provider returned | **PROVEN** — `packages/kernel/workforce-tools/src/context.ts:645` against `packages/kernel/core/src/seam-contracts.ts:92`, with its own loss marker (`packages/kernel/workforce-tools/src/context.ts:657`) kept distinct from the byte-budget marker because they are different losses. Driven by `packages/kernel/workforce-tools/src/context.test.ts`, `caps the hits it will render, whatever the provider returned, and says how many it dropped` (a 20 000-hit flood), with two controls: `a provider inside the ceiling is rendered whole, with no omission notice` and `the byte budget still applies INSIDE the ceiling, and both losses are reported` |
+| A replacement provider returning a very large hit list | the input is capped **before** the byte-budget shrink loop, so the work is bounded by the ceiling rather than by what the provider returned | **PROVEN** — `packages/kernel/workforce-tools/src/context.ts:648` against `packages/kernel/core/src/seam-contracts.ts:92`, with its own loss marker (`packages/kernel/workforce-tools/src/context.ts:660`) kept distinct from the byte-budget marker because they are different losses. Driven by `packages/kernel/workforce-tools/src/context.test.ts`, `caps the hits it will render, whatever the provider returned, and says how many it dropped` (a 20 000-hit flood), with two controls: `a provider inside the ceiling is rendered whole, with no omission notice` and `the byte budget still applies INSIDE the ceiling, and both losses are reported` |
 
 ---
 
@@ -205,11 +205,11 @@ seat's prompt.
 
 **Chokepoints.** `renderMergedResult` serializes through `JSON.stringify` — which escapes C0 —
 and then `escapeRawSeparators` closes the U+0085 / U+2028 / U+2029 residual `JSON.stringify` leaves
-raw (`packages/kernel/workforce-tools/src/context.ts:450`, helper at
-`packages/kernel/workforce-tools/src/context.ts:278`). Per-entry ceiling
+raw (`packages/kernel/workforce-tools/src/context.ts:453`, helper at
+`packages/kernel/workforce-tools/src/context.ts:281`). Per-entry ceiling
 `packages/kernel/workforce-tools/src/context.ts:79` with a compact fallback that keeps the typed
 fields; the keyed block drops highest-task-id-first with an explicit marker
-(`packages/kernel/workforce-tools/src/context.ts:496`).
+(`packages/kernel/workforce-tools/src/context.ts:499`).
 
 | Abuse case | Outcome | Evidence |
 |---|---|---|
@@ -228,14 +228,14 @@ fields; the keyed block drops highest-task-id-first with an explicit marker
 1. **Ajv at the dispatch chokepoint.** `dispatchTool` runs its validate-in only when the tool
    carries `inputSchema` (`packages/kernel/platform/src/dispatch.ts:318`). Every native tool gets
    one **structurally**, bound at the single return of the toolset builder
-   (`packages/kernel/workforce-tools/src/toolset.ts:856`) — so a tool added to the table above it
+   (`packages/kernel/workforce-tools/src/toolset.ts:923`) — so a tool added to the table above it
    cannot miss the pass, and the schema the model is *shown* is by construction the schema its
    arguments are checked against.
 2. **A per-tool zod `strictObject`**, through `parseEnding`
-   (`packages/kernel/workforce-tools/src/toolset.ts:168`), which **records the refusal**
-   (`packages/kernel/workforce-tools/src/toolset.ts:171`) before it throws.
+   (`packages/kernel/workforce-tools/src/toolset.ts:184`), which **records the refusal**
+   (`packages/kernel/workforce-tools/src/toolset.ts:187`) before it throws.
 3. **The engine's own discriminated union** over the resulting intent
-   (`packages/kernel/tasks/src/intent-applier.ts:116`).
+   (`packages/kernel/tasks/src/intent-applier.ts:134`).
 
 **What the engine receives on a refusal is a typed sentinel, never the model's arguments**
 (`packages/kernel/workforce-tools/src/collector.ts:35`, selected at
@@ -263,16 +263,16 @@ scheduler and asserting on rows and journal events, not on the toolset's return 
 **Trust: U0 for a model verdict, U1 for an HTTP verdict.**
 
 **The model side never chooses which review it decides.** `submit_review` takes the review id from
-the pre-built snapshot (`packages/kernel/workforce-tools/src/toolset.ts:619`, used at
-`packages/kernel/workforce-tools/src/toolset.ts:631`), and the snapshot only offers one when the
+the pre-built snapshot (`packages/kernel/workforce-tools/src/toolset.ts:686`, used at
+`packages/kernel/workforce-tools/src/toolset.ts:698`), and the snapshot only offers one when the
 parent's park binding names **this** task as the dispatched review task
 (`packages/kernel/workforce-tools/src/snapshot.ts:195`) **and** the row is undecided **and** its
 recorded reviewer is this employee (`packages/kernel/workforce-tools/src/snapshot.ts:206`).
 
 **Who may be *asked* for a review is also bounded**: the allowed set is the declared policies
 covering the caller, their own superior holding a decision role, or `user`
-(`packages/kernel/workforce-tools/src/toolset.ts:442`), and the caller is removed from it
-(`packages/kernel/workforce-tools/src/toolset.ts:449`).
+(`packages/kernel/workforce-tools/src/toolset.ts:458`), and the caller is removed from it
+(`packages/kernel/workforce-tools/src/toolset.ts:465`).
 
 **The HTTP side** parses a strict body (`packages/kernel/tasks/src/reviews.ts:145`), enforces the
 recorded reviewer (`packages/kernel/tasks/src/reviews.ts:196`, refusal at
@@ -305,10 +305,10 @@ be satisfied at all; see §7.2.
 accountability trail is the asset.
 
 **The request side cannot choose its approver.** `request_approval` hardcodes
-`approver: 'user'` (`packages/kernel/workforce-tools/src/toolset.ts:533`); the window and the
+`approver: 'user'` (`packages/kernel/workforce-tools/src/toolset.ts:549`); the window and the
 timeout fate come from the declared rule; and an escalating rule on a seat with no superior is
 refused up front rather than sent to the planner
-(`packages/kernel/workforce-tools/src/toolset.ts:511`).
+(`packages/kernel/workforce-tools/src/toolset.ts:527`).
 
 **The only writer of a *named* approver is the timeout sweep**, which re-issues an escalating
 request to the requester's declared superior
@@ -421,7 +421,7 @@ security story**, so it is stated per seam rather than in aggregate.
 | Seam | Production call site | Return value re-validated? |
 |---|---|---|
 | `OrchestrationStrategy` | **yes** — the goal intake | **yes** — `planRefusal` (`packages/app/server/src/workforce-goal-intake.ts:59`), except step count (§7.4) |
-| `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:182`) | **partly** — hits render as bounded, sanitized data (§3.3) and the input count is capped (`packages/kernel/workforce-tools/src/context.ts:645`); a *malformed* hit is rejected only by a confinement nothing calls (§7.1) |
+| `WorkforceMemoryProvider` | **yes** — the turn handler (`packages/app/server/src/workforce-turn-handlers.ts:182`) | **partly** — hits render as bounded, sanitized data (§3.3) and the input count is capped (`packages/kernel/workforce-tools/src/context.ts:648`); a *malformed* hit is rejected only by a confinement nothing calls (§7.1) |
 | `ReviewPolicy` | **yes**, but hardcoded — no injection point | n/a |
 | `WorkerSelector` (`packages/kernel/core/src/worker-selector.ts:53`) | **NONE** | a confinement exists and **nothing calls it** (§7.1) |
 | `CostPolicy` (`packages/kernel/core/src/cost-policy.ts:53`) | **NONE** — see below; the scheduler calls the underlying `authorizeTurn` function directly | a confinement exists and **nothing calls it** (§7.1) |
@@ -480,11 +480,11 @@ against the deployed declaration, and re-checked by the kernel:
 |---|---|---|
 | delegation target (employee) | `packages/kernel/workforce-tools/src/resolve-target.ts:64` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `resolves employee:, department: (manager) and team: (lead) to their owners` |
 | delegation target, manager scope | `packages/kernel/workforce-tools/src/resolve-target.ts:109`, own-department members at `packages/kernel/workforce-tools/src/resolve-target.ts:126`; `team:` refused outright at `packages/kernel/workforce-tools/src/resolve-target.ts:116` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `a manager reaches own department members and led-team members — nothing else`, and `the led-team grant exists exactly where the task IS that team's work` |
-| escalation target | `packages/kernel/workforce-tools/src/toolset.ts:586` — the reporting edge, never arguments | `packages/app/server/src/workforce-turn-validation.db.test.ts`, `a forged escalateTo cannot ride in through the tool arguments` |
-| reviewer | `packages/kernel/workforce-tools/src/toolset.ts:442` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `request_review refuses a reviewer outside the caller scope — no org-wide routing` |
+| escalation target | `packages/kernel/workforce-tools/src/toolset.ts:602` — the reporting edge, never arguments | `packages/app/server/src/workforce-turn-validation.db.test.ts`, `a forged escalateTo cannot ride in through the tool arguments` |
+| reviewer | `packages/kernel/workforce-tools/src/toolset.ts:458` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `request_review refuses a reviewer outside the caller scope — no org-wide routing` |
 | review id | `packages/kernel/workforce-tools/src/snapshot.ts:206` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `submit_review takes its reviewId from the SNAPSHOT` |
-| message recipient | `packages/kernel/workforce-tools/src/toolset.ts:705` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
-| approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:533`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
+| message recipient | `packages/kernel/workforce-tools/src/toolset.ts:772` | `packages/kernel/workforce-tools/src/toolset-semantics.test.ts`, `send_message accepts declared employees and the user, refusing anything else` |
+| approver | not chosen at request time (`packages/kernel/workforce-tools/src/toolset.ts:549`); **enforced at decision time** (§3.7) | `packages/kernel/tasks/src/decision-authority.db.test.ts` |
 | tenant | server-derived (`packages/compose/api-auth/src/http/middleware.ts:150`) | `packages/app/server/src/workforce-goal-intake.db.test.ts`, `reconciles tenant and workforce BEFORE the strategy runs` |
 | `requestedBy` | server-stamped for a root (`packages/compose/api-auth/src/routes/workforce.ts:1246`), inherited from the parent owner for a child (`packages/kernel/tasks/src/create-task.ts:259`); the child schema is a `strictObject` carrying no such field (`packages/kernel/tasks/src/create-task.ts:106`) | neutralized anyway — `packages/kernel/workforce-tools/src/context.test.ts`, ``C1: `requestedBy` cannot forge a section header from section 4`` |
 
@@ -516,7 +516,7 @@ Two changes since the earlier inventory matter here:
 (`packages/kernel/spec/src/workforce-lint.ts:236`) and again at dispatch composition
 (`packages/kernel/workforce-tools/src/toolset.ts:75`, called at
 `packages/app/server/src/workforce-turn-handlers.ts:157`), both through one shared predicate that
-normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:80`, over the set at
+normalizes the MCP-bridged spelling (`packages/kernel/core/src/workforce-ids.ts:81`, over the set at
 `packages/kernel/core/src/workforce-ids.ts:42`). See §6.4 for what happens *behind* those doors.
 
 **A declared agent tool with `idempotent: false` is refused on workforce turns**
@@ -577,20 +577,20 @@ above.
 
 **The rule is positional, not provenance-based: nothing interpolated into a line may contain a line
 boundary.** The neutralizer strips every line-boundary and control class — C0, DEL, C1 including
-U+0085 NEL, plus U+2028 LS and U+2029 PS (`packages/kernel/workforce-tools/src/context.ts:238`,
-applied by `packages/kernel/workforce-tools/src/context.ts:240`). For JSON-serialized values,
-`JSON.stringify` escapes C0 and `packages/kernel/workforce-tools/src/context.ts:278` closes the
+U+0085 NEL, plus U+2028 LS and U+2029 PS (`packages/kernel/workforce-tools/src/context.ts:241`,
+applied by `packages/kernel/workforce-tools/src/context.ts:243`). For JSON-serialized values,
+`JSON.stringify` escapes C0 and `packages/kernel/workforce-tools/src/context.ts:281` closes the
 three-character residual losslessly.
 
 **Config-derived text goes through the same neutralizer**, under a name that records which side of
-the boundary the value came from (`packages/kernel/workforce-tools/src/context.ts:273`). This is not
+the boundary the value came from (`packages/kernel/workforce-tools/src/context.ts:276`). This is not
 a claim that config is untrusted: its *content* is still authority. What it can no longer do is
 choose where in the document it appears — and sections 1–3 are where a forged header is most
 persuasive, because everything above the data-boundary line reads as the platform speaking. Applied
-to line 1 itself (`packages/kernel/workforce-tools/src/context.ts:679`), to labels
-(`packages/kernel/workforce-tools/src/context.ts:307`), and to every other config string in
+to line 1 itself (`packages/kernel/workforce-tools/src/context.ts:682`), to labels
+(`packages/kernel/workforce-tools/src/context.ts:310`), and to every other config string in
 sections 1–3. `requestedBy` is neutralized too
-(`packages/kernel/workforce-tools/src/context.ts:524`) even though it is server-derived today,
+(`packages/kernel/workforce-tools/src/context.ts:527`) even though it is server-derived today,
 because "safe by virtue of who writes it" is a property of the current writers, not of the frame.
 
 **PROVEN** — `packages/kernel/workforce-tools/src/context.test.ts` carries a forgery arm per
@@ -601,13 +601,13 @@ Each asserts **exactly one real header line** *and* that the words survive — f
 dropped.
 
 **The goal is never trimmed.** An oversized goal is a typed refusal
-(`packages/kernel/workforce-tools/src/context.ts:536`), not a silent shortening, and two module-load
+(`packages/kernel/workforce-tools/src/context.ts:539`), not a silent shortening, and two module-load
 asserts make that refusal unreachable for legally-created goals rather than merely typed: the
 mandatory budgets plus guidance fit the ceiling (`packages/kernel/workforce-tools/src/context.ts:97`
 against `packages/kernel/workforce-tools/src/context.ts:68`), and the creation-surface byte cap plus
 section 4's fixed overhead fit the task budget
 (`packages/kernel/workforce-tools/src/context.ts:112`). The one place the drop loop could fail open
-is closed typed (`packages/kernel/workforce-tools/src/context.ts:712`).
+is closed typed (`packages/kernel/workforce-tools/src/context.ts:715`).
 **PROVEN** — `packages/kernel/workforce-tools/src/context.test.ts`, `NEVER trims the goal: an
 oversized goal is a typed refusal`.
 
@@ -852,7 +852,7 @@ privilege escalation, and both were found by driving the seam rather than by rea
    excess rather than decomposition (§3.1).
 2. **Recall rendering was quadratic in the hit count a provider returned.** The byte budget always
    held; the *cost* of holding it grew with the square of the input. **Closed:**
-   `packages/kernel/workforce-tools/src/context.ts:645` caps the input before the shrink loop, under
+   `packages/kernel/workforce-tools/src/context.ts:648` caps the input before the shrink loop, under
    its own marker (§3.3). The shipped provider still self-caps well inside the ceiling
    (`packages/kernel/workforce-tools/src/memory.ts:39`), so no shipped configuration ever reached
    either version.
@@ -1015,42 +1015,42 @@ packages/kernel/workforce-tools/src/context.ts:68 | export const TURN_INPUT_MAX_
 packages/kernel/workforce-tools/src/context.ts:79 | export const CHILD_RESULT_MAX_BYTES = 4_096;
 packages/kernel/workforce-tools/src/context.ts:97 | if (MANDATORY_CEILING + GUIDANCE_CEILING >= TURN_INPUT_MAX_BYTES) {
 packages/kernel/workforce-tools/src/context.ts:112 | if (MAX_TASK_TEXT_BYTES + TASK_SECTION_FIXED_OVERHEAD_BOUND > SECTION_BUDGETS.task) {
-packages/kernel/workforce-tools/src/context.ts:238 | const UNTRUSTED_STRUCTURE_CHARS =
-packages/kernel/workforce-tools/src/context.ts:240 | function sanitizeUntrusted(text: string | null): string {
-packages/kernel/workforce-tools/src/context.ts:273 | const sanitizeConfig = sanitizeUntrusted;
-packages/kernel/workforce-tools/src/context.ts:278 | function escapeRawSeparators(json: string): string {
-packages/kernel/workforce-tools/src/context.ts:307 | employee.labels.length > 0 ? employee.labels.map(sanitizeConfig).join(', ') : 'none declared';
-packages/kernel/workforce-tools/src/context.ts:450 | const whole = escapeRawSeparators(JSON.stringify(entry, null, 1));
-packages/kernel/workforce-tools/src/context.ts:496 | ...(omitted > 0 ? [`[…${omitted} omitted: byte budget]`] : []),
-packages/kernel/workforce-tools/src/context.ts:524 | sanitizeUntrusted(task.requestedBy)
-packages/kernel/workforce-tools/src/context.ts:536 | throw new GoalExceedsContextBudgetError(
-packages/kernel/workforce-tools/src/context.ts:618 | sanitizeUntrusted(m.body)
-packages/kernel/workforce-tools/src/context.ts:634 | function renderRecall(recall: readonly MemoryHit[]): string | null {
-packages/kernel/workforce-tools/src/context.ts:645 | const capped = recall.slice(0, SEAM_MAX_MEMORY_HITS);
-packages/kernel/workforce-tools/src/context.ts:655 | sanitizeUntrusted(hit.text)
-packages/kernel/workforce-tools/src/context.ts:657 | omitted: hit ceiling
-packages/kernel/workforce-tools/src/context.ts:679 | sanitizeConfig(input.employee.id)
-packages/kernel/workforce-tools/src/context.ts:712 | throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
+packages/kernel/workforce-tools/src/context.ts:241 | const UNTRUSTED_STRUCTURE_CHARS =
+packages/kernel/workforce-tools/src/context.ts:243 | function sanitizeUntrusted(text: string | null): string {
+packages/kernel/workforce-tools/src/context.ts:276 | const sanitizeConfig = sanitizeUntrusted;
+packages/kernel/workforce-tools/src/context.ts:281 | function escapeRawSeparators(json: string): string {
+packages/kernel/workforce-tools/src/context.ts:310 | employee.labels.length > 0 ? employee.labels.map(sanitizeConfig).join(', ') : 'none declared';
+packages/kernel/workforce-tools/src/context.ts:453 | const whole = escapeRawSeparators(JSON.stringify(entry, null, 1));
+packages/kernel/workforce-tools/src/context.ts:499 | ...(omitted > 0 ? [`[…${omitted} omitted: byte budget]`] : []),
+packages/kernel/workforce-tools/src/context.ts:527 | sanitizeUntrusted(task.requestedBy)
+packages/kernel/workforce-tools/src/context.ts:539 | throw new GoalExceedsContextBudgetError(
+packages/kernel/workforce-tools/src/context.ts:621 | sanitizeUntrusted(m.body)
+packages/kernel/workforce-tools/src/context.ts:637 | function renderRecall(recall: readonly MemoryHit[]): string | null {
+packages/kernel/workforce-tools/src/context.ts:648 | const capped = recall.slice(0, SEAM_MAX_MEMORY_HITS);
+packages/kernel/workforce-tools/src/context.ts:658 | sanitizeUntrusted(hit.text)
+packages/kernel/workforce-tools/src/context.ts:660 | omitted: hit ceiling
+packages/kernel/workforce-tools/src/context.ts:682 | sanitizeConfig(input.employee.id)
+packages/kernel/workforce-tools/src/context.ts:715 | throw new ContextInputOverflowError(bytesOf(assembled), TURN_INPUT_MAX_BYTES);
 packages/kernel/workforce-tools/src/toolset.ts:75 | export function assertNoReservedCollisions(agentTools: readonly NeutralTool[]): void {
-packages/kernel/workforce-tools/src/toolset.ts:153 | body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
-packages/kernel/workforce-tools/src/toolset.ts:168 | const parseEnding = <T>(schema: z.ZodType<T>, args: unknown): T => {
-packages/kernel/workforce-tools/src/toolset.ts:171 | collector.recordMalformed(args, parsed.error.message);
-packages/kernel/workforce-tools/src/toolset.ts:442 | const allowed = new Set<string>([
-packages/kernel/workforce-tools/src/toolset.ts:449 | allowed.delete(employee.id);
-packages/kernel/workforce-tools/src/toolset.ts:511 | if (onTimeout === 'escalate' && employee.reportsTo === null) {
-packages/kernel/workforce-tools/src/toolset.ts:533 | approver: 'user',
-packages/kernel/workforce-tools/src/toolset.ts:586 | const superior = employee.reportsTo;
-packages/kernel/workforce-tools/src/toolset.ts:619 | const pending = snapshot.pendingReview;
-packages/kernel/workforce-tools/src/toolset.ts:631 | reviewId: pending.reviewId,
-packages/kernel/workforce-tools/src/toolset.ts:699 | if (collector.messageCount >= MAX_MESSAGES_PER_TURN) {
-packages/kernel/workforce-tools/src/toolset.ts:705 | if (recipient !== 'user' && !config.employees.has(recipient)) {
-packages/kernel/workforce-tools/src/toolset.ts:856 | inputSchema: handlers[name].spec.parameters
+packages/kernel/workforce-tools/src/toolset.ts:169 | body: z.string().min(1).max(MAX_MESSAGE_BODY_CHARS),
+packages/kernel/workforce-tools/src/toolset.ts:184 | const parseEnding = <T>(schema: z.ZodType<T>, args: unknown): T => {
+packages/kernel/workforce-tools/src/toolset.ts:187 | collector.recordMalformed(args, parsed.error.message);
+packages/kernel/workforce-tools/src/toolset.ts:458 | const allowed = new Set<string>([
+packages/kernel/workforce-tools/src/toolset.ts:465 | allowed.delete(employee.id);
+packages/kernel/workforce-tools/src/toolset.ts:527 | if (onTimeout === 'escalate' && employee.reportsTo === null) {
+packages/kernel/workforce-tools/src/toolset.ts:549 | approver: 'user',
+packages/kernel/workforce-tools/src/toolset.ts:602 | const superior = employee.reportsTo;
+packages/kernel/workforce-tools/src/toolset.ts:686 | const pending = snapshot.pendingReview;
+packages/kernel/workforce-tools/src/toolset.ts:698 | reviewId: pending.reviewId,
+packages/kernel/workforce-tools/src/toolset.ts:766 | if (collector.messageCount >= MAX_MESSAGES_PER_TURN) {
+packages/kernel/workforce-tools/src/toolset.ts:772 | if (recipient !== 'user' && !config.employees.has(recipient)) {
+packages/kernel/workforce-tools/src/toolset.ts:923 | inputSchema: handlers[name].spec.parameters
 packages/kernel/workforce-tools/src/memory.ts:36 | export const RECALL_SCAN_LIMIT = 200;
 packages/kernel/workforce-tools/src/memory.ts:37 | export const RECALL_MAX_AGE_MS = 30 * 24 * 3_600_000;
 packages/kernel/workforce-tools/src/memory.ts:38 | export const RECALL_HIT_TEXT_MAX_CHARS = 300;
 packages/kernel/workforce-tools/src/memory.ts:39 | export const RECALL_MAX_HITS = 10;
-packages/kernel/workforce-tools/src/memory.ts:147 | if (query.workforceId !== undefined && query.workforceId !== this.#scope.workforceId) {
-packages/kernel/workforce-tools/src/memory.ts:162 | const completedRows = (await this.#tdb
+packages/kernel/workforce-tools/src/memory.ts:153 | if (query.workforceId !== undefined && query.workforceId !== this.#scope.workforceId) {
+packages/kernel/workforce-tools/src/memory.ts:168 | const completedRows = (await this.#tdb
 packages/kernel/workforce-tools/src/snapshot.ts:195 | binding.data.reviewTaskId === task.taskId &&
 packages/kernel/workforce-tools/src/snapshot.ts:206 | review.verdict === null && review.reviewer === employee.id
 packages/kernel/workforce-tools/src/resolve-target.ts:64 | const employee = config.employees.get(target.id);
@@ -1085,7 +1085,7 @@ packages/kernel/tasks/src/signals.ts:160 | const WAKES: Readonly<Record<SignalKi
 packages/kernel/tasks/src/signals.ts:192 | const BUDGET_ESCALATION_PARKS: readonly Park[] = Object.freeze([
 packages/kernel/tasks/src/signals.ts:218 | function answersPark(kind: SignalKind, status: string, statusReason: string | null): boolean {
 packages/kernel/tasks/src/intent-applier.ts:40 | export const MAX_MESSAGES_PER_TURN = 20;
-packages/kernel/tasks/src/intent-applier.ts:116 | export const turnIntentSchema = z.discriminatedUnion('kind', [
+packages/kernel/tasks/src/intent-applier.ts:134 | export const turnIntentSchema = z.discriminatedUnion('kind', [
 packages/kernel/tasks/src/create-task.ts:106 | export const childTaskSpecSchema = z.strictObject({
 packages/kernel/tasks/src/create-task.ts:259 | requestedBy: parent.owner,
 packages/kernel/tasks/src/budget.ts:551 | export class LedgerCostPolicy implements CostPolicy {
@@ -1143,7 +1143,7 @@ packages/kernel/db/src/tenant-db.ts:208 | const tenantPredicate = eq(tenantColum
 packages/kernel/db/src/schema.ts:68 | id: uuid('id').defaultRandom().primaryKey(),
 packages/kernel/db/src/schema.ts:1151 | export const CORE_TENANT_SCOPED_TABLES = [
 packages/kernel/core/src/workforce-ids.ts:42 | export const RESERVED_WORKFORCE_TOOL_NAMES: ReadonlySet<string> = new Set([
-packages/kernel/core/src/workforce-ids.ts:80 | export function isReservedWorkforceToolSpelling(name: string): boolean {
+packages/kernel/core/src/workforce-ids.ts:81 | export function isReservedWorkforceToolSpelling(name: string): boolean {
 packages/kernel/core/src/worker-selector.ts:53 | export interface WorkerSelector {
 packages/kernel/core/src/cost-policy.ts:53 | export interface CostPolicy {
 packages/kernel/core/src/approval-provider.ts:45 | export interface ApprovalProvider {

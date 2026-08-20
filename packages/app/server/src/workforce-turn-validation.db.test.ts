@@ -220,6 +220,86 @@ describe.skipIf(!hasDb)('the turn chain: dispatch validate-in → composition �
     });
   });
 
+  /**
+   * THE FAILURE CHANNEL, PROVEN THROUGH THE WHOLE CHAIN rather than through three tests that meet
+   * in the middle. What is at stake is not "the handler returns the right object" — it is that a
+   * MODEL TOOL CALL, dispatched through the real validate-in, collected by the real composition and
+   * applied by the real engine, lands `failed` on a real row with the reason a human needs.
+   *
+   * Until `report_failure` existed the same seat's only ending was `submit_result`, and the arm
+   * below it shows what that did: the identical prose, submitted the only way that was available,
+   * COMPLETES the task. The two arms are the before and after of the defect, one after the other.
+   */
+  it('report_failure drives a real turn to failed, with the message on the row and in the journal', async () => {
+    const task = await workingTaskFor('dev');
+    const message = 'The workspace is mounted read-only, so no artifact can be written.';
+    const { outcome, applied } = await runTurn(task, [
+      { name: 'report_failure', args: { message } },
+    ]);
+    // The composition collected the TYPED intent — not model bytes, not a sentinel.
+    expect(outcome.intent).toEqual({ kind: 'fail', message });
+    expect(applied.plan).toEqual({ kind: 'fail', message });
+    const row = await rowOf(task.taskId);
+    expect(row).toMatchObject({ status: 'failed', status_reason: null });
+    // THE SUMMARY AND NOTHING ELSE. No `status` key rides in the result payload: the status column
+    // owns that fact, `workerResultSchema` (which governs this column) no longer admits `failed`
+    // anyway, and a second copy is a second thing that can disagree.
+    expect(row.result).toEqual({ summary: message });
+    // The turn journals as a failure and carries no classification: giving up is not a routing
+    // decision, and `dev` is not a decision seat in the first place.
+    expect(await turnEndedPayload(task.taskId)).toMatchObject({ outcome: 'fail' });
+    expect('classification' in (await turnEndedPayload(task.taskId))).toBe(false);
+    const failed = (await db.$client.unsafe(
+      `SELECT data FROM run_events WHERE run_id = '${task.taskId}' AND type = 'workforce.task.failed';`,
+    )) as unknown as { data: { resultSummary: string } }[];
+    expect(failed).toHaveLength(1);
+    expect(failed[0]?.data.resultSummary).toBe(message);
+    // The seat's OWN review policy does not intercept a failure — a failure is not a result to
+    // review, and `matchReviewPolicy` keys on a submitted result that does not exist here.
+    expect(outcome.reviewPolicy ?? null).toBeNull();
+  });
+
+  it('THE DEFECT: the same refusal submitted as a result still completes the task', async () => {
+    // Kept deliberately as a live demonstration rather than as prose. `submit_result` transitions
+    // to `completed` as a LITERAL, so honest failure prose in a result payload is recorded as
+    // success — which is exactly what `report_failure` above exists to give the seat instead. If
+    // this arm ever changes outcome, the engine started reading `result.status` — which is model
+    // prose deciding a task's status, the exact thing the narrowing was chosen to avoid.
+    const task = await workingTaskFor('dev');
+    const { applied } = await runTurn(task, [
+      {
+        name: 'submit_result',
+        args: {
+          status: 'partial',
+          summary: 'The workspace is mounted read-only, so no artifact could be written.',
+          confidence: 0.95,
+        },
+      },
+    ]);
+    expect(applied.plan?.kind).toBe('complete');
+    expect(await rowOf(task.taskId)).toMatchObject({ status: 'completed' });
+  });
+
+  it('a status the enum no longer carries is refused at the tool door and never completes', async () => {
+    // The narrowing, measured through the chain the seat actually runs in: `failed` and
+    // `needs_clarification` used to pass the schema and complete the task while claiming otherwise.
+    for (const status of ['failed', 'needs_clarification']) {
+      const task = await workingTaskFor('dev');
+      const { outcome, applied } = await runTurn(task, [
+        { name: 'submit_result', args: { status, summary: 'Could not do it.', confidence: 0.2 } },
+      ]);
+      // A refused ending crosses as the typed sentinel, never as the model's arguments.
+      expect(outcome.intent, status).toEqual({ kind: 'malformed_turn_ending' });
+      expect(applied.plan?.kind, status).toBe('invalid_intent');
+      // One requeue with the typed reason — the seat gets another turn, and `report_failure` is
+      // now on its toolset for that turn.
+      expect(await rowOf(task.taskId)).toMatchObject({
+        status: 'queued',
+        status_reason: 'tool_error',
+      });
+    }
+  });
+
   it('a high-confidence submission completes normally — the chain is not simply refusing', async () => {
     const task = await workingTaskFor('dev');
     const { applied } = await runTurn(task, [
