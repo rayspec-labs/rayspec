@@ -8,13 +8,18 @@
  *   (the classification 'team', journaled from the typed intent) → the team resolves to its lead,
  *   which splits the work across the team's members → the principal's low-confidence submission
  *   trips the declared review policy → the reviewer REJECTS round 1 → the rework resubmits →
- *   accepted round 2 → the copywriter drafts the announcement and the GROWTH MANAGER (the seat
- *   holding both the public_statement label and the request_approval tool) hits the declared
- *   approval — the growth stream parks in waiting_for_user → the server is SIGKILLED here, at a
+ *   accepted round 2 → the copywriter drafts the announcement and its OWN COMPLETION IS GATED by
+ *   the declared approval policy (the copywriter is a WORKER holding `public_statement`: it never
+ *   asks for anything, and the policy intercepts it anyway — the result is stored and the task
+ *   parks until a human decides, which the story does through the real CLI) → released, the GROWTH
+ *   MANAGER (which holds the same label AND the request_approval tool) asks for a sign-off of its
+ *   own — the growth stream parks in waiting_for_user → the server is SIGKILLED here, at a
  *   QUIESCENT PARK (nothing is mid-turn — a wait is a row), and a fresh process boots on the same
  *   database, where the reboot ORACLE (each task's status, version, transition count and turn-start
  *   count — not a whole-row byte compare, which timestamps would defeat) is identical across the
- *   kill → the approval is decided through the REAL CLI → the orchestrator wakes with its
+ *   kill → the approval is decided through the REAL CLI → the manager's own merge is then GATED in
+ *   turn (the same label, the second policy interception) and released the same way → the
+ *   orchestrator wakes with its
  *   children's results KEYED BY ID and submits a synthesis that is a pure function of those ids →
  *   `rayspec workforce tasks --tree` renders the whole story from the DURABLE `workforce_tasks`
  *   rows (the engine's own projection — not "the journal alone"), byte-exact, costs included. The
@@ -364,9 +369,52 @@ describe.skipIf(!baseUrl)(
       const rootId = (submittedBody.tasks[0] as { taskId: string }).taskId;
       expect((submittedBody.tasks[0] as { owner: string }).owner).toBe('lead');
 
+      // ── phase A0: THE DRAFT'S OWN COMPLETION IS GATED — the shape that could not exist before
+      //    a declared approval policy bound anything. The starter puts `labels: [public_statement]`
+      //    on the copywriter, a WORKER. While `approvalPolicies` only decorated a request a seat
+      //    chose to make, that label was INERT on this seat: a worker holds no `request_approval`
+      //    and the engine never read approval policies at all, so the draft simply completed. It is
+      //    now a GATE — the result is STORED and the task parks until a human decides — and the
+      //    story therefore takes TWO sign-offs, on the two seats that hold the label.
+      await waitUntil('the copywriter’s draft parks on its declared approval gate', async () => {
+        const rows = await allTasks();
+        const draft = rows.find((r) => r.owner === 'copywriter');
+        return draft?.status === 'blocked' && draft?.status_reason === 'approval_pending';
+      });
+      const draftTask = (await allTasks()).find((r) => r.owner === 'copywriter') as TaskRow;
+      // The result is on the row WHILE the task is parked: the human authorises bytes that already
+      // exist, and the seat is never re-dispatched to "finish" what it already finished.
+      expect(draftTask.result?.summary).toBe('Announcement drafted for sign-off.');
+      expect(draftTask.turns_used).toBe(1);
+      const draftApprovals = (await (sql as ReturnType<typeof postgres>)`
+      SELECT id, status, question FROM workforce_approvals
+        WHERE task_id = ${draftTask.task_id}`) as unknown as Array<{
+        id: string;
+        status: string;
+        question: string;
+      }>;
+      expect(draftApprovals).toHaveLength(1);
+      expect(draftApprovals[0]?.status).toBe('pending');
+      // The question is ENGINE-composed and names the DECLARED rule — no seat asked for this.
+      expect(draftApprovals[0]?.question).toContain('public_statement_signoff');
+      const draftDecision = cli([
+        'workforce',
+        'approvals',
+        'approve',
+        (draftApprovals[0] as { id: string }).id,
+        '--reason',
+        'Wording cleared.',
+        '--url',
+        base1,
+        '--api-key',
+        apiKey,
+      ]);
+      expect(draftDecision.code).toBe(0);
+
       // ── phase A: the story runs until the GROWTH stream parks on the approval (the manager —
       //    the seat holding the label and the tool — asked for the sign-off after the copywriter's
-      //    draft), with the whole engineering stream (reject → rework → accept) already landed ───
+      //    draft, which the gate above released), with the whole engineering stream
+      //    (reject → rework → accept) already landed ─────────────────────────────────────────────
       await waitUntil(
         'the approval parks the growth stream with engineering fully landed',
         async () => {
@@ -435,8 +483,9 @@ describe.skipIf(!baseUrl)(
         [2, 'accept', 'qa'],
       ]);
 
-      // step 6 — the capability-matched approval parked the GROWTH stream with the DECLARED
-      // window; the copywriter's draft is already landed (one turn, completed).
+      // step 6 — the manager's REQUESTED approval parked the GROWTH stream with the DECLARED
+      // window; the copywriter's draft is landed (one turn, completed — released by the GATE that
+      // phase A0 decided, not by simply finishing).
       const growthTask = byTitle('Growth');
       expect(growthTask).toMatchObject({
         status: 'waiting_for_user',
@@ -444,16 +493,24 @@ describe.skipIf(!baseUrl)(
       });
       expect(byOwner('copywriter')[0]).toMatchObject({ status: 'completed', turns_used: 1 });
       const approvals = (await (sql as ReturnType<typeof postgres>)`
-      SELECT id, status, extract(epoch FROM (timeout_at - created_at)) AS window_s
-      FROM workforce_approvals`) as unknown as Array<{
+      SELECT id, task_id, status, extract(epoch FROM (timeout_at - created_at)) AS window_s
+      FROM workforce_approvals ORDER BY created_at`) as unknown as Array<{
         id: string;
+        task_id: string;
         status: string;
         window_s: string;
       }>;
-      expect(approvals).toHaveLength(1);
-      expect(approvals[0]?.status).toBe('pending');
-      expect(Number(approvals[0]?.window_s)).toBeCloseTo(2 * 3600, -1); // the starter's declared 2h
-      const approvalId = (approvals[0] as { id: string }).id;
+      // TWO rows by now, and the pair is the point: the copywriter's POLICY GATE (already decided
+      // in phase A0) and the manager's OWN request (still pending). Role and rule are independent
+      // axes — a seat can be gated without holding the tool, and can hold the tool and also ask —
+      // and this story now drives both.
+      expect(approvals).toHaveLength(2);
+      expect(approvals.map((a) => a.status)).toEqual(['approved', 'pending']);
+      expect(approvals[0]?.task_id).toBe(draftTask.task_id);
+      const requested = approvals[1] as { id: string; task_id: string; window_s: string };
+      expect(requested.task_id).toBe(growthTask.task_id);
+      expect(Number(requested.window_s)).toBeCloseTo(2 * 3600, -1); // the starter's declared 2h
+      const approvalId = requested.id;
 
       // ── step 7: the kill — a REAL SIGKILL, no drain, nothing graceful — and boot #2 ──────────
       const beforeKill = await snapshotTasks();
@@ -490,6 +547,41 @@ describe.skipIf(!baseUrl)(
       expect(decidedRow[0]?.status).toBe('approved');
       expect(decidedRow[0]?.decided_by).toMatch(/^api-key:/); // the VERIFIED principal, never asserted
       expect(await eventTypes(growthTask.task_id)).toContain('workforce.approval.decided');
+
+      // ── step 8b: THE MANAGER'S OWN COMPLETION IS GATED TOO ───────────────────────────────────
+      // `mgr_growth` holds `public_statement` as well, so the merge turn it takes once its
+      // requested sign-off lands is intercepted exactly as the copywriter's draft was. The two are
+      // different acts and both happen: the request above ANSWERED A QUESTION the seat chose to
+      // ask, this gate AUTHORISES THE RELEASE of the finished result. Note it costs no turn — a
+      // decision is not a dispatch — which is why the tree's turn counts at step 10 are unchanged.
+      await waitUntil('the growth merge parks on its own declared approval gate', async () => {
+        const rows = await allTasks();
+        const growth = rows.find((r) => r.task_id === growthTask.task_id);
+        return growth?.status === 'blocked' && growth?.status_reason === 'approval_pending';
+      });
+      const mergeParked = (await allTasks()).find(
+        (r) => r.task_id === growthTask.task_id,
+      ) as TaskRow;
+      expect(mergeParked.result?.summary).toBe('Growth: the announcement is drafted and approved.');
+      const mergeApprovals = (await (sql as ReturnType<typeof postgres>)`
+      SELECT id FROM workforce_approvals
+        WHERE task_id = ${growthTask.task_id} AND status = 'pending'`) as unknown as Array<{
+        id: string;
+      }>;
+      expect(mergeApprovals).toHaveLength(1);
+      const releaseGrowth = cli([
+        'workforce',
+        'approvals',
+        'approve',
+        (mergeApprovals[0] as { id: string }).id,
+        '--reason',
+        'Ship the announcement.',
+        '--url',
+        base2,
+        '--api-key',
+        apiKey,
+      ]);
+      expect(releaseGrowth.code).toBe(0);
 
       // ── step 9: the synthesis — the orchestrator wakes with results keyed by id ──────────────
       await waitUntil('the root completes on the synthesis', async () => {

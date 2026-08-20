@@ -49,6 +49,7 @@ import {
   computeTurnFacts,
   isTurnEndingToolName,
   MALFORMED_TURN_ENDING,
+  matchApprovalRule,
   matchReviewPolicy,
   type RecallScope,
   TaskHistoryMemoryProvider,
@@ -256,6 +257,38 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
               result: collected.intent.result,
             })
           : null;
+      // THE APPROVAL GATE's trusted channel (K-002). A declared `approvalPolicies` rule now
+      // INTERCEPTS a completion instead of merely decorating a request the seat chose to make.
+      //
+      // Computed for the ENDINGS THAT CAN REACH A COMPLETION — a `complete` (chokepoint A) and a
+      // `request_review`, whose accept verdict is chokepoint B. Nothing else can complete a worked
+      // task, and computing it for every ending would put a rule on the wire that no plan reads.
+      //
+      // The MATCH itself reads only the deployed document and the seat's declared labels
+      // (`matchApprovalRule` takes no result), so — unlike the review match above — no model output
+      // can steer it. A review rule may key on `confidenceBelow`, a self-reported number; without
+      // this channel reaching BOTH endings a covered seat could choose which chokepoint it faced,
+      // and therefore whether it was gated, by choosing that number.
+      //
+      // A review task's own completion is NEVER gated, by the same `pendingReview` rule review uses
+      // one line above: that ending records a VERDICT rather than releasing a work product, and
+      // parking it would strand the reviewed task in a park no signal and no sweep can reach.
+      const approvalRule =
+        (collected.intent?.kind === 'complete' || collected.intent?.kind === 'request_review') &&
+        snapshot.pendingReview === null
+          ? matchApprovalRule(deps.config, employee)
+          : null;
+      const approvalPolicy =
+        approvalRule === null
+          ? null
+          : {
+              ...approvalRule,
+              // NOT a grammar field — an approval policy declares no escalation target. Resolved
+              // from the DECLARED reporting edge, exactly as the `request_approval` tool door does
+              // (toolset.ts). Null for a seat with no superior; the planner then degrades an
+              // `escalate` fate to `fail` rather than destroying a finished result.
+              escalateTo: employee.reportsTo,
+            };
       // CLASSIFICATION — derived from the COLLECTED intent (the validated one, never the
       // post-fallback value: a refused ending classifies nothing) and the seat's role. Journaled
       // by the engine on turn_ended; a pure function, so model prose can never steer it.
@@ -268,6 +301,7 @@ export function buildWorkforceTurnHandlers(deps: WorkforceTurnHandlerDeps): Reso
           ? { createdChildren: collected.createdChildren }
           : {}),
         ...(reviewPolicy !== null ? { reviewPolicy } : {}),
+        ...(approvalPolicy !== null ? { approvalPolicy } : {}),
         ...(classification !== null ? { classification } : {}),
         actualUsd: result.costUsd,
       };

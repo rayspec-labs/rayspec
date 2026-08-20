@@ -725,18 +725,24 @@ export function lintWorkforce(spec: RaySpec): SpecError[] {
     const labels = approval.requireWhen.labels;
     labels.forEach((label, li) => {
       // An approval policy's `requireWhen` is `{ labels }` alone, so with no held sibling the whole
-      // selector is dead. What that costs is NOT a skipped park: the engine never reads approval
-      // policies at all, and `request_approval` is offered by ROLE (workforce-tools roles.ts), so
-      // the seat can still park. What is lost is the declared window and fate — the handler falls
-      // back to `rule?.onTimeout ?? 'fail'` and `rule?.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS`
-      // (72h, workforce-tools toolset.ts) — plus the turn-frame fact that told the seat it was
-      // covered.
+      // selector is dead — and what that now costs is THE GATE ITSELF. An approval policy
+      // INTERCEPTS a completion (packages/kernel/tasks approval-gate.ts): a covered seat's result
+      // is stored and the task parks until a human decides. A selector nobody holds covers no seat,
+      // so nothing is intercepted and the seat ships without the human decision the rule was
+      // written to require.
+      //
+      // THIS PARAGRAPH USED TO SAY THE OPPOSITE, and the correction is the point of the rewrite:
+      // the engine did not read approval policies at all, so a dead selector cost only the declared
+      // window and fate for a `request_approval` the seat chose to make. That is no longer true.
+      // What IS still true is the independence of the two axes: `request_approval` is offered by
+      // ROLE (workforce-tools roles.ts), so an uncovered seat can still ASK — but asking is the
+      // seat's choice, and the gate is not, which is exactly why losing it is worth refusing.
       const consequence = hasHeldSibling(labels, label)
         ? 'though the policy still covers every seat holding the other declared label(s) — only ' +
           'this entry is dead'
-        : 'and no other selector remains, so the policy covers no seat: request_approval is still ' +
-          'offered by role, but any approval falls back to the default 72h/fail window instead of ' +
-          'the one declared here';
+        : 'and no other selector remains, so the policy covers no seat and gates no completion: ' +
+          'request_approval is still offered by role, but nothing now requires a human decision ' +
+          'before a covered seat completes its work';
       unheld(
         label,
         `approval policy '${approval.id}'`,

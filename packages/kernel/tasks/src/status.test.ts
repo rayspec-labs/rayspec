@@ -57,7 +57,7 @@ describe('ALLOWED_TRANSITIONS shape', () => {
         'failed',
         'cancelled',
       ],
-      blocked: ['queued', 'waiting_for_user', 'failed', 'cancelled'],
+      blocked: ['queued', 'waiting_for_user', 'completed', 'failed', 'cancelled'],
       waiting_for_review: [
         'queued',
         'blocked',
@@ -74,6 +74,29 @@ describe('ALLOWED_TRANSITIONS shape', () => {
     for (const from of TASK_STATUSES) {
       const truthy = TASK_STATUSES.filter((to) => ALLOWED_TRANSITIONS[from][to]);
       expect(truthy, `row '${from}'`).toEqual(allowed[from]);
+    }
+  });
+
+  it('blocked -> completed exists for exactly ONE reason: the approval gate releasing stored work', () => {
+    // K-002. A policy-intercepted completion stores its result and parks in
+    // `blocked(approval_pending)`; the human's `approve` is what releases it. Without this cell the
+    // gate cannot exist at all — every other park an approval can occupy has no edge to `completed`
+    // either. It is the only cell in the table whose driver is a HUMAN DECISION rather than a turn.
+    expect(ALLOWED_TRANSITIONS.blocked.completed).toBe(true);
+    // And it stays narrow: no OTHER park gained an edge to completed.
+    expect(ALLOWED_TRANSITIONS.waiting_for_user.completed).toBe(false);
+    expect(ALLOWED_TRANSITIONS.queued.completed).toBe(false);
+    expect(ALLOWED_TRANSITIONS.planned.completed).toBe(false);
+    // The reject fate needs no new cell — the table already carries "escalation to a human".
+    expect(ALLOWED_TRANSITIONS.blocked.waiting_for_user).toBe(true);
+  });
+
+  it('no status transitions to ITSELF — the diagonal is false in every row', () => {
+    // Pinned because K-002 considered a `waiting_for_user -> waiting_for_user` reason-change edge
+    // and rejected it: a self-transition is a shape this table has never carried, and the park it
+    // was wanted for is reachable without one.
+    for (const from of TASK_STATUSES) {
+      expect(ALLOWED_TRANSITIONS[from][from], `${from} -> ${from}`).toBe(false);
     }
   });
 
