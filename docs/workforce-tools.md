@@ -130,9 +130,21 @@ What a failure does to the tasks around it follows the ordinary terminal rules, 
 case: a parent waiting on a fan-out join is woken when its bound children are terminal, and reads
 this child's `failed` status and message in its next turn's child results; a parent parked
 `waiting_for_review` on a reviewer that fails is released to `waiting_for_user`, because the park's
-only other exit was the verdict that will now never arrive; the opening delegation record settles
-`failed`. A failed task does not fail its parent — what the parent does about a failed child is the
-parent's own decision to take.
+only other exit was the verdict that will now never arrive; a parent parked `blocked(escalated)` on
+an escalation child that fails receives the escalation reply, carrying the failure's summary; the
+opening delegation record settles `failed`. A failed task does not fail its parent — what the parent
+does about a failed child is the parent's own decision to take.
+
+Two limits of the ending, stated because a seat reading only the happy path would be misled. Both
+are the long-standing behaviour of every route to `failed`, not something this tool introduces:
+
+- **The turn's buffered effects are discarded.** A turn that calls `send_message` (or a create tool)
+  and then ends with `report_failure` has those effects dropped — the message is never written and
+  the child is never opened. So a note to a human must not be sent this way: put what a human needs
+  to read into the `message`, which is what gets stored and journaled.
+- **A failure does not cancel the task's own live children.** A task that opened detached children
+  with `create_task` and then fails leaves them running; they finish under a `failed` parent and
+  wake nobody. Cancel them first with `cancel_task` if they should not continue.
 
 ## The escalate contract
 

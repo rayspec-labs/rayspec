@@ -13,7 +13,9 @@ import {
   lockRootFirst,
   MAX_MESSAGE_BODY_CHARS,
   MAX_MESSAGES_PER_TURN,
+  MAX_TRUNCATION_MARKER_CHARS,
   TurnStateError,
+  truncationMarker,
 } from './apply-intents.js';
 import { applyTransition, type TaskRecord } from './apply-transition.js';
 import { ApprovalAlreadyDecidedError, decideApproval, sweepApprovalTimeouts } from './approvals.js';
@@ -348,6 +350,140 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
         `SELECT status, result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${second.task_id}';`,
       );
       expect(childRow[0]).toMatchObject({ status: 'failed', summary: MESSAGE });
+    });
+
+    it('a failing ESCALATION child answers the park, and its message reaches the caller', async () => {
+      // The THIRD child-bound park (join and review are the other two, above). Reviewed for K-001
+      // and found untested for a `failed` child: the branch at task-locks.ts has no status filter,
+      // and existing arms prove it status-agnostic for `completed` and `cancelled`. This is also
+      // the most valuable path the tool opens — a superior answering "this cannot be done" — and it
+      // is the one reader that slices the summary (500 chars) rather than passing it through.
+      const root = await driveToWorking(await newRoot({ owner: 'worker-1' }));
+      await turn(root.taskId, 1, {
+        kind: 'escalate',
+        reason: 'capability_missing',
+        detail: 'needs a production credential',
+        escalateTo: 'mgr',
+        escalateToDepartment: 'eng',
+      });
+      const rows = (await db.$client.unsafe(
+        `SELECT task_id, version FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string; version: number }[];
+      const child = rows[0] as { task_id: string; version: number };
+
+      const queued = await applyTransition(tdb(), {
+        taskId: child.task_id,
+        expectedVersion: child.version,
+        to: 'queued',
+        actor: 'scheduler',
+      });
+      await claim(child.task_id, queued.version, 1);
+      const refusal = 'No such credential exists and none can be minted for this environment.';
+      await turn(child.task_id, 1, { kind: 'fail', message: refusal });
+
+      // The caller is released — a failed superior answers the park exactly as a completed one does.
+      const woken = await db.$client.unsafe(
+        `SELECT status, status_reason FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      );
+      expect(woken[0]).toEqual({ status: 'queued', status_reason: null });
+
+      // And the REASON travels: before the message was persisted this payload carried `summary:
+      // null`, so the caller woke knowing only that its escalation had ended somehow.
+      const signal = (await db.$client.unsafe(
+        `SELECT kind, payload FROM workforce_task_signals WHERE task_id = '${root.taskId}';`,
+      )) as unknown as {
+        kind: string;
+        payload: { summary: string | null; status: string; escalationTaskId: string };
+      }[];
+      expect(signal).toHaveLength(1);
+      expect(signal[0]?.kind).toBe('escalated');
+      expect(signal[0]?.payload).toMatchObject({
+        status: 'failed',
+        summary: refusal,
+        escalationTaskId: child.task_id,
+      });
+    });
+
+    it('a failed task does NOT cancel its live detached children — pinned, not endorsed', async () => {
+      // PINNING PRE-EXISTING BEHAVIOUR, deliberately, because this PR is what makes it reachable by
+      // choice: `case 'cancelled'` calls cancelDescendants and `case 'fail'` does not, so a task
+      // that opened detached children with the create tool and then fails leaves them running under
+      // a failed parent. Identical for every other route to `failed` (the tool-error fate, the
+      // approval-timeout sweep), which is exactly why it is not changed here — see the memo's
+      // review-round section for why the cascade is a follow-up and not a one-line fix.
+      const root = await driveToWorking(await newRoot({ owner: 'lead' }));
+      const out = await applyTurnOutcome(tdb(), {
+        taskId: root.taskId,
+        turnId: turnIdFor(root.taskId, 1),
+        turnNumber: 1,
+        intent: { kind: 'yield' },
+        createdChildren: [{ title: 'Detached', goal: 'Keep working.', owner: 'lead' }],
+        budgets: NO_BUDGETS,
+      });
+      expect(out.task?.status).toBe('queued');
+      const kids = (await db.$client.unsafe(
+        `SELECT task_id, status FROM workforce_tasks WHERE parent_task_id = '${root.taskId}';`,
+      )) as unknown as { task_id: string; status: string }[];
+      expect(kids).toHaveLength(1);
+
+      await claim(root.taskId, (out.task as TaskRecord).version, 2);
+      await turn(root.taskId, 2, { kind: 'fail', message: MESSAGE });
+
+      const after = (await db.$client.unsafe(
+        `SELECT status FROM workforce_tasks WHERE task_id = '${(kids[0] as { task_id: string }).task_id}';`,
+      )) as unknown as { status: string }[];
+      // The child is NOT cancelled. If this ever flips, the cascade was added — update the docs
+      // section and the changelog with it, because both currently document this behaviour.
+      expect(after[0]?.status).toBe('planned');
+      expect(
+        (
+          await db.$client.unsafe(
+            `SELECT status FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+          )
+        )[0]?.status,
+      ).toBe('failed');
+    });
+
+    it('an oversized MACHINE diagnostic is stored bounded and says it was cut', async () => {
+      // The `fail` arm is shared with producers the tool cap cannot reach: the composition's
+      // failTurn and the scheduler's `turn handler for owner 'X' threw: ${err.message}`, which
+      // interpolates an arbitrary throw. Persisting the message made that an unbounded write into a
+      // jsonb column, so the write site bounds it. The engine's `fail` intent stays UNCAPPED on
+      // purpose — capping it would turn a long diagnostic into a malformed intent and lose the
+      // failure entirely.
+      const root = await driveToWorking(await newRoot());
+      const huge = 'x'.repeat(MAX_MESSAGE_BODY_CHARS * 3);
+      const out = await turn(root.taskId, 1, { kind: 'fail', message: huge });
+      // The INTENT was accepted in full — nothing was refused.
+      expect(out.plan).toEqual({ kind: 'fail', message: huge });
+      expect(out.task?.status).toBe('failed');
+
+      const stored = (await db.$client.unsafe(
+        `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { summary: string }[];
+      const summary = (stored[0] as { summary: string }).summary;
+      expect(summary.length).toBeLessThanOrEqual(
+        MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS,
+      );
+      expect(summary.startsWith('x'.repeat(MAX_MESSAGE_BODY_CHARS))).toBe(true);
+      expect(summary.endsWith(truncationMarker(huge.length))).toBe(true);
+      // The journal reads the same bounded column, so it cannot carry the untruncated string either.
+      const failed = (await db.$client.unsafe(
+        `SELECT data->>'resultSummary' AS s FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.failed';`,
+      )) as unknown as { s: string }[];
+      expect(failed[0]?.s).toBe(summary);
+    });
+
+    it('a message exactly at the model-facing cap is stored verbatim — the bound is not a trim', async () => {
+      const root = await driveToWorking(await newRoot());
+      const atCap = 'y'.repeat(MAX_MESSAGE_BODY_CHARS);
+      await turn(root.taskId, 1, { kind: 'fail', message: atCap });
+      const stored = (await db.$client.unsafe(
+        `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { summary: string }[];
+      // Every model-authored failure lands here (the tool refuses anything longer), so the
+      // truncation branch is dead on the model path and live only for machine diagnostics.
+      expect(stored[0]?.summary).toBe(atCap);
     });
 
     it('a REVIEWER that fails releases the reviewed task instead of stranding it forever', async () => {

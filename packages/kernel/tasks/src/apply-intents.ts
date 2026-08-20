@@ -1203,8 +1203,28 @@ export async function applyTurnOutcome(
           // payload satisfies all of them. `confidence` is deliberately absent: a failure has none
           // to report, and inventing one would feed the review-policy predicates a number nobody
           // stated.
+          //
+          // AND IT IS BOUNDED HERE, because this arm is shared with machine producers that the
+          // model-facing cap does not reach. `report_failure` caps `message` at
+          // MAX_MESSAGE_BODY_CHARS at the tool door, but four other sites build a `fail` intent
+          // directly — three in the composition (@rayspec/server workforce-turn-handlers.ts) and
+          // two in the scheduler (@rayspec/durable-dbos task-scheduler.ts) — and one of them
+          // interpolates a raw `err.message` from ANY throw inside a turn handler. A ZodError's
+          // message alone is its whole formatted issue list. Before this write existed the string
+          // was discarded, so its length cost nothing; now it lands in a jsonb column and a journal
+          // row, and an unbounded write is not something to introduce by accident.
+          //
+          // The cap lives HERE and still NOT on `turnIntentSchema`'s `fail` arm: capping the intent
+          // would turn a long diagnostic into a MALFORMED intent and lose the failure entirely,
+          // which is the opposite of the goal. Refuse nothing; store boundedly. The marker is
+          // deliberate — a silently truncated diagnostic is worse than one that says it was cut,
+          // and it names the full length so a reader knows how much is missing.
+          const summary =
+            plan.message.length > MAX_MESSAGE_BODY_CHARS
+              ? `${plan.message.slice(0, MAX_MESSAGE_BODY_CHARS)}${truncationMarker(plan.message.length)}`
+              : plan.message;
           await tx
-            .update(schema.workforceTasks, { result: { summary: plan.message } })
+            .update(schema.workforceTasks, { result: { summary } })
             .where(eq(schema.workforceTasks.taskId, task.taskId));
           finalTask = await applyTransition(tx, {
             taskId: task.taskId,
@@ -1367,6 +1387,26 @@ async function bindReviewPark(
 }
 
 type Stamp = { actor: string; turnId: string; turnNumber: number };
+
+/**
+ * The suffix a truncated failure summary carries, naming the ORIGINAL length so a reader can see
+ * how much was cut. Exported so the bound can be asserted without re-spelling the string in a test.
+ *
+ * The stored summary is therefore at most `MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS`
+ * characters. A model-authored failure never reaches this: `report_failure` caps `message` at
+ * MAX_MESSAGE_BODY_CHARS at the tool door, so the branch is dead on that path and live only for the
+ * machine producers of a `fail` intent.
+ */
+export function truncationMarker(originalLength: number): string {
+  return `… [truncated — full diagnostic was ${originalLength} characters]`;
+}
+
+/**
+ * The marker's own ceiling. `Number.MAX_SAFE_INTEGER` is 16 digits, which is a hard bound on the
+ * interpolated length for any string JavaScript can hold, so this constant is a fact about the
+ * template rather than a guess.
+ */
+export const MAX_TRUNCATION_MARKER_CHARS = truncationMarker(Number.MAX_SAFE_INTEGER).length;
 
 /** One retry re-queue, then failed — both with the typed `tool_error` reason. */
 async function applyToolErrorFate(

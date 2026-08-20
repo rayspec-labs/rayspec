@@ -140,6 +140,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with nothing after the baseline, both fail the gate rather than passing it vacuously. It runs in CI
   beside the other migration gates.
 
+- **A workforce seat can now report that it FAILED, and the record says why.** `report_failure` is a
+  new turn-ending native on every role (`@rayspec/workforce-tools`), taking one `message` capped at
+  the message-body limit. It ends the task `failed` through the one status writer and stores the
+  message as the task's result summary, which the terminal `workforce.task.failed` event carries as
+  `resultSummary`.
+  **Why it was needed:** the typed `fail` intent, its plan and its legal `working -> failed`
+  transition all already existed — no *tool* produced them. A seat that could not do its work had
+  only `submit_result` to end with, and a submitted result completes the task unconditionally, so an
+  honest refusal was recorded as a **success**. `escalate` remains the move when a superior might
+  still unblock the task; `report_failure` is for work that is over.
+  **Not covered, deliberately:** a turn that buffers `send_message` or `create_task` and then calls
+  `report_failure` has those effects discarded, and a failed task does not cancel detached children
+  it opened with `create_task` — both are the pre-existing behaviour of every `failed` producer,
+  documented in `docs/workforce-tools.md` and unchanged here.
+
+### Changed
+
+- **`report_failure` is a reserved workforce tool name — a declared agent tool may no longer be
+  called that.** BREAKING for a spec that used the name: `RESERVED_WORKFORCE_TOOL_NAMES`
+  (`@rayspec/core`) gains `report_failure`, so an agent bound to a workforce employee that declares
+  a tool of that name (or its MCP-bridged `mcp__<server>__report_failure` spelling) is now rejected
+  at **author time** with `reserved_tool_name`, where it previously validated. Rename the declared
+  tool. Natives are runtime-provided and cannot be redeclared; this is the same additive tightening
+  the reserved set has taken before.
+
+- **`submit_result`'s `status` enum narrows to `completed` and `partial`.** BREAKING for a turn that
+  sent one of the removed values: `failed` and `needs_clarification` are no longer accepted, and a
+  `submit_result` carrying either is refused at the dispatch validate-in — the turn takes the
+  declared tool-error fate (one re-queue with `tool_error`, failure on a second consecutive offence)
+  instead of completing.
+  **Why:** neither value decided anything. The engine writes `completed` from the intent and never
+  reads `result.status`, so both were prose that read like a decision — `failed` in particular meant
+  a seat's honest "I could not" was filed under a completed task. The real channels are
+  `report_failure` and `request_clarification`, which move the row. `partial` stays: it qualifies a
+  result the engine has accepted rather than claiming a status.
+
 ### Fixed
 
 - **The boot migrator is serialized, and a failed chain now names the pending migrations.**
