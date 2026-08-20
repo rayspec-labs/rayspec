@@ -282,9 +282,9 @@ recorded reviewer (`packages/kernel/tasks/src/reviews.ts:196`, refusal at
 
 **The in-engine reviewer turn is the one path where a *named* reviewer is satisfied without
 break-glass**: the applier refuses a verdict whose review names someone other than the task owner
-(`packages/kernel/tasks/src/apply-intents.ts:977`, alongside the parent check at
-`packages/kernel/tasks/src/apply-intents.ts:976`) and then passes that same owner as the actor
-(`packages/kernel/tasks/src/apply-intents.ts:999`) — a bare employee id, which
+(`packages/kernel/tasks/src/apply-intents.ts:982`, alongside the parent check at
+`packages/kernel/tasks/src/apply-intents.ts:981`) and then passes that same owner as the actor
+(`packages/kernel/tasks/src/apply-intents.ts:1004`) — a bare employee id, which
 `packages/kernel/tasks/src/decision-authority.ts:60` matches directly. At the HTTP door it cannot
 be satisfied at all; see §7.2.
 
@@ -780,7 +780,7 @@ employee id cannot be one.
    `workforce:override` is not api-key-grantable by design, so a machine credential can decide every
    `approver: 'user'` row through `store:write` and no named row whatsoever.
 4. The review side has one exception, and only one: the **dispatched reviewer's own turn** journals
-   the bare employee id as its actor (`packages/kernel/tasks/src/apply-intents.ts:999`), which
+   the bare employee id as its actor (`packages/kernel/tasks/src/apply-intents.ts:1004`), which
    `mayDecide` matches directly. That is the in-engine path; the HTTP verdict door behaves exactly
    like the approval door.
 
@@ -1075,9 +1075,9 @@ packages/kernel/tasks/src/decision-authority.ts:41 | export const ANY_AUTHENTICA
 packages/kernel/tasks/src/decision-authority.ts:47 | const PRINCIPAL_SCHEMES = ['user:', 'api-key:'] as const;
 packages/kernel/tasks/src/decision-authority.ts:60 | export function mayDecide(named: string, actor: string): boolean {
 packages/kernel/tasks/src/decision-authority.ts:64 | if (actor.startsWith(scheme) && actor.slice(scheme.length) === named) return true;
-packages/kernel/tasks/src/apply-intents.ts:976 | review.taskId !== task.parentTaskId ||
-packages/kernel/tasks/src/apply-intents.ts:977 | review.reviewer !== task.owner
-packages/kernel/tasks/src/apply-intents.ts:999 | actor: task.owner,
+packages/kernel/tasks/src/apply-intents.ts:981 | review.taskId !== task.parentTaskId ||
+packages/kernel/tasks/src/apply-intents.ts:982 | review.reviewer !== task.owner
+packages/kernel/tasks/src/apply-intents.ts:1004 | actor: task.owner,
 packages/kernel/tasks/src/signals.ts:65 | export const OPERATOR_SIGNAL_KINDS = [
 packages/kernel/tasks/src/signals.ts:101 | const STRUCTURAL_PARKS: readonly StatusReason[] = ['awaiting_children', 'escalated'];
 packages/kernel/tasks/src/signals.ts:113 | const NOT_OPERATOR_UNBLOCKABLE: readonly StatusReason[] = [

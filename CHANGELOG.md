@@ -328,14 +328,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so any summary past 500 units with an emoji at the cut reached it. **Reachable on the shipped code
   path, not in theory** — the arm that pins it drives a real escalate/complete pair against real
   Postgres and reproduces the exact `22P02` when the guard is removed.
-  **The fix is one shared guard, not a fourth private copy.** The tree truncates in four places, and
-  the two that had grown a correct surrogate check had grown it by copy-and-paste, each comment
-  pointing at the others. That is what produced this bug: the two sites written without the check were
-  written by people who had no way to inherit it. `truncateCodeUnits` now lives in `@rayspec/core` —
-  the one package all four callers already depend on, and a dependency-graph leaf, so no import cycle
-  is possible — and carries the hazard, the contract and the caller list in one place. Recall-hit
-  clamping, turn-context byte trimming, the failure summary and the escalation reply all call it, so a
-  fifth truncation site inherits the guard instead of re-deriving it.
+  **The fix is one shared guard, not another private copy.** The tree truncates authored text in
+  seven places, and the ones that had grown a correct surrogate check had grown it by copy-and-paste,
+  each comment pointing at the others. That is what produced this bug: the sites written without the
+  check were written by people who had no way to inherit it. `truncateCodeUnits` now lives in
+  `@rayspec/core` — a package every caller already depends on, and a dependency-graph leaf, so no
+  import cycle is possible — and carries the hazard, the contract and the caller list in one place.
+  Recall-hit clamping, turn-context byte trimming, the failure summary, the escalation reply, the
+  machine-composed `Review:` / `Escalation:` child titles and the confined selection rationale all
+  call it, so the next truncation site inherits the guard instead of re-deriving it. Three of those
+  had no surrogate handling at all before this change.
+  **One copy survives, deliberately and labelled.** `SingleTaskPlanStrategy`'s step-title trim keeps
+  its own predicate, because a seam interface module may import **nothing** — an out-of-tree
+  implementer reads one self-contained file to learn the whole contract, and `seam-wiring.test.ts`
+  asserts the import list is empty rather than merely asking for it. That rule is worth more than the
+  deduplication, so the copy is named as a copy, points at the canonical guard, and has its own
+  non-BMP test.
   **It repairs cuts, it does not scrub inputs, and that is deliberate.** A lone surrogate already
   present in the caller's string passes through untouched — including when the string is short enough
   that nothing is cut at all. Scrubbing inside a truncation helper would protect only the over-the-cap

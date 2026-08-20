@@ -37,6 +37,7 @@ import {
   SEAM_MAX_SELECTION_REASON_CHARS,
   type SeamName,
 } from './seam-contracts.js';
+import { truncateCodeUnits } from './text-utils.js';
 import type {
   SelectionTask,
   WorkerCandidate,
@@ -121,7 +122,9 @@ export function confineWorkerSelector(inner: WorkerSelector): WorkerSelector {
       const reason = typeof selection.reason === 'string' ? selection.reason : '';
       return {
         employeeId: chosen.employeeId,
-        reason: reason.slice(0, SEAM_MAX_SELECTION_REASON_CHARS),
+        // Through the shared truncation guard: the rationale is EXTENSION-authored text, so its cut
+        // can land inside an astral pair like any other untrusted string.
+        reason: truncateCodeUnits(reason, SEAM_MAX_SELECTION_REASON_CHARS),
       };
     },
   };

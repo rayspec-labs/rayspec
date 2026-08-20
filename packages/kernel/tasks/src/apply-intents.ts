@@ -898,7 +898,12 @@ export async function applyTurnOutcome(
               input.turnNumber,
               createdChildren.length,
               {
-                title: `Review: ${task.title}`.slice(0, 200),
+                // Through the shared guard: `task.title` is authored text, so this cut can land
+                // inside an astral pair. `workforce_tasks.title` is `text`, not `jsonb`, so the
+                // consequence here is a mangled stored title that then renders into the reviewer's
+                // turn context — not the `22P02` the jsonb sites take. Guarded all the same: there
+                // is no reason for a truncation in this file to be the one that still splits pairs.
+                title: truncateCodeUnits(`Review: ${task.title}`, CHILD_TITLE_MAX_CHARS),
                 goal:
                   `Review the submitted result of task ${task.taskId} (round ${plan.round}) and ` +
                   'return a verdict.',
@@ -1061,7 +1066,8 @@ export async function applyTurnOutcome(
             break;
           }
           const child = await insertChildTask(tx, task, input.turnNumber, createdChildren.length, {
-            title: `Escalation: ${task.title}`.slice(0, 200),
+            // Through the shared guard, for the same reason as the review child's title above.
+            title: truncateCodeUnits(`Escalation: ${task.title}`, CHILD_TITLE_MAX_CHARS),
             goal:
               `Escalated (${plan.reason}) from task ${task.taskId}: ` +
               `${plan.detail ?? task.goal}`,
@@ -1423,6 +1429,12 @@ export function truncationMarker(originalLength: number): string {
  * template rather than a guess.
  */
 export const MAX_TRUNCATION_MARKER_CHARS = truncationMarker(Number.MAX_SAFE_INTEGER).length;
+
+/**
+ * The code-unit ceiling on a machine-composed child title (`Review: …`, `Escalation: …`). Named
+ * rather than inlined at the two sites so the bound can be asserted without re-spelling it.
+ */
+export const CHILD_TITLE_MAX_CHARS = 200;
 
 /** One retry re-queue, then failed — both with the typed `tool_error` reason. */
 async function applyToolErrorFate(

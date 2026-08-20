@@ -53,7 +53,7 @@ declared; it cannot invent a seat, and it cannot change what a seat's role is al
 
 ### `OrchestrationStrategy` — goal to plan
 
-`packages/kernel/core/src/orchestration-strategy.ts:39`. Default: `SingleTaskPlanStrategy` (`:49`) —
+`packages/kernel/core/src/orchestration-strategy.ts:45`. Default: `SingleTaskPlanStrategy` (`:69`) —
 the whole goal as one step for the default owner.
 
 **Wired.** Its production caller is the goal intake
@@ -168,16 +168,16 @@ absence from the seam set is a stated fact rather than an omission.
 the returned value. One rule runs through all of them:
 
 - **AUTHORITY is REFUSED.** An identity, an approval status, a spend decision, a hit's score: wrong
-  means a typed `SeamConfinementError` (`:52`) naming the seam and the property.
+  means a typed `SeamConfinementError` (`:53`) naming the seam and the property.
 - **SIZE is CLAMPED.** A selection rationale, a recall hit count: these decide nothing, and refusing
   on them would hand an extension a denial of service — one oversized string and the turn dies.
 
 | Helper | What it makes structurally impossible | Driven by |
 |---|---|---|
-| `confineWorkerSelector` (`:75`) | Returning a non-candidate; returning someone lacking a required capability; answering on an empty list | `'REFUSES a selection naming someone outside the candidate set'`, `'REFUSES a selection lacking a capability the task requires'`, `'REFUSES an empty candidate list before the inner selector can answer at all'` |
-| `confineCostPolicy` (`:221`) | Turning a baseline denial into an allow — the baseline is asked first and its denial returns verbatim, so the extension is not even consulted. Settlement is the baseline's authoritatively; the extension's own is advisory and its failure cannot roll the ledger back | `'an extension may NOT allow what the baseline denied'`, `'a widened ceiling in the extension changes nothing'`, `'the extension is never consulted once the baseline has denied'`, `"a FAILING baseline settlement surfaces — it is the turn's real settlement"` |
-| `confineApprovalProvider` (`:248`) | Returning any status but `pending`; returning an unparseable timestamp or an unbounded ticket id | `'REFUSES a provider that answers its own question'`, `'REFUSES an unparseable requestedAt'` |
-| `confineMemoryProvider` (`:307`) | Exceeding the caller's limit or the seam ceiling (clamped); returning a hit with a non-finite score or no id (refused) | `'CLAMPS a flood to the seam ceiling'`, `"CLAMPS to the caller's own limit when it is narrower"`, `'REFUSES a malformed hit'` |
+| `confineWorkerSelector` (`:76`) | Returning a non-candidate; returning someone lacking a required capability; answering on an empty list | `'REFUSES a selection naming someone outside the candidate set'`, `'REFUSES a selection lacking a capability the task requires'`, `'REFUSES an empty candidate list before the inner selector can answer at all'` |
+| `confineCostPolicy` (`:224`) | Turning a baseline denial into an allow — the baseline is asked first and its denial returns verbatim, so the extension is not even consulted. Settlement is the baseline's authoritatively; the extension's own is advisory and its failure cannot roll the ledger back | `'an extension may NOT allow what the baseline denied'`, `'a widened ceiling in the extension changes nothing'`, `'the extension is never consulted once the baseline has denied'`, `"a FAILING baseline settlement surfaces — it is the turn's real settlement"` |
+| `confineApprovalProvider` (`:251`) | Returning any status but `pending`; returning an unparseable timestamp or an unbounded ticket id | `'REFUSES a provider that answers its own question'`, `'REFUSES an unparseable requestedAt'` |
+| `confineMemoryProvider` (`:310`) | Exceeding the caller's limit or the seam ceiling (clamped); returning a hit with a non-finite score or no id (refused) | `'CLAMPS a flood to the seam ceiling'`, `"CLAMPS to the caller's own limit when it is narrower"`, `'REFUSES a malformed hit'` |
 
 All named tests live in `packages/kernel/core/src/seam-confinement.test.ts`.
 
