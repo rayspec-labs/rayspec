@@ -206,8 +206,11 @@ function truncateToBytes(text: string, maxBytes: number): string {
     sliced = sliced.slice(0, -1);
   }
   // Never end on a split astral pair — a lone high surrogate is mangled text, not a shorter string
-  // (memory.ts's clampText carries the same guard). Dropping it only shrinks the result, so it stays
-  // inside the byte budget.
+  // (memory.ts's clampText carries the same guard, as does the failure-summary truncation in
+  // @rayspec/tasks apply-intents.ts — where the column is `jsonb`, so omitting it is not mangled
+  // text but a write Postgres REFUSES, observed as `22P02`. The fourth site, task-locks.ts's
+  // escalation-summary slice, reproduces that same refusal and is K-003's to fix). Dropping it only
+  // shrinks the result, so it stays inside the byte budget.
   if (/[\uD800-\uDBFF]$/.test(sliced)) sliced = sliced.slice(0, -1);
   return sliced;
 }

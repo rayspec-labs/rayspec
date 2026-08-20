@@ -1206,7 +1206,7 @@ export async function applyTurnOutcome(
           //
           // AND IT IS BOUNDED HERE, because this arm is shared with machine producers that the
           // model-facing cap does not reach. `report_failure` caps `message` at
-          // MAX_MESSAGE_BODY_CHARS at the tool door, but four other sites build a `fail` intent
+          // MAX_MESSAGE_BODY_CHARS at the tool door, but FIVE other sites build a `fail` intent
           // directly — three in the composition (@rayspec/server workforce-turn-handlers.ts) and
           // two in the scheduler (@rayspec/durable-dbos task-scheduler.ts) — and one of them
           // interpolates a raw `err.message` from ANY throw inside a turn handler. A ZodError's
@@ -1219,9 +1219,49 @@ export async function applyTurnOutcome(
           // which is the opposite of the goal. Refuse nothing; store boundedly. The marker is
           // deliberate — a silently truncated diagnostic is worse than one that says it was cut,
           // and it names the full length so a reader knows how much is missing.
+          //
+          // NEVER END ON A SPLIT ASTRAL PAIR. `slice` cuts UTF-16 CODE UNITS, so a cut landing
+          // between the halves of an astral pair leaves a lone high surrogate — and this column is
+          // `jsonb`, so unlike the other truncation sites that is not mangled text, it is a write
+          // PostgreSQL refuses outright (`22P02`, "Unicode low surrogate must follow a high
+          // surrogate"). That throw is inside this transaction: the `working -> failed` transition,
+          // the journal and the settlement all roll back, the row stays `working` under its claim,
+          // the reaper re-queues it and the same deterministic error recurs — a task that never
+          // settles, which is a worse outcome than the mislabelled `completed` this whole item
+          // exists to remove. The trigger is precisely the producer above, since model-authored text
+          // embedded in a ZodError carries emoji routinely.
+          //
+          // A DELIBERATELY TEMPORARY LOCAL COPY — extraction is K-003, and this comment is the
+          // cross-reference that a fourth silent copy would not have had.
+          //
+          // There are FOUR truncation sites in this tree. Two carry the guard already:
+          // @rayspec/workforce-tools memory.ts (`clampText`) and context.ts (`truncateToBytes`),
+          // which cross-reference each other. Two did not: this one, and task-locks.ts's 500-unit
+          // escalation-summary slice — which has since been DRIVEN and reproduces the same `22P02`
+          // on the completion path. That one is pre-existing, reachable on the main line today, and
+          // NOT this item's to fix (K-003 owns it, and owns pulling all four onto one predicate).
+          //
+          // Why this is a copy rather than an import, checked rather than assumed:
+          // `clampText` is NOT importable from here. The blocker is not
+          // `gate:delegation-dispatch-boundary` — that gate constrains the TOOLSET layer's OUTBOUND
+          // imports and says nothing about this direction. It is the dependency graph:
+          // workforce-tools declares `@rayspec/tasks` and this package does not declare
+          // workforce-tools, so importing it would create a package cycle.
+          //
+          // Where the shared predicate SHOULD live, for K-003 to act on: `@rayspec/core`. Both
+          // packages already depend on it (no new edge, no cycle), task-locks.ts is in this package
+          // so it is covered too, and the dispatch-boundary gate names `@rayspec/core` among the
+          // specifiers the toolset may import — so a pure string helper there is reachable by all
+          // four sites and boundary-legal. Deliberately NOT created here: that extraction deserves
+          // its own review, not a drive-by inside a failure-channel PR.
+          //
+          // Dropping one unit only shortens the result, so the stated ceiling of
+          // MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS is unaffected.
+          let head = plan.message.slice(0, MAX_MESSAGE_BODY_CHARS);
+          if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1);
           const summary =
             plan.message.length > MAX_MESSAGE_BODY_CHARS
-              ? `${plan.message.slice(0, MAX_MESSAGE_BODY_CHARS)}${truncationMarker(plan.message.length)}`
+              ? `${head}${truncationMarker(plan.message.length)}`
               : plan.message;
           await tx
             .update(schema.workforceTasks, { result: { summary } })

@@ -474,6 +474,57 @@ describe.skipIf(!hasDb)('turn application (db)', () => {
       expect(failed[0]?.s).toBe(summary);
     });
 
+    it('a cut landing INSIDE an astral pair still stores — the bound never emits a lone surrogate', async () => {
+      // THE ARM THE ASCII ONE ABOVE CANNOT BE. `'x'.repeat(...)` is pure BMP, so its cut can never
+      // land between the halves of a surrogate pair — which is exactly why it stayed green while
+      // this branch was broken. A size test written in ASCII cannot catch an encoding bug.
+      //
+      // `slice` cuts UTF-16 code units. With code unit 3999 a HIGH surrogate, the unguarded cut kept
+      // the high half and dropped its low partner, and `jsonb` REFUSES a lone surrogate:
+      // `22P02 invalid input syntax for type json — Unicode low surrogate must follow a high
+      // surrogate`. The throw is inside this transaction, so the transition, journal and settlement
+      // all roll back and the row stays `working` — the reaper re-queues it and the same
+      // deterministic error recurs. A task that never settles is worse than the mislabelled
+      // `completed` this whole item removes, so the failure mode is pinned here, not reasoned about.
+      const root = await driveToWorking(await newRoot());
+      // '\u{1F600}' is one astral code point = two UTF-16 units, so a 3999-char ASCII head puts a
+      // HIGH surrogate at index 3999 — the cut boundary — by construction.
+      const message = `${'x'.repeat(MAX_MESSAGE_BODY_CHARS - 1)}${'\u{1F600}'.repeat(200)}`;
+      expect(message.length).toBeGreaterThan(MAX_MESSAGE_BODY_CHARS);
+      const unitAtCut = message.charCodeAt(MAX_MESSAGE_BODY_CHARS - 1);
+      expect(
+        unitAtCut >= 0xd800 && unitAtCut <= 0xdbff,
+        'the fixture must actually put a high surrogate at the cut, or this arm proves nothing',
+      ).toBe(true);
+
+      const out = await turn(root.taskId, 1, { kind: 'fail', message });
+      // It COMMITTED: before the guard this threw and nothing below was reachable.
+      expect(out.task?.status).toBe('failed');
+
+      const stored = (await db.$client.unsafe(
+        `SELECT result->>'summary' AS summary FROM workforce_tasks WHERE task_id = '${root.taskId}';`,
+      )) as unknown as { summary: string }[];
+      const summary = (stored[0] as { summary: string }).summary;
+      // The lone high surrogate was dropped rather than stored, so the head is one unit shorter.
+      expect(summary.startsWith('x'.repeat(MAX_MESSAGE_BODY_CHARS - 1))).toBe(true);
+      expect(summary.endsWith(truncationMarker(message.length))).toBe(true);
+      // No unpaired surrogate survives anywhere in the stored value, and no replacement char either
+      // — dropping is not the same as mangling, and both would be wrong.
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(summary),
+      ).toBe(false);
+      expect(summary.includes('�')).toBe(false);
+      // Dropping a unit only shortens, so the stated ceiling still holds.
+      expect(summary.length).toBeLessThanOrEqual(
+        MAX_MESSAGE_BODY_CHARS + MAX_TRUNCATION_MARKER_CHARS,
+      );
+      // And the journal, which reads this same column, is equally intact.
+      const failedEvent = (await db.$client.unsafe(
+        `SELECT data->>'resultSummary' AS s FROM run_events WHERE run_id = '${root.taskId}' AND type = 'workforce.task.failed';`,
+      )) as unknown as { s: string }[];
+      expect(failedEvent[0]?.s).toBe(summary);
+    });
+
     it('a message exactly at the model-facing cap is stored verbatim — the bound is not a trim', async () => {
       const root = await driveToWorking(await newRoot());
       const atCap = 'y'.repeat(MAX_MESSAGE_BODY_CHARS);

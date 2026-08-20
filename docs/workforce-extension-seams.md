@@ -102,7 +102,7 @@ that composes the turn handlers itself, not by configuration.
 neutralization has to match the document being rendered into:
 
 - **Hit text cannot forge structure.** Each hit renders through `sanitizeUntrusted`
-  (`packages/kernel/workforce-tools/src/context.ts:655`), which strips every line-boundary and
+  (`packages/kernel/workforce-tools/src/context.ts:658`), which strips every line-boundary and
   control character, so a hit cannot begin a line and therefore cannot place a column-0 section
   header or a forged data-boundary line. Driven by `'C1: an untrusted recall hit cannot forge the
   data-boundary line'` in `context.test.ts`, which asserts exactly one boundary line and exactly one
@@ -110,9 +110,9 @@ neutralization has to match the document being rendered into:
 - **The section is byte-bounded and droppable.** `SECTION_BUDGETS.recall` is 4096 bytes
   (`packages/kernel/workforce-tools/src/context.ts:76`), and recall is section 7 — the first thing
   dropped when the whole input is over ceiling
-  (`packages/kernel/workforce-tools/src/context.ts:700-701`).
+  (`packages/kernel/workforce-tools/src/context.ts:703-704`).
 - **The hit COUNT is capped** at `SEAM_MAX_MEMORY_HITS = 64` before rendering
-  (`packages/kernel/workforce-tools/src/context.ts:645`), with the drop announced under its own
+  (`packages/kernel/workforce-tools/src/context.ts:648`), with the drop announced under its own
   marker. This exists because the byte-budget loop re-measures the whole block once per dropped hit:
   the budget was always honored, but honoring it cost time quadratic in what the provider returned.
   Measured on this checkout before the cap: 1 000 hits rendered in 0.2 ms, 5 000 in 1.2 s, and 20 000
