@@ -32,6 +32,6 @@
     "@openai/codex-sdk": "0.142.2",
     "dotenv": "17.4.2",
     "typescript": "5.9.3",
-    "vitest": "4.1.9"
+    "vitest": "4.1.11"
   }
 }
