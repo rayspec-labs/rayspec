@@ -2000,6 +2000,24 @@ weaker policy, `RAYSPEC_FRONTEND_CSP` replaces the whole baseline verbatim (and
 default, and one the scan honours: it judges a page against the policy in force, so an
 override permitting the shape the page ships silences the warning too.
 
+**A DOM built at runtime is the case the boot scan cannot see.** The scan reads the HTML
+files a mount ships, so it is silent about a page that ships almost no markup and builds
+its elements in JavaScript — and `element.setAttribute("style", …)` after load is blocked
+by exactly the same directive as a `style="…"` attribute in the file. Nothing says so at
+either end: no boot warning, because there was no markup to scan, and no runtime error,
+because the attribute is not rejected. It is **set**, and simply never applied. That
+asymmetry is what makes it cost an afternoon — `el.getAttribute("style")` returns the
+string that was written, while `el.style.length` is `0` and the computed style is
+unchanged, so the first thing anybody checks agrees that the attribute is there and the
+policy looks innocent. Only the console names it.
+
+The CSSOM path is not blocked, and it is the fix: `el.style.cssText = "…"` and
+`el.style.color = "…"` are script setting properties rather than an inline style source,
+so `default-src 'self'` permits them and the same code renders correctly. A page that
+builds its DOM at runtime needs no weaker policy — it needs the property, not the
+attribute. Stylesheets served from the mount remain the better answer wherever the styles
+are static; this is for the ones a script computes.
+
 **Range and HEAD** are a supported feature: a byte-`Range` GET returns `206` partial
 content (`Content-Range`, `Accept-Ranges: bytes`, and exactly the requested bytes),
 and a `HEAD` returns `200` with `Content-Length` and an empty body — useful for media

@@ -747,6 +747,14 @@ allows), or set `RAYSPEC_FRONTEND_CSP` to replace the baseline — an override t
 permits the shape a page ships also silences the warning, because the scan judges the
 page against the policy in force rather than the default.
 
+One case the boot warning cannot cover: a page that ships almost no markup and builds
+its elements in JavaScript. There is nothing to scan, so the boot is quiet, and
+`el.setAttribute("style", …)` at runtime is blocked by the same directive without
+raising anything — the attribute is set and never applied, so `el.getAttribute("style")`
+returns what was written while `el.style.length` is `0`. Assign through the CSSOM
+instead (`el.style.cssText = "…"`, `el.style.color = "…"`), which the default policy
+permits; see the spec reference for the longer version.
+
 ### A frontend-only (static) deployment
 
 The mount above serves a UI *next to* a full API. If a document declares **only** a
