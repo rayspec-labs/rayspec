@@ -4,10 +4,10 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "ebec6c82e0d240422f6b6a05a22ff12e1a3787330a84119a5a3335712dcf8406",
+  "lockfile_sha256": "12e8c956481fb03767e6250a7925e9c7df825bb775d4545dec50a02e12ddc8b3",
   "provenance": {
     "host": "darwin-arm64",
-    "node": "v22.12.0"
+    "node": "v24.21.0"
   },
   "counts": {
     "lockfile_distinct": 485,
@@ -2294,49 +2294,49 @@
     },
     {
       "name": "@vitest/expect",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
     {
       "name": "@vitest/mocker",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
     {
       "name": "@vitest/pretty-format",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
     {
       "name": "@vitest/runner",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
     {
       "name": "@vitest/snapshot",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
     {
       "name": "@vitest/spy",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
     },
     {
       "name": "@vitest/utils",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -2846,7 +2846,7 @@
     },
     {
       "name": "fast-uri",
-      "version": "3.1.5",
+      "version": "3.1.6",
       "license": "BSD-3-Clause",
       "license_file_present": true,
       "installed": true
@@ -3031,7 +3031,7 @@
     },
     {
       "name": "hono",
-      "version": "4.12.34",
+      "version": "4.13.5",
       "license": "MIT",
       "license_file_present": true,
       "installed": true,
@@ -3789,7 +3789,7 @@
     },
     {
       "name": "qs",
-      "version": "6.15.2",
+      "version": "6.16.0",
       "license": "BSD-3-Clause",
       "license_file_present": true,
       "installed": true
@@ -4228,7 +4228,7 @@
     },
     {
       "name": "vitest",
-      "version": "4.1.9",
+      "version": "4.1.11",
       "license": "MIT",
       "license_file_present": true,
       "installed": true,
