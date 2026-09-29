@@ -24,7 +24,8 @@ Both return `{ ok: true, value }` or `{ ok: false, errors }`, where `errors[0]` 
 reason from the contract vocabulary. Hostile input never throws, and a message never repeats a
 name or any other content from the archive. The value holds the validated manifest, the archive's
 identity (`archiveSha256`, the SHA-256 of its complete bytes, computed on the same pass),
-`secretFindings` (paths only) and whether a `<file>.sig` lies next to the archive.
+`secretFindings` (paths only), the number of entries (`entryCount`, `ray.json` included) and
+whether a `<file>.sig` lies next to the archive.
 
 Neither entry point imports, evaluates or executes anything from an archive: they read bytes,
 compare them and copy them. The ZIP parsing is written here on top of Node's built-ins, because
@@ -43,6 +44,10 @@ Options:
 - `timeBudgetMs` — the wall-time budget, at most `DEFAULT_TIME_BUDGET_MS` (five minutes);
   checked between reads, so it caps CPU time too. Exceeding it is `RAY_LIMIT_EXCEEDED`
   `time-budget`.
+- `captureSpec` — keep the bytes of the spec file the manifest names, once they have matched
+  their inventory size and SHA-256, as `specBytes`, so a caller can parse the spec without
+  extracting the archive. Application bundles only; the bytes are bounded by the extracted byte
+  limit like every other entry.
 - `clock` — the monotonic clock the budget is measured with.
 
 Each read stays inside the size taken when the archive was opened. The central directory is read

@@ -319,6 +319,38 @@ describe('findings and presence', () => {
     }
   });
 
+  it('keeps the spec bytes only when asked, and counts the entries', async () => {
+    const spec = Buffer.from(expectations.bases.application.files['payload/rayspec.yaml']!.utf8);
+    const asked = await inspectBundle(base, { captureSpec: true });
+    const plain = await inspectBundle(base);
+    expect(asked.ok && asked.value.specBytes?.equals(spec)).toBe(true);
+    expect(plain.ok && 'specBytes' in plain.value).toBe(false);
+    expect(asked.ok && asked.value.entryCount).toBe(entries().length);
+  });
+
+  it('keeps nothing of a migration bundle, whose one file is ciphertext', async () => {
+    const migration = rawZip(bundleEntries(expectations, { kind: 'migration' }));
+    const r = await inspectBundle(migration, { captureSpec: true });
+    expect(r.ok).toBe(true);
+    expect(r.ok && 'specBytes' in r.value).toBe(false);
+  });
+
+  it('refuses a spec whose bytes do not match the inventory instead of handing them over', async () => {
+    const files = baseFiles(expectations);
+    const forged = rawZip(
+      bundleEntries(expectations, { files }).map((e) =>
+        e.name === 'payload/rayspec.yaml' ? { ...e, data: Buffer.from(e.data).fill(0x20) } : e,
+      ),
+    );
+    const r = await inspectBundle(forged, { captureSpec: true });
+    expect(outcome(r)).toBe('RAY_DIGEST_MISMATCH/entry-sha256');
+  });
+
+  it('refuses a captureSpec that is not a boolean', async () => {
+    const r = await inspectBundle(base, { captureSpec: 'yes' as never });
+    expect(outcome(r)).toBe('RAY_USAGE/');
+  });
+
   it('reports whether a signature file lies next to the archive', async () => {
     const dir = workDir();
     const path = join(dir, 'app.ray');

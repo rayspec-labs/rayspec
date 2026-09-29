@@ -64,6 +64,11 @@ export interface ReadOptions {
   timeBudgetMs?: number;
   /** The clock the time budget is measured with; a monotonic clock by default. */
   clock?: Clock;
+  /**
+   * Keep the bytes of the spec the manifest names, once they have matched the inventory, so a
+   * caller can parse the spec without extracting the archive. Application bundles only.
+   */
+  captureSpec?: boolean;
 }
 
 export interface BundleInspection {
@@ -84,6 +89,13 @@ export interface BundleInspection {
    * archive was given as bytes.
    */
   signatureFile: 'present' | 'absent' | 'unknown';
+  /** The number of archive entries, `ray.json` included. */
+  entryCount: number;
+  /**
+   * The bytes of the spec file, after they matched their inventory size and SHA-256. Present only
+   * when `captureSpec` was asked for and the bundle is an application bundle.
+   */
+  specBytes?: Buffer;
 }
 
 export interface BundleExtraction extends BundleInspection {
@@ -155,6 +167,7 @@ interface Settings {
   operation: ReadOperation;
   timeBudgetMs: number;
   clock: Clock;
+  captureSpec: boolean;
 }
 
 const OPERATIONS: readonly ReadOperation[] = ['inspect', 'verify', 'deploy', 'prepare', 'import'];
@@ -178,7 +191,9 @@ function resolveSettings(options: ReadOptions | null | undefined): Settings {
   }
   const clock = options?.clock ?? monotonicClock;
   if (typeof clock !== 'function') throw refusal('RAY_USAGE', 'the clock is not a function');
-  return { limits, operation, timeBudgetMs, clock };
+  const captureSpec = options?.captureSpec ?? false;
+  if (typeof captureSpec !== 'boolean') throw refusal('RAY_USAGE', 'captureSpec is not a boolean');
+  return { limits, operation, timeBudgetMs, clock, captureSpec };
 }
 
 function operationLimit(settings: Settings): number {
@@ -243,6 +258,7 @@ async function readBundle(
     limits,
     deadline,
     target,
+    captureName: settings.captureSpec && manifest.kind === 'application' ? manifest.spec : null,
   });
 
   const archiveHash = streamed.archiveHash;
@@ -264,6 +280,8 @@ async function readBundle(
     archiveSha256: archiveHash.digest('hex'),
     archiveSize: source.size,
     secretFindings: streamed.secretFindings,
+    entryCount: directory.entries.length,
+    ...(streamed.captured === null ? {} : { specBytes: streamed.captured }),
   };
 }
 
@@ -271,6 +289,8 @@ interface StreamContext {
   limits: ReaderLimits;
   deadline: Deadline;
   target: ExtractionTarget | null;
+  /** The entry whose bytes are kept for the caller, or null. */
+  captureName: string | null;
 }
 
 /**
@@ -313,6 +333,7 @@ async function streamEntries(
     : context.limits.extractedBytes;
   const archiveHash = createHash('sha256');
   const secretFindings: SecretFinding[] = [];
+  let captured: Buffer | null = null;
   let extracted = 0;
 
   for (const e of entries) {
@@ -346,7 +367,8 @@ async function streamEntries(
       );
     }
     const scanner = migration ? null : new PrivateKeyScanner();
-    const data = await copyEntry(source, e, context, archiveHash, scanner);
+    const chunks: Buffer[] | null = e.name === context.captureName ? [] : null;
+    const data = await copyEntry(source, e, context, archiveHash, scanner, chunks);
     if (data.crc32 !== e.crc32) throw crcMismatch();
     if (data.sha256 !== entry.sha256) {
       throw refusal(
@@ -358,22 +380,27 @@ async function streamEntries(
         },
       );
     }
+    if (chunks !== null) captured = Buffer.concat(chunks);
     if (!migration && isSecretPath(entry.path)) {
       secretFindings.push({ path: entry.path, rule: 'secret-path' });
     } else if (scanner?.found) {
       secretFindings.push({ path: entry.path, rule: 'private-key' });
     }
   }
-  return { archiveHash, secretFindings };
+  return { archiveHash, secretFindings, captured };
 }
 
-/** Stream one entry's data: CRC-32, SHA-256, the archive digest, the scanner and the target. */
+/**
+ * Stream one entry's data: CRC-32, SHA-256, the archive digest, the scanner, the target and, when
+ * given, a list that keeps the chunks.
+ */
 async function copyEntry(
   source: ArchiveSource,
   e: ArchiveEntry,
   context: StreamContext,
   archiveHash: ReturnType<typeof createHash>,
   scanner: PrivateKeyScanner | null = null,
+  keep: Buffer[] | null = null,
 ): Promise<{ crc32: number; sha256: string }> {
   const hash = createHash('sha256');
   const file = context.target === null ? null : await context.target.openFile(e.name);
@@ -386,6 +413,7 @@ async function copyEntry(
       hash.update(chunk);
       archiveHash.update(chunk);
       scanner?.update(chunk);
+      keep?.push(chunk);
       if (file !== null) await file.write(chunk);
     }
     return { crc32: crc >>> 0, sha256: hash.digest('hex') };
