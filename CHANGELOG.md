@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`@rayspec/bundle-contract`: the application bundle contract in code.** A new kernel package
+  carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
+  managed hosting receipt, as a proposed contract version `1.0.0-draft.2`. It commits the contract's
+  JSON Schemas and vocabularies byte for byte under `contract/`, with `CONTRACT-LOCK.json` recording
+  the SHA-256 of every contract file and one digest over them; a test recomputes both. On top of
+  them it exports the TypeScript types of the manifest, the snapshot, the receipt, the result
+  envelope and the runtime-control operations; the closed error vocabulary with each code's exit
+  class and retryable flag; the capability ids, the reserved binding names, the reader limits and
+  the supported target.
+  It adds **one new canonical JSON form**: keys in Unicode code-point order (not RFC 8785's UTF-16
+  order), safe integers only, NFC strings, at most 64 nested containers, one trailing LF in a file.
+  The three existing serializers in `@rayspec/core`, the record runtime and the grounding runtime
+  are untouched and keep their output, because stored hashes depend on it.
+  `validateManifest`, `validateSnapshot` and `validateReceipt` parse a document under those rules,
+  validate it with its JSON Schema through Ajv 2020 in strict mode, and then apply the rules a
+  schema cannot express (inventory order and uniqueness, the spec and the closure files in the
+  inventory, unique binding names, the migration inventory, the archive limit of the kind, unknown
+  receipt capabilities). The first failure is returned as `errors[0]` with a code and reason from
+  the closed vocabulary; hostile input — deep nesting, oversized documents, `__proto__` members,
+  floats, non-NFC strings, duplicate keys — is answered, never thrown. `checkRuntimeAdmission`
+  runs the runtime, target, capability and reserved-binding checks of a validated manifest.
+  The golden fixture corpus (128 byte-level cases and 41 document cases) is rebuilt from
+  `contract/fixtures/EXPECTATIONS.json` by a generator and compared byte for byte; the tests run
+  every case whose outcome depends on the manifest, and check that every other case is committed,
+  matches its recorded digest and carries a vocabulary code. The archive reader that consumes the
+  container cases is not part of this package yet.
+  **Nothing uses the package yet**: the CLI and the server do not depend on it, so it is not in the
+  publish set and nothing a deployment runs changes.
+
 ### Changed
 
 - **The Node floor is now `>=22.21.0`.** Every package's `engines.node`, the root manifest's and
