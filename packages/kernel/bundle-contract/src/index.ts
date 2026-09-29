@@ -2,8 +2,8 @@
  * @rayspec/bundle-contract — the contract of RaySpec application bundles (`.ray`), encrypted
  * migration snapshots and the managed hosting receipt, carried in code.
  *
- * It holds the committed JSON Schemas and vocabularies, their TypeScript shapes and the canonical
- * JSON form.
+ * It holds the committed JSON Schemas and vocabularies, their TypeScript shapes, the canonical
+ * JSON form, and validators that parse and check each document in the reader pipeline's order.
  * No I/O: it reads no file, opens no connection and knows no cloud provider. The committed
  * contract files ship beside the build under `contract/`, with `CONTRACT-LOCK.json` recording the
  * SHA-256 of each.
@@ -46,6 +46,16 @@ export {
   schemaValidator,
 } from './schemas.js';
 export type * from './types.js';
+export {
+  checkRuntimeAdmission,
+  type DocumentValidationOptions,
+  type ManifestValidationOptions,
+  type RuntimeProfile,
+  type ValidationResult,
+  validateManifest,
+  validateReceipt,
+  validateSnapshot,
+} from './validate.js';
 export {
   ALWAYS_EXCLUDED_DATA_CATEGORIES,
   BINDING_NAME_PATTERN,
