@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including the removal of the `AuthStorage` export the adapter uses, and is left to its own
   change. Inside this repository pnpm ignores the shrinkwrap and the overrides already resolve
   fixed versions.
+- **The workspace dependency audit passes again.** Advisories published since the last release
+  cover `fast-uri` `3.1.6` (two, fixed in `3.1.7`) and `ip-address` `10.3.1` (two, fixed in
+  `10.5.1`), the versions the root overrides pinned, so the osv-scanner audit of `pnpm-lock.yaml`
+  failed. The overrides now name the first fixed versions. A consumer install was not affected: npm
+  resolves `fast-uri` `3.1.8` and `ip-address` `10.7.2` there.
 
 ## [1.8.0] - 2026-08-15
 
