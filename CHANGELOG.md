@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Node floor is now `>=22.21.0`.** Every package's `engines.node`, the root manifest's and
+  the documented prerequisites moved from `>=22` to the first release on the 22 line that
+  implements `NODE_USE_ENV_PROXY`; below it the server's proxy restore has nothing to restore (see
+  the 1.8.0 entry on the env-proxy dispatcher). A package manager only warns on an engines
+  mismatch unless it runs engine-strict, so the runtime check in the server stays. CI now installs
+  one exact patch, `22.23.3`, instead of whatever `22` resolved to on the day.
+
+### Fixed
+
+- **The documented test run passes on a fresh clone.** The shutdown test for the example
+  `dev-boot.mjs` wrappers forwarded `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` only
+  when they were exported, so without a `.env` the wrapper it spawns aborted on the missing
+  secrets and three tests failed. It now generates a throwaway key and pepper for whichever is
+  absent and still passes an exported value through, which is how CI runs it.
+- **`pnpm test` reports every failing package.** The root script stopped at the first failing
+  package task, which left the packages scheduled after it unrun and unreported. It now passes
+  `--continue`, so every package runs, and the command still exits non-zero when any failed.
+- **The local Postgres is the one CI tests against.** `docker-compose.yml` pulled whatever
+  `postgres:16` resolved to on the day. It now pins the same multi-platform index digest as CI's
+  service containers, which serves `linux/amd64` and `linux/arm64` alike.
+- CI no longer lists a push trigger for a branch that no longer exists.
+
+### Documentation
+
+- `CONTRIBUTING.md` states what a complete local test run needs: the Node and pnpm versions,
+  Docker for the pinned Postgres, the two database URLs and `RAYSPEC_REQUIRE_DB_TESTS` in the
+  environment, `ffmpeg` for the media suites, and that no boot secret has to be set.
+
 ### Security
 
 - **An install of the published packages no longer resolves the vulnerable `hono` and top-level
