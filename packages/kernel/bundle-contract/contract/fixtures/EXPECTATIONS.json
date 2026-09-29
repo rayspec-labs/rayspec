@@ -159,6 +159,8 @@
     "migrationExtractedBytes": 2147483648,
     "entryCount": 10000,
     "manifestBytes": 1048576,
+    "snapshotBytes": 4194304,
+    "receiptBytes": 4194304,
     "pathBytes": 4096,
     "jsonDepth": 64
   },
@@ -469,6 +471,46 @@
       "bytes": {
         "size": 1895,
         "sha256": "0b9e9869eb2c732ddf2ac841ad3d11b18ce839ca9a6672d91a54b4a6e8defd19",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": true,
+          "verdict": "structurally-valid",
+          "exit": 0
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": true,
+          "verdict": "deployable",
+          "exit": 0
+        }
+      ]
+    },
+    {
+      "id": "app-good-grantable-under-reserved-prefix",
+      "layer": "good",
+      "description": "Declares CLAUDE_CODE_OAUTH_TOKEN, a platform-grantable name that starts with the reserved CLAUDE_ prefix; a platformGrantable name is never reserved.",
+      "construction": {
+        "base": "application",
+        "manifestPatch": [
+          {
+            "op": "add",
+            "path": "/bindings/-",
+            "value": {
+              "name": "CLAUDE_CODE_OAUTH_TOKEN",
+              "kind": "secret",
+              "required": false,
+              "description": "Provider token."
+            }
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1906,
+        "sha256": "7617067eebf34c99c28e3cba48fcb713d05a280a9d1eef9b68444a6ff08f9f12",
         "committed": true
       },
       "expect": [
@@ -2602,6 +2644,88 @@
       ]
     },
     {
+      "id": "binding-reserved-anthropic-base-url",
+      "layer": "runtime",
+      "description": "A binding named ANTHROPIC_BASE_URL (reserved ANTHROPIC_ prefix; it would redirect provider traffic and the key with it).",
+      "construction": {
+        "base": "application",
+        "manifestPatch": [
+          {
+            "op": "add",
+            "path": "/bindings/-",
+            "value": {
+              "name": "ANTHROPIC_BASE_URL",
+              "kind": "secret",
+              "required": true,
+              "description": "x"
+            }
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1886,
+        "sha256": "f6833bb3d751181cb9d736247d158c6660a77ef88a43b58cba15ece5208eec62",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": true,
+          "verdict": "structurally-valid",
+          "exit": 0
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_BINDING_RESERVED",
+          "exit": 4
+        }
+      ]
+    },
+    {
+      "id": "binding-reserved-bash-env",
+      "layer": "runtime",
+      "description": "A binding named BASH_ENV (exact reserved name; a file every non-interactive shell sources).",
+      "construction": {
+        "base": "application",
+        "manifestPatch": [
+          {
+            "op": "add",
+            "path": "/bindings/-",
+            "value": {
+              "name": "BASH_ENV",
+              "kind": "secret",
+              "required": true,
+              "description": "x"
+            }
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1876,
+        "sha256": "4df4bab0f8dce33a8f18b3861bfb976781aafd4aad33dc4900759c6932381d40",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": true,
+          "verdict": "structurally-valid",
+          "exit": 0
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_BINDING_RESERVED",
+          "exit": 4
+        }
+      ]
+    },
+    {
       "id": "binding-reserved-database-url",
       "layer": "runtime",
       "description": "A binding named DATABASE_URL (exact reserved name).",
@@ -3535,6 +3659,84 @@
           "verdict": "not-deployable",
           "code": "RAY_INVALID_ARCHIVE",
           "reason": "case-fold-collision",
+          "exit": 2
+        }
+      ]
+    },
+    {
+      "id": "archive-path-prefix-collision",
+      "layer": "archive",
+      "description": "An extra entry \"payload/rayspec.yaml/x\" beneath the file payload/rayspec.yaml: one name is both a file and a directory.",
+      "construction": {
+        "base": "application",
+        "archive": [
+          {
+            "op": "addRawEntry",
+            "name": "payload/rayspec.yaml/x",
+            "utf8": "x"
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1928,
+        "sha256": "b244253fa3ddefbe083bcb504167ea6f5fb9212e400beab95bb974b5dbaae9ad",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": false,
+          "verdict": "invalid",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "path-prefix-collision",
+          "exit": 2
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "path-prefix-collision",
+          "exit": 2
+        }
+      ]
+    },
+    {
+      "id": "archive-path-prefix-collision-case-fold",
+      "layer": "archive",
+      "description": "An extra entry \"payload/RAYSPEC.yaml/x\": after ASCII lowercasing, its directory equals the file payload/rayspec.yaml.",
+      "construction": {
+        "base": "application",
+        "archive": [
+          {
+            "op": "addRawEntry",
+            "name": "payload/RAYSPEC.yaml/x",
+            "utf8": "x"
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1928,
+        "sha256": "0a16a9426d417680c5371b6c27ca7a48de61c24601526b6258c94c9fb7e193ba",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": false,
+          "verdict": "invalid",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "path-prefix-collision",
+          "exit": 2
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "path-prefix-collision",
           "exit": 2
         }
       ]

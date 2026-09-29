@@ -1,11 +1,12 @@
 /**
  * The fixed vocabularies of the bundle contract: the contract version, capability ids, reserved
- * binding names, reader limits, supported targets, execution levels and snapshot data categories.
+ * binding names, reader limits, supported targets, execution levels, snapshot data categories,
+ * result operations and quiesce barriers.
  *
  * Each constant restates one committed contract file (`contract/capabilities.json`,
  * `contract/reserved-bindings.json`, `contract/fixtures/EXPECTATIONS.json`,
- * `contract/snapshot.schema.json`); `vocabulary.test.ts` holds them equal, so a contract change
- * that is not carried here fails the suite.
+ * `contract/snapshot.schema.json`, `contract/cli-verbs.json`); `vocabulary.test.ts` holds them
+ * equal, so a contract change that is not carried here fails the suite.
  */
 
 /** The contract version every artifact, envelope and request states. */
@@ -183,6 +184,12 @@ export const RESERVED_BINDING_NAMES: readonly string[] = [
   'TZ',
   'LANG',
   'CI',
+  'ALL_PROXY',
+  'BASH_ENV',
+  'GLIBC_TUNABLES',
+  'OPENSSL_CONF',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
   'CLOUD_PROVIDER_TOKEN',
   'OPENAI_API_KEY_FILE',
   'ANTHROPIC_API_KEY_FILE',
@@ -191,7 +198,7 @@ export const RESERVED_BINDING_NAMES: readonly string[] = [
   'DEEPGRAM_API_KEY_FILE',
 ];
 
-/** Every name starting with one of these is reserved as well. */
+/** Every name starting with one of these is reserved as well, unless it is platform-grantable. */
 export const RESERVED_BINDING_PREFIXES: readonly string[] = [
   'RAYSPEC_',
   'DBOS_',
@@ -203,6 +210,8 @@ export const RESERVED_BINDING_PREFIXES: readonly string[] = [
   'CLOUD_',
   'OPENAI_AGENTS_',
   'OTEL_',
+  'ANTHROPIC_',
+  'CLAUDE_',
 ];
 
 export interface PlatformGrantableBinding {
@@ -225,13 +234,17 @@ export const PLATFORM_GRANTABLE_BINDINGS: readonly PlatformGrantableBinding[] = 
 ];
 
 const RESERVED_EXACT = new Set(RESERVED_BINDING_NAMES);
+const GRANTABLE = new Set(PLATFORM_GRANTABLE_BINDINGS.map((b) => b.name));
 
 /**
- * Whether a binding name is reserved for the operator: equal to a reserved name or starting with
- * a reserved prefix, compared byte for byte.
+ * Whether a binding name is reserved for the operator: equal to a reserved name, or starting with
+ * a reserved prefix without being platform-grantable, compared byte for byte. The exemption keeps
+ * `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` grantable under the `ANTHROPIC_` and `CLAUDE_`
+ * prefixes.
  */
 export function isReservedBindingName(name: string): boolean {
-  return RESERVED_EXACT.has(name) || RESERVED_BINDING_PREFIXES.some((p) => name.startsWith(p));
+  if (RESERVED_EXACT.has(name)) return true;
+  return !GRANTABLE.has(name) && RESERVED_BINDING_PREFIXES.some((p) => name.startsWith(p));
 }
 
 // ─── limits and targets ────────────────────────────────────────────────────────────────────────
@@ -248,8 +261,12 @@ export interface ReaderLimits {
   migrationExtractedBytes: number;
   /** Archive entries, `ray.json` included, so an inventory holds at most one fewer. */
   entryCount: number;
-  /** Bytes of `ray.json` (and of `snapshot.json` inside a migration). */
+  /** Bytes of `ray.json`. */
   manifestBytes: number;
+  /** Bytes of `snapshot.json` inside a migration. */
+  snapshotBytes: number;
+  /** Bytes of a managed receipt. */
+  receiptBytes: number;
   /** Bytes of one entry name. */
   pathBytes: number;
   /** Nested containers of a JSON document. */
@@ -263,6 +280,8 @@ export const DEFAULT_READER_LIMITS: Readonly<ReaderLimits> = {
   migrationExtractedBytes: 2 * 1024 * 1024 * 1024,
   entryCount: 10_000,
   manifestBytes: 1024 * 1024,
+  snapshotBytes: 4 * 1024 * 1024,
+  receiptBytes: 4 * 1024 * 1024,
   pathBytes: 4096,
   jsonDepth: 64,
 };
@@ -301,6 +320,52 @@ export const EXECUTION_LEVELS: readonly ExecutionLevel[] = ['none', 'in-process'
 
 /** The execution levels a v1 runtime provides. */
 export const V1_EXECUTION_LEVELS: readonly ExecutionLevel[] = ['none', 'in-process'];
+
+// ─── result envelope ───────────────────────────────────────────────────────────────────────────
+
+/** Every `operation` a result envelope may name: the CLI verbs and the runtime-control operations. */
+export const RESULT_OPERATIONS = [
+  'pack',
+  'bundle.inspect',
+  'bundle.verify',
+  'bundle.sign',
+  'deploy.dry-run',
+  'deploy',
+  'export',
+  'import.dry-run',
+  'import',
+  'resume',
+  'runtime.inspect',
+  'runtime.prepare',
+  'runtime.quiesce',
+  'runtime.snapshot',
+  'runtime.apply',
+  'runtime.health',
+  'runtime.resume',
+  'init',
+  'doctor',
+  'plan',
+  'openapi',
+  'gen-handler',
+  'deploy.legacy',
+  'tenant.ensure',
+  'dev.gen-secrets',
+  'dev.db',
+  'dev.bootstrap-tenant',
+  'version',
+  'help',
+] as const;
+
+export type ResultOperation = (typeof RESULT_OPERATIONS)[number];
+
+/** The write barriers a quiesce reports: one for the database, one for objects. */
+export const QUIESCE_BARRIERS = [
+  'database-write-role',
+  'database-stopped-source',
+  'object-writes',
+] as const;
+
+export type QuiesceBarrier = (typeof QUIESCE_BARRIERS)[number];
 
 // ─── snapshot categories ───────────────────────────────────────────────────────────────────────
 

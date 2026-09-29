@@ -95,6 +95,20 @@ describe('canonicalJson output', () => {
     expect((caught as CanonicalJsonError).path).toBe(path);
   });
 
+  it('refuses an array hole even when the prototype would fill it', () => {
+    // Reading a hole falls through to Array.prototype, so without the own-property check a
+    // polluted prototype would be written as data.
+    Object.defineProperty(Array.prototype, '0', { value: 'injected', configurable: true });
+    try {
+      expect(() => canonicalJson(Object.assign(new Array(2), { 1: 1 }))).toThrow(
+        CanonicalJsonError,
+      );
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>)['0'];
+    }
+    expect(([] as unknown[])[0]).toBeUndefined();
+  });
+
   it('refuses a cycle instead of recursing without end', () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
@@ -214,6 +228,13 @@ describe('parseJsonDocument', () => {
     expect(reasonOf('{"a":1.5,"a":2}\n')).toBe('duplicate-key');
     expect(reasonOf('{"a":1.5,"b":"cafe\u0301"}\n')).toBe('float');
     expect(reasonOf('{"a":-0,"b":"cafe\u0301"}\n')).toBe('non-nfc');
+  });
+
+  it('refuses -0 and unsafe integers when canonical bytes are not required', () => {
+    // Without the byte comparison only the explicit checks stand between these tokens and a value.
+    expect(reasonOf('{"a":-0}', false)).toBe('not-canonical');
+    expect(reasonOf('{"a":1152921504606846976}', false)).toBe('not-canonical');
+    expect(reasonOf('{ "a" : 0 }', false)).toBe('ok');
   });
 
   it('finds duplicate and non-NFC keys at any depth', () => {

@@ -33,7 +33,7 @@ const built = new Map(
 
 describe('corpus regeneration', () => {
   it('builds every case to the size and SHA-256 its expectation records', () => {
-    expect(expectations.cases).toHaveLength(128);
+    expect(expectations.cases).toHaveLength(133);
     for (const c of expectations.cases) {
       const bytes = built.get(c.id)!;
       expect({ id: c.id, size: bytes.length, sha256: sha256(bytes) }).toEqual({

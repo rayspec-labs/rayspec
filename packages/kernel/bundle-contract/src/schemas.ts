@@ -72,18 +72,34 @@ export function schemaValidator(name: ContractSchemaName, pointer = ''): Validat
   return validate;
 }
 
-/** Longest pointer an error reports; a longer one falls back to the parent member. */
+/** Longest pointer an error reports: the `path` limit of the result envelope. */
 const MAX_POINTER_LENGTH = 4096;
 
 /**
+ * A pointer segment an error may report: at most 64 printable ASCII characters. A member name
+ * comes from the document, so a longer one, or one holding a control character, a terminal escape
+ * or a bidirectional override, is never repeated.
+ */
+const REPORTABLE_SEGMENT = /^[\x20-\x7e]{0,64}$/;
+
+/**
  * The JSON pointer of the member a schema error is about. For a missing or an unexpected member
- * that is the member itself, not the object holding it.
+ * that is the member itself, not the object holding it. The pointer stops before the first
+ * segment that is not reportable, or that would take it past the envelope's `path` limit, so it
+ * then names the nearest member above.
  */
 export function failingPointer(error: ErrorObject): string {
-  let member: string | undefined;
-  if (error.keyword === 'required') member = String(error.params.missingProperty);
-  if (error.keyword === 'additionalProperties') member = String(error.params.additionalProperty);
-  if (member === undefined) return error.instancePath;
-  const pointer = `${error.instancePath}/${escapePointer(member)}`;
-  return pointer.length > MAX_POINTER_LENGTH ? error.instancePath : pointer;
+  const segments = error.instancePath === '' ? [] : error.instancePath.slice(1).split('/');
+  if (error.keyword === 'required')
+    segments.push(escapePointer(String(error.params.missingProperty)));
+  if (error.keyword === 'additionalProperties') {
+    segments.push(escapePointer(String(error.params.additionalProperty)));
+  }
+  let pointer = '';
+  for (const segment of segments) {
+    if (!REPORTABLE_SEGMENT.test(segment)) break;
+    if (pointer.length + 1 + segment.length > MAX_POINTER_LENGTH) break;
+    pointer += `/${segment}`;
+  }
+  return pointer;
 }

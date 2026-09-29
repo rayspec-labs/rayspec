@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalJson, canonicalJsonFile } from './canonical-json.js';
 import { schemaValidator } from './schemas.js';
-import { loadExpectations } from './test-support/contract-files.js';
+import { loadExpectations, readContractJson } from './test-support/contract-files.js';
 import { buildCase, type CaseExpectation, type CorpusCase } from './test-support/corpus.js';
 import type { ApplicationManifest, RayManifest } from './types.js';
 import {
@@ -313,6 +313,22 @@ describe('manifest semantics', () => {
     );
   });
 
+  it.each([
+    Number.NaN,
+    -1,
+    1.5,
+    Number.POSITIVE_INFINITY,
+    2 ** 53,
+  ])('refuses an archive size of %s as a usage error instead of skipping the check', (size) => {
+    expect(outcome(validateManifest(bytesOf(base), { archiveSize: size }))).toMatchObject({
+      code: 'RAY_USAGE',
+    });
+  });
+
+  it('accepts an archive size of 0', () => {
+    expect(outcome(validateManifest(bytesOf(base), { archiveSize: 0 }))).toBe('ok');
+  });
+
   it('returns the typed manifest', () => {
     const result = validateManifest(bytesOf(base));
     expect(result.ok && (result.value as RayManifest).kind).toBe('application');
@@ -375,6 +391,35 @@ describe('runtime admission', () => {
     });
     expect(admit(declare('ACME_WEBHOOK_SECRET'))).toBe('ok');
     expect(admit(declare('OPENAI_API_KEY'))).toBe('ok');
+    expect(admit(declare('ANTHROPIC_BASE_URL'))).toMatchObject({ code: 'RAY_BINDING_RESERVED' });
+    expect(admit(declare('CLAUDE_CODE_OAUTH_TOKEN'))).toBe('ok');
+  });
+
+  it('leaves the shape of requires to the derived-fields check', () => {
+    // capabilities.json: requires lists only requirable ids, sorted by code point. A list that is
+    // out of order or names an id a bundle cannot require never equals the list derived from the
+    // spec, so the derived-fields check that follows admission refuses it as requires-mismatch
+    // (the carried-forward case semantic-requires-mismatch). Refusing it any earlier would report
+    // an id this runtime does not know as something other than unknown-id.
+    const rules = readContractJson<{ rules: string[] }>('capabilities.json').rules;
+    expect(
+      rules.some((r) => r.includes('requirableByBundle') && r.includes('requires-mismatch')),
+    ).toBe(true);
+    expect(
+      admit((m) => {
+        m.requires = ['trigger-cron', 'static-frontend'];
+      }),
+    ).toBe('ok');
+    expect(
+      admit((m) => {
+        m.requires = ['static-frontend', 'stt-deepgram'];
+      }),
+    ).toBe('ok');
+    expect(
+      admit((m) => {
+        m.requires = ['zzz-unknown', 'static-frontend'];
+      }),
+    ).toEqual({ code: 'RAY_CAPABILITY_UNSUPPORTED', reason: 'unknown-id', path: '/requires/0' });
   });
 
   it('checks a migration manifest for runtime and target only', () => {
@@ -487,5 +532,61 @@ describe('snapshot and receipt semantics', () => {
   it('refuses a receipt with a duplicate key even though canonical form is not required', () => {
     const text = JSON.stringify(goodReceipt).replace('{', '{"agentTraceExport":"on",');
     expect(outcome(validateReceipt(text))).toMatchObject({ reason: 'duplicate-key' });
+  });
+});
+
+describe('document size limits', () => {
+  // biome-ignore lint/suspicious/noExplicitAny: the documents are edited member by member.
+  type Loose = Record<string, any>;
+  const document = (id: string) =>
+    structuredClone(expectations.documentCases.find((d) => d.id === id)!.document) as Loose;
+
+  it('accepts the largest snapshot.json its schema admits, above the manifest limit', () => {
+    const s = document('snapshot-good');
+    s.tableCounts = Array.from({ length: 10_000 }, (_, i) => ({
+      database: 'workflow-system',
+      schema: `s${'_'.repeat(62)}`,
+      table: `t${String(i).padStart(62, '0')}`,
+      rows: Number.MAX_SAFE_INTEGER,
+    }));
+    const text = canonicalJsonFile(s);
+    expect(text.length).toBeGreaterThan(DEFAULT_READER_LIMITS.manifestBytes);
+    expect(outcome(validateSnapshot(text))).toBe('ok');
+  });
+
+  it('refuses snapshot.json above its limit, before parsing, as snapshot-size', () => {
+    const over = ' '.repeat(DEFAULT_READER_LIMITS.snapshotBytes + 1);
+    expect(outcome(validateSnapshot(over))).toMatchObject({
+      code: 'RAY_LIMIT_EXCEEDED',
+      reason: 'snapshot-size',
+    });
+    const good = canonicalJsonFile(document('snapshot-good'));
+    expect(outcome(validateSnapshot(good, { limits: { snapshotBytes: 10 } }))).toMatchObject({
+      reason: 'snapshot-size',
+    });
+    // The manifest limit does not apply to snapshot.json.
+    expect(outcome(validateSnapshot(good, { limits: { manifestBytes: 10 } }))).toBe('ok');
+  });
+
+  it('accepts the largest receipt its schema admits, and refuses one above its limit', () => {
+    const r = document('receipt-good');
+    // U+0001 is written as a six-byte escape, the longest form a character takes.
+    const wide = (n: number, tail: string) => '\u0001'.repeat(n - tail.length) + tail;
+    r.evidence = Array.from({ length: 128 }, (_, i) => ({
+      protection: wide(128, `p${i}`),
+      reference: wide(2048, 'r'),
+      sha256: 'a'.repeat(64),
+    }));
+    r.residualRisks = Array.from({ length: 128 }, (_, i) => ({
+      risk: wide(2048, `r${i}`),
+      owner: wide(256, 'o'),
+    }));
+    const text = JSON.stringify(r);
+    expect(text.length).toBeGreaterThan(3 * 1024 * 1024);
+    expect(outcome(validateReceipt(text))).toBe('ok');
+    expect(outcome(validateReceipt(text, { limits: { receiptBytes: 1024 } }))).toMatchObject({
+      code: 'RAY_LIMIT_EXCEEDED',
+      reason: 'receipt-size',
+    });
   });
 });

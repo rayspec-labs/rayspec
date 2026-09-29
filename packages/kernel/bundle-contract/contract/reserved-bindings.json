@@ -134,9 +134,39 @@
       "source": "reserved by policy"
     },
     {
+      "name": "ALL_PROXY",
+      "purpose": "egress proxy for every scheme; host network policy",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "BASH_ENV",
+      "purpose": "file a non-interactive shell sources before it runs",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "GLIBC_TUNABLES",
+      "purpose": "C library behaviour of every child process",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "OPENSSL_CONF",
+      "purpose": "OpenSSL configuration file, which can load engines and providers",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "SSL_CERT_FILE",
+      "purpose": "trusted certificate bundle; replacing it allows interception of provider traffic",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "SSL_CERT_DIR",
+      "purpose": "trusted certificate directory; replacing it allows interception of provider traffic",
+      "source": "process environment; reserved by policy"
+    },
+    {
       "name": "CLOUD_PROVIDER_TOKEN",
       "purpose": "example of a cloud credential that a bundle can never obtain",
-      "source": "03-contracts/06-SEMANTIC-DETAILS.md:5"
+      "source": "06-SEMANTIC-DETAILS.md:6"
     },
     {
       "name": "OPENAI_API_KEY_FILE",
@@ -204,6 +234,14 @@
     {
       "prefix": "OTEL_",
       "covers": "telemetry export"
+    },
+    {
+      "prefix": "ANTHROPIC_",
+      "covers": "Anthropic SDK settings, which the agent CLI subprocess inherits (ANTHROPIC_BASE_URL redirects provider traffic and the key with it; ANTHROPIC_AUTH_TOKEN replaces the credential); ANTHROPIC_API_KEY stays platform-grantable"
+    },
+    {
+      "prefix": "CLAUDE_",
+      "covers": "agent CLI settings (CLAUDE_CONFIG_DIR, and CLAUDE_CODE_ switches that select another provider endpoint); CLAUDE_CODE_OAUTH_TOKEN stays platform-grantable"
     }
   ],
   "platformGrantable": [
@@ -239,7 +277,7 @@
     }
   ],
   "rules": [
-    "A name is reserved when it equals a reservedExact name, or starts with a reservedPrefixes prefix, compared byte for byte after the namePattern check. Reserved names come only from the operator.",
+    "A name is reserved when it equals a reservedExact name, or starts with a reservedPrefixes prefix and is not a platformGrantable name, compared byte for byte after the namePattern check. Reserved names come only from the operator.",
     "A bundle that declares a reserved name in bindings is refused by verify, deploy and prepare with RAY_BINDING_RESERVED. A bindings file that supplies a reserved name is refused the same way; the operator supplies reserved names through the explicit process environment or the host, never through the application bindings file.",
     "platformGrantable names are the only names the platform itself reads from application bindings. A bundle may declare them; the value is supplied by the customer or operator at deploy time, in the bindings file or the explicit process environment.",
     "The _FILE variant of each platformGrantable name (its fileVariant) is reserved and listed in reservedExact. It names a host path, so only the operator supplies it, through the explicit process environment; the platform then reads the named file, which must pass the same permission checks as the bindings file. A bundle or bindings file that supplies a _FILE variant is refused with RAY_BINDING_RESERVED, and the platform never reads a path taken from application bindings.",

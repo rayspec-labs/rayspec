@@ -14,7 +14,7 @@
   },
   "rules": [
     "pack derives requires from the spec; authors do not write it. verify re-derives it from the spec in the bundle and refuses a mismatch with RAY_MANIFEST_INVALID reason requires-mismatch.",
-    "requires lists only ids with requirableByBundle true, sorted by code point, unique.",
+    "requires lists only ids with requirableByBundle true, sorted by code point, unique. The schema enforces uniqueness only; a list with an id that is not requirable, or out of order, cannot equal the list derived from the spec and is refused at the derived-fields check (reader step 15) with RAY_MANIFEST_INVALID reason requires-mismatch. The manifest semantics check (reader step 8) does not test it, because an id this runtime does not know must reach the capabilities check (reader step 12) and be refused there as unknown-id.",
     "A runtime refuses a bundle whose requires contains an id that is unknown to its vocabulary (RAY_CAPABILITY_UNSUPPORTED reason unknown-id) or that it does not list in inspect() (reason not-provided).",
     "inspect() lists every id the runtime provides, including runtime-provided ids that bundles cannot require.",
     "Platform identity, sessions, API keys, OIDC and health are part of every runtime and have no capability id."

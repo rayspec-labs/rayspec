@@ -9,7 +9,8 @@
  * closed vocabulary.
  *
  * The validators never throw on hostile input, read no file and load nothing at run time.
- * Messages name the failing member by JSON pointer and never echo document content.
+ * Messages never echo document content, not even a member name: the failing member is named by
+ * `path` only, and only as far as its names are short printable ASCII (see `failingPointer`).
  */
 import { compareCodePoints, parseJsonDocument } from './canonical-json.js';
 import { type BundleError, type BundleErrorCode, bundleError, type ErrorReason } from './errors.js';
@@ -35,14 +36,18 @@ export interface ManifestValidationOptions {
   /** Reader limits, lowered from the defaults. */
   limits?: Partial<ReaderLimits>;
   /**
-   * The transfer size of the archive the manifest came from. Once the schema has fixed the kind,
-   * a size above that kind's archive limit is refused (`RAY_LIMIT_EXCEEDED` `archive-size`).
+   * The transfer size of the archive the manifest came from: a safe integer of 0 or more, else
+   * `RAY_USAGE`. Once the schema has fixed the kind, a size above that kind's archive limit is
+   * refused (`RAY_LIMIT_EXCEEDED` `archive-size`).
    */
   archiveSize?: number;
 }
 
 export interface DocumentValidationOptions {
-  /** Reader limits, lowered from the defaults; `manifestBytes` and `jsonDepth` apply. */
+  /**
+   * Reader limits, lowered from the defaults; `jsonDepth` applies, and `snapshotBytes` to
+   * `snapshot.json` or `receiptBytes` to the receipt.
+   */
   limits?: Partial<ReaderLimits>;
 }
 
@@ -54,15 +59,23 @@ export function validateManifest(
   input: Uint8Array | string,
   options: ManifestValidationOptions = {},
 ): ValidationResult<RayManifest> {
-  return guarded('ray.json', options.limits, (limits) => {
-    const parsed = parseDocument('ray.json', input, limits, true);
+  return guarded('ray.json', options, (limits) => {
+    const archiveSize = options?.archiveSize;
+    if (archiveSize !== undefined && !(Number.isSafeInteger(archiveSize) && archiveSize >= 0)) {
+      return refuse('RAY_USAGE', 'the archive size is not an integer of 0 or more');
+    }
+    const parsed = parseDocument('ray.json', input, limits, {
+      maxBytes: limits.manifestBytes,
+      sizeReason: 'manifest-size',
+      canonical: true,
+    });
     if (!parsed.ok) return parsed;
     const structural = checkSchema<RayManifest>('ray.json', 'manifest', parsed.value);
     if (!structural.ok) return structural;
     const manifest = structural.value;
     const kindLimit =
       manifest.kind === 'migration' ? limits.migrationArchiveBytes : limits.archiveBytes;
-    if (options.archiveSize !== undefined && options.archiveSize > kindLimit) {
+    if (archiveSize !== undefined && archiveSize > kindLimit) {
       return refuse(
         'RAY_LIMIT_EXCEEDED',
         `the archive is larger than the ${manifest.kind} archive limit`,
@@ -247,8 +260,12 @@ export function validateSnapshot(
   input: Uint8Array | string,
   options: DocumentValidationOptions = {},
 ): ValidationResult<Snapshot> {
-  return guarded('snapshot.json', options.limits, (limits) => {
-    const parsed = parseDocument('snapshot.json', input, limits, true);
+  return guarded('snapshot.json', options, (limits) => {
+    const parsed = parseDocument('snapshot.json', input, limits, {
+      maxBytes: limits.snapshotBytes,
+      sizeReason: 'snapshot-size',
+      canonical: true,
+    });
     if (!parsed.ok) return parsed;
     const structural = checkSchema<Snapshot>('snapshot.json', 'snapshot', parsed.value);
     if (!structural.ok) return structural;
@@ -268,8 +285,12 @@ export function validateReceipt(
   input: Uint8Array | string,
   options: DocumentValidationOptions = {},
 ): ValidationResult<ManagedReceipt> {
-  return guarded('the receipt', options.limits, (limits) => {
-    const parsed = parseDocument('the receipt', input, limits, false);
+  return guarded('the receipt', options, (limits) => {
+    const parsed = parseDocument('the receipt', input, limits, {
+      maxBytes: limits.receiptBytes,
+      sizeReason: 'receipt-size',
+      canonical: false,
+    });
     if (!parsed.ok) return parsed;
     const structural = checkSchema<ManagedReceipt>('the receipt', 'managedReceipt', parsed.value);
     if (!structural.ok) return structural;
@@ -289,6 +310,8 @@ export function validateReceipt(
 
 const JSON_FAILURE_MESSAGES: Record<string, string> = {
   'manifest-size': 'is larger than the manifest byte limit',
+  'snapshot-size': 'is larger than the snapshot.json byte limit',
+  'receipt-size': 'is larger than the receipt byte limit',
   'json-depth': 'nests deeper than the JSON depth limit',
   bom: 'starts with a byte order mark',
   'invalid-utf8': 'is not valid UTF-8',
@@ -299,11 +322,20 @@ const JSON_FAILURE_MESSAGES: Record<string, string> = {
   'not-canonical': 'is not in canonical JSON form',
 };
 
+interface DocumentRules {
+  /** The byte limit of this document. */
+  maxBytes: number;
+  /** The reason a document above `maxBytes` is refused with. */
+  sizeReason: 'manifest-size' | 'snapshot-size' | 'receipt-size';
+  /** Whether the bytes must be canonical JSON. */
+  canonical: boolean;
+}
+
 function parseDocument(
   document: string,
   input: unknown,
   limits: ReaderLimits,
-  canonical: boolean,
+  rules: DocumentRules,
 ): ValidationResult<unknown> {
   let bytes: Uint8Array;
   if (input instanceof Uint8Array) {
@@ -322,12 +354,14 @@ function parseDocument(
     });
   }
   const result = parseJsonDocument(bytes, {
-    maxBytes: limits.manifestBytes,
+    maxBytes: rules.maxBytes,
     maxDepth: limits.jsonDepth,
-    canonical,
+    canonical: rules.canonical,
   });
   if (result.ok) return result;
-  const { code, reason } = result.failure;
+  const { code } = result.failure;
+  const reason =
+    result.failure.reason === 'manifest-size' ? rules.sizeReason : result.failure.reason;
   return {
     ok: false,
     errors: [
@@ -347,12 +381,13 @@ function checkSchema<T>(
   if (validate(value)) return { ok: true, value: value as T };
   const first = validate.errors?.[0];
   const path = first === undefined ? '' : failingPointer(first);
+  // The keyword comes from the schema, never from the document. The pointer can hold member names
+  // taken from the document, so it stays in `path` and out of the message.
   const keyword = first === undefined ? 'schema' : first.keyword;
-  return refuse(
-    'RAY_MANIFEST_INVALID',
-    `${document} fails its JSON Schema at ${path === '' ? 'the document root' : path} (${keyword})`,
-    { reason: 'schema', path },
-  );
+  return refuse('RAY_MANIFEST_INVALID', `${document} fails its JSON Schema (${keyword})`, {
+    reason: 'schema',
+    path,
+  });
 }
 
 function refuse<C extends BundleErrorCode>(
@@ -365,16 +400,17 @@ function refuse<C extends BundleErrorCode>(
 
 /**
  * Resolve the limits, then run a validator so that nothing escapes as an exception: a limit set
- * above its default is a usage error, and any unexpected fault is reported as internal.
+ * above its default is a usage error, and any unexpected fault is reported as internal. The
+ * options are read inside, so options that are `null` or throw when read are answered too.
  */
 function guarded<T>(
   document: string,
-  overrides: Partial<ReaderLimits> | undefined,
+  options: { limits?: Partial<ReaderLimits> } | null | undefined,
   run: (limits: ReaderLimits) => ValidationResult<T>,
 ): ValidationResult<T> {
   let limits: ReaderLimits;
   try {
-    limits = resolveReaderLimits(overrides);
+    limits = resolveReaderLimits(options?.limits);
   } catch {
     return refuse('RAY_USAGE', `a reader limit for ${document} is outside 0 to its default`);
   }

@@ -8,7 +8,13 @@
  * timestamps are UTC RFC 3339 with `Z`, and digests are lowercase hex SHA-256.
  */
 import type { BundleError, BundleWarning } from './errors.js';
-import type { DataCategory, ExecutionLevel, Target } from './vocabulary.js';
+import type {
+  DataCategory,
+  ExecutionLevel,
+  QuiesceBarrier,
+  ResultOperation,
+  Target,
+} from './vocabulary.js';
 
 /** Lowercase hex SHA-256, `^[a-f0-9]{64}$`. */
 export type Sha256 = string;
@@ -228,21 +234,23 @@ export interface ReleaseSignatureFile {
 
 // ─── result envelope ───────────────────────────────────────────────────────────────────────────
 
+interface ResultEnvelopeBase<T> {
+  contractVersion: '1.0.0-draft.2';
+  operation: ResultOperation;
+  /** UUID v4: fresh per CLI invocation; echoed from the request by a runtime operation. */
+  operationId: string;
+  data: T | null;
+  warnings: BundleWarning[];
+}
+
 /**
  * The one result shape of every new CLI verb and every runtime-control operation. `ok: true`
  * carries no errors; `ok: false` carries at least one, and `errors[0]` is the first failing check
  * in the operation's pipeline order.
  */
-export interface ResultEnvelope<T> {
-  contractVersion: '1.0.0-draft.2';
-  ok: boolean;
-  operation: string;
-  /** UUID v4: fresh per CLI invocation; echoed from the request by a runtime operation. */
-  operationId: string;
-  data: T | null;
-  errors: BundleError[];
-  warnings: BundleWarning[];
-}
+export type ResultEnvelope<T> =
+  | (ResultEnvelopeBase<T> & { ok: true; errors: [] })
+  | (ResultEnvelopeBase<T> & { ok: false; errors: [BundleError, ...BundleError[]] });
 
 // ─── runtime-control operations ────────────────────────────────────────────────────────────────
 
@@ -344,7 +352,7 @@ export interface QuiesceData {
   fenceEpoch: number;
   status: 'fenced' | 'timed-out';
   producers: { producer: string; state: 'stopped' | 'drained' | 'still-running' }[];
-  barriers: { barrier: string; state: 'held' | 'unavailable' }[];
+  barriers: { barrier: QuiesceBarrier; state: 'held' | 'unavailable' }[];
   /** External services the runtime cannot fence, named, never hidden. */
   unfencedExternal: string[];
 }

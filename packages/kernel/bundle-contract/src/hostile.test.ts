@@ -5,6 +5,7 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalJsonFile } from './canonical-json.js';
 import { ERROR_CODES, isBundleErrorCode } from './errors.js';
+import { schemaValidator } from './schemas.js';
 import { loadExpectations } from './test-support/contract-files.js';
 import { validateManifest, validateReceipt, validateSnapshot } from './validate.js';
 
@@ -88,6 +89,70 @@ describe('hostile sizes', () => {
       code: 'RAY_USAGE',
       reason: undefined,
     });
+  });
+});
+
+describe('hostile member names', () => {
+  /** Every character a terminal shows as itself: no control, escape or bidirectional character. */
+  const PRINTABLE = /^[\x20-\x7e]*$/;
+  const TERMINAL = '\u001b]0;pwn\u0007\u001b[2J';
+  const BIDI = '\u202egnp.exe';
+
+  it.each([
+    ['a terminal escape at the root', withMember(`${TERMINAL}${'K'.repeat(100)}`, 1), ''],
+    ['a bidirectional override at the root', withMember(BIDI, 1), ''],
+    [
+      'a terminal escape inside a binding',
+      baseText.replace(
+        '"bindings":[]',
+        // The escape sorts before every letter, so canonical order puts it first.
+        `"bindings":[{${JSON.stringify(`${TERMINAL}K`)}:1,"description":"x","kind":"secret","name":"A","required":true}]`,
+      ),
+      '/bindings/0',
+    ],
+    [
+      'a bidirectional override inside a binding',
+      baseText.replace(
+        '"bindings":[]',
+        `"bindings":[{"description":"x","kind":"secret","name":"A","required":true,${JSON.stringify(BIDI)}:1}]`,
+      ),
+      '/bindings/0',
+    ],
+  ])('keeps %s out of the message and the path', (_label, text, parent) => {
+    const r = validateManifest(text);
+    expect(outcome(r)).toEqual({ code: 'RAY_MANIFEST_INVALID', reason: 'schema' });
+    if (r.ok) return;
+    const [error] = r.errors;
+    expect(error!.path).toBe(parent);
+    expect(error!.message).toMatch(PRINTABLE);
+    expect(error!.message).not.toContain('pwn');
+    expect(error!.message).not.toContain('gnp');
+  });
+
+  it('reports a short printable member name in the path only', () => {
+    const r = validateManifest(withMember('extraMember', 1));
+    expect(r.ok ? 'ok' : { path: r.errors[0]!.path, message: r.errors[0]!.message }).toEqual({
+      path: '/extraMember',
+      message: 'ray.json fails its JSON Schema (additionalProperties)',
+    });
+  });
+
+  it('a long member name gives a result that fits the result envelope', () => {
+    // 3,000 characters: under the old pointer cap, over the envelope's message limit.
+    const r = validateManifest(withMember(`k${'x'.repeat(2999)}`, 1));
+    expect(outcome(r)).toEqual({ code: 'RAY_MANIFEST_INVALID', reason: 'schema' });
+    if (r.ok) return;
+    const envelope = {
+      contractVersion: '1.0.0-draft.2',
+      ok: false,
+      operation: 'bundle.verify',
+      operationId: '00000000-0000-4000-8000-000000000000',
+      data: null,
+      errors: r.errors,
+      warnings: [],
+    };
+    const validate = schemaValidator('resultEnvelope');
+    expect(validate(envelope), JSON.stringify(validate.errors)).toBe(true);
   });
 });
 
@@ -203,6 +268,27 @@ describe('anything at all', () => {
       expect(r.ok).toBe(false);
       expect(outcome(r)).toEqual({ code: 'RAY_MANIFEST_INVALID', reason: 'invalid-json' });
     }
+  });
+
+  it.each(
+    Object.entries(VALIDATORS),
+  )('%s answers null options as no options, without throwing', (_n, validate) => {
+    const text = baseText;
+    const call = validate as (input: string, options: unknown) => unknown;
+    expect(() => call(text, null)).not.toThrow();
+    expect(call(text, null)).toEqual(call(text, {}));
+  });
+
+  it('reports an option that throws when read as an internal error', () => {
+    const options = {
+      get archiveSize(): number {
+        throw new Error('boom');
+      },
+    };
+    expect(outcome(validateManifest(baseText, options))).toEqual({
+      code: 'RAY_INTERNAL',
+      reason: undefined,
+    });
   });
 
   it.each(

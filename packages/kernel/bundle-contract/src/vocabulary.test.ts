@@ -2,6 +2,8 @@
  * The exported constants restate the committed contract vocabularies exactly, and the helpers
  * built on them follow the contract's rules.
  */
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ERROR_CODES,
@@ -13,7 +15,7 @@ import {
   WARNING_CODES,
 } from './errors.js';
 import { CONTRACT_SCHEMAS, schemaValidator } from './schemas.js';
-import { loadExpectations, readContractJson } from './test-support/contract-files.js';
+import { loadExpectations, PACKAGE_ROOT, readContractJson } from './test-support/contract-files.js';
 import {
   ALWAYS_EXCLUDED_DATA_CATEGORIES,
   BINDING_NAME_PATTERN,
@@ -24,8 +26,10 @@ import {
   EXECUTION_LEVELS,
   isReservedBindingName,
   PLATFORM_GRANTABLE_BINDINGS,
+  QUIESCE_BARRIERS,
   RESERVED_BINDING_NAMES,
   RESERVED_BINDING_PREFIXES,
+  RESULT_OPERATIONS,
   resolveReaderLimits,
   SUPPORTED_TARGETS,
   V1_EXECUTION_LEVELS,
@@ -150,6 +154,41 @@ describe('reserved bindings', () => {
     expect(isReservedBindingName('DATABASE_URL_2')).toBe(false);
     expect(isReservedBindingName('database_url')).toBe(false);
   });
+
+  it('reserves the provider and process settings an agent subprocess inherits', () => {
+    // The Anthropic adapter hands its whole environment to the agent CLI subprocess, so a bundle
+    // binding under these names would redirect provider traffic, and the key with it.
+    for (const name of [
+      'ANTHROPIC_BASE_URL',
+      'ANTHROPIC_AUTH_TOKEN',
+      'CLAUDE_CONFIG_DIR',
+      'CLAUDE_CODE_USE_BEDROCK',
+      'ALL_PROXY',
+      'BASH_ENV',
+      'GLIBC_TUNABLES',
+      'OPENSSL_CONF',
+      'SSL_CERT_FILE',
+      'SSL_CERT_DIR',
+    ]) {
+      expect(isReservedBindingName(name), name).toBe(true);
+    }
+    expect(isReservedBindingName('ANTHROPIC_API_KEY')).toBe(false);
+    expect(isReservedBindingName('CLAUDE_CODE_OAUTH_TOKEN')).toBe(false);
+    expect(isReservedBindingName('ANTHROPIC_API_KEY_FILE')).toBe(true);
+  });
+
+  it('every source a reserved name cites is a repository file or a contract document', () => {
+    const repoRoot = join(PACKAGE_ROOT, '..', '..', '..');
+    const lockFiles = readContractJson<Json>('CONTRACT-LOCK.json').files as Record<string, string>;
+    for (const entry of doc.reservedExact as Json[]) {
+      for (const part of String(entry.source).split('; ')) {
+        const cited = /^([^\s:]+):\d+(?:-\d+)?(?:,\d+)*$/.exec(part);
+        if (cited === null) continue;
+        const file = cited[1]!;
+        expect(existsSync(join(repoRoot, file)) || lockFiles[file] !== undefined, part).toBe(true);
+      }
+    }
+  });
 });
 
 describe('limits, targets, execution levels and data categories', () => {
@@ -190,6 +229,16 @@ describe('limits, targets, execution levels and data categories', () => {
     expect(ALWAYS_EXCLUDED_DATA_CATEGORIES).toEqual(
       categories.filter((c: Json) => c.default === 'excluded').map((c: Json) => c.id),
     );
+  });
+
+  it('result operations and quiesce barriers equal the result envelope schema', () => {
+    const envelope = readContractJson<Json>('cli-verbs.json').envelopeSchema;
+    expect([...RESULT_OPERATIONS]).toEqual(envelope.properties.operation.enum);
+    const quiesce = envelope.allOf.find(
+      (a: Json) => a.if?.properties?.operation?.const === 'runtime.quiesce',
+    );
+    const data = quiesce.then.properties.data.oneOf[0];
+    expect([...QUIESCE_BARRIERS]).toEqual(data.properties.barriers.items.properties.barrier.enum);
   });
 
   it('every contract schema compiles under Ajv 2020 strict mode', () => {
