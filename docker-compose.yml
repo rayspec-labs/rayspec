@@ -5,7 +5,10 @@
 # Shadow DB must be empty/disposable — Atlas drops & recreates its contents on every diff.
 services:
   postgres:
-    image: postgres:16
+    # Pinned by digest: the same multi-platform index CI's service containers use (linux/amd64 and
+    # linux/arm64 among its platforms), so a local run and a CI run test against the same Postgres
+    # build. Move both pins together.
+    image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
     # container_name + host port default to rayspec-pg / 5433 (what every doc and test expects).
     # Override BOTH — together with COMPOSE_PROJECT_NAME (which namespaces the data volume) — to run a
     # second, fully isolated instance on the same machine. See docs/getting-started.md.

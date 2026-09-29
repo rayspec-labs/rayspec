@@ -36,7 +36,7 @@ name: CI
 
 on:
   push:
-    branches: [main, p0-foundations]
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -332,6 +332,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
+        # The same digest docker-compose.yml pins for local runs; move both together.
         image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
         env:
           POSTGRES_USER: rayspec
@@ -444,6 +445,7 @@ jobs:
     environment: live
     services:
       postgres:
+        # The same digest docker-compose.yml pins for local runs; move both together.
         image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
         env:
           POSTGRES_USER: rayspec
