@@ -16,7 +16,9 @@ product-specific arrives as the spec a deployer injects.
 
 RaySpec is a TypeScript/Node monorepo managed with pnpm and Turborepo.
 
-- **Node** `>=22`.
+- **Node** `>=22.21.0`. CI runs one exact patch of the 22 line, pinned in
+  `.github/workflows/ci.yml`; the floor is the first 22 release that implements
+  `NODE_USE_ENV_PROXY`, which the server's proxy handling relies on.
 - **pnpm** `10.12.4` — pinned via `packageManager` in `package.json`. Use
   [Corepack](https://nodejs.org/api/corepack.html) (`corepack enable`) so your
   pnpm matches the pin exactly.
@@ -49,7 +51,8 @@ Run these from the repo root:
 
 Some tests are database-backed and need a reachable Postgres (`pnpm db:up`
 provides one). A change should be green on `pnpm typecheck`, `pnpm lint`,
-`pnpm build`, `pnpm test`, and `pnpm gate` before it is proposed.
+`pnpm build`, `pnpm test`, and `pnpm gate` before it is proposed. What a run
+that leaves nothing out needs is under [A complete local test run](#a-complete-local-test-run).
 
 ### The structural gate
 
@@ -152,6 +155,49 @@ dependency.
   own backend's credential, so a box holding some of the four still skips the rest.
   `RAYSPEC_LIVE_BACKENDS` makes that a named failure instead of a green run; it does not
   supply the missing credential.
+
+### A complete local test run
+
+A fresh clone with no `.env` and no secrets exported runs the whole suite and the
+structural gate. It needs:
+
+- **Node** `>=22.21.0` and **pnpm** `10.12.4` (see [Toolchain](#toolchain)).
+- **Docker with Compose v2** for `pnpm db:up`. It starts Postgres 16 on
+  `localhost:5433`, pinned by digest to the image CI uses, and creates the `rayspec`
+  and `rayspec_shadow` databases. Nothing else may be listening on that port, or set
+  `RAYSPEC_PG_PORT` and adjust the URLs below.
+- **The two database URLs and the require flag in the environment**, because turbo
+  passes a test task only the variables `turbo.json` declares and `@rayspec/cli` and
+  the local-boot wrapper read no `.env`:
+
+  ```bash
+  pnpm install --frozen-lockfile
+  pnpm build
+  pnpm typecheck
+  pnpm lint
+  pnpm db:up
+  export RAYSPEC_REQUIRE_DB_TESTS=true
+  export DATABASE_URL=postgres://rayspec:rayspec@localhost:5433/rayspec
+  export SHADOW_DATABASE_URL=postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+  pnpm test
+  pnpm gate
+  pnpm db:down
+  ```
+
+- **No boot secrets.** The tests that boot a server generate a throwaway
+  `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` themselves. The one that
+  spawns an example's `dev-boot.mjs` passes an exported value through (CI exports
+  both) and generates only what is missing.
+- **`ffmpeg` on the `PATH`** for the media suites. Without it they skip; set
+  `RAYSPEC_REQUIRE_MEDIA_TESTS=true` to turn that skip into a failure.
+- **Time.** The test task runs one package at a time and takes a little over ten
+  minutes on a current laptop. `pnpm test` keeps going after a package fails, so the
+  summary at the end lists every failed package, and the command still exits
+  non-zero.
+
+The provider-backed live tests still skip: they need paid credentials and are
+opted into separately, as described above. Leave those credentials unset for a run
+that must not spend.
 
 ---
 

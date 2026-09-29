@@ -33,12 +33,14 @@
  * Arm (a) skips without DATABASE_URL; the ran-guard at the bottom hard-fails if a REQUIRED run skipped it.
  */
 import { type ChildProcess, spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -96,8 +98,38 @@ interface Booted {
   err(): string;
 }
 
+interface BootSecrets {
+  RAYSPEC_JWT_SIGNING_KEY: string;
+  RAYSPEC_API_KEY_PEPPER: string;
+}
+
+/**
+ * The two secrets the wrapper refuses to boot without. An ambient value is passed through: CI writes
+ * both into the job env, and this package's vitest config loads a repo-root .env into it. A PEM read
+ * from a .env line keeps its literal \n escapes, so real newlines are restored exactly as the wrapper
+ * does for the values it reads itself, or the boot fails closed on the key format. A secret absent
+ * from the environment is generated here as a throwaway value (the wrapper's own .env fallback would
+ * find nothing either), so a clean checkout with no .env and nothing exported still boots the wrapper
+ * instead of aborting on "required env var(s) missing".
+ */
+async function resolveBootSecrets(): Promise<BootSecrets> {
+  const ambientKey = process.env.RAYSPEC_JWT_SIGNING_KEY;
+  const ambientPepper = process.env.RAYSPEC_API_KEY_PEPPER;
+  let signingKey: string;
+  if (ambientKey) {
+    signingKey = ambientKey.replace(/\\n/g, '\n');
+  } else {
+    const { privateKey } = await generateKeyPair('RS256', { extractable: true });
+    signingKey = await exportPKCS8(privateKey);
+  }
+  return {
+    RAYSPEC_JWT_SIGNING_KEY: signingKey,
+    RAYSPEC_API_KEY_PEPPER: ambientPepper || randomBytes(48).toString('base64'),
+  };
+}
+
 /** Spawn a wrapper with an EXPLICIT env (the ambient one would carry a different DATABASE_URL). */
-function spawnWrapper(wrapper: string, dbUrl: string, port: number): Booted {
+function spawnWrapper(wrapper: string, dbUrl: string, port: number, secrets: BootSecrets): Booted {
   const child = spawn(process.execPath, [wrapper], {
     cwd: EXAMPLES,
     env: {
@@ -105,16 +137,7 @@ function spawnWrapper(wrapper: string, dbUrl: string, port: number): Booted {
       HOME: process.env.HOME ?? '',
       DATABASE_URL: dbUrl,
       PORT: String(port),
-      // The wrapper reads the two secrets from the repo-root .env only when they are UNSET, so an
-      // ambient value (CI writes the PEM into the job env) has to be passed through here. A PEM
-      // exported from a .env line keeps its literal \n escapes; restore real newlines exactly as the
-      // wrapper does for the values it reads itself, or the boot fails closed on the key format.
-      ...(process.env.RAYSPEC_JWT_SIGNING_KEY
-        ? { RAYSPEC_JWT_SIGNING_KEY: process.env.RAYSPEC_JWT_SIGNING_KEY.replace(/\\n/g, '\n') }
-        : {}),
-      ...(process.env.RAYSPEC_API_KEY_PEPPER
-        ? { RAYSPEC_API_KEY_PEPPER: process.env.RAYSPEC_API_KEY_PEPPER }
-        : {}),
+      ...secrets,
     },
   });
   let out = '';
@@ -178,6 +201,11 @@ async function reap(booted: Booted | undefined): Promise<void> {
 
 describe.skipIf(!baseUrl)('examples/*/dev-boot.mjs — a signal stops the wrapper', () => {
   const spawned: Booted[] = [];
+  let secrets: BootSecrets;
+
+  beforeAll(async () => {
+    secrets = await resolveBootSecrets();
+  });
 
   afterAll(async () => {
     for (const booted of spawned) await reap(booted);
@@ -195,7 +223,7 @@ describe.skipIf(!baseUrl)('examples/*/dev-boot.mjs — a signal stops the wrappe
     it(`boots, serves /health, and exits 0 within ${EXIT_BUDGET_MS} ms of ${signal}`, async () => {
       if (!baseUrl) return;
       const port = await freePort();
-      const booted = spawnWrapper(BOOTABLE_WRAPPER, withDbName(baseUrl, SUITE_DB), port);
+      const booted = spawnWrapper(BOOTABLE_WRAPPER, withDbName(baseUrl, SUITE_DB), port, secrets);
       spawned.push(booted);
 
       // Accept control: the wrapper still boots and serves. Without it a wrapper that failed to

@@ -18,8 +18,9 @@
  * `removeComments`, which would strip the TRUSTED-AUTHOR / UNTRUSTED notices out of the deployed code.
  *
  * `dist/package.json` is not belt-and-braces: `"type"` is what makes a `.js` file ESM. Node only falls
- * back to detecting module syntax in an ambiguous `.js` from 22.7 on, and this repository supports
- * `>=22`, so on 22.0-22.6 an undeclared `.js` would be read as CommonJS and fail on its first `export`.
+ * back to detecting module syntax in an ambiguous `.js` from 22.7 on, and the `engines` floor is only a
+ * warning, so on a 22.0-22.6 that installs anyway an undeclared `.js` would be read as CommonJS and fail
+ * on its first `export`.
  *
  * Run `node examples/expense-claim-coder/build.mjs` (`--out=<dir>` builds elsewhere), then boot
  * `dist/rayspec.yaml`. Needs the CLI built first (`pnpm build`).

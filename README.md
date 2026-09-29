@@ -81,7 +81,7 @@ in the platform — everything comes from the spec you inject.
 ### From npm (fastest)
 
 No clone and no build — [`npx`](https://docs.npmjs.com/cli/commands/npx) fetches the
-published CLI (`rayspec`; Node `>=22`). Scaffold a project, validate it, and preview
+published CLI (`rayspec`; Node `>=22.21.0`). Scaffold a project, validate it, and preview
 the deploy — none of which needs a database:
 
 ```bash
@@ -123,7 +123,7 @@ making an authenticated request — is in
 
 ### From source
 
-Prerequisites: Node `>=22`, pnpm `10.12.4`, and a Postgres you can reach
+Prerequisites: Node `>=22.21.0`, pnpm `10.12.4`, and a Postgres you can reach
 (`pnpm db:up` brings up a local one and needs Docker with Compose v2). No pnpm on
 your PATH? Prefix each command with `npx -y pnpm@10.12.4`. Run these from the repo
 root; `dist/index.js` is the `rayspec` CLI and `dist/serve.js` is the
