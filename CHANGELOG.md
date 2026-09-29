@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
   managed hosting receipt, as a proposed contract version `1.0.0-draft.2`. It commits the contract's
   JSON Schemas and vocabularies byte for byte under `contract/`, with `CONTRACT-LOCK.json` recording
-  the SHA-256 of every contract file and one digest over them; a test recomputes both. On top of
+  the SHA-256 of every contract file and one digest over them. A test recomputes that digest over
+  the recorded file map and the hash of every committed file; the contract's prose documents are
+  not committed, so they are covered only through the digest. On top of
   them it exports the TypeScript types of the manifest, the snapshot, the receipt, the result
   envelope and the runtime-control operations; the closed error vocabulary with each code's exit
   class and retryable flag; the capability ids, the reserved binding names, the reader limits and
@@ -28,12 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inventory, unique binding names, the migration inventory, the archive limit of the kind, unknown
   receipt capabilities). The first failure is returned as `errors[0]` with a code and reason from
   the closed vocabulary; hostile input — deep nesting, oversized documents, `__proto__` members,
-  floats, non-NFC strings, duplicate keys — is answered, never thrown. `checkRuntimeAdmission`
+  floats, non-NFC strings, duplicate keys, `null` options — is answered, never thrown. A message
+  never repeats a member name taken from the document; `path` names the member only while every
+  name on the way is at most 64 printable ASCII characters, so a terminal escape or a
+  bidirectional override in a name reaches neither field. `ray.json` is limited to 1 MiB,
+  `snapshot.json` and the receipt to 4 MiB each, which holds every document their schemas admit.
+  Reserved binding names include the `ANTHROPIC_` and `CLAUDE_` settings that the agent CLI
+  subprocess inherits, except the two platform-grantable credentials. `checkRuntimeAdmission`
   runs the runtime, target, capability and reserved-binding checks of a validated manifest.
-  The golden fixture corpus (128 byte-level cases and 41 document cases) is rebuilt from
+  The golden fixture corpus (133 byte-level cases and 41 document cases) is rebuilt from
   `contract/fixtures/EXPECTATIONS.json` by a generator and compared byte for byte; the tests run
-  every case whose outcome depends on the manifest, and check that every other case is committed,
-  matches its recorded digest and carries a vocabulary code. The archive reader that consumes the
+  every case whose outcome depends on the manifest, and check that every other case matches its
+  recorded digest and carries a vocabulary code. Every case is committed except one with 10,005
+  entries, which the tests generate. The archive reader that consumes the
   container cases is not part of this package yet.
   **Nothing uses the package yet**: the CLI and the server do not depend on it, so it is not in the
   publish set and nothing a deployment runs changes.
