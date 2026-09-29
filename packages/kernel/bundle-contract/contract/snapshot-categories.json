@@ -1,0 +1,253 @@
+{
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Every platform table mapped to a snapshot data category.",
+  "contractVersion": "1.0.0-draft.2",
+  "platformSchemaHead": "0011_tenant_event_bus",
+  "categories": [
+    {
+      "id": "identity-and-tenancy",
+      "default": "included",
+      "meaning": "Organizations, users and memberships. Exactly one organization in v1."
+    },
+    {
+      "id": "credential-state",
+      "default": "excluded",
+      "meaning": "Live credential state that the identity policy resets."
+    },
+    {
+      "id": "request-replay-state",
+      "default": "excluded",
+      "meaning": "Idempotency replay state bound to reset credentials."
+    },
+    {
+      "id": "run-history",
+      "default": "policy",
+      "meaning": "Agent and workflow run records; runHistoryPolicy chooses included or excluded."
+    },
+    {
+      "id": "security-audit-log",
+      "default": "excluded",
+      "meaning": "Authentication audit log of the source environment."
+    },
+    {
+      "id": "application-event-log",
+      "default": "included",
+      "meaning": "Tenant event bus streams and events; application data that consumers read by cursor."
+    },
+    {
+      "id": "platform-migration-ledger",
+      "default": "included",
+      "meaning": "Migration ledgers that define the schema head."
+    },
+    {
+      "id": "runtime-control-state",
+      "default": "excluded",
+      "meaning": "Fence, environment revision and apply receipts of the source runtime; the target starts its own."
+    },
+    {
+      "id": "product-store-data",
+      "default": "included",
+      "meaning": "Every table generated from the spec stores."
+    },
+    {
+      "id": "workflow-system-state",
+      "default": "included",
+      "meaning": "The whole workflow system database as a second dump."
+    },
+    {
+      "id": "blob-objects",
+      "default": "included",
+      "meaning": "Every blob, as logical bytes plus the stored file."
+    }
+  ],
+  "rules": [
+    "Excluded tables are dumped with their schema and without rows (pg_dump --exclude-table-data), so the target reaches the same schema head with those tables empty.",
+    "excludedDataCategories in snapshot.json lists every category whose rows were not exported: always credential-state, request-replay-state, security-audit-log and runtime-control-state, plus run-history when runHistoryPolicy is excluded.",
+    "Every product store table is product-store-data. A table in the application database that is neither listed here nor a product store of the embedded application blocks export with RAY_EXTERNAL_STATE_UNSUPPORTED reason unknown-table.",
+    "A platform migration that adds a table must add its row here in the same change; the export refuses an unmapped platform table.",
+    "The workflow system database is the database the source resolves from DBOS_SYSTEM_DATABASE_URL, or else <appdb>_dbos_sys derived from DATABASE_URL; the source resolves that name unconditionally (packages/app/server/src/composition-root.ts:1101-1105), but the database exists only once the durable executor has launched, which happens only when the deployment wires the durable worker (deployment.durableWorker true and agent backends supplied, composition-root.ts:2769). Export checks pg_database on that server under the fence: when the database exists it is dumped whole to payload/workflow-system.dump and snapshot.json says workflowSystemDatabase included; when it does not exist, snapshot.json says absent and carries no second dump."
+  ],
+  "tables": [
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "api_keys",
+      "category": "credential-state",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:133",
+      "schemaSource": "packages/kernel/db/src/schema.ts:154",
+      "note": "key_hash is an HMAC under the pepper (packages/kernel/db/src/schema.ts, api_keys docblock); a reissued pepper invalidates every row."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "auth_audit",
+      "category": "security-audit-log",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:148",
+      "schemaSource": "packages/kernel/db/src/schema.ts:186",
+      "note": "The source environment security log stays with the source; not an unbounded log dump into the target."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "conversation_items",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:57",
+      "schemaSource": "packages/kernel/db/src/schema.ts:394"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "idempotency_keys",
+      "category": "request-replay-state",
+      "createdAt": "packages/kernel/db/drizzle/0001_oidc_models.sql:28",
+      "schemaSource": "packages/kernel/db/src/schema.ts:244",
+      "note": "Replay snapshots bound to credentials that are reset; they never carry key plaintext (packages/compose/api-auth/src/routes/orgs.ts:368-370)."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "invites",
+      "category": "credential-state",
+      "createdAt": "packages/kernel/db/drizzle/0008_invites.sql:1",
+      "schemaSource": "packages/kernel/db/src/schema.ts:277",
+      "note": "token_hash is an HMAC under the pepper (packages/kernel/auth-core/src/invite.ts:28-31); a reissued pepper invalidates every row."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "journal_steps",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:34",
+      "schemaSource": "packages/kernel/db/src/schema.ts:308"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "memberships",
+      "category": "identity-and-tenancy",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:106",
+      "schemaSource": "packages/kernel/db/src/schema.ts:85"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "oidc_models",
+      "category": "credential-state",
+      "createdAt": "packages/kernel/db/drizzle/0001_oidc_models.sql:10",
+      "schemaSource": "packages/kernel/db/src/schema.ts:215",
+      "note": "OAuth grants, codes and tokens of the source issuer; meaningless under a reissued signing key."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "orgs",
+      "category": "identity-and-tenancy",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:86",
+      "schemaSource": "packages/kernel/db/src/schema.ts:42"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "run_events",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0004_run_events.sql:24",
+      "schemaSource": "packages/kernel/db/src/schema.ts:439"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "runs",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:70",
+      "schemaSource": "packages/kernel/db/src/schema.ts:538"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "sessions",
+      "category": "credential-state",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:118",
+      "schemaSource": "packages/kernel/db/src/schema.ts:115",
+      "note": "token_hash is an HMAC under the API-key pepper (packages/kernel/auth-core/src/session.ts:23-27); a reissued pepper invalidates every row."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "tenant_event_streams",
+      "category": "application-event-log",
+      "createdAt": "packages/kernel/db/drizzle/0011_tenant_event_bus.sql:31",
+      "schemaSource": "packages/kernel/db/src/schema.ts:487"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "tenant_events",
+      "category": "application-event-log",
+      "createdAt": "packages/kernel/db/drizzle/0011_tenant_event_bus.sql:38",
+      "schemaSource": "packages/kernel/db/src/schema.ts:514"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "users",
+      "category": "identity-and-tenancy",
+      "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:97",
+      "schemaSource": "packages/kernel/db/src/schema.ts:65",
+      "note": "argon2id password hashes stay inside the encrypted snapshot; preserved only through the audited identity adapter (packages/kernel/auth-core/src/password.ts:14-27)."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "workflow_artifacts",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0007_workflow_journal.sql:1",
+      "schemaSource": "packages/kernel/db/src/schema.ts:686"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "workflow_node_states",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0007_workflow_journal.sql:16",
+      "schemaSource": "packages/kernel/db/src/schema.ts:638"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "workflow_runs",
+      "category": "run-history",
+      "createdAt": "packages/kernel/db/drizzle/0007_workflow_journal.sql:37",
+      "schemaSource": "packages/kernel/db/src/schema.ts:592",
+      "note": "Excluding run history does not remove workflow inputs and outputs held in the workflow system database, which is always included."
+    },
+    {
+      "database": "application",
+      "schema": "drizzle",
+      "table": "__drizzle_migrations",
+      "category": "platform-migration-ledger",
+      "createdAt": "created by the drizzle migrator (packages/app/server/src/composition-root.ts:1597)",
+      "schemaSource": "drizzle-orm migrator default table"
+    }
+  ],
+  "workflowSystemDatabase": {
+    "category": "workflow-system-state",
+    "dumpPath": "payload/workflow-system.dump",
+    "policy": "included whole when the database exists at capture time"
+  },
+  "proposedTables": [
+    {
+      "purpose": "product migration ledger",
+      "category": "platform-migration-ledger",
+      "status": "proposed; name fixed by the change that adds it"
+    },
+    {
+      "purpose": "runtime control state: fence epoch, environment revision",
+      "category": "runtime-control-state",
+      "status": "proposed; name fixed by the change that adds it"
+    },
+    {
+      "purpose": "apply receipts and idempotency keys of runtime control",
+      "category": "runtime-control-state",
+      "status": "proposed; name fixed by the change that adds it"
+    }
+  ]
+}

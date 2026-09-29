@@ -1,0 +1,3683 @@
+{
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. CLI verb map, result envelope and exit codes. Codes and their exit classes are in error-codes.json.",
+  "contractVersion": "1.0.0-draft.2",
+  "output": {
+    "rule": "A new verb writes exactly one final JSON envelope to stdout, with or without --json; progress and logs go to stderr. An existing verb without --json keeps its current output byte for byte. An existing verb with --json writes the envelope with its legacy result object unchanged in data and adds the warning RAY_W_LEGACY_OUTPUT; its legacy string errors become errors with code RAY_CHECK_FAILED and the string as message, and its spec errors become SPEC_ codes.",
+    "secrets": "No output, log, error message or envelope field ever carries a secret value, a bindings-file value, an identity or key file content, or a path component known to be secret.",
+    "operationId": "A CLI verb generates a fresh random UUID v4 operationId per invocation, prints it on stderr and records it in any receipt. A runtime.<name> result echoes the operationId of its request, which the caller chose and reuses on retry (runtime-control.md \"Common shapes\").",
+    "interrupt": "On SIGINT or SIGTERM a verb stops at a safe point, leaves any fence it took in place, writes an envelope with RAY_INTERRUPTED and a recovery instruction, and exits 6."
+  },
+  "exitCodes": {
+    "reference": "error-codes.json exitCodes, exitPrecedence and exitRule",
+    "existingVerbs": "Existing verbs keep 0, 1 and 2 for every outcome they have today. An unexpected internal error, which exits 2 today (packages/app/cli/src/index.ts:597-611), exits 7 from this release. Codes 3 to 6 appear on an existing verb only for an outcome that verb does not have today, such as RAY_LOCK_TIMEOUT when the boot waits on the shared advisory lock."
+  },
+  "globalFlags": [
+    {
+      "flag": "--json",
+      "value": null,
+      "required": false,
+      "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+    },
+    {
+      "flag": "--help",
+      "value": null,
+      "required": false,
+      "description": "Verb help; exit 0."
+    }
+  ],
+  "deployDispatch": {
+    "rule": "rayspec deploy <path> selects the bundle path when the file starts with the ZIP signature 50 4B 03 04 or 50 4B 05 06, or when the path ends in .ray (ASCII case-insensitive). The check reads at most the first 4 bytes and runs before any configuration is loaded or any database connection is opened. A .ray path whose bytes are not a ZIP is refused with RAY_INVALID_ARCHIVE reason not-a-zip. Every other file takes the legacy YAML path.",
+    "legacyOrder": "The legacy YAML path validates the spec and signer key before applying the platform migration chain. This is a fix of today's order (the chain is applied at packages/app/server/src/composition-root.ts:1925 before the spec is parsed at :2041); a spec that fails validation now leaves the database untouched, and the exit code stays 1."
+  },
+  "readerPipeline": {
+    "governedBy": "01-RAY-BUNDLE.md \"Reader pipeline\" fixes the order of its numbered items 1 to 17 and the reason of each failure; this table repeats them as reader steps with the codes each can emit. Where a verb pipeline lists reader steps it runs them in this order, and on any disagreement 01-RAY-BUNDLE.md governs.",
+    "steps": [
+      {
+        "step": 1,
+        "name": "budget: transfer size against the operation limit",
+        "codes": [
+          "RAY_LIMIT_EXCEEDED"
+        ]
+      },
+      {
+        "step": 2,
+        "name": "end record",
+        "codes": [
+          "RAY_INVALID_ARCHIVE",
+          "RAY_LIMIT_EXCEEDED"
+        ]
+      },
+      {
+        "step": 3,
+        "name": "central records",
+        "codes": [
+          "RAY_INVALID_ARCHIVE",
+          "RAY_LIMIT_EXCEEDED"
+        ]
+      },
+      {
+        "step": 4,
+        "name": "name set",
+        "codes": [
+          "RAY_INVALID_ARCHIVE"
+        ]
+      },
+      {
+        "step": 5,
+        "name": "layout and local headers",
+        "codes": [
+          "RAY_INVALID_ARCHIVE"
+        ]
+      },
+      {
+        "step": 6,
+        "name": "manifest bytes",
+        "codes": [
+          "RAY_LIMIT_EXCEEDED",
+          "RAY_MANIFEST_INVALID"
+        ]
+      },
+      {
+        "step": 7,
+        "name": "manifest schema, then the archive limit of the kind",
+        "codes": [
+          "RAY_MANIFEST_INVALID",
+          "RAY_LIMIT_EXCEEDED"
+        ]
+      },
+      {
+        "step": 8,
+        "name": "manifest semantics",
+        "codes": [
+          "RAY_MANIFEST_INVALID"
+        ]
+      },
+      {
+        "step": 9,
+        "name": "archive against inventory",
+        "codes": [
+          "RAY_INVALID_ARCHIVE",
+          "RAY_DIGEST_MISMATCH",
+          "RAY_LIMIT_EXCEEDED"
+        ]
+      },
+      {
+        "step": 10,
+        "name": "runtime",
+        "codes": [
+          "RAY_RUNTIME_UNSUPPORTED"
+        ]
+      },
+      {
+        "step": 11,
+        "name": "target",
+        "codes": [
+          "RAY_TARGET_UNSUPPORTED"
+        ]
+      },
+      {
+        "step": 12,
+        "name": "capabilities",
+        "codes": [
+          "RAY_CAPABILITY_UNSUPPORTED"
+        ]
+      },
+      {
+        "step": 13,
+        "name": "reserved bindings",
+        "codes": [
+          "RAY_BINDING_RESERVED"
+        ]
+      },
+      {
+        "step": 14,
+        "name": "spec parse from the payload (SPEC_ codes follow RAY_SPEC_INVALID)",
+        "codes": [
+          "RAY_SPEC_INVALID"
+        ]
+      },
+      {
+        "step": 15,
+        "name": "derived fields (requires, execution, egress) re-derived and compared",
+        "codes": [
+          "RAY_MANIFEST_INVALID"
+        ]
+      },
+      {
+        "step": 16,
+        "name": "secret scan",
+        "codes": [
+          "RAY_SECRET_DETECTED"
+        ]
+      },
+      {
+        "step": 17,
+        "name": "signature, when one is given or required",
+        "codes": [
+          "RAY_SIGNATURE_INVALID"
+        ]
+      }
+    ]
+  },
+  "pipelineRule": "Every code a verb pipeline step can emit is in that verb errors list. RAY_USAGE, RAY_INTERRUPTED and RAY_INTERNAL can occur at any step.",
+  "verbs": [
+    {
+      "verb": "rayspec pack",
+      "operation": "pack",
+      "status": "new",
+      "summary": "Build the closure, manifest and deterministic application archive from already-built artifacts. Never executes application code, never includes customer data or secret values.",
+      "positionals": [],
+      "flags": [
+        {
+          "flag": "--spec",
+          "value": "<path>",
+          "required": true,
+          "description": "The spec file (either profile)."
+        },
+        {
+          "flag": "--output",
+          "value": "<file.ray>",
+          "required": true,
+          "description": "Output path. Written atomically (temporary file in the same directory, fsync, rename)."
+        },
+        {
+          "flag": "--id",
+          "value": "<application-id>",
+          "required": false,
+          "description": "Overrides metadata.id from the spec."
+        },
+        {
+          "flag": "--version",
+          "value": "<semver>",
+          "required": false,
+          "description": "Overrides metadata.version from the spec. Never derived from the runtime version."
+        },
+        {
+          "flag": "--runtime",
+          "value": "<exact-version>",
+          "required": false,
+          "description": "The runtime the bundle pins.",
+          "default": "the version of the running CLI"
+        },
+        {
+          "flag": "--include",
+          "value": "<path>",
+          "required": false,
+          "description": "An extra file or directory relative to the spec directory, added to the inclusion list and shown in the preview.",
+          "repeatable": true
+        },
+        {
+          "flag": "--against",
+          "value": "<old-spec>",
+          "required": false,
+          "description": "Generate the product delta against this previous spec, as rayspec plan does, and carry it with the allowlist."
+        },
+        {
+          "flag": "--allowlist",
+          "value": "<file.json>",
+          "required": false,
+          "description": "Reviewed destructive-statement allowlist carried with the delta."
+        },
+        {
+          "flag": "--source-maps",
+          "value": null,
+          "required": false,
+          "description": "Include source maps; they are scanned like every other file."
+        },
+        {
+          "flag": "--preview",
+          "value": null,
+          "required": false,
+          "description": "Print the inclusion list and manifest without writing the archive."
+        },
+        {
+          "flag": "--force",
+          "value": null,
+          "required": false,
+          "description": "Overwrite an existing output file."
+        },
+        {
+          "flag": "--build",
+          "value": null,
+          "required": false,
+          "description": "Run the build in a disposable sandbox without production credentials. Until a sandboxed build ships, the flag is refused with RAY_USAGE and is not listed in help."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "pipeline": [
+        {
+          "step": "arguments",
+          "codes": [
+            "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "spec parse (SPEC_ codes)",
+          "codes": [
+            "RAY_SPEC_INVALID"
+          ]
+        },
+        {
+          "step": "application identity",
+          "codes": [
+            "RAY_APPLICATION_IDENTITY_MISSING"
+          ]
+        },
+        {
+          "step": "closure resolution",
+          "codes": [
+            "RAY_CLOSURE_INVALID",
+            "RAY_RUNTIME_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "secret scan",
+          "codes": [
+            "RAY_SECRET_DETECTED"
+          ]
+        },
+        {
+          "step": "manifest build and schema check",
+          "codes": [
+            "RAY_BINDING_RESERVED",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "archive write",
+          "codes": [
+            "RAY_OUTPUT_EXISTS",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "read back through the reader, steps 1 to 9; a failure here is a writer defect",
+          "codes": [
+            "RAY_INTERNAL"
+          ]
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_SPEC_INVALID",
+        "RAY_APPLICATION_IDENTITY_MISSING",
+        "RAY_CLOSURE_INVALID",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_SECRET_DETECTED",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_OUTPUT_EXISTS",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec bundle inspect <file.ray>",
+      "operation": "bundle.inspect",
+      "status": "new",
+      "summary": "Bounded passive inspection. No code execution, no SQL, no runtime start, no decryption.",
+      "positionals": [
+        "<file.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "pipeline": [
+        {
+          "step": "reader step 1: budget: transfer size against the operation limit",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 2: end record",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 3: central records",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 4: name set",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 5: layout and local headers",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 6: manifest bytes",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED",
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 7: manifest schema, then the archive limit of the kind",
+          "codes": [
+            "RAY_MANIFEST_INVALID",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 8: manifest semantics",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 9: archive against inventory",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_DIGEST_MISMATCH",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "signature presence",
+          "codes": []
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_INTERNAL"
+      ],
+      "verdictRule": "ok true with verdict structurally-valid when the container, manifest and inventory checks pass; runtime, target and capability checks are not run. A structural failure is ok false with verdict invalid."
+    },
+    {
+      "verb": "rayspec bundle verify <file.ray>",
+      "operation": "bundle.verify",
+      "status": "new",
+      "summary": "Integrity, schema, semantic, target, runtime and capability validation against an exact runtime. Unknown capability refused.",
+      "positionals": [
+        "<file.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--runtime",
+          "value": "<exact-version>",
+          "required": false,
+          "description": "The runtime to verify against.",
+          "default": "the version of the running CLI"
+        },
+        {
+          "flag": "--signature",
+          "value": "<file.ray.sig>",
+          "required": false,
+          "description": "Detached signature to verify.",
+          "default": "<file.ray>.sig when present"
+        },
+        {
+          "flag": "--trusted-key",
+          "value": "<ed25519-public-key.pem>",
+          "required": false,
+          "description": "A trusted signer public key.",
+          "repeatable": true
+        },
+        {
+          "flag": "--require-signature",
+          "value": null,
+          "required": false,
+          "description": "Refuse an unsigned bundle with RAY_SIGNATURE_INVALID reason malformed."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "pipeline": [
+        {
+          "step": "reader step 1: budget: transfer size against the operation limit",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 2: end record",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 3: central records",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 4: name set",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 5: layout and local headers",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 6: manifest bytes",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED",
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 7: manifest schema, then the archive limit of the kind",
+          "codes": [
+            "RAY_MANIFEST_INVALID",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 8: manifest semantics",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 9: archive against inventory",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_DIGEST_MISMATCH",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 10: runtime",
+          "codes": [
+            "RAY_RUNTIME_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 11: target",
+          "codes": [
+            "RAY_TARGET_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 12: capabilities",
+          "codes": [
+            "RAY_CAPABILITY_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 13: reserved bindings",
+          "codes": [
+            "RAY_BINDING_RESERVED"
+          ]
+        },
+        {
+          "step": "reader step 14: spec parse from the payload (SPEC_ codes follow RAY_SPEC_INVALID)",
+          "codes": [
+            "RAY_SPEC_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 15: derived fields (requires, execution, egress) re-derived and compared",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 16: secret scan",
+          "codes": [
+            "RAY_SECRET_DETECTED"
+          ]
+        },
+        {
+          "step": "reader step 17: signature, when one is given or required",
+          "codes": [
+            "RAY_SIGNATURE_INVALID"
+          ]
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_SPEC_INVALID",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_TARGET_UNSUPPORTED",
+        "RAY_CAPABILITY_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_SECRET_DETECTED",
+        "RAY_SIGNATURE_INVALID",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec bundle sign <file.ray>",
+      "operation": "bundle.sign",
+      "status": "new",
+      "summary": "Write a detached Ed25519 provenance signature over \"rayspec-ray-v1\\nsha256:<archive hex>\\n\". Establishes origin only.",
+      "positionals": [
+        "<file.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--key-file",
+          "value": "<ed25519-private-key.pem>",
+          "required": true,
+          "description": "PKCS#8 PEM private key; must pass the protected-file checks."
+        },
+        {
+          "flag": "--output",
+          "value": "<file.ray.sig>",
+          "required": false,
+          "description": "Signature output path.",
+          "default": "<file.ray>.sig"
+        },
+        {
+          "flag": "--force",
+          "value": null,
+          "required": false,
+          "description": "Overwrite an existing signature file."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_OUTPUT_EXISTS",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec deploy <file.ray> --dry-run",
+      "operation": "deploy.dry-run",
+      "status": "new",
+      "summary": "Plan only. Same reader as Cloud. No bundled code executed, no SQL mutation, no DDL, no migration chain applied.",
+      "positionals": [
+        "<file.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--dry-run",
+          "value": null,
+          "required": true,
+          "description": "Plan only."
+        },
+        {
+          "flag": "--bindings-file",
+          "value": "<protected-file>",
+          "required": false,
+          "description": "Bindings to check for satisfaction; values are never printed."
+        },
+        {
+          "flag": "--state-dir",
+          "value": "<dir>",
+          "required": false,
+          "description": "Deployment state directory (02-CLI-AND-RUNTIME.md \"Deployment state directory\"): mode 0700, owned by the invoking user, holding exactly one deployment.",
+          "default": ".rayspec-state"
+        },
+        {
+          "flag": "--trusted-key",
+          "value": "<ed25519-public-key.pem>",
+          "required": false,
+          "description": "A trusted signer public key.",
+          "repeatable": true
+        },
+        {
+          "flag": "--require-signature",
+          "value": null,
+          "required": false,
+          "description": "Refuse an unsigned bundle with RAY_SIGNATURE_INVALID reason malformed."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "pipeline": [
+        {
+          "step": "dispatch on the first 4 bytes",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "protected files: bindings file, trusted keys, state directory",
+          "codes": [
+            "RAY_BINDINGS_FILE_INSECURE",
+            "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "reader step 1: budget: transfer size against the operation limit",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 2: end record",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 3: central records",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 4: name set",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 5: layout and local headers",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 6: manifest bytes",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED",
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 7: manifest schema, then the archive limit of the kind",
+          "codes": [
+            "RAY_MANIFEST_INVALID",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 8: manifest semantics",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 9: archive against inventory",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_DIGEST_MISMATCH",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 10: runtime",
+          "codes": [
+            "RAY_RUNTIME_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 11: target",
+          "codes": [
+            "RAY_TARGET_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 12: capabilities",
+          "codes": [
+            "RAY_CAPABILITY_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 13: reserved bindings",
+          "codes": [
+            "RAY_BINDING_RESERVED"
+          ]
+        },
+        {
+          "step": "reader step 14: spec parse from the payload (SPEC_ codes follow RAY_SPEC_INVALID)",
+          "codes": [
+            "RAY_SPEC_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 15: derived fields (requires, execution, egress) re-derived and compared",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 16: secret scan",
+          "codes": [
+            "RAY_SECRET_DETECTED"
+          ]
+        },
+        {
+          "step": "reader step 17: signature, when one is given or required",
+          "codes": [
+            "RAY_SIGNATURE_INVALID"
+          ]
+        },
+        {
+          "step": "bindings file names",
+          "codes": [
+            "RAY_BINDING_RESERVED"
+          ]
+        },
+        {
+          "step": "prepare: live schema head, regenerated product delta and plan; findings are plan blockers",
+          "codes": [
+            "RAY_SCHEMA_DRIFT",
+            "RAY_MIGRATION_REQUIRED",
+            "RAY_MIGRATION_MISMATCH",
+            "RAY_INFRA_UNAVAILABLE"
+          ]
+        },
+        {
+          "step": "write the plan record to <state-dir>/plans/<planDigest>.json; nothing else is written and no SQL runs",
+          "codes": [
+            "RAY_INFRA_UNAVAILABLE"
+          ]
+        }
+      ],
+      "planRule": "The plan record holds the canonical digest input of runtime-control.md \"Plan digest inputs\" (revision ids, never values). deploy --plan-digest loads it, checks that its SHA-256 equals the digest, and passes its members to apply().",
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_SPEC_INVALID",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_TARGET_UNSUPPORTED",
+        "RAY_CAPABILITY_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_SECRET_DETECTED",
+        "RAY_SIGNATURE_INVALID",
+        "RAY_MIGRATION_REQUIRED",
+        "RAY_MIGRATION_MISMATCH",
+        "RAY_SCHEMA_DRIFT",
+        "RAY_INFRA_UNAVAILABLE",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec deploy <file.ray>",
+      "operation": "deploy",
+      "status": "new",
+      "summary": "Deploy a bundle on an explicitly configured local or self-hosted target and serve it. Stages into a fresh immutable version directory; never overwrites a live deployment. The legacy YAML deploy remains supported.",
+      "positionals": [
+        "<file.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--bindings-file",
+          "value": "<protected-file>",
+          "required": false,
+          "description": "Application bindings. Contents are never printed or logged."
+        },
+        {
+          "flag": "--plan-digest",
+          "value": "<sha256>",
+          "required": false,
+          "description": "Required when the plan has schema impact or permission changes: the planDigest printed by --dry-run, whose plan record is read from the state directory. A missing record, a different digest or an expired plan is refused with RAY_PLAN_STALE."
+        },
+        {
+          "flag": "--state-dir",
+          "value": "<dir>",
+          "required": false,
+          "description": "Deployment state directory (02-CLI-AND-RUNTIME.md \"Deployment state directory\"): mode 0700, owned by the invoking user, holding exactly one deployment.",
+          "default": ".rayspec-state"
+        },
+        {
+          "flag": "--port",
+          "value": "<n>",
+          "required": false,
+          "description": "Listen port."
+        },
+        {
+          "flag": "--host",
+          "value": "<addr>",
+          "required": false,
+          "description": "Listen address."
+        },
+        {
+          "flag": "--trusted-key",
+          "value": "<ed25519-public-key.pem>",
+          "required": false,
+          "description": "A trusted signer public key.",
+          "repeatable": true
+        },
+        {
+          "flag": "--require-signature",
+          "value": null,
+          "required": false,
+          "description": "Refuse an unsigned bundle."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "pipeline": [
+        {
+          "step": "dispatch on the first 4 bytes",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "protected files: bindings file, trusted keys, state directory",
+          "codes": [
+            "RAY_BINDINGS_FILE_INSECURE",
+            "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "reader step 1: budget: transfer size against the operation limit",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 2: end record",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 3: central records",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 4: name set",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 5: layout and local headers",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 6: manifest bytes",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED",
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 7: manifest schema, then the archive limit of the kind",
+          "codes": [
+            "RAY_MANIFEST_INVALID",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 8: manifest semantics",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 9: archive against inventory",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_DIGEST_MISMATCH",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 10: runtime",
+          "codes": [
+            "RAY_RUNTIME_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 11: target",
+          "codes": [
+            "RAY_TARGET_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 12: capabilities",
+          "codes": [
+            "RAY_CAPABILITY_UNSUPPORTED"
+          ]
+        },
+        {
+          "step": "reader step 13: reserved bindings",
+          "codes": [
+            "RAY_BINDING_RESERVED"
+          ]
+        },
+        {
+          "step": "reader step 14: spec parse from the payload (SPEC_ codes follow RAY_SPEC_INVALID)",
+          "codes": [
+            "RAY_SPEC_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 15: derived fields (requires, execution, egress) re-derived and compared",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 16: secret scan",
+          "codes": [
+            "RAY_SECRET_DETECTED"
+          ]
+        },
+        {
+          "step": "reader step 17: signature, when one is given or required",
+          "codes": [
+            "RAY_SIGNATURE_INVALID"
+          ]
+        },
+        {
+          "step": "bindings file names",
+          "codes": [
+            "RAY_BINDING_RESERVED"
+          ]
+        },
+        {
+          "step": "prepare: live schema head, regenerated product delta and plan; findings are plan blockers",
+          "codes": [
+            "RAY_SCHEMA_DRIFT",
+            "RAY_MIGRATION_REQUIRED",
+            "RAY_MIGRATION_MISMATCH",
+            "RAY_INFRA_UNAVAILABLE"
+          ]
+        },
+        {
+          "step": "plan acceptance: with schema impact or permission changes, the plan record named by --plan-digest must exist and match",
+          "codes": [
+            "RAY_PLAN_STALE"
+          ]
+        },
+        {
+          "step": "required bindings satisfied",
+          "codes": [
+            "RAY_BINDING_MISSING"
+          ]
+        },
+        {
+          "step": "apply() in the order of runtime-control.md: idempotency, freshness and revision, blockers, fence, shared advisory lock, steps with receipts",
+          "codes": [
+            "RAY_PLAN_STALE",
+            "RAY_POLICY_DENIED",
+            "RAY_LOCK_TIMEOUT",
+            "RAY_RECONCILIATION_REQUIRED",
+            "RAY_INFRA_UNAVAILABLE"
+          ]
+        },
+        {
+          "step": "serve",
+          "codes": []
+        }
+      ],
+      "orderRule": "No database connection is opened and no configuration is loaded until the archive, manifest, spec, bindings and signer key have validated. No database mutation happens until the plan is accepted. The shared advisory lock is held for every schema mutation.",
+      "jsonRule": "With --json, stdout carries exactly one envelope, written when the process refuses or stops; banners and logs go to stderr.",
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_SPEC_INVALID",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_TARGET_UNSUPPORTED",
+        "RAY_CAPABILITY_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_BINDING_MISSING",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_SECRET_DETECTED",
+        "RAY_SIGNATURE_INVALID",
+        "RAY_POLICY_DENIED",
+        "RAY_MIGRATION_REQUIRED",
+        "RAY_MIGRATION_MISMATCH",
+        "RAY_SCHEMA_DRIFT",
+        "RAY_PLAN_STALE",
+        "RAY_LOCK_TIMEOUT",
+        "RAY_INFRA_UNAVAILABLE",
+        "RAY_RECONCILIATION_REQUIRED",
+        "RAY_INTERRUPTED",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec export",
+      "operation": "export",
+      "status": "new",
+      "summary": "Preflight, quiesce under operator confirmation, and write an encrypted complete snapshot as a migration .ray. Never writes plaintext output. Leaves the source fenced.",
+      "positionals": [],
+      "flags": [
+        {
+          "flag": "--deployment",
+          "value": "<id>",
+          "required": true,
+          "description": "The deploymentId in <state-dir>/deployment.json; it must also equal the id in the runtime-control state of the database named by the explicit environment, else RAY_USAGE."
+        },
+        {
+          "flag": "--state-dir",
+          "value": "<dir>",
+          "required": false,
+          "description": "Deployment state directory (02-CLI-AND-RUNTIME.md \"Deployment state directory\"): mode 0700, owned by the invoking user, holding exactly one deployment.",
+          "default": ".rayspec-state"
+        },
+        {
+          "flag": "--recipient",
+          "value": "<age-x25519-recipient>",
+          "required": true,
+          "description": "The age X25519 public recipient (age1...). Only the owner of the matching identity can decrypt."
+        },
+        {
+          "flag": "--output",
+          "value": "<migration.ray>",
+          "required": true,
+          "description": "Output path; refused if it exists."
+        },
+        {
+          "flag": "--run-history",
+          "value": "<included|excluded>",
+          "required": true,
+          "description": "Run history export policy. There is no default."
+        },
+        {
+          "flag": "--confirm-quiesce",
+          "value": null,
+          "required": false,
+          "description": "Operator confirmation that the source will be fenced. Required with --json or without a terminal; otherwise asked interactively."
+        },
+        {
+          "flag": "--quiesce-deadline",
+          "value": "<seconds>",
+          "required": false,
+          "description": "Quiesce deadline.",
+          "default": "300"
+        },
+        {
+          "flag": "--source-stopped",
+          "value": null,
+          "required": false,
+          "description": "Operator attestation that every runtime process of the deployment is stopped. Required when database role separation is not enabled, because the database write barrier is then held only by this attestation; export checks that no other session is connected to either database."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_OUTPUT_EXISTS",
+        "RAY_MULTI_TENANT_UNSUPPORTED",
+        "RAY_OWNER_RECOVERY_REQUIRED",
+        "RAY_EXTERNAL_STATE_UNSUPPORTED",
+        "RAY_SCHEMA_DRIFT",
+        "RAY_SOURCE_NOT_QUIESCENT",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_LOCK_TIMEOUT",
+        "RAY_INFRA_UNAVAILABLE",
+        "RAY_INTERRUPTED",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec import <migration.ray> --dry-run",
+      "operation": "import.dry-run",
+      "status": "new",
+      "summary": "Passive eligibility plan: decrypts and validates in a scratch area, restores nothing, runs no hooks.",
+      "positionals": [
+        "<migration.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--target",
+          "value": "<state-dir>",
+          "required": true,
+          "description": "State directory of a new, empty target deployment. Its database and blob root come from the explicit environment."
+        },
+        {
+          "flag": "--identity-file",
+          "value": "<protected-key-file>",
+          "required": true,
+          "description": "age X25519 identity file; must pass the protected-file checks."
+        },
+        {
+          "flag": "--dry-run",
+          "value": null,
+          "required": true,
+          "description": "Plan only."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_DECRYPTION_FAILED",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_TARGET_UNSUPPORTED",
+        "RAY_TARGET_NOT_EMPTY",
+        "RAY_MULTI_TENANT_UNSUPPORTED",
+        "RAY_INFRA_UNAVAILABLE",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec import <migration.ray>",
+      "operation": "import",
+      "status": "new",
+      "summary": "Explicit restore into an isolated empty target with the exact source runtime, verification and credential reset. No in-place merge. Ends in ready-for-cutover; the target does not accept traffic until cutover.",
+      "positionals": [
+        "<migration.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--target",
+          "value": "<state-dir>",
+          "required": true,
+          "description": "State directory of a new, empty target deployment."
+        },
+        {
+          "flag": "--identity-file",
+          "value": "<protected-key-file>",
+          "required": true,
+          "description": "age X25519 identity file."
+        },
+        {
+          "flag": "--bindings-file",
+          "value": "<protected-file>",
+          "required": false,
+          "description": "Target application bindings."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_DECRYPTION_FAILED",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_TARGET_UNSUPPORTED",
+        "RAY_TARGET_NOT_EMPTY",
+        "RAY_MULTI_TENANT_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_BINDING_MISSING",
+        "RAY_POLICY_DENIED",
+        "RAY_LOCK_TIMEOUT",
+        "RAY_INFRA_UNAVAILABLE",
+        "RAY_RECONCILIATION_REQUIRED",
+        "RAY_INTERRUPTED",
+        "RAY_INTERNAL"
+      ]
+    },
+    {
+      "verb": "rayspec resume",
+      "operation": "resume",
+      "status": "new",
+      "summary": "Release the source fence taken by export, only for the matching epoch. The recovery instruction printed by an interrupted or failed export names this command.",
+      "positionals": [],
+      "flags": [
+        {
+          "flag": "--deployment",
+          "value": "<id>",
+          "required": true,
+          "description": "The fenced deployment; checked as for export."
+        },
+        {
+          "flag": "--state-dir",
+          "value": "<dir>",
+          "required": false,
+          "description": "Deployment state directory (02-CLI-AND-RUNTIME.md \"Deployment state directory\"): mode 0700, owned by the invoking user, holding exactly one deployment.",
+          "default": ".rayspec-state"
+        },
+        {
+          "flag": "--fence-epoch",
+          "value": "<n>",
+          "required": true,
+          "description": "The epoch returned by quiesce."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_FENCE_MISMATCH",
+        "RAY_INFRA_UNAVAILABLE",
+        "RAY_INTERNAL"
+      ]
+    }
+  ],
+  "existingVerbs": [
+    {
+      "verb": "rayspec init [dir] [--force]",
+      "operation": "init",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false (an existing spec without --force); 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec doctor <spec.yaml>",
+      "operation": "doctor",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false; 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec plan <spec.yaml> [--against <old-spec>] [--allowlist <file.json>]",
+      "operation": "plan",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false (including a blocked destructive delta); 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec openapi <spec.yaml>",
+      "operation": "openapi",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false; 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec gen-handler --holes <holes.json> --out <dir>",
+      "operation": "gen-handler",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false (malformed hole set); 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec deploy <spec.yaml> [...]",
+      "operation": "deploy.legacy",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 serving, or --dry-run/--check-env ok; 1 --dry-run/--check-env ok false, or boot refused (packages/app/cli/src/deploy.ts:656,800); 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec tenant ensure --org-id <uuid> --name <n> [...]",
+      "operation": "tenant.ensure",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false (operational failure); 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec dev gen-secrets [--out <path>]",
+      "operation": "dev.gen-secrets",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false; 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec dev db [...]",
+      "operation": "dev.db",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false; 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec dev bootstrap-tenant --base-url <url> [...]",
+      "operation": "dev.bootstrap-tenant",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0 ok; 1 ok false; 2 usage",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec --version",
+      "operation": "version",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec --help",
+      "operation": "help",
+      "status": "existing",
+      "json": "accepted from this release",
+      "exitToday": "0; 2 on trailing tokens",
+      "source": "packages/app/cli/src/index.ts:429-523"
+    },
+    {
+      "verb": "rayspec-serve",
+      "operation": null,
+      "status": "existing",
+      "json": "not applicable; no change",
+      "exitToday": "unchanged"
+    }
+  ],
+  "envelopeSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:rayspec:cli-envelope:v1",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "contractVersion": {
+        "const": "1.0.0-draft.2"
+      },
+      "ok": {
+        "type": "boolean"
+      },
+      "operation": {
+        "enum": [
+          "pack",
+          "bundle.inspect",
+          "bundle.verify",
+          "bundle.sign",
+          "deploy.dry-run",
+          "deploy",
+          "export",
+          "import.dry-run",
+          "import",
+          "resume",
+          "runtime.inspect",
+          "runtime.prepare",
+          "runtime.quiesce",
+          "runtime.snapshot",
+          "runtime.apply",
+          "runtime.health",
+          "runtime.resume",
+          "init",
+          "doctor",
+          "plan",
+          "openapi",
+          "gen-handler",
+          "deploy.legacy",
+          "tenant.ensure",
+          "dev.gen-secrets",
+          "dev.db",
+          "dev.bootstrap-tenant",
+          "version",
+          "help"
+        ]
+      },
+      "operationId": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+      },
+      "data": {},
+      "errors": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/error"
+        },
+        "maxItems": 1000
+      },
+      "warnings": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/warning"
+        },
+        "maxItems": 1000
+      }
+    },
+    "required": [
+      "contractVersion",
+      "ok",
+      "operation",
+      "operationId",
+      "data",
+      "errors",
+      "warnings"
+    ],
+    "allOf": [
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "pack"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "outputPath": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "preview": {
+                      "type": "boolean"
+                    },
+                    "sha256": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "size": {
+                      "oneOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "applicationId": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                    },
+                    "applicationVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "runtimeVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "target": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "os": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9]{0,15}$"
+                        },
+                        "arch": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_]{0,15}$"
+                        },
+                        "nodeMajor": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 999
+                        }
+                      },
+                      "required": [
+                        "os",
+                        "arch",
+                        "nodeMajor"
+                      ]
+                    },
+                    "requires": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+                      },
+                      "uniqueItems": true
+                    },
+                    "bindings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                          },
+                          "kind": {
+                            "enum": [
+                              "secret",
+                              "config"
+                            ]
+                          },
+                          "required": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "kind",
+                          "required"
+                        ]
+                      }
+                    },
+                    "execution": {
+                      "enum": [
+                        "none",
+                        "in-process",
+                        "sandboxed"
+                      ]
+                    },
+                    "egressHosts": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 253
+                      },
+                      "uniqueItems": true
+                    },
+                    "inclusion": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "path": {
+                            "type": "string",
+                            "maxLength": 4096
+                          },
+                          "size": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "sha256": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "source": {
+                            "type": "string",
+                            "maxLength": 4096
+                          }
+                        },
+                        "required": [
+                          "path",
+                          "size",
+                          "sha256",
+                          "source"
+                        ]
+                      },
+                      "maxItems": 9999
+                    }
+                  },
+                  "required": [
+                    "outputPath",
+                    "preview",
+                    "sha256",
+                    "size",
+                    "applicationId",
+                    "applicationVersion",
+                    "runtimeVersion",
+                    "target",
+                    "requires",
+                    "bindings",
+                    "execution",
+                    "egressHosts",
+                    "inclusion"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "bundle.inspect"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "size": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "entries": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "kind": {
+                      "enum": [
+                        "application",
+                        "migration"
+                      ]
+                    },
+                    "applicationId": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                    },
+                    "applicationVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "runtimeVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "target": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "os": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9]{0,15}$"
+                        },
+                        "arch": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_]{0,15}$"
+                        },
+                        "nodeMajor": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 999
+                        }
+                      },
+                      "required": [
+                        "os",
+                        "arch",
+                        "nodeMajor"
+                      ]
+                    },
+                    "requires": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+                      },
+                      "uniqueItems": true
+                    },
+                    "bindings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                          },
+                          "kind": {
+                            "enum": [
+                              "secret",
+                              "config"
+                            ]
+                          },
+                          "required": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "kind",
+                          "required"
+                        ]
+                      }
+                    },
+                    "execution": {
+                      "enum": [
+                        "none",
+                        "in-process",
+                        "sandboxed",
+                        null
+                      ]
+                    },
+                    "egressHosts": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 253
+                      },
+                      "uniqueItems": true
+                    },
+                    "signature": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "present": {
+                          "type": "boolean"
+                        },
+                        "verified": {
+                          "type": "boolean"
+                        },
+                        "publicKeySha256": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "present",
+                        "verified",
+                        "publicKeySha256"
+                      ]
+                    },
+                    "verdict": {
+                      "enum": [
+                        "structurally-valid",
+                        "invalid"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "sha256",
+                    "size",
+                    "entries",
+                    "kind",
+                    "applicationId",
+                    "applicationVersion",
+                    "runtimeVersion",
+                    "target",
+                    "requires",
+                    "bindings",
+                    "execution",
+                    "egressHosts",
+                    "signature",
+                    "verdict"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "bundle.verify"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "kind": {
+                      "enum": [
+                        "application",
+                        "migration"
+                      ]
+                    },
+                    "applicationId": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                    },
+                    "applicationVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "runtimeVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "checkedAgainstRuntime": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "signature": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "present": {
+                          "type": "boolean"
+                        },
+                        "verified": {
+                          "type": "boolean"
+                        },
+                        "publicKeySha256": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "present",
+                        "verified",
+                        "publicKeySha256"
+                      ]
+                    },
+                    "verdict": {
+                      "enum": [
+                        "deployable",
+                        "not-deployable"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "sha256",
+                    "kind",
+                    "applicationId",
+                    "applicationVersion",
+                    "runtimeVersion",
+                    "checkedAgainstRuntime",
+                    "signature",
+                    "verdict"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "bundle.sign"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "bundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "signaturePath": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "publicKeySha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "bundleSha256",
+                    "signaturePath",
+                    "publicKeySha256"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "deploy.dry-run"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "bundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "plan": {
+                      "$ref": "#/$defs/plan"
+                    },
+                    "planDigest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "preparedAt": {
+                      "type": "string",
+                      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+                    },
+                    "planRecordPath": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    }
+                  },
+                  "required": [
+                    "bundleSha256",
+                    "plan",
+                    "planDigest",
+                    "environmentRevision",
+                    "preparedAt",
+                    "expiresAt",
+                    "planRecordPath"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "deploy"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "bundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "deploymentId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9-]{1,64}$"
+                    },
+                    "planDigest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "status": {
+                      "enum": [
+                        "stopped",
+                        "refused"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "bundleSha256",
+                    "deploymentId",
+                    "planDigest",
+                    "environmentRevision",
+                    "status"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "export"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "deploymentId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9-]{1,64}$"
+                    },
+                    "outputPath": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "sha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "ciphertextSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "ciphertextSize": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "fenceEpoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "sourceState": {
+                      "const": "fenced"
+                    },
+                    "excludedDataCategories": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      "uniqueItems": true
+                    },
+                    "recovery": {
+                      "type": "string",
+                      "maxLength": 2048
+                    }
+                  },
+                  "required": [
+                    "deploymentId",
+                    "outputPath",
+                    "sha256",
+                    "ciphertextSha256",
+                    "ciphertextSize",
+                    "fenceEpoch",
+                    "sourceState",
+                    "excludedDataCategories",
+                    "recovery"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "import.dry-run"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "bundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "eligible": {
+                      "type": "boolean"
+                    },
+                    "applicationId": {
+                      "type": "string",
+                      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                    },
+                    "applicationVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "sourceRuntime": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "schemaHead": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "platform": {
+                          "type": "string",
+                          "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+                        },
+                        "product": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      },
+                      "required": [
+                        "platform",
+                        "product"
+                      ]
+                    },
+                    "fenceEpoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "workflowSystemDatabase": {
+                      "enum": [
+                        "included",
+                        "absent"
+                      ]
+                    },
+                    "blockers": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/$defs/error"
+                      }
+                    }
+                  },
+                  "required": [
+                    "bundleSha256",
+                    "eligible",
+                    "applicationId",
+                    "applicationVersion",
+                    "sourceRuntime",
+                    "schemaHead",
+                    "fenceEpoch",
+                    "workflowSystemDatabase",
+                    "blockers"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "import"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "bundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "deploymentId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9-]{1,64}$"
+                    },
+                    "status": {
+                      "const": "ready-for-cutover"
+                    },
+                    "applicationDigest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "schemaHead": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "platform": {
+                          "type": "string",
+                          "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+                        },
+                        "product": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      },
+                      "required": [
+                        "platform",
+                        "product"
+                      ]
+                    },
+                    "verification": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "checksums": {
+                          "const": "match"
+                        },
+                        "tableCounts": {
+                          "const": "match"
+                        },
+                        "objects": {
+                          "const": "match"
+                        },
+                        "referenceIntegrity": {
+                          "const": "match"
+                        }
+                      },
+                      "required": [
+                        "checksums",
+                        "tableCounts",
+                        "objects",
+                        "referenceIntegrity"
+                      ]
+                    },
+                    "credentialReset": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "sessions": {
+                          "const": "reset"
+                        },
+                        "apiKeys": {
+                          "const": "reset"
+                        },
+                        "invites": {
+                          "const": "reset"
+                        },
+                        "oidcArtifacts": {
+                          "const": "reset"
+                        },
+                        "passwordHashes": {
+                          "enum": [
+                            "preserved",
+                            "reset"
+                          ]
+                        },
+                        "forcedLogin": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "sessions",
+                        "apiKeys",
+                        "invites",
+                        "oidcArtifacts",
+                        "passwordHashes",
+                        "forcedLogin"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "bundleSha256",
+                    "deploymentId",
+                    "status",
+                    "applicationDigest",
+                    "schemaHead",
+                    "verification",
+                    "credentialReset"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "resume"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "deploymentId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9-]{1,64}$"
+                    },
+                    "fenceEpoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "released": {
+                      "type": "boolean"
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "deploymentId",
+                    "fenceEpoch",
+                    "released",
+                    "environmentRevision"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.inspect"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "runtimeVersion": {
+                      "type": "string",
+                      "maxLength": 128,
+                      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                    },
+                    "target": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "os": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9]{0,15}$"
+                        },
+                        "arch": {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9_]{0,15}$"
+                        },
+                        "nodeMajor": {
+                          "type": "integer",
+                          "minimum": 1,
+                          "maximum": 999
+                        }
+                      },
+                      "required": [
+                        "os",
+                        "arch",
+                        "nodeMajor"
+                      ]
+                    },
+                    "nodeVersion": {
+                      "type": "string",
+                      "pattern": "^[0-9]+[.][0-9]+[.][0-9]+$"
+                    },
+                    "contractVersion": {
+                      "const": "1.0.0-draft.2"
+                    },
+                    "capabilityVocabularyVersion": {
+                      "const": 1
+                    },
+                    "capabilities": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+                      },
+                      "uniqueItems": true
+                    },
+                    "executionLevels": {
+                      "type": "array",
+                      "items": {
+                        "enum": [
+                          "none",
+                          "in-process"
+                        ]
+                      },
+                      "uniqueItems": true,
+                      "minItems": 1
+                    },
+                    "schemaHead": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "platform": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+                            },
+                            "product": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          },
+                          "required": [
+                            "platform",
+                            "product"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "applicationId": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "applicationVersion": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "maxLength": 128,
+                          "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "applicationDigest": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "releaseManifestSha256": {
+                      "oneOf": [
+                        {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "managedPosture": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "supported": {
+                          "type": "boolean"
+                        },
+                        "receiptSha256": {
+                          "oneOf": [
+                            {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "supported",
+                        "receiptSha256"
+                      ]
+                    },
+                    "fence": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "state": {
+                          "enum": [
+                            "open",
+                            "fenced"
+                          ]
+                        },
+                        "fenceEpoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        }
+                      },
+                      "required": [
+                        "state",
+                        "fenceEpoch"
+                      ]
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "runtimeVersion",
+                    "target",
+                    "nodeVersion",
+                    "contractVersion",
+                    "capabilityVocabularyVersion",
+                    "capabilities",
+                    "executionLevels",
+                    "schemaHead",
+                    "applicationId",
+                    "applicationVersion",
+                    "applicationDigest",
+                    "releaseManifestSha256",
+                    "managedPosture",
+                    "fence",
+                    "environmentRevision"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.prepare"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "plan": {
+                      "$ref": "#/$defs/plan"
+                    },
+                    "planDigest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "preparedAt": {
+                      "type": "string",
+                      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "plan",
+                    "planDigest",
+                    "preparedAt",
+                    "expiresAt",
+                    "environmentRevision"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.quiesce"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "fenceEpoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "status": {
+                      "enum": [
+                        "fenced",
+                        "timed-out"
+                      ]
+                    },
+                    "producers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "producer": {
+                            "type": "string",
+                            "maxLength": 128
+                          },
+                          "state": {
+                            "enum": [
+                              "stopped",
+                              "drained",
+                              "still-running"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "producer",
+                          "state"
+                        ]
+                      }
+                    },
+                    "barriers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "barrier": {
+                            "enum": [
+                              "database-write-role",
+                              "database-stopped-source",
+                              "object-writes"
+                            ]
+                          },
+                          "state": {
+                            "enum": [
+                              "held",
+                              "unavailable"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "barrier",
+                          "state"
+                        ]
+                      }
+                    },
+                    "unfencedExternal": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "maxLength": 256
+                      }
+                    }
+                  },
+                  "required": [
+                    "fenceEpoch",
+                    "status",
+                    "producers",
+                    "barriers",
+                    "unfencedExternal"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.snapshot"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "migrationBundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "ciphertextSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "ciphertextSize": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "sourceLedger": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "fenceEpoch": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "schemaHead": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {
+                            "platform": {
+                              "type": "string",
+                              "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+                            },
+                            "product": {
+                              "type": "string",
+                              "pattern": "^[a-f0-9]{64}$"
+                            }
+                          },
+                          "required": [
+                            "platform",
+                            "product"
+                          ]
+                        },
+                        "applicationDigest": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        },
+                        "tableCounts": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                              "database": {
+                                "enum": [
+                                  "application",
+                                  "workflow-system"
+                                ]
+                              },
+                              "schema": {
+                                "type": "string",
+                                "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+                              },
+                              "table": {
+                                "type": "string",
+                                "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+                              },
+                              "rows": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 9007199254740991
+                              }
+                            },
+                            "required": [
+                              "database",
+                              "schema",
+                              "table",
+                              "rows"
+                            ]
+                          },
+                          "maxItems": 10000
+                        },
+                        "objectCount": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "excludedDataCategories": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "maxLength": 64
+                          },
+                          "uniqueItems": true
+                        }
+                      },
+                      "required": [
+                        "fenceEpoch",
+                        "schemaHead",
+                        "applicationDigest",
+                        "tableCounts",
+                        "objectCount",
+                        "excludedDataCategories"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "migrationBundleSha256",
+                    "ciphertextSha256",
+                    "ciphertextSize",
+                    "sourceLedger"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.apply"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "applied",
+                        "already-applied"
+                      ]
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "receipts": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "step": {
+                            "type": "string",
+                            "maxLength": 128
+                          },
+                          "state": {
+                            "enum": [
+                              "done",
+                              "skipped"
+                            ]
+                          },
+                          "startedAt": {
+                            "type": "string",
+                            "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+                          },
+                          "finishedAt": {
+                            "type": "string",
+                            "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+                          },
+                          "digest": {
+                            "oneOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[a-f0-9]{64}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "step",
+                          "state",
+                          "startedAt",
+                          "finishedAt",
+                          "digest"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "environmentRevision",
+                    "receipts"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.health"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "live": {
+                      "type": "boolean"
+                    },
+                    "ready": {
+                      "type": "boolean"
+                    },
+                    "checks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {
+                            "enum": [
+                              "database",
+                              "schema",
+                              "bindings",
+                              "assets",
+                              "worker",
+                              "workflow-system-database"
+                            ]
+                          },
+                          "ok": {
+                            "type": "boolean"
+                          },
+                          "detail": {
+                            "oneOf": [
+                              {
+                                "type": "string",
+                                "maxLength": 512
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "name",
+                          "ok",
+                          "detail"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "live",
+                    "ready",
+                    "checks"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "runtime.resume"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "fenceEpoch": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "released": {
+                      "type": "boolean"
+                    },
+                    "environmentRevision": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "fenceEpoch",
+                    "released",
+                    "environmentRevision"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "enum": [
+                "init",
+                "doctor",
+                "plan",
+                "openapi",
+                "gen-handler",
+                "deploy.legacy",
+                "tenant.ensure",
+                "dev.gen-secrets",
+                "dev.db",
+                "dev.bootstrap-tenant",
+                "version",
+                "help"
+              ]
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": [
+                "object",
+                "null"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "ok": {
+              "const": true
+            }
+          },
+          "required": [
+            "ok"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "errors": {
+              "type": "array",
+              "maxItems": 0
+            }
+          }
+        },
+        "else": {
+          "type": "object",
+          "properties": {
+            "errors": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
+        }
+      }
+    ],
+    "$defs": {
+      "error": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^(RAY|SPEC)_[A-Z0-9_]+$"
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "retryable": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ]
+      },
+      "warning": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^(RAY_W|SPEC)_[A-Z0-9_]+$"
+          },
+          "path": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "message": {
+            "type": "string",
+            "maxLength": 2048
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ]
+      },
+      "plan": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bundleSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "applicationId": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "applicationVersion": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+          },
+          "requiredBindings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                },
+                "kind": {
+                  "enum": [
+                    "secret",
+                    "config"
+                  ]
+                },
+                "required": {
+                  "type": "boolean"
+                },
+                "satisfied": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "name",
+                "kind",
+                "required",
+                "satisfied"
+              ]
+            },
+            "maxItems": 256
+          },
+          "schemaImpact": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                      "platform": {
+                        "type": "string",
+                        "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+                      },
+                      "product": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    },
+                    "required": [
+                      "platform",
+                      "product"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "to": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "platform": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+                  },
+                  "product": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "platform",
+                  "product"
+                ]
+              },
+              "productDeltaSha256": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "destructive": {
+                "type": "boolean"
+              },
+              "allowlisted": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "productDeltaSha256",
+              "destructive",
+              "allowlisted"
+            ]
+          },
+          "permissionChanges": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "executionFrom": {
+                "enum": [
+                  "none",
+                  "in-process",
+                  "sandboxed",
+                  null
+                ]
+              },
+              "executionTo": {
+                "enum": [
+                  "none",
+                  "in-process",
+                  "sandboxed"
+                ]
+              },
+              "egressAdded": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 253
+                },
+                "uniqueItems": true
+              },
+              "egressRemoved": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 253
+                },
+                "uniqueItems": true
+              },
+              "capabilitiesAdded": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+                },
+                "uniqueItems": true
+              },
+              "capabilitiesRemoved": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+                },
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "executionFrom",
+              "executionTo",
+              "egressAdded",
+              "egressRemoved",
+              "capabilitiesAdded",
+              "capabilitiesRemoved"
+            ]
+          },
+          "storageRequirements": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "bundleBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "extractedBytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "bundleBytes",
+              "extractedBytes"
+            ]
+          },
+          "blockers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/error"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/warning"
+            }
+          }
+        },
+        "required": [
+          "bundleSha256",
+          "applicationId",
+          "applicationVersion",
+          "requiredBindings",
+          "schemaImpact",
+          "permissionChanges",
+          "storageRequirements",
+          "blockers",
+          "warnings"
+        ]
+      }
+    }
+  },
+  "signatureFileSchema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "urn:rayspec:bundle-signature:v1",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "signatureFormatVersion": {
+        "const": 1
+      },
+      "algorithm": {
+        "const": "ed25519"
+      },
+      "archiveSha256": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "publicKeySha256": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "signature": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9+/]{86}==$"
+      }
+    },
+    "required": [
+      "signatureFormatVersion",
+      "algorithm",
+      "archiveSha256",
+      "publicKeySha256",
+      "signature"
+    ]
+  }
+}

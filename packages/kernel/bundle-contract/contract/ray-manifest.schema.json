@@ -1,0 +1,330 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rayspec:bundle:v1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Validates ray.json, the root manifest of a .ray bundle (formatVersion 1). Structural only: the semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": {
+      "const": 1
+    },
+    "kind": {
+      "enum": [
+        "application",
+        "migration"
+      ]
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/applicationId"
+        },
+        "version": {
+          "$ref": "#/$defs/exactVersion"
+        }
+      },
+      "required": [
+        "id",
+        "version"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "$ref": "#/$defs/exactVersion"
+        }
+      },
+      "required": [
+        "version"
+      ]
+    },
+    "target": {
+      "$ref": "#/$defs/target"
+    },
+    "spec": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payloadPath"
+        },
+        {
+          "type": "string",
+          "pattern": "[.]ya?ml$"
+        }
+      ]
+    },
+    "requires": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/capabilityId"
+      }
+    },
+    "bindings": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "$ref": "#/$defs/bindingName"
+          },
+          "kind": {
+            "enum": [
+              "secret",
+              "config"
+            ]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        },
+        "required": [
+          "name",
+          "kind",
+          "required",
+          "description"
+        ]
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "egressHosts": {
+          "type": "array",
+          "maxItems": 256,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/egressHost"
+          }
+        },
+        "execution": {
+          "enum": [
+            "none",
+            "in-process",
+            "sandboxed"
+          ]
+        }
+      },
+      "required": [
+        "egressHosts",
+        "execution"
+      ]
+    },
+    "productMigration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "fromProductSchemaDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "toProductSchemaDigest": {
+          "$ref": "#/$defs/sha256"
+        },
+        "deltaPath": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/payloadPath"
+            },
+            {
+              "type": "string",
+              "pattern": "^payload/migrations/[A-Za-z0-9_.@+-]+[.]sql$"
+            }
+          ]
+        },
+        "allowlistPath": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/payloadPath"
+            },
+            {
+              "type": "string",
+              "pattern": "^payload/migrations/[A-Za-z0-9_.@+-]+[.]json$"
+            }
+          ]
+        },
+        "destructive": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "fromProductSchemaDigest",
+        "toProductSchemaDigest",
+        "deltaPath",
+        "destructive"
+      ]
+    },
+    "inventory": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 9999,
+      "items": {
+        "$ref": "#/$defs/inventoryEntry"
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "encryption": {
+          "const": "age-v1-x25519"
+        },
+        "ciphertextPath": {
+          "const": "payload/migration.age"
+        }
+      },
+      "required": [
+        "encryption",
+        "ciphertextPath"
+      ]
+    }
+  },
+  "required": [
+    "formatVersion",
+    "kind",
+    "application",
+    "runtime",
+    "target",
+    "inventory"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "application"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "then": {
+        "required": [
+          "spec",
+          "requires",
+          "bindings",
+          "permissions"
+        ],
+        "properties": {
+          "spec": true,
+          "requires": true,
+          "bindings": true,
+          "permissions": true,
+          "migration": false
+        },
+        "type": "object"
+      },
+      "else": {
+        "required": [
+          "migration"
+        ],
+        "properties": {
+          "inventory": {
+            "maxItems": 1,
+            "type": "array"
+          },
+          "spec": false,
+          "requires": false,
+          "bindings": false,
+          "permissions": false,
+          "productMigration": false,
+          "migration": true
+        },
+        "type": "object"
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "exactVersion": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+    },
+    "applicationId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "capabilityId": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+    },
+    "bindingName": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+    },
+    "egressHost": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$"
+    },
+    "payloadPath": {
+      "type": "string",
+      "maxLength": 4096,
+      "pattern": "^(?!.*(?:^|/)[.]{1,2}(?:/|$))payload(?:/[A-Za-z0-9_.@+-]+)+$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "os": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]{0,15}$"
+        },
+        "arch": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,15}$"
+        },
+        "nodeMajor": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 999
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "nodeMajor"
+      ]
+    },
+    "inventoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/payloadPath"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967294
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "sha256"
+      ]
+    }
+  }
+}

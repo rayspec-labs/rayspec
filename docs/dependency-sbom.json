@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "8af25264061cb7621e28d36e3b9b2298809b32fdde52ba91cebe8c0d09afa6f9",
+  "lockfile_sha256": "55e15ab15abfeab2cde30f2fccb7f0cf95037a0e006f92c0167a2c5d54391edb",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v24.21.0"
@@ -2233,6 +2233,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/bundle-contract",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
         "packages/kernel/tts-port",
@@ -2368,7 +2369,11 @@
       "license": "MIT",
       "license_file_present": true,
       "installed": true,
-      "direct_dependents": ["packages/kernel/platform", "packages/kernel/spec"]
+      "direct_dependents": [
+        "packages/kernel/bundle-contract",
+        "packages/kernel/platform",
+        "packages/kernel/spec"
+      ]
     },
     {
       "name": "ajv-formats",
@@ -4166,6 +4171,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/bundle-contract",
         "packages/kernel/core",
         "packages/kernel/db",
         "packages/kernel/handler-sdk",
@@ -4253,6 +4259,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/bundle-contract",
         "packages/kernel/core",
         "packages/kernel/db",
         "packages/kernel/handler-sdk",

@@ -1,0 +1,47 @@
+{
+  "formatVersion": 1,
+  "kind": "application",
+  "application": {
+    "id": "format-fixture",
+    "version": "0.0.0-contract-fixture"
+  },
+  "runtime": {
+    "version": "0.0.0-contract-fixture"
+  },
+  "target": {
+    "os": "linux",
+    "arch": "x64",
+    "nodeMajor": 22
+  },
+  "spec": "payload/rayspec.yaml",
+  "requires": [
+    "static-frontend"
+  ],
+  "bindings": [],
+  "permissions": {
+    "egressHosts": [],
+    "execution": "none"
+  },
+  "inventory": [
+    {
+      "path": "payload/THIRD-PARTY-NOTICES.txt",
+      "size": 60,
+      "sha256": "046937d56bce3d10db29b8ff1e070a477b4a3566d0caa7910af42dc0562f55b6"
+    },
+    {
+      "path": "payload/assets/index.html",
+      "size": 105,
+      "sha256": "32a8e35171ae709f9367f5f0b760bbbdede8c0f5378fcebe7b8de73e83e071d2"
+    },
+    {
+      "path": "payload/rayspec.yaml",
+      "size": 111,
+      "sha256": "99ec929c3b1dbb37ecd3406caaec2b74c5ecbdf46094847f79887f36252c90b7"
+    },
+    {
+      "path": "payload/sbom.cdx.json",
+      "size": 74,
+      "sha256": "e7da7c7d8eebc817db20069248e4334f9055a395ad79f4e4bda79b8e89637e9e"
+    }
+  ]
+}

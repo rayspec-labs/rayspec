@@ -1,0 +1,595 @@
+{
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Stable error vocabulary. Codes are append-only; a code never changes meaning, exit code or retryable flag within a contract major.",
+  "contractVersion": "1.0.0-draft.2",
+  "exitCodes": [
+    {
+      "exit": 0,
+      "meaning": "success"
+    },
+    {
+      "exit": 1,
+      "meaning": "completed; the verdict is negative (existing meaning of doctor, plan and deploy refusals)"
+    },
+    {
+      "exit": 2,
+      "meaning": "invalid input or usage"
+    },
+    {
+      "exit": 3,
+      "meaning": "incompatibility"
+    },
+    {
+      "exit": 4,
+      "meaning": "policy refusal"
+    },
+    {
+      "exit": 5,
+      "meaning": "retryable infrastructure failure"
+    },
+    {
+      "exit": 6,
+      "meaning": "blocked; manual reconciliation required"
+    },
+    {
+      "exit": 7,
+      "meaning": "unexpected internal error"
+    }
+  ],
+  "exitPrecedence": [
+    7,
+    6,
+    4,
+    3,
+    2,
+    1,
+    5
+  ],
+  "exitRule": "ok true exits 0 and has no errors. ok false has at least one error; the process exits with the exit code of the error class that comes first in exitPrecedence among all errors present. A retryable exit (5) is reported only when no other class is present. Warnings never change the exit code.",
+  "errorOrderRule": "errors[0] is the first failing check in the pipeline order defined for the verb; later entries are further findings of the same or later checks. Golden fixture expectations compare errors[0].code and errors[0].reason.",
+  "codes": [
+    {
+      "code": "RAY_USAGE",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "The command line is invalid: unknown verb or flag, missing or malformed argument, conflicting flags, or a --deployment id that differs from the state directory or the database.",
+      "action": "Fix the command line; see the verb help."
+    },
+    {
+      "code": "RAY_INTERNAL",
+      "exit": 7,
+      "retryable": false,
+      "meaning": "An unexpected internal error. No partial result may be trusted; the message carries no stack or secret.",
+      "action": "Report it with the operationId; do not retry blindly."
+    },
+    {
+      "code": "RAY_CHECK_FAILED",
+      "exit": 1,
+      "retryable": false,
+      "meaning": "An existing verb completed and its verdict is negative for a reason that has no typed code yet. The legacy message is carried verbatim in message.",
+      "action": "Read the message; fix the input."
+    },
+    {
+      "code": "RAY_INVALID_ARCHIVE",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "The file is not a .ray in the strict v1 container profile.",
+      "action": "Rebuild the bundle with a conforming writer.",
+      "reasons": [
+        "not-a-zip",
+        "leading-data",
+        "trailing-data",
+        "archive-comment",
+        "multi-disk",
+        "zip64",
+        "entry-comment",
+        "extra-field",
+        "general-purpose-flag",
+        "encrypted-entry",
+        "data-descriptor",
+        "unsupported-compression",
+        "unsupported-version-needed",
+        "non-canonical-timestamp",
+        "non-canonical-mode",
+        "symlink",
+        "special-file",
+        "directory-entry",
+        "invalid-name-encoding",
+        "non-ascii-name",
+        "absolute-path",
+        "drive-or-unc-path",
+        "backslash",
+        "nul-in-name",
+        "empty-segment",
+        "dot-segment",
+        "outside-payload",
+        "duplicate-name",
+        "case-fold-collision",
+        "normalization-collision",
+        "entry-order",
+        "header-directory-mismatch",
+        "overlapping-entries",
+        "crc-mismatch",
+        "manifest-missing",
+        "undeclared-entry",
+        "missing-entry"
+      ]
+    },
+    {
+      "code": "RAY_LIMIT_EXCEEDED",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "A byte, entry, path, nesting, time or CPU budget was exceeded while reading or writing.",
+      "action": "Reduce the input; limits may only be lowered by configuration.",
+      "reasons": [
+        "archive-size",
+        "extracted-size",
+        "entry-count",
+        "entry-size",
+        "manifest-size",
+        "path-length",
+        "json-depth",
+        "time-budget",
+        "ciphertext-size",
+        "object-index-size",
+        "migration-size"
+      ]
+    },
+    {
+      "code": "RAY_DIGEST_MISMATCH",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "A declared size or digest does not match the bytes, or clear outer metadata disagrees with authenticated inner metadata.",
+      "action": "Treat the artifact as corrupt or forged; obtain it again from its source.",
+      "reasons": [
+        "entry-size",
+        "entry-sha256",
+        "ciphertext-size",
+        "ciphertext-sha256",
+        "inner-metadata",
+        "application-digest",
+        "object-sha256",
+        "object-range",
+        "schema-head",
+        "bundle-sha256"
+      ]
+    },
+    {
+      "code": "RAY_MANIFEST_INVALID",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "ray.json or snapshot.json is not canonical JSON, fails its JSON Schema, or breaks a semantic rule.",
+      "action": "Rebuild the bundle; the path field names the offending member.",
+      "reasons": [
+        "invalid-utf8",
+        "bom",
+        "invalid-json",
+        "duplicate-key",
+        "float",
+        "non-nfc",
+        "not-canonical",
+        "schema",
+        "inventory-unsorted",
+        "inventory-duplicate",
+        "spec-not-in-inventory",
+        "binding-duplicate",
+        "execution-mismatch",
+        "requires-mismatch",
+        "permissions-mismatch",
+        "closure-files-missing",
+        "product-migration-files-missing",
+        "migration-inventory"
+      ]
+    },
+    {
+      "code": "RAY_SPEC_INVALID",
+      "exit": 1,
+      "retryable": false,
+      "meaning": "The spec inside a bundle does not parse; the SPEC_ codes in the same errors list give the detail.",
+      "action": "Fix the spec and pack again."
+    },
+    {
+      "code": "RAY_CLOSURE_INVALID",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "pack could not build a sealed closure: unresolved import, a link escaping the closure, an excluded file class, or a native module without a validated linux/x64 build.",
+      "action": "Fix the closure or the inclusion list; pack never copies local node_modules silently.",
+      "reasons": [
+        "unresolved-import",
+        "escaping-link",
+        "excluded-file",
+        "native-module",
+        "source-map-not-opted-in"
+      ]
+    },
+    {
+      "code": "RAY_APPLICATION_IDENTITY_MISSING",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "pack found no application id or version: neither the spec metadata nor --id/--version gives a value, or the value does not match the manifest pattern.",
+      "action": "Add metadata.id and metadata.version to the spec, or pass --id and --version.",
+      "reasons": [
+        "id",
+        "version"
+      ]
+    },
+    {
+      "code": "RAY_OUTPUT_EXISTS",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "The output path exists and --force was not given, or the output would be written as plaintext where only encrypted output is allowed.",
+      "action": "Choose another path or pass --force where the verb allows it."
+    },
+    {
+      "code": "RAY_SIGNATURE_INVALID",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "A detached provenance signature is malformed, does not verify, or was made by a key that is not trusted.",
+      "action": "Do not deploy; obtain a correctly signed bundle or approve it through quarantine.",
+      "reasons": [
+        "malformed",
+        "mismatch",
+        "untrusted-key"
+      ]
+    },
+    {
+      "code": "RAY_RUNTIME_UNSUPPORTED",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The requested exact runtime version is not this runtime, is not in the signed release catalog, or an extension declares an @rayspec/* range that excludes it.",
+      "action": "Use a bundle built for this runtime, or deploy on the runtime the bundle pins."
+    },
+    {
+      "code": "RAY_TARGET_UNSUPPORTED",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The bundle target (os, arch, Node major) or the snapshot database major is not supported by this runtime.",
+      "action": "Use a supported target."
+    },
+    {
+      "code": "RAY_CAPABILITY_UNSUPPORTED",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "A required capability id is unknown to the vocabulary or not provided by this runtime, or the requested execution level is not available.",
+      "action": "Deploy on a runtime that provides it, or remove the requirement.",
+      "reasons": [
+        "unknown-id",
+        "not-provided",
+        "execution-level"
+      ]
+    },
+    {
+      "code": "RAY_BINDING_RESERVED",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "The bundle declares or the bindings file supplies a reserved operator name.",
+      "action": "Rename the application binding; reserved names come only from the operator."
+    },
+    {
+      "code": "RAY_BINDING_MISSING",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "A required binding has no value at deploy or apply time.",
+      "action": "Supply it in the bindings file or the explicit environment."
+    },
+    {
+      "code": "RAY_BINDINGS_FILE_INSECURE",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "The bindings, identity or key file is a link, not a regular file, not owned by the invoking user, or readable or writable by group or others; or the deployment state directory is a link, not owned by the invoking user, or not mode 0700.",
+      "action": "chmod 600 the file (0700 the state directory) and pass a regular file."
+    },
+    {
+      "code": "RAY_SECRET_DETECTED",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "pack or verify found a value that looks like a credential inside the closure.",
+      "action": "Remove the secret from the payload and declare a binding instead."
+    },
+    {
+      "code": "RAY_MIGRATION_REQUIRED",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The bundle needs a product schema change that the plan does not approve, or the target schema head is not the one the bundle migrates from.",
+      "action": "Prepare a plan with the reviewed delta and allowlist."
+    },
+    {
+      "code": "RAY_MIGRATION_MISMATCH",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The product delta regenerated from the live schema and the new spec differs from the delta carried in the bundle.",
+      "action": "Rebuild the bundle against the live schema head."
+    },
+    {
+      "code": "RAY_SCHEMA_DRIFT",
+      "exit": 6,
+      "retryable": false,
+      "meaning": "The live product schema does not match any known schema head (drift found by introspection).",
+      "action": "Reconcile the schema manually before any apply or export."
+    },
+    {
+      "code": "RAY_PLAN_STALE",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The plan expired or an input covered by the plan digest changed since prepare.",
+      "action": "Run prepare again and review the new plan."
+    },
+    {
+      "code": "RAY_IDEMPOTENCY_CONFLICT",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "An idempotency key was reused with a different plan digest or request.",
+      "action": "Use a new idempotency key for a different request."
+    },
+    {
+      "code": "RAY_LOCK_TIMEOUT",
+      "exit": 5,
+      "retryable": true,
+      "meaning": "The shared schema advisory lock was not acquired within the bounded wait.",
+      "action": "Retry later with the same idempotency key."
+    },
+    {
+      "code": "RAY_INFRA_UNAVAILABLE",
+      "exit": 5,
+      "retryable": true,
+      "meaning": "A dependency (database, blob storage, disk) is unreachable or temporarily failing.",
+      "action": "Retry with backoff and the same idempotency key."
+    },
+    {
+      "code": "RAY_TARGET_NOT_EMPTY",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "Import target is not empty: it has platform or product rows, blobs or a non-initial schema head.",
+      "action": "Import only into a new empty target; no in-place merge."
+    },
+    {
+      "code": "RAY_SOURCE_NOT_QUIESCENT",
+      "exit": 5,
+      "retryable": true,
+      "meaning": "The source could not be fenced before the deadline, or the fence was lost before the snapshot completed.",
+      "action": "The source stays fenced; retry quiesce or resume the source explicitly."
+    },
+    {
+      "code": "RAY_FENCE_MISMATCH",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "The fence epoch in the request does not match the active fence.",
+      "action": "Use the epoch returned by quiesce."
+    },
+    {
+      "code": "RAY_EXTERNAL_STATE_UNSUPPORTED",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The source has state the export cannot capture consistently: uncontrolled external database writers, an unsupported blob adapter, pending non-replayable external effects, a table that is neither a platform table nor a product store, or no database write barrier the application cannot bypass.",
+      "action": "Reconcile or remove the external state, or enable database role separation (or stop the source and attest it), then retry precheck.",
+      "reasons": [
+        "uncontrolled-writer",
+        "unsupported-blob-adapter",
+        "unreconciled-effects",
+        "unknown-table",
+        "database-barrier-unavailable"
+      ]
+    },
+    {
+      "code": "RAY_MULTI_TENANT_UNSUPPORTED",
+      "exit": 3,
+      "retryable": false,
+      "meaning": "The source holds more than one application tenant (organization); v1 snapshots carry exactly one.",
+      "action": "Export is not available for this deployment in v1."
+    },
+    {
+      "code": "RAY_OWNER_RECOVERY_REQUIRED",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "An organization would lose every credential on import because its only credentials are API keys and no tested owner-recovery path exists.",
+      "action": "Add a password-holding owner before export."
+    },
+    {
+      "code": "RAY_DECRYPTION_FAILED",
+      "exit": 2,
+      "retryable": false,
+      "meaning": "The age ciphertext could not be decrypted with the given identity, or failed authentication. Nothing was imported.",
+      "action": "Check the identity file; obtain the artifact again."
+    },
+    {
+      "code": "RAY_POLICY_DENIED",
+      "exit": 4,
+      "retryable": false,
+      "meaning": "An operator or platform policy refused the operation: a plan with blockers, an apply while the environment is fenced, a dump with privileged statements, an unsupported extension or an unmapped owner, or a refused grant or posture.",
+      "action": "Change the request or have the policy owner approve it.",
+      "reasons": [
+        "plan-has-blockers",
+        "fenced",
+        "privileged-statement",
+        "unsupported-extension",
+        "unmapped-owner",
+        "grant-refused",
+        "posture-refused"
+      ]
+    },
+    {
+      "code": "RAY_INTERRUPTED",
+      "exit": 6,
+      "retryable": false,
+      "meaning": "The operation was interrupted (SIGINT or SIGTERM). Any fence it took stays held.",
+      "action": "Follow the recovery instruction in the message: resume the source or retry."
+    },
+    {
+      "code": "RAY_RECONCILIATION_REQUIRED",
+      "exit": 6,
+      "retryable": false,
+      "meaning": "A crash or failure left a step in an unknown state; automatic replay is not safe.",
+      "action": "Inspect the receipts and reconcile manually."
+    }
+  ],
+  "warnings": [
+    {
+      "code": "RAY_W_UNSIGNED",
+      "meaning": "The bundle has no detached provenance signature. Under the managed posture it may only enter quarantine and be approved explicitly by an authorized deployer; a local self-host deploy accepts it with this warning unless --require-signature is given."
+    },
+    {
+      "code": "RAY_W_PRODUCT_SCHEMA_UNLEDGERED",
+      "meaning": "The product schema head was computed by introspection because no product migration ledger exists yet."
+    },
+    {
+      "code": "RAY_W_EGRESS_UNDECLARED",
+      "meaning": "The spec uses an agent backend or speech provider but declares no egress hosts; host network policy will deny its calls."
+    },
+    {
+      "code": "RAY_W_EXTERNAL_EFFECTS_UNFENCED",
+      "meaning": "quiesce cannot fence named external services; they are listed in the result."
+    },
+    {
+      "code": "RAY_W_LEGACY_OUTPUT",
+      "meaning": "An existing verb ran with --json; data carries its legacy result object unchanged."
+    }
+  ],
+  "specCodeMapping": {
+    "source": "packages/kernel/spec/src/errors.ts (SpecErrorCode, SpecWarningCode)",
+    "rule": "A spec error or warning appears in the envelope with code \"SPEC_\" followed by its spec code in upper case (for example yaml_parse_error becomes SPEC_YAML_PARSE_ERROR), its path unchanged and retryable false. Every mapped error has exit 1. The mapping is total and mechanical, so a spec code appended later maps without a contract change. SPEC_ codes are never reused for anything else.",
+    "exit": 1,
+    "errors": [
+      {
+        "specCode": "yaml_parse_error",
+        "code": "SPEC_YAML_PARSE_ERROR"
+      },
+      {
+        "specCode": "unsupported_version",
+        "code": "SPEC_UNSUPPORTED_VERSION"
+      },
+      {
+        "specCode": "schema_violation",
+        "code": "SPEC_SCHEMA_VIOLATION"
+      },
+      {
+        "specCode": "unknown_field",
+        "code": "SPEC_UNKNOWN_FIELD"
+      },
+      {
+        "specCode": "reserved_document_key",
+        "code": "SPEC_RESERVED_DOCUMENT_KEY"
+      },
+      {
+        "specCode": "dangling_ref",
+        "code": "SPEC_DANGLING_REF"
+      },
+      {
+        "specCode": "duplicate_name",
+        "code": "SPEC_DUPLICATE_NAME"
+      },
+      {
+        "specCode": "capability_violation",
+        "code": "SPEC_CAPABILITY_VIOLATION"
+      },
+      {
+        "specCode": "invalid_embedded_schema",
+        "code": "SPEC_INVALID_EMBEDDED_SCHEMA"
+      },
+      {
+        "specCode": "reserved_column_name",
+        "code": "SPEC_RESERVED_COLUMN_NAME"
+      },
+      {
+        "specCode": "reserved_query_keyword",
+        "code": "SPEC_RESERVED_QUERY_KEYWORD"
+      },
+      {
+        "specCode": "reserved_store_name",
+        "code": "SPEC_RESERVED_STORE_NAME"
+      },
+      {
+        "specCode": "frontend_route_collision",
+        "code": "SPEC_FRONTEND_ROUTE_COLLISION"
+      },
+      {
+        "specCode": "frontend_dir_missing",
+        "code": "SPEC_FRONTEND_DIR_MISSING"
+      },
+      {
+        "specCode": "fk_cycle",
+        "code": "SPEC_FK_CYCLE"
+      },
+      {
+        "specCode": "agent_output_schema_shortcircuits_tools",
+        "code": "SPEC_AGENT_OUTPUT_SCHEMA_SHORTCIRCUITS_TOOLS"
+      },
+      {
+        "specCode": "projection_unknown_column",
+        "code": "SPEC_PROJECTION_UNKNOWN_COLUMN"
+      },
+      {
+        "specCode": "projection_collision",
+        "code": "SPEC_PROJECTION_COLLISION"
+      },
+      {
+        "specCode": "projection_query_shadow",
+        "code": "SPEC_PROJECTION_QUERY_SHADOW"
+      },
+      {
+        "specCode": "no_code_in_yaml",
+        "code": "SPEC_NO_CODE_IN_YAML"
+      },
+      {
+        "specCode": "provider_native_leak",
+        "code": "SPEC_PROVIDER_NATIVE_LEAK"
+      },
+      {
+        "specCode": "invalid_capability_status",
+        "code": "SPEC_INVALID_CAPABILITY_STATUS"
+      },
+      {
+        "specCode": "invalid_contract",
+        "code": "SPEC_INVALID_CONTRACT"
+      },
+      {
+        "specCode": "prompt_execution_claim",
+        "code": "SPEC_PROMPT_EXECUTION_CLAIM"
+      },
+      {
+        "specCode": "production_execution_claim",
+        "code": "SPEC_PRODUCTION_EXECUTION_CLAIM"
+      },
+      {
+        "specCode": "invalid_dependency_order",
+        "code": "SPEC_INVALID_DEPENDENCY_ORDER"
+      },
+      {
+        "specCode": "invalid_view",
+        "code": "SPEC_INVALID_VIEW"
+      },
+      {
+        "specCode": "invalid_store",
+        "code": "SPEC_INVALID_STORE"
+      }
+    ],
+    "warnings": [
+      {
+        "specCode": "softdelete_fk_restrict",
+        "code": "SPEC_SOFTDELETE_FK_RESTRICT"
+      },
+      {
+        "specCode": "fk_forward_reference",
+        "code": "SPEC_FK_FORWARD_REFERENCE"
+      },
+      {
+        "specCode": "typescript_handler_module",
+        "code": "SPEC_TYPESCRIPT_HANDLER_MODULE"
+      },
+      {
+        "specCode": "stream_playback_media_token",
+        "code": "SPEC_STREAM_PLAYBACK_MEDIA_TOKEN"
+      },
+      {
+        "specCode": "agent_untrusted_field_precedence",
+        "code": "SPEC_AGENT_UNTRUSTED_FIELD_PRECEDENCE"
+      },
+      {
+        "specCode": "cron_tenant_required",
+        "code": "SPEC_CRON_TENANT_REQUIRED"
+      },
+      {
+        "specCode": "stale_suppression",
+        "code": "SPEC_STALE_SUPPRESSION"
+      }
+    ]
+  }
+}

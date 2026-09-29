@@ -15,7 +15,8 @@
       "!**/drizzle",
       "!packages/kernel/spec/spec.schema.json",
       "!packages/kernel/spec/product.schema.json",
-      "!packages/kernel/spec/version-1.0.schema.json"
+      "!packages/kernel/spec/version-1.0.schema.json",
+      "!packages/kernel/bundle-contract/contract"
     ]
   },
   "formatter": {
