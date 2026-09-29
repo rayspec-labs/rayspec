@@ -6,7 +6,7 @@ settings:
 
 overrides:
   '@esbuild-kit/core-utils>esbuild': '>=0.25.0'
-  hono: 4.13.5
+  hono: 4.13.9
   '@hono/node-server@1': 1.19.15
   brace-expansion: 5.0.9
   fast-uri: 3.1.6
@@ -15,7 +15,7 @@ overrides:
   postcss: 8.5.23
   nanoid@3: 3.3.18
   nanoid@5: 5.1.16
-  undici: 8.9.0
+  undici: 8.11.2
   ip-address: 10.3.1
 
 importers:
@@ -24,7 +24,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: 2.0.10
-        version: 2.0.10(hono@4.13.5)
+        version: 2.0.10(hono@4.13.9)
       '@rayspec/db':
         specifier: workspace:*
         version: link:packages/kernel/db
@@ -67,7 +67,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: 2.0.10
-        version: 2.0.10(hono@4.13.5)
+        version: 2.0.10(hono@4.13.9)
       '@rayspec/db':
         specifier: workspace:*
         version: link:../../packages/kernel/db
@@ -269,7 +269,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: 2.0.10
-        version: 2.0.10(hono@4.13.5)
+        version: 2.0.10(hono@4.13.9)
       '@rayspec/db':
         specifier: workspace:*
         version: link:../../kernel/db
@@ -325,7 +325,7 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: 2.0.10
-        version: 2.0.10(hono@4.13.5)
+        version: 2.0.10(hono@4.13.9)
       '@openai/agents':
         specifier: 0.11.8
         version: 0.11.8(ws@8.21.0)(zod@4.4.3)
@@ -393,14 +393,14 @@ importers:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.0)(pg@8.22.0)(postgres@3.4.9)
       hono:
-        specifier: 4.13.5
-        version: 4.13.5
+        specifier: 4.13.9
+        version: 4.13.9
       jose:
         specifier: 6.2.3
         version: 6.2.3
       undici:
-        specifier: 8.9.0
-        version: 8.9.0
+        specifier: 8.11.2
+        version: 8.11.2
       yaml:
         specifier: 2.9.0
         version: 2.9.0
@@ -535,10 +535,10 @@ importers:
     dependencies:
       '@hono/node-server':
         specifier: 2.0.10
-        version: 2.0.10(hono@4.13.5)
+        version: 2.0.10(hono@4.13.9)
       '@hono/zod-openapi':
         specifier: 1.4.0
-        version: 1.4.0(hono@4.13.5)(zod@4.4.3)
+        version: 1.4.0(hono@4.13.9)(zod@4.4.3)
       '@rayspec/auth-core':
         specifier: workspace:*
         version: link:../../kernel/auth-core
@@ -561,8 +561,8 @@ importers:
         specifier: 0.45.2
         version: 0.45.2(@opentelemetry/api@1.9.0)(pg@8.22.0)(postgres@3.4.9)
       hono:
-        specifier: 4.13.5
-        version: 4.13.5
+        specifier: 4.13.9
+        version: 4.13.9
       jose:
         specifier: 6.2.3
         version: 6.2.3
@@ -1661,25 +1661,25 @@ packages:
     resolution: {integrity: sha512-Za2ai6TLdKjUvnur+eenO6nuYYipVAEhyCAdaV8IRvmU9kK8crOZUSYvIXn72E4f8fJqyAbpcJuTsYYmZp9Deg==}
     engines: {node: '>=18.14.1'}
     peerDependencies:
-      hono: 4.13.5
+      hono: 4.13.9
 
   '@hono/node-server@2.0.10':
     resolution: {integrity: sha512-ZcnNVhKTmyDJeg0UlnZjvM73JBsTAuhrH/J4fjwGOw59PwOW51r4J+p6CsKZWXdKSme4MFqU62CZMOsdDrU4CA==}
     engines: {node: '>=20'}
     peerDependencies:
-      hono: 4.13.5
+      hono: 4.13.9
 
   '@hono/zod-openapi@1.4.0':
     resolution: {integrity: sha512-AFchqR1N/NxfI4hUOSGI2/g8zLROxA1OE7Oh5JJFlTaGxhrdRyH+93gd0tIBpb0z8s9r8hUoNnaOBfHbdb4NMw==}
     engines: {node: '>=16.0.0'}
     peerDependencies:
-      hono: 4.13.5
+      hono: 4.13.9
       zod: ^4.0.0
 
   '@hono/zod-validator@0.8.0':
     resolution: {integrity: sha512-5uS4S1/LKtZQYvD4BtpPUFkOv8d1wNxHHrChm26buMiEYc1FrHWvDUaKVBwkiVtvSExHSpLGDvcnpI2Copyj9w==}
     peerDependencies:
-      hono: 4.13.5
+      hono: 4.13.9
       zod: ^3.25.0 || ^4.0.0
 
   '@jridgewell/sourcemap-codec@1.5.5':
@@ -2627,8 +2627,8 @@ packages:
   highlight.js@10.7.3:
     resolution: {integrity: sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A==}
 
-  hono@4.13.5:
-    resolution: {integrity: sha512-O6+/eCYRkzzzy0rPWwKLiGBR1nFuUPZynnwjxN1MBA62NNqbT0wQEzQyK2gSO5yDIDB336sXQleAhOHrzlYyKw==}
+  hono@4.13.9:
+    resolution: {integrity: sha512-7dMkQmZoC4E6F7AtaQSPhlWAdnBti+j7rreMZl8QB4jFiEhP9TWbGWUMi8WYzBCgmgulxuvLQupKqo+Co6Omyg==}
     engines: {node: '>=16.9.0'}
 
   hosted-git-info@9.0.3:
@@ -3234,8 +3234,8 @@ packages:
   undici-types@6.20.0:
     resolution: {integrity: sha512-Ny6QZ2Nju20vw1SRHe3d9jVu6gJ+4e3+MMpqu7pqE5HT6WsTSlce++GQmK5UXS8mzV8DSYHrQH+Xrf2jVcuKNg==}
 
-  undici@8.9.0:
-    resolution: {integrity: sha512-aWZpUj7XoGonMClx4gdDRfgBjqeA+F473aDmROQQbM9n6PRfK/u1q/a0X4wMTgcHfT8H6fpbt98PFuDUwFg2YA==}
+  undici@8.11.2:
+    resolution: {integrity: sha512-u4UB2/IrKdU6lFxumHmmo1a3fCQO5tzQllRorfoRS63txhrB7xTpSn1PftwC4qEHkOaqP95fCWW4lJzwErwzhQ==}
     engines: {node: '>=22.19.0'}
 
   unpdf@1.6.2:
@@ -3775,7 +3775,7 @@ snapshots:
       proper-lockfile: 4.1.2
       semver: 7.8.0
       typebox: 1.1.38
-      undici: 8.9.0
+      undici: 8.11.2
       yaml: 2.9.0
     optionalDependencies:
       '@mariozechner/clipboard': 0.3.9
@@ -3989,25 +3989,25 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@hono/node-server@1.19.15(hono@4.13.5)':
+  '@hono/node-server@1.19.15(hono@4.13.9)':
     dependencies:
-      hono: 4.13.5
+      hono: 4.13.9
 
-  '@hono/node-server@2.0.10(hono@4.13.5)':
+  '@hono/node-server@2.0.10(hono@4.13.9)':
     dependencies:
-      hono: 4.13.5
+      hono: 4.13.9
 
-  '@hono/zod-openapi@1.4.0(hono@4.13.5)(zod@4.4.3)':
+  '@hono/zod-openapi@1.4.0(hono@4.13.9)(zod@4.4.3)':
     dependencies:
       '@asteasolutions/zod-to-openapi': 8.5.0(zod@4.4.3)
-      '@hono/zod-validator': 0.8.0(hono@4.13.5)(zod@4.4.3)
-      hono: 4.13.5
+      '@hono/zod-validator': 0.8.0(hono@4.13.9)(zod@4.4.3)
+      hono: 4.13.9
       openapi3-ts: 4.6.0
       zod: 4.4.3
 
-  '@hono/zod-validator@0.8.0(hono@4.13.5)(zod@4.4.3)':
+  '@hono/zod-validator@0.8.0(hono@4.13.9)(zod@4.4.3)':
     dependencies:
-      hono: 4.13.5
+      hono: 4.13.9
       zod: 4.4.3
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
@@ -4084,7 +4084,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.29.0(zod@4.4.3)':
     dependencies:
-      '@hono/node-server': 1.19.15(hono@4.13.5)
+      '@hono/node-server': 1.19.15(hono@4.13.9)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -4094,7 +4094,7 @@ snapshots:
       eventsource-parser: 3.1.0
       express: 5.2.1
       express-rate-limit: 8.5.2(express@5.2.1)
-      hono: 4.13.5
+      hono: 4.13.9
       jose: 6.2.3
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -4912,7 +4912,7 @@ snapshots:
 
   highlight.js@10.7.3: {}
 
-  hono@4.13.5: {}
+  hono@4.13.9: {}
 
   hosted-git-info@9.0.3:
     dependencies:
@@ -5492,7 +5492,7 @@ snapshots:
 
   undici-types@6.20.0: {}
 
-  undici@8.9.0: {}
+  undici@8.11.2: {}
 
   unpdf@1.6.2: {}
 
