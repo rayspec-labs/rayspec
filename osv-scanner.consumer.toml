@@ -1,0 +1,108 @@
+# osv-scanner configuration for the CONSUMER install scan in ci.yml ("Consumer install audit").
+#
+# That step installs the packed release with npm, the way a consumer does, and scans the resulting
+# package-lock.json. It sees what the workspace lockfile scan cannot: copies a dependency pins in its
+# own npm-shrinkwrap.json, which no pnpm.overrides entry reaches. The root osv-scanner.toml governs
+# the workspace scan; this file governs only the consumer scan, and is passed to it with --config.
+#
+# Every entry below is a copy pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent
+# 0.79.9, which reaches consumers through @rayspec/adapter-pi. The fix is to move the adapter to
+# pi-coding-agent and pi-ai 0.86.0 or later, whose shrinkwrap carries patched versions; that crosses
+# breaking SDK releases (the AuthStorage export the adapter uses is gone since 0.80.8), so it is its
+# own change. Each entry expires on 2026-10-31: the scan fails again then, whether or not the move
+# has landed. Renew only with a reason that still holds, never by lowering the gate.
+
+[[IgnoredVulns]]
+id = "GHSA-3jxr-9vmj-r5cp"
+ignoreUntil = 2026-10-31
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-mh99-v99m-4gvg"
+ignoreUntil = 2026-10-31
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-rgw5-rvv9-x895"
+ignoreUntil = 2026-10-31
+reason = "brace-expansion 5.0.6, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-j3f2-48v5-ccww"
+ignoreUntil = 2026-10-31
+reason = "protobufjs 7.6.4, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-2gqq-gqf2-x968"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-2jfj-6hjv-fm6j"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-3wwx-pv8p-q78v"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-3xpg-4rpp-hhhm"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-4cwx-7wf7-3272"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-8436-99hf-9mmv"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-8xcm-r25x-g524"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-jr45-8vmc-qm54"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-m8rv-5g2x-5cg5"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-pmjh-fq2x-6v4x"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-r53p-7pc4-xj5r"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-rfgv-xxqx-mfg5"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-rx4f-c7p8-82vq"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-v3r7-h72x-cjcm"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."
+
+[[IgnoredVulns]]
+id = "GHSA-w293-vg96-wgc3"
+ignoreUntil = 2026-10-31
+reason = "undici 8.5.0, pinned by the npm-shrinkwrap.json of @earendil-works/pi-coding-agent 0.79.9 (through @rayspec/adapter-pi); no override reaches it. Fixed by moving to pi-coding-agent 0.86.0 or later."

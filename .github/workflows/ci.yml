@@ -266,6 +266,27 @@ jobs:
       - name: Deploy-entrypoint import gate
         run: pnpm check:deploy-entrypoint
 
+      # The dependency audit above scans pnpm-lock.yaml, which no consumer installs from. A consumer's
+      # npm resolves the published closure afresh, and a dependency's own npm-shrinkwrap.json pins
+      # copies that no pnpm.overrides entry reaches, so a clean workspace lockfile can ship known
+      # advisories (1.8.0 did: three packages inside the Pi SDK's shrinkwrap). This step packs the
+      # release closure, installs it with npm the way a consumer does, loads every entry point, and
+      # scans the consumer's package-lock.json with the same pinned osv-scanner downloaded above.
+      # osv-scanner.consumer.toml holds the dated exceptions for this scan only. Needs Build and the
+      # registry; no Postgres, no secret.
+      - name: Consumer install audit (osv-scanner / OSV.dev)
+        run: |
+          node scripts/publish.mjs --pack --out /tmp/rayspec-tarballs
+          node scripts/check-consumer-install.mjs --tarballs /tmp/rayspec-tarballs --out /tmp/rayspec-consumer
+          /tmp/osv-scanner scan source --config=osv-scanner.consumer.toml --lockfile=/tmp/rayspec-consumer/package-lock.json
+
+      # The consumer install step above, driven against tarballs built in a throwaway directory:
+      # coherent tarballs install and load, an entry point that throws fails the run and is named, a
+      # bin-only package is not imported, and missing or stale inputs refuse. Offline, with its own
+      # npm cache. DB-free / secret-free / network-free → lane 1.
+      - name: Consumer-install regression
+        run: pnpm test:consumer-install
+
       # The Tier-1 wire-golden / replay-parity gate (@rayspec/parity). Deterministic: its live-smoke
       # self-skips with no creds + no RAYSPEC_REQUIRE_LIVE_TESTS (that suite runs in lane 3). Run as
       # its own step here, so @rayspec/parity is EXCLUDED from the deterministic test filter below —

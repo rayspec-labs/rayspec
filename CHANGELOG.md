@@ -33,6 +33,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `10.5.1`), the versions the root overrides pinned, so the osv-scanner audit of `pnpm-lock.yaml`
   failed. The overrides now name the first fixed versions. A consumer install was not affected: npm
   resolves `fast-uri` `3.1.8` and `ip-address` `10.7.2` there.
+- **CI now audits the release the way a consumer installs it.** The audit of `pnpm-lock.yaml` could
+  not see the three Pi SDK advisories above, because no consumer installs from that file and a
+  dependency's own shrinkwrap never enters it. A new CI step packs the release closure,
+  installs it with npm into an empty directory (`scripts/check-consumer-install.mjs`), imports every
+  package's entry point there, and scans the resulting `package-lock.json` with the same pinned
+  osv-scanner. The shrinkwrap advisories are recorded in `osv-scanner.consumer.toml` as exceptions
+  that expire on 2026-10-31, each naming the Pi SDK release that fixes it, so the step turns red
+  again unless the adapter has moved by then. The step also lists every dependency of a RaySpec
+  package that the consumer tree holds in two versions; today that includes `hono` (`4.13.9` for
+  `@rayspec/server` and `@rayspec/api-auth`, the newest `4.13.x` for the `@hono/*` packages that
+  take it as a peer).
 
 ## [1.8.0] - 2026-08-15
 
