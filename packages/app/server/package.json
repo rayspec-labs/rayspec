@@ -28,7 +28,7 @@
     "rayspec-serve": "./dist/serve.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.21.0"
   },
   "scripts": {
     "build": "tsc -b",

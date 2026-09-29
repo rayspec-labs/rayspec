@@ -80,7 +80,7 @@ jobs:
       # happens to ship.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: 22.23.3
 
       # Version + hash are kept byte-identical to the dependency-audit step in ci.yml on purpose.
       # Exit 1 means "advisories matched" — the outcome this round is built to handle, not an error;

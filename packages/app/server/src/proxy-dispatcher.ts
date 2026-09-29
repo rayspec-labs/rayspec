@@ -51,8 +51,10 @@ export const PROXY_URL_ENV_VARS = [
 /**
  * Does the RUNNING Node implement `NODE_USE_ENV_PROXY` at all?
  *
- * It does not exist on every runtime this repository supports. `engines` is `node >= 22`, and the
- * feature reached the 22 line only in 22.21.0 — so on 22.0–22.20 Node ignores the four proxy-URL
+ * It does not exist on every runtime that can load this package. `engines` declares `node >= 22.21.0`,
+ * the release that brought the feature to the 22 line, but a package manager only warns on an engines
+ * mismatch unless it runs engine-strict, so an older 22 can still install and boot it — and on
+ * 22.0–22.20 Node ignores the four proxy-URL
  * variables UNCONDITIONALLY, opt-in or not, and a boot that installed a proxy dispatcher there would
  * be adding egress routing Node itself would never have added. That is the very outcome this gate
  * exists to prevent (a deployment carrying leftover proxy variables from a base image must not
@@ -66,8 +68,8 @@ export const PROXY_URL_ENV_VARS = [
  *     v23.11.1 <undefined>   v24.0.0  EnvHttpProxyAgent                    v25.6.1  EnvHttpProxyAgent
  *
  * Hence: the whole 24 line and above, plus 22.21.0 and later on the 22 line. The 23 line never got it
- * and is end-of-life. `nodeVersion` is injectable so the rule can be pinned across the WHOLE declared
- * engines range from one test run, rather than being re-measured by whichever Node happens to run CI.
+ * and is end-of-life. `nodeVersion` is injectable so the rule can be pinned across every 22-and-later
+ * runtime from one test run, rather than being re-measured by whichever Node happens to run CI.
  */
 export function nodeSupportsEnvProxy(nodeVersion: string = process.versions.node): boolean {
   const { major, minor } = parseNodeVersion(nodeVersion);

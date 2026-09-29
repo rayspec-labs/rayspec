@@ -6,7 +6,7 @@
   "description": "RaySpec — file-deployable AI infrastructure platform",
   "packageManager": "pnpm@10.12.4",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.21.0"
   },
   "scripts": {
     "//spike-filter": "The '!@spike/*' filter EXCLUDES the @spike/* DEV-ONLY fixtures under examples/ (dev-server, the synthetic stream/agent packs) from CI build/test/typecheck. The @rayspec/local-boot spec-driven boot wrapper is a @rayspec/* member and IS covered by CI.",

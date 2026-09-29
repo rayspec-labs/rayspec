@@ -20,7 +20,7 @@ real authenticated request. You will:
 
 ## Prerequisites
 
-- **Node** `>=22`
+- **Node** `>=22.21.0`
 - **pnpm** `10.12.4`. The most robust way to run exactly this version is a one-off
   pin — prefix the commands below with `npx -y pnpm@10.12.4`, e.g.
   `npx -y pnpm@10.12.4 install`. It needs no global install and works even where
