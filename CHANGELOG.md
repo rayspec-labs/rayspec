@@ -82,10 +82,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases decided by the spec checks, which are left to the spec parser. Seeded property tests
   cover generated hostile names, header and end-record fields, every single-byte flip and every
   truncation.
-  **Nothing uses the package yet**: the CLI does not depend on it, so it is not in the publish set
-  and nothing a deployment runs changes.
+  The CLI's `bundle inspect` and `bundle verify` (below) are its first users, so it and the
+  contract package join the publish set with the CLI. `inspectBundle` also reports the entry count
+  and, when asked with `captureSpec`, hands over the bytes of the spec file once they have matched
+  the inventory, so the spec can be parsed without extracting the archive.
+- **`rayspec bundle inspect <file.ray>` and `rayspec bundle verify <file.ray>`.** Two passive
+  commands on top of `@rayspec/bundle`; neither extracts, imports or runs anything from the
+  archive, and neither writes anything or reads the environment. `inspect` runs the structural
+  checks and reports what the bundle declares — application id and version, pinned runtime and
+  target, required capabilities, binding names, execution level, egress hosts, size, SHA-256,
+  entry count and whether a `.sig` file lies next to it — with the verdict `structurally-valid`.
+  `verify` goes on against a runtime (the CLI's own version, or `--runtime <exact-version>`): the
+  runtime version, the target, each required capability (an id the vocabulary does not know is
+  refused), reserved binding names, the spec parsed from the payload, the `requires`, execution
+  level and egress hosts the spec derives, the secret scan, and the detached Ed25519 signature
+  (`--signature`, default `<file.ray>.sig`; `--trusted-key`, repeatable; `--require-signature`).
+  An unsigned bundle passes with the warning `RAY_W_UNSIGNED` unless a signature is required.
+  Both write one result envelope to stdout, with or without `--json`, print the operation id
+  (and, without `--json`, a short description that never claims the code is safe) on stderr, and
+  exit with the class of their first error: 0, 1 spec invalid, 2 invalid input, 3 incompatible,
+  4 policy refusal, 6 interrupted by SIGINT/SIGTERM, 7 internal. Every case of the golden corpus
+  runs through the commands with its expected envelope and exit code, the spec checks included.
+  A test runs both commands through the built CLI under a module-resolution probe and shows that
+  neither loads the server, the database layer, the platform's handler loader or the Postgres
+  driver; another shows a bundle whose handler would write a file and open a connection if it
+  ran leaves both untouched.
+- **`--json` on every existing command.** It wraps the command's own result object, unchanged, in
+  the same result envelope, with the warning `RAY_W_LEGACY_OUTPUT`; spec errors appear as `SPEC_`
+  codes, every other error as `RAY_CHECK_FAILED`, a usage error as `RAY_USAGE`, and the exit code
+  stays the one the command has without the flag. A serving `deploy --json` prints its banners on
+  stderr and writes its one envelope when it stops or is refused. Without `--json` every command's
+  output is unchanged.
 
 ### Changed
+
+- **An unexpected internal failure of the CLI exits 7**, not 2, so a script can tell a defect from
+  a usage error. Every other exit code of the existing commands is unchanged.
+- **Each CLI command loads only its own modules.** The entry point now imports a command's module
+  when that command runs, so a light command no longer loads the database layer and the Postgres
+  driver that `plan` and `dev db` need.
 
 - **The Node floor is now `>=22.21.0`.** Every package's `engines.node`, the root manifest's and
   the documented prerequisites moved from `>=22` to the first release on the 22 line that
