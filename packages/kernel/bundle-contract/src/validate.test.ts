@@ -530,7 +530,8 @@ describe('snapshot and receipt semantics', () => {
   });
 
   it('refuses a receipt with a duplicate key even though canonical form is not required', () => {
-    const text = JSON.stringify(goodReceipt).replace('{', '{"agentTraceExport":"on",');
+    // A second `agentTraceExport` member, written ahead of the receipt's own.
+    const text = `{"agentTraceExport":"on",${JSON.stringify(goodReceipt).slice(1)}`;
     expect(outcome(validateReceipt(text))).toMatchObject({ reason: 'duplicate-key' });
   });
 });
