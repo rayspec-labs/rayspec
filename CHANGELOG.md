@@ -5,6 +5,46 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **An install of the published packages no longer resolves the vulnerable `hono` and top-level
+  `undici`.** The root `pnpm.overrides` moved both inside this repository, but a consumer's `npm
+  install` never sees those overrides: it installs the exact versions `@rayspec/server` and
+  `@rayspec/api-auth` declare, which were `hono` `4.12.27` and `undici` `8.9.0`, both inside
+  advisory ranges `npm audit` reports (`hono` below `4.13.5`, `undici` `8.0.0` to `8.10.1`). The
+  declared versions are now `hono` `4.13.9` and `undici` `8.11.2`, and the overrides name the same
+  versions, so the workspace tests what a consumer installs. An `npm audit` over the packed
+  tarballs installed into an empty directory drops from 10 findings to 8, with no `hono` finding
+  and none against the top-level `undici`.
+- **Still open for consumers: three advisories inside `@earendil-works/pi-coding-agent`.**
+  `@rayspec/adapter-pi` depends on `@earendil-works/pi-coding-agent` `0.79.9`, which ships an
+  `npm-shrinkwrap.json` pinning `undici` `8.5.0`, `brace-expansion` `5.0.6` and `protobufjs`
+  `7.6.4`. npm installs a dependency's shrinkwrap as written, so neither a pin in a RaySpec manifest
+  nor the workspace overrides reach those copies. The first release whose shrinkwrap is clear of all
+  three is `0.86.0` (`undici` `8.10.2`, `brace-expansion` `5.0.9`, `protobufjs` `7.6.6`). Moving to
+  it is a dependency bump of the Pi adapter across several breaking releases of the Pi SDK,
+  including the removal of the `AuthStorage` export the adapter uses, and is left to its own
+  change. Inside this repository pnpm ignores the shrinkwrap and the overrides already resolve
+  fixed versions.
+- **The workspace dependency audit passes again.** Advisories published since the last release
+  cover `fast-uri` `3.1.6` (two, fixed in `3.1.7`) and `ip-address` `10.3.1` (two, fixed in
+  `10.5.1`), the versions the root overrides pinned, so the osv-scanner audit of `pnpm-lock.yaml`
+  failed. The overrides now name the first fixed versions. A consumer install was not affected: npm
+  resolves `fast-uri` `3.1.8` and `ip-address` `10.7.2` there.
+- **CI now audits the release the way a consumer installs it.** The audit of `pnpm-lock.yaml` could
+  not see the three Pi SDK advisories above, because no consumer installs from that file and a
+  dependency's own shrinkwrap never enters it. A new CI step packs the release closure,
+  installs it with npm into an empty directory (`scripts/check-consumer-install.mjs`), imports every
+  package's entry point there, and scans the resulting `package-lock.json` with the same pinned
+  osv-scanner. The shrinkwrap advisories are recorded in `osv-scanner.consumer.toml` as exceptions
+  that expire on 2026-10-31, each naming the Pi SDK release that fixes it, so the step turns red
+  again unless the adapter has moved by then. The step also lists every dependency of a RaySpec
+  package that the consumer tree holds in two versions; today that includes `hono` (`4.13.9` for
+  `@rayspec/server` and `@rayspec/api-auth`, the newest `4.13.x` for the `@hono/*` packages that
+  take it as a peer).
+
 ## [1.8.0] - 2026-08-15
 
 ### Added

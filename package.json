@@ -34,6 +34,8 @@
     "test:advisory-sync": "node scripts/sync-advisory-issues.test.mjs",
     "test:release-guard": "node scripts/publish.test.mjs",
     "test:release-identity": "node scripts/release-identity.test.mjs",
+    "test:consumer-install": "node scripts/check-consumer-install.test.mjs",
+    "check:consumer-install": "node scripts/check-consumer-install.mjs",
     "gate:migrations": "pnpm --filter @rayspec/db gate:migrations",
     "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",
     "gate:migrate-clean": "pnpm --filter @rayspec/db gate:migrate-clean",
@@ -66,17 +68,17 @@
   "pnpm": {
     "overrides": {
       "@esbuild-kit/core-utils>esbuild": ">=0.25.0",
-      "hono": "4.13.5",
+      "hono": "4.13.9",
       "@hono/node-server@1": "1.19.15",
       "brace-expansion": "5.0.9",
-      "fast-uri": "3.1.6",
+      "fast-uri": "3.1.7",
       "protobufjs": "7.6.5",
       "qs": "6.16.0",
       "postcss": "8.5.23",
       "nanoid@3": "3.3.18",
       "nanoid@5": "5.1.16",
-      "undici": "8.9.0",
-      "ip-address": "10.3.1"
+      "undici": "8.11.2",
+      "ip-address": "10.5.1"
     }
   }
 }
