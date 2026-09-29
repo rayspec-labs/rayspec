@@ -1,0 +1,505 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rayspec:snapshot:v1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Validates snapshot.json, the root of the inner encrypted snapshot archive (snapshotFormatVersion 1). The object index inside the snapshot (payload/object-index.json) validates against #/$defs/objectIndex; payload/objects.bin is the concatenation of the stored blob files in object-index order, one stored range per object, consecutive from offset 0 with no gaps or overlaps. The semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced. snapshot.json is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason snapshot-size before it is parsed. Every snapshot.json this schema admits, including 10,000 tableCounts entries, stays under that limit.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "snapshotFormatVersion": {
+      "const": 1
+    },
+    "sourceRuntime": {
+      "$ref": "#/$defs/exactVersion"
+    },
+    "exportToolVersion": {
+      "$ref": "#/$defs/exactVersion"
+    },
+    "applicationId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "applicationVersion": {
+      "$ref": "#/$defs/exactVersion"
+    },
+    "applicationDigest": {
+      "$ref": "#/$defs/sha256"
+    },
+    "schemaHead": {
+      "$ref": "#/$defs/schemaHead"
+    },
+    "databaseMajor": {
+      "type": "integer",
+      "minimum": 14,
+      "maximum": 99
+    },
+    "fenceEpoch": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "capturedAt": {
+      "$ref": "#/$defs/utcTimestamp"
+    },
+    "applicationTenantCount": {
+      "const": 1
+    },
+    "workflowSystemDatabase": {
+      "enum": [
+        "included",
+        "absent"
+      ]
+    },
+    "runHistoryPolicy": {
+      "enum": [
+        "included",
+        "excluded"
+      ]
+    },
+    "identityPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "userIds": {
+          "const": "preserved"
+        },
+        "passwordHashes": {
+          "enum": [
+            "preserved",
+            "reset"
+          ]
+        },
+        "sessions": {
+          "const": "reset"
+        },
+        "apiKeys": {
+          "const": "reset"
+        },
+        "invites": {
+          "const": "reset"
+        },
+        "oidcArtifacts": {
+          "const": "reset"
+        },
+        "jwtSigningKey": {
+          "const": "reissued"
+        },
+        "apiKeyPepper": {
+          "const": "reissued"
+        },
+        "mediaSigningKey": {
+          "const": "reissued"
+        },
+        "mediaPlaybackTokens": {
+          "const": "invalidated"
+        }
+      },
+      "required": [
+        "userIds",
+        "passwordHashes",
+        "sessions",
+        "apiKeys",
+        "invites",
+        "oidcArtifacts",
+        "jwtSigningKey",
+        "apiKeyPepper",
+        "mediaSigningKey",
+        "mediaPlaybackTokens"
+      ]
+    },
+    "tableCounts": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "enum": [
+              "application",
+              "workflow-system"
+            ]
+          },
+          "schema": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+          },
+          "table": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]{0,62}$"
+          },
+          "rows": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "database",
+          "schema",
+          "table",
+          "rows"
+        ]
+      }
+    },
+    "objectCount": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "inventory": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "enum": [
+              "payload/application.ray",
+              "payload/database.dump",
+              "payload/workflow-system.dump",
+              "payload/object-index.json",
+              "payload/objects.bin"
+            ]
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967294
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "payload/application.ray"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "payload/database.dump"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "payload/object-index.json"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {
+              "path": {
+                "const": "payload/objects.bin"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          },
+          "type": "array",
+          "maxContains": 1
+        }
+      ]
+    },
+    "excludedDataCategories": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/dataCategory"
+      },
+      "allOf": [
+        {
+          "contains": {
+            "const": "credential-state"
+          },
+          "type": "array"
+        },
+        {
+          "contains": {
+            "const": "request-replay-state"
+          },
+          "type": "array"
+        },
+        {
+          "contains": {
+            "const": "security-audit-log"
+          },
+          "type": "array"
+        },
+        {
+          "contains": {
+            "const": "runtime-control-state"
+          },
+          "type": "array"
+        }
+      ]
+    }
+  },
+  "required": [
+    "snapshotFormatVersion",
+    "sourceRuntime",
+    "exportToolVersion",
+    "applicationId",
+    "applicationVersion",
+    "applicationDigest",
+    "schemaHead",
+    "databaseMajor",
+    "fenceEpoch",
+    "capturedAt",
+    "applicationTenantCount",
+    "workflowSystemDatabase",
+    "runHistoryPolicy",
+    "identityPolicy",
+    "tableCounts",
+    "objectCount",
+    "inventory",
+    "excludedDataCategories"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "workflowSystemDatabase": {
+            "const": "included"
+          }
+        },
+        "required": [
+          "workflowSystemDatabase"
+        ],
+        "type": "object"
+      },
+      "then": {
+        "properties": {
+          "inventory": {
+            "contains": {
+              "properties": {
+                "path": {
+                  "const": "payload/workflow-system.dump"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "type": "object"
+            },
+            "type": "array",
+            "maxContains": 1
+          }
+        },
+        "type": "object"
+      },
+      "else": {
+        "properties": {
+          "inventory": {
+            "not": {
+              "contains": {
+                "properties": {
+                  "path": {
+                    "const": "payload/workflow-system.dump"
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "runHistoryPolicy": {
+            "const": "excluded"
+          }
+        },
+        "required": [
+          "runHistoryPolicy"
+        ],
+        "type": "object"
+      },
+      "then": {
+        "properties": {
+          "excludedDataCategories": {
+            "contains": {
+              "const": "run-history"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "else": {
+        "properties": {
+          "excludedDataCategories": {
+            "not": {
+              "contains": {
+                "const": "run-history"
+              },
+              "type": "array"
+            }
+          }
+        },
+        "type": "object"
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "exactVersion": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+    },
+    "utcTimestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:[.][0-9]{1,9})?Z$"
+    },
+    "schemaHead": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "platform": {
+          "type": "string",
+          "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
+        },
+        "product": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "platform",
+        "product"
+      ]
+    },
+    "dataCategory": {
+      "enum": [
+        "identity-and-tenancy",
+        "credential-state",
+        "request-replay-state",
+        "run-history",
+        "security-audit-log",
+        "application-event-log",
+        "platform-migration-ledger",
+        "runtime-control-state",
+        "product-store-data",
+        "workflow-system-state",
+        "blob-objects"
+      ]
+    },
+    "objectIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objectIndexFormatVersion": {
+          "const": 1
+        },
+        "objects": {
+          "type": "array",
+          "maxItems": 500000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "tenantId": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "contentType": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 255
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967294
+              },
+              "sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "storedOffset": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967294
+              },
+              "storedSize": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967294
+              },
+              "storedSha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            },
+            "required": [
+              "tenantId",
+              "key",
+              "size",
+              "sha256",
+              "storedOffset",
+              "storedSize",
+              "storedSha256"
+            ]
+          }
+        }
+      },
+      "required": [
+        "objectIndexFormatVersion",
+        "objects"
+      ]
+    }
+  }
+}

@@ -1,0 +1,225 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rayspec:managed-receipt:v1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. A release capability receipt names exactly which public-hosting protections were tested for one runtime release. It is not a compliance certificate. Every const below is a protection the release must have tested; a release that cannot attest one of them has no managed receipt. supportedBackends and capabilities list only what the managed posture allows: capabilities.json ids whose managedPosture is self-host-only or test-only are refused here, and Cloud also cross-checks every listed id against capabilities.json managedPosture allowed. A receipt is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason receipt-size before it is parsed. The array bounds keep every receipt this schema admits under that limit.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "receiptFormatVersion": {
+      "const": 1
+    },
+    "contractVersion": {
+      "const": "1.0.0-draft.2"
+    },
+    "runtimeVersion": {
+      "$ref": "#/$defs/exactVersion"
+    },
+    "sourceCommit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "releaseManifestSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "artifactSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "os": {
+            "const": "linux"
+          },
+          "arch": {
+            "const": "x64"
+          },
+          "nodeMajor": {
+            "const": 22
+          },
+          "nodeVersion": {
+            "type": "string",
+            "pattern": "^22[.](2[1-9]|[3-9][0-9]|[1-9][0-9]{2,})[.](0|[1-9][0-9]*)$"
+          }
+        },
+        "required": [
+          "os",
+          "arch",
+          "nodeMajor",
+          "nodeVersion"
+        ]
+      }
+    },
+    "capabilityVocabularyVersion": {
+      "const": 1
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
+        "not": {
+          "enum": [
+            "agent-backend-anthropic",
+            "agent-backend-codex",
+            "agent-backend-pi",
+            "extraction-deterministic",
+            "stt-fake",
+            "tts-fake"
+          ]
+        }
+      }
+    },
+    "maxApplicationTenants": {
+      "const": 1
+    },
+    "singleTenantModeEnforced": {
+      "const": true
+    },
+    "publicHostingPosture": {
+      "const": "isolated-environment-v1"
+    },
+    "supportedBackends": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "openai"
+        ]
+      }
+    },
+    "executionLevels": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "none",
+          "in-process"
+        ]
+      }
+    },
+    "databaseIsolation": {
+      "const": "dedicated-db-and-rls"
+    },
+    "databaseRoleSeparation": {
+      "const": true
+    },
+    "crossProcessCancellation": {
+      "const": true
+    },
+    "agentTraceExport": {
+      "const": "off"
+    },
+    "recoveryScopeEndpoint": {
+      "enum": [
+        "authenticated",
+        "disabled"
+      ]
+    },
+    "trustedProxiesPinned": {
+      "const": true
+    },
+    "egressEnforcement": {
+      "const": "host-network-policy"
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "protection": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "reference": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          }
+        },
+        "required": [
+          "protection",
+          "reference",
+          "sha256"
+        ]
+      }
+    },
+    "residualRisks": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "risk": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": [
+          "risk",
+          "owner"
+        ]
+      }
+    }
+  },
+  "required": [
+    "receiptFormatVersion",
+    "contractVersion",
+    "runtimeVersion",
+    "sourceCommit",
+    "releaseManifestSha256",
+    "artifactSha256",
+    "targets",
+    "capabilityVocabularyVersion",
+    "capabilities",
+    "maxApplicationTenants",
+    "singleTenantModeEnforced",
+    "publicHostingPosture",
+    "supportedBackends",
+    "executionLevels",
+    "databaseIsolation",
+    "databaseRoleSeparation",
+    "crossProcessCancellation",
+    "agentTraceExport",
+    "recoveryScopeEndpoint",
+    "trustedProxiesPinned",
+    "egressEnforcement",
+    "evidence",
+    "residualRisks"
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "exactVersion": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+    }
+  }
+}

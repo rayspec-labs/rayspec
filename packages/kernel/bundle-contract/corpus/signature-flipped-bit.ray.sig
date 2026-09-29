@@ -1,0 +1,1 @@
+{"algorithm":"ed25519","archiveSha256":"20331da54f5c5b0911e1d9fe6dc4732b6ebd28448930d845b6a84e0188a9d194","publicKeySha256":"3c281190ce1eeb36a024551e26bf929de23dc6e5f03e92b522e5f132ed5db783","signature":"9vnTrx2rAsee/1vy6yH9fsUF8mSDXlJRdQdmdRAi5GSToceHIv+UPpnZ2ySiIprRZeN6bdQN1TwCvrYwKRr2AQ==","signatureFormatVersion":1}

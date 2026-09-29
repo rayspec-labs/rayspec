@@ -1,0 +1,27 @@
+{
+  "formatVersion": 1,
+  "kind": "migration",
+  "application": {
+    "id": "format-fixture",
+    "version": "0.0.0-contract-fixture"
+  },
+  "runtime": {
+    "version": "0.0.0-contract-fixture"
+  },
+  "target": {
+    "os": "linux",
+    "arch": "x64",
+    "nodeMajor": 22
+  },
+  "migration": {
+    "encryption": "age-v1-x25519",
+    "ciphertextPath": "payload/migration.age"
+  },
+  "inventory": [
+    {
+      "path": "payload/migration.age",
+      "size": 1,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

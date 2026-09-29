@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:rayspec:release-manifest:v1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Validates the signed release manifest, the release catalog of one RaySpec release. The file is canonical JSON (01-RAY-BUNDLE.md) followed by one LF; releaseManifestSha256 is the SHA-256 of exactly those file bytes. Its detached signature file validates against #/$defs/signatureFile. The semantic rules in 06-SEMANTIC-DETAILS.md \"Release and bindings\" are normative and must also be enforced.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "releaseManifestFormatVersion": {
+      "const": 1
+    },
+    "rayspecVersion": {
+      "$ref": "#/$defs/exactVersion"
+    },
+    "sourceCommit": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{40}$"
+    },
+    "identityManifestSha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    },
+    "packages": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^(?:rayspec|@rayspec/[a-z0-9][a-z0-9-]{0,62})$"
+          },
+          "version": {
+            "$ref": "#/$defs/exactVersion"
+          },
+          "integrity": {
+            "type": "string",
+            "pattern": "^sha512-[A-Za-z0-9+/]{86}==$"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "integrity"
+        ]
+      }
+    },
+    "images": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "$ref": "#/$defs/target"
+          },
+          "platform": {
+            "type": "string",
+            "pattern": "^[a-z0-9]{1,16}/[a-z0-9]{1,16}$"
+          },
+          "nodeVersion": {
+            "type": "string",
+            "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$"
+          },
+          "repository": {
+            "type": "string",
+            "maxLength": 255,
+            "pattern": "^ghcr[.]io(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)+$"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "target",
+          "platform",
+          "nodeVersion",
+          "repository",
+          "digest"
+        ]
+      }
+    }
+  },
+  "required": [
+    "releaseManifestFormatVersion",
+    "rayspecVersion",
+    "sourceCommit",
+    "identityManifestSha256",
+    "targets",
+    "packages",
+    "images"
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "exactVersion": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "os": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]{0,15}$"
+        },
+        "arch": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,15}$"
+        },
+        "nodeMajor": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 999
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "nodeMajor"
+      ]
+    },
+    "signatureFile": {
+      "$comment": "The detached signature of a release manifest, canonical JSON plus LF, by convention <manifest file>.sig. signature is standard base64 (with padding) of the 64-byte Ed25519 signature over the ASCII bytes \"rayspec-release-manifest-v1\\nsha256:<releaseManifestSha256>\\n\", made with the release key.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "signatureFormatVersion": {
+          "const": 1
+        },
+        "algorithm": {
+          "const": "ed25519"
+        },
+        "releaseManifestSha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "publicKeySha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{86}==$"
+        }
+      },
+      "required": [
+        "signatureFormatVersion",
+        "algorithm",
+        "releaseManifestSha256",
+        "publicKeySha256",
+        "signature"
+      ]
+    }
+  }
+}

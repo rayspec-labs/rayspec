@@ -1,0 +1,329 @@
+{
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Reserved operator binding names and the rule for application-grantable names.",
+  "contractVersion": "1.0.0-draft.2",
+  "namePattern": "^[A-Z][A-Z0-9_]{0,127}$",
+  "reservedExact": [
+    {
+      "name": "DATABASE_URL",
+      "purpose": "application database connection",
+      "source": "packages/app/server/src/boot-env-demands.ts:91"
+    },
+    {
+      "name": "DATABASE_URL_FILE",
+      "purpose": "file variant of DATABASE_URL",
+      "source": "packages/app/server/src/boot-env-demands.ts:91"
+    },
+    {
+      "name": "DBOS_SYSTEM_DATABASE_URL",
+      "purpose": "workflow system database connection",
+      "source": "packages/app/server/src/composition-root.ts:1100-1105"
+    },
+    {
+      "name": "SHADOW_DATABASE_URL",
+      "purpose": "plan-only shadow database",
+      "source": "packages/app/cli/src/plan.ts:379"
+    },
+    {
+      "name": "MIGRATE_CLEAN_URL",
+      "purpose": "gate database",
+      "source": "packages/kernel/db/scripts/migrate-clean-assert.ts:75"
+    },
+    {
+      "name": "DRYRUN_PRODUCT_URL",
+      "purpose": "gate database",
+      "source": "packages/kernel/db/scripts/shadow-product-assertions.ts:176"
+    },
+    {
+      "name": "PORT",
+      "purpose": "listen port",
+      "source": "packages/app/cli/src/deploy.ts:604"
+    },
+    {
+      "name": "ALLOWED_ORIGINS",
+      "purpose": "CORS and CSRF origin allowlist",
+      "source": "packages/app/server/src/composition-root.ts:1068-1080"
+    },
+    {
+      "name": "ALLOWED_REQUEST_HEADERS",
+      "purpose": "CORS request header allowlist",
+      "source": "packages/app/server/src/composition-root.ts:1086"
+    },
+    {
+      "name": "OIDC_ISSUER",
+      "purpose": "OIDC issuer URL",
+      "source": "packages/app/server/src/composition-root.ts:1145"
+    },
+    {
+      "name": "STT_PROVIDER",
+      "purpose": "speech-to-text provider selection",
+      "source": "packages/app/server/src/composition-root.ts:530"
+    },
+    {
+      "name": "TTS_PROVIDER",
+      "purpose": "text-to-speech provider selection",
+      "source": "packages/app/server/src/composition-root.ts:545"
+    },
+    {
+      "name": "OPENAI_BASE_URL",
+      "purpose": "redirects provider traffic; egress is operator-controlled",
+      "source": "packages/adapters/codex/src/index.ts:818"
+    },
+    {
+      "name": "DEEPGRAM_BASE_URL",
+      "purpose": "redirects provider traffic; egress is operator-controlled",
+      "source": "packages/adapters/deepgram/src/deepgram-adapter.ts:261"
+    },
+    {
+      "name": "CODEX_HOME",
+      "purpose": "agent CLI state directory",
+      "source": "packages/adapters/codex/src/index.ts:202"
+    },
+    {
+      "name": "HTTP_PROXY",
+      "purpose": "egress proxy; host network policy",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "HTTPS_PROXY",
+      "purpose": "egress proxy; host network policy",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "NO_PROXY",
+      "purpose": "egress proxy bypass; host network policy",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "PATH",
+      "purpose": "process search path",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "HOME",
+      "purpose": "process home directory",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "USER",
+      "purpose": "process user",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "SHELL",
+      "purpose": "process shell",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "TMPDIR",
+      "purpose": "process temporary directory",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "TZ",
+      "purpose": "process time zone",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "LANG",
+      "purpose": "process locale",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "CI",
+      "purpose": "test and gate switch",
+      "source": "reserved by policy"
+    },
+    {
+      "name": "ALL_PROXY",
+      "purpose": "egress proxy for every scheme; host network policy",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "BASH_ENV",
+      "purpose": "file a non-interactive shell sources before it runs",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "GLIBC_TUNABLES",
+      "purpose": "C library behaviour of every child process",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "OPENSSL_CONF",
+      "purpose": "OpenSSL configuration file, which can load engines and providers",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "SSL_CERT_FILE",
+      "purpose": "trusted certificate bundle; replacing it allows interception of provider traffic",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "SSL_CERT_DIR",
+      "purpose": "trusted certificate directory; replacing it allows interception of provider traffic",
+      "source": "process environment; reserved by policy"
+    },
+    {
+      "name": "CLOUD_PROVIDER_TOKEN",
+      "purpose": "example of a cloud credential that a bundle can never obtain",
+      "source": "06-SEMANTIC-DETAILS.md:6"
+    },
+    {
+      "name": "OPENAI_API_KEY_FILE",
+      "purpose": "file variant of OPENAI_API_KEY; names a host path, so only the operator environment supplies it",
+      "source": "reserved by policy"
+    },
+    {
+      "name": "ANTHROPIC_API_KEY_FILE",
+      "purpose": "file variant of ANTHROPIC_API_KEY; names a host path, so only the operator environment supplies it",
+      "source": "reserved by policy"
+    },
+    {
+      "name": "CLAUDE_CODE_OAUTH_TOKEN_FILE",
+      "purpose": "file variant of CLAUDE_CODE_OAUTH_TOKEN; names a host path, so only the operator environment supplies it",
+      "source": "reserved by policy"
+    },
+    {
+      "name": "CODEX_API_KEY_FILE",
+      "purpose": "file variant of CODEX_API_KEY; names a host path, so only the operator environment supplies it",
+      "source": "reserved by policy"
+    },
+    {
+      "name": "DEEPGRAM_API_KEY_FILE",
+      "purpose": "file variant of DEEPGRAM_API_KEY; names a host path, so only the operator environment supplies it",
+      "source": "reserved by policy"
+    }
+  ],
+  "reservedPrefixes": [
+    {
+      "prefix": "RAYSPEC_",
+      "covers": "every platform setting and boot secret, including RAYSPEC_JWT_SIGNING_KEY, RAYSPEC_API_KEY_PEPPER, RAYSPEC_MEDIA_SIGNING_KEY, RAYSPEC_BLOB_ROOT, RAYSPEC_HANDLER_ROOT, RAYSPEC_AGENT_TRACING, RAYSPEC_TRUSTED_PROXIES, RAYSPEC_SKIP_DOTENV and their _FILE variants"
+    },
+    {
+      "prefix": "DBOS_",
+      "covers": "workflow engine settings"
+    },
+    {
+      "prefix": "PG",
+      "covers": "libpq connection settings (PGHOST, PGPASSWORD and others)"
+    },
+    {
+      "prefix": "NODE_",
+      "covers": "Node.js runtime switches (NODE_OPTIONS, NODE_EXTRA_CA_CERTS, NODE_USE_ENV_PROXY)"
+    },
+    {
+      "prefix": "NPM_",
+      "covers": "package manager settings"
+    },
+    {
+      "prefix": "LD_",
+      "covers": "dynamic loader"
+    },
+    {
+      "prefix": "DYLD_",
+      "covers": "dynamic loader"
+    },
+    {
+      "prefix": "CLOUD_",
+      "covers": "cloud control-plane names"
+    },
+    {
+      "prefix": "OPENAI_AGENTS_",
+      "covers": "agent SDK tracing and export switches"
+    },
+    {
+      "prefix": "OTEL_",
+      "covers": "telemetry export"
+    },
+    {
+      "prefix": "ANTHROPIC_",
+      "covers": "Anthropic SDK settings, which the agent CLI subprocess inherits (ANTHROPIC_BASE_URL redirects provider traffic and the key with it; ANTHROPIC_AUTH_TOKEN replaces the credential); ANTHROPIC_API_KEY stays platform-grantable"
+    },
+    {
+      "prefix": "CLAUDE_",
+      "covers": "agent CLI settings (CLAUDE_CONFIG_DIR, and CLAUDE_CODE_ switches that select another provider endpoint); CLAUDE_CODE_OAUTH_TOKEN stays platform-grantable"
+    }
+  ],
+  "platformGrantable": [
+    {
+      "name": "OPENAI_API_KEY",
+      "kind": "secret",
+      "usedBy": "agent-backend-openai, tts-openai",
+      "fileVariant": "OPENAI_API_KEY_FILE"
+    },
+    {
+      "name": "ANTHROPIC_API_KEY",
+      "kind": "secret",
+      "usedBy": "agent-backend-anthropic",
+      "fileVariant": "ANTHROPIC_API_KEY_FILE"
+    },
+    {
+      "name": "CLAUDE_CODE_OAUTH_TOKEN",
+      "kind": "secret",
+      "usedBy": "agent-backend-anthropic",
+      "fileVariant": "CLAUDE_CODE_OAUTH_TOKEN_FILE"
+    },
+    {
+      "name": "CODEX_API_KEY",
+      "kind": "secret",
+      "usedBy": "agent-backend-codex",
+      "fileVariant": "CODEX_API_KEY_FILE"
+    },
+    {
+      "name": "DEEPGRAM_API_KEY",
+      "kind": "secret",
+      "usedBy": "stt-deepgram",
+      "fileVariant": "DEEPGRAM_API_KEY_FILE"
+    }
+  ],
+  "rules": [
+    "A name is reserved when it equals a reservedExact name, or starts with a reservedPrefixes prefix and is not a platformGrantable name, compared byte for byte after the namePattern check. Reserved names come only from the operator.",
+    "A bundle that declares a reserved name in bindings is refused by verify, deploy and prepare with RAY_BINDING_RESERVED. A bindings file that supplies a reserved name is refused the same way; the operator supplies reserved names through the explicit process environment or the host, never through the application bindings file.",
+    "platformGrantable names are the only names the platform itself reads from application bindings. A bundle may declare them; the value is supplied by the customer or operator at deploy time, in the bindings file or the explicit process environment.",
+    "The _FILE variant of each platformGrantable name (its fileVariant) is reserved and listed in reservedExact. It names a host path, so only the operator supplies it, through the explicit process environment; the platform then reads the named file, which must pass the same permission checks as the bindings file. A bundle or bindings file that supplies a _FILE variant is refused with RAY_BINDING_RESERVED, and the platform never reads a path taken from application bindings.",
+    "Any other name that matches namePattern and is not reserved is application-defined: the platform never reads it and passes it only to the application process environment.",
+    "Declaring a name never grants a value. A request for a reserved name such as CLOUD_PROVIDER_TOKEN is refused, not silently dropped.",
+    "On the .ray deploy path no .env file is loaded, whatever RAYSPEC_SKIP_DOTENV says: bindings come only from --bindings-file and the explicit process environment.",
+    "Binding values never appear in any output, log, plan, receipt or error message; only names do."
+  ],
+  "bindingsFile": {
+    "description": "The --bindings-file format. A regular file owned by the invoking user with mode 0600 or stricter, not a link. Canonical JSON is not required on input. Names must be unique; a duplicate name is refused with RAY_USAGE.",
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "$id": "urn:rayspec:bindings-file:v1",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bindingsFormatVersion": {
+          "const": 1
+        },
+        "bindings": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 65536
+              }
+            },
+            "required": [
+              "name",
+              "value"
+            ]
+          }
+        }
+      },
+      "required": [
+        "bindingsFormatVersion",
+        "bindings"
+      ]
+    }
+  }
+}

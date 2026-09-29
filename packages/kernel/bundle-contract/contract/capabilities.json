@@ -1,0 +1,294 @@
+{
+  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Capability id vocabulary. An id never changes meaning; a changed meaning gets a new id. The vocabulary version increments when ids are added.",
+  "contractVersion": "1.0.0-draft.2",
+  "vocabularyVersion": 1,
+  "idPattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
+  "statusValues": {
+    "available": "provided by the runtime at the baseline commit",
+    "planned": "added by this release; not provided until the runtime that ships it lists it in inspect()"
+  },
+  "managedPostureValues": {
+    "allowed": "may be deployed under the managed posture",
+    "self-host-only": "refused under the managed posture until bounded and certified",
+    "test-only": "staging and conformance only; refused for production under the managed posture"
+  },
+  "rules": [
+    "pack derives requires from the spec; authors do not write it. verify re-derives it from the spec in the bundle and refuses a mismatch with RAY_MANIFEST_INVALID reason requires-mismatch.",
+    "requires lists only ids with requirableByBundle true, sorted by code point, unique. The schema enforces uniqueness only; a list with an id that is not requirable, or out of order, cannot equal the list derived from the spec and is refused at the derived-fields check (reader step 15) with RAY_MANIFEST_INVALID reason requires-mismatch. The manifest semantics check (reader step 8) does not test it, because an id this runtime does not know must reach the capabilities check (reader step 12) and be refused there as unknown-id.",
+    "A runtime refuses a bundle whose requires contains an id that is unknown to its vocabulary (RAY_CAPABILITY_UNSUPPORTED reason unknown-id) or that it does not list in inspect() (reason not-provided).",
+    "inspect() lists every id the runtime provides, including runtime-provided ids that bundles cannot require.",
+    "Platform identity, sessions, API keys, OIDC and health are part of every runtime and have no capability id."
+  ],
+  "capabilities": [
+    {
+      "id": "static-frontend",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "backend spec frontend[] non-empty",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:742-771,819",
+      "meaning": "Static frontend mounts served beside the API."
+    },
+    {
+      "id": "declarative-stores",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "stores[] non-empty (either profile)",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:793; packages/kernel/spec/src/product-grammar.ts:726",
+      "meaning": "Declared product stores, generated tables and store routes."
+    },
+    {
+      "id": "declarative-api",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "backend spec api[] non-empty",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:543-572,794",
+      "meaning": "Declared API routes with store, agent or handler actions."
+    },
+    {
+      "id": "stream-routes",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "an api[] action with kind stream",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:572; packages/compose/api-auth/src/engine/stream-routes.ts",
+      "meaning": "Streaming routes; stream handlers receive the raw request."
+    },
+    {
+      "id": "custom-handlers",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "backend spec handlers[] non-empty",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/platform/src/handlers/loader.ts:30-37",
+      "meaning": "Compiled JavaScript handler modules imported in the runtime process. Requires permissions.execution in-process."
+    },
+    {
+      "id": "extensions",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "backend spec extensions[] non-empty",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:806; docs/cli-reference.md:884-887",
+      "meaning": "Extension packages loaded at boot. Requires permissions.execution in-process."
+    },
+    {
+      "id": "durable-workflow",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "backend: deployment.durableWorker true; product profile: when the runtime wires the durable executor for the document (both profiles named at packages/app/server/src/durable-app-version.ts:44)",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:122; packages/app/server/src/composition-root.ts:1100-1105",
+      "meaning": "Durable workflow worker backed by a separate workflow system database."
+    },
+    {
+      "id": "tenant-event-bus",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "deployment.eventBus present",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:123; packages/kernel/db/drizzle/0011_tenant_event_bus.sql",
+      "meaning": "Per-tenant event streams stored in the application database."
+    },
+    {
+      "id": "trigger-cron",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "a triggers[] entry of kind cron",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:656",
+      "meaning": "Trigger kind cron."
+    },
+    {
+      "id": "trigger-webhook",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "a triggers[] entry of kind webhook",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:656",
+      "meaning": "Trigger kind webhook."
+    },
+    {
+      "id": "trigger-event",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "a triggers[] entry of kind event",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:656",
+      "meaning": "Trigger kind event."
+    },
+    {
+      "id": "trigger-manual",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "a triggers[] entry of kind manual",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:656",
+      "meaning": "Trigger kind manual."
+    },
+    {
+      "id": "agent-backend-openai",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "an agents[] entry with backend openai",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/spec/src/grammar.ts:795; packages/kernel/core/src/neutral.ts:24; packages/adapters/openai/src/index.ts",
+      "meaning": "Agent backend openai."
+    },
+    {
+      "id": "agent-backend-anthropic",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "an agents[] entry with backend anthropic",
+      "managedPosture": "self-host-only",
+      "source": "packages/kernel/spec/src/grammar.ts:795; packages/kernel/core/src/neutral.ts:24; packages/adapters/anthropic/src/index.ts",
+      "meaning": "Agent backend anthropic."
+    },
+    {
+      "id": "agent-backend-pi",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "an agents[] entry with backend pi",
+      "managedPosture": "self-host-only",
+      "source": "packages/kernel/spec/src/grammar.ts:795; packages/kernel/core/src/neutral.ts:24; packages/adapters/pi/src/index.ts",
+      "meaning": "Agent backend pi."
+    },
+    {
+      "id": "agent-backend-codex",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "an agents[] entry with backend codex",
+      "managedPosture": "self-host-only",
+      "source": "packages/kernel/spec/src/grammar.ts:795; packages/kernel/core/src/neutral.ts:24; packages/adapters/codex/src/index.ts",
+      "meaning": "Agent backend codex."
+    },
+    {
+      "id": "audio_input",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "product requires.capabilities contains audio_input",
+      "managedPosture": "allowed",
+      "source": "packages/capabilities/audio-runtime/src/manifest.ts",
+      "meaning": "Product capability audio_input (id kept exactly as the product grammar spells it)."
+    },
+    {
+      "id": "media_playback",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "product requires.capabilities contains media_playback",
+      "managedPosture": "allowed",
+      "source": "packages/capabilities/audio-runtime/src/manifest.ts",
+      "meaning": "Product capability media_playback (id kept exactly as the product grammar spells it)."
+    },
+    {
+      "id": "conversation_input",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "product requires.capabilities contains conversation_input",
+      "managedPosture": "allowed",
+      "source": "packages/capabilities/conversation-runtime/src/manifest.ts",
+      "meaning": "Product capability conversation_input (id kept exactly as the product grammar spells it)."
+    },
+    {
+      "id": "file_input",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "product requires.capabilities contains file_input",
+      "managedPosture": "allowed",
+      "source": "packages/capabilities/file-runtime/src/manifest.ts",
+      "meaning": "Product capability file_input (id kept exactly as the product grammar spells it)."
+    },
+    {
+      "id": "record_input",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": true,
+      "derivedFrom": "product requires.capabilities contains record_input",
+      "managedPosture": "allowed",
+      "source": "packages/capabilities/record-runtime/src/manifest.ts",
+      "meaning": "Product capability record_input (id kept exactly as the product grammar spells it)."
+    },
+    {
+      "id": "stt-deepgram",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": false,
+      "derivedFrom": "runtime-provided; selected by the operator with STT_PROVIDER=deepgram",
+      "managedPosture": "allowed",
+      "source": "packages/app/server/src/composition-root.ts:530",
+      "meaning": "Speech-to-text through Deepgram."
+    },
+    {
+      "id": "stt-fake",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": false,
+      "derivedFrom": "runtime-provided; STT_PROVIDER=fake",
+      "managedPosture": "test-only",
+      "source": "packages/app/server/src/composition-root.ts:530,2641",
+      "meaning": "Deterministic fake speech-to-text; boot warns."
+    },
+    {
+      "id": "tts-openai",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": false,
+      "derivedFrom": "runtime-provided; TTS_PROVIDER=openai",
+      "managedPosture": "allowed",
+      "source": "packages/app/server/src/composition-root.ts:545,1205",
+      "meaning": "Text-to-speech through OpenAI."
+    },
+    {
+      "id": "tts-fake",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": false,
+      "derivedFrom": "runtime-provided; TTS_PROVIDER=fake",
+      "managedPosture": "test-only",
+      "source": "packages/app/server/src/composition-root.ts:545,2653",
+      "meaning": "Deterministic fake text-to-speech; boot warns."
+    },
+    {
+      "id": "blob-store-fs",
+      "since": 1,
+      "status": "available",
+      "requirableByBundle": false,
+      "derivedFrom": "runtime-provided",
+      "managedPosture": "allowed",
+      "source": "packages/kernel/platform/src/blob/fs-blob-store.ts",
+      "meaning": "Filesystem blob store, one self-describing file per blob."
+    },
+    {
+      "id": "extraction-deterministic",
+      "since": 1,
+      "status": "planned",
+      "requirableByBundle": true,
+      "derivedFrom": "product extractors run in deterministic mode",
+      "managedPosture": "test-only",
+      "source": "packages/app/server/src/composition-root.ts:1833 (today: host-injected only, the platform ships none)",
+      "meaning": "A shipped deterministic extraction provider, labelled not for production extraction."
+    }
+  ]
+}
