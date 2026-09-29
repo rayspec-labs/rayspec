@@ -51,12 +51,13 @@ export const PROXY_URL_ENV_VARS = [
 /**
  * Does the RUNNING Node implement `NODE_USE_ENV_PROXY` at all?
  *
- * It does not exist on every runtime that can load this package. `engines` declares `node >= 22.21.0`,
- * the release that brought the feature to the 22 line, but a package manager only warns on an engines
- * mismatch unless it runs engine-strict, so an older 22 can still install and boot it — and on
- * 22.0–22.20 Node ignores the four proxy-URL
- * variables UNCONDITIONALLY, opt-in or not, and a boot that installed a proxy dispatcher there would
- * be adding egress routing Node itself would never have added. That is the very outcome this gate
+ * It does not exist on every runtime that can load this package, nor on every runtime the declared
+ * range admits. `engines` declares `node >= 22.21.0`, the release that brought the feature to the 22
+ * line, but that range also admits the whole 23 line, which never got it; and a package manager only
+ * warns on an engines mismatch unless it runs engine-strict, so an older 22 can still install and
+ * boot it. On 22.0–22.20 and on 23.x Node ignores the four proxy-URL variables UNCONDITIONALLY,
+ * opt-in or not, and a boot that installed a proxy dispatcher there would be adding egress routing
+ * Node itself would never have added. That is the very outcome this gate
  * exists to prevent (a deployment carrying leftover proxy variables from a base image must not
  * silently start routing through a proxy), so the runtime is part of the condition, not an assumption.
  *

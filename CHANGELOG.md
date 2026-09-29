@@ -12,8 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The Node floor is now `>=22.21.0`.** Every package's `engines.node`, the root manifest's and
   the documented prerequisites moved from `>=22` to the first release on the 22 line that
   implements `NODE_USE_ENV_PROXY`; below it the server's proxy restore has nothing to restore (see
-  the 1.8.0 entry on the env-proxy dispatcher). A package manager only warns on an engines
-  mismatch unless it runs engine-strict, so the runtime check in the server stays. CI now installs
+  the 1.8.0 entry on the env-proxy dispatcher). The runtime check in the server stays, because
+  the new range still admits the whole 23 line, which never got the feature, and because a package
+  manager only warns on an engines mismatch unless it runs engine-strict. CI now installs
   one exact patch, `22.23.3`, instead of whatever `22` resolved to on the day.
 
 ### Fixed

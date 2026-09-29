@@ -19,6 +19,7 @@
  *
  * No network beyond 127.0.0.1, no credentials.
  */
+import { readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { createServer } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -100,8 +101,9 @@ describe('nodeSupportsEnvProxy — does the RUNNING Node implement NODE_USE_ENV_
    * MEASURED, environment set at process startup, reading `Symbol.for('undici.globalDispatcher.1')`:
    * 22.12.0/22.19.0/22.20.0 and 23.11.1 install NOTHING for `NODE_USE_ENV_PROXY=1` + `HTTP_PROXY`;
    * 22.21.1, 24.0.0 and 25.6.1 install an `EnvHttpProxyAgent`. This is why the predicate exists:
-   * `engines` (`node >= 22.21.0`) is only a warning, a 22.0–22.20 runtime has no env-proxy support,
-   * and installing a proxy dispatcher there would ADD routing Node itself would never have added.
+   * `engines` (`node >= 22.21.0`) admits the 23 line, which has no env-proxy support, and is only a
+   * warning besides, so a 22.0–22.20 runtime can boot too; installing a proxy dispatcher on either
+   * would ADD routing Node itself would never have added.
    */
   it('is false across the 22.x versions that predate the feature — the whole 22.0–22.20 span', () => {
     for (const version of ['22.0.0', '22.12.0', '22.19.0', '22.20.0', '22.20.9']) {
@@ -120,6 +122,21 @@ describe('nodeSupportsEnvProxy — does the RUNNING Node implement NODE_USE_ENV_
     for (const version of ['24.0.0', '24.5.0', '25.6.1', '26.0.0']) {
       expect(nodeSupportsEnvProxy(version), `node ${version} has env-proxy support`).toBe(true);
     }
+  });
+
+  it('the declared floor is where the feature starts, and the range it declares still admits a line without it', () => {
+    const engine = (
+      JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+        engines: { node: string };
+      }
+    ).engines.node;
+    const floor = /^>=(\d+\.\d+\.\d+)$/.exec(engine)?.[1];
+    expect(floor, `engines.node is ${engine}`).toBeDefined();
+    expect(nodeSupportsEnvProxy(floor!)).toBe(true);
+    const [major, minor] = floor!.split('.').map(Number);
+    expect(nodeSupportsEnvProxy(`${major}.${minor! - 1}.99`)).toBe(false);
+    // 23.0.0 satisfies the floor and lacks the feature: engines alone cannot stand in for the check.
+    expect(nodeSupportsEnvProxy('23.0.0')).toBe(false);
   });
 
   it('fails CLOSED on a version string it cannot read', () => {
