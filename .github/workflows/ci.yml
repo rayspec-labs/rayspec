@@ -251,6 +251,15 @@ jobs:
       - name: Skill-drift gate
         run: pnpm gate:skill-drift
 
+      # The tier-direction gate: every workspace package depends only on its own tier or a lower one
+      # (docs/ARCHITECTURE.md, "Package taxonomy"), across every dependency field; a reviewed upward
+      # edge is listed by name in the gate and a stale one fails. Reads manifests only, so it needs no
+      # build. Its regression drives the gate over throwaway workspaces with planted edges.
+      - name: Tier-direction gate
+        run: pnpm gate:tier-direction
+      - name: Tier-direction gate regression
+        run: pnpm test:tier-direction
+
       # The third-party inventory backing THIRD-PARTY-NOTICES.md must describe the lockfile that
       # actually ships. Hashes pnpm-lock.yaml and compares it to the hash the SBOM recorded, so a pin
       # that moves without a regenerated SBOM fails here instead of silently invalidating a legal

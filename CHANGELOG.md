@@ -113,6 +113,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays the one the command has without the flag. A serving `deploy --json` prints its banners on
   stderr and writes its one envelope when it stops or is refused. Without `--json` every command's
   output is unchanged.
+- **A tier-direction gate.** `pnpm gate:tier-direction` (part of `pnpm gate` and CI) checks that
+  every workspace package depends only on packages of its own tier or a lower one, in every
+  dependency field, with the tier order read against `docs/ARCHITECTURE.md`. The three upward
+  edges the workspace has today are listed in the gate with their reasons, and a listed edge that
+  disappears fails the gate until it is removed. `pnpm test:tier-direction` drives the gate over
+  throwaway workspaces with planted edges.
 
 ### Changed
 

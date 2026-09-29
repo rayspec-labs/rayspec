@@ -57,6 +57,16 @@ downward.
 | **app**         | `cli` (bin `rayspec`), `server` (bin `rayspec-serve`)                      | The two entry points: the diagnostic/dev CLI and the boot server. |
 | **test**        | `parity`                                                                    | The cross-backend parity suite that holds every adapter to the same neutral contract. |
 
+`pnpm gate:tier-direction` enforces the direction for every workspace package and
+every dependency field, development dependencies included; the workspace members
+under `examples/` sit above every tier and nothing under `packages/` may depend on
+one. Three upward edges are reviewed exceptions, each named in the gate with its
+reason: `capability-bridges` depends on the workflow tier's `foundation` and
+`workflow-durable`, because joining the capabilities to the durable engine is the
+whole job of that package, and a test of `agent-runtime` uses
+`product-yaml-workflow-bridge` as a development dependency. A new upward edge fails
+the gate; so does an exception whose edge is gone.
+
 The neutral `core` types are the fixed point of the whole system: they sit at the
 bottom, and the adapters above them absorb every difference between vendor SDKs so
 those types never have to change when an SDK does.

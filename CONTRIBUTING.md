@@ -70,7 +70,7 @@ adapters, capabilities, workflow, compose, app, and test. Each tier depends only
 downward. See the **package taxonomy** in
 [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md#package-taxonomy) for what lives
 where; put new code in the lowest tier that fits, and never introduce an upward
-dependency.
+dependency. `pnpm gate:tier-direction` (part of `pnpm gate`) fails on one.
 
 ---
 
