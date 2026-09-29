@@ -46,6 +46,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container cases is not part of this package yet.
   **Nothing uses the package yet**: the CLI and the server do not depend on it, so it is not in the
   publish set and nothing a deployment runs changes.
+- **`@rayspec/bundle`: the one reader and writer of `.ray` archives.** A new kernel package, built
+  on `@rayspec/bundle-contract` and Node's own modules only, that the CLI and a hosting service are
+  meant to share, so both accept and refuse exactly the same archives.
+  `inspectBundle` runs the structural checks of the contract's reader pipeline in its order and
+  stops at the first failure: the archive limit of the operation (the larger kind limit for
+  inspect and verify, the application limit for deploy and prepare, the migration limit for
+  import), the end record, every central record (ZIP64, encryption, data descriptors, flag bits,
+  compression, version, timestamp, extra fields, comments, disks, links, directories, special
+  files, attributes, sizes and every name rule), the name set (duplicates, case-fold,
+  normalization and file-versus-directory collisions, byte order), the layout and each local
+  header byte for byte, the manifest through the contract validator, and every entry streamed
+  against the inventory (size, cumulative extracted bytes, CRC-32, SHA-256). It computes the
+  archive's identity on the same pass, reports secret findings by path, and writes nothing.
+  `extractBundle` runs the same checks while copying into a directory that must not exist: it is
+  created with mode 0700 only after the manifest passed, files are created exclusively without
+  following links, and the directory is removed on any failure. Neither ever imports, evaluates or
+  executes anything from an archive; a test with a payload that would write a file and open a
+  connection if imported shows both untouched, and then imports it on purpose to show the probe
+  works. Reads stay inside the size the archive had when it was opened, run under a wall-time
+  budget (`RAY_LIMIT_EXCEEDED` `time-budget`), and refuse an archive whose directory or size
+  changes while it is read. Every limit can only be lowered. Hostile input is answered with a
+  vocabulary code and never thrown, and no message repeats a name from the archive.
+  The ZIP parsing is written for the strict profile rather than taken from a ZIP library, which
+  would accept forms the contract refuses.
+  `writeBundle` computes the inventory from the prepared files, validates the manifest, writes the
+  entries in name order in the strict profile with the canonical manifest last, reads the result
+  back through the reader, and moves it into place atomically, never over an existing file unless
+  asked. The same input gives the same bytes in any directory, and the base contract fixture is
+  reproduced byte for byte. `createSignatureFile` and `verifySignatureFile` make and check the
+  detached Ed25519 signature in the contract's order (`malformed`, `mismatch`, `untrusted-key`).
+  Every case of the golden corpus runs through inspection and extraction with its expected code
+  and reason, including the generated 10,005-entry case; the verify expectations run through the
+  reader, the runtime admission checks, the secret scan and the signature, except for the four
+  cases decided by the spec checks, which are left to the spec parser. Seeded property tests
+  cover generated hostile names, header and end-record fields, every single-byte flip and every
+  truncation.
+  **Nothing uses the package yet**: the CLI does not depend on it, so it is not in the publish set
+  and nothing a deployment runs changes.
 
 ### Changed
 
