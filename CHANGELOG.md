@@ -406,7 +406,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runtime role can call other than the two lookups, unchanged. It reports the result as `BootedServer.databaseIsolation`
   and prints one warning line naming each failed check, while still serving. The durable worker's
   own tables are migrated as the migration role before the engine starts as the runtime role, and
-  `rayspec tenant ensure` provisions over the migration role when the variable is set. The three
+  `rayspec tenant ensure` provisions over the migration role when the variable is set. The boot's
+  product-schema drift check reads foreign keys from `pg_constraint` instead of the information
+  schema, which shows a constraint's referenced table only to the table's owner, so a restart of a
+  role-separated deployment mounts its product stores instead of refusing them as drifted. The three
   roles and their grants come from `sql/database-roles.sql` in `@rayspec/db`
   (`packages/kernel/db/sql/database-roles.sql`), which the dev container (`pnpm db:up`, on a new
   volume) and CI run too; it is idempotent and hands the objects of an existing single-role database

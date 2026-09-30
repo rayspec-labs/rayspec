@@ -35,12 +35,14 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import type { StoreSpec } from '@rayspec/spec';
 import { eq, getTableName, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Db, makeDb } from './client.js';
+import { detectDrift } from './generated/drift-detect.js';
 import { migrationsDir } from './migrations.js';
 import {
   apiKeys,
@@ -183,6 +185,35 @@ describeDb('row-level tenant isolation, connected as the runtime role', () => {
       [TENANT_POLICY_NAME],
     )) as unknown as { n: number }[];
     expect(policies?.n).toBe(tables.length);
+  });
+
+  it('the drift check sees every foreign key as the runtime role, as the migration role does', async () => {
+    // The boot's mount-or-materialize decision reads the live schema over the serving connection.
+    // The information schema hides a constraint's referenced table from a role that does not own the
+    // table, which made a reboot under role separation report every foreign key as missing.
+    const stores: StoreSpec[] = [
+      { name: 'notes_parents', columns: [{ name: 'title', type: 'text' }], foreignKeys: [] },
+      {
+        name: 'notes_children',
+        columns: [
+          { name: 'parent_id', type: 'uuid', nullable: true },
+          { name: 'body', type: 'text' },
+        ],
+        foreignKeys: [{ column: 'parent_id', references: 'notes_parents', onDelete: 'cascade' }],
+      },
+    ] as unknown as StoreSpec[];
+    const as = (sqlClient: ReturnType<typeof postgres>) => (q: string, params: unknown[]) =>
+      sqlClient.unsafe(q, params as never[]) as unknown as Promise<Record<string, unknown>[]>;
+    const asRuntime = await detectDrift(stores, 'public', as(runtime));
+    const asMigrator = await detectDrift(stores, 'public', as(migrator));
+    const fkKinds = new Set([
+      'missing_tenant_fk',
+      'tenant_fk_not_cascade',
+      'missing_product_fk',
+      'product_fk_policy',
+    ]);
+    expect(asRuntime.filter((f) => fkKinds.has(f.kind))).toEqual([]);
+    expect(asRuntime).toEqual(asMigrator);
   });
 
   it('the posture check reports the runtime role active, with no finding', async () => {

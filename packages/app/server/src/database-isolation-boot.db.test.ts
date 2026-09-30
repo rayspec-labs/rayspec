@@ -33,6 +33,7 @@ import {
   createIsolatedTestDatabase,
   type IsolatedTestDatabase,
   registerScopedTables,
+  testDatabaseIsolation,
 } from '@rayspec/db/testing';
 import { typeStrippingImporter } from '@rayspec/platform';
 import { exportPKCS8, generateKeyPair } from 'jose';
@@ -271,6 +272,26 @@ describe.skipIf(!baseUrl)(
       });
       expect(warnings.filter((w) => w.includes('RAYSPEC_MIGRATION_DATABASE_URL'))).toEqual([]);
     });
+
+    it('a restart mounts the product stores it created: the runtime role sees their foreign keys', async () => {
+      // The first boot's drift report reads the live schema as the runtime role, which owns nothing.
+      expect(server?.deployMode).toBe('materialized');
+      expect(server?.drift).toEqual([]);
+      // A second boot of the same stores decides mount-or-materialize from that same read; a drift
+      // check blind to foreign keys it does not own would refuse it as drifted.
+      const restarted = await boot(SPEC_PLAIN, {
+        DATABASE_URL: iso.urls.runtime,
+        RAYSPEC_MIGRATION_DATABASE_URL: iso.urls.migration,
+        DBOS_SYSTEM_DATABASE_URL: iso.workflowSystemUrls?.runtime,
+      });
+      try {
+        expect(restarted.deployMode).toBe('mounted');
+        expect(restarted.drift).toEqual([]);
+        expect(restarted.databaseIsolation.active).toBe(true);
+      } finally {
+        await restarted.close();
+      }
+    }, 120_000);
 
     it('every tenant table, product stores included, has an enabled, forced policy; the migration role owns them', async () => {
       const tables = await listTenantTables(admin);
@@ -545,45 +566,56 @@ describe.skipIf(!baseUrl)(
         }
       }, 120_000);
 
-      it('without the migration connection the boot is the single-role boot: no table has row security', async () => {
-        const single = new URL(baseUrl as string);
-        single.pathname = `/${second.name}_single`;
-        const server0 = postgres(iso.urls.admin.replace(`/${iso.name}`, '/postgres'), { max: 1 });
-        try {
-          await server0.unsafe(`CREATE DATABASE "${second.name}_single"`);
-        } finally {
-          await server0.end();
-        }
-        try {
-          const booted = await boot(SPEC_PLAIN, {
-            DATABASE_URL: single.toString(),
-            RAYSPEC_MIGRATION_DATABASE_URL: undefined,
-            DBOS_SYSTEM_DATABASE_URL: undefined,
-          });
+      // The runtime-role lane turns role separation on for every boot, so the single-role boot is
+      // proven only outside it.
+      it.skipIf(testDatabaseIsolation())(
+        'without the migration connection the boot is the single-role boot: no table has row security',
+        async () => {
+          const single = new URL(baseUrl as string);
+          single.pathname = `/${second.name}_single`;
+          const server0 = postgres(iso.urls.admin.replace(`/${iso.name}`, '/postgres'), { max: 1 });
           try {
-            expect(booted.databaseIsolation).toMatchObject({ mode: 'single-role', active: false });
-            const check = postgres(single.toString(), { max: 1, onnotice: () => {} });
+            await server0.unsafe(`CREATE DATABASE "${second.name}_single"`);
+          } finally {
+            await server0.end();
+          }
+          try {
+            const booted = await boot(SPEC_PLAIN, {
+              DATABASE_URL: single.toString(),
+              RAYSPEC_MIGRATION_DATABASE_URL: undefined,
+              DBOS_SYSTEM_DATABASE_URL: undefined,
+            });
             try {
-              const tables = await listTenantTables(check);
-              expect(tables.map((t) => t.table)).toEqual(
-                expect.arrayContaining(['notebooks', 'entries']),
-              );
-              expect(tables.filter((t) => t.rowSecurity || t.forced)).toEqual([]);
+              expect(booted.databaseIsolation).toMatchObject({
+                mode: 'single-role',
+                active: false,
+              });
+              const check = postgres(single.toString(), { max: 1, onnotice: () => {} });
+              try {
+                const tables = await listTenantTables(check);
+                expect(tables.map((t) => t.table)).toEqual(
+                  expect.arrayContaining(['notebooks', 'entries']),
+                );
+                expect(tables.filter((t) => t.rowSecurity || t.forced)).toEqual([]);
+              } finally {
+                await check.end();
+              }
             } finally {
-              await check.end();
+              await booted.close();
             }
           } finally {
-            await booted.close();
+            const server1 = postgres(iso.urls.admin.replace(`/${iso.name}`, '/postgres'), {
+              max: 1,
+            });
+            try {
+              await server1.unsafe(`DROP DATABASE IF EXISTS "${second.name}_single" WITH (FORCE)`);
+            } finally {
+              await server1.end();
+            }
           }
-        } finally {
-          const server1 = postgres(iso.urls.admin.replace(`/${iso.name}`, '/postgres'), { max: 1 });
-          try {
-            await server1.unsafe(`DROP DATABASE IF EXISTS "${second.name}_single" WITH (FORCE)`);
-          } finally {
-            await server1.end();
-          }
-        }
-      }, 120_000);
+        },
+        120_000,
+      );
     });
   },
 );
