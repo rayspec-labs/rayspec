@@ -10,6 +10,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   symlinkSync,
   writeFileSync,
@@ -182,7 +183,7 @@ describe('version directories', () => {
     expect(existsSync(root)).toBe(false);
   });
 
-  it('finds a changed, an added and a removed file in an existing version directory', async () => {
+  it('finds a changed, an added, a removed and a linked file in an existing version directory', async () => {
     const dir = await freshState();
     const root = await dir.stageVersion(bundlePath, bundleSha, manifest);
     const handler = join(root, 'payload', 'handlers', 'h.js');
@@ -202,6 +203,18 @@ describe('version directories', () => {
       code: 'RAY_DIGEST_MISMATCH',
     });
     await removeTree(again);
+
+    // A file of the inventory removed: refused by verifyVersion and by stageVersion alike.
+    const removed = await dir.stageVersion(bundlePath, bundleSha, manifest);
+    chmodSync(join(removed, 'payload', 'handlers'), 0o700);
+    rmSync(join(removed, 'payload', 'handlers', 'h.js'));
+    await expect(verifyVersion(removed, manifest).catch(refusalOf)).resolves.toMatchObject({
+      code: 'RAY_DIGEST_MISMATCH',
+    });
+    await expect(
+      dir.stageVersion(bundlePath, bundleSha, manifest).catch(refusalOf),
+    ).resolves.toMatchObject({ code: 'RAY_DIGEST_MISMATCH' });
+    await removeTree(removed);
 
     const third = await dir.stageVersion(bundlePath, bundleSha, manifest);
     chmodSync(join(third, 'payload', 'handlers'), 0o700);
