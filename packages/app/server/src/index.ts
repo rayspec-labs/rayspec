@@ -100,11 +100,32 @@ export {
   loadServerConfig,
   loadStaticServerConfig,
   loadTenantProvisionSecrets,
+  MAX_SCHEMA_LOCK_TIMEOUT_MS,
   type ProductTableRegistrar,
+  parseSchemaLockTimeoutMs,
   type ServerConfig,
   type StaticBootedServer,
   type StaticServerConfig,
+  validateInjectedSpec,
 } from './composition-root.js';
+// The operation lease with its fencing epoch, and the append-only operation receipts: the frame a
+// mutating runtime-control operation runs in (one holder at a time, intent before effect, every write
+// checked against the epoch in its own transaction).
+export {
+  acquireOperationLease,
+  findIntentByIdempotencyKey,
+  type LeaseTakeover,
+  type LeaseTx,
+  MAX_LEASE_TTL_MS,
+  type OperationIdentity,
+  OperationLease,
+  OperationLeaseError,
+  type OperationOutcome,
+  type OperationReceipt,
+  type ReceiptEvent,
+  readOperationReceipts,
+  unfinishedSteps,
+} from './operation-lease.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so
@@ -126,6 +147,7 @@ export {
   ProductBootError,
   resolveExtractorConfigPath,
   resolveStructuredOutputMode,
+  validateProductYamlSpec,
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
 // The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicates
@@ -142,6 +164,35 @@ export {
 // documented entrypoints instead of carrying a private single-path copy — the construction that let
 // those two drift apart in the first place. A leaf module (node builtins only).
 export { loadLocalDotenvIfPresent } from './read-env.js';
+// The runtime-control adapter — the typed library through which a deployment supervisor or the CLI
+// asks a runtime what it is (`inspect`) and what a bundle would do to its environment (`prepare`). It
+// mounts NO route: a caller holds the environment's database connection and calls it in process.
+export {
+  CAPABILITY_MODULES,
+  createRuntimeControl,
+  providedCapabilities,
+  type RuntimeControlAdapter,
+  type RuntimeControlOptions,
+  runtimeVersion,
+} from './runtime-control.js';
+// The live two-part schema head (platform ledger tag + product schema digest), read-only.
+export {
+  type CatalogQuery,
+  type LivePlatformHead,
+  readPlatformHead,
+  readProductSchemaDigest,
+  readProductTables,
+  readSchemaHead,
+  runtimePlatformHead,
+} from './schema-head.js';
+// The shared schema lock every schema-mutating path takes (boot migration chain, product DDL, tenant
+// ensure), with its bounded wait.
+export {
+  lockSchemaInTransaction,
+  SchemaLockTimeoutError,
+  type SchemaLockTx,
+  withSchemaLock,
+} from './schema-lock.js';
 // The deployer-seam opts builder — shared by the `rayspec-serve` bin (serve.ts) AND the `rayspec deploy`
 // CLI so both boot a backend-profile spec WITH agents directly from ONE builder (the sanctioned
 // registerProductStores registrar + the env-driven agent-backend factory). Exported so the CLI
