@@ -276,6 +276,8 @@ export interface AppVariables {
   principal?: AuthContext;
   /** Set by resolveTenant once a server-derived tenant is established. */
   tenantId?: string;
+  /** Set by the write-fence route guard on a declared route whose action writes, whatever its method. */
+  fenceGuarded?: boolean;
 }
 
 /** A resolved principal — the two-principals-one-model abstraction. */

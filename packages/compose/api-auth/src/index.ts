@@ -104,6 +104,7 @@ export {
   FENCED_MESSAGE,
   type WriteFence,
   writeFenceMiddleware,
+  writeRouteGuard,
 } from './http/write-fence.js';
 // the media-token service (the playback route's distinct HS256 auth path) + the
 // in-process revocation denylist. The composition root builds the service from the distinct
@@ -129,7 +130,7 @@ export {
   INVITE_MIN_TTL_SECONDS,
 } from './routes/invites.js';
 export { AuthService } from './services/auth-service.js';
-export { ApiKeyStore } from './stores/api-key-store.js';
+export { ApiKeyStore, type ApiKeyStoreOptions } from './stores/api-key-store.js';
 export { AuditStore } from './stores/audit-store.js';
 export { IdempotencyStore } from './stores/idempotency-store.js';
 export { IdentityStore } from './stores/identity-store.js';
