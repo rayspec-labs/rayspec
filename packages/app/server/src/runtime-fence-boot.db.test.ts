@@ -110,6 +110,37 @@ interface Booted {
   out(): string;
 }
 
+/** The child's exit state and everything it printed, for a failure message. */
+function childReport(booted: Booted | undefined): string {
+  if (!booted) return 'no server is running';
+  const { exitCode, signalCode, pid } = booted.child;
+  const state =
+    exitCode === null && signalCode === null
+      ? `still running (pid ${pid})`
+      : `exited (code ${exitCode}, signal ${signalCode})`;
+  return `server on port ${booted.port} ${state}; its stdout and stderr:\n${booted.out()}`;
+}
+
+/** A request to a booted server; a request that fails outright says what became of the server. */
+async function serverFetch(
+  booted: Booted | undefined,
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  try {
+    return await fetch(`http://127.0.0.1:${booted?.port}${path}`, init);
+  } catch (err) {
+    // Let the exit event land before reading the exit state.
+    await new Promise((r) => setTimeout(r, 300));
+    throw new Error(
+      `${init.method ?? 'GET'} ${path} failed: ${String(err)}\n${childReport(booted)}`,
+      {
+        cause: err,
+      },
+    );
+  }
+}
+
 describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
   let dbUrl = '';
   let dir = '';
@@ -192,6 +223,8 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
 
   async function stop(booted: Booted | undefined): Promise<number | null> {
     if (!booted || booted.child.exitCode !== null || booted.child.signalCode !== null) {
+      // Exited before it was asked to: say how, and what it printed.
+      if (booted) console.error(`stop: ${childReport(booted)}`);
       return booted?.child.exitCode ?? null;
     }
     const exited = new Promise<number | null>((r) => booted.child.once('exit', (code) => r(code)));
@@ -201,13 +234,14 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
       booted.child.kill('SIGKILL');
       throw new Error(`the server did not stop within ${EXIT_BUDGET_MS} ms:\n${booted.out()}`);
     }
+    if (code !== 0) console.error(`stop: ${childReport(booted)}`);
     return code;
   }
 
   function http(path: string, init: RequestInit = {}): Promise<Response> {
     const headers = new Headers(init.headers);
     if (token && !headers.has('authorization')) headers.set('authorization', `Bearer ${token}`);
-    return fetch(`http://127.0.0.1:${server?.port}${path}`, { ...init, headers });
+    return serverFetch(server, path, { ...init, headers });
   }
   function post(path: string, body: unknown): Promise<Response> {
     return http(path, {
@@ -361,7 +395,7 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     expect(minted.status).toBe(201);
     const apiKey = (await minted.json()).plaintext as string;
     const keyRead = () =>
-      fetch(`http://127.0.0.1:${server?.port}/fence-notes`, {
+      serverFetch(server, '/fence-notes', {
         headers: { authorization: `Bearer ${apiKey}` },
       });
     expect((await keyRead()).status).toBe(200);
@@ -693,7 +727,7 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
       const res = await http('/health');
       return { status: res.status, body: (await res.json()) as Record<string, unknown> };
     };
-    const live = async () => (await fetch(`http://127.0.0.1:${server?.port}/livez`)).status;
+    const live = async () => (await serverFetch(server, '/livez')).status;
 
     const ready = await health();
     expect(ready.status).toBe(200);
@@ -762,8 +796,8 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     expect(await stop(server)).toBe(0);
     server = await boot({ RAYSPEC_SHUTDOWN_DRAIN_MS: '1000', RAYSPEC_HOSTING_POSTURE: 'managed' });
     // The managed posture disables the public live-executor probe; the rest serves as before.
-    expect((await fetch(`http://127.0.0.1:${server.port}/recovery-scope`)).status).toBe(404);
-    expect((await fetch(`http://127.0.0.1:${server.port}/health`)).status).toBe(200);
+    expect((await serverFetch(server, '/recovery-scope')).status).toBe(404);
+    expect((await serverFetch(server, '/health')).status).toBe(200);
     // The request below must reach its handler and wait there, so the fence must be open.
     expect((await sql`SELECT fence_state FROM runtime_control_state`)[0]).toEqual({
       fence_state: 'open',

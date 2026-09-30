@@ -40,11 +40,10 @@
  * A future no-worker-also-cleans path (e.g. a lightweight in-process timer) is a build-on-demand follow-up.
  */
 
-import { createRequire } from 'node:module';
-import path from 'node:path';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import type { DurableExecutor } from '@rayspec/platform';
 import { type ProducerGate, ProducerPausedError } from './producer-gate.js';
+import { loadSchedulerInternals, registerScheduledWorkflow } from './scheduled-workflow.js';
 
 /** The default crontab — 3am daily (a quiet hour). Overridable via `RAYSPEC_CLEANUP_SCHEDULE`. */
 export const DEFAULT_CLEANUP_SCHEDULE = '0 3 * * *';
@@ -110,9 +109,9 @@ const CONSOLE_LOGGER: CleanupLogger = {
 
 /**
  * Register + fire the daily system cleanup as a DBOS scheduled-workflow. Wired by the composition root via
- * `executor.attachPreLaunchHook(() => scheduler.registerScheduledWorkflow())` — DBOS's `registerScheduled`
- * is static + pre-launch by design (the `ScheduledReceiver` lifecycle callback starts the schedule loop at
- * launch). The body runs the injected `runCleanup()` and logs one summary line; `runCleanupNow()` is the
+ * `executor.attachPreLaunchHook(() => scheduler.registerScheduledWorkflow())` — the registration is
+ * pre-launch by design (a DBOS lifecycle listener starts the schedule loop at launch; see
+ * scheduled-workflow.ts, which keeps it running while the workflow system database is unreachable). The body runs the injected `runCleanup()` and logs one summary line; `runCleanupNow()` is the
  * deterministic on-demand seam (tests + ops) that goes through the EXACT SAME `#run` path.
  */
 export class SystemCleanupScheduler {
@@ -159,9 +158,10 @@ export class SystemCleanupScheduler {
       },
       { name: SYSTEM_CLEANUP_WORKFLOW_NAME },
     );
-    DBOS.registerScheduled(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
+    registerScheduledWorkflow(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
       name: SYSTEM_CLEANUP_WORKFLOW_NAME,
       crontab: this.#schedule,
+      logger: { warn: (m) => this.#logger.error(m) },
     });
     this.#registered = true;
   }
@@ -200,41 +200,6 @@ export class SystemCleanupScheduler {
 }
 
 /**
- * The DBOS crontab validator, loaded lazily from the INSTALLED SDK. The SDK's `exports` map exposes
- * only `.` and `./datasource`, so its crontab module has no bare specifier — resolve the SDK
- * entrypoint FILE and load `scheduler/crontab.js` beside it (an absolute path is outside the map's
- * jurisdiction, and it is the identical installed file the scheduler itself runs). Lazy + memoized so
- * an SDK-layout change on upgrade fails the first VALIDATION call loudly instead of breaking every
- * import of this package.
- *
- * A load failure is its OWN, self-describing error, never the underlying `MODULE_NOT_FOUND`: this is
- * an INSTALLATION fault (a moved/renamed module in an upgraded SDK), and the one caller reports the
- * PARSER's verdict on an operator's value. Keeping the two distinguishable is what stops a moved
- * module from being reported as "your crontab is unparseable" — see `crontabParseError`.
- */
-let dbosValidateCrontab: ((pattern: string) => string) | undefined;
-function loadDbosValidateCrontab(): (pattern: string) => string {
-  if (dbosValidateCrontab === undefined) {
-    try {
-      const req = createRequire(import.meta.url);
-      const sdkEntry = req.resolve('@dbos-inc/dbos-sdk');
-      const crontabModule = req(path.join(path.dirname(sdkEntry), 'scheduler', 'crontab.js')) as {
-        validateCrontab: (pattern: string) => string;
-      };
-      dbosValidateCrontab = crontabModule.validateCrontab;
-    } catch (e) {
-      throw new Error(
-        "the scheduler's crontab parser could not be loaded from the installed " +
-          `'@dbos-inc/dbos-sdk' (expected 'scheduler/crontab.js' beside its entrypoint): ` +
-          `${e instanceof Error ? e.message : String(e)}. This is an SDK-layout fault, not a fault ` +
-          'in any crontab value.',
-      );
-    }
-  }
-  return dbosValidateCrontab;
-}
-
-/**
  * Attempt to parse a crontab through the scheduler's OWN parser, registering nothing — the boot-time
  * validation seam for `RAYSPEC_CLEANUP_SCHEDULE`. Returns `undefined` when the scheduler will accept
  * the expression, else the parser's own failure message (for the boot refusal to carry). DELIBERATELY
@@ -255,7 +220,7 @@ function loadDbosValidateCrontab(): (pattern: string) => string {
  * returning a detail.
  */
 export function crontabParseError(crontab: string): string | undefined {
-  const validateCrontab = loadDbosValidateCrontab();
+  const { validateCrontab } = loadSchedulerInternals();
   try {
     validateCrontab(crontab);
     return undefined;

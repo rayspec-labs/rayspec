@@ -30,7 +30,8 @@
  *     workflow-id idempotency law runs the SCHEDULED-WORKFLOW BODY at most once per (schedule, T)
  *     across the engine (verified doc-first against the installed 4.21.6 scheduler source:
  *     `scheduler_decorator.js:121` derives `sched-${name}-${date.toISOString()}` and starts the
- *     workflow under that id; default mode `ExactlyOncePerIntervalWhenActive` = fire once per interval
+ *     workflow under that id — the loop in scheduled-workflow.ts, which runs the schedule, keeps that
+ *     id, that slot arithmetic and those modes, and retries an instant the system database refused; default mode `ExactlyOncePerIntervalWhenActive` = fire once per interval
  *     WHILE THE APP IS ACTIVE, NO make-up work for intervals missed while the app was down. A trigger
  *     that opts into CATCH-UP (`descriptor.catchUp`) is instead registered in `ExactlyOncePerInterval`,
  *     the make-up-work mode — see the CATCH-UP section below; verified doc-first against
@@ -151,6 +152,7 @@ import type {
 import { deleteEnqueuedRunHeader, insertEnqueuedRunHeader } from '@rayspec/platform';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { type ProducerGate, ProducerPausedError } from './producer-gate.js';
+import { registerScheduledWorkflow } from './scheduled-workflow.js';
 
 /**
  * The narrow trigger-handler shape the cron worker passes to `invokeTriggerHandler`. The platform
@@ -512,9 +514,9 @@ export class DbosCronScheduler {
   }
 
   /**
-   * Register one DBOS scheduled-workflow per cron trigger. MUST run BEFORE `DBOS.launch()` (DBOS's
-   * `registerScheduled` is static + pre-launch by design; the `ScheduledReceiver` lifecycle callback
-   * starts each schedule loop at launch). Each scheduled workflow is a registered DBOS workflow whose
+   * Register one DBOS scheduled-workflow per cron trigger. MUST run BEFORE `DBOS.launch()` (the
+   * registration is pre-launch by design; a DBOS lifecycle listener starts each schedule loop at
+   * launch — scheduled-workflow.ts, which keeps it running while the workflow database is unreachable). Each scheduled workflow is a registered DBOS workflow whose
    * body is the scheduled-fire path (`#fire(..., { fromSchedule: true })`) — so a crash-replay OR a
    * catch-up make-up replay of the body still hits the same idempotent reserve (and, for catch-up, the
    * bounded look-back). Idempotent: calling twice is a no-op (a second register would duplicate the
@@ -544,10 +546,11 @@ export class DbosCronScheduler {
       // ExactlyOncePerIntervalWhenActive (no make-up work). The scheduled-workflow id `sched-{workflowName}
       // -{ISO}` gives engine-level at-most-once-per-instant; our reserve is the tenant-scoped idempotency /
       // exactly-once-cap guard (and, for a catch-up replay, the at-least-once make-up + dedup — see header).
-      DBOS.registerScheduled(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
+      registerScheduledWorkflow(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
         name: workflowName,
         crontab: descriptor.schedule,
         mode: catchUpSchedulerMode(descriptor),
+        logger: this.#logger,
       });
     }
     this.#registered = true;
