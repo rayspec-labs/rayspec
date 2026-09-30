@@ -64,6 +64,12 @@ rows of the organization it is a member of (the chokepoint's predicate, and with
 database policy), and an id from another organization answers `404`, like one that does not exist.
 Within an organization, members share its data; a role decides what they may administer.
 
+The table describes the posture turned on (role separation or single-tenant mode). Four rows differ
+without it, as they did before the posture existed: an agent run start or cancel trusts the token's
+role, a playback token alone admits playback until it expires, a queued durable run is not checked
+again when it starts, and a streamed run's `error` frame carries the error's own text (see
+[Upgrading](#upgrading)).
+
 | Surface | Authorization decision |
 | --- | --- |
 | Organization, member, invite and API-key routes | a write or administrative action (create, change or remove an organization, member, invite or API key) takes its permission from the **live** membership row, never the token's claim; `org:read` and `apikey:read` trust the token's role for its lifetime (see below); the organization in the URL must be the caller's |
@@ -97,9 +103,10 @@ Every write, run start and administrative action rereads the membership.
   without its `?token=`; every other header and the body arrive. Without either setting it receives
   the request as the caller sent it, as before.
 
-An error a handler throws answers `500` with `Internal server error.` and nothing else; a streamed
-run that fails ends with an `error` frame carrying the neutral class and a fixed message. The detail
-goes to the server log.
+An error a handler throws answers `500` with `Internal server error.` and nothing else. In the
+posture, a streamed run that fails ends with an `error` frame carrying the neutral class and a fixed
+message, and an agent definition its backend cannot run answers `400` without the validator's
+detail; the detail goes to the server log.
 
 ## What it does not protect against
 
@@ -126,15 +133,19 @@ goes to the server log.
 
 Nothing about the posture changes unless you turn it on: without `RAYSPEC_SINGLE_TENANT` the number
 of organizations is not limited and registration stays open; without
-`RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. With either setting on, a stream
-handler no longer sees `authorization`, `proxy-authorization`, `cookie`, or a playback route's
-`?token=` — a handler that read the caller from them reads `init.principal` instead.
+`RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves, and every authorization check and
+error answer behaves as before.
 
-These checks apply to every deployment from this release on, whether or not the posture is on. Each
-refuses only a principal that no longer has access, or removes internal detail from an answer:
+With either setting on, the runtime also:
 
-- starting or cancelling an agent run rereads the membership, like every other write;
-- a durable agent run is re-checked when the worker starts it;
-- a playback token stops working once its user is no longer a member;
-- the `error` frame of a streamed run carries a fixed message per class instead of the thrown
-  error's text.
+- no longer hands a stream handler `authorization`, `proxy-authorization`, `cookie`, or a playback
+  route's `?token=` — a handler that read the caller from them reads `init.principal` instead;
+- rereads the membership when an agent run is started or cancelled, like every other write;
+- re-checks a durable agent run when the worker starts it (a run enqueued before the upgrade
+  carries no requester and runs as before);
+- stops a playback token once its user is no longer a member;
+- puts a fixed message per class on the `error` frame of a streamed run, and answers an agent
+  definition its backend cannot run without the validator's detail.
+
+Each check refuses only a principal that no longer has access, or removes internal detail from an
+answer.

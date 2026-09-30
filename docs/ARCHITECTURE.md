@@ -292,13 +292,14 @@ further hardening layer that it does **not** include.
   checks the posture at boot and reports it active only when every check passes.
 - **Authenticate, then authorize the operation and the resource** — a credential
   only says who is calling. Every route then checks the permission for the action
-  (from the live membership row for every write, run start and administrative
-  action, never from the token's claim) and reaches only rows of the caller's own
-  organization, so another organization's id answers `404` like a missing one. A
-  durable agent run records the member or API key that asked for it and is checked
-  again when the worker starts it, so a member removed in the meantime has nothing
-  run on their behalf; a playback token stops working once its user is no longer a
-  member. Reads trust the token's role for the token's lifetime.
+  (from the live membership row for every write and administrative action, never
+  from the token's claim) and reaches only rows of the caller's own organization, so
+  another organization's id answers `404` like a missing one. In the hardened
+  posture a run start or cancel rereads the membership too; a durable agent run
+  records the member or API key that asked for it and is checked again when the
+  worker starts it, so a member removed in the meantime has nothing run on their
+  behalf; and a playback token stops working once its user is no longer a member.
+  Reads trust the token's role for the token's lifetime.
 - **Handlers get a sanitized principal and scoped facades** — the caller as plain
   values, a store facade over its own organization's stores, and capabilities bound
   to that organization; never a database handle or the migration connection. In

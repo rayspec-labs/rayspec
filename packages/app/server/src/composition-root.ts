@@ -100,6 +100,7 @@ import {
   type BlobStoreFactory,
   type DurableExecutor,
   type DurableExecutorIdentity,
+  type DurableRunAuthorizer,
   ExtensionLoadError,
   FsSourceConfigError,
   type FsSourceFactory,
@@ -1477,6 +1478,30 @@ function withDatabaseOf(connection: string, other: string): string {
 }
 
 /**
+ * Whether the server runs in the hardened hosting posture: role separation
+ * (`RAYSPEC_MIGRATION_DATABASE_URL`) or single-tenant mode (`RAYSPEC_SINGLE_TENANT=true`) is on.
+ * Several authorization and disclosure checks apply only there (`AppDeps.hardenedPosture`), so a
+ * deployment that turns neither on behaves as it did before either existed.
+ */
+export function hardenedPosture(
+  config: Pick<ServerConfig, 'migrationDatabaseUrl' | 'singleTenant'>,
+): boolean {
+  return config.migrationDatabaseUrl !== undefined || config.singleTenant === true;
+}
+
+/**
+ * The execution-time check the durable worker runs before it starts a queued agent run: in the
+ * hardened posture, whether the member or key that enqueued the job may still run agents in its
+ * tenant (`makeRunAuthorizer`). Outside it, none, so a queued job runs as it always did.
+ */
+export function durableRunAuthorizer(
+  deps: Pick<AppDeps, 'hardenedPosture' | 'identityStore' | 'apiKeyStore'>,
+): DurableRunAuthorizer | undefined {
+  if (deps.hardenedPosture !== true) return undefined;
+  return makeRunAuthorizer({ identityStore: deps.identityStore, apiKeyStore: deps.apiKeyStore });
+}
+
+/**
  * Derive the DBOS SYSTEM database url from the app DATABASE_URL by swapping the database
  * name to `<appdb>_dbos_sys` (DBOS auto-creates it; it is SEPARATE from the app DB so it never touches
  * our `public` schema). Fail closed on a URL we cannot parse. A url with no path (`/dbname`) is given
@@ -2472,10 +2497,10 @@ async function assembleServerWith(
     bodyRefreshEnabled: config.bodyRefreshEnabled,
     // The source fence: while the runtime is fenced every mutation answers 503 before it runs.
     writeFence: fence,
-    // The hardened posture (role separation or single-tenant mode): a stream handler is handed its
-    // request without the caller's credential. Off otherwise, so an existing handler sees what it saw.
-    stripHandlerCredentials:
-      config.migrationDatabaseUrl !== undefined || config.singleTenant === true,
+    // The hardened posture (role separation or single-tenant mode): stream handlers lose the caller's
+    // credential, agent runs and playback reread the live membership, and streamed error frames carry
+    // fixed messages (AppDeps.hardenedPosture). Off otherwise, so everything behaves as it did.
+    hardenedPosture: hardenedPosture(config),
   };
 
   //    Every refusal the deploy can decide from the configuration and the document alone, made with
@@ -3782,6 +3807,7 @@ async function deployDeclaredSpec(
     const workerConcurrency = DEFAULT_WORKER_CONCURRENCY;
     const WORKER_POOL_MAX = workerConcurrency + 1; // strict headroom over concurrency (sufficient — fix E)
     const workerDb = makeDb(config.databaseUrl, WORKER_POOL_MAX);
+    const runAuthorizer = durableRunAuthorizer(baseDeps);
     const executor = new DbosDurableExecutor(
       {
         db: workerDb,
@@ -3803,11 +3829,9 @@ async function deployDeclaredSpec(
             productTables,
           };
         },
-        // A job runs only while the member or key that enqueued it may still run agents here.
-        authorizeRun: makeRunAuthorizer({
-          identityStore: baseDeps.identityStore,
-          apiKeyStore: baseDeps.apiKeyStore,
-        }),
+        // In the hardened posture a job runs only while the member or key that enqueued it may still
+        // run agents here. Outside it a queued job runs as it always did.
+        ...(runAuthorizer !== undefined ? { authorizeRun: runAuthorizer } : {}),
       },
       {
         name: effectiveSpec.metadata.name,

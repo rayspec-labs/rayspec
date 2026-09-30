@@ -215,7 +215,11 @@ export async function executeAgentRun(
     assertSpecValid(spec, entry.backend.id);
   } catch (e) {
     // The deployment's agent definition does not fit its backend — a configuration fault, not the
-    // caller's. The reason names the deployed spec's internals, so it is logged, not returned.
+    // caller's. In the hardened posture the reason, which names the deployed spec's internals, is
+    // logged, not returned; outside it the response carries it, as before.
+    if (deps.hardenedPosture !== true) {
+      throw new ApiError('VALIDATION_ERROR', `Agent spec is invalid for its backend: ${String(e)}`);
+    }
     console.error(`[api-auth] agent '${agentId}' is invalid for its backend`, e);
     throw new ApiError('VALIDATION_ERROR', 'Agent spec is invalid for its backend.');
   }
@@ -407,27 +411,32 @@ export async function executeAgentRun(
         // `cancelled` class (never routed through the upstream classifier — nothing upstream failed);
         // any other throw → classify it.
         //
-        // The frame carries the class and a FIXED message per class, never the thrown error's own
-        // text: an unclassified throw is whatever failed inside the run (a database error, a tool's
-        // exception) and a provider's error text can name the deployment's own account, and neither
-        // belongs on the wire. The detail goes to the server log, the same place a thrown error on
-        // the JSON path goes. The platform's own timeout and cancellation texts are kept (they are
-        // written by this codebase and say what the caller needs).
-        const errorClass: ErrorClass =
-          err instanceof RunTimeoutError
-            ? 'timeout'
-            : err instanceof RunCancelledError
-              ? 'cancelled'
-              : classifyUpstreamError(err).errorClass;
-        const message =
-          err instanceof RunTimeoutError || err instanceof RunCancelledError
-            ? err.message
-            : streamErrorMessage(errorClass);
-        if (!(err instanceof RunTimeoutError || err instanceof RunCancelledError)) {
-          console.error(
-            `[api-auth] run stream failed requestId=${c.get('requestId') ?? 'unknown'} class=${errorClass}`,
-            err,
-          );
+        // In the hardened posture the frame carries the class and a FIXED message per class, never the
+        // thrown error's own text: an unclassified throw is whatever failed inside the run (a
+        // database error, a tool's exception) and a provider's error text can name the deployment's
+        // own account, and neither belongs on the wire. The detail goes to the server log, the same
+        // place a thrown error on the JSON path goes. The platform's own timeout and cancellation
+        // texts are kept (they are written by this codebase and say what the caller needs). Outside
+        // the posture the frame carries the classifier's message, as before.
+        let errorClass: ErrorClass;
+        let message: string;
+        if (err instanceof RunTimeoutError) {
+          errorClass = 'timeout';
+          message = err.message;
+        } else if (err instanceof RunCancelledError) {
+          errorClass = 'cancelled';
+          message = err.message;
+        } else {
+          const classified = classifyUpstreamError(err);
+          errorClass = classified.errorClass;
+          message = classified.message;
+          if (deps.hardenedPosture === true) {
+            message = streamErrorMessage(errorClass);
+            console.error(
+              `[api-auth] run stream failed requestId=${c.get('requestId') ?? 'unknown'} class=${errorClass}`,
+              err,
+            );
+          }
         }
         await stream
           .writeSSE({ event: 'error', data: JSON.stringify({ message, errorClass }) })

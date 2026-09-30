@@ -585,9 +585,10 @@ export function registerDeclaredRoutes(
         route.method,
         honoPath,
         mediaAuth(mediaTokenService, {
-          // Re-checked on every playback request: a token minted for a member who has since been
-          // removed stops working at once (no `identityStore` only in partial-deps unit suites).
-          ...(deps.identityStore
+          // In the hardened posture, re-checked on every playback request: a token minted for a
+          // member who has since been removed stops working at once (no `identityStore` only in
+          // partial-deps unit suites). Outside it the token alone decides, as before.
+          ...(deps.hardenedPosture === true && deps.identityStore
             ? {
                 isLiveMember: async (userId: string, tenantId: string) =>
                   (await deps.identityStore.liveMembership(userId, tenantId)) !== undefined,

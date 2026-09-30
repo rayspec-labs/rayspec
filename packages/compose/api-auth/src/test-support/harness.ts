@@ -263,8 +263,8 @@ export async function createHarness(
   opts: {
     /** Build the org store in single-tenant mode (RAYSPEC_SINGLE_TENANT=true). Default off. */
     singleTenant?: boolean;
-    /** Hand stream handlers their request without the caller's credential (the hardened posture). */
-    stripHandlerCredentials?: boolean;
+    /** Serve in the hardened posture (`AppDeps.hardenedPosture`). Default off. */
+    hardenedPosture?: boolean;
     withOidc?: boolean;
     oidcClients?: Configuration['clients'];
     /** Override the provider issuer (default http://127.0.0.1/oidc). A served suite passes its
@@ -581,7 +581,7 @@ export async function createHarness(
     inviteStore,
     authService,
     oidcProvider,
-    ...(opts.stripHandlerCredentials === true ? { stripHandlerCredentials: true } : {}),
+    ...(opts.hardenedPosture === true ? { hardenedPosture: true } : {}),
     allowedOrigins: ['https://app.rayspec.test'],
     // default false (today's cookie-only posture); a body-refresh suite opts in.
     bodyRefreshEnabled: opts.bodyRefreshEnabled ?? false,

@@ -97,9 +97,12 @@ that process. See [Database roles and row-level security](./docs/database-isolat
 refused on every path and accounts join by invite. With role separation and
 `RAYSPEC_HOSTING_POSTURE=managed` it makes up the hardened posture. In every posture
 each route authorizes the operation and the resource after authenticating the caller,
-a queued agent run is re-checked against its requester when it starts, a stream
-handler never sees the caller's credential, and handler errors reach the client
-without their detail. It is not a sandbox: custom code runs in the runtime process.
+and a thrown handler error reaches the client without its detail. With role separation
+or single-tenant mode on, the runtime also rereads the membership to start or cancel
+an agent run, re-checks a queued agent run against its requester when it starts,
+refuses a playback token whose user is no longer a member, hands a stream handler its
+request without the caller's credential, and keeps error detail out of streamed run
+frames. It is not a sandbox: custom code runs in the runtime process.
 See [Hosting in the hardened posture](./docs/hardened-posture.md).
 
 ### The separate hardening layer (NOT in the core)

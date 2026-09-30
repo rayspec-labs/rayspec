@@ -449,12 +449,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `true` or `false` refuses the boot. `BootedServer.singleTenant` reports it, and the
   runtime-control adapter's `inspectHosting()` reports the tenant limit as
   `applicationTenants: { singleTenantMode, maxApplicationTenants }`. Unset, nothing changes.
-- **A durable agent run is re-checked against its requester when it starts.** A run enqueued
+- **In the hardened posture a durable agent run is re-checked against its requester when it
+  starts.** A run enqueued
   through the API (`async: true`, or a handler's `init.enqueue`) records who asked for it —
   `requestedBy` on the job: the member, the API key, or `system` for a trigger — taken from the
-  authenticated request, never from the body or handler code. The worker asks the new
-  `DurableRunAuthorizer` (`makeRunAuthorizer` in `@rayspec/api-auth`, wired by the server) before it
-  starts the run: a member no longer in the organization, or a key revoked, expired or without
+  authenticated request, never from the body or handler code. With role separation or single-tenant
+  mode on, the worker asks the new `DurableRunAuthorizer` (`makeRunAuthorizer` in
+  `@rayspec/api-auth`, wired by the server only then) before it starts the run: a member no longer in the organization, or a key revoked, expired or without
   `agent:run`, gets no run. The run is marked like a cancellation, so no recovery re-dispatch runs
   it either, and it reads back as `status: 'error'`, `errorClass: 'cancelled'` with a message saying
   it was not started; the backend is never called. `recordRunCancelled` takes the message to record.
@@ -465,16 +466,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Starting or cancelling an agent run rereads the membership.** `agent:run` is now a permission
-  checked against the live membership row, like `store:write` and the administrative actions, so a
-  member removed or demoted since their access token was minted can no longer start or cancel a run
-  on the token's claim. An API key is unaffected (the key itself is the live credential).
-- **The terminal `error` frame of a streamed run carries a fixed message per class.** A run that
-  throws while streaming (`Accept: text/event-stream`) ends with `{ message, errorClass }` as before,
-  but `message` is now a fixed text for the class (`The run failed.` for an unclassified failure),
-  not the thrown error's own text; the platform's timeout and cancellation texts are kept. The
-  detail is logged server-side. An agent definition that does not fit its backend answers `Agent
-  spec is invalid for its backend.` without the validator's detail, which is logged.
+- **In the hardened posture, starting or cancelling an agent run rereads the membership.** With
+  role separation or single-tenant mode on, `agent:run` is checked against the live membership row,
+  like `store:write` and the administrative actions, so a member removed or demoted since their
+  access token was minted can no longer start or cancel a run on the token's claim. An API key is
+  unaffected (the key itself is the live credential). Outside the posture the claim is trusted, as
+  before. `isSensitive` in `@rayspec/auth-core` takes the posture as an optional second argument.
+- **In the hardened posture the terminal `error` frame of a streamed run carries a fixed message
+  per class.** A run that throws while streaming (`Accept: text/event-stream`) ends with
+  `{ message, errorClass }` as before, but with role separation or single-tenant mode on `message`
+  is a fixed text for the class (`The run failed.` for an unclassified failure), not the thrown
+  error's own text; the platform's timeout and cancellation texts are kept, and the detail is logged
+  server-side. There, an agent definition that does not fit its backend answers `Agent spec is
+  invalid for its backend.` without the validator's detail, which is logged. Outside the posture
+  both carry the detail, as before.
 
 - **Every statement of the tenant chokepoint runs under the tenant context.** A `TenantDb` built on
   the pool used to run each statement on its own, without the transaction-local `app.current_tenant`
@@ -618,11 +623,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other header and the body arrive unchanged; the caller is `init.principal`. Without either
   setting the handler sees the request as before. The platform exports the view as
   `withoutCredentials` and the header list as `CREDENTIAL_REQUEST_HEADERS`; `createAuthApp` takes
-  `stripHandlerCredentials`.
-- **A playback token stops working once its user is no longer a member.** The media-token check now
-  also rereads the token user's membership in the token's organization on every request, so a
-  member removed after the mint loses playback at once instead of at the token's expiry (up to 24
-  hours).
+  `hardenedPosture`, which turns on every check of the posture listed here.
+- **In the hardened posture a playback token stops working once its user is no longer a member.**
+  With role separation or single-tenant mode on, the media-token check also rereads the token
+  user's membership in the token's organization on every request, so a member removed after the
+  mint loses playback at once instead of at the token's expiry (up to 24 hours). Outside the
+  posture the token alone decides, as before.
 - **With role separation, one tenant's row cannot reference another tenant's row.** A store foreign
   key onto a parent's `id` is checked by Postgres without regard to tenancy, so a create or update
   naming another tenant's parent id was accepted. Under role separation the same-tenant trigger
@@ -681,13 +687,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `database-write-role` needs the runtime-control adapter's connection to be the migration role's.
 - **Nothing about the hardened posture changes unless it is turned on.** Without
   `RAYSPEC_SINGLE_TENANT` the number of organizations is not limited and registration stays open;
-  without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves, and a stream handler sees
-  the request as before. Three checks apply to every deployment from this release on, and each
-  refuses only a principal that no longer has access: `agent:run` rereads the membership; a queued
-  agent run is re-checked when it starts (a run enqueued before the upgrade carries no requester and
-  runs as before); and a playback token needs a current member. With either setting on, a stream
-  handler no longer sees the credential headers or the playback `?token=` — a handler that read the
-  caller from them reads `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
+  without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. With neither set, every
+  authorization check and error message behaves as before. With either setting on: `agent:run`
+  rereads the membership; a queued agent run is re-checked when it starts (a run enqueued before the
+  upgrade carries no requester and runs as before); a playback token needs a current member;
+  streamed error frames and the invalid agent-spec answer carry fixed messages; and a stream handler
+  no longer sees the credential headers or the playback `?token=` — a handler that read the caller
+  from them reads `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
 - **`rayspec deploy` of a `.ray` file is a new path.** It used to read the file as YAML. Now a
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,

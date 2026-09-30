@@ -143,7 +143,7 @@ describe.skipIf(!hasDb)('what handler code is handed', () => {
       blobFactory: makeFsBlobStoreFactory(blobDir),
       mediaTokenService: createMediaTokenService('media-secret-at-least-32-bytes-xxxxxxxx'),
       schema: 'rayspec_test_handler_credentials',
-      stripHandlerCredentials: true,
+      hardenedPosture: true,
     });
   });
   beforeEach(async () => {
@@ -254,7 +254,7 @@ describe.skipIf(!hasDb)('what handler code is handed', () => {
   });
 
   it('outside the hardened posture a stream handler sees the request as the caller sent it', async () => {
-    const asBefore = createAuthApp({ ...h.deps, stripHandlerCredentials: false });
+    const asBefore = createAuthApp({ ...h.deps, hardenedPosture: false });
     const { token } = await owner('as-before@example.com');
     const ingest = await asBefore.request('/echo/one', {
       method: 'POST',
@@ -315,6 +315,29 @@ describe.skipIf(!hasDb)('what handler code is handed', () => {
     expect(((await after.json()) as { error: { code: string } }).error.code).toBe(
       'UNAUTHENTICATED',
     );
+  });
+
+  it('outside the hardened posture a playback token keeps working after its member is removed, as before', async () => {
+    const asBefore = createAuthApp({ ...h.deps, hardenedPosture: false });
+    const o = await owner('owner-keep@example.com');
+    const m = await member(o.orgId, o.token, 'member-keep@example.com');
+    const minted = await jsonRequest(asBefore, 'POST', '/echo/k1/token', {
+      headers: { authorization: `Bearer ${m.token}` },
+    });
+    expect(minted.status).toBe(200);
+    const playToken = ((await minted.json()) as { token: string }).token;
+    const url = `/echo/k1/playback?token=${encodeURIComponent(playToken)}`;
+    const removed = await jsonRequest(
+      asBefore,
+      'DELETE',
+      `/v1/orgs/${o.orgId}/members/${m.userId}`,
+      {
+        headers: { authorization: `Bearer ${o.token}` },
+      },
+    );
+    expect(removed.status).toBe(204);
+    // The token alone decides until it expires, exactly as before the posture existed.
+    expect((await asBefore.request(url)).status).toBe(200);
   });
 
   it('a handler that throws with internal detail answers the bare 500 envelope', async () => {

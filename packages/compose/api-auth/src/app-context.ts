@@ -399,12 +399,19 @@ export interface AppDeps {
   /** Optional mounted OIDC provider (omit to skip the /oidc mount in unit-only suites). */
   oidcProvider?: Provider;
   /**
-   * Hand a stream handler its request without the caller's credential: no `authorization`,
-   * `proxy-authorization` or `cookie` header, and for a playback route no `?token=` in its URL or
-   * params. On in the hardened posture (the server turns it on with role separation or single-tenant
-   * mode). Omitted or false: the request as the caller sent it, as before.
+   * The hardened hosting posture (the server turns it on with role separation or single-tenant mode).
+   * On, the app also:
+   *  - hands a stream handler its request without the caller's credential: no `authorization`,
+   *    `proxy-authorization` or `cookie` header, and for a playback route no `?token=` in its URL or
+   *    params;
+   *  - rereads the live membership for `agent:run` (starting or cancelling a run), as it does for
+   *    every other write;
+   *  - refuses a playback token whose user is no longer a member of its tenant;
+   *  - puts a fixed message per error class on a streamed run's `error` frame and on the invalid
+   *    agent-spec 400, and logs the detail instead.
+   * Omitted or false: each of these behaves as before the posture existed.
    */
-  stripHandlerCredentials?: boolean;
+  hardenedPosture?: boolean;
   /** Allowed Origins for cookie-authenticated CSRF checks. */
   allowedOrigins: string[];
   /**

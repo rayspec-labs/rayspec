@@ -10,6 +10,8 @@ import { describe, expect, it } from 'vitest';
 import {
   BootConfigError,
   DEFAULT_SHUTDOWN_DRAIN_MS,
+  durableRunAuthorizer,
+  hardenedPosture,
   loadServerConfig,
   MAX_SHUTDOWN_DRAIN_MS,
   parseHostingPosture,
@@ -131,5 +133,33 @@ describe('the hosting report beside inspect()', () => {
 
   it('refuses a posture the boot would refuse', () => {
     expect(() => report({ RAYSPEC_HOSTING_POSTURE: 'public' })).toThrow(BootConfigError);
+  });
+});
+
+describe('the hardened posture switch', () => {
+  it('is on with role separation or single-tenant mode, and off with neither', () => {
+    expect(hardenedPosture({})).toBe(false);
+    expect(hardenedPosture({ singleTenant: false })).toBe(false);
+    expect(hardenedPosture({ singleTenant: true })).toBe(true);
+    expect(hardenedPosture({ migrationDatabaseUrl: 'postgres://m@h/db' })).toBe(true);
+  });
+
+  it('wires the queued-run re-check only in the hardened posture', async () => {
+    const stores = {
+      identityStore: { liveMembership: async () => undefined },
+      apiKeyStore: { findById: async () => undefined },
+    } as unknown as Parameters<typeof durableRunAuthorizer>[0];
+    // Outside it the worker gets no check, so a queued job runs as it always did.
+    expect(durableRunAuthorizer({ ...stores, hardenedPosture: false })).toBeUndefined();
+    expect(durableRunAuthorizer({ ...stores })).toBeUndefined();
+    const check = durableRunAuthorizer({ ...stores, hardenedPosture: true });
+    expect(check).toBeDefined();
+    const job = {
+      runId: 'r1',
+      tenantId: '00000000-0000-0000-0000-00000000000a',
+      requestedBy: { kind: 'user', userId: '00000000-0000-0000-0000-0000000000u1' },
+    } as unknown as Parameters<NonNullable<typeof check>>[0];
+    // A member with no live membership is refused.
+    expect(await check?.(job)).toBe(false);
   });
 });

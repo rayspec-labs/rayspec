@@ -107,7 +107,7 @@ export function makeStreamIngestHandler(args: {
       tdb,
       productTables,
       params,
-      deps.stripHandlerCredentials === true ? withoutCredentials(c.req.raw) : c.req.raw,
+      deps.hardenedPosture === true ? withoutCredentials(c.req.raw) : c.req.raw,
       blobFactory,
       // no media resource on the ingest path (playback-only); the actor follows as the next arg.
       undefined,
@@ -162,7 +162,7 @@ export function makeStreamPlaybackHandler(args: {
     // The media token authenticated this request and has done its job: in the hardened posture the
     // handler receives the request without it and without the credential headers. `params` is built
     // from the same URL, so the token reaches the handler through neither.
-    const strip = deps.stripHandlerCredentials === true;
+    const strip = deps.hardenedPosture === true;
     if (strip) delete params[MEDIA_TOKEN_PARAM];
     return invokeStreamRouteHandler(
       fn,
