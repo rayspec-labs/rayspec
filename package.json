@@ -37,6 +37,7 @@
     "test:release-guard": "node scripts/publish.test.mjs",
     "test:release-identity": "node scripts/release-identity.test.mjs",
     "test:consumer-install": "node scripts/check-consumer-install.test.mjs",
+    "test:upgrade-with-data": "node scripts/upgrade-with-data.mjs",
     "check:consumer-install": "node scripts/check-consumer-install.mjs",
     "gate:migrations": "pnpm --filter @rayspec/db gate:migrations",
     "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",

@@ -417,6 +417,13 @@ jobs:
       - name: Migration from-clean-DB gate
         run: pnpm gate:migrate-clean
 
+      # An existing deployment WITH DATA, upgraded: the previous published release (from npm, install
+      # scripts disabled) deploys an example and writes users, an API key and rows through it; this
+      # tree then boots on that database and must keep every row and credential, serve the same
+      # data, and deploy the same application as a bundle. About a minute, so it is a required step.
+      - name: Upgrade with data from the previous release
+        run: pnpm test:upgrade-with-data
+
       # ── DB test subset — the 9 Postgres-backed packages (8 platform + the local-boot example) ─────
       # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run
       # concurrently against one Postgres they deadlock / race on CREATE/DROP DATABASE. The two
