@@ -687,6 +687,7 @@ export async function serveDeployment(
     BootTimeoutError,
     bootBanner,
     bootBaseUrl,
+    bootRefusalExitCode,
     DeployError,
     detectStaticProfile,
     loadServerConfig,
@@ -825,7 +826,10 @@ export async function serveDeployment(
         err instanceof Error ? err.stack : String(err),
       );
     }
-    process.exit(1);
+    // A schema change refused by apply is an outcome this verb did not have before, so it exits with
+    // its contract class: 3 a stale plan, 4 a fenced environment, 5 another operation holding the
+    // lease, 6 an interrupted apply that needs manual reconciliation. Every other refusal keeps 1.
+    process.exit(bootRefusalExitCode(err));
   }
 }
 

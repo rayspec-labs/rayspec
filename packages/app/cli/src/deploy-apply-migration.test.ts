@@ -50,6 +50,7 @@ vi.mock('@rayspec/server', () => {
     BootTimeoutError,
     bootBanner: () => 'banner',
     bootBaseUrl: () => 'http://127.0.0.1:0',
+    bootRefusalExitCode: () => 1,
     DeployError,
     // The update-env wiring under test is the NORMAL (secret-requiring) boot: an undetected static
     // profile keeps every case on that path, so the static-boot stubs beside it are present but never
