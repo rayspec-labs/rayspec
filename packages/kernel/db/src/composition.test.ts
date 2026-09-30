@@ -30,6 +30,8 @@ import {
   memberships,
   oidcModels,
   orgs,
+  runtimeControlReceipts,
+  runtimeControlState,
   sessions,
   users,
 } from './schema.js';
@@ -302,7 +304,7 @@ describe('RESERVED_STORE_NAMES — the drift lock onto the real schema', () => {
     expect(derived).toEqual(RESERVED_STORE_NAMES);
 
     // The hand-written composition of the same set still agrees — so the constant's SHAPE (core
-    // tenant-scoped ⊕ the global identity/auth cluster) is documented by construction, not just by
+    // tenant-scoped ⊕ the global identity/auth cluster ⊕ the runtime-control pair) is documented by construction, not just by
     // its comment.
     const byCluster = new Set(
       [
@@ -314,6 +316,8 @@ describe('RESERVED_STORE_NAMES — the drift lock onto the real schema', () => {
         apiKeys,
         authAudit,
         oidcModels,
+        runtimeControlState,
+        runtimeControlReceipts,
       ].map((t) => getTableName(t as PgTable)),
     );
     expect(byCluster).toEqual(derived);

@@ -47,4 +47,16 @@ export const MIGRATION_ALLOWLIST: Record<string, AllowlistEntry[]> = {
         'on (tenant_id, run_id, idempotency_key) at the end of this migration.',
     },
   ],
+  '0012_runtime_control.sql': [
+    {
+      kind: 'truncate',
+      match:
+        'CREATE TRIGGER "runtime_control_receipts_no_truncate" BEFORE TRUNCATE ON ' +
+        '"runtime_control_receipts" FOR EACH STATEMENT EXECUTE FUNCTION ' +
+        '"runtime_control_receipts_append_only"();',
+      reason:
+        'Not a TRUNCATE: the statement creates the trigger that REFUSES a truncate of the ' +
+        'append-only receipts table. It removes nothing.',
+    },
+  ],
 };

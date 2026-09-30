@@ -354,6 +354,30 @@ psql -d "$DRYRUN_DB" -c "DELETE FROM orgs WHERE id='00000000-0000-0000-0000-0000
 assert_eq "0" "SELECT count(*) FROM tenant_events;" "tenant_events cascaded away after org delete"
 assert_eq "0" "SELECT count(*) FROM tenant_event_streams;" "tenant_event_streams cascaded away after org delete"
 
+echo "== ASSERT 0012 end state (runtime control: the singleton state row + append-only receipts) =="
+assert_eq "2" \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('runtime_control_state','runtime_control_receipts');" \
+  "0012 created runtime_control_state + runtime_control_receipts"
+# The singleton CHECK refuses a second state row; the key CHECK refuses a key that is not 32-byte hex.
+KEY="$(printf 'a%.0s' $(seq 1 64))"
+psql -d "$DRYRUN_DB" -c "INSERT INTO runtime_control_state (id, binding_revision_key) VALUES (1, '$KEY');" >/dev/null
+if psql -d "$DRYRUN_DB" -c "INSERT INTO runtime_control_state (id, binding_revision_key) VALUES (2, '$KEY');" >/dev/null 2>&1; then
+  echo "SHADOW DRY-RUN: FAIL — runtime_control_state accepted a second row" >&2; exit 1
+fi
+echo "  ok: runtime_control_state refuses a second row"
+if psql -d "$DRYRUN_DB" -c "UPDATE runtime_control_state SET binding_revision_key = 'short';" >/dev/null 2>&1; then
+  echo "SHADOW DRY-RUN: FAIL — runtime_control_state accepted a malformed binding revision key" >&2; exit 1
+fi
+echo "  ok: runtime_control_state refuses a malformed binding revision key"
+# The receipts are append-only: an INSERT lands, and UPDATE, DELETE and TRUNCATE are each refused.
+psql -d "$DRYRUN_DB" -c "INSERT INTO runtime_control_receipts (operation_id, operation_kind, actor, lease_epoch, inputs_digest, event) VALUES ('00000000-0000-4000-8000-000000000001', 'runtime.apply', 'gate', 1, 'd', 'intent');" >/dev/null
+for STATEMENT in "UPDATE runtime_control_receipts SET actor = 'x';" "DELETE FROM runtime_control_receipts;" "TRUNCATE runtime_control_receipts;"; do
+  if psql -d "$DRYRUN_DB" -c "$STATEMENT" >/dev/null 2>&1; then
+    echo "SHADOW DRY-RUN: FAIL — runtime_control_receipts accepted: $STATEMENT" >&2; exit 1
+  fi
+done
+assert_eq "1" "SELECT count(*) FROM runtime_control_receipts;" "0012 receipts refuse UPDATE, DELETE and TRUNCATE"
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');
