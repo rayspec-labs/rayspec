@@ -29,9 +29,10 @@ add no HTTP route: a caller holds the environment's database connection. `rayspe
 | --- | --- | --- |
 | `inspect()` | no | The runtime version and target, capabilities, the two-part schema head, the active application, the fence and the environment revision. |
 | `inspectHosting()` | no | The hosting posture and whether cross-process run cancellation is on. |
+| `inspectDatabaseIsolation()` | no | With `runtimeRole` set, whether the runtime role holds the isolated database posture, and each check it fails ([Database roles and row-level security](./database-isolation.md)). `inspect()` reports the managed posture as supported only when it does and the release carries a capability receipt. |
 | `prepare()` | no | Plans a `.ray` bundle against the live schema: a plan with its digest, valid for 30 minutes. |
 | apply (`runApply`) | yes | Runs a plan's steps under the operation lease with receipts; see below. |
-| `quiesce()` | yes | Takes the source fence: mutations answer 503, producers stop, in-flight work drains. |
+| `quiesce()` | yes | Takes the source fence: mutations answer 503, producers stop, in-flight work drains. With role separation (`runtimeRole`, over a connection as the migration role) it also revokes the runtime role's writes until `resume()`. |
 | `resume()` | yes | Releases the fence held at the epoch `quiesce()` returned. |
 | `health()` | no | Liveness and readiness with each failing check's cause. |
 

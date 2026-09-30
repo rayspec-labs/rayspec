@@ -181,6 +181,16 @@ storage), and each exemption is explicit and reviewed. The practical consequence
 there is no ergonomic path to a cross-tenant read, because the unscoped handle is
 not the one application code is given.
 
+Every statement the chokepoint issues runs in a transaction that first sets the
+transaction-local `app.current_tenant` to the server-derived tenant, and every
+tenant table carries a row-level policy that compares `tenant_id` with it. With
+**role separation** turned on (`RAYSPEC_MIGRATION_DATABASE_URL`, opt-in) the
+database enforces that policy on its own: the server serves as a runtime role that
+owns nothing and cannot bypass row security, the migration role owns the schema,
+and a statement that lost or never had its tenant reaches no tenant row. Without it
+the policies exist but are not enabled, and one role migrates and serves as before.
+See [Database roles and row-level security](./database-isolation.md).
+
 ### 3. The tool-dispatch trust boundary
 
 Agent tool calls run through one dispatch boundary, and everything that crosses it
@@ -273,7 +283,13 @@ further hardening layer that it does **not** include.
 
 - **Tenant isolation by construction** — the fail-closed chokepoint above, with a
   continuous-integration test that fails the build if any tenant-owned table can
-  be read without the predicate.
+  be read without the predicate, and a build gate that fails when a migration adds
+  a tenant table without its row-level policy.
+- **Database roles and row-level security, opt-in** — a migration role, a runtime
+  role without `BYPASSRLS` that owns nothing, and a read-only snapshot role, with
+  every tenant table's policy enabled and forced
+  ([Database roles and row-level security](./database-isolation.md)). The runtime
+  checks the posture at boot and reports it active only when every check passes.
 - **No plaintext secrets** — signing keys, peppers, and provider credentials live
   in the environment or a secret manager, never in the database or in git. The
   server refuses to boot if a required secret is missing (fail-closed).
@@ -295,7 +311,6 @@ protections that are deliberately out of scope for the core and belong to a
 distinct hardening layer:
 
 - per-tenant data encryption with wrapped data-encryption keys,
-- database row-level security as a second, in-database enforcement of tenancy,
 - per-tenant execution sandboxing, and
 - cryptographic binding of tokens to their client.
 
@@ -304,6 +319,10 @@ deployment on a public address** for untrusted traffic without that layer. The
 distinction is intentional: the core gives a self-hoster a correct, tenant-isolated
 backend for trusted use, and the hardening layer is what a public multi-tenant
 service additionally needs.
+
+Database row-level security, the second in-database enforcement of tenancy, is not
+part of that layer: it ships in the core, off until the operator turns on role
+separation, and a public multi-tenant service runs with it on.
 
 ### Restore and key rotation
 
@@ -472,7 +491,8 @@ the fence is in the database, a process that boots under it starts fenced (its q
 paused), and a `resume()` from another process reaches a running server within one poll.
 
 The database write barrier the export relies on is taken only after a full drain and is never
-assumed. With role separation (the runtime connects as a role that owns no table) `quiesce()`
+assumed. With role separation (the runtime connects as a role that owns no table — see
+[Database roles and row-level security](./database-isolation.md)) `quiesce()`
 revokes that role's INSERT, UPDATE, DELETE and TRUNCATE on every table of both databases, checks
 with `has_table_privilege` that nothing survived for the role or any role it can switch to with
 `SET ROLE`, refuses a role that can switch to a table owner, a superuser, a role that bypasses row

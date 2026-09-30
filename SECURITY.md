@@ -78,6 +78,19 @@ this split is essential to deploying it safely. This section mirrors
   signal to the owner; only the invitee resolves that, at redeem. Tokens are stored
   hashed, are single-use, and expire.
 
+### Database roles and row-level security (opt-in)
+
+Database row-level security, a second in-database enforcement of tenancy beneath the
+chokepoint, ships in the core and is **off until the operator turns on role
+separation** (`RAYSPEC_MIGRATION_DATABASE_URL`). With it the server serves as a
+runtime role that is no superuser, cannot bypass row security and owns nothing; the
+migration role owns the schema; and every tenant table's policy is enabled and
+forced, so a statement without the server-derived tenant reaches no tenant row. The
+runtime checks this posture at boot and reports it active only when every check
+passes. It protects against a statement that lost its tenant, not against code in
+the runtime process that sets another tenant deliberately — handlers still run in
+that process. See [Database roles and row-level security](./docs/database-isolation.md).
+
 ### The separate hardening layer (NOT in the core)
 
 Running RaySpec for **untrusted, multi-tenant, public-internet** traffic requires
@@ -85,7 +98,6 @@ protections that are deliberately out of scope for the core and belong to a
 distinct hardening layer:
 
 - per-tenant data encryption with wrapped data-encryption keys,
-- database row-level security as a second, in-database enforcement of tenancy,
 - cross-node federation and data-residency enforcement — the data model carries the
   federation- and residency-ready columns from day one, but enforcing them belongs
   to this layer,
