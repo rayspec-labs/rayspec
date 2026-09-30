@@ -66,6 +66,7 @@ import {
   scaledAuthPolicies,
   setBootSecrets,
 } from '@rayspec/auth-core';
+import { DEFAULT_SCHEMA_LOCK_TIMEOUT_MS } from '@rayspec/bundle-contract';
 import type { Backend, BackendId } from '@rayspec/core';
 import {
   buildProductTables,
@@ -138,8 +139,10 @@ import {
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
+  validateProductYamlSpec,
 } from './product-boot.js';
 import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
+import { lockSchemaInTransaction, withSchemaLock } from './schema-lock.js';
 import {
   type FrontendReadiness,
   frontendMountsReadiness,
@@ -587,6 +590,13 @@ export interface ServerConfig {
    * Fail-closed on an invalid value.
    */
   authRateMultiplier: number;
+  /**
+   * How long a schema-mutating step of this boot (the platform migration chain, product-store DDL)
+   * waits for the SHARED SCHEMA LOCK before it refuses the boot — RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS,
+   * default 60000. Omitted ⇒ that default. A boot that runs out of the wait fails with a retryable
+   * `SchemaLockTimeoutError`: another migration, tenant provisioning or deploy holds the lock.
+   */
+  schemaLockTimeoutMs?: number;
   /**
    * the OPERATOR gate for tenant DATA-ERASURE (the `eraseTenantNow` control seam). `true` ONLY when
    * RAYSPEC_ERASURE_ENABLED is EXACTLY the string `"true"`; ANYTHING else (unset, "1", "yes", "TRUE",
@@ -1114,6 +1124,9 @@ export function loadServerConfig(
   // invalid value; ≠ 1 is announced loudly where the scaled policies are applied — assembleServer).
   const authRateMultiplier = parseAuthRateMultiplier(env);
 
+  // the bounded wait for the shared schema lock (default 60 s; fail-closed on an invalid value).
+  const schemaLockTimeoutMs = parseSchemaLockTimeoutMs(env);
+
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
   // trim/lowercase coercion of an ambiguous value), mirroring RAYSPEC_GDPR_PURGE_ENABLED — an
   // ambiguous/typo'd value must never silently enable irreversible product+blob deletion.
@@ -1151,6 +1164,7 @@ export function loadServerConfig(
     cleanup,
     accessTokenTtlSeconds,
     authRateMultiplier,
+    schemaLockTimeoutMs,
     erasureEnabled,
     bodyRefreshEnabled,
     tenantBootstrapEnabled,
@@ -1349,6 +1363,34 @@ export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
         'silently fall back — falling back to the production limits would reproduce exactly the ' +
         'far-from-cause 429s the variable exists to remove, and guessing a scale would silently ' +
         'weaken an auth throttle).',
+    );
+  }
+  return n;
+}
+
+/** The longest bounded wait for the shared schema lock an operator may configure: one hour. */
+export const MAX_SCHEMA_LOCK_TIMEOUT_MS = 3_600_000;
+
+/**
+ * Parse RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS — how long a schema-mutating boot step waits for the shared
+ * schema lock. Unset/blank ⇒ the contract default (60000). A whole number of milliseconds from 1 to
+ * one hour; anything else ABORTS the boot rather than silently waiting forever or not at all.
+ */
+export function parseSchemaLockTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw === '') return DEFAULT_SCHEMA_LOCK_TIMEOUT_MS;
+  const n = Number(raw);
+  if (
+    !/^[0-9]+$/.test(raw) ||
+    !Number.isSafeInteger(n) ||
+    n < 1 ||
+    n > MAX_SCHEMA_LOCK_TIMEOUT_MS
+  ) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS='${raw}' is not a whole number of ` +
+        `milliseconds from 1 to ${MAX_SCHEMA_LOCK_TIMEOUT_MS}. It bounds how long the boot waits ` +
+        'for the shared schema lock another migration, tenant provisioning or deploy may hold ' +
+        `(default ${DEFAULT_SCHEMA_LOCK_TIMEOUT_MS}). Fail-closed.`,
     );
   }
   return n;
@@ -1600,13 +1642,20 @@ export function assembleStaticServer(
  * re-run against an already-migrated DB is a no-op. Bootstraps a CLEAN empty DB AND no-ops
  * on an up-to-date one, so the boot is safe to run repeatedly.
  *
- * Concurrency: the migrator takes NO advisory lock. Two boots racing against the SAME fresh
- * empty DB would both try to apply 0000's non-`IF NOT EXISTS` CREATEs — one wins, the other's
- * transaction aborts cleanly (full rollback, no corruption). A LOCAL single-node boot does not hit
- * this; a future multi-replica deploy would gate migrations on a single runner.
+ * Concurrency: the chain runs under the SHARED SCHEMA LOCK (`schema-lock.ts`) — the same advisory
+ * lock product-store DDL and `rayspec tenant ensure` take — so two boots, or a boot and a tenant
+ * ensure, started against the same empty database run one after the other: the second waits, finds
+ * the chain applied and no-ops. The drizzle migrator takes no lock of its own, and without this one
+ * the loser of such a race died on a duplicate object. The wait is bounded (`lockTimeoutMs`, default
+ * 60 s); running out of it is a retryable `SchemaLockTimeoutError`, never a hang.
  */
-export async function applyMigrations(db: Db): Promise<void> {
-  await migrate(db, { migrationsFolder: migrationsDir() });
+export async function applyMigrations(
+  db: Db,
+  opts: { lockTimeoutMs?: number } = {},
+): Promise<void> {
+  await withSchemaLock(db, () => migrate(db, { migrationsFolder: migrationsDir() }), {
+    ...(opts.lockTimeoutMs !== undefined ? { timeoutMs: opts.lockTimeoutMs } : {}),
+  });
 }
 
 /**
@@ -1918,13 +1967,12 @@ export async function assembleServer(
     apiKeyPepper: config.apiKeyPepper,
   });
 
-  // 1. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
-  const db = makeDb(config.databaseUrl);
-
-  // 2. Apply the committed migration chain (idempotent — safe to re-run).
-  await applyMigrations(db);
-
-  // 3. Signer + JWKS + OIDC provider — all from the SAME RS256 PEM. The signer mints with the
+  // 1. VALIDATE BEFORE ANYTHING IS MUTATED — the signing key first, then the injected spec. A boot
+  //    that is going to refuse must leave the database exactly as it found it: before this ordering
+  //    a malformed key or an invalid spec was reported only AFTER the platform migration chain had
+  //    run, so pointing a broken deploy at an empty database still created the platform tables.
+  //
+  //    Signer + JWKS + OIDC provider — all from the SAME RS256 PEM. The signer mints with the
   //    configured access-token TTL (default 480s — the boot env, fail-closed-validated above).
   //
   // `loadServerConfig` checks this secret is PRESENT; nothing between it and `jose` looks at the
@@ -1951,6 +1999,24 @@ export async function assembleServer(
     // kind of change but never the value.
     throw new BootConfigError(MALFORMED_JWT_SIGNING_KEY_MESSAGE);
   }
+
+  // The injected spec, validated by the SAME per-profile checks its deploy path runs first (the
+  // deploy path repeats them; they are pure). Nothing below this line runs for an invalid spec.
+  if (config.specPath) validateInjectedSpec(config.specPath);
+
+  // 2. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
+  const db = makeDb(config.databaseUrl);
+
+  // 3. Apply the committed migration chain (idempotent — safe to re-run) under the SHARED SCHEMA
+  //    LOCK, so a concurrent boot, tenant ensure or deploy against the same database waits its turn.
+  try {
+    await applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs });
+  } catch (err) {
+    // A refused boot hands no pool back, so end it here rather than leave its connections open.
+    await db.$client.end();
+    throw err;
+  }
+
   const jwks = new JwksProvider([signer.publicKeyJwk()]);
   const providerJwk = await exportJWK(privateKey);
   const oidcProvider = createOidcProvider({
@@ -2332,6 +2398,45 @@ export function assertSpecFamilyMountable(specSource: string, specPath: string):
 }
 
 /**
+ * The pure checks of a backend-profile (`rayspec.yaml`) document that its deploy path runs before
+ * anything else: a Product-YAML document is refused with guidance (`assertSpecFamilyMountable`), and
+ * the document must parse and lint clean. Returns the parsed spec.
+ */
+function validateDeclaredSpec(specSource: string, specPath: string): RaySpec {
+  // reject a Product-YAML doc up-front with the SAME guidance `deploy()` gives (before any DB work),
+  // instead of the RaySpec strict-shape wall below. A classic doc passes through UNCHANGED.
+  assertSpecFamilyMountable(specSource, specPath);
+  const parsed = parseSpec(specSource);
+  if (!parsed.ok) {
+    throw new BootConfigError(
+      `Boot aborted — injected spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
+    );
+  }
+  return parsed.value;
+}
+
+/**
+ * Validate the injected spec BEFORE the boot mutates anything: read it and run the checks of the
+ * deploy path its profile takes — `validateProductYamlSpec` for a Product-YAML document,
+ * `validateDeclaredSpec` for everything else — throwing exactly the refusal that path throws. The
+ * deploy path runs the same checks again; what this adds is the ORDER: an invalid document now
+ * refuses the boot while the database is still untouched.
+ *
+ * Scope, stated so it is not read wider: this is the document itself. Checks that need the merged
+ * extension fragments or a spec-dependent environment demand (a media signing key, an STT or TTS
+ * provider, the blob root) still run inside the deploy path, after the platform chain and before
+ * any product DDL.
+ */
+export function validateInjectedSpec(specPath: string): void {
+  const specSource = readFileSync(specPath, 'utf8');
+  if (detectSpecKind(specSource) === 'product') {
+    validateProductYamlSpec(specSource, specPath);
+    return;
+  }
+  validateDeclaredSpec(specSource, specPath);
+}
+
+/**
  * Run the REAL `deploy()` GitOps pipeline for an injected spec (product-agnostic). Mirrors the dev
  * wrapper's pattern but lives in the composition root so a real deployer can drive a declarative
  * deploy from env alone. The deployer supplies the agent backends (the platform ships none).
@@ -2395,18 +2500,11 @@ async function deployDeclaredSpec(
   const specSource = readFileSync(specPath, 'utf8');
   const bootWarn = opts.bootWarn ?? consoleWarn;
 
-  // reject a Product-YAML doc up-front with the SAME guidance `deploy()` gives (before any DB work),
-  // instead of the RaySpec strict-shape wall below. A classic doc passes through UNCHANGED.
-  assertSpecFamilyMountable(specSource, specPath);
-
   // Pre-parse to build the product tables + the first-materialization migration SQL the rollout
   // needs (deploy() re-parses internally for its own VALIDATE step — a !ok there aborts the deploy).
-  const parsed = parseSpec(specSource);
-  if (!parsed.ok) {
-    throw new BootConfigError(
-      `Boot aborted — injected spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
-    );
-  }
+  // assembleServer already ran the same check before it migrated anything; it is repeated here so
+  // this deployer never depends on its caller for it.
+  const parsedSpec = validateDeclaredSpec(specSource, specPath);
 
   // ── Resolve + merge the referenced extension PACKS, fail-closed ─────────────
   // For each `extensions[]` ref, loadExtensions resolves the pack's defineExtension manifest
@@ -2424,13 +2522,7 @@ async function deployDeclaredSpec(
     specSource: effectiveSpecSource,
     extensionImporter,
     packBlobFactory,
-  } = await mergeExtensions(
-    parsed.value,
-    specSource,
-    escapeHatchRoot,
-    specPath,
-    opts.moduleImporter,
-  );
+  } = await mergeExtensions(parsedSpec, specSource, escapeHatchRoot, specPath, opts.moduleImporter);
 
   const specStores = [...effectiveSpec.stores];
   const productTables = buildProductTables(specStores);
@@ -2858,7 +2950,10 @@ async function deployDeclaredSpec(
       // The generated product SQL carries drizzle statement-breakpoints; strip them and apply the
       // migration all-or-nothing in one transaction (the public schema is the live target here).
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
+      // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
+      // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
       await db.$client.begin(async (tx) => {
+        await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
         await tx.unsafe(ddl);
       });
       // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.

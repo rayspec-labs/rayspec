@@ -153,6 +153,7 @@ import {
   type ServerConfig,
 } from './composition-root.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
+import { lockSchemaInTransaction } from './schema-lock.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
 export class ProductBootError extends Error {
@@ -2302,6 +2303,38 @@ export function buildRecordNormalizer(
 }
 
 /**
+ * The pure checks of a Product-YAML document that its deploy path runs before anything else: it must
+ * parse, and it must pass the fail-closed BOOT-SCOPE GATE. Returns the parsed spec; throws a
+ * `ProductBootError`. `assembleServer` runs it before the boot migrates anything, so an invalid
+ * document leaves the database untouched.
+ */
+export function validateProductYamlSpec(specSource: string, specPath: string): ProductSpec {
+  const parsed = parseProductSpec(specSource);
+  if (!parsed.ok) {
+    throw new ProductBootError(
+      `the Product-YAML spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
+    );
+  }
+  const spec = parsed.value;
+
+  // ── the fail-closed BOOT-SCOPE GATE ──────────────────────────────────────
+  // A grammar-valid product doc can still declare a shape the composable v1 envelope cannot serve
+  // end-to-end (the sufficiency finding): MULTI-SCOPE persistence (the single-scope law, enforced 3×
+  // deeper in derive/compose/nodes but with an internal, less-actionable error) or a product-declared
+  // WRITE/ADMIN surface (a non-capability POST view — an interpreted read on POST mounts + boots today,
+  // caught by nothing else). Reject those HERE, at the front door, before any compose/derive/DBOS work,
+  // with ONE actionable operator message. The SUPPORTED shape (an audio+stt+agents acceptance product) is a
+  // no-op — it composes + boots unchanged (FENCE PARITY).
+  try {
+    assertProductScope(spec);
+  } catch (e) {
+    if (e instanceof ProductScopeError) throw new ProductBootError(e.message);
+    throw e;
+  }
+  return spec;
+}
+
+/**
  * Fail-closed BOOT gate on `RAYSPEC_PRODUCT_TENANT_ID`: it must be a well-formed org id AND name a
  * live org. Both halves matter and neither was checked before — `requireEnv` only rejects an empty
  * value, so a deployment pointed at nothing came up green and then failed far from the cause: a bare
@@ -2376,29 +2409,7 @@ export async function deployProductYamlSpec(
   const specPath = config.specPath as string;
   const escapeHatchRoot = config.escapeHatchRoot as string;
   const specSource = readFileSync(specPath, 'utf8');
-
-  const parsed = parseProductSpec(specSource);
-  if (!parsed.ok) {
-    throw new ProductBootError(
-      `the Product-YAML spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
-    );
-  }
-  const spec = parsed.value;
-
-  // ── the fail-closed BOOT-SCOPE GATE ──────────────────────────────────────
-  // A grammar-valid product doc can still declare a shape the composable v1 envelope cannot serve
-  // end-to-end (the sufficiency finding): MULTI-SCOPE persistence (the single-scope law, enforced 3×
-  // deeper in derive/compose/nodes but with an internal, less-actionable error) or a product-declared
-  // WRITE/ADMIN surface (a non-capability POST view — an interpreted read on POST mounts + boots today,
-  // caught by nothing else). Reject those HERE, at the front door, before any compose/derive/DBOS work,
-  // with ONE actionable operator message. The SUPPORTED shape (an audio+stt+agents acceptance product) is a
-  // no-op — it composes + boots unchanged (FENCE PARITY).
-  try {
-    assertProductScope(spec);
-  } catch (e) {
-    if (e instanceof ProductScopeError) throw new ProductBootError(e.message);
-    throw e;
-  }
+  const spec = validateProductYamlSpec(specSource, specPath);
 
   // The deployment binds to the org as the DATABASE stores it, not to the spelling the operator
   // configured — see `assertProductTenantBootable`, which returns that canonical form.
@@ -2856,7 +2867,10 @@ export async function deployProductYamlSpec(
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
+      // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
+      // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
       await db.$client.begin(async (tx) => {
+        await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
         await tx.unsafe(ddl);
       });
       // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.

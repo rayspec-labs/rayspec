@@ -6,6 +6,9 @@
   },
   "references": [
     { "path": "../../kernel/core" },
+    { "path": "../../kernel/bundle-contract" },
+    { "path": "../../kernel/bundle" },
+    { "path": "../../kernel/bundle-closure" },
     { "path": "../../kernel/db" },
     { "path": "../../kernel/auth-core" },
     { "path": "../../kernel/platform" },

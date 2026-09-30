@@ -780,8 +780,10 @@ attempt got through.
 
 - **Exit:** `0` on success; `1` on an operational failure (a missing secret, a
   soft-deleted id, an invite-out path that is taken, a migration chain that could
-  not be applied — that one reports `MIGRATION_FAILED` and creates nothing); `2`
-  on a usage error.
+  not be applied — that one reports `MIGRATION_FAILED` and creates nothing, and
+  one that waited longer than 60 seconds for the shared schema lock a booting
+  server or another migration held reports `SCHEMA_LOCK_TIMEOUT`, creates
+  nothing and can simply be run again); `2` on a usage error.
 
 ### The owner handoff, and why it creates no user
 

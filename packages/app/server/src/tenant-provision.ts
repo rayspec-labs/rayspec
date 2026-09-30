@@ -42,9 +42,10 @@
  *
  * IT APPLIES THE COMMITTED MIGRATION CHAIN. That is what makes it genuinely one step against a fresh
  * database, and it is the same idempotent chain every boot runs — but it does mean the command
- * migrates whatever `DATABASE_URL` it is pointed at. The step is serialized by an advisory lock, so
- * two runs fanned out at the same instant against an EMPTY database converge here too and not only at
- * the reservation.
+ * migrates whatever `DATABASE_URL` it is pointed at. The chain runs under the SHARED SCHEMA LOCK
+ * (`schema-lock.ts`) that a booting server and every other schema-mutating path take too, so two runs
+ * fanned out at the same instant against an EMPTY database — or a run racing a first boot — converge
+ * here too and not only at the reservation.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -61,6 +62,7 @@ import {
 import { mintInviteToken, normalizeEmail } from '@rayspec/auth-core';
 import { isUniqueViolation, makeDb } from '@rayspec/db';
 import { applyMigrations } from './composition-root.js';
+import { SchemaLockTimeoutError } from './schema-lock.js';
 
 /** The two secrets the provisioning path uses — resolved by `loadTenantProvisionSecrets`. */
 export interface TenantProvisionSecrets {
@@ -145,39 +147,6 @@ export class TenantProvisionError extends Error {
 export const OPERATOR_INVITE_DEFAULT_TTL_SECONDS = 60 * 60;
 
 /**
- * The advisory-lock the migration step serializes on. `0x72617973` is a namespace this project owns,
- * so the pair cannot collide with an unrelated application holding advisory locks on the same
- * database; slot 1 is the platform migration chain. Any pair works as long as every runner of this
- * command uses the SAME one, which is why it is a constant rather than a parameter.
- */
-const MIGRATION_LOCK_NAMESPACE = 0x7261_7973;
-const MIGRATION_LOCK_SLOT = 1;
-
-/**
- * Apply the committed chain with the whole step serialized by a Postgres ADVISORY LOCK.
- *
- * The migrator takes no lock of its own, and its first two statements — `CREATE SCHEMA IF NOT EXISTS
- * "drizzle"` and `CREATE TABLE IF NOT EXISTS "drizzle"."__drizzle_migrations"` — are not
- * concurrency-safe: `IF NOT EXISTS` checks the catalogue and then creates, so two runs started
- * together against a FRESH database both see nothing and the loser dies on a duplicate-object error
- * before it ever reaches the reservation. That is precisely the shape a deploy script produces when
- * it fans out on a first bring-up, and it is the one case where "safe to call unconditionally" would
- * otherwise be false. Serialized, the loser waits, then finds the chain applied and no-ops — which is
- * what the reservation below already does, one layer down.
- *
- * The lock is transaction-scoped and the transaction does nothing else, so it is released by the
- * COMMIT — and by the connection dying, so a killed run never leaves the next one waiting. The
- * migration itself runs on a different connection of the same pool: an advisory lock is a mutex
- * between runners, not a data lock, so it blocks the other command, never our own work.
- */
-async function migrateUnderLock(db: ReturnType<typeof makeDb>): Promise<void> {
-  await db.$client.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK_NAMESPACE}::int4, ${MIGRATION_LOCK_SLOT}::int4)`;
-    await applyMigrations(db);
-  });
-}
-
-/**
  * Write the minted token to `path`, creating it EXCLUSIVELY at mode 600.
  *
  * `wx` is the whole point: an existing path is an error, never an overwrite — the same never-clobber
@@ -220,7 +189,8 @@ async function writeTokenFile(path: string, token: string): Promise<void> {
  * Provision (create or resolve) the organization named by `input.orgId`, idempotently.
  *
  * `opts.writeToken` is injectable so a suite can prove the token never reaches a stream without
- * touching a disk; `opts.now` so expiry assertions are deterministic. Both default to the real thing.
+ * touching a disk; `opts.now` so expiry assertions are deterministic; `opts.schemaLockTimeoutMs` so a
+ * suite can run out the lock wait in milliseconds. All default to the real thing.
  */
 export async function provisionTenant(
   secrets: TenantProvisionSecrets,
@@ -228,6 +198,8 @@ export async function provisionTenant(
   opts: {
     readonly writeToken?: (path: string, token: string) => Promise<void>;
     readonly now?: () => Date;
+    /** How long the migration step waits for the shared schema lock; the contract default if omitted. */
+    readonly schemaLockTimeoutMs?: number;
   } = {},
 ): Promise<TenantProvisionResult> {
   const writeToken = opts.writeToken ?? writeTokenFile;
@@ -252,8 +224,21 @@ export async function provisionTenant(
     // code: the migrator's rejection is a multi-line query dump, and an operator handed one has no
     // way to tell that nothing was reserved.
     try {
-      await migrateUnderLock(db);
+      await applyMigrations(
+        db,
+        opts.schemaLockTimeoutMs === undefined ? {} : { lockTimeoutMs: opts.schemaLockTimeoutMs },
+      );
     } catch (err) {
+      if (err instanceof SchemaLockTimeoutError) {
+        // Nothing is wrong with the database: another migration, boot or deploy holds the shared
+        // schema lock. Its own code, because the remedy is to retry, not to inspect DATABASE_URL.
+        throw new TenantProvisionError(
+          'SCHEMA_LOCK_TIMEOUT',
+          'Another migration, server boot or deploy is changing this database and held the shared ' +
+            'schema lock for longer than the bounded wait, so no organization was created or ' +
+            'resolved. Run the command again once it has finished.',
+        );
+      }
       throw new TenantProvisionError(
         'MIGRATION_FAILED',
         'Applying the committed migration chain to the target database failed, so no organization ' +
