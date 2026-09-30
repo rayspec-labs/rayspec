@@ -78,13 +78,14 @@ import {
   makeDb,
   scanMigrationSql,
 } from '@rayspec/db';
+import { type RunCancelPollSource, resolveRunCancelPoll } from '@rayspec/platform';
 import {
   composeCapabilityStores,
   deriveConflictKeys,
   deriveProductStores,
 } from '@rayspec/product-yaml';
 import type { StoreSpec } from '@rayspec/spec';
-import { applyMigrations } from './composition-root.js';
+import { applyMigrations, type HostingPosture, parseHostingPosture } from './composition-root.js';
 import {
   type FenceOperationOptions,
   healthOperation,
@@ -98,11 +99,33 @@ import {
   runtimePlatformHead,
 } from './schema-head.js';
 
-/** The operations this adapter implements today. */
+/**
+ * How this runtime is hosted, beside what `inspect()` reports: the contract's inspect result is a
+ * closed shape with no member for it.
+ */
+export interface HostingReport {
+  /** `RAYSPEC_HOSTING_POSTURE`. */
+  hostingPosture: HostingPosture;
+  /**
+   * Whether a run executing in another worker process is reached by a cancellation: on when
+   * `RAYSPEC_RUN_CANCEL_POLL_MS` sets an interval (`explicit`) or the posture is managed
+   * (`hosting-posture`), off otherwise.
+   */
+  crossProcessCancellation: {
+    enabled: boolean;
+    pollIntervalMs: number | null;
+    source: RunCancelPollSource;
+  };
+}
+
+/** The operations this adapter implements today, and the hosting report. */
 export type RuntimeControlAdapter = Pick<
   RuntimeControl,
   'inspect' | 'prepare' | 'quiesce' | 'resume' | 'health'
->;
+> & {
+  /** The hosting posture and the cross-process cancellation it implies; reads no database. */
+  inspectHosting(): HostingReport;
+};
 
 export interface RuntimeControlOptions extends Omit<FenceOperationOptions, 'db'> {
   /** The environment's application database. */
@@ -124,6 +147,8 @@ export interface RuntimeControlOptions extends Omit<FenceOperationOptions, 'db'>
   now?: () => Date;
   /** Whether a module resolves in this process; the capability probe. */
   resolvesModule?: (specifier: string) => boolean;
+  /** The environment the hosting report reads. Default: `process.env`. */
+  env?: NodeJS.ProcessEnv;
 }
 
 // ─── envelopes ─────────────────────────────────────────────────────────────────────────────────
@@ -326,6 +351,19 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
     >[];
 
   return {
+    inspectHosting(): HostingReport {
+      const env = options.env ?? process.env;
+      const poll = resolveRunCancelPoll(env);
+      return {
+        hostingPosture: parseHostingPosture(env),
+        crossProcessCancellation: {
+          enabled: poll.intervalMs !== undefined,
+          pollIntervalMs: poll.intervalMs ?? null,
+          source: poll.source,
+        },
+      };
+    },
+
     async inspect(request: InspectRequest): Promise<ResultEnvelope<InspectData>> {
       const operation = 'runtime.inspect';
       const operationId = operationIdOf(request);
