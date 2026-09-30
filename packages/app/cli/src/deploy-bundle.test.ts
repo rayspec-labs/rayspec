@@ -216,6 +216,13 @@ maybeDescribe('rayspec deploy <file.ray> — refused before any database', () =>
     const withWritable = deploy([bundle, '--dry-run', '--trusted-key', writable], {}, cwd);
     expectRefusal(withWritable, 'RAY_BINDINGS_FILE_INSECURE', 4);
     expect(withWritable.envelope.errors[0].message).toContain('writable by group or others');
+    // A link to an acceptable key is refused as well: the file is judged through the handle that
+    // reads it, which is never opened through a link.
+    const linked = join(keys, 'linked.pub.pem');
+    symlinkSync(readable, linked);
+    const withLink = deploy([bundle, '--dry-run', '--trusted-key', linked], {}, cwd);
+    expectRefusal(withLink, 'RAY_BINDINGS_FILE_INSECURE', 4);
+    expect(withLink.envelope.errors[0].message).toContain('is a link or not a regular file');
     expect(existsSync(join(cwd, '.rayspec-state'))).toBe(false);
     // The control: a world-readable public key is accepted, so the run goes on to the database,
     // which does not exist.

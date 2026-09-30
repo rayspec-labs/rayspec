@@ -37,7 +37,7 @@
  */
 import { createPublicKey, type KeyObject } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, open } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { type ParseArgsConfig, parseArgs } from 'node:util';
 import {
@@ -282,24 +282,29 @@ function parse(args: readonly string[]): Parsed {
  * public key in PEM form. It holds nothing secret, so it may be readable by others.
  */
 async function readTrustedKey(path: string): Promise<KeyObject> {
-  let stat: Awaited<ReturnType<typeof lstat>>;
+  // Open first, without following a link, and judge the file through that one handle: a check by
+  // path followed by a separate open could be answered by one file and read from another.
+  let handle: Awaited<ReturnType<typeof open>>;
   try {
-    stat = await lstat(path);
-  } catch {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      refuse('RAY_BINDINGS_FILE_INSECURE', `--trusted-key ${path} is a link or not a regular file`);
+    }
     refuse('RAY_USAGE', `--trusted-key ${path} cannot be read as a public key file`);
   }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    refuse('RAY_BINDINGS_FILE_INSECURE', `--trusted-key ${path} is a link or not a regular file`);
-  }
-  if ((stat.mode & 0o022) !== 0) {
-    refuse(
-      'RAY_BINDINGS_FILE_INSECURE',
-      `--trusted-key ${path} is writable by group or others; restrict it with chmod 644`,
-    );
-  }
   let text: string;
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      refuse('RAY_BINDINGS_FILE_INSECURE', `--trusted-key ${path} is a link or not a regular file`);
+    }
+    if ((stat.mode & 0o022) !== 0) {
+      refuse(
+        'RAY_BINDINGS_FILE_INSECURE',
+        `--trusted-key ${path} is writable by group or others; restrict it with chmod 644`,
+      );
+    }
     const buffer = Buffer.alloc(MAX_KEY_FILE_BYTES + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     if (bytesRead > MAX_KEY_FILE_BYTES) {
