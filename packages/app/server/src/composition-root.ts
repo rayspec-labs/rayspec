@@ -53,6 +53,7 @@ import {
   IdentityStore,
   InviteStore,
   type ManualTriggerFirer,
+  makeRunAuthorizer,
   makeTenantEventBus,
   makeTenantEventWake,
   OrgStore,
@@ -566,6 +567,8 @@ export interface BootedServer {
    * `verifyTenantIsolation` passed for the role the server serves with.
    */
   databaseIsolation: DatabaseIsolationStatus;
+  /** Whether this boot runs in single-tenant mode (RAYSPEC_SINGLE_TENANT). */
+  singleTenant: boolean;
   /** How long `shutdownHttpServer` lets in-flight connections finish (the resolved config value). */
   shutdownDrainMs: number;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
@@ -767,6 +770,13 @@ export interface ServerConfig {
    * unchanged. Omitted ⇒ `local`.
    */
   hostingPosture?: HostingPosture;
+  /**
+   * Single-tenant mode — RAYSPEC_SINGLE_TENANT. `true`: the runtime holds one organization; creating
+   * a second is refused on every path (the org store is the one point that decides), open registration
+   * only creates that first one, and after it accounts join by invitation. A boot of a database that
+   * already holds more than one organization is refused. Omitted ⇒ `false`, today's behaviour.
+   */
+  singleTenant?: boolean;
   /**
    * How long a graceful shutdown lets in-flight connections finish before it closes the rest —
    * RAYSPEC_SHUTDOWN_DRAIN_MS, default 10000. Omitted ⇒ that default.
@@ -1193,6 +1203,9 @@ export function loadTenantProvisionSecrets(
     databaseUrl: resolvedSecrets.get('DATABASE_URL') as string,
     apiKeyPepper: resolvedSecrets.get('RAYSPEC_API_KEY_PEPPER') as string,
     ...(migrationDatabaseUrl !== undefined ? { migrationDatabaseUrl } : {}),
+    // The same single-tenant switch the server reads, so provisioning cannot create the second
+    // organization a single-tenant runtime would then refuse to boot with.
+    ...(parseSingleTenantMode(env) ? { singleTenant: true } : {}),
   };
 }
 
@@ -1323,6 +1336,8 @@ export function loadServerConfig(
   // the hosting posture and the graceful-shutdown drain (both fail-closed on an invalid value).
   const hostingPosture = parseHostingPosture(env);
   const shutdownDrainMs = parseShutdownDrainMs(env);
+  // single-tenant mode (fail-closed on an invalid value; off unless set).
+  const singleTenant = parseSingleTenantMode(env);
 
   // The boot secrets supplied as file mounts, for the readiness re-check (paths only, never content).
   const secretFiles: SecretFile[] = [];
@@ -1375,6 +1390,7 @@ export function loadServerConfig(
     authRateMultiplier,
     schemaLockTimeoutMs,
     hostingPosture,
+    singleTenant,
     shutdownDrainMs,
     secretFiles,
     erasureEnabled,
@@ -1619,6 +1635,41 @@ export function parseHostingPosture(env: NodeJS.ProcessEnv): HostingPosture {
     `Boot aborted — RAYSPEC_HOSTING_POSTURE='${raw}' is not 'local' or 'managed'. Under 'managed' ` +
       'the public live-executor probe (/recovery-scope) is disabled. Fail-closed.',
   );
+}
+
+/**
+ * Parse RAYSPEC_SINGLE_TENANT — single-tenant mode. Unset/blank ⇒ `false` (any number of
+ * organizations, as before the mode existed). Exactly `true` or `false`; anything else ABORTS the
+ * boot, so a typo never silently leaves a deployment meant to hold one tenant open to more.
+ */
+export function parseSingleTenantMode(env: NodeJS.ProcessEnv): boolean {
+  const raw = env.RAYSPEC_SINGLE_TENANT?.trim();
+  if (raw === undefined || raw === '') return false;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  throw new BootConfigError(
+    `Boot aborted — RAYSPEC_SINGLE_TENANT='${raw}' is not 'true' or 'false'. Under 'true' the ` +
+      'runtime holds one organization: creating a second is refused and registration is by ' +
+      'invitation. Fail-closed.',
+  );
+}
+
+/**
+ * Refuse a single-tenant boot of a database that already holds more than one organization: the mode
+ * would otherwise report a limit the data does not meet. Nothing is picked or hidden; the operator
+ * decides what to do with the extra organizations.
+ */
+export async function assertSingleTenantBootable(db: Db): Promise<void> {
+  const rows = (await db.$client.unsafe(
+    'SELECT count(*)::int AS n FROM orgs',
+  )) as unknown as Array<{ n: number }>;
+  const count = Number(rows[0]?.n ?? 0);
+  if (count > 1) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_SINGLE_TENANT=true, but the database holds ${count} organizations. ` +
+        'Single-tenant mode serves exactly one; unset it, or reduce the database to one organization.',
+    );
+  }
 }
 
 /** The default graceful-shutdown drain: ten seconds. */
@@ -2383,7 +2434,10 @@ async function assembleServerWith(
   // The org store carries the tenant-bootstrap posture, not just the handle: it is the ONE place that
   // decides whether an org id may be chosen, so a route that forgot to check could not smuggle one
   // past it, and the gated route keys its own registration off the same value (one source of truth).
-  const orgStore = new OrgStore(db, { tenantBootstrapEnabled: config.tenantBootstrapEnabled });
+  const orgStore = new OrgStore(db, {
+    tenantBootstrapEnabled: config.tenantBootstrapEnabled,
+    singleTenant: config.singleTenant === true,
+  });
   // A read authenticated with an api key stamps its last use, a write a source fence withholds.
   const apiKeyStore = new ApiKeyStore(db, { stampsLastUse: () => fence.admitsWrites() });
   const auditStore = new AuditStore(db);
@@ -2500,6 +2554,8 @@ async function assembleServerWith(
         (opts.bootWarn ?? consoleWarn)(databaseIsolationWarning(databaseIsolation));
       }
     }
+    // Single-tenant mode is checked against the migrated database before anything serves from it.
+    if (config.singleTenant === true) await assertSingleTenantBootable(db);
     await fence.load();
     started.fence = fence;
   } catch (err) {
@@ -2713,6 +2769,7 @@ async function assembleServerWith(
     fence,
     readiness,
     databaseIsolation,
+    singleTenant: config.singleTenant === true,
     shutdownDrainMs: config.shutdownDrainMs ?? DEFAULT_SHUTDOWN_DRAIN_MS,
     close: async () => {
       // Stop watching the fence (and remove this process's heartbeat), then drain the durable worker
@@ -3742,6 +3799,11 @@ async function deployDeclaredSpec(
             productTables,
           };
         },
+        // A job runs only while the member or key that enqueued it may still run agents here.
+        authorizeRun: makeRunAuthorizer({
+          identityStore: baseDeps.identityStore,
+          apiKeyStore: baseDeps.apiKeyStore,
+        }),
       },
       {
         name: effectiveSpec.metadata.name,

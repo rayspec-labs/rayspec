@@ -14,8 +14,9 @@
  *   3. The scheduled cleanup sweeps the event bus per tenant under row security.
  *   4. A source fence revokes the runtime role's writes while the snapshot role still reads every
  *      tenant's rows; resume grants them back.
- *   5. The runtime-control adapter reports the managed posture supported only with a receipt AND the
- *      posture active; a runtime role that is a superuser is reported not active, with a boot warning.
+ *   5. The runtime-control adapter reports the managed posture supported only with a receipt, the
+ *      posture active AND single-tenant mode; a runtime role that is a superuser is reported not
+ *      active, with a boot warning.
  *   6. Without the migration connection the boot is today's single-role boot: nothing is enabled.
  *
  * The durable worker launches DBOS (a process-global singleton), so only the first boot declares one.
@@ -476,20 +477,30 @@ describe.skipIf(!baseUrl)(
       }
     }, 60_000);
 
-    it('the managed posture is supported only with a receipt and the isolation posture active', async () => {
+    it('the managed posture is supported only with a receipt, the isolation posture active and single-tenant mode', async () => {
       const control: Db = makeDb(iso.urls.migration, 1);
       try {
         const receipt = 'a'.repeat(64);
-        const inspect = (runtimeRole?: string) =>
+        const inspect = (
+          runtimeRole?: string,
+          env: NodeJS.ProcessEnv = { RAYSPEC_SINGLE_TENANT: 'true' },
+        ) =>
           createRuntimeControl({
             db: control,
             managedReceiptSha256: receipt,
+            env,
             ...(runtimeRole !== undefined ? { runtimeRole } : {}),
           }).inspect(base());
         expect((await inspect(iso.roles.runtime)).data?.managedPosture).toEqual({
           supported: true,
           receiptSha256: receipt,
         });
+        // Without single-tenant mode (unset, or a value the boot would refuse): not supported.
+        expect((await inspect(iso.roles.runtime, {})).data?.managedPosture.supported).toBe(false);
+        expect(
+          (await inspect(iso.roles.runtime, { RAYSPEC_SINGLE_TENANT: 'yes' })).data?.managedPosture
+            .supported,
+        ).toBe(false);
         // The snapshot role bypasses row security: as a runtime role it would not hold the posture.
         expect((await inspect(iso.roles.snapshot)).data?.managedPosture.supported).toBe(false);
         // One database role: never supported.

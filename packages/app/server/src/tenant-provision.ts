@@ -65,6 +65,7 @@ import {
   OrgIdInUseError,
   OrgStore,
   OrgTombstonedError,
+  SingleTenantLimitError,
 } from '@rayspec/api-auth';
 import { mintInviteToken, normalizeEmail } from '@rayspec/auth-core';
 import { isUniqueViolation, makeDb } from '@rayspec/db';
@@ -91,6 +92,11 @@ export interface TenantProvisionSecrets {
    * then run over it; `databaseUrl` is only asked which role the runtime serves with.
    */
   readonly migrationDatabaseUrl?: string;
+  /**
+   * Single-tenant mode (RAYSPEC_SINGLE_TENANT=true): resolving the one organization stays idempotent,
+   * creating a second is refused with `SINGLE_TENANT_LIMIT`.
+   */
+  readonly singleTenant?: boolean;
 }
 
 export interface TenantProvisionInput {
@@ -294,8 +300,12 @@ export async function provisionTenant(
       );
     }
 
-    // The posture is hardcoded, not read from the environment — see the module docblock.
-    const orgStore = new OrgStore(db, { tenantBootstrapEnabled: true });
+    // The bootstrap posture is hardcoded, not read from the environment — see the module docblock.
+    // The single-tenant limit is the deployment's own switch, resolved with the secrets.
+    const orgStore = new OrgStore(db, {
+      tenantBootstrapEnabled: true,
+      singleTenant: secrets.singleTenant === true,
+    });
     const inviteStore = new InviteStore(db);
     const auditStore = new AuditStore(db);
 
@@ -494,6 +504,13 @@ function oneLine(err: unknown): string {
  */
 function translateReserveError(err: unknown, input: TenantProvisionInput): unknown {
   if (err instanceof TenantProvisionError) return err;
+  if (err instanceof SingleTenantLimitError) {
+    return new TenantProvisionError(
+      'SINGLE_TENANT_LIMIT',
+      `The deployment runs in single-tenant mode (RAYSPEC_SINGLE_TENANT=true) and already holds ` +
+        `another organization, so ${input.orgId} was not created. Nothing was written.`,
+    );
+  }
   if (err instanceof OrgTombstonedError) {
     return new TenantProvisionError(
       'ORG_TOMBSTONED',

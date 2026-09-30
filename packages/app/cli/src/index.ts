@@ -337,7 +337,9 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 that file can take the tenant, so treat it as a credential: it defaults
                                 to a 1-hour lifetime (--invite-ttl-seconds overrides, clamped to
                                 5min-30d). --reissue-owner-invite revokes the outstanding invite and
-                                mints a replacement (for a lost token). Emits ONE JSON object.`,
+                                mints a replacement (for a lost token). With RAYSPEC_SINGLE_TENANT=true
+                                it resolves the one organization and refuses to create a second
+                                (SINGLE_TENANT_LIMIT). Emits ONE JSON object.`,
       },
     ],
   },

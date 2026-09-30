@@ -76,6 +76,7 @@ import {
   type DatabaseIsolationStatus,
   type HostingPosture,
   parseHostingPosture,
+  parseSingleTenantMode,
   SINGLE_ROLE_ISOLATION,
 } from './composition-root.js';
 import {
@@ -108,6 +109,15 @@ export interface HostingReport {
     enabled: boolean;
     pollIntervalMs: number | null;
     source: RunCancelPollSource;
+  };
+  /**
+   * How many application tenants (organizations) the runtime holds, read from
+   * `RAYSPEC_SINGLE_TENANT`: `singleTenantMode: true` with `maxApplicationTenants: 1`, or `false`
+   * with `null` (no limit).
+   */
+  applicationTenants: {
+    singleTenantMode: boolean;
+    maxApplicationTenants: 1 | null;
   };
 }
 
@@ -363,12 +373,17 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
     inspectHosting(): HostingReport {
       const env = options.env ?? process.env;
       const poll = resolveRunCancelPoll(env);
+      const singleTenantMode = parseSingleTenantMode(env);
       return {
         hostingPosture: parseHostingPosture(env),
         crossProcessCancellation: {
           enabled: poll.intervalMs !== undefined,
           pollIntervalMs: poll.intervalMs ?? null,
           source: poll.source,
+        },
+        applicationTenants: {
+          singleTenantMode,
+          maxApplicationTenants: singleTenantMode ? 1 : null,
         },
       };
     },
@@ -399,6 +414,14 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         ]);
       }
       const receipt = options.managedReceiptSha256 ?? null;
+      // Single-tenant mode is part of the supported posture. An unreadable value (which a boot would
+      // refuse) counts as off: the posture is never reported on a setting that does not parse.
+      let singleTenantMode = false;
+      try {
+        singleTenantMode = parseSingleTenantMode(options.env ?? process.env);
+      } catch {
+        singleTenantMode = false;
+      }
       return succeeded(operation, operationId, {
         runtimeVersion: runtimeVersion(),
         target: {
@@ -419,8 +442,12 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         applicationDigest: state.applicationDigest,
         releaseManifestSha256: options.releaseManifestSha256 ?? null,
         // The managed posture is supported only by a release that ships its capability receipt, on an
-        // environment whose database isolation (role separation and row-level security) is active.
-        managedPosture: { supported: receipt !== null && isolation.active, receiptSha256: receipt },
+        // environment whose database isolation (role separation and row-level security) is active
+        // and whose runtime runs in single-tenant mode.
+        managedPosture: {
+          supported: receipt !== null && isolation.active && singleTenantMode,
+          receiptSha256: receipt,
+        },
         fence: state.fence,
         environmentRevision: state.environmentRevision,
       });
