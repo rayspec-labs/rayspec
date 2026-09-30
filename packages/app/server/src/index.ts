@@ -95,19 +95,38 @@ export {
   BootConfigError,
   type BootedServer,
   DEFAULT_PORT,
+  DEFAULT_SHUTDOWN_DRAIN_MS,
   detectStaticProfile,
+  type HostingPosture,
   isStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
   loadTenantProvisionSecrets,
   MAX_SCHEMA_LOCK_TIMEOUT_MS,
+  MAX_SHUTDOWN_DRAIN_MS,
   type ProductTableRegistrar,
+  parseHostingPosture,
   parseSchemaLockTimeoutMs,
+  parseShutdownDrainMs,
+  SchemaNewerThanRuntimeError,
   type ServerConfig,
   type StaticBootedServer,
   type StaticServerConfig,
   validateInjectedSpec,
 } from './composition-root.js';
+// Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
+export {
+  bindingsProbe,
+  databaseProbe,
+  durableWorkerReadiness,
+  type HealthCheck,
+  type HealthCheckName,
+  LIVENESS_PATH,
+  type ReadinessProbe,
+  runReadiness,
+  type SecretFile,
+  schemaProbe,
+} from './health.js';
 // The operation lease with its fencing epoch, and the append-only operation receipts: the frame a
 // mutating runtime-control operation runs in (one holder at a time, intent before effect, every write
 // checked against the epoch in its own transaction).
@@ -165,8 +184,9 @@ export {
 // those two drift apart in the first place. A leaf module (node builtins only).
 export { loadLocalDotenvIfPresent } from './read-env.js';
 // The runtime-control adapter — the typed library through which a deployment supervisor or the CLI
-// asks a runtime what it is (`inspect`) and what a bundle would do to its environment (`prepare`). It
-// mounts NO route: a caller holds the environment's database connection and calls it in process.
+// asks a runtime what it is (`inspect`), what a bundle would do to its environment (`prepare`) and
+// whether it is ready (`health`), and fences and releases its source (`quiesce`, `resume`). It mounts
+// NO route: a caller holds the environment's database connection and calls it in process.
 export {
   CAPABILITY_MODULES,
   createRuntimeControl,
@@ -175,6 +195,19 @@ export {
   type RuntimeControlOptions,
   runtimeVersion,
 } from './runtime-control.js';
+// The source fence as one runtime process keeps it: the phases, the producers it stops and restarts,
+// and the heartbeat quiesce reads.
+export {
+  DEFAULT_FENCE_POLL_MS,
+  type FencedProducer,
+  type FencePhase,
+  fencedBlobStore,
+  gatedProducer,
+  PROCESS_LIVE_WINDOW_MS,
+  queueProducer,
+  RuntimeFence,
+  type RuntimeFenceOptions,
+} from './runtime-fence.js';
 // The live two-part schema head (platform ledger tag + product schema digest), read-only.
 export {
   type CatalogQuery,
@@ -199,6 +232,8 @@ export {
 // (packages/app/cli/src/deploy.ts) reuses it instead of duplicating the opts logic; lives in serve-opts.ts
 // (not the self-executing bin) so re-exporting it here drags in no entrypoint side effect.
 export { assembleOptsFromEnv } from './serve-opts.js';
+// The bounded graceful shutdown both entrypoints run on SIGINT/SIGTERM.
+export { type DrainableServer, type ShutdownOutcome, shutdownHttpServer } from './shutdown.js';
 // The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
 // handoff that leaves no platform user behind. It lives in the composition root because it is the only
 // package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach
@@ -213,3 +248,11 @@ export {
   type TenantProvisionResult,
   type TenantProvisionSecrets,
 } from './tenant-provision.js';
+// The database write barrier a quiesce holds: the runtime role's write privileges revoked (with role
+// separation), or a stopped source with no other session connected.
+export {
+  BarrierUnavailableError,
+  CONTROL_APPLICATION_PREFIX,
+  openControlDatabase,
+  type RecordedGrant,
+} from './write-barrier.js';

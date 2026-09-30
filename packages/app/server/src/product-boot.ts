@@ -153,6 +153,8 @@ import {
   type ServerConfig,
 } from './composition-root.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
+import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
+import { gatedProducer, queueProducer, type RuntimeFence } from './runtime-fence.js';
 import { lockSchemaInTransaction } from './schema-lock.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
@@ -192,9 +194,16 @@ export interface DeployedProductBoot {
    * worker is launched" rule covers it too.
    */
   runCleanupNow?: BootedServer['runCleanupNow'];
+  /** The durable worker's readiness probes (the worker and its system database). */
+  workerReadiness: readonly ReadinessProbe[];
 }
 
 export interface DeployProductYamlOpts {
+  /**
+   * This process's source fence: the queues, the cleanup scheduler, the event bus and the blob
+   * backend this boot wires all stop under it. Omitted ⇒ nothing is fenced (a direct test caller).
+   */
+  fence?: RuntimeFence;
   /** LOCAL table-registration stand-in: register the built product tables before deploy()'s identity-keyed verify. */
   registerProductTables?: (tables: ReadonlyMap<string, PgTable>) => void;
   /** Env source (default process.env) — injectable for tests. */
@@ -2406,6 +2415,7 @@ export async function deployProductYamlSpec(
   opts: DeployProductYamlOpts = {},
 ): Promise<DeployedProductBoot> {
   const env = opts.env ?? process.env;
+  const fence = opts.fence;
   const specPath = config.specPath as string;
   const escapeHatchRoot = config.escapeHatchRoot as string;
   const specSource = readFileSync(specPath, 'utf8');
@@ -2547,6 +2557,8 @@ export async function deployProductYamlSpec(
       );
     }
     blobFactory = makeFsBlobStoreFactory(config.blobRoot);
+    // Object writes stop once the process has drained under a source fence; reads never do.
+    if (opts.fence) blobFactory = opts.fence.blobFactory(blobFactory);
   }
   // The READ-ONLY fs-source (`init.fsSource`) — purely deploy-config-gated (no capability KIND demands
   // it, unlike the blob byte-movers above): build the factory when RAYSPEC_FS_SOURCE_ROOT is configured,
@@ -2706,6 +2718,23 @@ export async function deployProductYamlSpec(
     },
   );
   executor.attachPreLaunchHook(() => wfExecutor.registerWorkflowJob());
+  // Both queues stop dequeuing under a source fence and start again on resume, without the engine
+  // shutting down; attached BEFORE the launch, so a boot under a held fence registers them paused.
+  if (fence) {
+    await fence.attach(queueProducer('run-queue', executor));
+    await fence.attach(queueProducer('workflow-queue', wfExecutor));
+    // The external services a fence cannot reach: a model call already made, a transcription sent.
+    const live = [
+      env.RAYSPEC_EXTRACTION_MODE,
+      env.RAYSPEC_RESPONDER_MODE,
+      env.RAYSPEC_NORMALIZE_MODE,
+    ]
+      .map((mode) => mode?.trim())
+      .includes('live');
+    if (live) fence.addExternal(['model-provider']);
+    const sttProvider = env.STT_PROVIDER?.trim();
+    if (sttProvider && sttProvider !== 'fake') fence.addExternal([`stt-${sttProvider}`]);
+  }
 
   // ── 6a2. Wire the SYSTEM cleanup scheduled-workflow (BEFORE launch) ──────────────────────────
   // Platform housekeeping (OIDC prune LIVE + the operator-gated GDPR purge) runs on a daily DBOS
@@ -2731,7 +2760,10 @@ export async function deployProductYamlSpec(
       }),
     schedule: config.cleanup.schedule,
     executor,
+    // Closed by a source fence: no scheduled run or on-demand run starts while it is held.
+    ...(fence ? { gate: fence } : {}),
   });
+  if (fence) await fence.attach(gatedProducer('system-cleanup', () => cleanupScheduler.inFlight));
   executor.attachPreLaunchHook(() => cleanupScheduler.registerScheduledWorkflow());
   // The on-demand cleanup delegate (control seam) — goes through the EXACT same `runCleanup` path the
   // daily workflow fires on. Cast the engine-local outcome back to the api-auth CleanupResult (the
@@ -2921,7 +2953,9 @@ export async function deployProductYamlSpec(
             // grammar to write one in. Same rule by which a product deployment gets its durable worker:
             // the profile's contract is that the platform's runtime is present, so a product's handlers
             // and tools can emit without the document having to ask for it.
-            eventBus: makeTenantEventBus(),
+            eventBus: makeTenantEventBus(
+              fence === undefined ? {} : { admitsWrites: () => fence.admitsDataWrites() },
+            ),
             // …and the wake beside it, so this profile's subscribers are woken by the emitting
             // transaction rather than by their next read.
             eventWake,
@@ -3039,6 +3073,7 @@ export async function deployProductYamlSpec(
     durableExecutorIdentity,
     eraseTenantNow,
     runCleanupNow,
+    workerReadiness: durableWorkerReadiness(executor),
   };
 }
 

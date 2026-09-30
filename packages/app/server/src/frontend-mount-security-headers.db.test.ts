@@ -170,7 +170,14 @@ describe('frontend-mount security headers — full-backend boot parity with the 
       const res = await server.app.request('/health');
       expect(res.status).toBe(200);
       // The health JSON, not a mount response.
-      expect(await res.json()).toEqual({ status: 'ok', db: 'ok', frontend: 'ok' });
+      expect(await res.json()).toEqual({
+        status: 'ok',
+        db: 'ok',
+        frontend: 'ok',
+        live: true,
+        ready: true,
+        checks: { database: true, assets: true, schema: true, bindings: true },
+      });
       // The frontend headers must NOT leak onto the API surface (CSP stays with the fronting proxy).
       expect(res.headers.get('content-security-policy')).toBeNull();
       expect(res.headers.get('permissions-policy')).toBeNull();

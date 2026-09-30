@@ -160,7 +160,13 @@ describe('boot smoke — real composition root + migration-chain boot + authed r
   maybe('GET /health round-trips the DB and returns ok', async () => {
     const res = await server!.app.request('/health');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ status: 'ok', db: 'ok' });
+    expect(await res.json()).toEqual({
+      status: 'ok',
+      db: 'ok',
+      live: true,
+      ready: true,
+      checks: { database: true, schema: true, bindings: true },
+    });
   });
 
   maybe('register → me → login is a real authed round-trip (no LLM)', async () => {

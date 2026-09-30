@@ -257,7 +257,13 @@ maybeDescribe(
       const res = await fetch(`${base()}/health`);
       expect(res.status).toBe(200);
       // `frontend` reports the boot-time readiness of the declared mounts; `db` is absent.
-      expect(await res.json()).toEqual({ status: 'ok', frontend: 'ok' });
+      expect(await res.json()).toEqual({
+        status: 'ok',
+        frontend: 'ok',
+        live: true,
+        ready: true,
+        checks: { assets: true },
+      });
     });
   },
 );

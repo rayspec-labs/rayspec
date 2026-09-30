@@ -187,22 +187,41 @@ describe('mountUnservableReason — the one definition the boot guard and the pr
 });
 
 describe('the full platform probe — the database cases are unchanged', () => {
-  it('a reachable database with NO declared mounts answers exactly 200 {status:ok, db:ok}', async () => {
+  it('a reachable database with NO declared mounts answers exactly 200 {status:ok, db:ok} and its check', async () => {
     const { status, body } = await probe(fullPlatformApp(dbReachable, undefined));
     expect(status).toBe(200);
-    expect(body).toEqual({ status: 'ok', db: 'ok' });
+    expect(body).toEqual({
+      status: 'ok',
+      db: 'ok',
+      live: true,
+      ready: true,
+      checks: { database: true },
+    });
   });
 
   it('an unreachable database with NO declared mounts answers exactly 503 {status:degraded, db:unreachable}', async () => {
     const { status, body } = await probe(fullPlatformApp(dbUnreachable, undefined));
     expect(status).toBe(503);
-    expect(body).toEqual({ status: 'degraded', db: 'unreachable' });
+    expect(body).toEqual({
+      status: 'degraded',
+      db: 'unreachable',
+      live: true,
+      ready: false,
+      checks: { database: false },
+    });
   });
 
   it('an unreachable database stays 503 {status:degraded, db:unreachable} when the mounts ARE servable', async () => {
     const { status, body } = await probe(fullPlatformApp(dbUnreachable, 'ok'));
     expect(status).toBe(503);
-    expect(body).toEqual({ status: 'degraded', db: 'unreachable', frontend: 'ok' });
+    expect(body).toEqual({
+      status: 'degraded',
+      db: 'unreachable',
+      frontend: 'ok',
+      live: true,
+      ready: false,
+      checks: { database: false, assets: true },
+    });
   });
 });
 
@@ -210,19 +229,40 @@ describe('the full platform probe — a non-servable mount is reported', () => {
   it('servable mounts add frontend:ok and keep the 200', async () => {
     const { status, body } = await probe(fullPlatformApp(dbReachable, 'ok'));
     expect(status).toBe(200);
-    expect(body).toEqual({ status: 'ok', db: 'ok', frontend: 'ok' });
+    expect(body).toEqual({
+      status: 'ok',
+      db: 'ok',
+      frontend: 'ok',
+      live: true,
+      ready: true,
+      checks: { database: true, assets: true },
+    });
   });
 
   it('a non-servable mount answers 503, NOT 200, even though the database is reachable', async () => {
     const { status, body } = await probe(fullPlatformApp(dbReachable, 'unavailable'));
     expect(status).toBe(503);
-    expect(body).toEqual({ status: 'degraded', db: 'ok', frontend: 'unavailable' });
+    expect(body).toEqual({
+      status: 'degraded',
+      db: 'ok',
+      frontend: 'unavailable',
+      live: true,
+      ready: false,
+      checks: { database: true, assets: false },
+    });
   });
 
   it('a non-servable mount AND an unreachable database report both', async () => {
     const { status, body } = await probe(fullPlatformApp(dbUnreachable, 'unavailable'));
     expect(status).toBe(503);
-    expect(body).toEqual({ status: 'degraded', db: 'unreachable', frontend: 'unavailable' });
+    expect(body).toEqual({
+      status: 'degraded',
+      db: 'unreachable',
+      frontend: 'unavailable',
+      live: true,
+      ready: false,
+      checks: { database: false, assets: false },
+    });
   });
 });
 
@@ -230,13 +270,25 @@ describe('the static profile probe', () => {
   it('a servable mount answers 200 {status:ok, frontend:ok} — still no db field', async () => {
     const { status, body } = await probe(staticApp([SPA_OK]));
     expect(status).toBe(200);
-    expect(body).toEqual({ status: 'ok', frontend: 'ok' });
+    expect(body).toEqual({
+      status: 'ok',
+      frontend: 'ok',
+      live: true,
+      ready: true,
+      checks: { assets: true },
+    });
   });
 
   it('a non-servable mount answers 503, NOT 200', async () => {
     const { status, body } = await probe(staticApp([SPA_NO_INDEX]));
     expect(status).toBe(503);
-    expect(body).toEqual({ status: 'degraded', frontend: 'unavailable' });
+    expect(body).toEqual({
+      status: 'degraded',
+      frontend: 'unavailable',
+      live: true,
+      ready: false,
+      checks: { assets: false },
+    });
   });
 
   it('the frontend mounts still serve — /health is not the only route', async () => {
@@ -277,8 +329,14 @@ describe('the probe performs no filesystem access per call', () => {
       specPath: join(doomedRoot, 'rayspec.yaml'),
       frontend: [SPA_OK],
     }).app;
-    expect(await probe(app)).toEqual({ status: 200, body: { status: 'ok', frontend: 'ok' } });
+    expect(await probe(app)).toEqual({
+      status: 200,
+      body: { status: 'ok', frontend: 'ok', live: true, ready: true, checks: { assets: true } },
+    });
     rmSync(doomedRoot, { recursive: true, force: true });
-    expect(await probe(app)).toEqual({ status: 200, body: { status: 'ok', frontend: 'ok' } });
+    expect(await probe(app)).toEqual({
+      status: 200,
+      body: { status: 'ok', frontend: 'ok', live: true, ready: true, checks: { assets: true } },
+    });
   });
 });

@@ -108,7 +108,13 @@ describe('static boot — /health carries no database field', () => {
     const body = (await res.json()) as Record<string, unknown>;
     // `frontend` reports the boot-time readiness of the served mount; `db` is absent — a static cell
     // has no database. (health-frontend-mounts.test.ts owns the mount-readiness cases.)
-    expect(body).toEqual({ status: 'ok', frontend: 'ok' });
+    expect(body).toEqual({
+      status: 'ok',
+      frontend: 'ok',
+      live: true,
+      ready: true,
+      checks: { assets: true },
+    });
     expect(body).not.toHaveProperty('db');
   });
 });

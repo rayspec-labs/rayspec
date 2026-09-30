@@ -40,7 +40,10 @@ import {
   type RuntimeControlOptions,
   runtimeVersion,
 } from './runtime-control.js';
-import { readProductSchemaDigest } from './schema-head.js';
+import { readProductSchemaDigest, runtimePlatformHead } from './schema-head.js';
+
+/** The platform head a fresh chain reaches: the last migration this runtime ships. */
+const RUNTIME_HEAD = runtimePlatformHead();
 
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -312,7 +315,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     const { plan } = result.data!;
     expect(plan.blockers).toEqual([]);
     expect(plan.schemaImpact.from).toBeNull();
-    expect(plan.schemaImpact.to.platform).toBe('0012_runtime_control');
+    expect(plan.schemaImpact.to.platform).toBe(RUNTIME_HEAD);
     expect(plan.schemaImpact.to.product).not.toBe(EMPTY_PRODUCT_SCHEMA_DIGEST);
     expect(await writableFootprint()).toEqual(before);
     expect(await planScratchDatabases()).toBe(0);
@@ -324,7 +327,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     const result = await adapter().inspect(base());
     expectValidEnvelope(result);
     expect(result.data?.schemaHead).toEqual({
-      platform: '0012_runtime_control',
+      platform: RUNTIME_HEAD,
       product: EMPTY_PRODUCT_SCHEMA_DIGEST,
     });
     armsRan += 1;
@@ -334,7 +337,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     const before = await writableFootprint();
     const request = prepareRequest({
       expectedSchemaHead: {
-        platform: '0012_runtime_control',
+        platform: RUNTIME_HEAD,
         product: EMPTY_PRODUCT_SCHEMA_DIGEST,
       },
     });
@@ -347,8 +350,8 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     expect(plan.blockers.map((b) => b.code)).toEqual(['RAY_MIGRATION_REQUIRED']);
     const stores = (parseSpec(SPEC) as { ok: true; value: { stores: never[] } }).value.stores;
     expect(plan.schemaImpact).toEqual({
-      from: { platform: '0012_runtime_control', product: EMPTY_PRODUCT_SCHEMA_DIGEST },
-      to: { platform: '0012_runtime_control', product: EMPTY_PRODUCT_SCHEMA_DIGEST },
+      from: { platform: RUNTIME_HEAD, product: EMPTY_PRODUCT_SCHEMA_DIGEST },
+      to: { platform: RUNTIME_HEAD, product: EMPTY_PRODUCT_SCHEMA_DIGEST },
       productDeltaSha256: sha256(generateProductSql(stores)),
       destructive: false,
       allowlisted: false,
@@ -432,7 +435,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     const stale = await adapter().prepare(
       prepareRequest({
         expectedSchemaHead: {
-          platform: '0012_runtime_control',
+          platform: RUNTIME_HEAD,
           product: EMPTY_PRODUCT_SCHEMA_DIGEST,
         },
       }),

@@ -36,10 +36,12 @@ import {
   detectStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
+  parseShutdownDrainMs,
 } from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
+import { shutdownHttpServer } from './shutdown.js';
 
 /**
  * If RAYSPEC_SPEC_PATH names a STATIC-PROFILE (frontend-only) backend spec, return its resolved path +
@@ -78,6 +80,8 @@ async function main(): Promise<void> {
       '[rayspec-serve] booting — static profile (frontend-only): no database, no auth surface…',
     );
     const staticConfig = loadStaticServerConfig();
+    // Read (and fail-closed validate) the shutdown drain at boot, not at the signal.
+    const drainMs = parseShutdownDrainMs(process.env);
     const staticServer = assembleStaticServer(staticConfig, staticBoot);
     const httpServer = serve(
       { fetch: staticServer.app.fetch, hostname: staticConfig.host, port: staticConfig.port },
@@ -95,10 +99,10 @@ async function main(): Promise<void> {
     });
     const shutdown = (signal: string) => {
       console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
-      httpServer.close(async () => {
-        await staticServer.close();
-        process.exit(0);
-      });
+      // Bounded: in-flight requests get the drain, then any connection still open is closed.
+      void shutdownHttpServer(httpServer, () => staticServer.close(), { drainMs }).then(() =>
+        process.exit(0),
+      );
     };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -135,13 +139,14 @@ async function main(): Promise<void> {
     prefix: '[rayspec-serve]',
   });
 
-  // Graceful shutdown: stop accepting connections, end the DB pool, exit. Wired to SIGINT/SIGTERM.
+  // Graceful shutdown: stop accepting connections, let in-flight requests finish for the configured
+  // drain (RAYSPEC_SHUTDOWN_DRAIN_MS), close whatever is still open, end the worker and the DB pool,
+  // exit. Wired to SIGINT/SIGTERM. Bounded, so one connection that never ends cannot hold the process.
   const shutdown = (signal: string) => {
     console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
-    httpServer.close(async () => {
-      await server.close();
-      process.exit(0);
-    });
+    void shutdownHttpServer(httpServer, () => server.close(), {
+      drainMs: server.shutdownDrainMs,
+    }).then(() => process.exit(0));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));

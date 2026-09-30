@@ -188,7 +188,14 @@ describe('static frontend serving — composition root mounts declared frontend[
     // servable `frontend` mount (tests (a)/(b) serve it), so `assembleServer` must derive the
     // mounts' readiness from the deployed spec and report it. A boot that dropped that wiring
     // would answer `{status:'ok',db:'ok'}` here.
-    expect(await res.json()).toEqual({ status: 'ok', db: 'ok', frontend: 'ok' });
+    expect(await res.json()).toEqual({
+      status: 'ok',
+      db: 'ok',
+      frontend: 'ok',
+      live: true,
+      ready: true,
+      checks: { database: true, assets: true, schema: true, bindings: true },
+    });
   });
 
   maybe(

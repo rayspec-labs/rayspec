@@ -48,6 +48,7 @@ import {
   deploy,
   type EraseResult,
   eraseTenant,
+  FENCED_MESSAGE,
   IdempotencyStore,
   IdentityStore,
   InviteStore,
@@ -59,6 +60,7 @@ import {
   runScheduledCleanup,
 } from '@rayspec/api-auth';
 import {
+  ApiError,
   createSigner,
   InMemoryRateLimitStore,
   JwksProvider,
@@ -86,6 +88,7 @@ import {
   DbosDurableExecutor,
   DEFAULT_CLEANUP_SCHEDULE,
   DEFAULT_WORKER_CONCURRENCY,
+  ProducerPausedError,
   type ResolvedRun,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
@@ -135,6 +138,16 @@ import {
 } from './boot-env-demands.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import {
+  bindingsProbe,
+  durableWorkerReadiness,
+  type HealthCheck,
+  type ReadinessProbe,
+  registerLivenessRoute,
+  runReadiness,
+  type SecretFile,
+  schemaProbe,
+} from './health.js';
+import {
   deployProductYamlSpec,
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
@@ -142,6 +155,8 @@ import {
   validateProductYamlSpec,
 } from './product-boot.js';
 import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
+import { gatedProducer, queueProducer, RuntimeFence } from './runtime-fence.js';
+import { type CatalogQuery, readPlatformHead, runtimePlatformHead } from './schema-head.js';
 import { lockSchemaInTransaction, withSchemaLock } from './schema-lock.js';
 import {
   type FrontendReadiness,
@@ -233,6 +248,11 @@ interface HealthOutcome {
     readonly status: 'ok' | 'degraded';
     readonly db?: 'ok' | 'unreachable';
     readonly frontend?: FrontendReadiness;
+    /** Always true: a process that answers is alive (`/livez` says only this). */
+    readonly live: true;
+    readonly ready: boolean;
+    /** Each covered check by name, with its boolean — never its cause. */
+    readonly checks: Readonly<Record<string, boolean>>;
   };
 }
 
@@ -250,14 +270,23 @@ interface HealthOutcome {
 function healthResponse(
   db: 'ok' | 'unreachable' | undefined,
   frontend: FrontendReadiness | undefined,
+  checks: readonly HealthCheck[] = [],
 ): HealthOutcome {
-  const ready = db !== 'unreachable' && frontend !== 'unavailable';
+  const ready =
+    db !== 'unreachable' && frontend !== 'unavailable' && checks.every((check) => check.ok);
+  const byName: Record<string, boolean> = {};
+  if (db !== undefined) byName.database = db === 'ok';
+  if (frontend !== undefined) byName.assets = frontend === 'ok';
+  for (const check of checks) byName[check.name] = check.ok;
   return {
     ready,
     body: {
       status: ready ? 'ok' : 'degraded',
       ...(db === undefined ? {} : { db }),
       ...(frontend === undefined ? {} : { frontend }),
+      live: true,
+      ready,
+      checks: byName,
     },
   };
 }
@@ -277,14 +306,23 @@ function healthResponse(
  *    load balancer polls this route every second, and a per-call filesystem access would put that load
  *    on disk. `undefined` for a deployment that declares no mounts ⇒ the field is omitted.
  *
+ *  - `probes` — the further readiness checks of a full-platform boot (`health.ts`): the schema, the
+ *    mounted secrets, the durable worker and its system database. Each is bounded in time.
+ *
  * A non-ready dependency answers 503, so a deploy tool waiting on this signal does not report "ready"
- * while part of the application cannot serve.
+ * while part of the application cannot serve. The body adds `live`, `ready` and `checks` (each
+ * check's name with its boolean, never its cause) to the fields it always carried.
+ *
+ * The liveness probe `GET /livez` is registered beside it: 200 while the process answers, whatever
+ * the dependencies say.
  */
 export function registerHealthRoute<E extends Env>(
   app: Hono<E>,
   probeDatabase: (() => Promise<void>) | undefined,
   frontend: FrontendReadiness | undefined,
+  probes: readonly ReadinessProbe[] = [],
 ): void {
+  registerLivenessRoute(app);
   app.get('/health', async (c) => {
     let db: 'ok' | 'unreachable' | undefined;
     if (probeDatabase !== undefined) {
@@ -295,7 +333,8 @@ export function registerHealthRoute<E extends Env>(
         db = 'unreachable';
       }
     }
-    const { ready, body } = healthResponse(db, frontend);
+    const checks = probes.length === 0 ? [] : await runReadiness(probes);
+    const { ready, body } = healthResponse(db, frontend, checks);
     return ready ? c.json(body, 200) : c.json(body, 503);
   });
 }
@@ -420,6 +459,19 @@ export interface BootedServer {
    * value.
    */
   agentTracing: AgentTracingPosture;
+  /**
+   * This process's side of the source fence (`runtime-fence.ts`): the phase it is in, and the seam an
+   * embedder or a test uses to observe a quiesce or a resume without waiting for the next poll.
+   */
+  fence: RuntimeFence;
+  /**
+   * The readiness probes beyond the database and the frontend mounts — the schema, the mounted
+   * secrets, and the durable worker with its system database when one is wired. `/health` runs them;
+   * an in-process runtime-control adapter hands them to `health()`.
+   */
+  readiness: readonly ReadinessProbe[];
+  /** How long `shutdownHttpServer` lets in-flight connections finish (the resolved config value). */
+  shutdownDrainMs: number;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -597,6 +649,22 @@ export interface ServerConfig {
    * `SchemaLockTimeoutError`: another migration, tenant provisioning or deploy holds the lock.
    */
   schemaLockTimeoutMs?: number;
+  /**
+   * The hosting posture — RAYSPEC_HOSTING_POSTURE, `local` (default) or `managed`. Under `managed`
+   * the public live-executor probe (`/recovery-scope`) is not registered at all; everything else is
+   * unchanged. Omitted ⇒ `local`.
+   */
+  hostingPosture?: HostingPosture;
+  /**
+   * How long a graceful shutdown lets in-flight connections finish before it closes the rest —
+   * RAYSPEC_SHUTDOWN_DRAIN_MS, default 10000. Omitted ⇒ that default.
+   */
+  shutdownDrainMs?: number;
+  /**
+   * The boot secrets that were supplied as `<VAR>_FILE` mounts: readiness re-checks that each is still
+   * a readable file. Omitted ⇒ none.
+   */
+  secretFiles?: readonly SecretFile[];
   /**
    * the OPERATOR gate for tenant DATA-ERASURE (the `eraseTenantNow` control seam). `true` ONLY when
    * RAYSPEC_ERASURE_ENABLED is EXACTLY the string `"true"`; ANYTHING else (unset, "1", "yes", "TRUE",
@@ -1127,6 +1195,19 @@ export function loadServerConfig(
   // the bounded wait for the shared schema lock (default 60 s; fail-closed on an invalid value).
   const schemaLockTimeoutMs = parseSchemaLockTimeoutMs(env);
 
+  // the hosting posture and the graceful-shutdown drain (both fail-closed on an invalid value).
+  const hostingPosture = parseHostingPosture(env);
+  const shutdownDrainMs = parseShutdownDrainMs(env);
+
+  // The boot secrets supplied as file mounts, for the readiness re-check (paths only, never content).
+  const secretFiles: SecretFile[] = [];
+  for (const secret of SERVER_BOOT_SECRETS) {
+    const path = secret.fileVariant === null ? undefined : env[secret.fileVariant]?.trim();
+    if (secret.fileVariant !== null && path) {
+      secretFiles.push({ variable: secret.fileVariant, path: resolve(path) });
+    }
+  }
+
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
   // trim/lowercase coercion of an ambiguous value), mirroring RAYSPEC_GDPR_PURGE_ENABLED — an
   // ambiguous/typo'd value must never silently enable irreversible product+blob deletion.
@@ -1165,6 +1246,9 @@ export function loadServerConfig(
     accessTokenTtlSeconds,
     authRateMultiplier,
     schemaLockTimeoutMs,
+    hostingPosture,
+    shutdownDrainMs,
+    secretFiles,
     erasureEnabled,
     bodyRefreshEnabled,
     tenantBootstrapEnabled,
@@ -1363,6 +1447,48 @@ export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
         'silently fall back — falling back to the production limits would reproduce exactly the ' +
         'far-from-cause 429s the variable exists to remove, and guessing a scale would silently ' +
         'weaken an auth throttle).',
+    );
+  }
+  return n;
+}
+
+/** The hosting postures: `local` (the default) and `managed` (the public-hosting posture). */
+export type HostingPosture = 'local' | 'managed';
+
+/**
+ * Parse RAYSPEC_HOSTING_POSTURE. Unset/blank ⇒ `local`. Exactly `local` or `managed`; anything else
+ * ABORTS the boot, so a typo never silently leaves a public probe open.
+ */
+export function parseHostingPosture(env: NodeJS.ProcessEnv): HostingPosture {
+  const raw = env.RAYSPEC_HOSTING_POSTURE?.trim();
+  if (raw === undefined || raw === '') return 'local';
+  if (raw === 'local' || raw === 'managed') return raw;
+  throw new BootConfigError(
+    `Boot aborted — RAYSPEC_HOSTING_POSTURE='${raw}' is not 'local' or 'managed'. Under 'managed' ` +
+      'the public live-executor probe (/recovery-scope) is disabled. Fail-closed.',
+  );
+}
+
+/** The default graceful-shutdown drain: ten seconds. */
+export const DEFAULT_SHUTDOWN_DRAIN_MS = 10_000;
+
+/** The longest graceful-shutdown drain an operator may configure: ten minutes. */
+export const MAX_SHUTDOWN_DRAIN_MS = 600_000;
+
+/**
+ * Parse RAYSPEC_SHUTDOWN_DRAIN_MS — how long a graceful shutdown lets in-flight connections finish
+ * before it closes the rest. Unset/blank ⇒ 10000. A whole number of milliseconds from 0 to ten
+ * minutes; anything else ABORTS the boot.
+ */
+export function parseShutdownDrainMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.RAYSPEC_SHUTDOWN_DRAIN_MS?.trim();
+  if (raw === undefined || raw === '') return DEFAULT_SHUTDOWN_DRAIN_MS;
+  const n = Number(raw);
+  if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(n) || n > MAX_SHUTDOWN_DRAIN_MS) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_SHUTDOWN_DRAIN_MS='${raw}' is not a whole number of milliseconds from ` +
+        `0 to ${MAX_SHUTDOWN_DRAIN_MS}. It bounds how long a shutdown waits for in-flight ` +
+        `connections before it closes them (default ${DEFAULT_SHUTDOWN_DRAIN_MS}). Fail-closed.`,
     );
   }
   return n;
@@ -1648,14 +1774,49 @@ export function assembleStaticServer(
  * the chain applied and no-ops. The drizzle migrator takes no lock of its own, and without this one
  * the loser of such a race died on a duplicate object. The wait is bounded (`lockTimeoutMs`, default
  * 60 s); running out of it is a retryable `SchemaLockTimeoutError`, never a hang.
+ *
+ * A NEWER DATABASE IS REFUSED. Under the lock and before anything is applied, the ledger is mapped
+ * onto this runtime's journal (`readPlatformHead`). A ledger row the journal cannot explain means a
+ * newer runtime migrated this database: the drizzle migrator alone would apply nothing and let this
+ * older runtime serve a schema it does not understand. It throws `SchemaNewerThanRuntimeError`
+ * instead, having changed nothing.
  */
 export async function applyMigrations(
   db: Db,
   opts: { lockTimeoutMs?: number } = {},
 ): Promise<void> {
-  await withSchemaLock(db, () => migrate(db, { migrationsFolder: migrationsDir() }), {
-    ...(opts.lockTimeoutMs !== undefined ? { timeoutMs: opts.lockTimeoutMs } : {}),
-  });
+  const query: CatalogQuery = async (sql, params = []) =>
+    (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
+  await withSchemaLock(
+    db,
+    async () => {
+      const head = await readPlatformHead(query);
+      if (head.state === 'unknown') throw new SchemaNewerThanRuntimeError(head.unexplainedRows);
+      await migrate(db, { migrationsFolder: migrationsDir() });
+    },
+    {
+      ...(opts.lockTimeoutMs !== undefined ? { timeoutMs: opts.lockTimeoutMs } : {}),
+    },
+  );
+}
+
+/**
+ * The database was migrated by a newer runtime than this one: its platform ledger records migrations
+ * this runtime does not ship. The runtime refuses to serve it (a `BootConfigError`, so both
+ * entrypoints print the message and exit 1) and changes nothing.
+ */
+export class SchemaNewerThanRuntimeError extends BootConfigError {
+  readonly unexplainedMigrations: number;
+  constructor(unexplainedMigrations: number) {
+    super(
+      `Boot aborted — the database records ${unexplainedMigrations} platform migration(s) this ` +
+        `runtime (${runtimePlatformHead()}) does not ship: a newer runtime migrated it. Refusing to ` +
+        'serve a schema this runtime does not understand; nothing was changed. Run the runtime that ' +
+        'migrated this database, or a newer one.',
+    );
+    this.name = 'SchemaNewerThanRuntimeError';
+    this.unexplainedMigrations = unexplainedMigrations;
+  }
 }
 
 /**
@@ -1933,6 +2094,11 @@ export async function assembleServer(
      * depends on it, so a caller that omits it boots exactly as it did before.
      */
     bootWarn?: BootWarnSink;
+    /**
+     * How often this process re-reads the source fence (default 500 ms — the contract's one-second
+     * observation bound with margin). A test may shorten it.
+     */
+    fencePollIntervalMs?: number;
   } = {},
 ): Promise<BootedServer> {
   // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
@@ -2009,8 +2175,15 @@ export async function assembleServer(
 
   // 3. Apply the committed migration chain (idempotent — safe to re-run) under the SHARED SCHEMA
   //    LOCK, so a concurrent boot, tenant ensure or deploy against the same database waits its turn.
+  //    Then read the SOURCE FENCE before anything that produces work exists: a boot under a held fence
+  //    starts fenced, so its queues register paused and its gates start closed (runtime-fence.ts).
+  const fence = new RuntimeFence({
+    db,
+    ...(opts.fencePollIntervalMs !== undefined ? { pollIntervalMs: opts.fencePollIntervalMs } : {}),
+  });
   try {
     await applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs });
+    await fence.load();
   } catch (err) {
     // A refused boot hands no pool back, so end it here rather than leave its connections open.
     await db.$client.end();
@@ -2072,6 +2245,8 @@ export async function assembleServer(
     trustedProxies: config.trustedProxies,
     // The body-refresh operator gate (default false ⇒ cookie-only, today's posture).
     bodyRefreshEnabled: config.bodyRefreshEnabled,
+    // The source fence: while the runtime is fenced every mutation answers 503 before it runs.
+    writeFence: fence,
   };
 
   let app: ReturnType<typeof createAuthApp>;
@@ -2091,6 +2266,8 @@ export async function assembleServer(
   // A read of the LIVE durable executor identity for the /recovery-scope probe (undefined when no
   // durable worker is wired — the probe then fail-closes 503).
   let durableExecutorIdentity: (() => DurableExecutorIdentity) | undefined;
+  // The durable worker's readiness probes (empty when no worker is wired).
+  let workerReadiness: readonly ReadinessProbe[] = [];
   // Control seam: the on-demand cron-fire delegate (undefined for an auth-only / no-cron boot).
   let fireCronNow: BootedServer['fireCronNow'];
   // M1 control seam: the on-demand cleanup delegate (undefined for an auth-only / no durable-worker boot).
@@ -2114,6 +2291,7 @@ export async function assembleServer(
     //     REAL DbosWorkflowExecutor + resolveWorkflowRun) and serves it — the env-driven boot the
     //     the earlier family guard used to abort. The classic path (6b) is untouched.
     const deployed = await deployProductYamlSpec(db, config, baseDeps, {
+      fence,
       registerProductTables: opts.registerProductTables,
       ...(opts.productDeterministicAgents
         ? { deterministicAgents: opts.productDeterministicAgents }
@@ -2141,6 +2319,7 @@ export async function assembleServer(
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
     durableExecutorIdentity = deployed.durableExecutorIdentity;
+    workerReadiness = deployed.workerReadiness;
     eraseTenantNow = deployed.eraseTenantNow;
     // A product deployment launches a durable worker too, so it registers the daily system cleanup in
     // the same pre-launch window — propagate its on-demand seam exactly as the classic branch does below.
@@ -2149,6 +2328,7 @@ export async function assembleServer(
     // 6b. A classic rayspec.yaml → run the REAL deploy() GitOps pipeline (validate → diff → lint/gate
     //    → migrate → roll out → drift). Product-agnostic: the spec is the injected deployer artifact.
     const deployed = await deployDeclaredSpec(db, config, baseDeps, {
+      fence,
       agentBackendsFactory: opts.agentBackendsFactory,
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
@@ -2163,6 +2343,7 @@ export async function assembleServer(
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
     durableExecutorIdentity = deployed.durableExecutorIdentity;
+    workerReadiness = deployed.workerReadiness ?? [];
     fireCronNow = deployed.fireCronNow;
     runCleanupNow = deployed.runCleanupNow;
     eraseTenantNow = deployed.eraseTenantNow;
@@ -2197,19 +2378,33 @@ export async function assembleServer(
   //    and reports the boot-time readiness of the declared frontend mounts as `frontend` (omitted, so
   //    the response is unchanged, when the deployment declares none) — a deploy tool waiting on this
   //    signal must not read ready while the declared assets cannot be served.
+  //    Beyond the database and the mounts, readiness covers the platform schema (not behind, not
+  //    migrated by a newer runtime), the boot secrets mounted as files, and the durable worker with
+  //    its system database when one is wired (health.ts). `/livez` is registered beside it.
+  const catalogQuery: CatalogQuery = async (sql, params = []) =>
+    (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
+  const readiness: ReadinessProbe[] = [
+    schemaProbe(catalogQuery),
+    bindingsProbe(config.secretFiles ?? []),
+    ...workerReadiness,
+  ];
   registerHealthRoute(
     app,
     async () => {
       await db.$client`select 1`;
     },
     frontendReadiness,
+    readiness,
   );
 
   // 7b. The live-executor-identity readiness probe — registered right beside /health (same PUBLIC,
   //     product-free posture, before the static catch-all). It reports the LIVE durable executor
   //     identity ({ executorId, applicationVersion }); a boot with no durable worker (no accessor
-  //     wired) fail-closes 503.
-  registerRecoveryScopeRoute(app, durableExecutorIdentity);
+  //     wired) fail-closes 503. Under the MANAGED hosting posture it is not registered at all
+  //     (disabled): it confirms a guessed application identity to anyone who asks.
+  if ((config.hostingPosture ?? 'local') !== 'managed') {
+    registerRecoveryScopeRoute(app, durableExecutorIdentity);
+  }
 
   // 8. Mount the deployed spec's declared static frontend(s) — registered LAST (after every
   //    API/auth/OIDC route + /health) so a static miss never shadows an API path: Hono runs matching
@@ -2226,6 +2421,9 @@ export async function assembleServer(
       permissionsPolicy: config.permissionsPolicy,
     });
   }
+
+  // 9. Start watching the source fence (and heartbeating), now that every producer is attached.
+  await fence.start();
 
   return {
     app,
@@ -2247,10 +2445,15 @@ export async function assembleServer(
     // from the variable this boot may itself have written — so the banner is honest on the entry points
     // that never change the SDK default, and cannot report OFF on a process that is still exporting.
     agentTracing: await observedAgentTracing(),
+    fence,
+    readiness,
+    shutdownDrainMs: config.shutdownDrainMs ?? DEFAULT_SHUTDOWN_DRAIN_MS,
     close: async () => {
-      // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
-      // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so
-      // the DB pool still closes (a noisy shutdown must not leak a pooled connection).
+      // Stop watching the fence (and remove this process's heartbeat), then drain the durable worker
+      // (finish in-flight jobs, stop dequeuing) so a shutdown does not orphan a job, THEN end the app
+      // DB pool. Swallow a worker-shutdown error so the DB pool still closes (a noisy shutdown must
+      // not leak a pooled connection).
+      await fence.stop();
       if (durableExecutorShutdown) await durableExecutorShutdown().catch(() => {});
       await db.$client.end();
     },
@@ -2455,6 +2658,8 @@ async function deployDeclaredSpec(
   config: ServerConfig,
   baseDeps: Omit<AppDeps, 'engine'>,
   opts: {
+    /** This process's source fence: every producer this deploy wires is attached to it. */
+    fence: RuntimeFence;
     agentBackendsFactory?: AgentBackendsFactory;
     registerProductTables?: ProductTableRegistrar;
     /**
@@ -2488,6 +2693,8 @@ async function deployDeclaredSpec(
   durableExecutorShutdown?: () => Promise<void>;
   /** Read the LIVE durable executor identity for /recovery-scope (undefined when none was wired). */
   durableExecutorIdentity?: () => DurableExecutorIdentity;
+  /** The durable worker's readiness probes (undefined when none was wired). */
+  workerReadiness?: readonly ReadinessProbe[];
   /** Control seam: the on-demand cron-fire delegate (undefined when no cron is scheduled). */
   fireCronNow?: BootedServer['fireCronNow'];
   /** M1 control seam: the on-demand cleanup delegate (undefined when no durable worker is wired). */
@@ -2499,6 +2706,7 @@ async function deployDeclaredSpec(
   const escapeHatchRoot = config.escapeHatchRoot as string;
   const specSource = readFileSync(specPath, 'utf8');
   const bootWarn = opts.bootWarn ?? consoleWarn;
+  const fence = opts.fence;
 
   // Pre-parse to build the product tables + the first-materialization migration SQL the rollout
   // needs (deploy() re-parses internally for its own VALIDATE step — a !ok there aborts the deploy).
@@ -2663,6 +2871,8 @@ async function deployDeclaredSpec(
           'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',
       );
     }
+    // Object writes stop once the process has drained under a source fence; reads never do.
+    blobFactory = fence.blobFactory(blobFactory);
   }
 
   // ── The READ-ONLY FS-SOURCE backend build ──────────────────────────────────
@@ -2755,7 +2965,10 @@ async function deployDeclaredSpec(
   // runs on the DURABLE WORKER, so a boot that enables the bus without one never sweeps; that boot is
   // told so, once, below (`eventBusUnsweptBootNotice`, after the cleanup wiring decides).
   const eventBusDecl = effectiveSpec.deployment?.eventBus;
-  const eventBus = eventBusDecl?.enabled === true ? makeTenantEventBus() : undefined;
+  const eventBus =
+    eventBusDecl?.enabled === true
+      ? makeTenantEventBus({ admitsWrites: () => fence.admitsDataWrites() })
+      : undefined;
   // The WAKE half — ONE process LISTEN on the bus channel, fanned out in memory to whatever
   // `GET /v1/subscribe` is serving. Built beside the bus, on the same enablement, because it is only
   // ever useful when there is a stream to wake about. It is a LATENCY optimisation and nothing else:
@@ -2841,7 +3054,16 @@ async function deployDeclaredSpec(
           // instant to now; a double fire within one firing-instant bucket dedups to one dispatch).
           // The full outcome surfaces the enqueued run's deterministic id when THIS fire dispatched
           // an AGENT action, so the route's 202 can hand the caller a followable run.
-          const outcome = await wiredCronScheduler.fireNowWithOutcome(name);
+          const outcome = await wiredCronScheduler
+            .fireNowWithOutcome(name)
+            .catch((err: unknown) => {
+              // A fire that reached the scheduler after the fence closed its gate: the same 503 the
+              // fence answers every other mutation with.
+              if (err instanceof ProducerPausedError) {
+                throw new ApiError('SERVICE_UNAVAILABLE', FENCED_MESSAGE);
+              }
+              throw err;
+            });
           return {
             notFound: false,
             fired: outcome.fired,
@@ -2859,6 +3081,16 @@ async function deployDeclaredSpec(
   // long after start()), and `enqueue` itself throws if not started — so no enqueue can race the
   // start. This removes the `let … undefined` dispatch window entirely with no duplicate handler load.
   let pendingExecutorStart: (() => Promise<void>) | undefined;
+  let workerReadiness: readonly ReadinessProbe[] | undefined;
+  // The model providers this deployment calls: no fence reaches a call already made to one.
+  if (agentBackends)
+    fence.addExternal([...agentBackends.keys()].map((id) => `agent-backend-${id}`));
+  if (config.sttProvider && config.sttProvider !== 'fake') {
+    fence.addExternal([`stt-${config.sttProvider}`]);
+  }
+  if (config.ttsProvider && config.ttsProvider !== 'fake') {
+    fence.addExternal([`tts-${config.ttsProvider}`]);
+  }
   if (effectiveSpec.deployment?.durableWorker === true && agentBackends) {
     // ── Fix B (pool starvation): the durable worker gets its OWN dedicated postgres pool, SEPARATE
     //    from the HTTP/API `db` pool. Each in-flight off-request run holds ONE connection across the
@@ -2935,6 +3167,10 @@ async function deployDeclaredSpec(
     // The /recovery-scope probe reads the LIVE executor identity off this same wired executor.
     durableExecutorIdentity = () => executor.identity();
     pendingExecutorStart = () => executor.start();
+    // The run queue stops dequeuing under a source fence and starts again on resume, without the
+    // engine shutting down; attached BEFORE start, so a boot under a held fence registers it paused.
+    await fence.attach(queueProducer('run-queue', executor));
+    workerReadiness = durableWorkerReadiness(executor);
   }
 
   const PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
@@ -3192,7 +3428,10 @@ async function deployDeclaredSpec(
             ? { backend: entry.backend.id, agentName: entry.spec.name, model: entry.spec.model }
             : undefined;
         },
+        // Closed by a source fence: no scheduled tick or on-demand fire starts while it is held.
+        gate: fence,
       });
+      await fence.attach(gatedProducer('cron-triggers', () => cronScheduler.inFlight));
       // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
       // app inside deploy()); the firer restricts on-demand fires to its manual triggers.
       wiredCronScheduler = cronScheduler;
@@ -3247,7 +3486,10 @@ async function deployDeclaredSpec(
         }),
       schedule: config.cleanup.schedule,
       executor: durableExecutorInstance,
+      // Closed by a source fence, like the cron scheduler.
+      gate: fence,
     });
+    await fence.attach(gatedProducer('system-cleanup', () => cleanupScheduler.inFlight));
     durableExecutorInstance.attachPreLaunchHook(() => cleanupScheduler.registerScheduledWorkflow());
     // The on-demand cleanup delegate (control seam) — goes through the EXACT same `runCleanup` path the
     // daily workflow fires on. Cast the engine-local outcome back to the api-auth CleanupResult (the
@@ -3336,6 +3578,7 @@ async function deployDeclaredSpec(
     drift: result.drift,
     ...(durableExecutorShutdown ? { durableExecutorShutdown } : {}),
     ...(durableExecutorIdentity ? { durableExecutorIdentity } : {}),
+    ...(workerReadiness ? { workerReadiness } : {}),
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
     ...(eraseTenantNow ? { eraseTenantNow } : {}),

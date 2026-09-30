@@ -1,14 +1,16 @@
 /**
  * THE RUNTIME-CONTROL ADAPTER — the typed library a deployment supervisor or the CLI calls to ask a
- * runtime what it is (`inspect`) and what deploying a bundle onto its environment would do
- * (`prepare`). It adds no HTTP route: a caller holds the environment's database connection and calls
- * these functions in process.
+ * runtime what it is (`inspect`), what deploying a bundle onto its environment would do (`prepare`),
+ * whether it is ready (`health`), and to fence and release its source (`quiesce`, `resume`). It adds
+ * no HTTP route: a caller holds the environment's database connection and calls these functions in
+ * process.
  *
- * Both operations are READ-ONLY. They take no advisory lock and write nothing to the environment's
- * database; `prepare` stores no plan — `apply` receives every plan input again and recomputes the
- * digest. The one place `prepare` writes is a throwaway database on the shadow server, created and
- * dropped within the call, to learn the product schema head a delta would produce without running
- * the delta against the live database.
+ * `inspect`, `prepare` and `health` are READ-ONLY. They take no advisory lock and write nothing to
+ * the environment's database; `prepare` stores no plan — `apply` receives every plan input again and
+ * recomputes the digest. The one place `prepare` writes is a throwaway database on the shadow server,
+ * created and dropped within the call, to learn the product schema head a delta would produce without
+ * running the delta against the live database. `quiesce` and `resume` run under the operation lease
+ * and write receipts (`fence-operations.ts`).
  *
  * Every result is the contract's result envelope with `operation` `runtime.inspect` or
  * `runtime.prepare`, echoing the request's `operationId`. No result carries a secret, a binding
@@ -35,12 +37,16 @@ import {
   CAPABILITY_VOCABULARY_VERSION,
   CONTRACT_VERSION,
   checkPrepareRequest,
+  checkQuiesceRequest,
   checkRequestBase,
+  checkResumeRequest,
   checkRuntimeAdmission,
   compareCodePoints,
   type DeploymentPlan,
   type ExecutionLevel,
   formatTimestamp,
+  type HealthData,
+  type HealthRequest,
   type InspectData,
   type InspectRequest,
   isSha256,
@@ -51,9 +57,13 @@ import {
   planDigest,
   planExpiresAt,
   productSchemaDigest,
+  type QuiesceData,
+  type QuiesceRequest,
   type ReaderLimits,
   type ResultEnvelope,
   type ResultOperation,
+  type ResumeData,
+  type ResumeRequest,
   type RuntimeControl,
   type SchemaHead,
   SUPPORTED_TARGETS,
@@ -76,6 +86,12 @@ import {
 import type { StoreSpec } from '@rayspec/spec';
 import { applyMigrations } from './composition-root.js';
 import {
+  type FenceOperationOptions,
+  healthOperation,
+  quiesceOperation,
+  resumeOperation,
+} from './fence-operations.js';
+import {
   type CatalogQuery,
   readProductTables,
   readSchemaHead,
@@ -83,9 +99,12 @@ import {
 } from './schema-head.js';
 
 /** The operations this adapter implements today. */
-export type RuntimeControlAdapter = Pick<RuntimeControl, 'inspect' | 'prepare'>;
+export type RuntimeControlAdapter = Pick<
+  RuntimeControl,
+  'inspect' | 'prepare' | 'quiesce' | 'resume' | 'health'
+>;
 
-export interface RuntimeControlOptions {
+export interface RuntimeControlOptions extends Omit<FenceOperationOptions, 'db'> {
   /** The environment's application database. */
   db: Db;
   /**
@@ -355,6 +374,27 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         fence: state.fence,
         environmentRevision: state.environmentRevision,
       });
+    },
+
+    async quiesce(request: QuiesceRequest): Promise<ResultEnvelope<QuiesceData>> {
+      const operationId = operationIdOf(request);
+      const usage = checkQuiesceRequest(request);
+      if (usage.length > 0) return failed('runtime.quiesce', operationId, usage);
+      return quiesceOperation(request, operationId, options);
+    },
+
+    async resume(request: ResumeRequest): Promise<ResultEnvelope<ResumeData>> {
+      const operationId = operationIdOf(request);
+      const usage = checkResumeRequest(request);
+      if (usage.length > 0) return failed('runtime.resume', operationId, usage);
+      return resumeOperation(request, operationId, options);
+    },
+
+    async health(request: HealthRequest): Promise<ResultEnvelope<HealthData>> {
+      const operationId = operationIdOf(request);
+      const usage = checkRequestBase(request);
+      if (usage.length > 0) return failed('runtime.health', operationId, usage);
+      return healthOperation(request, operationId, options);
     },
 
     async prepare(request: PrepareRequest): Promise<ResultEnvelope<PrepareData>> {

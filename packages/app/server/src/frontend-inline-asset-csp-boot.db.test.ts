@@ -198,7 +198,14 @@ describe('boot warning — an inline asset the active CSP blocks (full-backend b
       expect(await res.text()).toContain('<style>body { color: #222 }</style>');
       const health = await server.app.request('/health');
       expect(health.status).toBe(200);
-      expect(await health.json()).toEqual({ status: 'ok', db: 'ok', frontend: 'ok' });
+      expect(await health.json()).toEqual({
+        status: 'ok',
+        db: 'ok',
+        frontend: 'ok',
+        live: true,
+        ready: true,
+        checks: { database: true, assets: true, schema: true, bindings: true },
+      });
     },
     120_000,
   );

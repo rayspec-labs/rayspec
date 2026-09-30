@@ -61,7 +61,10 @@ vi.mock('@rayspec/server', () => {
     isStaticProfile: vi.fn(() => false),
     loadServerConfig: () => ({ port: 0 }),
     loadStaticServerConfig: () => ({ port: 0, host: '127.0.0.1' }),
+    // The bounded shutdown the signal handlers run; no signal is sent in this suite.
+    parseShutdownDrainMs: () => 10_000,
     ProductBootError,
+    shutdownHttpServer: vi.fn(async () => ({ forcedConnections: false, appClosed: true })),
     staticBootBanner: () => 'static banner',
   };
 });
