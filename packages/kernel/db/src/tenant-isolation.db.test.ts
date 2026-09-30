@@ -19,7 +19,13 @@
  *      its own role attributes or preset a tenant, cannot switch to the migration role, and cannot
  *      write a migration ledger;
  *   6. the posture check names what is wrong when it is wrong, and `applyTenantIsolation` is a no-op
- *      on a database that has everything, and fixes a table added without a policy.
+ *      on a database that has everything, and fixes a table added without a policy;
+ *   7. the side doors the migration role could open are named by the posture check: a second
+ *      permissive policy, a tenant policy with a wider expression, a view that reads tenant tables
+ *      as its owner, a SECURITY DEFINER function other than the two lookups, and a changed lookup;
+ *   8. the tables without a tenant column are exactly the documented global tables, the chokepoint
+ *      refuses every one of them, and a session-level tenant set by code in the process does not
+ *      reach a chokepoint statement.
  *
  * A second throwaway database, migrated by a single superuser role (today's layout), proves the
  * chain's policies are inert there: nothing is enabled and the owner reads every row as before.
@@ -27,6 +33,8 @@
  * Skips without DATABASE_URL; HARD-FAILS when the DB is required (CI / RAYSPEC_REQUIRE_DB_TESTS).
  */
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { eq, getTableName, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
@@ -34,15 +42,31 @@ import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { type Db, makeDb } from './client.js';
 import { migrationsDir } from './migrations.js';
-import { CORE_TENANT_SCOPED_TABLES, runs } from './schema.js';
+import {
+  apiKeys,
+  authAudit,
+  CORE_TENANT_SCOPED_TABLES,
+  memberships,
+  oidcModels,
+  orgs,
+  runs,
+  sessions,
+  users,
+} from './schema.js';
 import { forTenant, TENANT_GUC } from './tenant-db.js';
 import {
   applyTenantIsolation,
+  GLOBAL_TABLES,
   listTenantTables,
   TENANT_POLICY_NAME,
   verifyTenantIsolation,
 } from './tenant-isolation.js';
-import { createIsolatedTestDatabase, type IsolatedTestDatabase } from './testing-isolation.js';
+import {
+  assertConnectedAsRuntimeRole,
+  createIsolatedTestDatabase,
+  type IsolatedTestDatabase,
+  testDatabaseIsolation,
+} from './testing-isolation.js';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 const requireDb = process.env.CI === 'true' || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -518,6 +542,252 @@ describeDb('row-level tenant isolation, connected as the runtime role', () => {
       expect((await verifyTenantIsolation(runtime)).active).toBe(true);
     } finally {
       await admin.end();
+    }
+  });
+
+  it('the posture check names a role the runtime role can switch to, a temporary-table grant and CREATEDB', async () => {
+    const admin = postgres(iso.urls.admin, { max: 1, onnotice: () => {} });
+    const role = iso.roles.runtime;
+    try {
+      await admin.unsafe(`GRANT "${iso.roles.snapshot}" TO "${role}"`);
+      try {
+        const member = await verifyTenantIsolation(runtime);
+        expect(member.active).toBe(false);
+        expect(member.findings).toEqual([
+          expect.objectContaining({
+            check: 'role-membership',
+            detail: expect.stringContaining(iso.roles.snapshot),
+          }),
+        ]);
+      } finally {
+        await admin.unsafe(`REVOKE "${iso.roles.snapshot}" FROM "${role}"`);
+      }
+
+      await admin.unsafe(`GRANT TEMPORARY ON DATABASE "${iso.name}" TO "${role}"`);
+      try {
+        const temp = await verifyTenantIsolation(runtime);
+        expect(temp.findings).toEqual([
+          { check: 'can-create', detail: expect.stringContaining('temporary tables') },
+        ]);
+      } finally {
+        await admin.unsafe(`REVOKE TEMPORARY ON DATABASE "${iso.name}" FROM "${role}"`);
+      }
+
+      await admin.unsafe(`ALTER ROLE "${role}" CREATEDB`);
+      try {
+        const createdb = await verifyTenantIsolation(runtime);
+        expect(createdb.findings).toEqual([
+          { check: 'role-attributes', detail: 'the runtime role may create databases' },
+        ]);
+      } finally {
+        await admin.unsafe(`ALTER ROLE "${role}" NOCREATEDB`);
+      }
+      expect((await verifyTenantIsolation(runtime)).active).toBe(true);
+    } finally {
+      await admin.end();
+    }
+  });
+
+  // ── 7. side doors the migration role could open ──────────────────────────────────────────────
+
+  it('a second permissive policy opens a tenant table, and the posture check names it', async () => {
+    await migrator.unsafe('CREATE POLICY open_read ON runs FOR SELECT USING (true)');
+    try {
+      // Why it matters: permissive policies are ORed, so with no tenant context both tenants show.
+      expect(await runtime.unsafe('SELECT run_id FROM runs')).toHaveLength(2);
+      const report = await verifyTenantIsolation(runtime);
+      expect(report.active).toBe(false);
+      expect(report.findings).toEqual([
+        { check: 'extra-policy', detail: expect.stringContaining('public.runs (open_read)') },
+      ]);
+    } finally {
+      await migrator.unsafe('DROP POLICY open_read ON runs');
+    }
+    // A restrictive policy only narrows what the tenant policy allows: no finding.
+    await migrator.unsafe('CREATE POLICY narrow ON runs AS RESTRICTIVE FOR SELECT USING (true)');
+    try {
+      expect((await verifyTenantIsolation(runtime)).active).toBe(true);
+    } finally {
+      await migrator.unsafe('DROP POLICY narrow ON runs');
+    }
+  });
+
+  it('a tenant policy whose expression only mentions the tenant setting is not the tenant policy', async () => {
+    const wide = `"tenant_id" = NULLIF(current_setting('${TENANT_GUC}', true), '')::uuid OR true`;
+    await migrator.unsafe(`DROP POLICY ${TENANT_POLICY_NAME} ON notes_parents`);
+    await migrator.unsafe(
+      `CREATE POLICY ${TENANT_POLICY_NAME} ON notes_parents USING (${wide}) WITH CHECK (${wide})`,
+    );
+    const report = await verifyTenantIsolation(runtime);
+    expect(report.active).toBe(false);
+    expect(report.findings).toEqual([
+      { check: 'tenant-table-policy', detail: expect.stringContaining('public.notes_parents') },
+    ]);
+    // The enable step replaces it with the canonical one.
+    const changes = await migrator.begin((tx) => applyTenantIsolation(tx));
+    expect(changes.policiesCreated).toEqual(['public.notes_parents']);
+    expect((await verifyTenantIsolation(runtime)).active).toBe(true);
+    expect(await runtime.unsafe('SELECT * FROM notes_parents')).toHaveLength(0);
+  });
+
+  it("a view that reads a tenant table with its owner's rights is named; a security_invoker view is not", async () => {
+    // The default privileges of the setup SQL grant the runtime role SELECT on the view.
+    await migrator.unsafe('CREATE VIEW run_ids AS SELECT run_id, tenant_id FROM runs');
+    try {
+      expect(await runtime.unsafe('SELECT * FROM run_ids')).toHaveLength(2);
+      const report = await verifyTenantIsolation(runtime);
+      expect(report.findings).toEqual([
+        { check: 'definer-view', detail: expect.stringContaining('public.run_ids') },
+      ]);
+      // As security_invoker the view reads under the runtime role's policy: nothing without context.
+      await migrator.unsafe('ALTER VIEW run_ids SET (security_invoker = true)');
+      expect(await runtime.unsafe('SELECT * FROM run_ids')).toHaveLength(0);
+      expect((await verifyTenantIsolation(runtime)).active).toBe(true);
+    } finally {
+      await migrator.unsafe('DROP VIEW run_ids');
+    }
+    // An owner-rights view the runtime role cannot read, reached through an invoker view it can.
+    await migrator.unsafe('CREATE VIEW inner_runs AS SELECT run_id FROM runs');
+    await migrator.unsafe(`REVOKE SELECT ON inner_runs FROM "${iso.roles.runtime}"`);
+    await migrator.unsafe(
+      'CREATE VIEW outer_runs WITH (security_invoker = true) AS SELECT run_id FROM inner_runs',
+    );
+    try {
+      expect((await verifyTenantIsolation(runtime)).findings).toEqual([
+        { check: 'definer-view', detail: expect.stringContaining('public.inner_runs') },
+      ]);
+    } finally {
+      await migrator.unsafe('DROP VIEW outer_runs');
+      await migrator.unsafe('DROP VIEW inner_runs');
+    }
+    // A materialized view holds its owner's read of every tenant.
+    await migrator.unsafe('CREATE MATERIALIZED VIEW run_copy AS SELECT run_id FROM runs');
+    try {
+      expect((await verifyTenantIsolation(runtime)).findings).toEqual([
+        { check: 'definer-view', detail: expect.stringContaining('public.run_copy') },
+      ]);
+    } finally {
+      await migrator.unsafe('DROP MATERIALIZED VIEW run_copy');
+    }
+  });
+
+  it('a SECURITY DEFINER function other than the two lookups, or a changed lookup, is named', async () => {
+    await migrator.unsafe(
+      `CREATE FUNCTION all_run_ids() RETURNS SETOF text LANGUAGE sql SECURITY DEFINER
+       SET search_path = pg_catalog, pg_temp AS $$ SELECT run_id FROM public.runs $$`,
+    );
+    try {
+      expect(await runtime.unsafe('SELECT * FROM all_run_ids()')).toHaveLength(2);
+      expect((await verifyTenantIsolation(runtime)).findings).toEqual([
+        { check: 'definer-function', detail: expect.stringContaining('public.all_run_ids()') },
+      ]);
+    } finally {
+      await migrator.unsafe('DROP FUNCTION all_run_ids()');
+    }
+
+    const original = readFileSync(join(migrationsDir(), '0015_tenant_row_security.sql'), 'utf8')
+      .split('--> statement-breakpoint')
+      .map((chunk) => chunk.trim())
+      .find((chunk) => chunk.startsWith('CREATE FUNCTION "public"."rayspec_invite_tenant"'));
+    expect(original).toBeDefined();
+    await migrator.unsafe(
+      `CREATE OR REPLACE FUNCTION public.rayspec_invite_tenant(p_token_hash text) RETURNS uuid
+       LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+       SELECT tenant_id FROM public.invites LIMIT 1 $$`,
+    );
+    try {
+      expect((await verifyTenantIsolation(runtime)).findings).toEqual([
+        {
+          check: 'definer-function',
+          detail: expect.stringContaining('public.rayspec_invite_tenant(p_token_hash text)'),
+        },
+      ]);
+    } finally {
+      await migrator.unsafe(
+        (original as string).replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION'),
+      );
+    }
+    expect((await verifyTenantIsolation(runtime)).active).toBe(true);
+  });
+
+  it('a runtime-role test lane checks its own session: the runtime role passes, a bypassing role does not', async () => {
+    await assertConnectedAsRuntimeRole(runtime, iso.roles.runtime);
+    await expect(assertConnectedAsRuntimeRole(migrator, iso.roles.migration)).rejects.toThrow(
+      /bypass true/,
+    );
+    await expect(assertConnectedAsRuntimeRole(runtime, iso.roles.migration)).rejects.toThrow(
+      /expected a session as the runtime role/,
+    );
+    const before = process.env.RAYSPEC_TEST_DATABASE_ISOLATION;
+    try {
+      process.env.RAYSPEC_TEST_DATABASE_ISOLATION = 'role';
+      expect(() => testDatabaseIsolation()).toThrow(/must be 'roles' or unset/);
+    } finally {
+      if (before === undefined) delete process.env.RAYSPEC_TEST_DATABASE_ISOLATION;
+      else process.env.RAYSPEC_TEST_DATABASE_ISOLATION = before;
+    }
+  });
+
+  // ── 8. the global tables, and a session-level tenant ─────────────────────────────────────────
+
+  it('the tables without a tenant column are exactly the documented global tables', async () => {
+    const found = (await runtime.unsafe(
+      `SELECT n.nspname::text AS schema, c.relname::text AS table
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p') AND n.nspname IN ('public', 'drizzle')
+          AND NOT EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid
+                           AND a.attname = 'tenant_id' AND NOT a.attisdropped)
+        ORDER BY 1, 2`,
+    )) as unknown as { schema: string; table: string }[];
+    expect(found).toEqual(GLOBAL_TABLES.map(({ schema, table }) => ({ schema, table })));
+    // Every column the list names as the organization link exists.
+    for (const g of GLOBAL_TABLES.filter((t) => t.orgColumn !== undefined)) {
+      const [col] = (await runtime.unsafe(
+        `SELECT count(*)::int AS n FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
+        [g.schema, g.table, g.orgColumn],
+      )) as unknown as { n: number }[];
+      expect(col?.n, `${g.table}.${g.orgColumn}`).toBe(1);
+    }
+  });
+
+  it('the global tables carry no policy, and the chokepoint refuses every one of them', async () => {
+    const user = randomUUID();
+    await migrator.unsafe('INSERT INTO users (id, email) VALUES ($1, $2)', [
+      user,
+      `g-${user}@example.test`,
+    ]);
+    await migrator.unsafe(
+      `INSERT INTO memberships (org_id, user_id, role) VALUES ($1, $3, 'owner'), ($2, $3, 'member')`,
+      [TENANT_A, TENANT_B, user],
+    );
+    // The exception, stated: the runtime role reads both organizations' memberships with no tenant.
+    expect(
+      await runtime.unsafe('SELECT org_id FROM memberships WHERE user_id = $1', [user]),
+    ).toHaveLength(2);
+    const a = forTenant(runtimeDb, TENANT_A);
+    for (const table of [orgs, users, memberships, sessions, apiKeys, authAudit, oidcModels]) {
+      await expect((async () => a.select(table).all())(), getTableName(table)).rejects.toThrow(
+        /not registered in TENANT_SCOPED_TABLES/,
+      );
+    }
+  });
+
+  it('a session-level tenant set by code in the process does not reach a chokepoint statement', async () => {
+    // One connection, so the session value and the chokepoint statement share the session.
+    const one = makeDb(iso.urls.runtime, 1);
+    try {
+      await one.$client.unsafe(`SELECT set_config('${TENANT_GUC}', $1, false)`, [TENANT_A]);
+      // A bare statement on that session reads as A: the session value is not reset on reuse.
+      const bare = (await one.$client.unsafe('SELECT run_id FROM runs')) as unknown as {
+        run_id: string;
+      }[];
+      expect(bare.map((r) => r.run_id)).toEqual([RUN_A]);
+      // A chokepoint statement sets its own tenant for its transaction and sees only that one.
+      const seen = await forTenant(one, TENANT_B).select(runs).all();
+      expect(seen.map((r) => r.runId)).toEqual([RUN_B]);
+    } finally {
+      await one.$client.end();
     }
   });
 });

@@ -42,6 +42,30 @@ export const SAME_TENANT_TRIGGER_PREFIX = 'rayspec_same_tenant_';
 /** The trigger function that trigger calls (created by the platform chain). */
 export const SAME_TENANT_FUNCTION = 'rayspec_same_tenant_reference';
 
+/**
+ * The tables of the application database that have no `tenant_id` column, and so no tenant policy:
+ * the documented exceptions to row-level isolation. Each is reached before a tenant is known (sign-in,
+ * token checks, invite and key resolution) or belongs to the environment rather than to a tenant.
+ * `orgColumn` names the column that ties a row to an organization when there is one; row security
+ * does not cover it, so those rows are reached only through the platform's global stores (the
+ * chokepoint refuses every one of these tables, and the build gate keeps the raw handle out of
+ * request code). The database-backed test holds this list equal to the catalog.
+ */
+export const GLOBAL_TABLES: readonly { schema: string; table: string; orgColumn?: string }[] = [
+  { schema: 'drizzle', table: '__drizzle_migrations' },
+  { schema: 'public', table: 'api_keys', orgColumn: 'org_id' },
+  { schema: 'public', table: 'auth_audit', orgColumn: 'actor_org_id' },
+  { schema: 'public', table: 'memberships', orgColumn: 'org_id' },
+  { schema: 'public', table: 'oidc_models' },
+  { schema: 'public', table: 'orgs', orgColumn: 'id' },
+  { schema: 'public', table: 'product_migration_ledger' },
+  { schema: 'public', table: 'runtime_control_processes' },
+  { schema: 'public', table: 'runtime_control_receipts' },
+  { schema: 'public', table: 'runtime_control_state' },
+  { schema: 'public', table: 'sessions', orgColumn: 'current_org_id' },
+  { schema: 'public', table: 'users' },
+];
+
 /** Tables whose rows only the migration role writes: the two schema ledgers. */
 export const MIGRATION_ONLY_TABLES: readonly { schema: string; table: string }[] = [
   { schema: 'drizzle', table: '__drizzle_migrations' },
@@ -71,6 +95,46 @@ async function rows<T>(db: IsolationSql, query: string, params: unknown[] = []):
  */
 export const CURRENT_TENANT_EXPRESSION = `NULLIF(current_setting('${TENANT_GUC}', true), '')::uuid`;
 
+/**
+ * The policy expression exactly as Postgres prints it back (`pg_get_expr`) for `tenantPolicySql`. The
+ * check compares with it, so a policy that merely mentions the tenant setting (`… OR true`) is not
+ * mistaken for the tenant policy.
+ */
+export const CANONICAL_POLICY_EXPRESSION = `(${TENANT_COLUMN} = (NULLIF(current_setting('${TENANT_GUC}'::text, true), ''::text))::uuid)`;
+
+/**
+ * The two SECURITY DEFINER functions the platform chain creates for the lookups that must find a
+ * tenant row before any tenant is known. Their owner bypasses row security, so a function like them
+ * reaches every tenant: the posture check accepts these two only while each has exactly this
+ * signature, body and search path, and names any other one the runtime role may call.
+ */
+export const ISOLATION_DEFINER_FUNCTIONS: readonly {
+  name: string;
+  arguments: string;
+  body: string;
+}[] = [
+  {
+    name: 'rayspec_run_owned_elsewhere',
+    arguments: 'p_run_id text',
+    body:
+      'SELECT EXISTS ( SELECT 1 FROM public.runs WHERE run_id = p_run_id AND tenant_id IS DISTINCT ' +
+      `FROM NULLIF(current_setting('${TENANT_GUC}', true), '')::uuid )`,
+  },
+  {
+    name: 'rayspec_invite_tenant',
+    arguments: 'p_token_hash text',
+    body: 'SELECT tenant_id FROM public.invites WHERE token_hash = p_token_hash',
+  },
+];
+
+/** The search path both definer functions pin. */
+export const ISOLATION_DEFINER_SEARCH_PATH = 'search_path=pg_catalog, pg_temp';
+
+/** Collapse every run of whitespace to one space, so a body compares by its tokens. */
+export function normalizeFunctionBody(body: string): string {
+  return body.replace(/\s+/g, ' ').trim();
+}
+
 function quoteIdent(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
@@ -91,10 +155,18 @@ export interface TenantTableState {
   table: string;
   rowSecurity: boolean;
   forced: boolean;
-  /** Whether the table carries a policy named `tenant_isolation` that reads the tenant setting. */
+  /**
+   * Whether the table carries the tenant policy exactly: named `tenant_isolation`, permissive, for
+   * every command and every role, with the canonical expression in both USING and WITH CHECK.
+   */
   policy: boolean;
   /** Whether the table carries any policy named `tenant_isolation`, whatever it reads. */
   policyNamed: boolean;
+  /**
+   * Every other permissive policy on the table. Postgres ORs permissive policies, so any one of them
+   * widens what the tenant policy allows (`USING (true)` opens every tenant's rows).
+   */
+  otherPolicies: string[];
 }
 
 /**
@@ -113,15 +185,19 @@ export async function listTenantTables(
             EXISTS (
               SELECT 1 FROM pg_policy p
                WHERE p.polrelid = c.oid AND p.polname = $2 AND p.polcmd = '*' AND p.polpermissive
-                 AND pg_get_expr(p.polqual, p.polrelid) LIKE $3
-                 AND pg_get_expr(p.polwithcheck, p.polrelid) LIKE $3
-            ) AS policy
+                 AND p.polroles = '{0}'::oid[]
+                 AND pg_get_expr(p.polqual, p.polrelid) = $3
+                 AND pg_get_expr(p.polwithcheck, p.polrelid) = $3
+            ) AS policy,
+            coalesce((SELECT array_agg(p.polname::text ORDER BY p.polname) FROM pg_policy p
+                       WHERE p.polrelid = c.oid AND p.polpermissive AND p.polname <> $2),
+                     '{}'::text[]) AS "otherPolicies"
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = $4 AND NOT a.attisdropped
       WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY($1::text[])
       ORDER BY 1, 2`,
-    [schemas, TENANT_POLICY_NAME, `%${TENANT_GUC}%`, TENANT_COLUMN],
+    [schemas, TENANT_POLICY_NAME, CANONICAL_POLICY_EXPRESSION, TENANT_COLUMN],
   );
 }
 
@@ -256,6 +332,27 @@ export async function applyTenantIsolation(
   return changes;
 }
 
+/**
+ * Whether a SECURITY DEFINER function is one of the platform chain's two lookups, unchanged. A test
+ * schema gets them with its own schema in place of `public` (`isolationFunctionsSql`).
+ */
+function isIsolationDefiner(f: {
+  schema: string;
+  name: string;
+  arguments: string;
+  body: string;
+  config: string[] | null;
+}): boolean {
+  const expected = ISOLATION_DEFINER_FUNCTIONS.find(
+    (d) => d.name === f.name && d.arguments === f.arguments,
+  );
+  if (expected === undefined) return false;
+  if (f.config?.length !== 1 || f.config[0] !== ISOLATION_DEFINER_SEARCH_PATH) return false;
+  const body =
+    f.schema === 'public' ? f.body : f.body.replaceAll(`${quoteIdent(f.schema)}.`, 'public.');
+  return normalizeFunctionBody(body) === normalizeFunctionBody(expected.body);
+}
+
 /** Why a role does not hold the isolated posture; names no host, password or row. */
 export interface IsolationFinding {
   check:
@@ -264,6 +361,9 @@ export interface IsolationFinding {
     | 'owns-objects'
     | 'can-create'
     | 'tenant-table-policy'
+    | 'extra-policy'
+    | 'definer-view'
+    | 'definer-function'
     | 'truncate-privilege'
     | 'setting-default';
   detail: string;
@@ -287,7 +387,12 @@ export interface TenantIsolationReport {
  *    as an owner through membership (an owner can disable row security and grant itself anything);
  *  - it may create nothing: no object in any non-system schema, no schema in the database, no
  *    temporary table;
- *  - every tenant table has row security enabled and forced and carries the tenant policy;
+ *  - every tenant table has row security enabled and forced and carries the tenant policy exactly,
+ *    and no other permissive policy (permissive policies are ORed, so one more widens the first);
+ *  - it can read no view or materialized view that reaches a tenant table with its owner's rights
+ *    (a view runs as its owner unless it is `security_invoker`, and the owner bypasses row security);
+ *  - it can call no SECURITY DEFINER function owned by a role that is a superuser or bypasses row
+ *    security, except the two lookups the platform chain creates, unchanged;
  *  - it holds no TRUNCATE on a tenant table (TRUNCATE is not subject to row security);
  *  - no role or database default presets the tenant setting, row security, the search path or the
  *    session role, so a fresh session starts with none of them changed.
@@ -411,6 +516,91 @@ export async function verifyTenantIsolation(
       detail:
         'tenant tables without an enabled, forced tenant policy: ' +
         unprotected.map((t) => `${t.schema}.${t.table}`).join(', '),
+    });
+  }
+
+  const widened = tables.filter((t) => t.otherPolicies.length > 0);
+  if (widened.length > 0) {
+    findings.push({
+      check: 'extra-policy',
+      detail:
+        'tenant tables with a permissive policy besides the tenant policy: ' +
+        widened.map((t) => `${t.schema}.${t.table} (${t.otherPolicies.join(', ')})`).join(', '),
+    });
+  }
+
+  // A view (or a materialized view) that reads a tenant table as its owner, reachable by the role:
+  // readable itself, or through another view it can read that depends on it.
+  const views = await rows<{ name: string }>(
+    db,
+    `WITH RECURSIVE edges AS (
+       SELECT DISTINCT r.ev_class AS view, d.refobjid AS ref
+         FROM pg_rewrite r
+         JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = r.oid
+                         AND d.refclassid = 'pg_class'::regclass AND d.refobjid <> r.ev_class
+     ), reach AS (
+       SELECT view, ref FROM edges
+       UNION
+       SELECT r.view, e.ref FROM reach r JOIN edges e ON e.view = r.ref
+     ), tenant_tables AS (
+       SELECT c.oid FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = $3 AND NOT a.attisdropped
+        WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY($2::text[])
+     ), definer AS (
+       SELECT v.oid FROM pg_class v
+         JOIN pg_namespace n ON n.oid = v.relnamespace
+        WHERE v.relkind IN ('v', 'm')
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
+          AND (v.relkind = 'm' OR NOT EXISTS (
+                SELECT 1 FROM unnest(coalesce(v.reloptions, '{}'::text[])) AS o
+                 WHERE lower(o) IN ('security_invoker=true', 'security_invoker=on',
+                                    'security_invoker=yes', 'security_invoker=1')))
+          AND EXISTS (SELECT 1 FROM reach r JOIN tenant_tables t ON t.oid = r.ref WHERE r.view = v.oid)
+     )
+     SELECT format('%I.%I', n.nspname, v.relname) AS name
+       FROM definer d JOIN pg_class v ON v.oid = d.oid JOIN pg_namespace n ON n.oid = v.relnamespace
+      WHERE has_table_privilege($1, v.oid, 'SELECT')
+         OR EXISTS (SELECT 1 FROM reach r WHERE r.ref = v.oid AND has_table_privilege($1, r.view, 'SELECT'))
+      ORDER BY 1`,
+    [role, schemas, TENANT_COLUMN],
+  );
+  if (views.length > 0) {
+    findings.push({
+      check: 'definer-view',
+      detail:
+        "the runtime role can read a view that reads tenant tables with its owner's rights: " +
+        views.map((v) => v.name).join(', '),
+    });
+  }
+
+  const definers = await rows<{
+    schema: string;
+    name: string;
+    arguments: string;
+    body: string;
+    config: string[] | null;
+  }>(
+    db,
+    `SELECT n.nspname::text AS schema, p.proname::text AS name,
+            pg_get_function_identity_arguments(p.oid) AS arguments, p.prosrc AS body,
+            p.proconfig AS config
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+       JOIN pg_roles o ON o.oid = p.proowner
+      WHERE p.prosecdef AND (o.rolsuper OR o.rolbypassrls)
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
+        AND has_function_privilege($1, p.oid, 'EXECUTE')
+      ORDER BY 1, 2, 3`,
+    [role],
+  );
+  const unexpected = definers.filter((f) => !isIsolationDefiner(f));
+  if (unexpected.length > 0) {
+    findings.push({
+      check: 'definer-function',
+      detail:
+        'the runtime role can call a function that runs with the rights of a role that bypasses ' +
+        `row security: ${unexpected.map((f) => `${f.schema}.${f.name}(${f.arguments})`).join(', ')}`,
     });
   }
 

@@ -57,6 +57,7 @@ export {
   parseCreateTableColumnNames,
 } from './testing-ddl.js';
 export {
+  assertConnectedAsRuntimeRole,
   createIsolatedTestDatabase,
   type IsolatedTestDatabase,
   isolateTestSchema,

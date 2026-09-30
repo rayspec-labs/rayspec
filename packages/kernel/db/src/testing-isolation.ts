@@ -163,6 +163,9 @@ export async function isolateTestSchema(
   const role = `${schema}_runtime`.slice(0, 63);
   const password = randomBytes(12).toString('hex');
   await admin.begin(async (tx) => {
+    // A hand-built schema may hold only some core tables; a lookup over a table it lacks is created
+    // unchecked and is simply never called.
+    await tx.unsafe('SET LOCAL check_function_bodies = off');
     for (const stmt of isolationFunctionsSql(schema)) await tx.unsafe(stmt);
     await applyTenantIsolation(tx, { schemas: [schema], functionSchema: schema });
   });
@@ -204,7 +207,30 @@ export async function isolateTestSchema(
   };
 }
 
-/** Whether this run puts hand-built test schemas under the isolated posture. */
+/**
+ * Whether this run puts hand-built test schemas under the isolated posture. Any value other than
+ * `roles` or unset throws, so a mistyped lane never runs as the superuser while claiming otherwise.
+ */
 export function testDatabaseIsolation(): boolean {
-  return process.env.RAYSPEC_TEST_DATABASE_ISOLATION === 'roles';
+  const value = process.env.RAYSPEC_TEST_DATABASE_ISOLATION;
+  if (value === undefined || value === '') return false;
+  if (value === 'roles') return true;
+  throw new Error(`RAYSPEC_TEST_DATABASE_ISOLATION must be 'roles' or unset, not '${value}'.`);
+}
+
+/**
+ * Throw unless `sql` is connected as `role`, and that role is no superuser and does not bypass row
+ * security: a suite that claims to run as the runtime role checks it once, from inside the session.
+ */
+export async function assertConnectedAsRuntimeRole(sql: IsolationSql, role: string): Promise<void> {
+  const [who] = (await sql.unsafe(
+    `SELECT current_user::text AS name, r.rolsuper AS super, r.rolbypassrls AS bypass
+       FROM pg_roles r WHERE r.rolname = current_user`,
+  )) as { name: string; super: boolean; bypass: boolean }[];
+  if (who === undefined || who.name !== role || who.super || who.bypass) {
+    throw new Error(
+      `expected a session as the runtime role ${role} (no superuser, no BYPASSRLS), got ` +
+        `${who === undefined ? 'no role' : `${who.name} (superuser ${who.super}, bypass ${who.bypass})`}.`,
+    );
+  }
 }
