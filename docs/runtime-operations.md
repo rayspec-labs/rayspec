@@ -93,6 +93,24 @@ the fence first. The chain that first creates the two tables above, on a databas
 they existed, runs outside apply (under the shared schema lock, as before), because there is
 nowhere to record it yet.
 
+`rayspec deploy <file.ray>` makes its change as ONE apply with the actor `rayspec-deploy`, whose
+idempotency key is the plan digest the operator accepted, so running the same deploy again after
+an interruption continues that operation. Its steps, in order:
+
+| Step | What it does | After a crash |
+| --- | --- | --- |
+| `stage-bundle` | verifies the version directory the bundle was extracted into against the manifest's inventory | re-runnable |
+| `platform-migrations` | the platform migration chain, when the database is behind this runtime | read from the platform ledger |
+| `product-ddl` | the product change regenerated from the ledger and the bundled spec, its ledger row and the finish receipt in one transaction | rolled back with its transaction unless its finish receipt committed |
+| `record-application` | the deployment id, the application, its digest and its grants in `runtime_control_state` | committed with its finish receipt |
+| `activate` | replaces `active.json` in the state directory in one rename | re-runnable |
+
+The active version switches last, so a deploy that stops before it leaves the previous version
+active. A schema change that committed is not reversed; the deploy is finished forward (see
+[Deploying a bundle → Recovery](./self-hosted-deployment.md#recovery)). On a database without the
+runtime-control tables the platform chain that creates them runs first, outside apply, once the plan
+is accepted.
+
 To read what happened:
 
 ```sql
@@ -232,5 +250,4 @@ depends on the poll interval:
 
 - Receipts are never pruned; the table grows by a few rows per schema change.
 - There is no CLI verb for `resolveInterruptedStep` yet; call it as above.
-- Bundle deploy (`rayspec deploy <file.ray>`), `export` and `resume` as CLI verbs are not
-  available yet; the library operations are.
+- `export` and `resume` as CLI verbs are not available yet; the library operations are.

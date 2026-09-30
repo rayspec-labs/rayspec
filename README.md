@@ -72,6 +72,9 @@ in the platform — everything comes from the spec you inject.
   `rayspec bundle verify` read a bundle — what it declares, whether its archive and
   inventory hold together, whether this runtime can deploy it — without extracting or
   running anything inside it ([CLI reference](./docs/cli-reference.md#bundle-inspect)).
+  `rayspec deploy <file.ray>` plans a bundle against the live database, applies the
+  reviewed plan into an immutable version directory and serves it
+  ([self-hosted deployment guide](./docs/self-hosted-deployment.md)).
 - **Security by construction, not by convention.** No plaintext secrets, a
   fail-closed tenant chokepoint, an explicit trust boundary around untrusted
   content, and an append-only audit log — from the first boot. That boundary is

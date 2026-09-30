@@ -444,8 +444,13 @@ step records, when it starts, the observer that reads its state, what it read an
 expects; the next apply reads it again and closes the step as applied or not applied. A step
 nothing can read back is unknown, and an unknown step blocks every apply
 (`RAY_RECONCILIATION_REQUIRED`) until an operator records its outcome — nothing is replayed
-blindly and no schema change is reversed. The legacy YAML deploy is the first caller; the
-operator's view is in [Runtime operations](./runtime-operations.md).
+blindly and no schema change is reversed. The legacy YAML deploy is one caller; the bundle deploy
+(`rayspec deploy <file.ray>`) is the other: it extracts the bundle into an immutable, content-addressed
+version directory, applies its accepted plan in one operation whose idempotency key is the plan
+digest, switches the active version last, and serves the application from that directory with
+`@rayspec/*` imports answered by the installed runtime. The operator's view is in
+[Runtime operations](./runtime-operations.md) and
+[Deploying a bundle on your own server](./self-hosted-deployment.md).
 
 The **source fence** is what `quiesce()` takes and `resume()` releases, for an export or a
 migration. It lives in `runtime_control_state` (`fence_state`, `fence_epoch`, and the write

@@ -10,8 +10,9 @@ how to fix each refusal. The flags, the output and the exit codes are in the
 
 Packing is not deploying. `pack` writes a file and nothing else; check the file
 with [`rayspec bundle verify`](./cli-reference.md#bundle-verify), which tells
-you whether this runtime can deploy it. `rayspec deploy` does not take a `.ray`
-file yet: deploy the spec as before.
+you whether this runtime can deploy it, and deploy it with
+`rayspec deploy <file.ray>` — see
+[Deploying a bundle on your own server](./self-hosted-deployment.md).
 
 ## Before you pack
 

@@ -66,6 +66,14 @@ role, and open the control connection with `openControlDatabase` so the stopped-
 tell its sessions from a runtime's. None of it adds an HTTP route; see `docs/ARCHITECTURE.md`,
 "Runtime control".
 
+`applyBundle` applies a plan `prepare()` produced for a bundle staged into its version directory
+(`openStateDirectory(...).stageVersion`): it recomputes the plan digest before it writes anything
+and again under the lease, then runs the platform chain, the product change, the application record
+and the switch of the active version as one apply whose idempotency key is the plan digest.
+`installBundleModuleResolution` makes the served application's `@rayspec/*` imports resolve to this
+runtime and every other import to the bundle. `rayspec deploy <file.ray>` is built on them; see
+`docs/self-hosted-deployment.md`.
+
 ### Reading the boot values from a file
 
 Each of those three also accepts a `<VAR>_FILE` variant — `DATABASE_URL_FILE`,
