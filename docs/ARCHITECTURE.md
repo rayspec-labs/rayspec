@@ -401,6 +401,36 @@ inputs digest, each step's start and finish with its digest, the outcome — whi
 append-only. A step with a start and no finish is what a crash leaves behind, and the next holder
 must reconcile it before it repeats anything. Neither table is ever exported in a snapshot.
 
+The **source fence** is what `quiesce()` takes and `resume()` releases, for an export or a
+migration. It lives in `runtime_control_state` (`fence_state`, `fence_epoch`, and the write
+barriers recorded with it), so every runtime process of the environment sees it: each one re-reads
+it every 500 ms and moves through three phases. *Open*: everything runs. *Draining*: new work is
+refused — HTTP mutations and new event streams answer `503 SERVICE_UNAVAILABLE` with
+`Retry-After` from a middleware in front of every route, cron ticks and the system cleanup pass
+their producer gate as no-ops, and the run queues stop dequeuing (their worker concurrency set to
+0, the engine left running) — open event streams close after the chunk in flight, and work already
+running continues. *Fenced*: that work has finished; event-bus appends and object writes are now
+refused too. Each process reports its phase, its producers and the external services it calls in
+its heartbeat (`runtime_control_processes`), and `quiesce()` reports `fenced` only once every live
+process has drained at the new epoch — otherwise `timed-out`, with the fence still held. Because
+the fence is in the database, a process that boots under it starts fenced (its queues register
+paused), and a `resume()` from another process reaches a running server within one poll.
+
+The database write barrier the export relies on is taken only after a full drain and is never
+assumed. With role separation (the runtime connects as a role that owns no table) `quiesce()`
+revokes that role's INSERT, UPDATE, DELETE and TRUNCATE on every table of both databases, checks
+with `has_table_privilege` that nothing survived, and records exactly what it revoked; `resume()`
+grants back exactly that. Without role separation the only barrier is a stopped source: the
+operator attests that no runtime process runs, and no session other than the caller's own is
+connected to either database. In every other case the barrier is reported unavailable, and an
+export refuses.
+
+Readiness (`GET /health`) covers the database, the platform schema (a database migrated by a newer
+runtime is refused at boot and reported not ready), the boot secrets mounted as files, the frontend
+mounts and the durable worker with its system database; liveness (`GET /livez`) only says the
+process answers. Neither names a host, a path or a secret. Under `RAYSPEC_HOSTING_POSTURE=managed`
+the public `/recovery-scope` probe is not registered.
+
 ---
 
 ## The extension model

@@ -12,7 +12,7 @@ real authenticated request. You will:
 > **A note on what was verified.** The clone → build → secrets → database → boot →
 > `rayspec deploy` path in this guide was run end to end against a live local
 > Postgres: the deploy of the shipped product example serves, and `curl /health`
-> returns `{"status":"ok","db":"ok"}` with `GET /sessions` mounted and
+> returns `"status":"ok"` with `GET /sessions` mounted and
 > bearer-guarded. The auth request/response JSON shapes are checked against the
 > source; the token/id values shown are illustrative — yours will differ.
 
@@ -240,7 +240,7 @@ Confirm it's up:
 
 ```bash
 curl -s http://localhost:8080/health
-# → {"status":"ok","db":"ok"}
+# → {"status":"ok","db":"ok","live":true,"ready":true,"checks":{"database":true,"schema":true,"bindings":true}}
 ```
 
 Provision the first organization and owner. The CLI does this against the running
@@ -513,7 +513,7 @@ mounted. In a second terminal:
 
 ```bash
 curl -s http://localhost:8080/health
-# → {"status":"ok","db":"ok"}
+# → {"status":"ok","db":"ok","live":true,"ready":true,"checks":{"database":true,"schema":true,"bindings":true,"worker":true,"workflow-system-database":true}}
 
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/sessions
 # → 401 — GET /sessions is a declared, bearer-guarded view. Pass
@@ -783,7 +783,7 @@ RAYSPEC_SPEC_PATH=$PWD/my-ui.yaml $RAYSPEC_SERVE
 # (equivalently: $RAYSPEC deploy ./my-ui.yaml)
 
 curl -s http://localhost:8080/            # → index.html (200)
-curl -s http://localhost:8080/health      # → {"status":"ok","frontend":"ok"}   (no db field)
+curl -s http://localhost:8080/health      # → {"status":"ok","frontend":"ok","live":true,"ready":true,"checks":{"assets":true}}   (no db field)
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/v1/auth/me
 #   → 404 — no auth surface is mounted at all in a static profile (the reserved
 #     /v1, /health, and /oidc prefixes are declined even under the SPA fallback)

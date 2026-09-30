@@ -230,6 +230,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at most one hour; an invalid value aborts the boot). See Fixed.
 - **`@rayspec/bundle`: `refuseLinks`.** A read option that opens the archive path with
   `O_NOFOLLOW` and refuses a symbolic link with `RAY_USAGE` instead of following it.
+- **Runtime control: `quiesce()`, `resume()` and `health()`, and a source fence every running
+  process keeps.** `quiesce(reason, deadline, sourceStopped)` takes the environment's fence under
+  the operation lease (the fence epoch and the environment revision increase in one transaction,
+  with receipts) and waits, until the deadline, for every running runtime process to stop its
+  producers and drain its in-flight work. Each process reads the fence every 500 ms and, while it
+  is held, refuses every HTTP mutation (uploads, trigger fires and run starts included) and every
+  new event stream with `503 SERVICE_UNAVAILABLE` and `Retry-After` (reads keep answering), closes
+  open event streams after the chunk in flight, skips cron ticks and the daily system cleanup, and
+  pauses the run queues without shutting the durable engine down; once it has drained it also
+  refuses event-bus appends and object writes. Status `fenced` means every live process reported
+  drained at the new epoch; otherwise the result is `timed-out` with `ok: false` and
+  `RAY_SOURCE_NOT_QUIESCENT`, and the fence stays held. The result lists each producer's state,
+  the write barriers and the external services no fence reaches (`RAY_W_EXTERNAL_EFFECTS_UNFENCED`).
+  The database barrier is taken only after a full drain: with role separation (`runtimeRole`) the
+  runtime role's write privileges are revoked in both databases and recorded; without it, a source
+  the operator attests is stopped holds `database-stopped-source` when no other session is
+  connected; otherwise it is reported `database-write-role: unavailable`. `resume(fenceEpoch)`
+  releases only the fence held at that epoch (`RAY_FENCE_MISMATCH` otherwise), grants back exactly
+  the recorded privileges, and every process restarts its producers within one poll. The fence is
+  kept in the database, so a process booted under it starts fenced. `health()` reports liveness
+  and readiness with each failing check's cause and no topology. One new platform table
+  (migration `0013_runtime_control_processes`) holds each running process's heartbeat; it is a
+  reserved store name, classified `runtime-control-state`, and the one table the write barrier
+  leaves writable.
+- **`GET /livez`**, a liveness probe that answers 200 while the process answers. **`GET /health`**
+  (readiness) also checks that the platform schema is the one this runtime ships, that every boot
+  secret mounted as a `<VAR>_FILE` is still a readable file, and, when a durable worker is wired,
+  that it is running and its system database answers. Its body keeps `status`, `db` and
+  `frontend` and adds `live`, `ready` and `checks` (each check's name with its boolean).
+- **`RAYSPEC_HOSTING_POSTURE`** (`local`, the default, or `managed`). Under `managed` the public
+  `/recovery-scope` probe is not registered; nothing else changes.
+- **`RAYSPEC_SHUTDOWN_DRAIN_MS`**, the bounded graceful shutdown (default 10000, at most 600000).
+  On SIGINT or SIGTERM both `rayspec-serve` and `rayspec deploy` stop accepting connections, let
+  in-flight requests finish for that long, then close every connection still open and the
+  application, itself bounded by the same drain.
+- **`SERVICE_UNAVAILABLE`** (503) joins the platform's HTTP error codes.
+- **`@rayspec/durable-dbos`: pausable dispatch.** `pauseDispatch()` / `resumeDispatch()` on both
+  executors stop and restart dequeuing (the queue's worker concurrency set to 0 and back) without
+  shutting DBOS down, and `inFlight` counts the jobs running; the cron and cleanup schedulers take
+  a `gate` and count their fires in flight.
 
 ### Changed
 
@@ -263,6 +303,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A runtime refuses a database a newer runtime migrated.** An older runtime found a platform
+  ledger with migrations it does not ship, applied nothing and served that schema silently. The
+  boot (and `rayspec tenant ensure`) now refuses it, under the schema lock and before anything is
+  applied, with a message that names the cause, and leaves the database unchanged.
+- **Shutdown no longer waits for ever on an open connection.** A request that never completed (a
+  stalled upload, an event stream, half a request) kept a stopping server alive indefinitely; the
+  drain above bounds it.
 - **A boot that refuses leaves the database untouched.** The server applied the platform
   migration chain before it parsed the injected spec and the signing key, so a deploy with an
   invalid spec, a Product-YAML document outside the boot scope or a malformed

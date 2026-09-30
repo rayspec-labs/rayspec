@@ -161,8 +161,8 @@ A backend-profile document can serve a built web UI itself, in one of two forms.
   OIDC / run route mounted at all**. The auth-and-database composition is not merely left empty — the boot
   branches away from it entirely, so there is provably no authenticated surface
   behind the assets. `/health` runs no database probe; it reports whether the declared
-  mounts can be served — `200 {"status":"ok","frontend":"ok"}`, or `503` with
-  `"status":"degraded"` and `"frontend":"unavailable"`. A `503` names every dependency
+  mounts can be served — `200` with `"status":"ok"` and `"frontend":"ok"`, or `503` with
+  `"status":"degraded"` and `"frontend":"unavailable"` (and `"ready":false`, `"checks":{"assets":false}`). A `503` names every dependency
   the boot covers rather than only the failing one, so one read of the body says which
   one is at fault. This is the form for serving a built single-page app directly, with
   no reverse proxy in front.
