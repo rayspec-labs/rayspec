@@ -79,6 +79,7 @@ import {
 import {
   DbosDurableExecutor,
   DbosWorkflowExecutor,
+  migrateWorkflowSystemDatabase,
   type ResolvedRun,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
@@ -3261,6 +3262,11 @@ export async function deployProductYamlSpec(
     );
   }
 
+  // With role separation the runtime role may create nothing, so the workflow engine's own schema is
+  // migrated as the migration role first; the engine then launches as the runtime role.
+  if (config.migrationDbosSystemDatabaseUrl !== undefined) {
+    await migrateWorkflowSystemDatabase(config.migrationDbosSystemDatabaseUrl);
+  }
   await executor.start();
   await wfExecutor.registerQueueAfterLaunch();
 

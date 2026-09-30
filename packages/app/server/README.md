@@ -37,6 +37,7 @@ curl -s http://127.0.0.1:8080/livez
 | `DATABASE_URL` | **yes** | Postgres connection string. The committed migration chain is applied here at boot (bootstraps a clean DB; idempotent on an up-to-date one). |
 | `RAYSPEC_JWT_SIGNING_KEY` | **yes** | RS256 PKCS#8 PEM — the JWT signing key AND the OIDC provider signing key. Secret-manager/env only (never DB/git). |
 | `RAYSPEC_API_KEY_PEPPER` | **yes** | The api-key pepper. Secret-manager/env only. |
+| `RAYSPEC_MIGRATION_DATABASE_URL` | no | The migration role's connection (also `RAYSPEC_MIGRATION_DATABASE_URL_FILE`). Set, it turns role separation on: migrations, product DDL and the row-level security step run over it and its pool is closed after the boot; the server serves as the runtime role in `DATABASE_URL`, and reports the isolated posture active only when every check passes. Unset ⇒ one role, as before. See [Database roles and row-level security](../../../docs/database-isolation.md). |
 | `ALLOWED_ORIGINS` | no | Comma-separated cookie-CSRF allow-list. **Unset ⇒ EMPTY (no cross-origin).** NEVER dev-permissive by default. |
 | `OIDC_ISSUER` | no | The OIDC issuer (drives emitted URLs). Default `http://127.0.0.1:<port>/oidc`. |
 | `PORT` | no | TCP port. Default `8080`. A non-numeric/out-of-range value fails closed. |

@@ -858,7 +858,10 @@ export interface ServeExtras {
    * Run by the boot after it validated everything and before it changes any schema; it reports the
    * product change it applied, which the boot banner names.
    */
-  beforeSchemaChange?: (db: Db) => Promise<BeforeSchemaChangeResult | undefined>;
+  beforeSchemaChange?: (
+    db: Db,
+    tenantIsolation?: { runtimeRole: string },
+  ) => Promise<BeforeSchemaChangeResult | undefined>;
 }
 
 /**

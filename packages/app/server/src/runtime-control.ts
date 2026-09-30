@@ -70,9 +70,14 @@ import {
   V1_EXECUTION_LEVELS,
   type ValidationResult,
 } from '@rayspec/bundle-contract';
-import type { Db } from '@rayspec/db';
+import { type Db, verifyTenantIsolation } from '@rayspec/db';
 import { type RunCancelPollSource, resolveRunCancelPoll } from '@rayspec/platform';
-import { type HostingPosture, parseHostingPosture } from './composition-root.js';
+import {
+  type DatabaseIsolationStatus,
+  type HostingPosture,
+  parseHostingPosture,
+  SINGLE_ROLE_ISOLATION,
+} from './composition-root.js';
 import {
   type FenceOperationOptions,
   healthOperation,
@@ -113,6 +118,11 @@ export type RuntimeControlAdapter = Pick<
 > & {
   /** The hosting posture and the cross-process cancellation it implies; reads no database. */
   inspectHosting(): HostingReport;
+  /**
+   * The database isolation posture of the environment: `single-role` without `runtimeRole`; with it,
+   * the posture check (`verifyTenantIsolation`) for that role, read from the catalog over `db`.
+   */
+  inspectDatabaseIsolation(): Promise<DatabaseIsolationStatus>;
 };
 
 export interface RuntimeControlOptions extends Omit<FenceOperationOptions, 'db'> {
@@ -335,7 +345,21 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
       unknown
     >[];
 
+  const databaseIsolation = async (): Promise<DatabaseIsolationStatus> => {
+    if (options.runtimeRole === undefined) return SINGLE_ROLE_ISOLATION;
+    const report = await verifyTenantIsolation(options.db.$client, { role: options.runtimeRole });
+    return {
+      mode: 'role-separated',
+      active: report.active,
+      runtimeRole: report.role,
+      tenantTables: report.tenantTables,
+      findings: report.findings,
+    };
+  };
+
   return {
+    inspectDatabaseIsolation: databaseIsolation,
+
     inspectHosting(): HostingReport {
       const env = options.env ?? process.env;
       const poll = resolveRunCancelPoll(env);
@@ -357,9 +381,11 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
 
       let head: Awaited<ReturnType<typeof readSchemaHead>>;
       let state: EnvironmentState;
+      let isolation: DatabaseIsolationStatus;
       try {
         head = await readSchemaHead(query);
         state = await readEnvironmentState(query);
+        isolation = await databaseIsolation();
       } catch {
         return failed(operation, operationId, [infraUnavailable()]);
       }
@@ -392,8 +418,9 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         applicationVersion: state.applicationVersion,
         applicationDigest: state.applicationDigest,
         releaseManifestSha256: options.releaseManifestSha256 ?? null,
-        // The managed posture is supported only by a release that ships its capability receipt.
-        managedPosture: { supported: receipt !== null, receiptSha256: receipt },
+        // The managed posture is supported only by a release that ships its capability receipt, on an
+        // environment whose database isolation (role separation and row-level security) is active.
+        managedPosture: { supported: receipt !== null && isolation.active, receiptSha256: receipt },
         fence: state.fence,
         environmentRevision: state.environmentRevision,
       });

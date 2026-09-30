@@ -47,7 +47,7 @@ import {
   productSchemaDigest,
   type ResultEnvelope,
 } from '@rayspec/bundle-contract';
-import type { Db } from '@rayspec/db';
+import { applyTenantIsolation, type Db, type TenantIsolationChanges } from '@rayspec/db';
 import {
   type ApplyCheckpoint,
   type ApplyStep,
@@ -74,6 +74,7 @@ import {
   readProductTables,
   runtimePlatformHead,
 } from './schema-head.js';
+import { lockSchemaInTransaction } from './schema-lock.js';
 
 /** The version of the legacy deploy's plan digest input. */
 export const LEGACY_DEPLOY_PLAN_FORMAT_VERSION = 1;
@@ -126,6 +127,13 @@ export interface DeployApplyOptions {
   leaseTtlMs?: number;
   /** Crash tests only: see `ApplyOptions.onCheckpoint`. */
   onCheckpoint?: (point: ApplyCheckpoint, step?: string) => Promise<void>;
+  /**
+   * Set when the runtime connects as its own role (role separation): `db` is then the migration
+   * role's connection, every product migration brings the tables it creates under row-level
+   * isolation in its own transaction, and `tenantIsolation()` covers every tenant table. Absent ⇒ one
+   * database role, and nothing here touches row security.
+   */
+  tenantIsolation?: { runtimeRole: string };
 }
 
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -326,7 +334,14 @@ export class DeployApply {
     migration: { name: string; sql: string },
     declared: DeclaredProductStores,
   ): Promise<void> {
-    const step = productDdlStep({ name: migration.name, sql: migration.sql, declared });
+    const step = productDdlStep({
+      name: migration.name,
+      sql: migration.sql,
+      declared,
+      ...(this.#options.tenantIsolation !== undefined
+        ? { isolateFor: this.#options.tenantIsolation }
+        : {}),
+    });
     const result = await this.#apply(
       {
         step: 'product-ddl',
@@ -336,6 +351,21 @@ export class DeployApply {
       [step],
     );
     if (!result.ok) throw new RuntimeApplyError(result.errors);
+  }
+
+  /**
+   * With role separation, bring every tenant table under row-level isolation: the policy, row security
+   * enabled and forced, the same-tenant reference triggers, and the schema ledgers read-only for the
+   * runtime role. One transaction under the shared schema lock; on a database that already has it all
+   * it changes nothing. Returns undefined when the runtime uses one database role.
+   */
+  async tenantIsolation(): Promise<TenantIsolationChanges | undefined> {
+    const isolation = this.#options.tenantIsolation;
+    if (isolation === undefined) return undefined;
+    return this.#db.$client.begin(async (tx) => {
+      await lockSchemaInTransaction(tx, this.#lockTimeoutMs);
+      return applyTenantIsolation(tx, { runtimeRole: isolation.runtimeRole });
+    });
   }
 }
 
@@ -363,6 +393,12 @@ export interface ProductDdlStepInput {
   declared: DeclaredProductStores;
   /** The product schema digest the migration must produce, when a plan computed it in advance. */
   expectedAfter?: string;
+  /**
+   * With role separation: the runtime role. The tables the DDL creates are brought under row-level
+   * isolation (`applyTenantIsolation`) in the same transaction, so no product table is ever
+   * committed without its policy.
+   */
+  isolateFor?: { runtimeRole: string };
 }
 
 /**
@@ -390,6 +426,9 @@ export function productDdlStep(input: ProductDdlStepInput): ApplyStep {
         if (drift !== null) throw new ApplyStepRefusal(bundleError('RAY_SCHEMA_DRIFT', drift));
       }
       await tx.unsafe(ddl);
+      if (input.isolateFor !== undefined) {
+        await applyTenantIsolation(tx, { runtimeRole: input.isolateFor.runtimeRole });
+      }
       const product = await recordProductMigration(query, {
         operationId: context.operationId,
         migrationName: input.name,

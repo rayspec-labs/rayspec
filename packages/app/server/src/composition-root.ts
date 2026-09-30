@@ -79,8 +79,10 @@ import {
   formatDrift,
   forTenant,
   generateProductSql,
+  type IsolationFinding,
   makeDb,
   migrationsDir,
+  verifyTenantIsolation,
 } from '@rayspec/db';
 import {
   crontabParseError,
@@ -88,6 +90,7 @@ import {
   DbosDurableExecutor,
   DEFAULT_CLEANUP_SCHEDULE,
   DEFAULT_WORKER_CONCURRENCY,
+  migrateWorkflowSystemDatabase,
   ProducerPausedError,
   type ResolvedRun,
   SystemCleanupScheduler,
@@ -351,6 +354,68 @@ export function registerHealthRoute<E extends Env>(
   });
 }
 
+/**
+ * The database isolation posture of a running server.
+ *
+ * `single-role`: the server serves and migrates with one database role (no
+ * RAYSPEC_MIGRATION_DATABASE_URL). Tenant isolation is the application's chokepoint alone, and the
+ * posture is never reported active.
+ *
+ * `role-separated`: schema changes ran as the migration role and the server serves as the runtime
+ * role. `active` is true only when the posture check found nothing wrong: the runtime role is no
+ * superuser, bypasses no row security, owns and may create nothing, and every tenant table carries an
+ * enabled, forced tenant policy. Otherwise `findings` names each failed check, and the boot said so
+ * on its warning line.
+ */
+export interface DatabaseIsolationStatus {
+  mode: 'single-role' | 'role-separated';
+  active: boolean;
+  /** The role the server serves with; set with role separation. */
+  runtimeRole?: string;
+  /** How many tenant tables the check found. 0 for one role. */
+  tenantTables: number;
+  findings: readonly IsolationFinding[];
+}
+
+/** The posture of a server that uses one database role. */
+export const SINGLE_ROLE_ISOLATION: DatabaseIsolationStatus = Object.freeze({
+  mode: 'single-role',
+  active: false,
+  tenantTables: 0,
+  findings: Object.freeze([]) as readonly IsolationFinding[],
+});
+
+/** The role `db` connects as. */
+async function currentRole(db: Db): Promise<string> {
+  const rows = (await db.$client.unsafe('SELECT current_user::text AS role')) as unknown as {
+    role: string;
+  }[];
+  return rows[0]?.role ?? '';
+}
+
+/** Check the isolated posture for the role `db` connects as (the runtime role). */
+export async function checkDatabaseIsolation(db: Db): Promise<DatabaseIsolationStatus> {
+  const report = await verifyTenantIsolation(db.$client);
+  return {
+    mode: 'role-separated',
+    active: report.active,
+    runtimeRole: report.role,
+    tenantTables: report.tenantTables,
+    findings: report.findings,
+  };
+}
+
+/** The boot's one warning line when role separation is configured but the posture does not hold. */
+export function databaseIsolationWarning(status: DatabaseIsolationStatus): string {
+  return (
+    `[rayspec] WARNING — ${MIGRATION_DATABASE_URL_VAR} is set, but the database isolation posture ` +
+    `is NOT active for the runtime role '${status.runtimeRole ?? ''}': ` +
+    `${status.findings.map((f) => f.detail).join('; ')}. The server starts and serves as before; ` +
+    'it does not report the posture as active until every check passes. See ' +
+    'docs/database-isolation.md.'
+  );
+}
+
 /** What the `beforeSchemaChange` hook reports back to the boot. */
 export interface BeforeSchemaChangeResult {
   /** The product schema change the hook applied, named by its product migration ledger row. */
@@ -495,6 +560,12 @@ export interface BootedServer {
    * an in-process runtime-control adapter hands them to `health()`.
    */
   readiness: readonly ReadinessProbe[];
+  /**
+   * The database isolation posture this boot found: `single-role` without
+   * RAYSPEC_MIGRATION_DATABASE_URL; with it, `role-separated` and `active` only when every check of
+   * `verifyTenantIsolation` passed for the role the server serves with.
+   */
+  databaseIsolation: DatabaseIsolationStatus;
   /** How long `shutdownHttpServer` lets in-flight connections finish (the resolved config value). */
   shutdownDrainMs: number;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
@@ -564,6 +635,22 @@ export interface ServerConfig {
    * `<appdb>_dbos_sys`. Never point it at the app DB.
    */
   dbosSystemDatabaseUrl: string;
+  /**
+   * The MIGRATION ROLE's connection — RAYSPEC_MIGRATION_DATABASE_URL, or a file named by
+   * RAYSPEC_MIGRATION_DATABASE_URL_FILE (same precedence as the boot secrets). Setting it turns ROLE
+   * SEPARATION on: the platform migrations, product DDL, the ledger writes and the step that enables
+   * row-level security run over this connection, the pool is closed once the boot has finished its
+   * schema work, and the server serves over `databaseUrl` as the runtime role, which then must hold
+   * the isolated posture (checked at boot, reported in `BootedServer.databaseIsolation`). Absent ⇒
+   * one database role, exactly as before this setting existed.
+   */
+  migrationDatabaseUrl?: string;
+  /**
+   * The migration role's connection to the workflow system database: `migrationDatabaseUrl` with its
+   * database name replaced by the one `dbosSystemDatabaseUrl` names. Used with role separation to
+   * apply the workflow engine's own migrations before the durable worker starts as the runtime role.
+   */
+  migrationDbosSystemDatabaseUrl?: string;
   /**
    * The tenant (org id) the deployment's CRON triggers fire under (single-deployment
    * LOCAL posture — multi-tenant cron fan-out is RESERVED, out of scope). Set via
@@ -1100,9 +1187,12 @@ export function loadTenantProvisionSecrets(
       missing,
     );
   }
+  const migrationDatabaseUrl =
+    resolveBootSecret(env, MIGRATION_DATABASE_URL_VAR, warn)?.trim() || undefined;
   return {
     databaseUrl: resolvedSecrets.get('DATABASE_URL') as string,
     apiKeyPepper: resolvedSecrets.get('RAYSPEC_API_KEY_PEPPER') as string,
+    ...(migrationDatabaseUrl !== undefined ? { migrationDatabaseUrl } : {}),
   };
 }
 
@@ -1208,6 +1298,15 @@ export function loadServerConfig(
   const dbosSystemDatabaseUrl =
     env.DBOS_SYSTEM_DATABASE_URL?.trim() || deriveDbosSystemUrl(databaseUrl as string);
 
+  // Role separation (opt-in): the migration role's connection. Resolved like a boot secret (it holds a
+  // password), but optional: unset or blank ⇒ one database role, exactly as before.
+  const migrationDatabaseUrl =
+    resolveBootSecret(env, MIGRATION_DATABASE_URL_VAR, warn)?.trim() || undefined;
+  const migrationDbosSystemDatabaseUrl =
+    migrationDatabaseUrl === undefined
+      ? undefined
+      : withDatabaseOf(migrationDatabaseUrl, dbosSystemDatabaseUrl);
+
   // The system cleanup knobs (always present, safe defaults; the GDPR gate is fail-closed).
   const cleanup = parseCleanupSettings(env);
 
@@ -1268,6 +1367,9 @@ export function loadServerConfig(
     frontendCsp,
     permissionsPolicy,
     dbosSystemDatabaseUrl,
+    ...(migrationDatabaseUrl !== undefined
+      ? { migrationDatabaseUrl, migrationDbosSystemDatabaseUrl }
+      : {}),
     cleanup,
     accessTokenTtlSeconds,
     authRateMultiplier,
@@ -1332,6 +1434,30 @@ export function loadServerConfig(
   if (openaiApiKey) config.openaiApiKey = openaiApiKey;
 
   return config;
+}
+
+/** The variable that turns role separation on (plus its `_FILE` variant). */
+export const MIGRATION_DATABASE_URL_VAR = 'RAYSPEC_MIGRATION_DATABASE_URL';
+
+/**
+ * `connection` pointed at the database `other` names: the credentials, host and options of the first
+ * with the database name of the second. Fail closed on a URL that cannot be parsed, naming only the
+ * variable (a connection URL may carry a password).
+ */
+function withDatabaseOf(connection: string, other: string): string {
+  let url: URL;
+  let target: URL;
+  try {
+    url = new URL(connection);
+    target = new URL(other);
+  } catch {
+    throw new BootConfigError(
+      `Boot aborted — ${MIGRATION_DATABASE_URL_VAR} or the workflow system database url is not a ` +
+        'valid URL, so the migration connection to the workflow system database cannot be derived.',
+    );
+  }
+  url.pathname = target.pathname;
+  return url.toString();
 }
 
 /**
@@ -2064,11 +2190,12 @@ export async function assembleServer(
 ): Promise<BootedServer> {
   // A boot that fails after it read the source fence stops watching it and removes its heartbeat, so
   // a refused boot is not counted as a live, undrained process by the next quiesce.
-  const started: { fence?: RuntimeFence } = {};
+  const started: { fence?: RuntimeFence; migrationDb?: Db } = {};
   try {
     return await assembleServerWith(config, opts, started);
   } catch (err) {
     await started.fence?.stop().catch(() => {});
+    await started.migrationDb?.$client.end().catch(() => {});
     throw err;
   }
 }
@@ -2148,9 +2275,12 @@ async function assembleServerWith(
      * changes any schema: the bundle deploy applies its plan here, so a boot that is going to refuse
      * refuses before the apply writes anything. A throw refuses the boot.
      */
-    beforeSchemaChange?: (db: Db) => Promise<BeforeSchemaChangeResult | undefined>;
+    beforeSchemaChange?: (
+      db: Db,
+      tenantIsolation?: { runtimeRole: string },
+    ) => Promise<BeforeSchemaChangeResult | undefined>;
   },
-  started: { fence?: RuntimeFence },
+  started: { fence?: RuntimeFence; migrationDb?: Db },
 ): Promise<BootedServer> {
   // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
   // Importing this boot closure pulls in undici v8, whose module-import-time side effect overwrites the
@@ -2223,6 +2353,13 @@ async function assembleServerWith(
 
   // 2. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
   const db = makeDb(config.databaseUrl);
+  //    With role separation, the migration role's own small pool: every schema change of this boot
+  //    runs over it, and it is closed once the boot's schema work is done, so a serving process holds
+  //    no connection that could change the schema. Without, the one pool does both, as always.
+  const migrationDb =
+    config.migrationDatabaseUrl !== undefined ? makeDb(config.migrationDatabaseUrl, 2) : undefined;
+  started.migrationDb = migrationDb;
+  const schemaDb = migrationDb ?? db;
 
   //    The source fence and the platform's stores, signer and limiter: constructed, nothing read or
   //    written yet (the fence is read once the schema is in place, below). The preflight assembles
@@ -2332,19 +2469,37 @@ async function assembleServerWith(
   //    starts fenced, so its queues register paused and its gates start closed (runtime-fence.ts).
   // Every schema change this boot makes runs as a `runtime.apply` operation with its receipts, and an
   // apply an earlier process left interrupted is reconciled first (deploy-apply.ts).
+  //    With role separation the schema changes run as the migration role, and every tenant table is
+  //    brought under row-level isolation (the product stores a migration creates, in that migration's
+  //    own transaction). The runtime role's name is what the migration role revokes the ledger writes
+  //    from and what the posture check below checks.
   let bundleProductChange: BootedServer['bundleProductChange'];
-  const deployApply = new DeployApply({
-    db,
-    migratePlatform: () => applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs }),
-    ...(config.specPath ? { specSource: readFileSync(config.specPath, 'utf8') } : {}),
-    lockTimeoutMs: config.schemaLockTimeoutMs,
-    warn: opts.bootWarn ?? consoleWarn,
-  });
+  let deployApply: DeployApply;
+  let databaseIsolation: DatabaseIsolationStatus = SINGLE_ROLE_ISOLATION;
   try {
+    const tenantIsolation =
+      migrationDb === undefined ? undefined : { runtimeRole: await currentRole(db) };
+    deployApply = new DeployApply({
+      db: schemaDb,
+      migratePlatform: () =>
+        applyMigrations(schemaDb, { lockTimeoutMs: config.schemaLockTimeoutMs }),
+      ...(config.specPath ? { specSource: readFileSync(config.specPath, 'utf8') } : {}),
+      lockTimeoutMs: config.schemaLockTimeoutMs,
+      warn: opts.bootWarn ?? consoleWarn,
+      ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
+    });
     if (opts.beforeSchemaChange !== undefined) {
-      bundleProductChange = (await opts.beforeSchemaChange(db))?.productChange;
+      bundleProductChange = (await opts.beforeSchemaChange(schemaDb, tenantIsolation))
+        ?.productChange;
     }
     await deployApply.platformChain();
+    if (tenantIsolation !== undefined) {
+      await deployApply.tenantIsolation();
+      databaseIsolation = await checkDatabaseIsolation(db);
+      if (!databaseIsolation.active) {
+        (opts.bootWarn ?? consoleWarn)(databaseIsolationWarning(databaseIsolation));
+      }
+    }
     await fence.load();
     started.fence = fence;
   } catch (err) {
@@ -2524,7 +2679,14 @@ async function assembleServerWith(
     });
   }
 
-  // 9. Start watching the source fence (and heartbeating), now that every producer is attached.
+  // 9. The schema work of this boot is done: close the migration role's pool, so the serving process
+  //    holds no connection that could change the schema.
+  if (migrationDb !== undefined) {
+    await migrationDb.$client.end();
+    started.migrationDb = undefined;
+  }
+
+  // 10. Start watching the source fence (and heartbeating), now that every producer is attached.
   await fence.start();
 
   return {
@@ -2550,6 +2712,7 @@ async function assembleServerWith(
     agentTracing: await observedAgentTracing(),
     fence,
     readiness,
+    databaseIsolation,
     shutdownDrainMs: config.shutdownDrainMs ?? DEFAULT_SHUTDOWN_DRAIN_MS,
     close: async () => {
       // Stop watching the fence (and remove this process's heartbeat), then drain the durable worker
@@ -3602,7 +3765,14 @@ async function deployDeclaredSpec(
     };
     // The /recovery-scope probe reads the LIVE executor identity off this same wired executor.
     durableExecutorIdentity = () => executor.identity();
-    pendingExecutorStart = () => executor.start();
+    pendingExecutorStart = async () => {
+      // With role separation the runtime role may create nothing, so the workflow engine's own schema
+      // is migrated as the migration role first; the engine then launches as the runtime role.
+      if (config.migrationDbosSystemDatabaseUrl !== undefined) {
+        await migrateWorkflowSystemDatabase(config.migrationDbosSystemDatabaseUrl);
+      }
+      await executor.start();
+    };
     // The run queue stops dequeuing under a source fence and starts again on resume, without the
     // engine shutting down; attached BEFORE start, so a boot under a held fence registers it paused.
     await fence.attach(queueProducer('run-queue', executor));

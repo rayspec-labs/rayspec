@@ -56,6 +56,9 @@ export {
   SystemCleanupScheduler,
   type SystemCleanupSchedulerDeps,
 } from './system-cleanup-scheduler.js';
+// The workflow system database's schema, applied by the migration role when the runtime connects as
+// its own role and so may not create the engine's tables at launch.
+export { migrateWorkflowSystemDatabase } from './system-database-migrations.js';
 // Compile-time DBOS wire-shape pins (doc-first): re-exported so the type assertions in this module
 // are part of the build graph (a DBOS config-key rename breaks `tsc -b` here). Erased at runtime.
 export { WIRE_SHAPE_PINNED } from './wire-shape-assertions.js';

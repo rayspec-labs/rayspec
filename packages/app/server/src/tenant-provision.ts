@@ -85,6 +85,12 @@ const FENCED_MESSAGE =
 export interface TenantProvisionSecrets {
   readonly databaseUrl: string;
   readonly apiKeyPepper: string;
+  /**
+   * The migration role's connection (RAYSPEC_MIGRATION_DATABASE_URL), when the deployment separates
+   * its database roles. The migration chain, the row-level isolation step and the provisioning writes
+   * then run over it; `databaseUrl` is only asked which role the runtime serves with.
+   */
+  readonly migrationDatabaseUrl?: string;
 }
 
 export interface TenantProvisionInput {
@@ -229,7 +235,9 @@ export async function provisionTenant(
     );
   }
 
-  const db = makeDb(secrets.databaseUrl);
+  // With role separation everything here runs as the migration role: it migrates, and it writes the
+  // org and its invite before any runtime serves them.
+  const db = makeDb(secrets.migrationDatabaseUrl ?? secrets.databaseUrl);
   // Tracked outside the transaction so a failure AFTER the token file exists — including at commit —
   // can remove it. A stray file holding a credential for a reservation that rolled back is exactly
   // the residue this whole path exists to avoid.
@@ -243,13 +251,20 @@ export async function provisionTenant(
     try {
       const lockOptions =
         opts.schemaLockTimeoutMs === undefined ? {} : { lockTimeoutMs: opts.schemaLockTimeoutMs };
-      await new DeployApply({
+      const tenantIsolation =
+        secrets.migrationDatabaseUrl === undefined
+          ? undefined
+          : { runtimeRole: await runtimeRoleOf(secrets.databaseUrl) };
+      const apply = new DeployApply({
         db,
         migratePlatform: () => applyMigrations(db, lockOptions),
         ...lockOptions,
         actor: TENANT_ENSURE_ACTOR,
         warn: () => {},
-      }).platformChain();
+        ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
+      });
+      await apply.platformChain();
+      await apply.tenantIsolation();
     } catch (err) {
       if (err instanceof RuntimeApplyError) {
         if (err.errors[0]?.reason === 'fenced') {
@@ -443,6 +458,19 @@ export async function provisionTenant(
     throw err;
   } finally {
     await db.$client.end();
+  }
+}
+
+/** The role `databaseUrl` connects as: the runtime role the isolation step revokes ledger writes from. */
+async function runtimeRoleOf(databaseUrl: string): Promise<string> {
+  const runtime = makeDb(databaseUrl, 1);
+  try {
+    const rows = (await runtime.$client.unsafe('SELECT current_user::text AS role')) as unknown as {
+      role: string;
+    }[];
+    return rows[0]?.role ?? '';
+  } finally {
+    await runtime.$client.end();
   }
 }
 
