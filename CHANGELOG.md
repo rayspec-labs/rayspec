@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Application identity in the spec.** A backend spec may declare `metadata.id` and
+  `metadata.version`, and a product spec the same two keys in `product.metadata`: the identity an
+  application bundle carries. Both are optional. The id is a lowercase letter followed by up to 62
+  lowercase letters, digits or hyphens; the version is an exact semantic version with an optional
+  pre-release and no build metadata, at most 128 characters. These are the patterns of
+  `application.id` and `application.version` in the bundle manifest, so a value the grammar accepts
+  is one a bundle can carry. A document without them parses exactly as before, and every other
+  `product.metadata` key stays a free-form string. The three committed JSON Schemas carry the new
+  fields. A 1.8 parser refuses a spec that uses them.
 - **`@rayspec/bundle-contract`: the application bundle contract in code.** A new kernel package
   carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
   managed hosting receipt, as a proposed contract version `1.0.0-draft.2`. It commits the contract's

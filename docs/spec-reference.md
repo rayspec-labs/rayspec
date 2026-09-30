@@ -107,6 +107,23 @@ metadata:
 
 - `name` — required, non-empty string.
 - `description` — optional string.
+- `id` — optional application id: a lowercase letter followed by up to 62 lowercase
+  letters, digits or hyphens (`^[a-z][a-z0-9-]{0,62}$`).
+- `version` — optional application version: an exact semantic version
+  (`MAJOR.MINOR.PATCH`, optionally `-prerelease`), without `+build` metadata, at most
+  128 characters. Quote it so YAML reads it as a string.
+
+`id` and `version` are the identity an application bundle carries. `rayspec pack`
+takes them from here unless `--id` and `--version` override them, and refuses when
+neither gives a value. Neither is ever derived from `name` or from the runtime
+version. A spec without them parses exactly as before.
+
+```yaml
+metadata:
+  name: acme-notes
+  id: acme-notes
+  version: '1.4.0'
+```
 
 ## `stores`
 
@@ -2091,7 +2108,12 @@ product:
 - `name` — required, non-empty.
 - `description` — optional.
 - `owners` — optional list of ownership strings.
-- `metadata` — optional map of small string metadata.
+- `metadata` — optional map of small string metadata. Two keys have a fixed form:
+  `id` (the application id, `^[a-z][a-z0-9-]{0,62}$`) and `version` (the application
+  version, an exact semantic version without `+build` metadata). They are the
+  identity an application bundle carries, as `metadata.id` and `metadata.version` are
+  for a backend spec; `rayspec pack` never derives them from `product.id`. Every other
+  key is a free-form string.
 
 ## `requires` and `capabilities`
 

@@ -46,11 +46,54 @@ export const SPEC_VERSION = '1.0' as const;
 // metadata
 // ---------------------------------------------------------------------------------------
 
-/** Minimal deployment metadata. `name` identifies the backend; extend later as needed. */
+/**
+ * The application id an application bundle is keyed by: a lowercase letter, then up to 62 lowercase
+ * letters, digits or hyphens. The same pattern as `application.id` in the bundle manifest schema, so
+ * an id the grammar accepts is one `rayspec pack` can write.
+ */
+export const APPLICATION_ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
+
+/**
+ * An application's own version: an exact semantic version with an optional pre-release and no build
+ * metadata, at most 128 characters. The same pattern as `application.version` in the bundle manifest
+ * schema.
+ */
+export const APPLICATION_VERSION_PATTERN =
+  /^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:[.](?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
+
+/** The longest application version the bundle manifest accepts. */
+export const APPLICATION_VERSION_MAX_LENGTH = 128;
+
+/** An application id (see `APPLICATION_ID_PATTERN`). */
+export const ApplicationId = z
+  .string()
+  .regex(
+    APPLICATION_ID_PATTERN,
+    'an application id is a lowercase letter followed by up to 62 lowercase letters, digits or hyphens',
+  );
+
+/** An application version (see `APPLICATION_VERSION_PATTERN`). */
+export const ApplicationVersion = z
+  .string()
+  .max(APPLICATION_VERSION_MAX_LENGTH)
+  .regex(
+    APPLICATION_VERSION_PATTERN,
+    'an application version is an exact semantic version (MAJOR.MINOR.PATCH with an optional ' +
+      '-prerelease, no +build metadata)',
+  );
+
+/**
+ * Deployment metadata. `name` identifies the backend. `id` and `version` are the application identity
+ * an application bundle carries: `rayspec pack` takes them from here unless its `--id` and `--version`
+ * flags override them. Both are optional, and neither is ever derived from `name` or from the runtime
+ * version; a spec without them parses exactly as before.
+ */
 export const Metadata = z
   .object({
     name: z.string().min(1),
     description: z.string().optional(),
+    id: ApplicationId.optional(),
+    version: ApplicationVersion.optional(),
   })
   .strict();
 export type Metadata = z.infer<typeof Metadata>;

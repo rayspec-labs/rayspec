@@ -867,6 +867,8 @@ version: '1.0'            # REQUIRED, the literal string '1.0' (quote it).
 metadata:                 # REQUIRED
   name: <string>          #   REQUIRED, non-empty — identifies the backend.
   description: <string>   #   optional
+  id: <app-id>            #   optional — application id for `rayspec pack`: ^[a-z][a-z0-9-]{0,62}$ (never derived from name).
+  version: '<semver>'     #   optional — application version for `rayspec pack`: exact MAJOR.MINOR.PATCH[-pre], no +build. Quote it.
 stores: []                # optional (default []) — see StoreSpec
 api: []                   # optional (default []) — see ApiRouteSpec
 agents: []                # optional (default []) — see AgentSpecConfig
@@ -1801,6 +1803,8 @@ and a multi-turn run where turn 2's reply demonstrably used turn 1 (the history 
 version: '1.0'                # REQUIRED — the SAME literal as a backend spec; the `product:` section is the
                               #   PROFILE discriminant (checked FIRST; a bad version → unsupported_version).
 product:                      # REQUIRED — identity: { id (safe-ident), name, description?, owners?, metadata? }.
+                              #   metadata is a string map; its optional `id` (^[a-z][a-z0-9-]{0,62}$) and
+                              #   `version` (exact semver, no +build) are the application identity `rayspec pack` uses.
 requires:                     # capability ids the product depends on: { capabilities: [<id>, ...] }.
 capabilities: []              # Tier-B capability REFERENCES (declaration, not implementation) — see below.
 artifacts: []                # product-owned artifact KINDS + their response contract — see below.

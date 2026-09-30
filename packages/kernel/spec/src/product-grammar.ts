@@ -38,7 +38,13 @@ import { z } from 'zod';
 // kind / declared store column is rejected the same way backend store/column names are — and so a derived
 // product store is a standard `StoreSpec` the whole backend store machinery (generateProductSql /
 // diffProductStores / drift / classify / the update seam) consumes UNCHANGED.
-import { SafeIdentifier, SPEC_VERSION, StoreColumn } from './grammar.js';
+import {
+  ApplicationId,
+  ApplicationVersion,
+  SafeIdentifier,
+  SPEC_VERSION,
+  StoreColumn,
+} from './grammar.js';
 // The view read+projection vocabulary — a SEPARATE module so this file's diff
 // stays minimal. See product-views.ts for the design laws.
 import { ViewConditionalRead, ViewParamSpec, ViewRead } from './product-views.js';
@@ -61,8 +67,16 @@ export const ProductIdentity = z
     description: z.string().optional(),
     /** Human ownership metadata (free-form small strings). */
     owners: z.array(z.string().min(1)).optional(),
-    /** Small string metadata — NOT runtime behavior. */
-    metadata: z.record(z.string(), z.string()).optional(),
+    /**
+     * Small string metadata — NOT runtime behavior. Free-form, except for two keys: `id` and
+     * `version` are the application identity an application bundle carries (`rayspec pack` takes
+     * them from here unless `--id` and `--version` override them), so each must match the pattern
+     * the bundle manifest uses. Every other key stays an arbitrary string.
+     */
+    metadata: z
+      .object({ id: ApplicationId.optional(), version: ApplicationVersion.optional() })
+      .catchall(z.string())
+      .optional(),
   })
   .strict();
 export type ProductIdentity = z.infer<typeof ProductIdentity>;
