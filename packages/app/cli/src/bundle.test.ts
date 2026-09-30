@@ -10,6 +10,7 @@
  * reaches it. Those run through `runBundle`, the verb body `main` calls, with that runtime profile or
  * those limits.
  */
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +20,8 @@ import { cliRuntimeProfile, runBundle } from './bundle.js';
 import { envelopeExitCode } from './envelope.js';
 import { main } from './index.js';
 import {
+  baseFilesOf,
+  bundleEntries,
   type CaseExpectation,
   type CorpusCase,
   captureOutput,
@@ -26,6 +29,7 @@ import {
   corpusFile,
   loadExpectations,
   type ParsedJson,
+  rawZip,
   testSigner,
   writePublicKeyPem,
 } from './test-support/bundles.js';
@@ -172,6 +176,37 @@ describe('bundle verify — every corpus case', () => {
     expect(exit).toBe(1);
     const codes = stdoutEnvelope().errors.map((e: { code: string }) => e.code);
     expect(codes).toEqual(['RAY_SPEC_INVALID', 'SPEC_SCHEMA_VIOLATION', 'SPEC_UNKNOWN_FIELD']);
+  });
+
+  it.each([
+    ['a YAML syntax error', 'version: "1.0"\nmetadata:\n  db_password: "hunter2-SECRET-VALUE" [\n'],
+    ['an unsupported version', 'version: "hunter2-SECRET-VALUE"\n'],
+    ['a schema violation', 'version: "1.0"\nmetadata:\n  name: ["hunter2-SECRET-VALUE"]\n'],
+  ])('a spec error from %s never repeats the spec text', async (_label, spec) => {
+    const files = baseFilesOf(expectations);
+    files.set('payload/rayspec.yaml', Buffer.from(spec));
+    const archive = join(work, 'spec-echo.ray');
+    writeFileSync(archive, rawZip(bundleEntries(expectations as never, { files })));
+    const exit = await main(['bundle', 'verify', archive, '--runtime', '0.0.0-contract-fixture']);
+    expect(exit).toBe(1);
+    const envelope = stdoutEnvelope();
+    expect(envelope.errors[0].code).toBe('RAY_SPEC_INVALID');
+    expect(envelope.errors[1].code).toMatch(/^SPEC_/);
+    expect(io.out() + io.err()).not.toContain('hunter2');
+  });
+
+  it('a spec syntax error keeps its line and column', async () => {
+    const files = baseFilesOf(expectations);
+    files.set('payload/rayspec.yaml', Buffer.from('version: "1.0"\nmetadata:\n  x: "y" [\n'));
+    const archive = join(work, 'spec-position.ray');
+    writeFileSync(archive, rawZip(bundleEntries(expectations as never, { files })));
+    await main(['bundle', 'verify', archive, '--runtime', '0.0.0-contract-fixture']);
+    expect(stdoutEnvelope().errors[1]).toMatchObject({
+      code: 'SPEC_YAML_PARSE_ERROR',
+      message: expect.stringMatching(
+        /^the spec breaks the yaml parse error rule at line 3, column \d+$/,
+      ),
+    });
   });
 
   it('a secret finding names the path and never the content', async () => {
@@ -329,6 +364,45 @@ describe('arguments', () => {
       expect(io.out() + io.err()).not.toContain('AAAA');
       expect(io.out() + io.err()).not.toContain('BEGIN PRIVATE');
     }
+  });
+
+  it('a trusted key file larger than a key file is refused, even when it starts with a key', async () => {
+    const padded = join(work, 'padded.pub.pem');
+    const pem = testSigner('a key padded past the size cap').publicKey.export({
+      format: 'pem',
+      type: 'spki',
+    });
+    writeFileSync(padded, `${pem}${'\n'.repeat(20_000)}`);
+    const exit = await main([
+      'bundle',
+      'verify',
+      good,
+      '--runtime',
+      '0.0.0-contract-fixture',
+      '--trusted-key',
+      padded,
+    ]);
+    expect(exit).toBe(2);
+    expect(stdoutEnvelope().errors[0].code).toBe('RAY_USAGE');
+  });
+
+  it('a FIFO as the archive, the signature or a trusted key is answered at once', {
+    timeout: 10_000,
+  }, async () => {
+    const fifo = join(work, 'pipe');
+    execFileSync('mkfifo', [fifo]);
+    expect(await main(['bundle', 'inspect', fifo])).toBe(2);
+    expect(stdoutEnvelope().errors[0].code).toBe('RAY_USAGE');
+    io = captureOutput();
+    const runtime = ['--runtime', '0.0.0-contract-fixture'];
+    expect(await main(['bundle', 'verify', good, ...runtime, '--signature', fifo])).toBe(4);
+    expect(stdoutEnvelope().errors[0]).toMatchObject({
+      code: 'RAY_SIGNATURE_INVALID',
+      reason: 'malformed',
+    });
+    io = captureOutput();
+    expect(await main(['bundle', 'verify', good, ...runtime, '--trusted-key', fifo])).toBe(2);
+    expect(stdoutEnvelope().errors[0].code).toBe('RAY_USAGE');
   });
 
   it('a file that does not exist is RAY_USAGE', async () => {

@@ -44,12 +44,14 @@ export type BundleSpec =
   | { kind: 'rayspec'; spec: RaySpec }
   | { kind: 'product'; spec: ProductSpec };
 
-/** The largest spec message an envelope carries; the envelope schema caps a message at 2048. */
-const MAX_SPEC_MESSAGE = 2048;
-
 /**
  * Parse the spec bytes of a bundle. A spec that is not UTF-8, or that the grammar refuses, is
  * `RAY_SPEC_INVALID` followed by each spec error as a `SPEC_` code with its path.
+ *
+ * The parser's own messages quote the document (a YAML error repeats the offending line, a schema
+ * error the offending value), and the document here comes from an archive, so its text could be a
+ * secret. Each message is therefore rebuilt from the error code and, when the parser gives one,
+ * the line and column; nothing of the spec's text reaches the envelope except the path.
  */
 export function parseBundleSpec(
   bytes: Uint8Array,
@@ -80,7 +82,7 @@ export function parseBundleSpec(
       ...parsed.errors.map((e) => {
         const error: BundleError = {
           code: specEnvelopeCode(e.code),
-          message: e.message.slice(0, MAX_SPEC_MESSAGE),
+          message: redactedMessage(e.code, e.message),
           retryable: false,
         };
         if (e.path !== undefined && e.path !== '') error.path = e.path;
@@ -88,6 +90,13 @@ export function parseBundleSpec(
       }),
     ],
   };
+}
+
+/** A spec error's message without the spec's text: the rule it breaks and where. */
+function redactedMessage(code: string, message: string): string {
+  const position = /\bline (\d+), column (\d+)/.exec(message);
+  const where = position === null ? '' : ` at line ${position[1]}, column ${position[2]}`;
+  return `the spec breaks the ${code.replaceAll('_', ' ')} rule${where}`;
 }
 
 /** The manifest fields a parsed spec derives, in the form the manifest carries them. */

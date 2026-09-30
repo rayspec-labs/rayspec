@@ -10,7 +10,19 @@ import { fileURLToPath } from 'node:url';
 import { vi } from 'vitest';
 // The one case the corpus does not commit (10,005 entries) is built by construction with the bundle
 // package's own raw ZIP helper, so the bytes are the ones that package checks against the recording.
-import { bundleEntries, rawZip } from '../../../../kernel/bundle/src/test-support/raw-zip.js';
+import {
+  baseFiles,
+  bundleEntries,
+  rawZip,
+} from '../../../../kernel/bundle/src/test-support/raw-zip.js';
+
+/** The raw ZIP helpers, for tests that build a bundle with a file of their own. */
+export { bundleEntries, rawZip };
+
+/** The files of the application base of the corpus, as name to bytes. */
+export function baseFilesOf(expectations: Expectations): Map<string, Buffer> {
+  return baseFiles(expectations as never);
+}
 
 const require = createRequire(import.meta.url);
 

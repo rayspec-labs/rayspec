@@ -401,11 +401,14 @@ async function verifySteps(
 
 // ─── files ─────────────────────────────────────────────────────────────────────────────────────
 
-/** Read up to `limit` bytes of a regular file; null when it is not one or cannot be read. */
+/**
+ * Read up to `limit` bytes of a regular file; null when it is not one or cannot be read. The file
+ * is opened without blocking, so a FIFO with no writer is answered at once instead of hanging.
+ */
 async function readBounded(path: string, limit: number): Promise<Buffer | null> {
   let handle: Awaited<ReturnType<typeof open>>;
   try {
-    handle = await open(path, constants.O_RDONLY);
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch {
     return null;
   }

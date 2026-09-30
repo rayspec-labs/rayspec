@@ -209,6 +209,25 @@ describe('parseBundleSpec', () => {
     }
   });
 
+  it('builds each message from the rule and position, never from the spec text', () => {
+    const r = parseBundleSpec(
+      Buffer.from("version: '1.0'\nmetadata:\n  name: x\nsecret_token_value: 1\n"),
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.errors[1]).toMatchObject({
+        code: 'SPEC_UNKNOWN_FIELD',
+        message: 'the spec breaks the unknown field rule',
+        path: 'secret_token_value',
+      });
+    }
+    const y = parseBundleSpec(Buffer.from('a: 1\nkey: "s3cr3t" [\n'));
+    expect(!y.ok && y.errors[1]!.message).toMatch(
+      /^the spec breaks the yaml parse error rule at line 2, column \d+$/,
+    );
+    expect(JSON.stringify(y)).not.toContain('s3cr3t');
+  });
+
   it('refuses a YAML syntax error', () => {
     const r = parseBundleSpec(Buffer.from('version: [\n'));
     expect(r.ok).toBe(false);
