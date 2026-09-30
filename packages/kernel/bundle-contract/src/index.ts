@@ -4,6 +4,10 @@
  *
  * It holds the committed JSON Schemas and vocabularies, their TypeScript shapes, the canonical
  * JSON form, and validators that parse and check each document in the reader pipeline's order.
+ * It also carries the pure rules of the runtime-control operations: request checks, the plan
+ * digest and its expiry, the product schema digest, the shared schema lock key and the platform
+ * tables with their snapshot categories.
+ *
  * No I/O: it reads no file, opens no connection and knows no cloud provider. The committed
  * contract files ship beside the build under `contract/`, with `CONTRACT-LOCK.json` recording the
  * SHA-256 of each.
@@ -39,6 +43,48 @@ export {
   specEnvelopeCode,
   WARNING_CODES,
 } from './errors.js';
+export {
+  CONTRACT_PLATFORM_TABLES,
+  PLATFORM_TABLES,
+  type PlatformTable,
+  PUBLIC_PLATFORM_TABLE_NAMES,
+  RUNTIME_CONTROL_TABLES,
+} from './platform-tables.js';
+export {
+  BINDING_REVISION_KEY_BYTES,
+  bindingRevisionId,
+  checkBindingRevisions,
+  checkPrepareRequest,
+  checkRequestBase,
+  DEFAULT_SCHEMA_LOCK_TIMEOUT_MS,
+  digestOf,
+  EMPTY_PRODUCT_SCHEMA_DIGEST,
+  formatTimestamp,
+  isPlanExpired,
+  isSha256,
+  isUuidV4,
+  MAX_ACTOR_LENGTH,
+  MAX_BINDING_REVISIONS,
+  normalizeProductSchema,
+  PLAN_FORMAT_VERSION,
+  PLAN_LIFETIME_MS,
+  type PlanDigestInput,
+  type PlanDigestInputs,
+  type PlanGrants,
+  PRODUCT_SCHEMA_FORMAT_VERSION,
+  type ProductColumn,
+  type ProductSchemaDescription,
+  type ProductTable,
+  parseTimestamp,
+  planDigest,
+  planDigestInput,
+  planExpiresAt,
+  productSchemaDigest,
+  SCHEMA_LOCK_NAMESPACE,
+  SCHEMA_LOCK_SLOT,
+  sameSchemaHead,
+  UNRELEASED_RUNTIME,
+} from './runtime-control.js';
 export {
   CONTRACT_SCHEMAS,
   type ContractSchemaName,
