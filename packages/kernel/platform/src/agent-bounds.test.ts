@@ -7,8 +7,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  MANAGED_RUN_CANCEL_POLL_MS,
   resolveAgentMaxAttempts,
   resolveAgentRequestTimeoutMs,
+  resolveRunCancelPoll,
   resolveRunCancelPollMs,
   resolveRunMaxMs,
 } from './agent-bounds.js';
@@ -176,6 +178,41 @@ describe('resolveRunCancelPollMs (RAYSPEC_RUN_CANCEL_POLL_MS)', () => {
     } finally {
       if (saved === undefined) delete process.env.RAYSPEC_RUN_CANCEL_POLL_MS;
       else process.env.RAYSPEC_RUN_CANCEL_POLL_MS = saved;
+    }
+  });
+});
+
+describe('resolveRunCancelPoll under the hosting posture', () => {
+  it('turns the poll on at the managed default when the posture is managed', () => {
+    expect(resolveRunCancelPoll(env({ RAYSPEC_HOSTING_POSTURE: 'managed' }))).toEqual({
+      intervalMs: MANAGED_RUN_CANCEL_POLL_MS,
+      source: 'hosting-posture',
+    });
+    expect(resolveRunCancelPollMs(env({ RAYSPEC_HOSTING_POSTURE: ' managed ' }))).toBe(
+      MANAGED_RUN_CANCEL_POLL_MS,
+    );
+  });
+
+  it('keeps an explicit interval over the posture default', () => {
+    expect(
+      resolveRunCancelPoll(
+        env({ RAYSPEC_HOSTING_POSTURE: 'managed', RAYSPEC_RUN_CANCEL_POLL_MS: '500' }),
+      ),
+    ).toEqual({ intervalMs: 500, source: 'explicit' });
+  });
+
+  it('falls back to the managed default for an unusable explicit value', () => {
+    expect(
+      resolveRunCancelPollMs(
+        env({ RAYSPEC_HOSTING_POSTURE: 'managed', RAYSPEC_RUN_CANCEL_POLL_MS: '0' }),
+      ),
+    ).toBe(MANAGED_RUN_CANCEL_POLL_MS);
+  });
+
+  it('stays off under the local posture, an unset posture or any other value', () => {
+    for (const posture of [undefined, 'local', 'Managed', 'managed-ish']) {
+      const e = posture === undefined ? env({}) : env({ RAYSPEC_HOSTING_POSTURE: posture });
+      expect(resolveRunCancelPoll(e)).toEqual({ intervalMs: undefined, source: 'off' });
     }
   });
 });

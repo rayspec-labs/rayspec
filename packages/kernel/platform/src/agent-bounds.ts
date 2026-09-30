@@ -10,6 +10,7 @@
  *   RAYSPEC_AGENT_RUN_MAX_MS          wall clock run-core waits for one whole run
  *   RAYSPEC_RUN_CANCEL_POLL_MS        how often an executing run re-reads its own cancellation
  *                                     marker, so a cancellation issued in another process reaches it
+ *                                     (on by default under RAYSPEC_HOSTING_POSTURE=managed)
  *
  * The parsing rule is the one `resolveBootTimeoutMs` uses for RAYSPEC_BOOT_TIMEOUT_MS: trim, parse,
  * and fall back to the default on anything unusable. Here the default is "off", so an absent or
@@ -82,10 +83,42 @@ export function resolveRunMaxMs(env: NodeJS.ProcessEnv = process.env): number | 
 }
 
 /**
+ * The cancellation poll interval under the managed hosting posture when `RAYSPEC_RUN_CANCEL_POLL_MS`
+ * does not set one: a cancellation issued anywhere reaches a run executing in another worker process
+ * within about two seconds, for one indexed read per executing run per interval.
+ */
+export const MANAGED_RUN_CANCEL_POLL_MS = 2_000;
+
+/** Where the cancellation poll interval came from. */
+export type RunCancelPollSource = 'explicit' | 'hosting-posture' | 'off';
+
+/**
+ * How often a run that is EXECUTING re-reads its own persisted cancellation marker, and why: the value
+ * of `RAYSPEC_RUN_CANCEL_POLL_MS` when it is set (`explicit`); otherwise, under
+ * `RAYSPEC_HOSTING_POSTURE=managed`, {@link MANAGED_RUN_CANCEL_POLL_MS} (`hosting-posture`), because a
+ * managed runtime must stop a run wherever it executes; otherwise undefined (`off`).
+ *
+ * The posture value is read raw here: the boot validates it (`parseHostingPosture` refuses anything
+ * but `local` and `managed`), and a value that is not exactly `managed` leaves the default off.
+ */
+export function resolveRunCancelPoll(env: NodeJS.ProcessEnv = process.env): {
+  intervalMs: number | undefined;
+  source: RunCancelPollSource;
+} {
+  const explicit = positiveInt(env.RAYSPEC_RUN_CANCEL_POLL_MS);
+  if (explicit !== undefined) return { intervalMs: explicit, source: 'explicit' };
+  if (env.RAYSPEC_HOSTING_POSTURE?.trim() === 'managed') {
+    return { intervalMs: MANAGED_RUN_CANCEL_POLL_MS, source: 'hosting-posture' };
+  }
+  return { intervalMs: undefined, source: 'off' };
+}
+
+/**
  * How often a run that is EXECUTING re-reads its own persisted cancellation marker, in milliseconds
- * (`RAYSPEC_RUN_CANCEL_POLL_MS`). Undefined ⇒ it is never re-read while the run waits, which is the
- * behaviour before this variable existed: a cancellation reaches an executing run only through the
- * process-local signal, so a run executing in ANOTHER process is not interrupted by it.
+ * (`RAYSPEC_RUN_CANCEL_POLL_MS`, or the managed posture's default — {@link resolveRunCancelPoll}).
+ * Undefined ⇒ it is never re-read while the run waits, which is the behaviour of a local posture
+ * without the variable: a cancellation reaches an executing run only through the process-local
+ * signal, so a run executing in ANOTHER process is not interrupted by it.
  *
  * There is deliberately NO floor and NO clamp: the parser above is the whole rule. A floor would
  * silently substitute a longer interval than the operator wrote — the same surprise the out-of-range
@@ -93,7 +126,7 @@ export function resolveRunMaxMs(env: NodeJS.ProcessEnv = process.env): number | 
  * shorter than it.
  */
 export function resolveRunCancelPollMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
-  return positiveInt(env.RAYSPEC_RUN_CANCEL_POLL_MS);
+  return resolveRunCancelPoll(env).intervalMs;
 }
 
 /**

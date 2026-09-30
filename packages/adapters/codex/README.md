@@ -34,7 +34,8 @@ bridge is **bounded**: it no longer waits on connections that outlive the turn. 
   here**. The cancellation tests drive the real SDK against a stand-in executable, so the points
   above are stated as limits rather than measured against the shipped CLI.
 - A run already executing in a **separate worker process** receives no in-process signal by
-  default; setting `RAYSPEC_RUN_CANCEL_POLL_MS` makes that process re-read the cancellation record
+  default; setting `RAYSPEC_RUN_CANCEL_POLL_MS` (on by default under
+  `RAYSPEC_HOSTING_POSTURE=managed`) makes that process re-read the cancellation record
   and raise the abort itself, which is the signal this adapter acts on. Both behaviours are shared
   by all four backends.
 - A tool call already in flight is not interrupted, and work already committed upstream is not

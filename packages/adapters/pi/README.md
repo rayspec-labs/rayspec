@@ -49,7 +49,8 @@ abandoned. What that leaves, honestly:
   starts a branch summary itself.)
 - **A run executing in a separate worker process receives no in-process signal by default.** The
   run is recorded cancelled and never dispatched again, but the work in that process stops when it
-  stops. Setting `RAYSPEC_RUN_CANCEL_POLL_MS` makes that process re-read the cancellation record on
+  stops. Setting `RAYSPEC_RUN_CANCEL_POLL_MS` (on by default under
+  `RAYSPEC_HOSTING_POSTURE=managed`) makes that process re-read the cancellation record on
   the configured interval and raise the abort itself — the same signal this adapter wires to its
   session, so the stop applies there as it does in-process. Both behaviours are shared by all four
   backends and are not adapter-specific.

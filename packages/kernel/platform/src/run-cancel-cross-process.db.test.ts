@@ -43,6 +43,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TenantDb } from '@rayspec/db';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { MANAGED_RUN_CANCEL_POLL_MS } from './agent-bounds.js';
 import {
   isRunCancelled,
   markRunCancelled,
@@ -98,9 +99,16 @@ interface ChildArm {
  * parent's own configuration is never changed by this, which is what keeps the in-process control
  * arms honest.
  */
-function spawnCrossProcessRun(cfg: CrossProcessRunConfig, pollMs: number): ChildArm {
+function spawnCrossProcessRun(
+  cfg: CrossProcessRunConfig,
+  pollMs: number | { env: Record<string, string> },
+): ChildArm {
+  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  delete childEnv[POLL_ENV];
+  delete childEnv.RAYSPEC_HOSTING_POSTURE;
+  Object.assign(childEnv, typeof pollMs === 'number' ? { [POLL_ENV]: String(pollMs) } : pollMs.env);
   const child = spawn(process.execPath, ['--import', 'tsx', CHILD_PATH, JSON.stringify(cfg)], {
-    env: { ...process.env, [POLL_ENV]: String(pollMs) },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.push(child);
@@ -409,6 +417,36 @@ describe('ACCEPTANCE 1 — a run in a second process observes the cancellation a
   });
 });
 
+describe('the managed hosting posture turns the cross-process poll on by default', () => {
+  it('a child with RAYSPEC_HOSTING_POSTURE=managed and no interval set ends on the marker alone', async () => {
+    testsRan += 1;
+    const childCfg = config('managed-posture');
+    const child = spawnCrossProcessRun(childCfg, { env: { RAYSPEC_HOSTING_POSTURE: 'managed' } });
+    await child.inGate;
+    expect(signalRunCancelled(childCfg.runId)).toBe(false);
+    const markedAt = Date.now();
+    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    expect(await child.done).toMatchObject({
+      outcome: 'cancelled',
+      errorName: 'RunCancelledError',
+    });
+    expect(await terminalShape(childCfg.runId)).toEqual(CANCELLED_SHAPE);
+    // Within one default interval plus the margin the explicit arms get, and well inside the gate a
+    // run nothing reached would burn out.
+    expect(Date.now() - markedAt).toBeLessThan(MANAGED_RUN_CANCEL_POLL_MS + OBSERVE_WITHIN_MS);
+  });
+
+  it('PAIRED CONTROL: without the posture and without an interval, the marker alone does not end it', async () => {
+    testsRan += 1;
+    const childCfg = config('local-posture', { gateMs: 2500 });
+    const child = spawnCrossProcessRun(childCfg, { env: {} });
+    await child.inGate;
+    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    // Nothing re-reads the marker, so the run burns its gate and completes.
+    expect(await child.done).toMatchObject({ outcome: 'completed' });
+  });
+});
+
 describe('ACCEPTANCE 3 — a cancelled run that fired a non-idempotent tool stays quarantined', () => {
   it('the taint survives the rollback, the run stays marked cancelled, and the journal shows only the cancellation', async () => {
     testsRan += 1;
@@ -520,7 +558,7 @@ describe('what a cancelled run leaves in its journal follows the INVOCATION SHAP
 // The ran-guard: registered LAST + no beforeAll dependency, so a beforeAll throw that skipped the
 // arms above can never read as a passing (green) file.
 describe('cross-process cancellation — ran-guard (not skippable-as-green)', () => {
-  it('the cross-process arms ACTUALLY RAN (all seven)', () => {
-    expect(testsRan).toBe(7);
+  it('the cross-process arms ACTUALLY RAN (all nine)', () => {
+    expect(testsRan).toBe(9);
   });
 });

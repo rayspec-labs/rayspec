@@ -140,8 +140,10 @@ that the core deliberately leaves out.
   cancellation is what makes it non-re-dispatchable rather than anything stopping the
   work. Setting **`RAYSPEC_RUN_CANCEL_POLL_MS`** lifts that: the run's own process
   re-reads its cancellation record on that interval and raises the abort there, so
-  the run ends where it runs. It is **off by default** — a deployment that wants
-  cross-process cancellation opts into the per-run reads it costs. How far the stop
+  the run ends where it runs. It is **off by default** under the local hosting
+  posture — a deployment that wants cross-process cancellation opts into the per-run
+  reads it costs — and **on by default** under `RAYSPEC_HOSTING_POSTURE=managed`, at a
+  2000 ms interval unless the variable sets another. How far the stop
   reaches inside a single process also varies by backend; the per-backend table in
   `spec-reference.md` and each adapter README state the residual limits.
 - **Deletes are soft; the hard-delete purge is off by default.** A delete takes
