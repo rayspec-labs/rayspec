@@ -150,8 +150,10 @@ version with the same schema and grants needs no digest. The deploy then:
    one envelope (`operation: deploy`, `status: stopped`).
 
 The application runs from the version directory only: its handlers and extensions import
-`@rayspec/*` from the installed runtime and every other package from the bundle. A package the bundle
-does not carry is not found, even if a `node_modules` above the state directory has it.
+`@rayspec/*` from the installed runtime and every other package from the bundle, whether they use
+`import` or CommonJS `require()`. A copy of a `@rayspec/*` package inside the bundle is never loaded.
+A package the bundle does not carry is not found, even if a `node_modules` above the state directory
+has it.
 
 ### The state directory
 
@@ -237,11 +239,14 @@ the cause.
 | `RAY_RECONCILIATION_REQUIRED` | 6 | An earlier operation left a step whose outcome is unknown; see [Runtime operations → Recovering from an interrupted operation](./runtime-operations.md#recovering-from-an-interrupted-operation). |
 
 **A deploy that stopped part way** — killed, out of memory, the host lost — is continued by running
-the same command again: its idempotency key is the plan digest, so the second run continues the
-interrupted operation instead of starting another. Its finished steps are not repeated, and a
-product schema change that had not committed was rolled back with its transaction and runs again.
-While the dead process's operation lease lives (up to a minute) the retry is refused with
-`RAY_LOCK_TIMEOUT`; retry after it.
+the same command again while its plan is valid (30 minutes from the dry-run, its `expiresAt`): its
+idempotency key is the plan digest, so the second run continues the interrupted operation instead of
+starting another. Its finished steps are not repeated, and a product schema change that had not
+committed was rolled back with its transaction and runs again. While the dead process's operation
+lease lives (up to a minute) the retry is refused with `RAY_LOCK_TIMEOUT`; retry after it. Once the
+plan has expired the same command is refused with `RAY_PLAN_STALE`: run the dry-run again and
+deploy the new digest. The interrupted operation is settled first, as every apply settles an
+interrupted one before it starts.
 
 **A deploy that stopped after its schema change committed** is never reversed: the runtime does not
 drop what it added or restore what it changed. The previous version stays active and nothing

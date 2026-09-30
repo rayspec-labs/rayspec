@@ -95,7 +95,9 @@ nowhere to record it yet.
 
 `rayspec deploy <file.ray>` makes its change as ONE apply with the actor `rayspec-deploy`, whose
 idempotency key is the plan digest the operator accepted, so running the same deploy again after
-an interruption continues that operation. Its steps, in order:
+an interruption continues that operation while the plan is valid (30 minutes from the dry-run);
+after that the plan is refused as `RAY_PLAN_STALE`, and a new dry-run and its digest finish the
+deploy. Its steps, in order:
 
 | Step | What it does | After a crash |
 | --- | --- | --- |

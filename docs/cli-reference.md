@@ -1332,7 +1332,11 @@ says how to finish it. The application is served from the active version directo
 `deploy` with `{bundleSha256, deploymentId, planDigest, environmentRevision, status}` —
 written when the deploy refuses (`status: refused`) or, once it serves, when it stops
 (`status: stopped`). The operation id, the boot banner and, without `--json`, a summary of the plan
-go to stderr.
+go to stderr, and so does anything else printed while the deploy runs (the durable runtime's
+startup lines, a handler's `console.log`), so stdout holds the one envelope. After a deploy that
+changed the product schema the banner's `Product DB` line names the product migration ledger row
+that change wrote. A `.ray` path that cannot be opened is refused as `RAY_USAGE`, in the words
+`rayspec bundle verify` uses.
 
 **Exit codes.** `0` a dry-run that planned, or a deployment that stopped on `SIGINT`/`SIGTERM` ·
 `1` the boot refused its configuration after the plan was accepted (`RAY_CHECK_FAILED`, with the

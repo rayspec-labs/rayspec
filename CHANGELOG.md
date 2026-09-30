@@ -26,18 +26,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the boot validates the signing key, the spec and its preflight, and only then does one apply run
   the platform chain, the regenerated product change with its ledger row, the application's record
   and the switch of `active.json`, each step with receipts; its idempotency key is the plan digest,
-  so the same deploy run again after an interruption continues the interrupted operation. A deploy
-  that fails leaves the previous version active and reverses no schema change; its refusal names
-  the forward step that finishes it. The application is served from the active version directory:
-  `@rayspec/*` imports resolve to the installed runtime, every other package to the bundle, and a
-  package the bundle does not carry is not found even when a `node_modules` above the state
-  directory has it. Bindings come from `--bindings-file` (JSON, the contract's schema, a regular
+  so the same deploy run again after an interruption, while its plan is valid (30 minutes from the
+  dry-run), continues the interrupted operation; once the plan has expired, run the dry-run again
+  and deploy the new digest. A deploy that fails leaves the previous version active and reverses no
+  schema change; its refusal names the forward step that finishes it. When the live product schema
+  is already the one the bundle's delta migrates to — the delta landed in a deploy that stopped
+  before it finished — the dry-run plans no further product change, so the deploy is finished
+  forward; a carried delta that ends anywhere else is refused. The boot banner names the product
+  migration ledger row the deploy's product change wrote. The application is served from the active
+  version directory: `@rayspec/*` imports and `require()` calls resolve to the installed runtime (a
+  copy the bundle carries is never loaded), every other package to the bundle, and a package the
+  bundle does not carry is not found even when a `node_modules` above the state directory has it. Bindings come from `--bindings-file` (JSON, the contract's schema, a regular
   file owned by the user with mode 0600 or stricter, otherwise `RAY_BINDINGS_FILE_INSECURE`) and
   the explicit process environment only: no `.env` file is loaded on this path, a reserved operator
   name in the file is refused with `RAY_BINDING_RESERVED`, a required binding without a value is
   `RAY_BINDING_MISSING`, and no value reaches any output, plan or receipt — plans carry HMAC
   revision ids. The verb writes one `deploy.dry-run` or `deploy` envelope on stdout, with or without
-  `--json`, and exits with the contract class of its first error. New: the guide
+  `--json`, and exits with the contract class of its first error; whatever else is printed while it
+  runs (the durable runtime's startup lines, a handler's `console.log`) goes to stderr. New: the guide
   [Deploying a bundle on your own server](./docs/self-hosted-deployment.md) — inspect, bind, review,
   apply, readiness, update, recovery.
 - **An upgrade check with data, run in CI.** `pnpm test:upgrade-with-data`
@@ -54,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `applyBundle`, `bindingRevisions`, `initialBindingRevisionKey`, `planNeedsReview`, the
   deployment state directory (`openStateDirectory`, `StateDirectory`, `readProtectedFile`) and
   `installBundleModuleResolution`. `assembleServer` accepts `beforeSchemaChange`, run after the
-  boot validated everything and before it changes any schema, and `ensureRuntimeControlState`
+  boot validated everything and before it changes any schema, which may report the product change
+  it applied (`BeforeSchemaChangeResult`, shown on the boot banner), and `ensureRuntimeControlState`
   accepts the binding revision key a first apply stores.
 
 - **`rayspec pack`: an application bundle from an application that is already built.**
@@ -381,11 +388,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **A bundle whose product change is already applied plans no further change.** `prepare()` used to
-  refuse, with `RAY_MIGRATION_MISMATCH`, a bundle whose carried delta regenerates empty. When the
-  live product schema is exactly the one the bundle's delta migrates to — the delta landed in a
-  deploy that stopped before it finished — the plan now has no product change and no blocker, so
-  the deploy can be finished forward. A carried delta that ends anywhere else is still refused.
 - **The legacy YAML deploy changes the schema through apply.** Every schema change a boot makes
   (`rayspec deploy <spec.yaml>` and `rayspec-serve`) — the platform migration chain when the
   ledger is behind the runtime, and each product-store migration — runs as a `runtime.apply`
