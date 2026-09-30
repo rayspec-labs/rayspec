@@ -1,0 +1,73 @@
+# A backend-profile spec with one of every work producer a source fence has to stop: a cron trigger
+# ticking every second, a manual trigger, the durable run queue (async agent runs), the tenant event
+# bus, an upload (stream ingest) route and the event-stream subscription. Purely a test fixture —
+# zero product meaning. The agent's backend is injected by boot.ts (no network).
+
+version: '1.0'
+
+metadata:
+  name: fence-boot
+  description: every producer a source fence stops, for the fence boot suite
+
+deployment:
+  durableWorker: true
+  eventBus:
+    enabled: true
+
+stores:
+  - name: fence_notes
+    columns:
+      - { name: body, type: text }
+  - name: fence_ticks
+    columns:
+      - { name: trigger_name, type: text }
+
+api:
+  - { method: GET, path: '/fence-notes', action: { kind: store, store: fence_notes, op: list } }
+  - { method: POST, path: '/fence-notes', action: { kind: store, store: fence_notes, op: create } }
+  - { method: GET, path: '/fence-ticks', action: { kind: store, store: fence_ticks, op: list } }
+  - method: GET
+    path: /emit-on-read
+    action: { kind: handler, handler: emit_handler }
+  - method: GET
+    path: /write-on-read
+    action: { kind: handler, handler: write_handler }
+  - method: POST
+    path: /uploads/{upload_id}
+    action: { kind: stream, handler: ingest_handler, mode: ingest }
+
+agents:
+  - id: echo
+    name: echo-agent
+    backend: openai
+    model: gpt-4o-mini
+    instructions: Echo the input back.
+    maxTurns: 2
+
+triggers:
+  - name: every-second
+    kind: cron
+    schedule: '* * * * * *'
+    action: { kind: handler, handler: tick_handler }
+  - name: by-hand
+    kind: manual
+    action: { kind: agent, agent: echo }
+
+handlers:
+  - id: tick_handler
+    module: handlers/tick.mjs
+    export: tick
+    kind: trigger
+  - id: emit_handler
+    module: handlers/emit.mjs
+    export: emitOnRead
+    kind: route
+    readonly: true
+  - id: write_handler
+    module: handlers/write.mjs
+    export: writeOnRead
+    kind: route
+  - id: ingest_handler
+    module: handlers/ingest.mjs
+    export: ingest
+    kind: route

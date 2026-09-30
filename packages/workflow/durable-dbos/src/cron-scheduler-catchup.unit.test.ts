@@ -106,14 +106,25 @@ triggers:
   });
 });
 
-describe('registerScheduledWorkflows — hands the catch-up mode to DBOS', () => {
+describe('registerScheduledWorkflows — hands the catch-up mode to the schedule', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('registers a catch-up trigger under ExactlyOncePerInterval and a plain trigger under ExactlyOncePerIntervalWhenActive', () => {
-    // Mock the two static DBOS registration calls so nothing touches a real engine / the global
-    // registry. `registerWorkflow` passes its function through; `registerScheduled` captures the config.
+    // Mock the static DBOS registration calls so nothing touches a real engine / the global
+    // registry. `registerWorkflow` passes its function through; the schedule registration
+    // (scheduled-workflow.ts) associates its config with the workflow, captured here per name.
     vi.spyOn(DBOS, 'registerWorkflow').mockImplementation(((fn: unknown) => fn) as never);
-    const scheduled = vi.spyOn(DBOS, 'registerScheduled').mockImplementation((() => {}) as never);
+    vi.spyOn(DBOS, 'registerLifecycleCallback').mockImplementation((() => {}) as never);
+    const byName = new Map<string, { crontab: string; mode: SchedulerMode }>();
+    vi.spyOn(DBOS, 'associateFunctionWithInfo').mockImplementation(((
+      _service: unknown,
+      _fn: unknown,
+      target: { name: string },
+    ) => {
+      const regInfo = {} as { crontab: string; mode: SchedulerMode };
+      byName.set(target.name, regInfo);
+      return { registration: {}, regInfo };
+    }) as never);
 
     const scheduler = new DbosCronScheduler([cron('makeup', true), cron('active', false)], {
       db: {} as never,
@@ -127,12 +138,6 @@ describe('registerScheduledWorkflows — hands the catch-up mode to DBOS', () =>
     });
     scheduler.registerScheduledWorkflows();
 
-    const byName = new Map(
-      scheduled.mock.calls.map((c) => {
-        const cfg = c[1] as { name: string; crontab: string; mode: SchedulerMode };
-        return [cfg.name, cfg];
-      }),
-    );
     // The catch-up trigger is handed the make-up-work mode; the plain one keeps when-active.
     expect(byName.get('cron:makeup')?.mode).toBe(SchedulerMode.ExactlyOncePerInterval);
     expect(byName.get('cron:active')?.mode).toBe(SchedulerMode.ExactlyOncePerIntervalWhenActive);

@@ -192,9 +192,146 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edges the workspace has today are listed in the gate with their reasons, and a listed edge that
   disappears fails the gate until it is removed. `pnpm test:tier-direction` drives the gate over
   throwaway workspaces with planted edges.
+- **Runtime control: `inspect()` and `prepare()`, an operation lease, and operation receipts.**
+  `@rayspec/server` exports `createRuntimeControl`, a typed library (no HTTP route) over one
+  environment database. `inspect()` reports the runtime version, target and Node version, the
+  capability ids whose modules resolve in this process, the contract version, the two-part schema
+  head (the last platform migration tag, mapped from the drizzle ledger onto the runtime's journal,
+  and a SHA-256 of the live product schema read from the catalog; null before the first
+  migration; `RAY_SCHEMA_DRIFT` when the ledger holds a migration this runtime does not ship), the
+  active application, the release and managed-posture digests, the fence and the environment
+  revision — never a host, port, user or path. `prepare()` reads a `.ray` bundle at an absolute
+  path without following a link, through the reader pipeline, checks its SHA-256 against the one
+  the caller named, and plans against the LIVE schema: required bindings and whether each has a
+  revision, schema impact (the head before and after, the product delta's SHA-256, destructive),
+  permission changes against the active application, storage, warnings and blockers (drift, a
+  changed schema head, a missing binding, a delta without a shadow database to evaluate it in, a
+  carried delta). The target product head is computed by applying the delta to a throwaway
+  database on the shadow server, never the live one. The result carries the plan digest over the
+  contract's inputs, `preparedAt`, `expiresAt` (exactly thirty minutes later) and the environment
+  revision. `prepare()` takes no lock, stores no plan and writes nothing to the environment's
+  database. The contract package gains the pure rules both sides compute: request checks, the plan
+  digest and its expiry, the product schema digest, binding revision ids, the shared schema lock
+  key and the platform tables with their snapshot categories.
+- **An operation lease with a fencing epoch, and append-only operation receipts.** Two new platform
+  tables (migration `0012_runtime_control`): `runtime_control_state`, one row per environment
+  (environment revision, fence, binding revision key, operation lease, the active application), and
+  `runtime_control_receipts`. `acquireOperationLease` gives one mutating operation at a time the
+  lease, increments its fencing epoch and records the operation's intent in the same transaction,
+  before any effect. Every write of the holder re-checks the epoch, the holder and the expiry (by
+  the database clock) in its own transaction, so a holder whose lease expired and was taken over
+  cannot write when it wakes up; the takeover names the previous holder, and a step it started
+  and never finished stays visible for reconciliation. Receipts record the operation id, actor,
+  kind, lease epoch, inputs digest, each step's start and finish with its digest, timestamps and
+  the outcome; a trigger refuses UPDATE, DELETE and TRUNCATE on them, and an idempotency key names
+  one intent only. Both tables are reserved store names and classified `runtime-control-state`,
+  which a snapshot never exports.
+- **`RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS`**, the bounded wait for the shared schema lock (default 60000,
+  at most one hour; an invalid value aborts the boot). See Fixed.
+- **`@rayspec/bundle`: `refuseLinks`.** A read option that opens the archive path with
+  `O_NOFOLLOW` and refuses a symbolic link with `RAY_USAGE` instead of following it.
+- **Runtime control: `quiesce()`, `resume()` and `health()`, and a source fence every running
+  process keeps.** `quiesce(reason, deadline, sourceStopped)` takes the environment's fence under
+  the operation lease (the fence epoch and the environment revision increase in one transaction,
+  with receipts) and waits, until the deadline, for every running runtime process to stop its
+  producers and drain its in-flight work. Each process reads the fence every 500 ms and, while it
+  is held, refuses every HTTP mutation (uploads, trigger fires and run starts included, and any
+  request to a declared route whose action writes — a store create, update or delete, an agent
+  run, a handler not declared `readonly`, a stream ingest — whatever its method) and every new
+  event stream with `503 SERVICE_UNAVAILABLE` and `Retry-After` (reads keep answering, and a read
+  authenticated with an api key does not stamp the key's last use), closes open event streams
+  after the chunk in flight, skips cron ticks and the daily system cleanup, and pauses the run
+  queues without shutting the durable engine down; once it has drained it also refuses event-bus
+  appends and object writes. A mutation counts as in flight until its work has ended: the drain
+  closes a streamed run's stream for its client, and the run behind it finishes and is waited for.
+  A process is counted from the moment its boot reads the fence, before it attaches any producer,
+  so a quiesce during a boot waits for that process too. Status `fenced` means every live process
+  reported drained at the new epoch; otherwise the result is `timed-out` with `ok: false` and
+  `RAY_SOURCE_NOT_QUIESCENT`, and the fence stays held; quiesce renews its lease while it waits,
+  however far away the deadline is. The result lists each producer's state,
+  the write barriers and the external services no fence reaches (`RAY_W_EXTERNAL_EFFECTS_UNFENCED`).
+  The database barrier is taken only after a full drain: with role separation (`runtimeRole`) the
+  runtime role's write privileges are revoked in both databases and recorded (refused as
+  `unavailable` when the role, or a role it can switch to with `SET ROLE`, owns a table, holds a
+  write that survives, is a superuser, bypasses row security or may create roles); without it, a source
+  the operator attests is stopped holds `database-stopped-source` when no other session is
+  connected; otherwise it is reported `database-write-role: unavailable`. `resume(fenceEpoch)`
+  releases only the fence held at that epoch (`RAY_FENCE_MISMATCH` otherwise), grants back exactly
+  the recorded privileges, and every process restarts its producers within one poll. The fence is
+  kept in the database, so a process booted under it starts fenced. `health()` reports liveness
+  and readiness with each failing check's cause and no topology. One new platform table
+  (migration `0013_runtime_control_processes`) holds each running process's heartbeat; it is a
+  reserved store name, classified `runtime-control-state`, and the one table the write barrier
+  leaves writable.
+- **`GET /livez`**, a liveness probe that answers 200 while the process answers. **`GET /health`**
+  (readiness) also checks that the platform schema is the one this runtime ships, that every boot
+  secret mounted as a `<VAR>_FILE` is still a readable file, and, when a durable worker is wired,
+  that it is running and its system database answers. Its body keeps `status`, `db` and
+  `frontend` and adds `live`, `ready` and `checks` (each check's name with its boolean).
+- **`RAYSPEC_HOSTING_POSTURE`** (`local`, the default, or `managed`). Under `managed` the public
+  `/recovery-scope` probe is not registered, and cross-process run cancellation is on (see
+  Changed).
+- **`RAYSPEC_SHUTDOWN_DRAIN_MS`**, the bounded graceful shutdown (default 10000, at most 600000).
+  On SIGINT or SIGTERM both `rayspec-serve` and `rayspec deploy` stop accepting connections, let
+  in-flight requests finish for that long, then close every connection still open and the
+  application, itself bounded by the same drain.
+- **`SERVICE_UNAVAILABLE`** (503) joins the platform's HTTP error codes.
+- **`@rayspec/durable-dbos`: pausable dispatch.** `pauseDispatch()` / `resumeDispatch()` on both
+  executors stop and restart dequeuing (the queue's worker concurrency set to 0 and back) without
+  shutting DBOS down, and `inFlight` counts the jobs running; the cron and cleanup schedulers take
+  a `gate` and count their fires in flight.
+- **Runtime control: apply, with crash reconciliation.** `runApply` (in `@rayspec/server`) runs a
+  list of steps against an environment in the contract's order: the idempotency key is looked up
+  (a key recorded with another plan digest is `RAY_IDEMPOTENCY_CONFLICT`; a succeeded operation
+  answers `already-applied` with its original receipts and runs nothing), the plan digest is
+  recomputed from the live state and the expected environment revision compared (`RAY_PLAN_STALE`,
+  also for an expired plan, and nothing is written), blockers and a held fence are
+  `RAY_POLICY_DENIED` (`plan-has-blockers`, `fenced`), then the operation lease is taken with the
+  intent receipt, the checks run again under it, and each step runs with a receipt before and
+  after; a schema-changing step takes the shared schema lock. The environment revision increases
+  by one in the transaction of the outcome when a step ran. Before any step, every apply an earlier
+  process left unsettled is reconciled from its receipts and the live state: a step whose effect
+  commits with its finish receipt is proven not applied by a start without a finish; any other step
+  is read back through the observer its start receipt names and closed as applied or not applied;
+  a step whose outcome cannot be established — an external effect nothing can read back — is never
+  replayed and blocks every apply with `RAY_RECONCILIATION_REQUIRED` (exit class 6) until an
+  operator records what it did with `resolveInterruptedStep`. Schema changes are never reversed
+  automatically. A live lease is never taken over, not even by a retry under the same operation
+  id, so two retries of one interrupted apply cannot both run its steps; a retry under the key of
+  an apply that another apply closed as interrupted continues that operation. The contract package gains `checkApplyRequest`, `checkApplyControl` and
+  `isIdempotencyKey`. New: [the runtime operations guide](./docs/runtime-operations.md) — the
+  lifecycle operations, the receipts and how to recover from each interruption.
+- **The hosting report beside `inspect()`.** `inspectHosting()` on the runtime-control adapter
+  reports the hosting posture and whether cross-process run cancellation is on, with its interval
+  and whether the variable or the posture set it. The contract's inspect result has no member for
+  it, so it is not part of `inspect()`.
 
 ### Changed
 
+- **The legacy YAML deploy changes the schema through apply.** Every schema change a boot makes
+  (`rayspec deploy <spec.yaml>` and `rayspec-serve`) — the platform migration chain when the
+  ledger is behind the runtime, and each product-store migration — runs as a `runtime.apply`
+  operation: under the operation lease, after reconciling any interrupted apply, with receipts,
+  the environment revision raised and, for product DDL, the product schema digest recorded in the
+  same transaction as the DDL. A successful deploy boots and prints exactly as before; a restart
+  with nothing to change takes no lease and writes nothing — unless an interrupted apply is there
+  that it can settle, and not even then when the environment is blocked on a step whose outcome no
+  one can establish: that restart warns, serves the schema it finds, and writes nothing. New
+  refusals, each with a message and
+  its contract exit class from `rayspec deploy` (`rayspec-serve` keeps exit 1): a schema change on
+  a fenced environment (`RAY_POLICY_DENIED`, 4), a plan made stale by a concurrent change
+  (`RAY_PLAN_STALE`, 3; the platform chain plans again instead), another operation holding the
+  lease past the wait (`RAY_LOCK_TIMEOUT`, 5) and an interrupted apply that needs manual
+  reconciliation (`RAY_RECONCILIATION_REQUIRED`, 6). The chain that first creates the receipt
+  tables on an older database runs as before, under the schema lock. `rayspec tenant ensure` runs
+  its platform chain the same way (actor `tenant-ensure`), and while the environment is fenced it
+  creates, resolves and migrates nothing: it reports `ENVIRONMENT_FENCED`, or `MIGRATION_REFUSED`
+  for another refusal of its chain.
+- **Cross-process run cancellation is on under the managed hosting posture.** With
+  `RAYSPEC_HOSTING_POSTURE=managed` and no `RAYSPEC_RUN_CANCEL_POLL_MS`, an executing run re-reads
+  its cancellation record every 2000 ms, so a cancellation reaches it in whichever worker process
+  it runs. An explicit interval still wins; the local posture keeps it off unless the variable
+  sets one.
 - **The release script `release:pack` is now `release:tarballs`**, so that "pack" means only
   `rayspec pack`. It runs the same `node scripts/publish.mjs --pack`; the old name is gone, because
   no workflow or document used it. The documentation calls extension packs **extensions**, and
@@ -225,6 +362,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A runtime refuses a database a newer runtime migrated.** An older runtime found a platform
+  ledger with migrations it does not ship, applied nothing and served that schema silently. The
+  boot (and `rayspec tenant ensure`) now refuses it, under the schema lock and before anything is
+  applied, with a message that names the cause, and leaves the database unchanged.
+- **Shutdown no longer waits for ever on an open connection.** A request that never completed (a
+  stalled upload, an event stream, half a request) kept a stopping server alive indefinitely; the
+  drain above bounds it.
+- **A boot that refuses leaves the database untouched.** The server applied the platform
+  migration chain before it parsed the injected spec and the signing key, so a deploy with an
+  invalid spec, a Product-YAML document outside the boot scope or a malformed
+  `RAYSPEC_JWT_SIGNING_KEY` still created every platform table in an empty database before it
+  refused. The key and the document are now validated first, with the same refusals as before; a
+  valid deployment boots exactly as it did. Every other refusal the deploy can decide from the
+  configuration and the document is made before the platform chain runs too, with the same
+  message. For a backend spec, with its extension packs loaded and merged: a stream route without
+  a blob root, a playback route without a valid media signing key, an unsupported STT or TTS
+  provider or a missing credential for one, an unreadable `RAYSPEC_FS_SOURCE_ROOT`, a frontend
+  mount with nothing to serve, a cron or manual trigger without `RAYSPEC_CRON_TENANT_ID` or with no
+  durable worker to fire it (no `deployment.durableWorker`, or no agent backends supplied), a cron
+  schedule the scheduler cannot parse (a new refusal: it failed only when the worker launched), an
+  agent whose backend the deployment does not build, and whatever the deploy itself refuses — the
+  merged document, a handler module that does not load, a route under a reserved prefix, a store
+  table the registrar did not admit — which the boot finds by rehearsing the deploy with no
+  migration to apply. For a Product-YAML document: its deployment tenant (`RAYSPEC_PRODUCT_TENANT_ID`
+  set, an org id, and naming a live org; on a database without the platform tables no org exists
+  yet, so that refusal comes first), a reviewed update delta and its allowlist, a blob root, a
+  media signing key, a readable `RAYSPEC_FS_SOURCE_ROOT`, `RAYSPEC_MEDIA_PREP`, the extraction mode,
+  the speech provider, the responder and the normalizer with their sidecar configurations, a
+  deployment's model-call factory, and the composed deploy, rehearsed the same way. What is left
+  after the first write depends on the database: the platform chain and the source fence, the live
+  product schema (its drift, the update plan, and so whether a reviewed delta is applied and gated),
+  each migration's apply, the post-update drift gate, and the durable worker's launch.
+- **A server no longer exits when its workflow system database is briefly unreachable.** DBOS's
+  scheduler started each scheduled workflow from a loop that did not catch: when the workflow
+  system database refused a connection at a scheduled instant (a failover, a restart, a database
+  not accepting connections), the rejection went unhandled and the process exited with code 1 —
+  and every server with a durable worker schedules at least the system cleanup. Scheduled
+  workflows (cron triggers and the system cleanup) now run on a loop of the runtime's own with the
+  same instants, workflow ids, modes and make-up watermark; an instant that cannot be started is
+  reported once and retried, the server stays live and reports not ready, and the schedule fires
+  again once the database is back. A trigger without make-up work does not fire the instants
+  missed meanwhile; a catch-up trigger makes them up.
+- **`GET /health` answers when the database hangs.** Its database round trip had no time bound, so
+  a database that stopped answering (rather than refusing connections) left the probe without an
+  answer. It is now bounded like the other readiness checks (2 s) and reports `db: unreachable`
+  with 503. The boot banner's route list is unchanged; it does not list `GET /livez`.
+- **Every schema change takes one lock.** The boot's platform migration chain took no lock, so a
+  boot racing another boot or a `rayspec tenant ensure` against an empty database could die on a
+  duplicate object. The chain, product-store DDL and `tenant ensure` now all take the one shared
+  advisory lock (`pg_advisory_xact_lock(1918990707, 1)`, the pair `tenant ensure` already used),
+  with a bounded wait: a boot that waits longer than `RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS` refuses with
+  a retryable error and changes nothing, and `tenant ensure` reports `SCHEMA_LOCK_TIMEOUT`.
 - **The documented test run passes on a fresh clone.** The shutdown test for the example
   `dev-boot.mjs` wrappers forwarded `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` only
   when they were exported, so without a `.env` the wrapper it spawns aborted on the missing

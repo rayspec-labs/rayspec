@@ -56,18 +56,22 @@ type StartWorkflowParams = NonNullable<Parameters<typeof DBOS.startWorkflow>[1]>
 type _WorkflowID = AssertTrue<HasKey<StartWorkflowParams, 'workflowID'>>;
 type _QueueName = AssertTrue<HasKey<StartWorkflowParams, 'queueName'>>;
 
-// 6. The SCHEDULED-WORKFLOW API the cron scheduler depends on (doc-first). The cron
-//    scheduler uses the FUNCTIONAL pre-launch path: `DBOS.registerWorkflow(fn, {name})` then
-//    `DBOS.registerScheduled(fn, {name, crontab})`. We pin BOTH the function existence (a rename of
-//    registerScheduled → createSchedule/applySchedules breaks the build here, not just at runtime when
-//    the cron silently never fires) AND the `crontab` config key (the scheduler passes
-//    `{ name, crontab: descriptor.schedule }`). `SchedulerConfig` is not publicly exported, so we
-//    derive the config param type from the INSTALLED `registerScheduled` signature.
+// 6. The SCHEDULED-WORKFLOW API the schedulers depend on (doc-first). Both schedulers use the
+//    FUNCTIONAL pre-launch path: `DBOS.registerWorkflow(fn, {name})`, then scheduled-workflow.ts
+//    associates `{crontab, mode}` with it (`associateFunctionWithInfo`), a lifecycle listener
+//    (`registerLifecycleCallback`) reads them back (`getAssociatedInfo`) and runs each loop, and the
+//    make-up watermark lives in the event-dispatch state. A rename of any of these breaks the build
+//    here, not just at runtime when every schedule silently never fires.
 /** Resolves to `true` iff `Fn` is callable (`never[]`→`unknown` tests callability without `any`). */
 type IsFn<Fn> = Fn extends (...args: never[]) => unknown ? true : false;
-type _RegisterScheduled = AssertTrue<IsFn<typeof DBOS.registerScheduled>>;
-type RegisterScheduledConfig = Parameters<typeof DBOS.registerScheduled>[1];
-type _Crontab = AssertTrue<HasKey<RegisterScheduledConfig, 'crontab'>>;
+type _AssociateFunctionWithInfo = AssertTrue<IsFn<typeof DBOS.associateFunctionWithInfo>>;
+type _GetAssociatedInfo = AssertTrue<IsFn<typeof DBOS.getAssociatedInfo>>;
+type _RegisterLifecycleCallback = AssertTrue<IsFn<typeof DBOS.registerLifecycleCallback>>;
+type _GetEventDispatchState = AssertTrue<IsFn<typeof DBOS.getEventDispatchState>>;
+type DispatchState = Parameters<typeof DBOS.upsertEventDispatchState>[0];
+type _DispatchStateKeys = AssertTrue<
+  HasKey<DispatchState, 'service' | 'workflowFnName' | 'key' | 'value' | 'updateTime'>
+>;
 // The scheduled body is registered as a workflow first; pin the deterministic-id workflow id law's
 // entry point (registerWorkflow → a recovery-safe scheduled body). Already pinned at 1/the golden, but
 // keep the cron-relevant assertion local so a future split of the scheduled path is caught here too.
@@ -88,8 +92,11 @@ type _WireShapeAssertions = [
   _WorkerConcurrency,
   _WorkflowID,
   _QueueName,
-  _RegisterScheduled,
-  _Crontab,
+  _AssociateFunctionWithInfo,
+  _GetAssociatedInfo,
+  _RegisterLifecycleCallback,
+  _GetEventDispatchState,
+  _DispatchStateKeys,
   _RegisterWorkflowForScheduled,
 ];
 

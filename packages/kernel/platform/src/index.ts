@@ -69,11 +69,14 @@ export { httpResponse, isHttpResponse } from '@rayspec/handler-sdk';
 // The optional agent-run bounds resolved from the environment. run-core consumes the two run-level
 // ones itself; the composition root reads the two request-level ones and hands them to the adapter.
 export {
+  MANAGED_RUN_CANCEL_POLL_MS,
   RunAbandonedError,
   type RunAbandonReason,
   RunBoundTimeoutError,
+  type RunCancelPollSource,
   resolveAgentMaxAttempts,
   resolveAgentRequestTimeoutMs,
+  resolveRunCancelPoll,
   resolveRunCancelPollMs,
   resolveRunMaxMs,
   runBoundTimeoutMessage,

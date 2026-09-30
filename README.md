@@ -192,7 +192,7 @@ OPENAI_API_KEY=sk-placeholder \
 node packages/app/cli/dist/index.js deploy examples/acme-notes/acme-notes.product.yaml --port 8080
 
 # In a second terminal — the declared backend is live:
-curl -s localhost:8080/health                          # → {"status":"ok","db":"ok"}
+curl -s localhost:8080/health                          # → {"status":"ok","db":"ok",…,"ready":true}
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/sessions
 #   → 401: GET /sessions is a declared, bearer-guarded view. See getting-started
 #     to provision a tenant and call it with a token.

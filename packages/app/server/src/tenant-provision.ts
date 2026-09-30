@@ -42,9 +42,17 @@
  *
  * IT APPLIES THE COMMITTED MIGRATION CHAIN. That is what makes it genuinely one step against a fresh
  * database, and it is the same idempotent chain every boot runs — but it does mean the command
- * migrates whatever `DATABASE_URL` it is pointed at. The step is serialized by an advisory lock, so
- * two runs fanned out at the same instant against an EMPTY database converge here too and not only at
- * the reservation.
+ * migrates whatever `DATABASE_URL` it is pointed at. The chain runs under the SHARED SCHEMA LOCK
+ * (`schema-lock.ts`) that a booting server and every other schema-mutating path take too, so two runs
+ * fanned out at the same instant against an EMPTY database — or a run racing a first boot — converge
+ * here too and not only at the reservation.
+ *
+ * IT RESPECTS THE SOURCE FENCE. On a database that already has the runtime-control tables, the chain
+ * runs as a `runtime.apply` (`deploy-apply.ts`) — under the operation lease, with its receipts, and
+ * refused while the environment is fenced for an export or a migration, exactly as a boot's is. The
+ * reservation itself reads the fence in its own transaction with a share lock on the state row, so a
+ * quiesce cannot take the fence between that read and the commit: while the fence is held, nothing is
+ * created, resolved or migrated (`ENVIRONMENT_FENCED`).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -60,7 +68,18 @@ import {
 } from '@rayspec/api-auth';
 import { mintInviteToken, normalizeEmail } from '@rayspec/auth-core';
 import { isUniqueViolation, makeDb } from '@rayspec/db';
+import { sql } from 'drizzle-orm';
 import { applyMigrations } from './composition-root.js';
+import { DeployApply, RuntimeApplyError } from './deploy-apply.js';
+import { SchemaLockTimeoutError } from './schema-lock.js';
+
+/** The actor tenant ensure records on the receipts of the migration chain it runs. */
+export const TENANT_ENSURE_ACTOR = 'tenant-ensure';
+
+const FENCED_MESSAGE =
+  'The environment is fenced (quiesced for an export or a migration), so no organization was ' +
+  'created or resolved and nothing was migrated. Run the command again once the fence is released ' +
+  'with resume.';
 
 /** The two secrets the provisioning path uses — resolved by `loadTenantProvisionSecrets`. */
 export interface TenantProvisionSecrets {
@@ -145,39 +164,6 @@ export class TenantProvisionError extends Error {
 export const OPERATOR_INVITE_DEFAULT_TTL_SECONDS = 60 * 60;
 
 /**
- * The advisory-lock the migration step serializes on. `0x72617973` is a namespace this project owns,
- * so the pair cannot collide with an unrelated application holding advisory locks on the same
- * database; slot 1 is the platform migration chain. Any pair works as long as every runner of this
- * command uses the SAME one, which is why it is a constant rather than a parameter.
- */
-const MIGRATION_LOCK_NAMESPACE = 0x7261_7973;
-const MIGRATION_LOCK_SLOT = 1;
-
-/**
- * Apply the committed chain with the whole step serialized by a Postgres ADVISORY LOCK.
- *
- * The migrator takes no lock of its own, and its first two statements — `CREATE SCHEMA IF NOT EXISTS
- * "drizzle"` and `CREATE TABLE IF NOT EXISTS "drizzle"."__drizzle_migrations"` — are not
- * concurrency-safe: `IF NOT EXISTS` checks the catalogue and then creates, so two runs started
- * together against a FRESH database both see nothing and the loser dies on a duplicate-object error
- * before it ever reaches the reservation. That is precisely the shape a deploy script produces when
- * it fans out on a first bring-up, and it is the one case where "safe to call unconditionally" would
- * otherwise be false. Serialized, the loser waits, then finds the chain applied and no-ops — which is
- * what the reservation below already does, one layer down.
- *
- * The lock is transaction-scoped and the transaction does nothing else, so it is released by the
- * COMMIT — and by the connection dying, so a killed run never leaves the next one waiting. The
- * migration itself runs on a different connection of the same pool: an advisory lock is a mutex
- * between runners, not a data lock, so it blocks the other command, never our own work.
- */
-async function migrateUnderLock(db: ReturnType<typeof makeDb>): Promise<void> {
-  await db.$client.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK_NAMESPACE}::int4, ${MIGRATION_LOCK_SLOT}::int4)`;
-    await applyMigrations(db);
-  });
-}
-
-/**
  * Write the minted token to `path`, creating it EXCLUSIVELY at mode 600.
  *
  * `wx` is the whole point: an existing path is an error, never an overwrite — the same never-clobber
@@ -220,7 +206,8 @@ async function writeTokenFile(path: string, token: string): Promise<void> {
  * Provision (create or resolve) the organization named by `input.orgId`, idempotently.
  *
  * `opts.writeToken` is injectable so a suite can prove the token never reaches a stream without
- * touching a disk; `opts.now` so expiry assertions are deterministic. Both default to the real thing.
+ * touching a disk; `opts.now` so expiry assertions are deterministic; `opts.schemaLockTimeoutMs` so a
+ * suite can run out the lock wait in milliseconds. All default to the real thing.
  */
 export async function provisionTenant(
   secrets: TenantProvisionSecrets,
@@ -228,6 +215,8 @@ export async function provisionTenant(
   opts: {
     readonly writeToken?: (path: string, token: string) => Promise<void>;
     readonly now?: () => Date;
+    /** How long the migration step waits for the shared schema lock; the contract default if omitted. */
+    readonly schemaLockTimeoutMs?: number;
   } = {},
 ): Promise<TenantProvisionResult> {
   const writeToken = opts.writeToken ?? writeTokenFile;
@@ -252,8 +241,36 @@ export async function provisionTenant(
     // code: the migrator's rejection is a multi-line query dump, and an operator handed one has no
     // way to tell that nothing was reserved.
     try {
-      await migrateUnderLock(db);
+      const lockOptions =
+        opts.schemaLockTimeoutMs === undefined ? {} : { lockTimeoutMs: opts.schemaLockTimeoutMs };
+      await new DeployApply({
+        db,
+        migratePlatform: () => applyMigrations(db, lockOptions),
+        ...lockOptions,
+        actor: TENANT_ENSURE_ACTOR,
+        warn: () => {},
+      }).platformChain();
     } catch (err) {
+      if (err instanceof RuntimeApplyError) {
+        if (err.errors[0]?.reason === 'fenced') {
+          throw new TenantProvisionError('ENVIRONMENT_FENCED', FENCED_MESSAGE);
+        }
+        throw new TenantProvisionError(
+          err.code === 'RAY_LOCK_TIMEOUT' ? 'SCHEMA_LOCK_TIMEOUT' : 'MIGRATION_REFUSED',
+          `The migration chain was refused (${err.code}), so no organization was created or ` +
+            `resolved: ${err.errors[0]?.message ?? 'the apply failed'}.`,
+        );
+      }
+      if (err instanceof SchemaLockTimeoutError) {
+        // Nothing is wrong with the database: another migration, boot or deploy holds the shared
+        // schema lock. Its own code, because the remedy is to retry, not to inspect DATABASE_URL.
+        throw new TenantProvisionError(
+          'SCHEMA_LOCK_TIMEOUT',
+          'Another migration, server boot or deploy is changing this database and held the shared ' +
+            'schema lock for longer than the bounded wait, so no organization was created or ' +
+            'resolved. Run the command again once it has finished.',
+        );
+      }
       throw new TenantProvisionError(
         'MIGRATION_FAILED',
         'Applying the committed migration chain to the target database failed, so no organization ' +
@@ -352,7 +369,22 @@ export async function provisionTenant(
         writtenTokenFile = undefined;
       }
       const slug = await orgStore.deriveUniqueSlug(input.name);
-      return orgStore.reserveOrgById({ id: input.orgId, name: input.name, slug }, claim);
+      return orgStore.reserveOrgById(
+        { id: input.orgId, name: input.name, slug },
+        async (ttx, org, st) => {
+          // The fence, read under a share lock that a quiesce's fence update waits for: the
+          // reservation either commits before the fence is taken or is refused.
+          const rows = (await ttx
+            .unscoped()
+            .execute(
+              sql`SELECT fence_state FROM runtime_control_state WHERE id = 1 FOR SHARE`,
+            )) as unknown as { fence_state: string }[];
+          if (rows[0]?.fence_state === 'fenced') {
+            throw new TenantProvisionError('ENVIRONMENT_FENCED', FENCED_MESSAGE);
+          }
+          await claim(ttx, org, st);
+        },
+      );
     };
 
     // THE SLUG RACE, and why exactly ONE retry closes it. `deriveUniqueSlug` is a read-then-derive

@@ -36,6 +36,28 @@ export {
   observedAgentTracing,
   resolveAgentTracing,
 } from './agent-tracing.js';
+// Apply: a list of steps run under the operation lease with a receipt before and after each, after the
+// plan, revision, fence and idempotency checks, and after reconciling what an interrupted apply left
+// unsettled; a step whose outcome cannot be established blocks until an operator records it.
+export {
+  type ApplyCheckpoint,
+  type ApplyControl,
+  type ApplyOptions,
+  type ApplyPlanCheck,
+  type ApplyStep,
+  DEFAULT_APPLY_LEASE_TTL_MS,
+  hasUnsettledApplies,
+  MAX_STEP_NAME_LENGTH,
+  type ObservedOutcome,
+  type ReconciledOperation,
+  type ResolveStepRequest,
+  type ResolveStepResult,
+  reconcileUnsettled,
+  resolveInterruptedStep,
+  runApply,
+  type StateObservers,
+  type StepEffect,
+} from './apply-operation.js';
 export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
 // The port-collision boot refusal — shared by the `rayspec-serve` bin (serve.ts) and the `rayspec
 // deploy` CLI so a taken port refuses the boot in the same actionable one-line form on both, instead
@@ -95,16 +117,66 @@ export {
   BootConfigError,
   type BootedServer,
   DEFAULT_PORT,
+  DEFAULT_SHUTDOWN_DRAIN_MS,
   detectStaticProfile,
+  type HostingPosture,
   isStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
   loadTenantProvisionSecrets,
+  MAX_SCHEMA_LOCK_TIMEOUT_MS,
+  MAX_SHUTDOWN_DRAIN_MS,
   type ProductTableRegistrar,
+  parseHostingPosture,
+  parseSchemaLockTimeoutMs,
+  parseShutdownDrainMs,
+  SchemaNewerThanRuntimeError,
   type ServerConfig,
   type StaticBootedServer,
   type StaticServerConfig,
+  validateInjectedSpec,
 } from './composition-root.js';
+// The legacy YAML deploy's schema changes, each run as an apply.
+export {
+  BOOT_ACTOR,
+  bootRefusalExitCode,
+  DeployApply,
+  type DeployApplyOptions,
+  LEGACY_DEPLOY_PLAN_FORMAT_VERSION,
+  RuntimeApplyError,
+} from './deploy-apply.js';
+// Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
+export {
+  bindingsProbe,
+  databaseProbe,
+  durableWorkerReadiness,
+  type HealthCheck,
+  type HealthCheckName,
+  LIVENESS_PATH,
+  type ReadinessProbe,
+  runReadiness,
+  type SecretFile,
+  schemaProbe,
+} from './health.js';
+// The operation lease with its fencing epoch, and the append-only operation receipts: the frame a
+// mutating runtime-control operation runs in (one holder at a time, intent before effect, every write
+// checked against the epoch in its own transaction).
+export {
+  acquireOperationLease,
+  findIntentByIdempotencyKey,
+  type LeaseTakeover,
+  type LeaseTx,
+  MAX_LEASE_TTL_MS,
+  type OperationIdentity,
+  OperationLease,
+  OperationLeaseError,
+  type OperationOutcome,
+  type OperationReceipt,
+  type ReceiptEvent,
+  type ReceiptInput,
+  readOperationReceipts,
+  unfinishedSteps,
+} from './operation-lease.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so
@@ -126,6 +198,7 @@ export {
   ProductBootError,
   resolveExtractorConfigPath,
   resolveStructuredOutputMode,
+  validateProductYamlSpec,
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
 // The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicates
@@ -142,12 +215,58 @@ export {
 // documented entrypoints instead of carrying a private single-path copy — the construction that let
 // those two drift apart in the first place. A leaf module (node builtins only).
 export { loadLocalDotenvIfPresent } from './read-env.js';
+// The runtime-control adapter — the typed library through which a deployment supervisor or the CLI
+// asks a runtime what it is (`inspect`), what a bundle would do to its environment (`prepare`) and
+// whether it is ready (`health`), and fences and releases its source (`quiesce`, `resume`). It mounts
+// NO route: a caller holds the environment's database connection and calls it in process.
+export {
+  CAPABILITY_MODULES,
+  createRuntimeControl,
+  type HostingReport,
+  providedCapabilities,
+  type RuntimeControlAdapter,
+  type RuntimeControlOptions,
+  runtimeVersion,
+} from './runtime-control.js';
+// The source fence as one runtime process keeps it: the phases, the producers it stops and restarts,
+// and the heartbeat quiesce reads.
+export {
+  DEFAULT_FENCE_POLL_MS,
+  type FencedProducer,
+  type FencePhase,
+  fencedBlobStore,
+  gatedProducer,
+  PROCESS_LIVE_WINDOW_MS,
+  queueProducer,
+  RuntimeFence,
+  type RuntimeFenceOptions,
+} from './runtime-fence.js';
+// The live two-part schema head (platform ledger tag + product schema digest), read-only.
+export {
+  type CatalogQuery,
+  type LivePlatformHead,
+  readPlatformHead,
+  readProductSchemaDigest,
+  readProductTables,
+  readSchemaHead,
+  runtimePlatformHead,
+} from './schema-head.js';
+// The shared schema lock every schema-mutating path takes (boot migration chain, product DDL, tenant
+// ensure), with its bounded wait.
+export {
+  lockSchemaInTransaction,
+  SchemaLockTimeoutError,
+  type SchemaLockTx,
+  withSchemaLock,
+} from './schema-lock.js';
 // The deployer-seam opts builder — shared by the `rayspec-serve` bin (serve.ts) AND the `rayspec deploy`
 // CLI so both boot a backend-profile spec WITH agents directly from ONE builder (the sanctioned
 // registerProductStores registrar + the env-driven agent-backend factory). Exported so the CLI
 // (packages/app/cli/src/deploy.ts) reuses it instead of duplicating the opts logic; lives in serve-opts.ts
 // (not the self-executing bin) so re-exporting it here drags in no entrypoint side effect.
 export { assembleOptsFromEnv } from './serve-opts.js';
+// The bounded graceful shutdown both entrypoints run on SIGINT/SIGTERM.
+export { type DrainableServer, type ShutdownOutcome, shutdownHttpServer } from './shutdown.js';
 // The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
 // handoff that leaves no platform user behind. It lives in the composition root because it is the only
 // package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach
@@ -162,3 +281,11 @@ export {
   type TenantProvisionResult,
   type TenantProvisionSecrets,
 } from './tenant-provision.js';
+// The database write barrier a quiesce holds: the runtime role's write privileges revoked (with role
+// separation), or a stopped source with no other session connected.
+export {
+  BarrierUnavailableError,
+  CONTROL_APPLICATION_PREFIX,
+  openControlDatabase,
+  type RecordedGrant,
+} from './write-barrier.js';

@@ -48,6 +48,7 @@ import {
   deploy,
   type EraseResult,
   eraseTenant,
+  FENCED_MESSAGE,
   IdempotencyStore,
   IdentityStore,
   InviteStore,
@@ -59,6 +60,7 @@ import {
   runScheduledCleanup,
 } from '@rayspec/api-auth';
 import {
+  ApiError,
   createSigner,
   InMemoryRateLimitStore,
   JwksProvider,
@@ -66,6 +68,7 @@ import {
   scaledAuthPolicies,
   setBootSecrets,
 } from '@rayspec/auth-core';
+import { DEFAULT_SCHEMA_LOCK_TIMEOUT_MS } from '@rayspec/bundle-contract';
 import type { Backend, BackendId } from '@rayspec/core';
 import {
   buildProductTables,
@@ -85,6 +88,7 @@ import {
   DbosDurableExecutor,
   DEFAULT_CLEANUP_SCHEDULE,
   DEFAULT_WORKER_CONCURRENCY,
+  ProducerPausedError,
   type ResolvedRun,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
@@ -132,14 +136,31 @@ import {
   PROVISION_BOOT_SECRETS,
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
+import { DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
+import {
+  bindingsProbe,
+  durableWorkerReadiness,
+  type HealthCheck,
+  type ReadinessProbe,
+  registerLivenessRoute,
+  runReadiness,
+  type SecretFile,
+  schemaProbe,
+} from './health.js';
 import {
   deployProductYamlSpec,
   makeSchemaProbe,
+  type PreparedProductYaml,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
+  prepareProductYamlSpec,
+  validateProductYamlSpec,
 } from './product-boot.js';
 import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
+import { gatedProducer, queueProducer, RuntimeFence } from './runtime-fence.js';
+import { type CatalogQuery, readPlatformHead, runtimePlatformHead } from './schema-head.js';
+import { lockSchemaInTransaction, withSchemaLock } from './schema-lock.js';
 import {
   type FrontendReadiness,
   frontendMountsReadiness,
@@ -230,6 +251,11 @@ interface HealthOutcome {
     readonly status: 'ok' | 'degraded';
     readonly db?: 'ok' | 'unreachable';
     readonly frontend?: FrontendReadiness;
+    /** Always true: a process that answers is alive (`/livez` says only this). */
+    readonly live: true;
+    readonly ready: boolean;
+    /** Each covered check by name, with its boolean — never its cause. */
+    readonly checks: Readonly<Record<string, boolean>>;
   };
 }
 
@@ -247,14 +273,23 @@ interface HealthOutcome {
 function healthResponse(
   db: 'ok' | 'unreachable' | undefined,
   frontend: FrontendReadiness | undefined,
+  checks: readonly HealthCheck[] = [],
 ): HealthOutcome {
-  const ready = db !== 'unreachable' && frontend !== 'unavailable';
+  const ready =
+    db !== 'unreachable' && frontend !== 'unavailable' && checks.every((check) => check.ok);
+  const byName: Record<string, boolean> = {};
+  if (db !== undefined) byName.database = db === 'ok';
+  if (frontend !== undefined) byName.assets = frontend === 'ok';
+  for (const check of checks) byName[check.name] = check.ok;
   return {
     ready,
     body: {
       status: ready ? 'ok' : 'degraded',
       ...(db === undefined ? {} : { db }),
       ...(frontend === undefined ? {} : { frontend }),
+      live: true,
+      ready,
+      checks: byName,
     },
   };
 }
@@ -267,32 +302,51 @@ function healthResponse(
  * every part of the application a deploy tool waits on:
  *
  *  - `probeDatabase` — a real round-trip per call, so the probe reflects DB reachability rather than
- *    just process liveness. `undefined` for a boot with no database (the static profile): the `db`
- *    field is then OMITTED rather than reported `ok`, which would be a lie.
+ *    just process liveness. It is bounded by the same timeout as the other probes: a database that
+ *    does not answer counts as unreachable. `undefined` for a boot with no database (the static
+ *    profile): the `db` field is then OMITTED rather than reported `ok`, which would be a lie.
  *  - `frontend` — the BOOT-TIME readiness of the declared static mounts (`frontendMountsReadiness`),
  *    computed once by the caller and passed in as a value. It is deliberately NOT recomputed here: a
  *    load balancer polls this route every second, and a per-call filesystem access would put that load
  *    on disk. `undefined` for a deployment that declares no mounts ⇒ the field is omitted.
  *
+ *  - `probes` — the further readiness checks of a full-platform boot (`health.ts`): the schema, the
+ *    mounted secrets, the durable worker and its system database. Each is bounded in time.
+ *
  * A non-ready dependency answers 503, so a deploy tool waiting on this signal does not report "ready"
- * while part of the application cannot serve.
+ * while part of the application cannot serve. The body adds `live`, `ready` and `checks` (each
+ * check's name with its boolean, never its cause) to the fields it always carried.
+ *
+ * The liveness probe `GET /livez` is registered beside it: 200 while the process answers, whatever
+ * the dependencies say.
  */
 export function registerHealthRoute<E extends Env>(
   app: Hono<E>,
   probeDatabase: (() => Promise<void>) | undefined,
   frontend: FrontendReadiness | undefined,
+  probes: readonly ReadinessProbe[] = [],
 ): void {
+  registerLivenessRoute(app);
   app.get('/health', async (c) => {
-    let db: 'ok' | 'unreachable' | undefined;
-    if (probeDatabase !== undefined) {
-      try {
-        await probeDatabase();
-        db = 'ok';
-      } catch {
-        db = 'unreachable';
-      }
-    }
-    const { ready, body } = healthResponse(db, frontend);
+    // The round trip is bounded like every other probe, so a database that hangs rather than
+    // refuses still gets a 503 answer instead of none.
+    const [dbCheck, checks] = await Promise.all([
+      probeDatabase === undefined
+        ? undefined
+        : runReadiness([
+            {
+              name: 'database',
+              check: async () => {
+                await probeDatabase();
+                return null;
+              },
+            },
+          ]).then(([check]) => check),
+      probes.length === 0 ? [] : runReadiness(probes),
+    ]);
+    const db: 'ok' | 'unreachable' | undefined =
+      dbCheck === undefined ? undefined : dbCheck.ok ? 'ok' : 'unreachable';
+    const { ready, body } = healthResponse(db, frontend, checks);
     return ready ? c.json(body, 200) : c.json(body, 503);
   });
 }
@@ -417,6 +471,19 @@ export interface BootedServer {
    * value.
    */
   agentTracing: AgentTracingPosture;
+  /**
+   * This process's side of the source fence (`runtime-fence.ts`): the phase it is in, and the seam an
+   * embedder or a test uses to observe a quiesce or a resume without waiting for the next poll.
+   */
+  fence: RuntimeFence;
+  /**
+   * The readiness probes beyond the database and the frontend mounts — the schema, the mounted
+   * secrets, and the durable worker with its system database when one is wired. `/health` runs them;
+   * an in-process runtime-control adapter hands them to `health()`.
+   */
+  readiness: readonly ReadinessProbe[];
+  /** How long `shutdownHttpServer` lets in-flight connections finish (the resolved config value). */
+  shutdownDrainMs: number;
   /** Close the underlying DB pool (the entrypoint wires this to SIGINT/SIGTERM). */
   close: () => Promise<void>;
 }
@@ -587,6 +654,29 @@ export interface ServerConfig {
    * Fail-closed on an invalid value.
    */
   authRateMultiplier: number;
+  /**
+   * How long a schema-mutating step of this boot (the platform migration chain, product-store DDL)
+   * waits for the SHARED SCHEMA LOCK before it refuses the boot — RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS,
+   * default 60000. Omitted ⇒ that default. A boot that runs out of the wait fails with a retryable
+   * `SchemaLockTimeoutError`: another migration, tenant provisioning or deploy holds the lock.
+   */
+  schemaLockTimeoutMs?: number;
+  /**
+   * The hosting posture — RAYSPEC_HOSTING_POSTURE, `local` (default) or `managed`. Under `managed`
+   * the public live-executor probe (`/recovery-scope`) is not registered at all; everything else is
+   * unchanged. Omitted ⇒ `local`.
+   */
+  hostingPosture?: HostingPosture;
+  /**
+   * How long a graceful shutdown lets in-flight connections finish before it closes the rest —
+   * RAYSPEC_SHUTDOWN_DRAIN_MS, default 10000. Omitted ⇒ that default.
+   */
+  shutdownDrainMs?: number;
+  /**
+   * The boot secrets that were supplied as `<VAR>_FILE` mounts: readiness re-checks that each is still
+   * a readable file. Omitted ⇒ none.
+   */
+  secretFiles?: readonly SecretFile[];
   /**
    * the OPERATOR gate for tenant DATA-ERASURE (the `eraseTenantNow` control seam). `true` ONLY when
    * RAYSPEC_ERASURE_ENABLED is EXACTLY the string `"true"`; ANYTHING else (unset, "1", "yes", "TRUE",
@@ -1114,6 +1204,22 @@ export function loadServerConfig(
   // invalid value; ≠ 1 is announced loudly where the scaled policies are applied — assembleServer).
   const authRateMultiplier = parseAuthRateMultiplier(env);
 
+  // the bounded wait for the shared schema lock (default 60 s; fail-closed on an invalid value).
+  const schemaLockTimeoutMs = parseSchemaLockTimeoutMs(env);
+
+  // the hosting posture and the graceful-shutdown drain (both fail-closed on an invalid value).
+  const hostingPosture = parseHostingPosture(env);
+  const shutdownDrainMs = parseShutdownDrainMs(env);
+
+  // The boot secrets supplied as file mounts, for the readiness re-check (paths only, never content).
+  const secretFiles: SecretFile[] = [];
+  for (const secret of SERVER_BOOT_SECRETS) {
+    const path = secret.fileVariant === null ? undefined : env[secret.fileVariant]?.trim();
+    if (secret.fileVariant !== null && path) {
+      secretFiles.push({ variable: secret.fileVariant, path: resolve(path) });
+    }
+  }
+
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
   // trim/lowercase coercion of an ambiguous value), mirroring RAYSPEC_GDPR_PURGE_ENABLED — an
   // ambiguous/typo'd value must never silently enable irreversible product+blob deletion.
@@ -1151,6 +1257,10 @@ export function loadServerConfig(
     cleanup,
     accessTokenTtlSeconds,
     authRateMultiplier,
+    schemaLockTimeoutMs,
+    hostingPosture,
+    shutdownDrainMs,
+    secretFiles,
     erasureEnabled,
     bodyRefreshEnabled,
     tenantBootstrapEnabled,
@@ -1349,6 +1459,76 @@ export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
         'silently fall back — falling back to the production limits would reproduce exactly the ' +
         'far-from-cause 429s the variable exists to remove, and guessing a scale would silently ' +
         'weaken an auth throttle).',
+    );
+  }
+  return n;
+}
+
+/** The hosting postures: `local` (the default) and `managed` (the public-hosting posture). */
+export type HostingPosture = 'local' | 'managed';
+
+/**
+ * Parse RAYSPEC_HOSTING_POSTURE. Unset/blank ⇒ `local`. Exactly `local` or `managed`; anything else
+ * ABORTS the boot, so a typo never silently leaves a public probe open.
+ */
+export function parseHostingPosture(env: NodeJS.ProcessEnv): HostingPosture {
+  const raw = env.RAYSPEC_HOSTING_POSTURE?.trim();
+  if (raw === undefined || raw === '') return 'local';
+  if (raw === 'local' || raw === 'managed') return raw;
+  throw new BootConfigError(
+    `Boot aborted — RAYSPEC_HOSTING_POSTURE='${raw}' is not 'local' or 'managed'. Under 'managed' ` +
+      'the public live-executor probe (/recovery-scope) is disabled. Fail-closed.',
+  );
+}
+
+/** The default graceful-shutdown drain: ten seconds. */
+export const DEFAULT_SHUTDOWN_DRAIN_MS = 10_000;
+
+/** The longest graceful-shutdown drain an operator may configure: ten minutes. */
+export const MAX_SHUTDOWN_DRAIN_MS = 600_000;
+
+/**
+ * Parse RAYSPEC_SHUTDOWN_DRAIN_MS — how long a graceful shutdown lets in-flight connections finish
+ * before it closes the rest. Unset/blank ⇒ 10000. A whole number of milliseconds from 0 to ten
+ * minutes; anything else ABORTS the boot.
+ */
+export function parseShutdownDrainMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.RAYSPEC_SHUTDOWN_DRAIN_MS?.trim();
+  if (raw === undefined || raw === '') return DEFAULT_SHUTDOWN_DRAIN_MS;
+  const n = Number(raw);
+  if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(n) || n > MAX_SHUTDOWN_DRAIN_MS) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_SHUTDOWN_DRAIN_MS='${raw}' is not a whole number of milliseconds from ` +
+        `0 to ${MAX_SHUTDOWN_DRAIN_MS}. It bounds how long a shutdown waits for in-flight ` +
+        `connections before it closes them (default ${DEFAULT_SHUTDOWN_DRAIN_MS}). Fail-closed.`,
+    );
+  }
+  return n;
+}
+
+/** The longest bounded wait for the shared schema lock an operator may configure: one hour. */
+export const MAX_SCHEMA_LOCK_TIMEOUT_MS = 3_600_000;
+
+/**
+ * Parse RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS — how long a schema-mutating boot step waits for the shared
+ * schema lock. Unset/blank ⇒ the contract default (60000). A whole number of milliseconds from 1 to
+ * one hour; anything else ABORTS the boot rather than silently waiting forever or not at all.
+ */
+export function parseSchemaLockTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS?.trim();
+  if (raw === undefined || raw === '') return DEFAULT_SCHEMA_LOCK_TIMEOUT_MS;
+  const n = Number(raw);
+  if (
+    !/^[0-9]+$/.test(raw) ||
+    !Number.isSafeInteger(n) ||
+    n < 1 ||
+    n > MAX_SCHEMA_LOCK_TIMEOUT_MS
+  ) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS='${raw}' is not a whole number of ` +
+        `milliseconds from 1 to ${MAX_SCHEMA_LOCK_TIMEOUT_MS}. It bounds how long the boot waits ` +
+        'for the shared schema lock another migration, tenant provisioning or deploy may hold ' +
+        `(default ${DEFAULT_SCHEMA_LOCK_TIMEOUT_MS}). Fail-closed.`,
     );
   }
   return n;
@@ -1600,13 +1780,55 @@ export function assembleStaticServer(
  * re-run against an already-migrated DB is a no-op. Bootstraps a CLEAN empty DB AND no-ops
  * on an up-to-date one, so the boot is safe to run repeatedly.
  *
- * Concurrency: the migrator takes NO advisory lock. Two boots racing against the SAME fresh
- * empty DB would both try to apply 0000's non-`IF NOT EXISTS` CREATEs — one wins, the other's
- * transaction aborts cleanly (full rollback, no corruption). A LOCAL single-node boot does not hit
- * this; a future multi-replica deploy would gate migrations on a single runner.
+ * Concurrency: the chain runs under the SHARED SCHEMA LOCK (`schema-lock.ts`) — the same advisory
+ * lock product-store DDL and `rayspec tenant ensure` take — so two boots, or a boot and a tenant
+ * ensure, started against the same empty database run one after the other: the second waits, finds
+ * the chain applied and no-ops. The drizzle migrator takes no lock of its own, and without this one
+ * the loser of such a race died on a duplicate object. The wait is bounded (`lockTimeoutMs`, default
+ * 60 s); running out of it is a retryable `SchemaLockTimeoutError`, never a hang.
+ *
+ * A NEWER DATABASE IS REFUSED. Under the lock and before anything is applied, the ledger is mapped
+ * onto this runtime's journal (`readPlatformHead`). A ledger row the journal cannot explain means a
+ * newer runtime migrated this database: the drizzle migrator alone would apply nothing and let this
+ * older runtime serve a schema it does not understand. It throws `SchemaNewerThanRuntimeError`
+ * instead, having changed nothing.
  */
-export async function applyMigrations(db: Db): Promise<void> {
-  await migrate(db, { migrationsFolder: migrationsDir() });
+export async function applyMigrations(
+  db: Db,
+  opts: { lockTimeoutMs?: number } = {},
+): Promise<void> {
+  const query: CatalogQuery = async (sql, params = []) =>
+    (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
+  await withSchemaLock(
+    db,
+    async () => {
+      const head = await readPlatformHead(query);
+      if (head.state === 'unknown') throw new SchemaNewerThanRuntimeError(head.unexplainedRows);
+      await migrate(db, { migrationsFolder: migrationsDir() });
+    },
+    {
+      ...(opts.lockTimeoutMs !== undefined ? { timeoutMs: opts.lockTimeoutMs } : {}),
+    },
+  );
+}
+
+/**
+ * The database was migrated by a newer runtime than this one: its platform ledger records migrations
+ * this runtime does not ship. The runtime refuses to serve it (a `BootConfigError`, so both
+ * entrypoints print the message and exit 1) and changes nothing.
+ */
+export class SchemaNewerThanRuntimeError extends BootConfigError {
+  readonly unexplainedMigrations: number;
+  constructor(unexplainedMigrations: number) {
+    super(
+      `Boot aborted — the database records ${unexplainedMigrations} platform migration(s) this ` +
+        `runtime (${runtimePlatformHead()}) does not ship: a newer runtime migrated it. Refusing to ` +
+        'serve a schema this runtime does not understand; nothing was changed. Run the runtime that ' +
+        'migrated this database, or a newer one.',
+    );
+    this.name = 'SchemaNewerThanRuntimeError';
+    this.unexplainedMigrations = unexplainedMigrations;
+  }
 }
 
 /**
@@ -1824,6 +2046,24 @@ export function attachAppliedProductDdlNote(
  */
 export async function assembleServer(
   config: ServerConfig,
+  opts: AssembleServerOptions = {},
+): Promise<BootedServer> {
+  // A boot that fails after it read the source fence stops watching it and removes its heartbeat, so
+  // a refused boot is not counted as a live, undrained process by the next quiesce.
+  const started: { fence?: RuntimeFence } = {};
+  try {
+    return await assembleServerWith(config, opts, started);
+  } catch (err) {
+    await started.fence?.stop().catch(() => {});
+    throw err;
+  }
+}
+
+/** The boot seams `assembleServer` accepts beside the validated config. */
+export type AssembleServerOptions = Parameters<typeof assembleServerWith>[1];
+
+async function assembleServerWith(
+  config: ServerConfig,
   opts: {
     agentBackendsFactory?: AgentBackendsFactory;
     /** LOCAL table-registration stand-in — register the built product tables (the dev wrapper supplies this). */
@@ -1884,7 +2124,13 @@ export async function assembleServer(
      * depends on it, so a caller that omits it boots exactly as it did before.
      */
     bootWarn?: BootWarnSink;
-  } = {},
+    /**
+     * How often this process re-reads the source fence (default 500 ms — the contract's one-second
+     * observation bound with margin). A test may shorten it.
+     */
+    fencePollIntervalMs?: number;
+  },
+  started: { fence?: RuntimeFence },
 ): Promise<BootedServer> {
   // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
   // Importing this boot closure pulls in undici v8, whose module-import-time side effect overwrites the
@@ -1918,13 +2164,12 @@ export async function assembleServer(
     apiKeyPepper: config.apiKeyPepper,
   });
 
-  // 1. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
-  const db = makeDb(config.databaseUrl);
-
-  // 2. Apply the committed migration chain (idempotent — safe to re-run).
-  await applyMigrations(db);
-
-  // 3. Signer + JWKS + OIDC provider — all from the SAME RS256 PEM. The signer mints with the
+  // 1. VALIDATE BEFORE ANYTHING IS MUTATED — the signing key first, then the injected spec. A boot
+  //    that is going to refuse must leave the database exactly as it found it: before this ordering
+  //    a malformed key or an invalid spec was reported only AFTER the platform migration chain had
+  //    run, so pointing a broken deploy at an empty database still created the platform tables.
+  //
+  //    Signer + JWKS + OIDC provider — all from the SAME RS256 PEM. The signer mints with the
   //    configured access-token TTL (default 480s — the boot env, fail-closed-validated above).
   //
   // `loadServerConfig` checks this secret is PRESENT; nothing between it and `jose` looks at the
@@ -1951,6 +2196,21 @@ export async function assembleServer(
     // kind of change but never the value.
     throw new BootConfigError(MALFORMED_JWT_SIGNING_KEY_MESSAGE);
   }
+
+  // The injected spec, validated by the SAME per-profile checks its deploy path runs first (the
+  // deploy path repeats them; they are pure). Nothing below this line runs for an invalid spec.
+  if (config.specPath) validateInjectedSpec(config.specPath);
+
+  // 2. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
+  const db = makeDb(config.databaseUrl);
+
+  //    The source fence and the platform's stores, signer and limiter: constructed, nothing read or
+  //    written yet (the fence is read once the schema is in place, below). The preflight assembles
+  //    the declared app on them to rehearse the deploy.
+  const fence = new RuntimeFence({
+    db,
+    ...(opts.fencePollIntervalMs !== undefined ? { pollIntervalMs: opts.fencePollIntervalMs } : {}),
+  });
   const jwks = new JwksProvider([signer.publicKeyJwk()]);
   const providerJwk = await exportJWK(privateKey);
   const oidcProvider = createOidcProvider({
@@ -1961,25 +2221,18 @@ export async function assembleServer(
     proxy: true,
   });
 
-  // 4. The five global-table stores (deny-by-default predicate-exempt modules) + AuthService.
+  //    The five global-table stores (deny-by-default predicate-exempt modules) + AuthService.
   const identityStore = new IdentityStore(db);
   // The org store carries the tenant-bootstrap posture, not just the handle: it is the ONE place that
   // decides whether an org id may be chosen, so a route that forgot to check could not smuggle one
   // past it, and the gated route keys its own registration off the same value (one source of truth).
   const orgStore = new OrgStore(db, { tenantBootstrapEnabled: config.tenantBootstrapEnabled });
-  const apiKeyStore = new ApiKeyStore(db);
+  // A read authenticated with an api key stamps its last use, a write a source fence withholds.
+  const apiKeyStore = new ApiKeyStore(db, { stampsLastUse: () => fence.admitsWrites() });
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
   const inviteStore = new InviteStore(db);
   const authService = new AuthService(identityStore, signer);
-
-  // the dev/CI auth rate-limit multiplier, applied HERE — the one production limiter construction.
-  // 1 (the default) hands the limiter DEFAULT_POLICIES itself (scaledAuthPolicies returns its input,
-  // so a default boot is byte-identical to before); any other value scales the login/register/refresh
-  // buckets and is announced LOUDLY on the boot's one-line warning sink, so it can never sit in a
-  // production environment silently.
-  const authRateBanner = authRateMultiplierBanner(config.authRateMultiplier);
-  if (authRateBanner !== null) (opts.bootWarn ?? consoleWarn)(authRateBanner);
 
   const baseDeps: Omit<AppDeps, 'engine'> = {
     db,
@@ -2006,7 +2259,83 @@ export async function assembleServer(
     trustedProxies: config.trustedProxies,
     // The body-refresh operator gate (default false ⇒ cookie-only, today's posture).
     bodyRefreshEnabled: config.bodyRefreshEnabled,
+    // The source fence: while the runtime is fenced every mutation answers 503 before it runs.
+    writeFence: fence,
   };
+
+  //    Every refusal the deploy can decide from the configuration and the document alone, made with
+  //    nothing changed yet: preflightDeclaredSpec for a backend document and prepareProductYamlSpec
+  //    for a Product-YAML document each build what the deploy needs and rehearse the deploy with no
+  //    migration to apply. The deploy path below takes what they built.
+  const productOpts = {
+    fence,
+    registerProductTables: opts.registerProductTables,
+    ...(opts.productDeterministicAgents
+      ? { deterministicAgents: opts.productDeterministicAgents }
+      : {}),
+    ...(opts.productSttAdapter ? { sttAdapter: opts.productSttAdapter } : {}),
+    ...(opts.productDeterministicResponderBackend
+      ? { deterministicResponderBackend: opts.productDeterministicResponderBackend }
+      : {}),
+    ...(opts.productDeterministicNormalizerBackend
+      ? { deterministicNormalizerBackend: opts.productDeterministicNormalizerBackend }
+      : {}),
+    ...(opts.productAgentBackendsFactory
+      ? { agentBackendsFactory: opts.productAgentBackendsFactory }
+      : {}),
+  };
+  let preflight: PreflightedSpec | undefined;
+  let preparedProduct: PreparedProductYaml | undefined;
+  if (config.specPath) {
+    try {
+      if (detectSpecKind(readFileSync(config.specPath, 'utf8')) === 'product') {
+        preparedProduct = await prepareProductYamlSpec(db, config, { ...productOpts, baseDeps });
+      } else {
+        preflight = await preflightDeclaredSpec(db, config, config.specPath, {
+          baseDeps,
+          ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
+          ...(opts.agentBackendsFactory ? { agentBackendsFactory: opts.agentBackendsFactory } : {}),
+          ...(opts.registerProductTables
+            ? { registerProductTables: opts.registerProductTables }
+            : {}),
+        });
+      }
+    } catch (err) {
+      await db.$client.end();
+      throw err;
+    }
+  }
+
+  // 3. Apply the committed migration chain (idempotent — safe to re-run) under the SHARED SCHEMA
+  //    LOCK, so a concurrent boot, tenant ensure or deploy against the same database waits its turn.
+  //    Then read the SOURCE FENCE before anything that produces work exists: a boot under a held fence
+  //    starts fenced, so its queues register paused and its gates start closed (runtime-fence.ts).
+  // Every schema change this boot makes runs as a `runtime.apply` operation with its receipts, and an
+  // apply an earlier process left interrupted is reconciled first (deploy-apply.ts).
+  const deployApply = new DeployApply({
+    db,
+    migratePlatform: () => applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs }),
+    ...(config.specPath ? { specSource: readFileSync(config.specPath, 'utf8') } : {}),
+    lockTimeoutMs: config.schemaLockTimeoutMs,
+    warn: opts.bootWarn ?? consoleWarn,
+  });
+  try {
+    await deployApply.platformChain();
+    await fence.load();
+    started.fence = fence;
+  } catch (err) {
+    // A refused boot hands no pool back, so end it here rather than leave its connections open.
+    await db.$client.end();
+    throw err;
+  }
+
+  // the dev/CI auth rate-limit multiplier, applied HERE — the one production limiter construction.
+  // 1 (the default) hands the limiter DEFAULT_POLICIES itself (scaledAuthPolicies returns its input,
+  // so a default boot is byte-identical to before); any other value scales the login/register/refresh
+  // buckets and is announced LOUDLY on the boot's one-line warning sink, so it can never sit in a
+  // production environment silently.
+  const authRateBanner = authRateMultiplierBanner(config.authRateMultiplier);
+  if (authRateBanner !== null) (opts.bootWarn ?? consoleWarn)(authRateBanner);
 
   let app: ReturnType<typeof createAuthApp>;
   let declaredRoutes: BootedServer['declaredRoutes'] = [];
@@ -2025,6 +2354,8 @@ export async function assembleServer(
   // A read of the LIVE durable executor identity for the /recovery-scope probe (undefined when no
   // durable worker is wired — the probe then fail-closes 503).
   let durableExecutorIdentity: (() => DurableExecutorIdentity) | undefined;
+  // The durable worker's readiness probes (empty when no worker is wired).
+  let workerReadiness: readonly ReadinessProbe[] = [];
   // Control seam: the on-demand cron-fire delegate (undefined for an auth-only / no-cron boot).
   let fireCronNow: BootedServer['fireCronNow'];
   // M1 control seam: the on-demand cleanup delegate (undefined for an auth-only / no durable-worker boot).
@@ -2048,20 +2379,9 @@ export async function assembleServer(
     //     REAL DbosWorkflowExecutor + resolveWorkflowRun) and serves it — the env-driven boot the
     //     the earlier family guard used to abort. The classic path (6b) is untouched.
     const deployed = await deployProductYamlSpec(db, config, baseDeps, {
-      registerProductTables: opts.registerProductTables,
-      ...(opts.productDeterministicAgents
-        ? { deterministicAgents: opts.productDeterministicAgents }
-        : {}),
-      ...(opts.productSttAdapter ? { sttAdapter: opts.productSttAdapter } : {}),
-      ...(opts.productDeterministicResponderBackend
-        ? { deterministicResponderBackend: opts.productDeterministicResponderBackend }
-        : {}),
-      ...(opts.productDeterministicNormalizerBackend
-        ? { deterministicNormalizerBackend: opts.productDeterministicNormalizerBackend }
-        : {}),
-      ...(opts.productAgentBackendsFactory
-        ? { agentBackendsFactory: opts.productAgentBackendsFactory }
-        : {}),
+      ...productOpts,
+      deployApply,
+      ...(preparedProduct ? { prepared: preparedProduct } : {}),
     });
     app = deployed.app;
     declaredRoutes = deployed.declaredRoutes;
@@ -2075,6 +2395,7 @@ export async function assembleServer(
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
     durableExecutorIdentity = deployed.durableExecutorIdentity;
+    workerReadiness = deployed.workerReadiness;
     eraseTenantNow = deployed.eraseTenantNow;
     // A product deployment launches a durable worker too, so it registers the daily system cleanup in
     // the same pre-launch window — propagate its on-demand seam exactly as the classic branch does below.
@@ -2083,6 +2404,9 @@ export async function assembleServer(
     // 6b. A classic rayspec.yaml → run the REAL deploy() GitOps pipeline (validate → diff → lint/gate
     //    → migrate → roll out → drift). Product-agnostic: the spec is the injected deployer artifact.
     const deployed = await deployDeclaredSpec(db, config, baseDeps, {
+      fence,
+      deployApply,
+      ...(preflight ? { preflight } : {}),
       agentBackendsFactory: opts.agentBackendsFactory,
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
@@ -2097,6 +2421,7 @@ export async function assembleServer(
     drift = deployed.drift;
     durableExecutorShutdown = deployed.durableExecutorShutdown;
     durableExecutorIdentity = deployed.durableExecutorIdentity;
+    workerReadiness = deployed.workerReadiness ?? [];
     fireCronNow = deployed.fireCronNow;
     runCleanupNow = deployed.runCleanupNow;
     eraseTenantNow = deployed.eraseTenantNow;
@@ -2131,19 +2456,33 @@ export async function assembleServer(
   //    and reports the boot-time readiness of the declared frontend mounts as `frontend` (omitted, so
   //    the response is unchanged, when the deployment declares none) — a deploy tool waiting on this
   //    signal must not read ready while the declared assets cannot be served.
+  //    Beyond the database and the mounts, readiness covers the platform schema (not behind, not
+  //    migrated by a newer runtime), the boot secrets mounted as files, and the durable worker with
+  //    its system database when one is wired (health.ts). `/livez` is registered beside it.
+  const catalogQuery: CatalogQuery = async (sql, params = []) =>
+    (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
+  const readiness: ReadinessProbe[] = [
+    schemaProbe(catalogQuery),
+    bindingsProbe(config.secretFiles ?? []),
+    ...workerReadiness,
+  ];
   registerHealthRoute(
     app,
     async () => {
       await db.$client`select 1`;
     },
     frontendReadiness,
+    readiness,
   );
 
   // 7b. The live-executor-identity readiness probe — registered right beside /health (same PUBLIC,
   //     product-free posture, before the static catch-all). It reports the LIVE durable executor
   //     identity ({ executorId, applicationVersion }); a boot with no durable worker (no accessor
-  //     wired) fail-closes 503.
-  registerRecoveryScopeRoute(app, durableExecutorIdentity);
+  //     wired) fail-closes 503. Under the MANAGED hosting posture it is not registered at all
+  //     (disabled): it confirms a guessed application identity to anyone who asks.
+  if ((config.hostingPosture ?? 'local') !== 'managed') {
+    registerRecoveryScopeRoute(app, durableExecutorIdentity);
+  }
 
   // 8. Mount the deployed spec's declared static frontend(s) — registered LAST (after every
   //    API/auth/OIDC route + /health) so a static miss never shadows an API path: Hono runs matching
@@ -2160,6 +2499,9 @@ export async function assembleServer(
       permissionsPolicy: config.permissionsPolicy,
     });
   }
+
+  // 9. Start watching the source fence (and heartbeating), now that every producer is attached.
+  await fence.start();
 
   return {
     app,
@@ -2181,10 +2523,15 @@ export async function assembleServer(
     // from the variable this boot may itself have written — so the banner is honest on the entry points
     // that never change the SDK default, and cannot report OFF on a process that is still exporting.
     agentTracing: await observedAgentTracing(),
+    fence,
+    readiness,
+    shutdownDrainMs: config.shutdownDrainMs ?? DEFAULT_SHUTDOWN_DRAIN_MS,
     close: async () => {
-      // Drain the durable worker FIRST (finish in-flight jobs, stop dequeuing) so a
-      // shutdown does not orphan a job, THEN end the app DB pool. Swallow a worker-shutdown error so
-      // the DB pool still closes (a noisy shutdown must not leak a pooled connection).
+      // Stop watching the fence (and remove this process's heartbeat), then drain the durable worker
+      // (finish in-flight jobs, stop dequeuing) so a shutdown does not orphan a job, THEN end the app
+      // DB pool. Swallow a worker-shutdown error so the DB pool still closes (a noisy shutdown must
+      // not leak a pooled connection).
+      await fence.stop();
       if (durableExecutorShutdown) await durableExecutorShutdown().catch(() => {});
       await db.$client.end();
     },
@@ -2332,6 +2679,436 @@ export function assertSpecFamilyMountable(specSource: string, specPath: string):
 }
 
 /**
+ * The pure checks of a backend-profile (`rayspec.yaml`) document that its deploy path runs before
+ * anything else: a Product-YAML document is refused with guidance (`assertSpecFamilyMountable`), and
+ * the document must parse and lint clean. Returns the parsed spec.
+ */
+function validateDeclaredSpec(specSource: string, specPath: string): RaySpec {
+  // reject a Product-YAML doc up-front with the SAME guidance `deploy()` gives (before any DB work),
+  // instead of the RaySpec strict-shape wall below. A classic doc passes through UNCHANGED.
+  assertSpecFamilyMountable(specSource, specPath);
+  const parsed = parseSpec(specSource);
+  if (!parsed.ok) {
+    throw new BootConfigError(
+      `Boot aborted — injected spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
+    );
+  }
+  return parsed.value;
+}
+
+/**
+ * Validate the injected spec BEFORE the boot mutates anything: read it and run the checks of the
+ * deploy path its profile takes — `validateProductYamlSpec` for a Product-YAML document,
+ * `validateDeclaredSpec` for everything else — throwing exactly the refusal that path throws. The
+ * deploy path runs the same checks again; what this adds is the ORDER: an invalid document now
+ * refuses the boot while the database is still untouched.
+ *
+ * Scope, stated so it is not read wider: this is the document itself. For a backend document,
+ * `preflightDeclaredSpec` then checks, still before anything is mutated, what the environment must
+ * satisfy for it once its extensions are merged; for a Product-YAML document,
+ * `preflightProductYamlSpec` does the same for its deployment tenant, blob root, media signing key,
+ * extraction mode and speech provider.
+ */
+export function validateInjectedSpec(specPath: string): void {
+  const specSource = readFileSync(specPath, 'utf8');
+  if (detectSpecKind(specSource) === 'product') {
+    validateProductYamlSpec(specSource, specPath);
+    return;
+  }
+  validateDeclaredSpec(specSource, specPath);
+}
+
+/**
+ * What `preflightDeclaredSpec` resolved: the parsed document and its merged extensions, the product
+ * tables the registrar already admitted, and the agent backends the deployment's factory built.
+ */
+export interface PreflightedSpec {
+  readonly parsedSpec: RaySpec;
+  readonly merged: MergedExtensions;
+  readonly productTables: ReturnType<typeof buildProductTables>;
+  readonly agentBackends?: ReadonlyMap<BackendId, Backend>;
+}
+
+/**
+ * The blob backend a document's `kind:'stream'` routes move bytes through: a pack's own when a pack
+ * provided one, else the fs backend over RAYSPEC_BLOB_ROOT, else a refusal. Undefined when the
+ * document declares no stream route. Asked through the SHARED predicate (boot-env-demands.ts), on the
+ * POST-MERGE spec, so the read-only report asks the identical question of the base document.
+ */
+function streamBlobFactory(
+  effectiveSpec: RaySpec,
+  config: ServerConfig,
+  packBlobFactory: BlobStoreFactory | undefined,
+  specPath: string,
+): BlobStoreFactory | undefined {
+  if (!declaresStreamRoute(effectiveSpec.api)) return undefined;
+  // A PACK may PROVIDE its own blob backend (an ExtensionCapabilities.blobFactory — e.g. an S3
+  // backend). When a pack provided one, prefer it (the pack owns the bytes); else the default fs
+  // backend over RAYSPEC_BLOB_ROOT. A stream route with NEITHER is fail-closed (nowhere to put bytes).
+  // The pack-provided factory is still tenant-bound BY CONSTRUCTION (the BlobStore contract).
+  if (packBlobFactory) return packBlobFactory;
+  if (config.blobRoot) return makeFsBlobStoreFactory(config.blobRoot);
+  throw new BootConfigError(
+    `Boot aborted — the deployed spec at ${specPath} declares a 'stream' route but no blob backend ` +
+      'is configured (RAYSPEC_BLOB_ROOT is unset and no extension provided one). A stream ' +
+      'route moves binary bytes through the tenant-bound BlobStore; set RAYSPEC_BLOB_ROOT to a ' +
+      'writable directory (the fs blob backend writes one subdir per tenant under it), or load a ' +
+      'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',
+  );
+}
+
+/**
+ * The READ-ONLY, path-jailed fs-source factory over RAYSPEC_FS_SOURCE_ROOT, or undefined when no root
+ * is configured. `makeFsSourceFactory` fail-closes on a missing root without knowing the environment,
+ * so the refusal is re-raised here naming the VARIABLE the operator has to fix.
+ */
+function fsSourceFactoryFor(config: ServerConfig): FsSourceFactory | undefined {
+  if (!config.fsSourceRoot) return undefined;
+  try {
+    return makeFsSourceFactory(config.fsSourceRoot);
+  } catch (err) {
+    if (!(err instanceof FsSourceConfigError)) throw err;
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a ` +
+        'directory. It is the READ-ONLY source root `init.fsSource` reads under; point it at an ' +
+        'existing directory on the box (nothing here creates it). Fail-closed.',
+    );
+  }
+}
+
+/**
+ * The media-token service a stream PLAYBACK route is authenticated by (a signed `?token=` media-JWT,
+ * HS256, a DISTINCT key from the RS256 API chain), or undefined when no playback route is declared.
+ * A playback route without a valid media signing key is refused: it would be unauthenticated.
+ */
+function mediaTokenServiceFor(
+  effectiveSpec: RaySpec,
+  config: ServerConfig,
+  specPath: string,
+): ReturnType<typeof createMediaTokenService> | undefined {
+  if (!declaresPlaybackRoute(effectiveSpec.api)) return undefined;
+  if (!config.mediaSigningKey) {
+    throw new BootConfigError(
+      `Boot aborted — the deployed spec at ${specPath} declares a stream PLAYBACK route but no media ` +
+        'signing key is configured (RAYSPEC_MEDIA_SIGNING_KEY is unset). A playback route is ' +
+        'authenticated by a signed ?token= media-JWT (HS256, a DISTINCT key from the RS256 API chain ' +
+        '— a leaked media URL must not grant API access). Set RAYSPEC_MEDIA_SIGNING_KEY to a ' +
+        'high-entropy secret of at least 32 bytes. Fail-closed (a playback route requires the media ' +
+        'verifier).',
+    );
+  }
+  // createMediaTokenService fail-closes on a too-short secret; wrap that as a BootConfigError so the
+  // abort is uniform + actionable at the entrypoint.
+  try {
+    return createMediaTokenService(config.mediaSigningKey);
+  } catch (err) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Refuse a declared frontend mount that cannot be served, on the SAME per-mount check `/health`
+ * reports (`mountUnservableReason`, the one definition of servable).
+ */
+function assertFrontendMountsServable(effectiveSpec: RaySpec, specPath: string): void {
+  const frontendSpecDir = dirname(specPath);
+  for (const mount of effectiveSpec.frontend ?? []) {
+    const unservable = mountUnservableReason(mount, frontendSpecDir);
+    if (unservable === undefined) continue;
+    const resolvedDir = resolve(frontendSpecDir, mount.dir);
+    if (unservable === 'dir') {
+      throw new BootConfigError(
+        `Boot aborted — the deployed spec at ${specPath} declares a frontend at route '${mount.route}' ` +
+          `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) is missing or unreadable. ` +
+          'Point frontend.dir at a readable directory of built assets. Fail-closed.',
+      );
+    }
+    throw new BootConfigError(
+      `Boot aborted — the deployed spec at ${specPath} declares an spa frontend at route '${mount.route}' ` +
+        `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) has no readable index.html. ` +
+        'An spa mount serves index.html for every unmatched deep link, so without it the mount cannot ' +
+        'answer one. Build the frontend into frontend.dir, or set spa: false. Fail-closed.',
+    );
+  }
+}
+
+/**
+ * The deployment tenant a cron or manual trigger fires under. A document that declares one without
+ * RAYSPEC_CRON_TENANT_ID is refused: firing under an unknown tenant is never silently OK.
+ */
+function requireCronTenant(fireable: number, config: ServerConfig): string {
+  if (!config.cronTenantId) {
+    throw new BootConfigError(
+      `Boot aborted — the spec declares ${fireable} cron/manual trigger(s) but ` +
+        'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
+        'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
+        'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
+    );
+  }
+  return config.cronTenantId;
+}
+
+/** What a declared document's app is assembled with; each capability is absent when not wired. */
+interface DeclaredAppParts {
+  readonly baseDeps: Omit<AppDeps, 'engine'>;
+  readonly blobFactory?: BlobStoreFactory;
+  readonly fsSourceFactory?: FsSourceFactory;
+  readonly mediaTokenService?: ReturnType<typeof createMediaTokenService>;
+  readonly sttCapability?: NonNullable<ReturnType<typeof buildSttCapability>>;
+  readonly ttsCapability?: NonNullable<ReturnType<typeof buildTtsCapability>>;
+  readonly eventBus?: ReturnType<typeof makeTenantEventBus>;
+  readonly eventWake?: ReturnType<typeof makeTenantEventWake>;
+  readonly durableExecutor?: DurableExecutor;
+  readonly manualTriggerFirer?: ManualTriggerFirer;
+}
+
+/**
+ * Assemble a declared (backend-profile) document's app from the engine `deploy()` rolled out, and the
+ * agent registry the durable worker resolves a run's agent against. Shared by the deploy and by its
+ * rehearsal before the boot changes anything (`preflightDeclaredSpec`), so both assemble — and refuse —
+ * the same document the same way.
+ */
+function assembleDeclaredApp(
+  engine: DeclarativeEngine,
+  parts: DeclaredAppParts,
+): { app: ReturnType<typeof createAuthApp>; agentRegistry?: AgentRegistry } {
+  const {
+    baseDeps,
+    blobFactory,
+    fsSourceFactory,
+    mediaTokenService,
+    sttCapability,
+    ttsCapability,
+    eventBus,
+    eventWake,
+    durableExecutor,
+    manualTriggerFirer,
+  } = parts;
+  let agentRegistry: AgentRegistry | undefined;
+  // Capture the SAME AgentRegistry the run surface builds, so the durable worker
+  // resolves a RunJob's agentId identically (the engine's loaded handlers are only available
+  // HERE — inside the rollout). Built only when the engine declares agents + backends.
+  if (engine.agentBackends && engine.spec.agents.length > 0) {
+    agentRegistry = buildAgentRegistry({
+      spec: engine.spec,
+      agentBackends: engine.agentBackends,
+      handlers: engine.handlers ?? new Map(),
+      productTables: engine.productTables,
+      // Thread the SAME wired blob backend (assembled above, present iff the spec has a
+      // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
+      // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
+      ...(blobFactory ? { blobFactory } : {}),
+      // The three REMAINING handle-shaped capabilities the sync run surface threads
+      // (api-auth's `withDeclaredAgents`), on the SAME terms and for the SAME reason.
+      // `resolve-tools.ts` SPREADS each handle onto the tool init, so a capability this
+      // registry never received is an ABSENT key — and a declared tool that reads it throws
+      // off-request while the identical tool works in-request. None of the three touches the
+      // run's transaction: `fsSourceFactory()` reads the deployment's jailed source root and
+      // `sttCapability`/`ttsCapability` are provider handles that take no database at all.
+      // Every one is spread-when-wired, so a deployment that configured none builds a
+      // byte-identical registry to before.
+      ...(fsSourceFactory ? { fsSourceFactory } : {}),
+      ...(sttCapability ? { sttCapability } : {}),
+      ...(ttsCapability ? { ttsCapability } : {}),
+      // `eventBus` is DELIBERATELY NOT threaded here, and it is the one capability that
+      // cannot cross this seam on these terms. The durable worker runs the WHOLE run inside
+      // one `tdb.transaction(...)` and builds the run's tools from that TRANSACTIONAL handle
+      // (@rayspec/durable-dbos `executor.ts`, the `runAgent` step), while the sync run surface
+      // builds them from a plain `forTenant(...)` handle (api-auth `routes/runs.ts`). The bus
+      // gives a tool the IMMEDIATE form, which allocates the sequence number at the call —
+      // so built from the worker's handle it would take the tenant's `tenant_event_streams`
+      // counter-row lock INSIDE the run's transaction, and Postgres holds that lock until
+      // COMMIT: for the rest of the run, across the model call, with every other emit of that
+      // tenant (ordinary in-request route flushes included) waiting behind it, unbounded —
+      // exactly the hazard the buffered/immediate split exists to prevent (api-auth
+      // `engine/event-bus.ts`). The same wrapping would also roll a tool's emitted events back
+      // with a run that later throws, while the identical in-request tool's survive. Giving an
+      // off-request tool a sound `init.emit` needs a handle that is NOT the run's transaction,
+      // which is a change to the tool-factory seam itself, not a wiring choice available here.
+      // `durable-worker-capability-parity.db.test.ts` arm (d) measures the counter row while a
+      // run is parked and fails if this seam is opened.
+    });
+  }
+  // Inject the tenant-bound blob backend into the engine (the `stream` route arm
+  // reads `engine.blobFactory` to build `init.blob`). `deploy()`/`RolloutConfig` is an unchanged
+  // platform contract that knows nothing of blobs, so the composition root — which OWNS
+  // buildApp + assembled blobFactory above (guarded: present iff the spec has a stream route) —
+  // augments the engine here, exactly as it injects `durableExecutor`. Spread so the field is
+  // ABSENT (not undefined) for a no-stream spec, keeping the engine shape exact.
+  const engineWithBlob: DeclarativeEngine = {
+    ...engine,
+    ...(blobFactory ? { blobFactory } : {}),
+    // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
+    // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
+    ...(fsSourceFactory ? { fsSourceFactory } : {}),
+    // Inject the media-token service (when wired) so the playback arm's 2nd auth path
+    // + the mint capability are available. Spread so ABSENT for a no-playback spec.
+    ...(mediaTokenService ? { mediaTokenService } : {}),
+    // Inject the speech-to-text capability (when a provider is configured) so a route/tool
+    // handler's `init.stt` transcribes through it. Spread so ABSENT when STT_PROVIDER is unset.
+    ...(sttCapability ? { sttCapability } : {}),
+    // Inject the text-to-speech capability (when a provider is configured) so a route/tool
+    // handler's `init.tts` synthesizes through it. Spread so ABSENT when TTS_PROVIDER is unset.
+    ...(ttsCapability ? { ttsCapability } : {}),
+    // Inject the tenant event bus (when the deployed spec enabled it) so a route/tool handler's
+    // `init.emit` appends to its tenant's stream. Spread so ABSENT otherwise — which is what
+    // makes the capability absent from every init rather than an undefined-valued key, AND
+    // what makes `GET /v1/subscribe` serve rather than answer its fail-closed 501.
+    ...(eventBus ? { eventBus } : {}),
+    // Inject the process wake beside it, so a subscriber is woken by the emitting transaction
+    // instead of waiting out its next read. Absent ⇒ subscribers poll only (later, never lossy).
+    ...(eventWake ? { eventWake } : {}),
+  };
+  // Inject the durable executor (when wired) so the run surface's async path can enqueue.
+  const app = createAuthApp({
+    ...baseDeps,
+    engine: engineWithBlob,
+    ...(durableExecutor ? { durableExecutor } : {}),
+    // Inject the manual-trigger fire seam (when the spec declares manual triggers) so
+    // POST /v1/triggers/:name/fire drives it; it reads the late-bound scheduler at request time.
+    ...(manualTriggerFirer ? { manualTriggerFirer } : {}),
+  });
+  return { app, ...(agentRegistry ? { agentRegistry } : {}) };
+}
+
+/**
+ * The refusal of a document whose cron or manual trigger nothing would fire: no durable worker is
+ * wired (the document does not declare `deployment.durableWorker`, or the deployment supplied no agent
+ * backends, which the worker runs on).
+ */
+function noDurableWorkerRefusal(fireable: number): BootConfigError {
+  return new BootConfigError(
+    `Boot aborted — the spec declares ${fireable} cron/manual trigger(s) but no ` +
+      'durable worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
+      'supplied). A cron/manual trigger is fired by the durable worker; without it the trigger ' +
+      'would never fire. Set deployment.durableWorker:true and supply agent backends, or remove ' +
+      'the trigger(s). Fail-closed.',
+  );
+}
+
+/** The tenant the chokepoint admission probe builds (never queries) a select under. */
+const CHOKEPOINT_PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
+
+/**
+ * Everything a backend-profile (`rayspec.yaml`) deploy can refuse from its configuration and the
+ * document alone, checked BEFORE the boot changes anything — so a boot that is going to refuse leaves
+ * the database as it found it:
+ *  - the document parses and lints, and its extension packs load and merge;
+ *  - the environment satisfies what the merged document needs: a blob backend for a stream route, a
+ *    media signing key for a playback route, a readable fs-source root, a supported speech provider
+ *    with its credential, servable frontend mounts;
+ *  - the deployment's agent backends build for every merged agent (a pack agent's included);
+ *  - a cron or manual trigger has a durable worker to fire it and a deployment tenant, and a cron
+ *    trigger's schedule parses (the scheduler itself parses it only when the worker launches);
+ *  - the product tables build and the registrar admits them;
+ *  - and the deploy itself, REHEARSED with nothing to apply: `deploy()` validates the merged document,
+ *    verifies every product table against the chokepoint, loads the handlers, registers the triggers
+ *    and assembles the app, exactly as the real deploy does after the migrations — so a document that
+ *    would be refused there is refused here, with the same error. Its drift step only reads.
+ * What is left for after the first write depends on the database: the platform chain and the fence,
+ * the live product schema (drift, the update plan and whether a reviewed delta is applied — and so
+ * gated), each migration's apply, the post-update drift gate, and the durable worker's launch.
+ *
+ * The deploy path reuses what this returns (the merged document, the registered product tables, the
+ * agent backends) and makes the other checks again on the same inputs.
+ */
+async function preflightDeclaredSpec(
+  db: Db,
+  config: ServerConfig,
+  specPath: string,
+  opts: {
+    moduleImporter?: ModuleImporter;
+    agentBackendsFactory?: AgentBackendsFactory;
+    registerProductTables?: ProductTableRegistrar;
+    /** What the rehearsed app is assembled on: the platform's stores, signer and limiter. */
+    baseDeps: Omit<AppDeps, 'engine'>;
+  },
+): Promise<PreflightedSpec> {
+  const specSource = readFileSync(specPath, 'utf8');
+  const parsedSpec = validateDeclaredSpec(specSource, specPath);
+  const merged = await mergeExtensions(
+    parsedSpec,
+    specSource,
+    config.escapeHatchRoot as string,
+    specPath,
+    opts.moduleImporter,
+  );
+  const spec = merged.spec;
+  const blobFactory = streamBlobFactory(spec, config, merged.packBlobFactory, specPath);
+  const fsSourceFactory = fsSourceFactoryFor(config);
+  const mediaTokenService = mediaTokenServiceFor(spec, config, specPath);
+  const sttCapability = buildSttCapability(config);
+  const ttsCapability = buildTtsCapability(config);
+  assertFrontendMountsServable(spec, specPath);
+  // The merged agents' backends: a pack agent may select one no base agent does.
+  const agentBackends = opts.agentBackendsFactory?.(spec.agents);
+  // A cron or manual trigger is fired by the durable worker, which the deploy wires only for a
+  // document that declares it and a deployment that supplies agent backends; and it fires under a
+  // known deployment tenant.
+  const fireable = fireableTriggers(spec.triggers);
+  if (fireable.length > 0) {
+    if (!(spec.deployment?.durableWorker === true && agentBackends)) {
+      throw noDurableWorkerRefusal(fireable.length);
+    }
+    await assertCronTenantBootable(db, requireCronTenant(fireable.length, config));
+    // The scheduler parses a crontab only when the worker launches, after the migrations; the
+    // grammar and the lint leave it unevaluated.
+    for (const trigger of fireable) {
+      if (trigger.kind !== 'cron' || trigger.schedule === undefined) continue;
+      const scheduleError = crontabParseError(trigger.schedule);
+      if (scheduleError !== undefined) {
+        throw new BootConfigError(
+          `Boot aborted — cron trigger '${trigger.name}' has the schedule '${trigger.schedule}', ` +
+            `which the scheduler cannot parse (${scheduleError}). A schedule is a standard 5-field ` +
+            'crontab or the 6-field form with a leading seconds field; shorthand such as ' +
+            "'@daily' is not supported. Fail-closed.",
+        );
+      }
+    }
+  }
+  // Built once: the registrar admits THESE instances, which the deploy verifies by identity.
+  const productTables = buildProductTables([...spec.stores]);
+  opts.registerProductTables?.(productTables);
+
+  const eventBus = spec.deployment?.eventBus?.enabled === true ? makeTenantEventBus({}) : undefined;
+  await deploy<ReturnType<typeof createAuthApp>>({
+    specSource: merged.specSource,
+    migrations: [],
+    target: {
+      driftSchema: 'public',
+      async applyMigration(): Promise<void> {
+        throw new Error('a rehearsed deploy applies no migration');
+      },
+      verifyTenantScoped(table: PgTable): void {
+        (forTenant(db, CHOKEPOINT_PROBE_TENANT).select as (t: PgTable) => unknown)(table);
+      },
+      query: async (sql, params) =>
+        (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[],
+    },
+    rollout: {
+      productTables,
+      escapeHatchRoot: config.escapeHatchRoot as string,
+      ...(merged.extensionImporter ? { importer: merged.extensionImporter } : {}),
+      ...(agentBackends ? { agentBackends } : {}),
+      buildApp<App>(engine: DeclarativeEngine): App {
+        return assembleDeclaredApp(engine, {
+          baseDeps: opts.baseDeps,
+          ...(blobFactory ? { blobFactory } : {}),
+          ...(fsSourceFactory ? { fsSourceFactory } : {}),
+          ...(mediaTokenService ? { mediaTokenService } : {}),
+          ...(sttCapability ? { sttCapability } : {}),
+          ...(ttsCapability ? { ttsCapability } : {}),
+          ...(eventBus ? { eventBus } : {}),
+        }).app as App;
+      },
+    },
+  });
+  return { parsedSpec, merged, productTables, ...(agentBackends ? { agentBackends } : {}) };
+}
+
+/**
  * Run the REAL `deploy()` GitOps pipeline for an injected spec (product-agnostic). Mirrors the dev
  * wrapper's pattern but lives in the composition root so a real deployer can drive a declarative
  * deploy from env alone. The deployer supplies the agent backends (the platform ships none).
@@ -2350,6 +3127,15 @@ async function deployDeclaredSpec(
   config: ServerConfig,
   baseDeps: Omit<AppDeps, 'engine'>,
   opts: {
+    /** This process's source fence: every producer this deploy wires is attached to it. */
+    fence: RuntimeFence;
+    /** Runs each product migration as a `runtime.apply` operation, with its receipts. */
+    deployApply?: DeployApply;
+    /**
+     * What `preflightDeclaredSpec` already resolved before the boot changed anything: the parsed
+     * document and its merged extensions. Absent, this deployer resolves them itself.
+     */
+    preflight?: PreflightedSpec;
     agentBackendsFactory?: AgentBackendsFactory;
     registerProductTables?: ProductTableRegistrar;
     /**
@@ -2383,6 +3169,8 @@ async function deployDeclaredSpec(
   durableExecutorShutdown?: () => Promise<void>;
   /** Read the LIVE durable executor identity for /recovery-scope (undefined when none was wired). */
   durableExecutorIdentity?: () => DurableExecutorIdentity;
+  /** The durable worker's readiness probes (undefined when none was wired). */
+  workerReadiness?: readonly ReadinessProbe[];
   /** Control seam: the on-demand cron-fire delegate (undefined when no cron is scheduled). */
   fireCronNow?: BootedServer['fireCronNow'];
   /** M1 control seam: the on-demand cleanup delegate (undefined when no durable worker is wired). */
@@ -2394,19 +3182,13 @@ async function deployDeclaredSpec(
   const escapeHatchRoot = config.escapeHatchRoot as string;
   const specSource = readFileSync(specPath, 'utf8');
   const bootWarn = opts.bootWarn ?? consoleWarn;
-
-  // reject a Product-YAML doc up-front with the SAME guidance `deploy()` gives (before any DB work),
-  // instead of the RaySpec strict-shape wall below. A classic doc passes through UNCHANGED.
-  assertSpecFamilyMountable(specSource, specPath);
+  const fence = opts.fence;
 
   // Pre-parse to build the product tables + the first-materialization migration SQL the rollout
   // needs (deploy() re-parses internally for its own VALIDATE step — a !ok there aborts the deploy).
-  const parsed = parseSpec(specSource);
-  if (!parsed.ok) {
-    throw new BootConfigError(
-      `Boot aborted — injected spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
-    );
-  }
+  // assembleServer already ran the same check before it migrated anything; it is repeated here so
+  // this deployer never depends on its caller for it.
+  const parsedSpec = opts.preflight?.parsedSpec ?? validateDeclaredSpec(specSource, specPath);
 
   // ── Resolve + merge the referenced extension PACKS, fail-closed ─────────────
   // For each `extensions[]` ref, loadExtensions resolves the pack's defineExtension manifest
@@ -2424,18 +3206,17 @@ async function deployDeclaredSpec(
     specSource: effectiveSpecSource,
     extensionImporter,
     packBlobFactory,
-  } = await mergeExtensions(
-    parsed.value,
-    specSource,
-    escapeHatchRoot,
-    specPath,
-    opts.moduleImporter,
-  );
+  } = opts.preflight?.merged ??
+  (await mergeExtensions(parsedSpec, specSource, escapeHatchRoot, specPath, opts.moduleImporter));
 
   const specStores = [...effectiveSpec.stores];
-  const productTables = buildProductTables(specStores);
-  // LOCAL table-registration stand-in: register THESE exact table instances before deploy()'s identity-keyed verify.
-  opts.registerProductTables?.(productTables);
+  // The preflight built the product tables and registered THESE exact instances, before deploy()'s
+  // identity-keyed verify; without a preflight, this deployer does both itself.
+  let productTables = opts.preflight?.productTables;
+  if (productTables === undefined) {
+    productTables = buildProductTables(specStores);
+    opts.registerProductTables?.(productTables);
+  }
 
   // ── mount-without-deploy — classify the LIVE product schema → MATERIALIZE vs MOUNT ───────
   // The platform migration chain (applyMigrations) already ran in assembleServer, so the platform
@@ -2539,7 +3320,9 @@ async function deployDeclaredSpec(
   // omit that backend and `buildAgentRegistry` would fail closed at boot on the pack agent. Base-only
   // deploys (empty extensions ⇒ mergeExtensions no-op ⇒ effectiveSpec.agents === base agents) are
   // byte-identical, and a factory that ignores the arg (a test-injected map) is unaffected.
-  const agentBackends = opts.agentBackendsFactory?.(effectiveSpec.agents);
+  const agentBackends = opts.preflight
+    ? opts.preflight.agentBackends
+    : opts.agentBackendsFactory?.(effectiveSpec.agents);
 
   // ── The BLOB BACKEND deploy guard + injection ───────────────────────────────
   // A `kind:'stream'` route reads/writes binary bytes through the tenant-bound BlobStore (init.blob).
@@ -2551,27 +3334,9 @@ async function deployDeclaredSpec(
   // Asked through the SHARED predicate (boot-env-demands.ts), on the POST-MERGE `effectiveSpec` — so
   // the read-only report asks the identical question of the base document, and says in its own output
   // that a pack could still supply a blob backend it cannot see.
-  const hasStreamRoute = declaresStreamRoute(effectiveSpec.api);
-  let blobFactory: BlobStoreFactory | undefined;
-  if (hasStreamRoute) {
-    // A PACK may PROVIDE its own blob backend (an ExtensionCapabilities.blobFactory — e.g.
-    // an S3 backend). When a pack provided one, prefer it (the pack owns the bytes); else the default
-    // fs backend over RAYSPEC_BLOB_ROOT. A stream route with NEITHER is fail-closed (nowhere to put
-    // bytes). The pack-provided factory is still tenant-bound BY CONSTRUCTION (the BlobStore contract).
-    if (packBlobFactory) {
-      blobFactory = packBlobFactory;
-    } else if (config.blobRoot) {
-      blobFactory = makeFsBlobStoreFactory(config.blobRoot);
-    } else {
-      throw new BootConfigError(
-        `Boot aborted — the deployed spec at ${specPath} declares a 'stream' route but no blob backend ` +
-          'is configured (RAYSPEC_BLOB_ROOT is unset and no extension provided one). A stream ' +
-          'route moves binary bytes through the tenant-bound BlobStore; set RAYSPEC_BLOB_ROOT to a ' +
-          'writable directory (the fs blob backend writes one subdir per tenant under it), or load a ' +
-          'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',
-      );
-    }
-  }
+  let blobFactory = streamBlobFactory(effectiveSpec, config, packBlobFactory, specPath);
+  // Object writes stop once the process has drained under a source fence; reads never do.
+  if (blobFactory !== undefined) blobFactory = fence.blobFactory(blobFactory);
 
   // ── The READ-ONLY FS-SOURCE backend build ──────────────────────────────────
   // The READ-ONLY, path-jailed `FsSource` (`init.fsSource`) reads deployment-static assets under
@@ -2582,19 +3347,7 @@ async function deployDeclaredSpec(
   // refusal is re-raised HERE in the house form: it names the VARIABLE the operator has to fix, and a
   // BootConfigError is one of the classes the entrypoint prints message-only (serve.ts). Injected into
   // the engine in buildApp (below), like blobFactory.
-  let fsSourceFactory: FsSourceFactory | undefined;
-  if (config.fsSourceRoot) {
-    try {
-      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
-    } catch (err) {
-      if (!(err instanceof FsSourceConfigError)) throw err;
-      throw new BootConfigError(
-        `Boot aborted — RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a ` +
-          'directory. It is the READ-ONLY source root `init.fsSource` reads under; point it at an ' +
-          'existing directory on the box (nothing here creates it). Fail-closed.',
-      );
-    }
-  }
+  const fsSourceFactory = fsSourceFactoryFor(config);
 
   // ── The MEDIA-TOKEN service (playback's 2nd auth path) deploy guard + build ──
   // A `kind:'stream', mode:'playback'` route is authenticated by a signed `?token=` media-JWT (HS256,
@@ -2603,29 +3356,7 @@ async function deployDeclaredSpec(
   // playback route without a verifier would be unauthenticated. The service ALSO powers the
   // `init.mintPlayToken` capability a mint `{handler}` route receives. Built once (LOCAL/self-host,
   // pre-hardening); injected into the engine in buildApp. A spec with no playback route needs none.
-  const hasPlaybackRoute = declaresPlaybackRoute(effectiveSpec.api);
-  let mediaTokenService: ReturnType<typeof createMediaTokenService> | undefined;
-  if (hasPlaybackRoute) {
-    if (!config.mediaSigningKey) {
-      throw new BootConfigError(
-        `Boot aborted — the deployed spec at ${specPath} declares a stream PLAYBACK route but no media ` +
-          'signing key is configured (RAYSPEC_MEDIA_SIGNING_KEY is unset). A playback route is ' +
-          'authenticated by a signed ?token= media-JWT (HS256, a DISTINCT key from the RS256 API chain ' +
-          '— a leaked media URL must not grant API access). Set RAYSPEC_MEDIA_SIGNING_KEY to a ' +
-          'high-entropy secret of at least 32 bytes. Fail-closed (a playback route requires the media ' +
-          'verifier).',
-      );
-    }
-    // createMediaTokenService fail-closes on a too-short secret; wrap that as a BootConfigError so the
-    // abort is uniform + actionable at the entrypoint.
-    try {
-      mediaTokenService = createMediaTokenService(config.mediaSigningKey);
-    } catch (err) {
-      throw new BootConfigError(
-        `Boot aborted — RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(err as Error).message}`,
-      );
-    }
-  }
+  const mediaTokenService = mediaTokenServiceFor(effectiveSpec, config, specPath);
 
   // ── The SPEECH-TO-TEXT capability build (`init.stt`) ───────────────────────
   // A route/tool handler transcribes audio bytes through the provider the deployment selected with
@@ -2663,7 +3394,10 @@ async function deployDeclaredSpec(
   // runs on the DURABLE WORKER, so a boot that enables the bus without one never sweeps; that boot is
   // told so, once, below (`eventBusUnsweptBootNotice`, after the cleanup wiring decides).
   const eventBusDecl = effectiveSpec.deployment?.eventBus;
-  const eventBus = eventBusDecl?.enabled === true ? makeTenantEventBus() : undefined;
+  const eventBus =
+    eventBusDecl?.enabled === true
+      ? makeTenantEventBus({ admitsWrites: () => fence.admitsDataWrites() })
+      : undefined;
   // The WAKE half — ONE process LISTEN on the bus channel, fanned out in memory to whatever
   // `GET /v1/subscribe` is serving. Built beside the bus, on the same enablement, because it is only
   // ever useful when there is a stream to wake about. It is a LATENCY optimisation and nothing else:
@@ -2686,25 +3420,7 @@ async function deployDeclaredSpec(
   // entrypoints branch it to `assembleStaticServer`, which carries no such gate and still reports an
   // unservable mount through `/health` alone. Mirrors the stream/playback guards above; the actual
   // mounting runs in assembleServer AFTER deployDeclaredSpec returns.
-  const frontendSpecDir = dirname(specPath);
-  for (const mount of effectiveSpec.frontend ?? []) {
-    const unservable = mountUnservableReason(mount, frontendSpecDir);
-    if (unservable === undefined) continue;
-    const resolvedDir = resolve(frontendSpecDir, mount.dir);
-    if (unservable === 'dir') {
-      throw new BootConfigError(
-        `Boot aborted — the deployed spec at ${specPath} declares a frontend at route '${mount.route}' ` +
-          `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) is missing or unreadable. ` +
-          'Point frontend.dir at a readable directory of built assets. Fail-closed.',
-      );
-    }
-    throw new BootConfigError(
-      `Boot aborted — the deployed spec at ${specPath} declares an spa frontend at route '${mount.route}' ` +
-        `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) has no readable index.html. ` +
-        'An spa mount serves index.html for every unmatched deep link, so without it the mount cannot ' +
-        'answer one. Build the frontend into frontend.dir, or set spa: false. Fail-closed.',
-    );
-  }
+  assertFrontendMountsServable(effectiveSpec, specPath);
 
   // ── Wire the off-request DURABLE WORKER iff the spec declares deployment.durableWorker
   //    AND the deployment supplies agent backends (the platform ships none). The executor runs
@@ -2749,7 +3465,16 @@ async function deployDeclaredSpec(
           // instant to now; a double fire within one firing-instant bucket dedups to one dispatch).
           // The full outcome surfaces the enqueued run's deterministic id when THIS fire dispatched
           // an AGENT action, so the route's 202 can hand the caller a followable run.
-          const outcome = await wiredCronScheduler.fireNowWithOutcome(name);
+          const outcome = await wiredCronScheduler
+            .fireNowWithOutcome(name)
+            .catch((err: unknown) => {
+              // A fire that reached the scheduler after the fence closed its gate: the same 503 the
+              // fence answers every other mutation with.
+              if (err instanceof ProducerPausedError) {
+                throw new ApiError('SERVICE_UNAVAILABLE', FENCED_MESSAGE);
+              }
+              throw err;
+            });
           return {
             notFound: false,
             fired: outcome.fired,
@@ -2767,6 +3492,16 @@ async function deployDeclaredSpec(
   // long after start()), and `enqueue` itself throws if not started — so no enqueue can race the
   // start. This removes the `let … undefined` dispatch window entirely with no duplicate handler load.
   let pendingExecutorStart: (() => Promise<void>) | undefined;
+  let workerReadiness: readonly ReadinessProbe[] | undefined;
+  // The model providers this deployment calls: no fence reaches a call already made to one.
+  if (agentBackends)
+    fence.addExternal([...agentBackends.keys()].map((id) => `agent-backend-${id}`));
+  if (config.sttProvider && config.sttProvider !== 'fake') {
+    fence.addExternal([`stt-${config.sttProvider}`]);
+  }
+  if (config.ttsProvider && config.ttsProvider !== 'fake') {
+    fence.addExternal([`tts-${config.ttsProvider}`]);
+  }
   if (effectiveSpec.deployment?.durableWorker === true && agentBackends) {
     // ── Fix B (pool starvation): the durable worker gets its OWN dedicated postgres pool, SEPARATE
     //    from the HTTP/API `db` pool. Each in-flight off-request run holds ONE connection across the
@@ -2843,31 +3578,52 @@ async function deployDeclaredSpec(
     // The /recovery-scope probe reads the LIVE executor identity off this same wired executor.
     durableExecutorIdentity = () => executor.identity();
     pendingExecutorStart = () => executor.start();
+    // The run queue stops dequeuing under a source fence and starts again on resume, without the
+    // engine shutting down; attached BEFORE start, so a boot under a held fence registers it paused.
+    await fence.attach(queueProducer('run-queue', executor));
+    workerReadiness = durableWorkerReadiness(executor);
   }
 
-  const PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
   // The product DDL this boot has actually COMMITTED. Appended to inside applyMigration below — the
   // ONE place this deployer executes product DDL — so it counts APPLIED migrations, never planned
   // ones: `migrations` and `deployMode` are both fixed far above, while deploy() still refuses at
   // [validate] / [unsupported_spec] / [lint/gate] before its migrate stage. The catch around the
   // deploy + the post-deploy gates reads it to tell an operator what a refusal left behind.
   const appliedMigrations: string[] = [];
+  // An apply refusal of a product migration (deploy-apply.ts), raised as itself, not as deploy()'s
+  // wrapper, so the entrypoints can exit with its class.
+  let applyRefusal: RuntimeApplyError | undefined;
   const target: DeployTarget = {
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
       // The generated product SQL carries drizzle statement-breakpoints; strip them and apply the
       // migration all-or-nothing in one transaction (the public schema is the live target here).
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
-      await db.$client.begin(async (tx) => {
-        await tx.unsafe(ddl);
-      });
+      if (opts.deployApply !== undefined) {
+        // As an apply: under the operation lease, with receipts, the DDL and its finish receipt in
+        // one transaction under the shared schema lock (deploy-apply.ts). deploy() re-wraps whatever
+        // this throws; an apply refusal is kept so the catch below can raise it as itself.
+        try {
+          await opts.deployApply.productMigration(migration);
+        } catch (err) {
+          if (err instanceof RuntimeApplyError) applyRefusal = err;
+          throw err;
+        }
+      } else {
+        // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
+        // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
+        await db.$client.begin(async (tx) => {
+          await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
+          await tx.unsafe(ddl);
+        });
+      }
       // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.
       appliedMigrations.push(migration.name);
     },
     verifyTenantScoped(table: PgTable, _storeName: string): void {
       // Probe the REAL TenantDb chokepoint: building the select runs assertScoped, which THROWS
       // deny-by-default unless the table is registered (the caller registered them — see the wrapper).
-      const tdb = forTenant(db, PROBE_TENANT);
+      const tdb = forTenant(db, CHOKEPOINT_PROBE_TENANT);
       (tdb.select as (t: PgTable) => unknown)(table);
     },
     query: queryFn, // the SAME thunk used for the pre-flight drift classification above.
@@ -2910,89 +3666,21 @@ async function deployDeclaredSpec(
         ...(extensionImporter ? { importer: extensionImporter } : {}),
         ...(agentBackends ? { agentBackends } : {}),
         buildApp<App>(engine: DeclarativeEngine): App {
-          // Capture the SAME AgentRegistry the run surface builds, so the durable worker
-          // resolves a RunJob's agentId identically (the engine's loaded handlers are only available
-          // HERE — inside the rollout). Built only when the engine declares agents + backends.
-          if (engine.agentBackends && engine.spec.agents.length > 0) {
-            workerAgentRegistry = buildAgentRegistry({
-              spec: engine.spec,
-              agentBackends: engine.agentBackends,
-              handlers: engine.handlers ?? new Map(),
-              productTables: engine.productTables,
-              // Thread the SAME wired blob backend (assembled above, present iff the spec has a
-              // stream route) so a declared tool the OFF-REQUEST worker runs gets the SAME tenant-bound
-              // `init.blob` the sync run surface gives it — built from the run's server-derived tenant.
-              ...(blobFactory ? { blobFactory } : {}),
-              // The three REMAINING handle-shaped capabilities the sync run surface threads
-              // (api-auth's `withDeclaredAgents`), on the SAME terms and for the SAME reason.
-              // `resolve-tools.ts` SPREADS each handle onto the tool init, so a capability this
-              // registry never received is an ABSENT key — and a declared tool that reads it throws
-              // off-request while the identical tool works in-request. None of the three touches the
-              // run's transaction: `fsSourceFactory()` reads the deployment's jailed source root and
-              // `sttCapability`/`ttsCapability` are provider handles that take no database at all.
-              // Every one is spread-when-wired, so a deployment that configured none builds a
-              // byte-identical registry to before.
-              ...(fsSourceFactory ? { fsSourceFactory } : {}),
-              ...(sttCapability ? { sttCapability } : {}),
-              ...(ttsCapability ? { ttsCapability } : {}),
-              // `eventBus` is DELIBERATELY NOT threaded here, and it is the one capability that
-              // cannot cross this seam on these terms. The durable worker runs the WHOLE run inside
-              // one `tdb.transaction(...)` and builds the run's tools from that TRANSACTIONAL handle
-              // (@rayspec/durable-dbos `executor.ts`, the `runAgent` step), while the sync run surface
-              // builds them from a plain `forTenant(...)` handle (api-auth `routes/runs.ts`). The bus
-              // gives a tool the IMMEDIATE form, which allocates the sequence number at the call —
-              // so built from the worker's handle it would take the tenant's `tenant_event_streams`
-              // counter-row lock INSIDE the run's transaction, and Postgres holds that lock until
-              // COMMIT: for the rest of the run, across the model call, with every other emit of that
-              // tenant (ordinary in-request route flushes included) waiting behind it, unbounded —
-              // exactly the hazard the buffered/immediate split exists to prevent (api-auth
-              // `engine/event-bus.ts`). The same wrapping would also roll a tool's emitted events back
-              // with a run that later throws, while the identical in-request tool's survive. Giving an
-              // off-request tool a sound `init.emit` needs a handle that is NOT the run's transaction,
-              // which is a change to the tool-factory seam itself, not a wiring choice available here.
-              // `durable-worker-capability-parity.db.test.ts` arm (d) measures the counter row while a
-              // run is parked and fails if this seam is opened.
-            });
-          }
-          // Inject the tenant-bound blob backend into the engine (the `stream` route arm
-          // reads `engine.blobFactory` to build `init.blob`). `deploy()`/`RolloutConfig` is an unchanged
-          // platform contract that knows nothing of blobs, so the composition root — which OWNS
-          // buildApp + assembled blobFactory above (guarded: present iff the spec has a stream route) —
-          // augments the engine here, exactly as it injects `durableExecutor`. Spread so the field is
-          // ABSENT (not undefined) for a no-stream spec, keeping the engine shape exact.
-          const engineWithBlob: DeclarativeEngine = {
-            ...engine,
+          const assembled = assembleDeclaredApp(engine, {
+            baseDeps,
             ...(blobFactory ? { blobFactory } : {}),
-            // Inject the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
-            // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
             ...(fsSourceFactory ? { fsSourceFactory } : {}),
-            // Inject the media-token service (when wired) so the playback arm's 2nd auth path
-            // + the mint capability are available. Spread so ABSENT for a no-playback spec.
             ...(mediaTokenService ? { mediaTokenService } : {}),
-            // Inject the speech-to-text capability (when a provider is configured) so a route/tool
-            // handler's `init.stt` transcribes through it. Spread so ABSENT when STT_PROVIDER is unset.
             ...(sttCapability ? { sttCapability } : {}),
-            // Inject the text-to-speech capability (when a provider is configured) so a route/tool
-            // handler's `init.tts` synthesizes through it. Spread so ABSENT when TTS_PROVIDER is unset.
             ...(ttsCapability ? { ttsCapability } : {}),
-            // Inject the tenant event bus (when the deployed spec enabled it) so a route/tool handler's
-            // `init.emit` appends to its tenant's stream. Spread so ABSENT otherwise — which is what
-            // makes the capability absent from every init rather than an undefined-valued key, AND
-            // what makes `GET /v1/subscribe` serve rather than answer its fail-closed 501.
             ...(eventBus ? { eventBus } : {}),
-            // Inject the process wake beside it, so a subscriber is woken by the emitting transaction
-            // instead of waiting out its next read. Absent ⇒ subscribers poll only (later, never lossy).
             ...(eventWake ? { eventWake } : {}),
-          };
-          // Inject the durable executor (when wired) so the run surface's async path can enqueue.
-          return createAuthApp({
-            ...baseDeps,
-            engine: engineWithBlob,
             ...(durableExecutor ? { durableExecutor } : {}),
-            // Inject the manual-trigger fire seam (when the spec declares manual triggers) so
-            // POST /v1/triggers/:name/fire drives it; it reads the late-bound scheduler at request time.
             ...(manualTriggerFirer ? { manualTriggerFirer } : {}),
-          }) as App;
+          });
+          // The durable worker resolves a RunJob's agentId against this SAME registry.
+          workerAgentRegistry = assembled.agentRegistry;
+          return assembled.app as App;
         },
       },
     });
@@ -3039,36 +3727,22 @@ async function deployDeclaredSpec(
       // (Fail-closed, defense-in-depth with the lint rule.) A cron/manual trigger is fired ONLY by the
       // durable off-request worker. If the spec declares one but no durable worker is wired (the spec
       // omitted deployment.durableWorker, or no agent backends were supplied), the trigger could never
-      // fire. Refuse to boot — a half-deployed fireable trigger is never silently OK. The static lint rule
-      // (lint.ts) already rejects cron/manual-without-durableWorker at parse/deploy time; this is the
-      // runtime backstop for a code-built spec or a missing-backends boot.
+      // fire. The preflight refuses that before the boot changes anything (the static lint rule
+      // already rejects cron/manual-without-durableWorker at parse time); this is the same check
+      // again, on the same inputs, for a deployer called without a preflight.
       if (!(durableExecutorInstance && workerDbHandle)) {
-        throw new BootConfigError(
-          `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but no ` +
-            'durable worker is wired (deployment.durableWorker is not true, or no agent backends were ' +
-            'supplied). A cron/manual trigger is fired by the durable worker; without it the trigger ' +
-            'would never fire. Set deployment.durableWorker:true and supply agent backends, or remove ' +
-            'the trigger(s). Fail-closed.',
-        );
+        throw noDurableWorkerRefusal(fireable.length);
       }
       // A cron/manual trigger fires under a KNOWN tenant (single-deployment LOCAL posture). Fail closed if
       // one is declared but no tenant was configured — firing under an unknown tenant is never silently OK.
-      if (!config.cronTenantId) {
-        throw new BootConfigError(
-          `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but ` +
-            'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
-            'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
-            'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
-        );
-      }
       // Validate the tenant SHAPE at BOOT: `forTenant` throws the fail-closed "tenantId must be a UUID"
       // for a malformed id, which no amount of waiting could ever make valid.
-      await assertCronTenantBootable(db, config.cronTenantId);
+      await assertCronTenantBootable(db, requireCronTenant(fireable.length, config));
       // Whether that org EXISTS is a per-firing question, not a boot gate — it is normal for a cron
       // deployment to come up BEFORE its tenant org has been registered against it. Announce the state
       // once here so an operator watching the boot knows why nothing fires yet (and that it will, without
       // a restart); the scheduler then re-asks per firing through the SAME probe.
-      const cronTenantId = config.cronTenantId;
+      const cronTenantId = requireCronTenant(fireable.length, config);
       if (!(await tenantOrgExists(db, cronTenantId))) {
         bootWarn(cronTenantAbsentBootNotice(cronTenantId));
       }
@@ -3097,7 +3771,10 @@ async function deployDeclaredSpec(
             ? { backend: entry.backend.id, agentName: entry.spec.name, model: entry.spec.model }
             : undefined;
         },
+        // Closed by a source fence: no scheduled tick or on-demand fire starts while it is held.
+        gate: fence,
       });
+      await fence.attach(gatedProducer('cron-triggers', () => cronScheduler.inFlight));
       // Expose the wired scheduler to the late-bound manual-trigger firer (built above, injected into the
       // app inside deploy()); the firer restricts on-demand fires to its manual triggers.
       wiredCronScheduler = cronScheduler;
@@ -3118,7 +3795,7 @@ async function deployDeclaredSpec(
     // Say what was committed, without re-wrapping (the message keeps its class and its prefix), and
     // without repeating the post-UPDATE drift gate, whose own text already states it.
     throw attachAppliedProductDdlNote(
-      e,
+      applyRefusal ?? e,
       appliedMigrations,
       specStores.map((s) => s.name),
     );
@@ -3152,7 +3829,10 @@ async function deployDeclaredSpec(
         }),
       schedule: config.cleanup.schedule,
       executor: durableExecutorInstance,
+      // Closed by a source fence, like the cron scheduler.
+      gate: fence,
     });
+    await fence.attach(gatedProducer('system-cleanup', () => cleanupScheduler.inFlight));
     durableExecutorInstance.attachPreLaunchHook(() => cleanupScheduler.registerScheduledWorkflow());
     // The on-demand cleanup delegate (control seam) — goes through the EXACT same `runCleanup` path the
     // daily workflow fires on. Cast the engine-local outcome back to the api-auth CleanupResult (the
@@ -3241,6 +3921,7 @@ async function deployDeclaredSpec(
     drift: result.drift,
     ...(durableExecutorShutdown ? { durableExecutorShutdown } : {}),
     ...(durableExecutorIdentity ? { durableExecutorIdentity } : {}),
+    ...(workerReadiness ? { workerReadiness } : {}),
     ...(fireCronNow ? { fireCronNow } : {}),
     ...(runCleanupNow ? { runCleanupNow } : {}),
     ...(eraseTenantNow ? { eraseTenantNow } : {}),

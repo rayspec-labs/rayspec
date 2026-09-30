@@ -2,7 +2,7 @@
  * DBOS wire-shape GOLDEN/CONTRACT test (doc-first against the INSTALLED @dbos-inc/dbos-sdk).
  *
  * The SDK API churns (functional vs decorator; `registerQueue` vs the deprecated `new WorkflowQueue`;
- * `createSchedule` vs `registerScheduled`). This test PINS the exact surface `executor.ts` depends on
+ * `createSchedule` vs `registerScheduled`, and the scheduler's crontab matcher). This test PINS the exact surface `executor.ts` depends on
  * — every function it calls and the constant enum members it maps — so a future `pnpm up` to an SDK
  * that renames/removes one FAILS HERE LOUDLY (a "version bumped, re-verify the wire shape" forcing
  * function) instead of failing only at runtime under load.
@@ -20,6 +20,7 @@
 
 import { DBOS, StatusString } from '@dbos-inc/dbos-sdk';
 import { describe, expect, it } from 'vitest';
+import { loadSchedulerInternals } from './scheduled-workflow.js';
 
 describe('DBOS 4.21.6 wire shape (the API executor.ts depends on)', () => {
   it('exposes the lifecycle functions (setConfig / launch / shutdown)', () => {
@@ -40,13 +41,28 @@ describe('DBOS 4.21.6 wire shape (the API executor.ts depends on)', () => {
     expect(typeof DBOS.getWorkflowStatus).toBe('function');
   });
 
-  it('exposes registerScheduled — the cron scheduler pre-launch registration', () => {
-    // The cron scheduler registers ONE scheduled workflow per cron trigger via the FUNCTIONAL path
-    // `registerWorkflow(fn, {name})` → `registerScheduled(fn, {name, crontab})` BEFORE DBOS.launch().
-    // A rename (registerScheduled → createSchedule/applySchedules) would make the cron SILENTLY never
-    // fire; pin its existence so that breaks loudly here. (The `crontab` config key + the functional
-    // signature are pinned at compile time in wire-shape-assertions.ts.)
-    expect(typeof DBOS.registerScheduled).toBe('function');
+  it('exposes what the schedule loop runs on — registry, lifecycle, watermark, crontab matcher', () => {
+    // scheduled-workflow.ts associates each schedule with its registered workflow, starts its loop
+    // from a lifecycle listener, keeps the make-up watermark in the event-dispatch state, and computes
+    // instants with the SDK's own crontab matcher on the SDK's internal queue. A rename of any of these
+    // would make every schedule SILENTLY never fire; pin them so that breaks loudly here.
+    expect(typeof DBOS.associateFunctionWithInfo).toBe('function');
+    expect(typeof DBOS.getAssociatedInfo).toBe('function');
+    expect(typeof DBOS.registerLifecycleCallback).toBe('function');
+    expect(typeof DBOS.getEventDispatchState).toBe('function');
+    expect(typeof DBOS.upsertEventDispatchState).toBe('function');
+    const internals = loadSchedulerInternals();
+    expect(typeof internals.validateCrontab).toBe('function');
+    // The loop's own stepping: wake-up times until one matches (the matcher works in local time).
+    const matcher = new internals.TimeMatcher('0 3 * * *');
+    let next = matcher.nextWakeupTime(new Date(2026, 0, 1, 12));
+    for (let steps = 0; !matcher.match(next) && steps < 1_000; steps += 1) {
+      next = matcher.nextWakeupTime(next);
+    }
+    expect([next.getDate(), next.getHours(), next.getMinutes(), next.getSeconds()]).toEqual([
+      2, 3, 0, 0,
+    ]);
+    expect(internals.internalQueueName).toBe('_dbos_internal_queue');
   });
 
   it('exposes the StatusString members executor.ts maps to the neutral status enum', () => {

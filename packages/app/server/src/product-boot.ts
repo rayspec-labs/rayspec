@@ -152,7 +152,11 @@ import {
   resolveLiveTenantOrgId,
   type ServerConfig,
 } from './composition-root.js';
+import { type DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
+import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
+import { gatedProducer, queueProducer, type RuntimeFence } from './runtime-fence.js';
+import { lockSchemaInTransaction } from './schema-lock.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
 export class ProductBootError extends Error {
@@ -191,9 +195,21 @@ export interface DeployedProductBoot {
    * worker is launched" rule covers it too.
    */
   runCleanupNow?: BootedServer['runCleanupNow'];
+  /** The durable worker's readiness probes (the worker and its system database). */
+  workerReadiness: readonly ReadinessProbe[];
 }
 
 export interface DeployProductYamlOpts {
+  /**
+   * This process's source fence: the queues, the cleanup scheduler, the event bus and the blob
+   * backend this boot wires all stop under it. Omitted ⇒ nothing is fenced (a direct test caller).
+   */
+  fence?: RuntimeFence;
+  /**
+   * Runs each product migration as a `runtime.apply` operation, with its receipts. Omitted ⇒ the DDL
+   * runs directly under the shared schema lock (a direct test caller).
+   */
+  deployApply?: DeployApply;
   /** LOCAL table-registration stand-in: register the built product tables before deploy()'s identity-keyed verify. */
   registerProductTables?: (tables: ReadonlyMap<string, PgTable>) => void;
   /** Env source (default process.env) — injectable for tests. */
@@ -731,24 +747,30 @@ class BlobRemuxSttMediaResolver implements SttMediaResolver {
   }
 }
 
+/** The speech provider the environment selects, with its credential, or the refusal it earns. */
+function selectSttProvider(
+  env: NodeJS.ProcessEnv,
+): { provider: 'fake' } | { provider: 'deepgram'; apiKey: string } {
+  const provider = requireEnv(env, STT_PROVIDER);
+  if (provider === 'fake') return { provider };
+  if (provider === 'deepgram') return { provider, apiKey: requireEnv(env, DEEPGRAM_API_KEY) };
+  throw new ProductBootError(
+    `STT_PROVIDER '${provider}' is not supported (wired: deepgram | fake).`,
+  );
+}
+
 export function buildSttAdapter(
   env: NodeJS.ProcessEnv,
   blob: ReturnType<BlobStoreFactory>,
   defaultModel: string | undefined,
 ): SttAdapter {
-  const provider = requireEnv(env, STT_PROVIDER);
-  if (provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
-  if (provider === 'deepgram') {
-    const apiKey = requireEnv(env, DEEPGRAM_API_KEY);
-    return new DeepgramSttAdapter({
-      apiKey,
-      ...(defaultModel ? { model: defaultModel } : {}),
-      resolver: new BlobRemuxSttMediaResolver(blob),
-    });
-  }
-  throw new ProductBootError(
-    `STT_PROVIDER '${provider}' is not supported (wired: deepgram | fake).`,
-  );
+  const selected = selectSttProvider(env);
+  if (selected.provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
+  return new DeepgramSttAdapter({
+    apiKey: selected.apiKey,
+    ...(defaultModel ? { model: defaultModel } : {}),
+    resolver: new BlobRemuxSttMediaResolver(blob),
+  });
 }
 
 // ── the LIVE extraction executor (env `live`) ──────────────────────────────────────────────────
@@ -2302,6 +2324,38 @@ export function buildRecordNormalizer(
 }
 
 /**
+ * The pure checks of a Product-YAML document that its deploy path runs before anything else: it must
+ * parse, and it must pass the fail-closed BOOT-SCOPE GATE. Returns the parsed spec; throws a
+ * `ProductBootError`. `assembleServer` runs it before the boot migrates anything, so an invalid
+ * document leaves the database untouched.
+ */
+export function validateProductYamlSpec(specSource: string, specPath: string): ProductSpec {
+  const parsed = parseProductSpec(specSource);
+  if (!parsed.ok) {
+    throw new ProductBootError(
+      `the Product-YAML spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
+    );
+  }
+  const spec = parsed.value;
+
+  // ── the fail-closed BOOT-SCOPE GATE ──────────────────────────────────────
+  // A grammar-valid product doc can still declare a shape the composable v1 envelope cannot serve
+  // end-to-end (the sufficiency finding): MULTI-SCOPE persistence (the single-scope law, enforced 3×
+  // deeper in derive/compose/nodes but with an internal, less-actionable error) or a product-declared
+  // WRITE/ADMIN surface (a non-capability POST view — an interpreted read on POST mounts + boots today,
+  // caught by nothing else). Reject those HERE, at the front door, before any compose/derive/DBOS work,
+  // with ONE actionable operator message. The SUPPORTED shape (an audio+stt+agents acceptance product) is a
+  // no-op — it composes + boots unchanged (FENCE PARITY).
+  try {
+    assertProductScope(spec);
+  } catch (e) {
+    if (e instanceof ProductScopeError) throw new ProductBootError(e.message);
+    throw e;
+  }
+  return spec;
+}
+
+/**
  * Fail-closed BOOT gate on `RAYSPEC_PRODUCT_TENANT_ID`: it must be a well-formed org id AND name a
  * live org. Both halves matter and neither was checked before — `requireEnv` only rejects an empty
  * value, so a deployment pointed at nothing came up green and then failed far from the cause: a bare
@@ -2340,6 +2394,14 @@ export function buildRecordNormalizer(
  * It is not hypothetical: `uuidgen` prints upper case on macOS/BSD.
  */
 export async function assertProductTenantBootable(db: Db, tenantId: string): Promise<string> {
+  assertProductTenantShape(db, tenantId);
+  const storedId = await resolveLiveTenantOrgId(db, tenantId);
+  if (storedId === undefined) throw productTenantAbsent(tenantId);
+  return storedId;
+}
+
+/** The first half of `assertProductTenantBootable`: the configured value is an org id at all. */
+function assertProductTenantShape(db: Db, tenantId: string): void {
   try {
     forTenant(db, tenantId);
   } catch {
@@ -2349,60 +2411,225 @@ export async function assertProductTenantBootable(db: Db, tenantId: string): Pro
         '(8-4-4-4-12 UUID). Fail-closed.',
     );
   }
-  const storedId = await resolveLiveTenantOrgId(db, tenantId);
-  if (storedId === undefined) {
-    throw new ProductBootError(
-      `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' does not name a live org (a soft-deleted org counts ` +
-        'as absent). Every principal of this deployment is bound to that tenant, so it would serve ' +
-        'nobody: 404 on the reprocess seam, cross_tenant on the first capability event. Create the ' +
-        'org FIRST — run `rayspec tenant ensure --org-id <this id> --name <n>` against the same ' +
-        'DATABASE_URL (no server needed), then deploy with that id. Locally you can instead boot the ' +
-        'auth surface alone (`rayspec-serve` with no spec) and run `rayspec dev bootstrap-tenant ' +
-        '--org-id <this id>` against it. Fail-closed.',
-    );
-  }
-  return storedId;
 }
 
-// ── the boot ─────────────────────────────────────────────────────────────────────────────────────
+/** The refusal for a deployment tenant that names no live org. */
+function productTenantAbsent(tenantId: string): ProductBootError {
+  return new ProductBootError(
+    `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' does not name a live org (a soft-deleted org counts ` +
+      'as absent). Every principal of this deployment is bound to that tenant, so it would serve ' +
+      'nobody: 404 on the reprocess seam, cross_tenant on the first capability event. Create the ' +
+      'org FIRST — run `rayspec tenant ensure --org-id <this id> --name <n>` against the same ' +
+      'DATABASE_URL (no server needed), then deploy with that id. Locally you can instead boot the ' +
+      'auth surface alone (`rayspec-serve` with no spec) and run `rayspec dev bootstrap-tenant ' +
+      '--org-id <this id>` against it. Fail-closed.',
+  );
+}
 
-export async function deployProductYamlSpec(
-  db: Db,
+// ── the environment a document demands, checked before anything changes ─────────────────────────
+
+/**
+ * The blob backend a document that moves binary bytes needs: audio (chunk ingest + playback) and
+ * file_input (bounded upload ingest). A document with neither demands no RAYSPEC_BLOB_ROOT and gets
+ * none. The audio refusal wins when both are declared, and a file-only document's refusal names
+ * file_input.
+ */
+function productBlobFactory(
   config: ServerConfig,
-  baseDeps: Omit<AppDeps, 'engine'>,
-  opts: DeployProductYamlOpts = {},
-): Promise<DeployedProductBoot> {
-  const env = opts.env ?? process.env;
-  const specPath = config.specPath as string;
-  const escapeHatchRoot = config.escapeHatchRoot as string;
-  const specSource = readFileSync(specPath, 'utf8');
-
-  const parsed = parseProductSpec(specSource);
-  if (!parsed.ok) {
+  withAudio: boolean,
+  withFileInput: boolean,
+): BlobStoreFactory | undefined {
+  if (!withAudio && !withFileInput) return undefined;
+  if (!config.blobRoot) {
+    if (withAudio) {
+      throw new ProductBootError(
+        'the audio capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT is ' +
+          'unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
+      );
+    }
     throw new ProductBootError(
-      `the Product-YAML spec at ${specPath} is invalid:\n${JSON.stringify(parsed.errors, null, 2)}`,
+      'the file_input capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT ' +
+        'is unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
     );
   }
-  const spec = parsed.value;
+  return makeFsBlobStoreFactory(config.blobRoot);
+}
 
-  // ── the fail-closed BOOT-SCOPE GATE ──────────────────────────────────────
-  // A grammar-valid product doc can still declare a shape the composable v1 envelope cannot serve
-  // end-to-end (the sufficiency finding): MULTI-SCOPE persistence (the single-scope law, enforced 3×
-  // deeper in derive/compose/nodes but with an internal, less-actionable error) or a product-declared
-  // WRITE/ADMIN surface (a non-capability POST view — an interpreted read on POST mounts + boots today,
-  // caught by nothing else). Reject those HERE, at the front door, before any compose/derive/DBOS work,
-  // with ONE actionable operator message. The SUPPORTED shape (an audio+stt+agents acceptance product) is a
-  // no-op — it composes + boots unchanged (FENCE PARITY).
+/**
+ * The read-only fs-source root, when one is configured. `makeFsSourceFactory` refuses a root that is
+ * missing or not a directory; that refusal is re-raised as the named `ProductBootError` every other
+ * environment refusal of this boot throws.
+ */
+function productFsSourceFactory(config: ServerConfig): FsSourceFactory | undefined {
+  if (!config.fsSourceRoot) return undefined;
   try {
-    assertProductScope(spec);
+    return makeFsSourceFactory(config.fsSourceRoot);
   } catch (e) {
-    if (e instanceof ProductScopeError) throw new ProductBootError(e.message);
-    throw e;
+    if (!(e instanceof FsSourceConfigError)) throw e;
+    throw new ProductBootError(
+      `RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a directory. It is ` +
+        'the READ-ONLY source root `init.fsSource` reads under; point it at an existing directory ' +
+        'on the box (nothing here creates it). Fail-closed.',
+    );
   }
+}
 
+/** The media-token service an audio document's playback route verifies with; none otherwise. */
+function productMediaTokenService(
+  config: ServerConfig,
+  withAudio: boolean,
+): ReturnType<typeof createMediaTokenService> | undefined {
+  if (!withAudio) return undefined;
+  if (!config.mediaSigningKey) {
+    throw new ProductBootError(
+      'the audio capability declares a playback route but RAYSPEC_MEDIA_SIGNING_KEY is unset (the ' +
+        'media-JWT verifier). Set a high-entropy secret ≥ 32 bytes. Fail-closed.',
+    );
+  }
+  try {
+    return createMediaTokenService(config.mediaSigningKey);
+  } catch (e) {
+    throw new ProductBootError(`RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * The extraction mode an agent-declaring document runs in: `live`, or `deterministic` with an
+ * injected executor (the platform ships none). A document without agents demands no mode.
+ */
+function productExtractionMode(
+  env: NodeJS.ProcessEnv,
+  hasAgents: boolean,
+  deterministicAgents: AgentRuntimeRegistry | undefined,
+): 'live' | 'deterministic' | undefined {
+  if (!hasAgents) return undefined;
+  const mode = requireEnv(env, EXTRACTION_MODE);
+  if (mode === 'live') return mode;
+  if (mode === 'deterministic') {
+    if (!deterministicAgents) {
+      throw new ProductBootError(
+        'RAYSPEC_EXTRACTION_MODE=deterministic requires an injected deterministic executor (the ' +
+          'platform ships none — product-free). Use live mode in production. Fail-closed.',
+      );
+    }
+    return mode;
+  }
+  throw new ProductBootError(
+    `RAYSPEC_EXTRACTION_MODE '${mode}' is not supported (wired: live | deterministic).`,
+  );
+}
+
+/**
+ * An `stt.*` step's demands: the real STT resolver reads the AUDIO capability's blob chunks, so a
+ * document that transcribes without the audio capability is refused (a file-only document has a
+ * blob backend but no audio chunks), and the environment must select a supported provider with its
+ * credential. A deployment-supplied adapter supersedes the provider selection.
+ */
+function assertSttSelectable(
+  env: NodeJS.ProcessEnv,
+  withAudio: boolean,
+  injectedAdapter: boolean,
+): void {
+  if (injectedAdapter) return;
+  if (!withAudio) {
+    throw new ProductBootError(
+      "the document declares an 'stt.*' workflow step, whose media resolver reads the audio " +
+        "capability's blob-backed chunks, but no audio capability (audio_input/media_playback) is " +
+        'declared — declare the audio capability or remove the stt step. Fail-closed.',
+    );
+  }
+  selectSttProvider(env);
+}
+
+/**
+ * The deployment tenant, as the DATABASE stores it: set, an org UUID, and a live org. On a database
+ * without the platform tables no org exists yet, so that is refused the same way without reading one.
+ */
+async function productTenant(db: Db, configured: string): Promise<string> {
+  const [platform] = (await db.$client.unsafe(
+    "SELECT to_regclass('public.orgs') IS NOT NULL AS present",
+  )) as unknown as { present: boolean }[];
+  if (!platform?.present) {
+    assertProductTenantShape(db, configured);
+    throw productTenantAbsent(configured);
+  }
   // The deployment binds to the org as the DATABASE stores it, not to the spelling the operator
   // configured — see `assertProductTenantBootable`, which returns that canonical form.
-  const tenantId = await assertProductTenantBootable(db, requireEnv(env, PRODUCT_TENANT_ID));
+  return await assertProductTenantBootable(db, configured);
+}
+
+/** The rehearsed deploy's enqueuer: composition only wires it, and nothing runs a rehearsal. */
+const REHEARSAL_ENQUEUER: ProductYamlRollout['enqueuer'] = {
+  async enqueueWorkflowRun() {
+    throw new ProductBootError('a rehearsed deploy enqueues no workflow run (unexpected).');
+  },
+};
+
+/**
+ * Everything a Product-YAML deploy can refuse from its configuration and the document alone, and
+ * everything it builds from them, done BEFORE the boot changes anything — so a boot that is going to
+ * refuse leaves the database as it found it. In the order the deploy path always ran them:
+ *  - the document validates; the deployment tenant is set, an org UUID, and names a live org;
+ *  - the product tables build and the registrar admits them; a reviewed update delta and its
+ *    allowlist read;
+ *  - the byte movers (a blob root, a readable fs-source root, a media signing key) wherever the
+ *    document needs them; the deployment's model-call factory; the extraction executor; the speech
+ *    adapter; the conversation responder and the record normalizer, from the environment and their
+ *    sidecar configurations;
+ *  - and the deploy itself, REHEARSED with nothing to apply and an enqueuer that enqueues nothing:
+ *    `deploy()` composes the product, verifies every product table against the chokepoint, registers
+ *    the triggers and assembles the app, exactly as the real deploy does after the migrations — so a
+ *    document that would be refused there is refused here, with the same error. Its drift step only
+ *    reads.
+ * What is left for after the first write depends on the database: the platform chain and the fence,
+ * the live product schema (drift, the update plan and whether a reviewed delta is applied — and so
+ * gated), each migration's apply, the post-update drift gate, and the durable worker's launch.
+ */
+export async function prepareProductYamlSpec(
+  db: Db,
+  config: ServerConfig,
+  opts: DeployProductYamlOpts & {
+    /** What the rehearsed app is assembled on: the platform's stores, signer and limiter. */
+    baseDeps: Omit<AppDeps, 'engine'>;
+  },
+): Promise<PreparedProductYaml> {
+  const env = opts.env ?? process.env;
+  const prepared = await buildProductYamlParts(db, config, opts);
+
+  // ── the deploy, rehearsed with nothing to apply (see the header) ──────────────────────────────
+  await deploy<ReturnType<typeof createAuthApp>>({
+    specSource: prepared.specSource,
+    migrations: [],
+    target: {
+      driftSchema: 'public',
+      async applyMigration(): Promise<void> {
+        throw new ProductBootError('a rehearsed deploy applies no migration (unexpected).');
+      },
+      verifyTenantScoped(table: PgTable): void {
+        (forTenant(db, CHOKEPOINT_PROBE_TENANT).select as (t: PgTable) => unknown)(table);
+      },
+      query: async (sql, params) =>
+        (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[],
+    },
+    rollout: {
+      productTables: prepared.productTables,
+      escapeHatchRoot: config.escapeHatchRoot as string,
+      buildApp<App>(engine: DeclarativeEngine): App {
+        return assembleProductApp(engine, prepared, { baseDeps: opts.baseDeps }) as App;
+      },
+      productYaml: productYamlRollout(prepared, REHEARSAL_ENQUEUER, env),
+    },
+  });
+  return prepared;
+}
+
+/** Everything `prepareProductYamlSpec` builds from the configuration and the document, in order. */
+async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployProductYamlOpts) {
+  const env = opts.env ?? process.env;
+  const specPath = config.specPath as string;
+  const specSource = readFileSync(specPath, 'utf8');
+  const spec = validateProductYamlSpec(specSource, specPath);
+  const tenantId = await productTenant(db, requireEnv(env, PRODUCT_TENANT_ID));
 
   // ── DOC-DRIVEN env demands — each capability's env is demanded iff the spec USES it ────────
   // `withAudio` (declares audio_input/media_playback — the SAME predicate compose's conditional mount
@@ -2445,6 +2672,240 @@ export async function deployProductYamlSpec(
   const productTables = buildProductTables(composedStores, conflictKeys);
   opts.registerProductTables?.(productTables);
 
+  // The ENV-DRIVEN update-apply seam: `RAYSPEC_UPDATE_MIGRATION` (+ its reviewed allowlist), read
+  // here and routed by the live schema in the deploy path.
+  const updateMigrations = readProductUpdateMigrations({
+    migrationPath: env.RAYSPEC_UPDATE_MIGRATION,
+    allowlistPath: env.RAYSPEC_UPDATE_ALLOWLIST,
+  });
+
+  // ── 3. blob + media byte-movers — DEMANDED iff the doc moves blob bytes ─
+  // A capability that moves binary bytes through stream routes needs the blob factory: audio (chunk
+  // ingest + playback) and file_input (bounded upload ingest). `withBlob = withAudio || withFileInput`
+  // drives the blobFactory + the RAYSPEC_BLOB_ROOT demand; the media-token service +
+  // RAYSPEC_MEDIA_SIGNING_KEY stay AUDIO-ONLY (no file download in v1 — a playback route is the only
+  // consumer). A non-audio, non-file doc demands NEITHER (and builds no blob factory / media-token
+  // service). An audio-declaring product ⇒ both stay demanded with the EXACT messages in the EXACT
+  // order (blob before media), byte-behavior-identical; a file-only doc's blob demand NAMES file_input.
+  let blobFactory = productBlobFactory(config, withAudio, withFileInput);
+  // Object writes stop once the process has drained under a source fence; reads never do.
+  if (blobFactory && opts.fence) blobFactory = opts.fence.blobFactory(blobFactory);
+  // The READ-ONLY fs-source (`init.fsSource`) — purely deploy-config-gated (no capability KIND demands
+  // it, unlike the blob byte-movers above): built when RAYSPEC_FS_SOURCE_ROOT is configured, else
+  // undefined (`init.fsSource` absent; a handler that needs it fail-closes loudly).
+  const fsSourceFactory = productFsSourceFactory(config);
+  const mediaTokenService = productMediaTokenService(config, withAudio);
+
+  // ── 3b. the OPTIONAL deployment-supplied product backend factory ───────────────────────────────
+  // Reached ONLY when the option is present. An omitting boot never executes a byte of this block and
+  // every builder below keeps its built-in env construction, unchanged. The factory is called HERE —
+  // after the sidecar configs and the capability composition — so it sees the COMPLETE set of model
+  // calls the deployed document needs, never one at a time.
+  const productBackends = opts.agentBackendsFactory
+    ? bindProductBackends(opts.agentBackendsFactory, {
+        env,
+        specPath,
+        spec,
+        withConversationInput,
+        ...(recordNormalizeDecl ? { normalizeAgentId: recordNormalizeDecl.agent } : {}),
+      })
+    : undefined;
+
+  // ── 4. the extraction executor — DEMANDED iff the doc declares agents ─────────────────────────
+  // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is
+  // only read inside the `hasAgents` guard). An agent-declaring product ⇒ the demand + the live/
+  // deterministic dispatch stay exactly as before.
+  const extractionMode = productExtractionMode(env, hasAgents, opts.deterministicAgents);
+  let liveAgent: ProductYamlRollout['liveAgent'] | undefined;
+  let agents: AgentRuntimeRegistry | undefined;
+  if (extractionMode === 'live') {
+    // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
+    liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
+  } else if (extractionMode === 'deterministic') {
+    agents = opts.deterministicAgents;
+  }
+
+  // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step ───────────────────────────
+  // STT_PROVIDER (and DEEPGRAM_API_KEY) are only demanded when the doc actually transcribes. A
+  // deployment override (a fixtured fake) still wins. The real STT resolver reads the AUDIO
+  // capability's blob chunks, so an stt.* step needs the audio capability's blob factory — a doc that
+  // declares stt without audio is a fail-closed misconfiguration (never a crash on an absent factory).
+  let stt: SttAdapter | undefined;
+  if (usesStt) {
+    assertSttSelectable(env, withAudio, opts.sttAdapter !== undefined);
+    if (opts.sttAdapter) {
+      stt = opts.sttAdapter;
+    } else if (blobFactory) {
+      stt = buildSttAdapter(env, blobFactory(tenantId), providerDefaultModel(spec, 'deepgram'));
+    }
+  }
+
+  // ── 5a. the conversation turn responder — built iff the doc declares conversation_input
+  // (demands RAYSPEC_RESPONDER_MODE + the per-product conversation/<agent_id>.responder.json;
+  // compose fail-closes a conversation-declaring doc without it, so the guard here and the
+  // compose guard can never disagree on when a responder exists).
+  const responder = withConversationInput
+    ? buildTurnResponder(env, specPath, spec, db, opts, productBackends)
+    : undefined;
+  // ── 5a2. the record input-normalize step — built iff the record_input capability declares
+  // input_normalize (demands RAYSPEC_NORMALIZE_MODE + the per-product record/<agent_id>.normalizer.json;
+  // compose fail-closes a normalize-declaring doc without it, so the guard here and the compose guard
+  // can never disagree on when a normalizer exists — the responder mirror). A record_input doc WITHOUT
+  // input_normalize sets no `record` block and stores the raw record unchanged (byte-identical to today).
+  const normalizer = recordNormalizeDecl
+    ? buildRecordNormalizer(env, specPath, spec, db, opts, recordNormalizeDecl, productBackends)
+    : undefined;
+
+  return {
+    spec,
+    specSource,
+    tenantId,
+    withAudio,
+    withFileInput,
+    withConversationInput,
+    recordNormalizeDecl,
+    usesStt,
+    hasAgents,
+    derived,
+    composedStores,
+    conflictKeys,
+    productTables,
+    updateMigrations,
+    blobFactory,
+    fsSourceFactory,
+    mediaTokenService,
+    extractionMode,
+    liveAgent,
+    agents,
+    stt,
+    responder,
+    normalizer,
+  };
+}
+
+/** What `prepareProductYamlSpec` built before the boot changed anything; the deploy takes it. */
+export type PreparedProductYaml = Awaited<ReturnType<typeof buildProductYamlParts>>;
+
+/** The tenant the chokepoint admission probe builds (never queries) a select under. */
+const CHOKEPOINT_PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
+
+/** The Product-YAML rollout `deploy()` composes the product from, on the prepared parts. */
+function productYamlRollout(
+  p: PreparedProductYaml,
+  enqueuer: ProductYamlRollout['enqueuer'],
+  env: NodeJS.ProcessEnv,
+): ProductYamlRollout {
+  return {
+    tenantId: p.tenantId,
+    enqueuer,
+    stores: p.derived.stores,
+    ...(p.derived.transcripts ? { transcripts: p.derived.transcripts } : {}),
+    artifactCollections: p.derived.artifactCollections,
+    // stt/mediaPrep ride only when the doc uses them (compose requires rollout.stt iff usesStt).
+    ...(p.stt ? { stt: { adapter: p.stt } } : {}),
+    ...(p.liveAgent ? { liveAgent: p.liveAgent } : {}),
+    ...(p.agents ? { agents: p.agents } : {}),
+    // media-prep is honored via RAYSPEC_MEDIA_PREP (ffmpeg | off; unset or blank ⇒ ffmpeg). `off`
+    // omits the hook entirely (playback stays the honest 409); an invalid value fail-closes here.
+    // only when the doc declares AUDIO — `&&` short-circuits so RAYSPEC_MEDIA_PREP is not even
+    // read for a non-audio doc. (keyed on `withAudio`, not the generalized blobFactory —
+    // media prep remuxes AUDIO chunks; a file-only doc has a blob factory but nothing to prep.)
+    ...(p.withAudio && p.blobFactory !== undefined && mediaPrepEnabled(env)
+      ? { mediaPrep: { blob: p.blobFactory } }
+      : {}),
+    // the tenant-bound blob READER for the `file_input.parse_text` node (the mediaPrep
+    // mirror) — threaded iff the doc declares file_input (the same predicate that demanded
+    // RAYSPEC_BLOB_ROOT above, so the factory is guaranteed here; the second guard is type
+    // narrowing). compose fail-closes a parse_text step without it, so a file doc that never
+    // parses composes unchanged and one that does gets the reader with zero extra env.
+    ...(p.withFileInput && p.blobFactory !== undefined ? { file: { blob: p.blobFactory } } : {}),
+    // the conversation turn responder and the record normalizer, built iff the doc declares them.
+    ...(p.responder ? { conversation: { responder: p.responder } } : {}),
+    ...(p.normalizer ? { record: { normalizer: p.normalizer } } : {}),
+  };
+}
+
+/**
+ * Assemble a Product-YAML document's app from the engine `deploy()` rolled out. Shared by the deploy
+ * and by its rehearsal, so both assemble — and refuse — the same document the same way.
+ */
+function assembleProductApp(
+  engine: DeclarativeEngine,
+  p: PreparedProductYaml,
+  parts: {
+    baseDeps: Omit<AppDeps, 'engine'>;
+    fence?: RuntimeFence;
+    eventWake?: ReturnType<typeof makeTenantEventWake>;
+    sessionReprocessor?: SessionReprocessor;
+  },
+): ReturnType<typeof createAuthApp> {
+  const { fence } = parts;
+  // the byte-movers ride only when the doc demands them — the blob
+  // factory for audio OR file_input (stream routes), the media-token service for audio only
+  // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
+  const engineWithByteMovers: DeclarativeEngine = {
+    ...engine,
+    // Thread the product-profile conflict-key carve-out (computed above from
+    // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
+    // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
+    // `unique` column is still named. deploy() builds `engine` WITHOUT this (a frozen surface);
+    // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
+    conflictKeys: p.conflictKeys,
+    ...(p.blobFactory ? { blobFactory: p.blobFactory } : {}),
+    // the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
+    // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
+    ...(p.fsSourceFactory ? { fsSourceFactory: p.fsSourceFactory } : {}),
+    ...(p.mediaTokenService ? { mediaTokenService: p.mediaTokenService } : {}),
+    // The tenant event bus is on STRUCTURALLY here — no declaration, and no key in the product
+    // grammar to write one in. Same rule by which a product deployment gets its durable worker:
+    // the profile's contract is that the platform's runtime is present, so a product's handlers
+    // and tools can emit without the document having to ask for it.
+    eventBus: makeTenantEventBus(
+      fence === undefined ? {} : { admitsWrites: () => fence.admitsDataWrites() },
+    ),
+    // …and the wake beside it, so this profile's subscribers are woken by the emitting
+    // transaction rather than by their next read.
+    ...(parts.eventWake ? { eventWake: parts.eventWake } : {}),
+  };
+  return createAuthApp({
+    ...parts.baseDeps,
+    ...(parts.sessionReprocessor ? { sessionReprocessor: parts.sessionReprocessor } : {}),
+    engine: engineWithByteMovers,
+  });
+}
+
+// ── the boot ─────────────────────────────────────────────────────────────────────────────────────
+
+export async function deployProductYamlSpec(
+  db: Db,
+  config: ServerConfig,
+  baseDeps: Omit<AppDeps, 'engine'>,
+  opts: DeployProductYamlOpts & {
+    /** What `prepareProductYamlSpec` built before the boot changed anything; absent, built here. */
+    prepared?: PreparedProductYaml;
+  } = {},
+): Promise<DeployedProductBoot> {
+  const env = opts.env ?? process.env;
+  const fence = opts.fence;
+  const specPath = config.specPath as string;
+  const escapeHatchRoot = config.escapeHatchRoot as string;
+  const prepared =
+    opts.prepared ?? (await prepareProductYamlSpec(db, config, { ...opts, baseDeps }));
+  const {
+    spec,
+    specSource,
+    tenantId,
+    withAudio,
+    withConversationInput,
+    recordNormalizeDecl,
+    composedStores,
+    conflictKeys,
+    productTables,
+    updateMigrations,
+    blobFactory,
+    extractionMode,
+  } = prepared;
+
   // ── 2. reboot-safety: mount-vs-materialize (existing data survives a reboot) ──────────
   const queryFn = async (sql: string, params: unknown[]): Promise<Record<string, unknown>[]> =>
     (await db.$client.unsafe(sql, params as never[])) as unknown as Record<string, unknown>[];
@@ -2457,10 +2918,6 @@ export async function deployProductYamlSpec(
   // stays BYTE-UNCHANGED throughout: it GATES each migration (scanMigrationSql over the reviewed allowlist —
   // a destructive statement WITHOUT a covering entry BLOCKS with a DeployError at [lint/gate], never a
   // silent apply) then applies it, evolving the live schema in place while existing rows survive.
-  const updateMigrations = readProductUpdateMigrations({
-    migrationPath: env.RAYSPEC_UPDATE_MIGRATION,
-    allowlistPath: env.RAYSPEC_UPDATE_ALLOWLIST,
-  });
   const preDrift = await detectDrift(composedStores, 'public', queryFn);
   const schemaState = classifyProductSchema(composedStores, preDrift);
   let migrations: PlannedMigration[];
@@ -2509,130 +2966,6 @@ export async function deployProductYamlSpec(
           ]
         : [];
     deployMode = schemaState === 'absent' ? 'materialized' : 'mounted';
-  }
-
-  // ── 3. blob + media byte-movers — DEMANDED iff the doc moves blob bytes ─
-  // A capability that moves binary bytes through stream routes needs the blob factory: audio (chunk
-  // ingest + playback) and file_input (bounded upload ingest). `withBlob = withAudio || withFileInput`
-  // drives the blobFactory + the RAYSPEC_BLOB_ROOT demand; the media-token service +
-  // RAYSPEC_MEDIA_SIGNING_KEY stay AUDIO-ONLY (no file download in v1 — a playback route is the only
-  // consumer). A non-audio, non-file doc demands NEITHER (and builds no blob factory / media-token
-  // service). An audio-declaring product ⇒ both stay demanded with the EXACT messages in the EXACT
-  // order (blob before media), byte-behavior-identical; a file-only doc's blob demand NAMES file_input.
-  let blobFactory: BlobStoreFactory | undefined;
-  let mediaTokenService: ReturnType<typeof createMediaTokenService> | undefined;
-  const withBlob = withAudio || withFileInput;
-  if (withBlob) {
-    if (!config.blobRoot) {
-      if (withAudio) {
-        throw new ProductBootError(
-          'the audio capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT is ' +
-            'unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
-        );
-      }
-      throw new ProductBootError(
-        'the file_input capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT ' +
-          'is unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
-      );
-    }
-    blobFactory = makeFsBlobStoreFactory(config.blobRoot);
-  }
-  // The READ-ONLY fs-source (`init.fsSource`) — purely deploy-config-gated (no capability KIND demands
-  // it, unlike the blob byte-movers above): build the factory when RAYSPEC_FS_SOURCE_ROOT is configured,
-  // else leave it undefined (`init.fsSource` absent; a handler that needs it fail-closes loudly).
-  // `makeFsSourceFactory` fail-closes at build if the root is missing / not a directory — it takes a
-  // plain `root` and knows nothing about the environment, so that refusal is re-raised here as the
-  // NAMED ProductBootError every other env refusal in this boot throws.
-  let fsSourceFactory: FsSourceFactory | undefined;
-  if (config.fsSourceRoot) {
-    try {
-      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
-    } catch (e) {
-      if (!(e instanceof FsSourceConfigError)) throw e;
-      throw new ProductBootError(
-        `RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a directory. It is ` +
-          'the READ-ONLY source root `init.fsSource` reads under; point it at an existing directory ' +
-          'on the box (nothing here creates it). Fail-closed.',
-      );
-    }
-  }
-  if (withAudio) {
-    if (!config.mediaSigningKey) {
-      throw new ProductBootError(
-        'the audio capability declares a playback route but RAYSPEC_MEDIA_SIGNING_KEY is unset (the ' +
-          'media-JWT verifier). Set a high-entropy secret ≥ 32 bytes. Fail-closed.',
-      );
-    }
-    try {
-      mediaTokenService = createMediaTokenService(config.mediaSigningKey);
-    } catch (e) {
-      throw new ProductBootError(`RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(e as Error).message}`);
-    }
-  }
-
-  // ── 3b. the OPTIONAL deployment-supplied product backend factory ───────────────────────────────
-  // Reached ONLY when the option is present. An omitting boot never executes a byte of this block and
-  // every builder below keeps its built-in env construction, unchanged. The factory is called HERE —
-  // after the sidecar configs and the capability composition — so it sees the COMPLETE set of model
-  // calls the deployed document needs, never one at a time.
-  const productBackends = opts.agentBackendsFactory
-    ? bindProductBackends(opts.agentBackendsFactory, {
-        env,
-        specPath,
-        spec,
-        withConversationInput,
-        ...(recordNormalizeDecl ? { normalizeAgentId: recordNormalizeDecl.agent } : {}),
-      })
-    : undefined;
-
-  // ── 4. the extraction executor — DEMANDED iff the doc declares agents ─────────────────────────
-  // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is
-  // only read inside the `hasAgents` guard). An agent-declaring product ⇒ the demand + the live/
-  // deterministic dispatch stay exactly as before.
-  let extractionMode: string | undefined;
-  let liveAgent: ProductYamlRollout['liveAgent'] | undefined;
-  let agents: AgentRuntimeRegistry | undefined;
-  if (hasAgents) {
-    extractionMode = requireEnv(env, EXTRACTION_MODE);
-    if (extractionMode === 'live') {
-      // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
-      liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
-    } else if (extractionMode === 'deterministic') {
-      if (!opts.deterministicAgents) {
-        throw new ProductBootError(
-          'RAYSPEC_EXTRACTION_MODE=deterministic requires an injected deterministic executor (the ' +
-            'platform ships none — product-free). Use live mode in production. Fail-closed.',
-        );
-      }
-      agents = opts.deterministicAgents;
-    } else {
-      throw new ProductBootError(
-        `RAYSPEC_EXTRACTION_MODE '${extractionMode}' is not supported (wired: live | deterministic).`,
-      );
-    }
-  }
-
-  // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step ───────────────────────────
-  // STT_PROVIDER (and DEEPGRAM_API_KEY) are only demanded when the doc actually transcribes. A
-  // deployment override (a fixtured fake) still wins. The real STT resolver reads the AUDIO
-  // capability's blob chunks, so an stt.* step needs the audio capability's blob factory — a doc that
-  // declares stt without audio is a fail-closed misconfiguration (never a crash on an absent factory).
-  let stt: SttAdapter | undefined;
-  if (usesStt) {
-    if (opts.sttAdapter) {
-      stt = opts.sttAdapter;
-    } else if (!withAudio || !blobFactory) {
-      // keyed on `withAudio`, NOT on the (now-generalized) blobFactory — a file-only doc
-      // HAS a blob factory but no audio chunks for the STT resolver to read, so an stt.* step
-      // without the audio capability keeps failing closed with this same named error.
-      throw new ProductBootError(
-        "the document declares an 'stt.*' workflow step, whose media resolver reads the audio " +
-          "capability's blob-backed chunks, but no audio capability (audio_input/media_playback) is " +
-          'declared — declare the audio capability or remove the stt step. Fail-closed.',
-      );
-    } else {
-      stt = buildSttAdapter(env, blobFactory(tenantId), providerDefaultModel(spec, 'deepgram'));
-    }
   }
 
   // ── 5b. a NON-REAL provider selection boots fine but silently produces nothing usable in prod.
@@ -2695,6 +3028,23 @@ export async function deployProductYamlSpec(
     },
   );
   executor.attachPreLaunchHook(() => wfExecutor.registerWorkflowJob());
+  // Both queues stop dequeuing under a source fence and start again on resume, without the engine
+  // shutting down; attached BEFORE the launch, so a boot under a held fence registers them paused.
+  if (fence) {
+    await fence.attach(queueProducer('run-queue', executor));
+    await fence.attach(queueProducer('workflow-queue', wfExecutor));
+    // The external services a fence cannot reach: a model call already made, a transcription sent.
+    const live = [
+      env.RAYSPEC_EXTRACTION_MODE,
+      env.RAYSPEC_RESPONDER_MODE,
+      env.RAYSPEC_NORMALIZE_MODE,
+    ]
+      .map((mode) => mode?.trim())
+      .includes('live');
+    if (live) fence.addExternal(['model-provider']);
+    const sttProvider = env.STT_PROVIDER?.trim();
+    if (sttProvider && sttProvider !== 'fake') fence.addExternal([`stt-${sttProvider}`]);
+  }
 
   // ── 6a2. Wire the SYSTEM cleanup scheduled-workflow (BEFORE launch) ──────────────────────────
   // Platform housekeeping (OIDC prune LIVE + the operator-gated GDPR purge) runs on a daily DBOS
@@ -2720,7 +3070,10 @@ export async function deployProductYamlSpec(
       }),
     schedule: config.cleanup.schedule,
     executor,
+    // Closed by a source fence: no scheduled run or on-demand run starts while it is held.
+    ...(fence ? { gate: fence } : {}),
   });
+  if (fence) await fence.attach(gatedProducer('system-cleanup', () => cleanupScheduler.inFlight));
   executor.attachPreLaunchHook(() => cleanupScheduler.registerScheduledWorkflow());
   // The on-demand cleanup delegate (control seam) — goes through the EXACT same `runCleanup` path the
   // daily workflow fires on. Cast the engine-local outcome back to the api-auth CleanupResult (the
@@ -2781,62 +3134,7 @@ export async function deployProductYamlSpec(
     : undefined;
 
   // ── 7. the rollout + deploy ───────────────────────────────────────────────────────────────────
-  const productYaml: ProductYamlRollout = {
-    tenantId,
-    enqueuer: wfExecutor,
-    stores: derived.stores,
-    ...(derived.transcripts ? { transcripts: derived.transcripts } : {}),
-    artifactCollections: derived.artifactCollections,
-    // stt/mediaPrep ride only when the doc uses them (compose requires rollout.stt iff usesStt).
-    ...(stt ? { stt: { adapter: stt } } : {}),
-    ...(liveAgent ? { liveAgent } : {}),
-    ...(agents ? { agents } : {}),
-    // media-prep is honored via RAYSPEC_MEDIA_PREP (ffmpeg | off; unset or blank ⇒ ffmpeg). `off`
-    // omits the hook entirely (playback stays the honest 409); an invalid value fail-closed above.
-    // only when the doc declares AUDIO — `&&` short-circuits so RAYSPEC_MEDIA_PREP is not even
-    // read for a non-audio doc. (keyed on `withAudio`, not the generalized blobFactory —
-    // media prep remuxes AUDIO chunks; a file-only doc has a blob factory but nothing to prep.)
-    ...(withAudio && blobFactory !== undefined && mediaPrepEnabled(env)
-      ? { mediaPrep: { blob: blobFactory } }
-      : {}),
-    // the tenant-bound blob READER for the `file_input.parse_text` node (the mediaPrep
-    // mirror) — threaded iff the doc declares file_input (the same predicate that demanded
-    // RAYSPEC_BLOB_ROOT above, so the factory is guaranteed here; the second guard is type
-    // narrowing). compose fail-closes a parse_text step without it, so a file doc that never
-    // parses composes unchanged and one that does gets the reader with zero extra env.
-    ...(withFileInput && blobFactory !== undefined ? { file: { blob: blobFactory } } : {}),
-    // the conversation turn responder — built iff the doc declares conversation_input
-    // (demands RAYSPEC_RESPONDER_MODE + the per-product conversation/<agent_id>.responder.json;
-    // compose fail-closes a conversation-declaring doc without it, so the guard here and the
-    // compose guard can never disagree on when a responder exists).
-    ...(withConversationInput
-      ? {
-          conversation: {
-            responder: buildTurnResponder(env, specPath, spec, db, opts, productBackends),
-          },
-        }
-      : {}),
-    // the record input-normalize step — built iff the record_input capability declares input_normalize
-    // (demands RAYSPEC_NORMALIZE_MODE + the per-product record/<agent_id>.normalizer.json; compose
-    // fail-closes a normalize-declaring doc without it, so the guard here and the compose guard can
-    // never disagree on when a normalizer exists — the responder mirror). A record_input doc WITHOUT
-    // input_normalize sets no `record` block and stores the raw record unchanged (byte-identical to today).
-    ...(recordNormalizeDecl
-      ? {
-          record: {
-            normalizer: buildRecordNormalizer(
-              env,
-              specPath,
-              spec,
-              db,
-              opts,
-              recordNormalizeDecl,
-              productBackends,
-            ),
-          },
-        }
-      : {}),
-  };
+  const productYaml = productYamlRollout(prepared, wfExecutor, env);
 
   // The event-bus WAKE — ONE process LISTEN on the bus channel, what makes `GET /v1/subscribe`
   // deliver immediately rather than within one poll interval. Built HERE rather than inside
@@ -2845,25 +3143,42 @@ export async function deployProductYamlSpec(
   // only — every subscriber also reads on its own interval — and `close()` ends it with the pool.
   const eventWake = makeTenantEventWake(db);
 
-  const PROBE_TENANT = '00000000-0000-0000-0000-0000000000aa';
   // The product DDL this boot has actually COMMITTED — appended to inside applyMigration below, the
   // ONE place this deployer executes product DDL, so it counts APPLIED migrations and never planned
   // ones (`migrations` and `deployMode` are both fixed above, while deploy() still refuses at
   // [validate] / [unsupported_spec] / [lint/gate] before its migrate stage). Mirrors the classic
   // composition-root deployer.
   const appliedMigrations: string[] = [];
+  // An apply refusal of a product migration (deploy-apply.ts), raised as itself, not as deploy()'s
+  // wrapper, so the entrypoints can exit with its class.
+  let applyRefusal: RuntimeApplyError | undefined;
   const target: DeployTarget = {
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
-      await db.$client.begin(async (tx) => {
-        await tx.unsafe(ddl);
-      });
+      if (opts.deployApply !== undefined) {
+        // As an apply: under the operation lease, with receipts, the DDL and its finish receipt in
+        // one transaction under the shared schema lock (deploy-apply.ts). deploy() re-wraps whatever
+        // this throws; an apply refusal is kept so the catch below can raise it as itself.
+        try {
+          await opts.deployApply.productMigration(migration);
+        } catch (err) {
+          if (err instanceof RuntimeApplyError) applyRefusal = err;
+          throw err;
+        }
+      } else {
+        // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
+        // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
+        await db.$client.begin(async (tx) => {
+          await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
+          await tx.unsafe(ddl);
+        });
+      }
       // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.
       appliedMigrations.push(migration.name);
     },
     verifyTenantScoped(table: PgTable): void {
-      const tdb = forTenant(db, PROBE_TENANT);
+      const tdb = forTenant(db, CHOKEPOINT_PROBE_TENANT);
       (tdb.select as (t: PgTable) => unknown)(table);
     },
     query: queryFn,
@@ -2887,35 +3202,11 @@ export async function deployProductYamlSpec(
         productTables,
         escapeHatchRoot,
         buildApp<App>(engine: DeclarativeEngine): App {
-          // the byte-movers ride only when the doc demands them — the blob
-          // factory for audio OR file_input (stream routes), the media-token service for audio only
-          // (both `undefined` otherwise — DeclarativeEngine.blobFactory/mediaTokenService are optional).
-          const engineWithByteMovers: DeclarativeEngine = {
-            ...engine,
-            // Thread the product-profile conflict-key carve-out (computed above from
-            // `deriveConflictKeys`) onto the engine so a store-route 409 on a GLOBAL-unique key column
-            // uses the generic message (no cross-tenant existence oracle), while a tenant-scoped author-
-            // `unique` column is still named. deploy() builds `engine` WITHOUT this (a frozen surface);
-            // we add it HERE, in the deployer-owned buildApp seam, so the frozen surface stays untouched.
-            conflictKeys,
-            ...(blobFactory ? { blobFactory } : {}),
-            // the READ-ONLY fs-source (when a root is configured) so a tool/route handler's
-            // `init.fsSource` reads the deployment's jailed source root. Spread so ABSENT when unset.
-            ...(fsSourceFactory ? { fsSourceFactory } : {}),
-            ...(mediaTokenService ? { mediaTokenService } : {}),
-            // The tenant event bus is on STRUCTURALLY here — no declaration, and no key in the product
-            // grammar to write one in. Same rule by which a product deployment gets its durable worker:
-            // the profile's contract is that the platform's runtime is present, so a product's handlers
-            // and tools can emit without the document having to ask for it.
-            eventBus: makeTenantEventBus(),
-            // …and the wake beside it, so this profile's subscribers are woken by the emitting
-            // transaction rather than by their next read.
+          return assembleProductApp(engine, prepared, {
+            baseDeps,
+            ...(fence ? { fence } : {}),
             eventWake,
-          };
-          return createAuthApp({
-            ...baseDeps,
             ...(sessionReprocessor ? { sessionReprocessor } : {}),
-            engine: engineWithByteMovers,
           }) as App;
         },
         productYaml,
@@ -2960,7 +3251,7 @@ export async function deployProductYamlSpec(
     // whose own text already states it. The launch below is deliberately OUTSIDE: it is not a gate,
     // and it runs workflows, so the note's "nothing has served" reading would stop being true.
     throw attachAppliedProductDdlNote(
-      e,
+      applyRefusal ?? e,
       appliedMigrations,
       composedStores.map((s) => s.name),
     );
@@ -3025,6 +3316,7 @@ export async function deployProductYamlSpec(
     durableExecutorIdentity,
     eraseTenantNow,
     runCleanupNow,
+    workerReadiness: durableWorkerReadiness(executor),
   };
 }
 

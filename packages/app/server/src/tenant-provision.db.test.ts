@@ -367,10 +367,63 @@ describe.skipIf(!baseUrl)('provisionTenant — the operator create-or-resolve', 
     );
     armsRan += 1;
   }, 180_000);
+
+  it('refuses while the environment is fenced: no org, no migration, and a pending chain is not run', async () => {
+    const FENCED = '00000000-0000-4000-8000-0000000000c5';
+    const epochBefore = await scalar(
+      'SELECT coalesce((SELECT fence_epoch FROM runtime_control_state WHERE id = 1), 0)::text',
+    );
+    await rows(
+      `INSERT INTO runtime_control_state (id, binding_revision_key, fence_state, fence_epoch)
+       VALUES (1, $1, 'fenced', 7)
+       ON CONFLICT (id) DO UPDATE SET fence_state = 'fenced', fence_epoch = 7`,
+      ['b'.repeat(64)],
+    );
+    try {
+      // Nothing to migrate: the reservation itself is refused, inside its own transaction.
+      await expect(
+        provisionTenant(secrets, { orgId: FENCED, name: 'Fenced Co' }),
+      ).rejects.toMatchObject({ name: 'TenantProvisionError', code: 'ENVIRONMENT_FENCED' });
+      expect(await scalar('SELECT count(*) FROM orgs WHERE id = $1', [FENCED])).toBe('0');
+
+      // One platform migration behind: the chain runs as an apply, which a held fence refuses.
+      const ledger = await scalar('SELECT count(*) FROM drizzle.__drizzle_migrations');
+      await rows('DROP TABLE runtime_control_processes');
+      await rows(
+        `DELETE FROM drizzle.__drizzle_migrations
+          WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`,
+      );
+      await expect(
+        provisionTenant(secrets, { orgId: FENCED, name: 'Fenced Co' }),
+      ).rejects.toMatchObject({ name: 'TenantProvisionError', code: 'ENVIRONMENT_FENCED' });
+      expect(await scalar('SELECT count(*) FROM drizzle.__drizzle_migrations')).toBe(
+        String(Number(ledger) - 1),
+      );
+      expect(await scalar('SELECT count(*) FROM orgs WHERE id = $1', [FENCED])).toBe('0');
+
+      // Released: the chain runs under its receipts and the org is created.
+      await rows(`UPDATE runtime_control_state SET fence_state = 'open' WHERE id = 1`);
+      const out = await provisionTenant(secrets, { orgId: FENCED, name: 'Fenced Co' });
+      expect(out.org).toBe('created');
+      expect(await scalar('SELECT count(*) FROM drizzle.__drizzle_migrations')).toBe(ledger);
+      expect(
+        await scalar(
+          `SELECT count(*) FROM runtime_control_receipts
+            WHERE actor = 'tenant-ensure' AND step = 'platform-migrations' AND event = 'step-finished'`,
+        ),
+      ).toBe('1');
+    } finally {
+      await rows(
+        `UPDATE runtime_control_state SET fence_state = 'open', fence_epoch = $1::bigint WHERE id = 1`,
+        [epochBefore],
+      );
+    }
+    armsRan += 1;
+  }, 180_000);
 });
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(5);
+  if (dbRequired) expect(armsRan).toBe(6);
   else expect(true).toBe(true);
 });

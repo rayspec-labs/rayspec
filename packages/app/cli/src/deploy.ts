@@ -687,11 +687,14 @@ export async function serveDeployment(
     BootTimeoutError,
     bootBanner,
     bootBaseUrl,
+    bootRefusalExitCode,
     DeployError,
     detectStaticProfile,
     loadServerConfig,
     loadStaticServerConfig,
+    parseShutdownDrainMs,
     ProductBootError,
+    shutdownHttpServer,
     staticBootBanner,
   } = await import('@rayspec/server');
   const { sealProductStores } = await import('@rayspec/db/composition');
@@ -715,6 +718,8 @@ export async function serveDeployment(
         '[rayspec deploy] booting — static profile (frontend-only): no database, no auth surface…',
       );
       const staticConfig = loadStaticServerConfig();
+      // Read (and fail-closed validate) the shutdown drain at boot, not at the signal.
+      const drainMs = parseShutdownDrainMs(process.env);
       const staticServer = assembleStaticServer(staticConfig, staticBoot);
       const httpStatic = serve(
         { fetch: staticServer.app.fetch, hostname: staticConfig.host, port: staticConfig.port },
@@ -733,10 +738,10 @@ export async function serveDeployment(
       const shutdownStatic = (signal: string): void => {
         report.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
         report.stopped(signal);
-        httpStatic.close(async () => {
-          await staticServer.close();
-          process.exit(0);
-        });
+        // Bounded: in-flight requests get the drain, then any connection still open is closed.
+        void shutdownHttpServer(httpStatic, () => staticServer.close(), { drainMs }).then(() =>
+          process.exit(0),
+        );
       };
       process.on('SIGINT', () => shutdownStatic('SIGINT'));
       process.on('SIGTERM', () => shutdownStatic('SIGTERM'));
@@ -772,10 +777,11 @@ export async function serveDeployment(
     const shutdown = (signal: string): void => {
       report.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
       report.stopped(signal);
-      httpServer.close(async () => {
-        await server.close();
-        process.exit(0);
-      });
+      // Bounded: in-flight requests get the drain (RAYSPEC_SHUTDOWN_DRAIN_MS), then any connection
+      // still open is closed, then the worker and the pool.
+      void shutdownHttpServer(httpServer, () => server.close(), {
+        drainMs: server.shutdownDrainMs,
+      }).then(() => process.exit(0));
     };
     process.on('SIGINT', () => shutdown('SIGINT'));
     process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -820,7 +826,10 @@ export async function serveDeployment(
         err instanceof Error ? err.stack : String(err),
       );
     }
-    process.exit(1);
+    // A schema change refused by apply is an outcome this verb did not have before, so it exits with
+    // its contract class: 3 a stale plan, 4 a fenced environment, 5 another operation holding the
+    // lease, 6 an interrupted apply that needs manual reconciliation. Every other refusal keeps 1.
+    process.exit(bootRefusalExitCode(err));
   }
 }
 

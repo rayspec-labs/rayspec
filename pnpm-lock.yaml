@@ -368,6 +368,15 @@ importers:
       '@rayspec/auth-core':
         specifier: workspace:*
         version: link:../../kernel/auth-core
+      '@rayspec/bundle':
+        specifier: workspace:*
+        version: link:../../kernel/bundle
+      '@rayspec/bundle-closure':
+        specifier: workspace:*
+        version: link:../../kernel/bundle-closure
+      '@rayspec/bundle-contract':
+        specifier: workspace:*
+        version: link:../../kernel/bundle-contract
       '@rayspec/capability-bridges':
         specifier: workspace:*
         version: link:../../capabilities/workflow-bridges

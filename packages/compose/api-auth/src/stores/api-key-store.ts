@@ -48,8 +48,24 @@ function dummyKeyHash(): string {
   return DUMMY_KEY_HASH;
 }
 
+export interface ApiKeyStoreOptions {
+  /**
+   * Whether the last-used stamp may be written now. A runtime under a source fence answers false, so
+   * a read authenticated with an api key writes nothing while the environment is quiesced. Default:
+   * always.
+   */
+  stampsLastUse?: () => boolean;
+}
+
 export class ApiKeyStore {
-  constructor(private readonly db: Db) {}
+  readonly #stampsLastUse: () => boolean;
+
+  constructor(
+    private readonly db: Db,
+    options: ApiKeyStoreOptions = {},
+  ) {
+    this.#stampsLastUse = options.stampsLastUse ?? (() => true);
+  }
 
   async mint(input: {
     orgId: string;
@@ -129,11 +145,16 @@ export class ApiKeyStore {
     const active = !row.revokedAt && (!row.expiresAt || row.expiresAt.getTime() > now);
     if (!active || !secretOk) return undefined;
 
-    // Best-effort last-used stamp (not on the timing-sensitive miss path).
-    await this.db
-      .update(schema.apiKeys)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(schema.apiKeys.id, row.id));
+    // Best-effort last-used stamp (not on the timing-sensitive miss path): skipped while a source
+    // fence refuses writes, and a stamp the database refuses (the write barrier a quiesce holds
+    // revokes UPDATE from the runtime role) never fails the request it belongs to.
+    if (this.#stampsLastUse()) {
+      await this.db
+        .update(schema.apiKeys)
+        .set({ lastUsedAt: new Date() })
+        .where(eq(schema.apiKeys.id, row.id))
+        .catch(() => undefined);
+    }
 
     return { id: row.id, orgId: row.orgId, type: row.type, scopes: row.scopes };
   }

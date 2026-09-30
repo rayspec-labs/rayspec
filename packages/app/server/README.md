@@ -24,7 +24,10 @@ A successful boot prints the banner + the routes, then listens on `PORT`. Probe 
 
 ```bash
 curl -s http://127.0.0.1:8080/health
-# {"status":"ok","db":"ok"}
+# {"status":"ok","db":"ok","live":true,"ready":true,"checks":{"database":true,"schema":true,"bindings":true}}
+
+curl -s http://127.0.0.1:8080/livez
+# {"live":true}
 ```
 
 ## Environment
@@ -39,10 +42,29 @@ curl -s http://127.0.0.1:8080/health
 | `PORT` | no | TCP port. Default `8080`. A non-numeric/out-of-range value fails closed. |
 | `RAYSPEC_SPEC_PATH` | no | Absolute path to a `rayspec.yaml` to deploy at boot (the declarative engine). The platform ships **none** — the deployer injects it. Absent ⇒ an **auth-only** boot. |
 | `RAYSPEC_HANDLER_ROOT` | no | The path-jail root for declared escape-hatch handlers. Defaults to the spec file's directory. |
+| `RAYSPEC_HOSTING_POSTURE` | no | `local` (default) or `managed`. Under `managed` the public `/recovery-scope` probe is not registered. Any other value fails closed. |
+| `RAYSPEC_SHUTDOWN_DRAIN_MS` | no | How long a graceful shutdown lets in-flight requests finish before it closes every connection still open. Default `10000`, `0` to `600000`; the application's own close is bounded the same. An invalid value fails closed. |
+| `RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS` | no | How long a schema change at boot (the migration chain, product-store DDL) waits for the shared schema lock another boot, migration or `rayspec tenant ensure` holds. Default `60000`, at most `3600000`; running out refuses the boot with a retryable error and changes nothing. An invalid value fails closed. |
 | `RAYSPEC_SKIP_DOTENV` | no | Set to `1` to skip the local-DX `.env` loader (prove a pure-ambient-env boot). That loader reads `$PWD/.env` first and the install-root `.env` second (the install root is resolved from the loader's own module location), per key, and never overrides a variable already set. |
 
 Missing `DATABASE_URL` / `RAYSPEC_JWT_SIGNING_KEY` / `RAYSPEC_API_KEY_PEPPER` → the boot aborts
-with an actionable message (fail-closed), never a partial start.
+with an actionable message (fail-closed), never a partial start. A malformed signing key or an
+invalid spec is refused before the migration chain runs, so it leaves the database untouched.
+
+## Runtime control
+
+`createRuntimeControl({ db, shadowDatabaseUrl? })` is the typed runtime-control library over one
+environment database: `inspect()` (what this runtime is, the live two-part schema head, the fence
+and the environment revision) and `prepare()` (a read-only plan for a `.ray` bundle, with its
+digest and a thirty-minute expiry). `acquireOperationLease` runs a mutating operation under the
+environment's operation lease — one holder at a time, a fencing epoch every write re-checks, and
+append-only receipts. `quiesce()` fences the environment's source (every running process stops
+its producers, drains, and reports so in its heartbeat; the database write barrier is taken after a
+full drain) and `resume()` releases the fence at exactly its epoch; `health()` reports liveness and
+readiness. Pass `runtimeRole` (with `workflowSystemDb`) when the runtime connects as a separate
+role, and open the control connection with `openControlDatabase` so the stopped-source check can
+tell its sessions from a runtime's. None of it adds an HTTP route; see `docs/ARCHITECTURE.md`,
+"Runtime control".
 
 ### Reading the boot values from a file
 

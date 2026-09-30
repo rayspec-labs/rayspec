@@ -59,6 +59,7 @@ import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context, MiddlewareHandler } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
+import { writeRouteGuard } from '../http/write-fence.js';
 import type { MediaTokenService } from '../media/media-token.js';
 import { mediaAuth, perUserStreamSemaphore } from '../media/playback-middleware.js';
 import { executeAgentRun } from '../routes/runs.js';
@@ -263,6 +264,14 @@ export function registerDeclaredRoutes(
     }
     const honoPath = toHonoPath(route.path);
     const action = route.action;
+
+    // A route whose ACTION can write is fenced as a mutation whatever its declared method: the
+    // app-wide fence decides by method alone, and a GET that deletes a row, runs an agent or calls a
+    // handler that writes must not pass a held fence as a read (http/write-fence.ts). Registered
+    // first, so it runs before the route's own chain.
+    if (deps.writeFence !== undefined && actionWrites(action, spec)) {
+      app.on(route.method, honoPath, writeRouteGuard(deps.writeFence) as MiddlewareHandler);
+    }
 
     // The per-route budget, derived ONCE per route at boot. This sits BEFORE the action dispatch on
     // purpose: the playback arm registers its own middleware tuple further down and `continue`s, so a
@@ -591,6 +600,25 @@ export function registerDeclaredRoutes(
     // NOT `never` here and this call is a COMPILE error — a future route kind can never silently
     // fall through. `assertNever` throws (returns `never`), so control never proceeds past it.
     assertNever(action, route);
+  }
+}
+
+/**
+ * Whether a route's action can write: a store create, update or delete; an agent run; a handler not
+ * declared read-only; a stream ingest. A store list or get and a stream playback only read.
+ */
+function actionWrites(action: RaySpec['api'][number]['action'], spec: RaySpec): boolean {
+  switch (action.kind) {
+    case 'store':
+      return action.op !== 'list' && action.op !== 'get';
+    case 'agent':
+      return true;
+    case 'handler':
+      return spec.handlers.find((h) => h.id === action.handler)?.readonly !== true;
+    case 'stream':
+      return action.mode !== 'playback';
+    default:
+      return true;
   }
 }
 

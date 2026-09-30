@@ -1,6 +1,7 @@
 /**
  * ApiKeyStore unit tests — mint/resolve/revoke + the uniform dummy-HMAC resolution path + the
- * m2m_client (client_credentials seam) resolving to one org.
+ * m2m_client (client_credentials seam) resolving to one org, and the last-used stamp: withheld while
+ * a source fence refuses writes, and never failing the resolve when the database refuses it.
  */
 import { mintApiKey } from '@rayspec/auth-core';
 import type { Db } from '@rayspec/db';
@@ -113,5 +114,63 @@ describe('revoke is org-scoped', () => {
     expect(revokedByB).toBe(false);
     // The key still resolves (org A still owns it).
     expect(await store.resolve(minted.plaintext)).toBeDefined();
+  });
+});
+
+describe('the last-used stamp', () => {
+  async function mintOne(): Promise<string> {
+    const minted = mintApiKey();
+    await store.mint({
+      orgId: ORG_A,
+      keyPrefix: minted.prefix,
+      keyHash: minted.hash,
+      scopes: ['store:read'],
+    });
+    return minted.plaintext;
+  }
+
+  async function lastUsed(): Promise<unknown> {
+    const rows = await store.listForOrg(ORG_A);
+    return rows[0]?.lastUsedAt ?? null;
+  }
+
+  it('is written on a resolve by default', async () => {
+    const plaintext = await mintOne();
+    expect((await store.resolve(plaintext))?.orgId).toBe(ORG_A);
+    expect(await lastUsed()).toBeInstanceOf(Date);
+  });
+
+  it('is withheld while the stamp is not admitted (a fenced runtime), and the key still resolves', async () => {
+    let admitted = false;
+    const fenced = new ApiKeyStore(db, { stampsLastUse: () => admitted });
+    const plaintext = await mintOne();
+    expect((await fenced.resolve(plaintext))?.orgId).toBe(ORG_A);
+    expect(await lastUsed()).toBeNull();
+    admitted = true;
+    await fenced.resolve(plaintext);
+    expect(await lastUsed()).toBeInstanceOf(Date);
+  });
+
+  it('never fails the resolve when the database refuses the stamp (a write barrier)', async () => {
+    const plaintext = await mintOne();
+    await db.$client.unsafe(`
+      SET search_path TO ${SCHEMA};
+      CREATE FUNCTION refuse_update() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN RAISE EXCEPTION 'permission denied for table api_keys' USING ERRCODE = '42501'; END $$;
+      CREATE TRIGGER api_keys_refuse_update BEFORE UPDATE ON api_keys
+        FOR EACH ROW EXECUTE FUNCTION refuse_update();
+    `);
+    try {
+      const resolved = await store.resolve(plaintext);
+      expect(resolved?.orgId).toBe(ORG_A);
+      expect(resolved?.scopes).toEqual(['store:read']);
+      expect(await lastUsed()).toBeNull();
+    } finally {
+      await db.$client.unsafe(`
+        SET search_path TO ${SCHEMA};
+        DROP TRIGGER api_keys_refuse_update ON api_keys;
+        DROP FUNCTION refuse_update();
+      `);
+    }
   });
 });

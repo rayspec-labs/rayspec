@@ -69,6 +69,11 @@ export interface ReadOptions {
    * caller can parse the spec without extracting the archive. Application bundles only.
    */
   captureSpec?: boolean;
+  /**
+   * Refuse an archive path whose last component is a symbolic link instead of following it. A
+   * runtime reading a path another process placed sets it.
+   */
+  refuseLinks?: boolean;
 }
 
 export interface BundleInspection {
@@ -113,7 +118,7 @@ export async function inspectBundle(
   return guarded(async () => {
     const settings = resolveSettings(options);
     const deadline = new Deadline(settings.timeBudgetMs, settings.clock);
-    const source = await openSource(archive);
+    const source = await openSource(archive, settings);
     try {
       const inspection = await readBundle(source, settings, deadline, null);
       return {
@@ -142,7 +147,7 @@ export async function extractBundle(
     const settings = resolveSettings(options);
     const deadline = new Deadline(settings.timeBudgetMs, settings.clock);
     const target = await ExtractionTarget.prepare(destination);
-    const source = await openSource(archive);
+    const source = await openSource(archive, settings);
     try {
       const inspection = await readBundle(source, settings, deadline, target);
       return {
@@ -170,6 +175,7 @@ interface Settings {
   timeBudgetMs: number;
   clock: Clock;
   captureSpec: boolean;
+  refuseLinks: boolean;
 }
 
 const OPERATIONS: readonly ReadOperation[] = ['inspect', 'verify', 'deploy', 'prepare', 'import'];
@@ -195,7 +201,9 @@ function resolveSettings(options: ReadOptions | null | undefined): Settings {
   if (typeof clock !== 'function') throw refusal('RAY_USAGE', 'the clock is not a function');
   const captureSpec = options?.captureSpec ?? false;
   if (typeof captureSpec !== 'boolean') throw refusal('RAY_USAGE', 'captureSpec is not a boolean');
-  return { limits, operation, timeBudgetMs, clock, captureSpec };
+  const refuseLinks = options?.refuseLinks ?? false;
+  if (typeof refuseLinks !== 'boolean') throw refusal('RAY_USAGE', 'refuseLinks is not a boolean');
+  return { limits, operation, timeBudgetMs, clock, captureSpec, refuseLinks };
 }
 
 function operationLimit(settings: Settings): number {
@@ -205,8 +213,10 @@ function operationLimit(settings: Settings): number {
   return Math.max(limits.archiveBytes, limits.migrationArchiveBytes);
 }
 
-async function openSource(archive: unknown): Promise<ArchiveSource> {
-  if (typeof archive === 'string') return openFileSource(archive);
+async function openSource(archive: unknown, settings: Settings): Promise<ArchiveSource> {
+  if (typeof archive === 'string') {
+    return openFileSource(archive, { refuseLinks: settings.refuseLinks });
+  }
   if (archive instanceof Uint8Array) return bytesSource(archive);
   throw refusal('RAY_USAGE', 'the archive is neither a path nor bytes');
 }

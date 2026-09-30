@@ -126,8 +126,21 @@ function validateEmitCall(topic: unknown, payload: unknown): TenantEventInput {
  *
  * It holds no state and no handle: everything tenant-bound comes from the `TenantDb` each constructor
  * is handed at request/run time.
+ *
+ * `admitsWrites` is the runtime's source fence: while it answers false, every append is refused with
+ * 503 SERVICE_UNAVAILABLE before it reaches the database. It is asked at the moment of the write (the
+ * flush, or the immediate call), so work that was already running when the drain started still
+ * writes its events, and nothing appends once the runtime has drained. Absent ⇒ always admitted.
  */
-export function makeTenantEventBus(): TenantEventBus {
+export function makeTenantEventBus(opts: { admitsWrites?: () => boolean } = {}): TenantEventBus {
+  const admit = (): void => {
+    if (opts.admitsWrites !== undefined && !opts.admitsWrites()) {
+      throw new ApiError(
+        'SERVICE_UNAVAILABLE',
+        'The event stream accepts no new events while the service is paused. Retry later.',
+      );
+    }
+  };
   return {
     buffered(tdb: TenantDb) {
       // The REQUEST-LOCAL buffer. One array per invocation, captured by the closure — never shared
@@ -158,6 +171,7 @@ export function makeTenantEventBus(): TenantEventBus {
         flush: async (): Promise<void> => {
           flushed = true;
           if (pending.length === 0) return;
+          admit();
           // ONE statement for the whole request: one counter bump, one multi-row insert. `tdb` is the
           // TRANSACTIONAL handle the engine bound, so these rows commit with the handler's own writes.
           await tdb.appendEvents(pending);
@@ -167,7 +181,9 @@ export function makeTenantEventBus(): TenantEventBus {
     },
     immediate(tdb: TenantDb) {
       return async (topic: unknown, payload?: unknown): Promise<void> => {
-        await tdb.appendEvents([validateEmitCall(topic, payload)]);
+        const event = validateEmitCall(topic, payload);
+        admit();
+        await tdb.appendEvents([event]);
       };
     },
   };

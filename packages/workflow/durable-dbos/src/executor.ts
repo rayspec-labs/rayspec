@@ -66,6 +66,7 @@ import type {
 import { isRunCancelled, isRunTainted, recordRunCancelled, runAgent } from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { PausableQueue } from './pausable-queue.js';
 
 /**
  * The neutral run-resolution the executor needs to turn a `RunJob` back into a runnable run — the
@@ -355,10 +356,46 @@ export class DbosDurableExecutor implements DurableExecutor {
    * registration still lands in the correct pre-launch window.
    */
   readonly #preLaunchHooks: Array<() => void> = [];
+  /** The agent-run queue, pausable without shutting the engine down (see `pausable-queue.ts`). */
+  readonly #queue: PausableQueue;
 
   constructor(deps: DbosExecutorDeps, config: DbosExecutorConfig) {
     this.#deps = deps;
     this.#config = config;
+    this.#queue = new PausableQueue(
+      AGENT_RUNS_QUEUE,
+      config.workerConcurrency ?? DEFAULT_WORKER_CONCURRENCY,
+    );
+  }
+
+  /**
+   * Stop dequeuing agent runs without shutting DBOS down, so `resumeDispatch` can start them again.
+   * Runs already executing continue (`inFlight` counts them); an `enqueue` still records the job,
+   * which waits until dispatch resumes. Callable before `start()`: the queue is then registered
+   * paused.
+   */
+  async pauseDispatch(): Promise<void> {
+    await this.#queue.pause();
+  }
+
+  /** Dequeue agent runs again after `pauseDispatch`. */
+  async resumeDispatch(): Promise<void> {
+    await this.#queue.resume();
+  }
+
+  /** Whether a pause has settled: no dispatch loop can still claim a job it read before it. */
+  get dispatchSettled(): boolean {
+    return this.#queue.settled;
+  }
+
+  /** Whether the engine is launched and not shut down. */
+  get running(): boolean {
+    return this.#started;
+  }
+
+  /** How many agent runs this process is executing right now. */
+  get inFlight(): number {
+    return this.#queue.inFlight;
   }
 
   /**
@@ -578,10 +615,13 @@ export class DbosDurableExecutor implements DurableExecutor {
     // maxRecoveryAttempts:1 = layer 1 (cap DBOS recovery so a perpetually-crashing job dead-letters at
     // MAX_RECOVERY_ATTEMPTS_EXCEEDED instead of looping); the started-once guard (layer 2, in the body)
     // is the real never-silently-re-fire guarantee.
-    this.#runAgentJob = DBOS.registerWorkflow((job: RunJob) => this.#runAgentJobBody(job), {
-      name: 'runAgentJob',
-      maxRecoveryAttempts: 1,
-    });
+    this.#runAgentJob = DBOS.registerWorkflow(
+      (job: RunJob) => this.#queue.track(() => this.#runAgentJobBody(job)),
+      {
+        name: 'runAgentJob',
+        maxRecoveryAttempts: 1,
+      },
+    );
 
     // Run the pre-launch hooks (the cron scheduler registers its DBOS scheduled-workflows
     // HERE — after registerWorkflow, before launch — so the `ScheduledReceiver` lifecycle callback
@@ -603,10 +643,10 @@ export class DbosDurableExecutor implements DurableExecutor {
     // 4.21.6 sysdb migrations + `system_database.ts`), and the name here is a process-independent
     // constant. So two deployments sharing one system database share ONE row: whichever booted most
     // recently sets `workerConcurrency` for both. Differing values need separate system databases.
-    await DBOS.registerQueue(AGENT_RUNS_QUEUE, {
-      workerConcurrency: this.#config.workerConcurrency ?? DEFAULT_WORKER_CONCURRENCY,
-      onConflict: 'always_update',
-    });
+    // Registered PAUSED (worker concurrency 0) when `pauseDispatch` ran before start: a runtime that
+    // boots under a held source fence must not dequeue anything, and must not switch dispatch back on
+    // for the other processes that share this queue row.
+    await this.#queue.register();
 
     this.#started = true;
   }

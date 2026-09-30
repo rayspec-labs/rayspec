@@ -364,6 +364,116 @@ and apply it with `rayspec deploy --apply-migration <delta.sql>` (which runs it 
 the same safety gate). See the
 [CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product).
 
+A boot validates before it changes anything: the signing key and the injected spec are checked
+first, so a boot that is going to refuse leaves the database as it found it. Every step that
+changes the schema — the platform migration chain at boot, product-store DDL, `rayspec tenant
+ensure` — takes one shared transaction-scoped advisory lock, `pg_advisory_xact_lock(1918990707,
+1)`, so two of them never run at once against one database. The wait is bounded
+(`RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS`, default 60 s) and running out of it is a retryable refusal
+that changed nothing. The lock is released by commit, rollback or a lost connection, so a
+killed runner never blocks the next one.
+
+The boot runs in this order: validate the signing key and the spec; build what the spec needs
+from the environment (for a backend spec, once its extensions are merged: its capabilities, its
+agent backends, a durable worker and a deployment tenant for a cron or manual trigger, the product
+tables; for a Product-YAML document, its deployment tenant, byte movers, model calls, speech
+adapter, responder and normalizer) and rehearse the deploy on it with no migration to apply, so
+every refusal that follows from the configuration and the document comes before anything is
+written; reconcile any apply an earlier process left interrupted; apply the platform migration
+chain if the ledger is behind the runtime; read the source fence; assemble the application, whose
+deployer applies product-store DDL. What can still refuse after that depends on the database: the
+live product schema, each migration's apply and the durable worker's launch. Each schema change is a `runtime.apply` operation (below): it takes the operation lease
+first and the shared schema lock inside it, so a boot, an export's quiesce and an operator's
+apply never interleave; `tenant ensure` runs its chain the same way, and refuses to create or
+resolve an organization while the source fence is held. The chain that creates
+the receipt tables on an older database runs before them, under the schema lock alone. A restart
+that has nothing to change takes neither, unless an interrupted apply is there that it can settle;
+on an environment blocked on a step whose outcome no one can establish it warns and writes nothing.
+
+### Runtime control
+
+`@rayspec/server` exposes a typed runtime-control library, `createRuntimeControl`, over one
+environment database; it adds no HTTP route. `inspect()` reports what the runtime is — version,
+target, the capability ids whose modules resolve in the process, the contract version, the
+two-part schema head, the active application, the fence and the environment revision — and
+nothing that names a host, a port, a user or a path. `prepare()` plans a `.ray` bundle against the
+live schema without writing to it: it reads the bundle through the reader pipeline, computes the
+product head the bundle's delta would produce in a throwaway database on the shadow server, and
+returns the plan with its digest and an expiry thirty minutes out. Drift, a changed schema head
+and a missing binding are blockers.
+
+The **schema head** has two parts: the tag of the last applied platform migration (the drizzle
+ledger's `created_at` mapped onto the runtime's migration journal; a ledger row the journal does
+not explain means a newer runtime migrated the database) and the SHA-256 of the product schema
+read from the catalog — every table in `public` that is not a platform table, with its columns,
+keys, uniques, indexes and foreign keys in a canonical order.
+
+Mutating operations run under an **operation lease** kept in `runtime_control_state`, one row
+per environment. Taking the lease increments a fencing epoch and records the operation's intent
+in the same transaction, before any effect; every later write of the operation re-checks the
+epoch, the holder and the expiry, by the database clock, inside its own transaction. A holder
+whose lease expired and was taken over therefore cannot write when it wakes up. Only an expired
+lease is taken over, even by a retry of the same operation, so one operation never has two live
+holders. Each operation
+leaves **receipts** in `runtime_control_receipts` — operation id, actor, kind, lease epoch,
+inputs digest, each step's start and finish with its digest, the outcome — which a trigger keeps
+append-only. A step with a start and no finish is what a crash leaves behind, and the next holder
+must reconcile it before it repeats anything. Neither table is ever exported in a snapshot.
+
+**Apply** (`runApply`) is how anything changes an environment. It recomputes the plan digest from
+the live state instead of trusting a stored plan, compares the expected environment revision,
+refuses blockers and a held fence, answers a replayed idempotency key from the receipts, and only
+then takes the lease and runs its steps, each between a start and a finish receipt; the revision
+rises by one when a step ran. Crash safety comes from what each step's receipts can prove. A step
+whose effect runs in the lease-checked transaction that writes its finish receipt (product DDL)
+has no in-between state: a start without a finish means the transaction rolled back. Any other
+step records, when it starts, the observer that reads its state, what it read and what it
+expects; the next apply reads it again and closes the step as applied or not applied. A step
+nothing can read back is unknown, and an unknown step blocks every apply
+(`RAY_RECONCILIATION_REQUIRED`) until an operator records its outcome — nothing is replayed
+blindly and no schema change is reversed. The legacy YAML deploy is the first caller; the
+operator's view is in [Runtime operations](./runtime-operations.md).
+
+The **source fence** is what `quiesce()` takes and `resume()` releases, for an export or a
+migration. It lives in `runtime_control_state` (`fence_state`, `fence_epoch`, and the write
+barriers recorded with it), so every runtime process of the environment sees it: each one re-reads
+it every 500 ms and moves through three phases. *Open*: everything runs. *Draining*: new work is
+refused — HTTP mutations and new event streams answer `503 SERVICE_UNAVAILABLE` with
+`Retry-After` from a middleware in front of every route (a declared route whose action writes is a
+mutation whatever its method, through a guard it carries), cron ticks and the system cleanup pass
+their producer gate as no-ops, and the run queues stop dequeuing (their worker concurrency set to
+0, the engine left running) — open event streams close after the chunk in flight, and work already
+running continues: a mutation stays in flight until its work has ended, so a streamed run whose
+client stream the drain closed is still waited for. *Fenced*: that work has finished; event-bus appends and object writes are now
+refused too. Each process reports its phase, its producers and the external services it calls in
+its heartbeat (`runtime_control_processes`), and `quiesce()` reports `fenced` only once every live
+process has drained at the new epoch — otherwise `timed-out`, with the fence still held. A process
+writes its first heartbeat before it reads the fence at boot, so one that is still booting counts as
+live and undrained. Because
+the fence is in the database, a process that boots under it starts fenced (its queues register
+paused), and a `resume()` from another process reaches a running server within one poll.
+
+The database write barrier the export relies on is taken only after a full drain and is never
+assumed. With role separation (the runtime connects as a role that owns no table) `quiesce()`
+revokes that role's INSERT, UPDATE, DELETE and TRUNCATE on every table of both databases, checks
+with `has_table_privilege` that nothing survived for the role or any role it can switch to with
+`SET ROLE`, refuses a role that can switch to a table owner, a superuser, a role that bypasses row
+security or one that may create roles, and records exactly what it revoked; `resume()`
+grants back exactly that. Without role separation the only barrier is a stopped source: the
+operator attests that no runtime process runs, and no session other than the caller's own is
+connected to either database. In every other case the barrier is reported unavailable, and an
+export refuses.
+
+Readiness (`GET /health`) covers the database, the platform schema (a database migrated by a newer
+runtime is refused at boot and reported not ready), the boot secrets mounted as files, the frontend
+mounts and the durable worker with its system database, each bounded to 2 s, so a database that
+hangs is reported unreachable rather than leaving the probe without an answer; liveness
+(`GET /livez`) only says the process answers. Neither names a host, a path or a secret. The boot
+banner's route list is kept as it was, so a legacy deploy prints the same output; it does not list
+`/livez`. Under `RAYSPEC_HOSTING_POSTURE=managed`
+the public `/recovery-scope` probe is not registered, and cross-process run cancellation is on
+by default (`RAYSPEC_RUN_CANCEL_POLL_MS` 2000 unless set); `inspectHosting()` reports both.
+
 ---
 
 ## The extension model
@@ -393,3 +503,5 @@ across every product built on it.
 
 - **[Concepts](./concepts.md)** — the definitions this document builds on.
 - **[Getting started](./getting-started.md)** — run the stack and make a request.
+- **[Runtime operations](./runtime-operations.md)** — apply, quiesce, resume and recovery from an
+  interrupted operation, for operators.

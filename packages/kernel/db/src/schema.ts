@@ -17,12 +17,14 @@ import { sql } from 'drizzle-orm';
 import {
   bigint,
   boolean,
+  check,
   index,
   integer,
   jsonb,
   numeric,
   pgTable,
   primaryKey,
+  smallint,
   text,
   timestamp,
   uniqueIndex,
@@ -711,6 +713,157 @@ export const workflowArtifacts = pgTable(
     index('workflow_artifacts_tenant_idx').on(t.tenantId),
     // Content-addressed idempotency key: one row per (tenant, handle id) → persist is get-or-create.
     uniqueIndex('workflow_artifacts_tenant_artifact_idx').on(t.tenantId, t.artifactId),
+  ],
+);
+
+// ---------------------------------------------------------------------------------------
+// Runtime control (GLOBAL — one environment per application database)
+// ---------------------------------------------------------------------------------------
+
+/**
+ * runtime_control_state — the ONE row of runtime-control state an environment keeps in its own
+ * application database: the deployment id, the environment revision, the source fence, the
+ * binding revision key, the operation lease and what the last apply activated.
+ *
+ * GLOBAL/predicate-exempt: it belongs to the environment, not to a tenant, and only the composition
+ * root's runtime-control adapter reads or writes it. `id` is pinned to 1 by a CHECK, so the row is a
+ * singleton by construction rather than by convention.
+ *
+ * The OPERATION LEASE (`lease_*`) is what makes one mutating operation at a time safe across
+ * processes. Taking it increments `lease_epoch` in the same transaction that records the operation's
+ * intent receipt, and every mutating transaction of the operation re-reads this row FOR UPDATE and
+ * refuses unless the epoch, the holder and the expiry still match — so a holder whose lease expired
+ * and was taken over cannot write, however late it wakes up. Expiry is compared against the
+ * database clock, never a process clock.
+ *
+ * The FENCE (`fence_*`) is the separate source fence a quiesce takes; its epoch counts fences, not
+ * leases. Rows here are never exported: the category is `runtime-control-state`.
+ */
+export const runtimeControlState = pgTable(
+  'runtime_control_state',
+  {
+    id: smallint('id').primaryKey().default(1),
+    /** The deployment id, written by the first apply; null before it. */
+    deploymentId: text('deployment_id'),
+    /** Starts at 1 and increases with every apply, quiesce, resume and binding change. */
+    environmentRevision: bigint('environment_revision', { mode: 'number' }).notNull().default(1),
+    fenceState: text('fence_state').notNull().default('open'),
+    /** 0 before the first fence. */
+    fenceEpoch: bigint('fence_epoch', { mode: 'number' }).notNull().default(0),
+    fenceActor: text('fence_actor'),
+    fenceReason: text('fence_reason'),
+    fencedAt: timestamp('fenced_at', { withTimezone: true }),
+    /** The write barriers recorded with the fence, restored on resume. */
+    fenceBarriers: jsonb('fence_barriers'),
+    /** 32 random bytes as lowercase hex: the key self-hosted binding revision ids are HMAC'd under. */
+    bindingRevisionKey: text('binding_revision_key').notNull(),
+    /** The fencing epoch of the operation lease; 0 before the first operation. */
+    leaseEpoch: bigint('lease_epoch', { mode: 'number' }).notNull().default(0),
+    leaseOperationId: uuid('lease_operation_id'),
+    leaseKind: text('lease_kind'),
+    leaseActor: text('lease_actor'),
+    leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+    /** The application the last apply activated; null until one did. */
+    applicationId: text('application_id'),
+    applicationVersion: text('application_version'),
+    applicationDigest: text('application_digest'),
+    /** The grants of the active application: `{execution, egressHosts, capabilities}`. */
+    activeGrants: jsonb('active_grants'),
+    /** The product schema digest the last apply left behind; null until one did. */
+    appliedProductSchema: text('applied_product_schema'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check('runtime_control_state_singleton', sql`${t.id} = 1`),
+    check('runtime_control_state_fence_state', sql`${t.fenceState} IN ('open', 'fenced')`),
+    check('runtime_control_state_binding_key', sql`${t.bindingRevisionKey} ~ '^[a-f0-9]{64}$'`),
+    check(
+      'runtime_control_state_revision',
+      sql`${t.environmentRevision} >= 1 AND ${t.fenceEpoch} >= 0 AND ${t.leaseEpoch} >= 0`,
+    ),
+  ],
+);
+
+/**
+ * runtime_control_receipts — the APPEND-ONLY record of every runtime-control operation: who asked
+ * (`actor`), what (`operation_kind`, `inputs_digest`), under which lease epoch, and what happened
+ * (`event`: intent, lease-taken-over, step-started, step-finished, step-skipped, outcome).
+ *
+ * A step with a start receipt and no finish receipt is what tells the next holder a crash left it in
+ * an unknown state. A trigger created with the table (migration `0012_runtime_control`) refuses UPDATE, DELETE and TRUNCATE, so a receipt, once
+ * written, is never rewritten. An apply's intent carries its idempotency key; the partial unique
+ * index with its CHECK makes a key name one operation only.
+ *
+ * GLOBAL/predicate-exempt like the state row. Receipts hold ids, digests and step names, never a
+ * secret or a binding value.
+ */
+export const runtimeControlReceipts = pgTable(
+  'runtime_control_receipts',
+  {
+    /** An identity column: receipts of one operation read back in the order they were written. */
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    operationId: uuid('operation_id').notNull(),
+    operationKind: text('operation_kind').notNull(),
+    actor: text('actor').notNull(),
+    leaseEpoch: bigint('lease_epoch', { mode: 'number' }).notNull(),
+    inputsDigest: text('inputs_digest').notNull(),
+    event: text('event').notNull(),
+    step: text('step'),
+    digest: text('digest'),
+    outcome: text('outcome'),
+    idempotencyKey: text('idempotency_key'),
+    detail: jsonb('detail'),
+    recordedAt: timestamp('recorded_at', { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (t) => [
+    index('runtime_control_receipts_operation_idx').on(t.operationId, t.id),
+    // Only an intent carries a key (the CHECK below), so a key names exactly one operation.
+    uniqueIndex('runtime_control_receipts_idempotency_idx')
+      .on(t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
+    check(
+      'runtime_control_receipts_idempotency_intent',
+      sql`${t.idempotencyKey} IS NULL OR ${t.event} = 'intent'`,
+    ),
+    check(
+      'runtime_control_receipts_event',
+      sql`${t.event} IN ('intent', 'lease-taken-over', 'step-started', 'step-finished', 'step-skipped', 'outcome')`,
+    ),
+  ],
+);
+
+/**
+ * runtime_control_processes — one row per RUNNING runtime process of the environment, written by the
+ * process itself: which fence epoch it has observed, whether it has stopped its producers and drained
+ * its in-flight work, what each producer is doing, and which external services it talks to that no
+ * fence can stop. A quiesce reads these rows to learn whether every live process has drained; a
+ * process that stops heartbeating (`seen_at` goes stale) is no longer counted as live.
+ *
+ * GLOBAL/predicate-exempt. It holds no application data and never a secret; the category is
+ * `runtime-control-state`, so it is never exported. It is the one table a database write barrier
+ * leaves writable to the runtime, so a fenced process can still report that it drained.
+ */
+export const runtimeControlProcesses = pgTable(
+  'runtime_control_processes',
+  {
+    processId: uuid('process_id').primaryKey(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    /** The database clock at the process's last heartbeat. */
+    seenAt: timestamp('seen_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+    /** The fence epoch the process last observed. */
+    fenceEpoch: bigint('fence_epoch', { mode: 'number' }).notNull().default(0),
+    /** `open`, `draining` (producers stopped, in-flight work still running) or `fenced` (drained). */
+    phase: text('phase').notNull().default('open'),
+    /** `[{producer, state}]`: each producer's state as the process sees it. */
+    producers: jsonb('producers').notNull().default(sql`'[]'::jsonb`),
+    /** The external services this process calls that a fence cannot stop, by name. */
+    unfencedExternal: jsonb('unfenced_external').notNull().default(sql`'[]'::jsonb`),
+  },
+  (t) => [
+    check('runtime_control_processes_phase', sql`${t.phase} IN ('open', 'draining', 'fenced')`),
+    check('runtime_control_processes_epoch', sql`${t.fenceEpoch} >= 0`),
   ],
 );
 

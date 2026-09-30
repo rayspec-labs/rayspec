@@ -30,6 +30,7 @@ import { buildDeclaredRoutesOpenApi } from './engine/emit-openapi.js';
 import { registerDeclaredRoutes } from './engine/register-declared-routes.js';
 import { clientIpFromContext } from './http/client-ip.js';
 import { authenticate, requestId, securityHeaders } from './http/middleware.js';
+import { writeFenceMiddleware } from './http/write-fence.js';
 import { mountOidc } from './oidc/mount.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerInviteRoutes } from './routes/invites.js';
@@ -189,6 +190,13 @@ export function createAuthApp(deps: AppDeps): OpenAPIHono<AppEnv> {
       }),
     );
   }
+  // --- the source fence (registered only when the runtime wired one) ------------------------
+  // In front of authentication and every route: while the runtime is fenced a mutation is refused
+  // with 503 SERVICE_UNAVAILABLE + Retry-After before anything else runs, and an open event stream is
+  // closed when the drain starts (http/write-fence.ts). A preflight OPTIONS never reaches here with a
+  // body to refuse, and reads pass through. Absent ⇒ nothing is registered, so an app built without a
+  // fence (a unit suite, the static profile) behaves exactly as before.
+  if (deps.writeFence) app.use('*', writeFenceMiddleware(deps.writeFence));
   app.use('*', authenticate(deps));
 
   // if the declarative engine supplies `agents` + their backends

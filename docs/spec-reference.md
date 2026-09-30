@@ -156,8 +156,9 @@ stores:
 
   `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
   `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
-  `sessions`, `tenant_event_streams`, `tenant_events`, `users`,
-  `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
+  `runtime_control_processes`, `runtime_control_receipts`,
+  `runtime_control_state`, `sessions`, `tenant_event_streams`, `tenant_events`,
+  `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
 
   Several are names a product would plausibly reach for on its own — `sessions`
   for a chat application, `invites`, `runs`. The match is exact, so a
@@ -1083,7 +1084,8 @@ different runs:
   engine's own cancellation is cooperative and the whole run occupies one engine step, so
   the model call in flight is not interrupted: the run stops when it stops. A run that
   reaches its own end writes the cancellation as its outcome rather than its own, and it
-  is never dispatched again. Setting **`RAYSPEC_RUN_CANCEL_POLL_MS`** changes this case:
+  is never dispatched again. Setting **`RAYSPEC_RUN_CANCEL_POLL_MS`** (on at 2000 ms by
+  default under `RAYSPEC_HOSTING_POSTURE=managed`) changes this case:
   a run that is executing re-reads its own cancellation record on that interval and ends
   itself where it runs, with the same terminal state and the same journal as a run
   cancelled in this process. Two honest consequences. What the run leaves in its journal

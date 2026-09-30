@@ -30,7 +30,8 @@
  *     workflow-id idempotency law runs the SCHEDULED-WORKFLOW BODY at most once per (schedule, T)
  *     across the engine (verified doc-first against the installed 4.21.6 scheduler source:
  *     `scheduler_decorator.js:121` derives `sched-${name}-${date.toISOString()}` and starts the
- *     workflow under that id; default mode `ExactlyOncePerIntervalWhenActive` = fire once per interval
+ *     workflow under that id — the loop in scheduled-workflow.ts, which runs the schedule, keeps that
+ *     id, that slot arithmetic and those modes, and retries an instant the system database refused; default mode `ExactlyOncePerIntervalWhenActive` = fire once per interval
  *     WHILE THE APP IS ACTIVE, NO make-up work for intervals missed while the app was down. A trigger
  *     that opts into CATCH-UP (`descriptor.catchUp`) is instead registered in `ExactlyOncePerInterval`,
  *     the make-up-work mode — see the CATCH-UP section below; verified doc-first against
@@ -150,6 +151,8 @@ import type {
 } from '@rayspec/platform';
 import { deleteEnqueuedRunHeader, insertEnqueuedRunHeader } from '@rayspec/platform';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { type ProducerGate, ProducerPausedError } from './producer-gate.js';
+import { registerScheduledWorkflow } from './scheduled-workflow.js';
 
 /**
  * The narrow trigger-handler shape the cron worker passes to `invokeTriggerHandler`. The platform
@@ -304,6 +307,19 @@ export function cronTenantAbsentLog(triggerName: string, tenantId: string, insta
 }
 
 /**
+ * The one line a scheduled tick logs when the producer gate is closed (the runtime is fenced): the
+ * tick dispatched nothing and wrote no firing marker, and the engine records the interval as run, so
+ * scheduled firing resumes at the first instant after the fence is released.
+ */
+export function cronPausedLog(triggerName: string, instant: Date): string {
+  return (
+    `[cron] PAUSED trigger '${triggerName}' for ${firingInstantIso(instant)} — the runtime is ` +
+    'fenced, so nothing was dispatched and no firing marker was written. Scheduled firing resumes ' +
+    'at the next instant after the fence is released.'
+  );
+}
+
+/**
  * The outcome of a fire, with the enqueued run's id when there is one: `fired` exactly as `fireNow`
  * reports it, plus — iff THIS call won the reserve and dispatched an AGENT action — the deterministic
  * `runId` it enqueued (`cronRunId(name, instant)`), so the consumer control path can hand the caller
@@ -385,6 +401,12 @@ export interface CronSchedulerDeps {
   readonly resolveRunHeaderIdentity?: (
     agentId: string,
   ) => Omit<RunHeaderIdentity, 'runId'> | undefined;
+  /**
+   * The switch a source fence closes. Asked FIRST on every fire: closed, a scheduled tick dispatches
+   * nothing (one `cronPausedLog` line) and an on-demand fire throws `ProducerPausedError`. Absent ⇒
+   * always open.
+   */
+  readonly gate?: ProducerGate;
 }
 
 /** Thrown when a NON-cron trigger reaches the cron SCHEDULING path (per-kind reservation — fail-closed). */
@@ -445,6 +467,7 @@ export class DbosCronScheduler {
   /** Where the one-line skipped-firing notice goes (the injected sink, or `console`). */
   readonly #logger: CronSchedulerLogger;
   #registered = false;
+  #inFlight = 0;
 
   /**
    * @param descriptors EVERY registered descriptor (the full `TriggerRegistry.list()`). Cron ones are
@@ -475,6 +498,11 @@ export class DbosCronScheduler {
     }
   }
 
+  /** How many fires (scheduled or on demand) are dispatching in this process right now. */
+  get inFlight(): number {
+    return this.#inFlight;
+  }
+
   /** The names of the cron triggers this scheduler SCHEDULES (for the boot banner / tests). */
   get cronTriggerNames(): string[] {
     return [...this.#crons.keys()];
@@ -486,9 +514,9 @@ export class DbosCronScheduler {
   }
 
   /**
-   * Register one DBOS scheduled-workflow per cron trigger. MUST run BEFORE `DBOS.launch()` (DBOS's
-   * `registerScheduled` is static + pre-launch by design; the `ScheduledReceiver` lifecycle callback
-   * starts each schedule loop at launch). Each scheduled workflow is a registered DBOS workflow whose
+   * Register one DBOS scheduled-workflow per cron trigger. MUST run BEFORE `DBOS.launch()` (the
+   * registration is pre-launch by design; a DBOS lifecycle listener starts each schedule loop at
+   * launch — scheduled-workflow.ts, which keeps it running while the workflow database is unreachable). Each scheduled workflow is a registered DBOS workflow whose
    * body is the scheduled-fire path (`#fire(..., { fromSchedule: true })`) — so a crash-replay OR a
    * catch-up make-up replay of the body still hits the same idempotent reserve (and, for catch-up, the
    * bounded look-back). Idempotent: calling twice is a no-op (a second register would duplicate the
@@ -505,6 +533,10 @@ export class DbosCronScheduler {
       const workflowName = `cron:${name}`;
       const body = DBOS.registerWorkflow(
         async (scheduledTime: Date): Promise<void> => {
+          if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+            this.#logger.warn(cronPausedLog(descriptor.name, scheduledTime));
+            return;
+          }
           await this.#fire(descriptor, scheduledTime, { fromSchedule: true });
         },
         { name: workflowName },
@@ -514,10 +546,11 @@ export class DbosCronScheduler {
       // ExactlyOncePerIntervalWhenActive (no make-up work). The scheduled-workflow id `sched-{workflowName}
       // -{ISO}` gives engine-level at-most-once-per-instant; our reserve is the tenant-scoped idempotency /
       // exactly-once-cap guard (and, for a catch-up replay, the at-least-once make-up + dedup — see header).
-      DBOS.registerScheduled(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
+      registerScheduledWorkflow(body as (scheduledTime: Date, startTime: Date) => Promise<void>, {
         name: workflowName,
         crontab: descriptor.schedule,
         mode: catchUpSchedulerMode(descriptor),
+        logger: this.#logger,
       });
     }
     this.#registered = true;
@@ -562,6 +595,9 @@ export class DbosCronScheduler {
           '(unknown, or a RESERVED webhook/event kind not built here). Fail-closed.',
       );
     }
+    if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+      throw new ProducerPausedError(`trigger '${name}'`);
+    }
     return this.#fire(descriptor, instant);
   }
 
@@ -589,6 +625,10 @@ export class DbosCronScheduler {
           '(unknown, or a RESERVED webhook/event/manual kind not built here). Fail-closed.',
       );
     }
+    if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+      this.#logger.warn(cronPausedLog(name, instant));
+      return false;
+    }
     return (await this.#fire(descriptor, instant, { fromSchedule: true })).fired;
   }
 
@@ -612,6 +652,19 @@ export class DbosCronScheduler {
    *   that does not exist (yet).
    */
   async #fire(
+    descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
+    instant: Date,
+    opts?: { fromSchedule?: boolean },
+  ): Promise<FireOutcome> {
+    this.#inFlight += 1;
+    try {
+      return await this.#dispatch(descriptor, instant, opts);
+    } finally {
+      this.#inFlight -= 1;
+    }
+  }
+
+  async #dispatch(
     descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
     instant: Date,
     opts?: { fromSchedule?: boolean },

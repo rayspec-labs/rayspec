@@ -56,6 +56,10 @@ Options:
   their inventory size and SHA-256, as `specBytes`, so a caller can parse the spec without
   extracting the archive. Application bundles only; the bytes are bounded by the extracted byte
   limit like every other entry.
+- `refuseLinks` — refuse an archive path whose last component is a symbolic link
+  (`RAY_USAGE`) instead of following it. The file is opened with `O_NOFOLLOW`, so a link swapped
+  in after an earlier check is refused too. A runtime reading a path another process placed sets
+  it; off by default.
 - `clock` — the monotonic clock the budget is measured with.
 
 Each read stays inside the size taken when the archive was opened. The central directory is read

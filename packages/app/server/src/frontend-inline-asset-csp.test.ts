@@ -120,6 +120,9 @@ describe('static boot — the warning an operator actually sees', () => {
     expect(await (await server.app.request('/health')).json()).toEqual({
       status: 'ok',
       frontend: 'ok',
+      live: true,
+      ready: true,
+      checks: { assets: true },
     });
   });
 

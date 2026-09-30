@@ -37,6 +37,9 @@ import {
   orgs,
   runEvents,
   runs,
+  runtimeControlProcesses,
+  runtimeControlReceipts,
+  runtimeControlState,
   sessions,
   tenantEventStreams,
   tenantEvents,
@@ -50,7 +53,8 @@ import {
 // tables the PRD enumerates + the workflow-runtime journal trio (workflow_runs /
 // workflow_node_states / workflow_artifacts), so the from-clean-DB structural oracle covers the
 // durable workflow journal too, + the tenant event-bus pair (tenant_events / tenant_event_streams),
-// whose composite PK and bigint counter columns are load-bearing for the stream's ordering.
+// whose composite PK and bigint counter columns are load-bearing for the stream's ordering, + the
+// runtime-control tables (the singleton state row, the append-only receipts and the process heartbeats).
 const CORE_PLATFORM_TABLES: PgTable[] = [
   orgs,
   users,
@@ -70,6 +74,9 @@ const CORE_PLATFORM_TABLES: PgTable[] = [
   workflowArtifacts,
   tenantEvents,
   tenantEventStreams,
+  runtimeControlState,
+  runtimeControlReceipts,
+  runtimeControlProcesses,
 ];
 
 const url = process.env.MIGRATE_CLEAN_URL;

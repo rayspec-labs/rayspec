@@ -97,6 +97,15 @@ export { makeTenantEventBus } from './engine/event-bus.js';
 // `GET /v1/subscribe` deliver immediately rather than within one poll interval, and nothing keys
 // correctness on it (a subscriber's own periodic read is the delivery guarantee).
 export { makeTenantEventWake, type TenantEventWakeHub } from './engine/event-wake.js';
+// The HTTP half of a source fence: refuse mutations with 503 while fenced, close open streams on the
+// drain. The runtime implements `WriteFence`; the app registers the middleware when one is wired.
+export {
+  closeOnDrain,
+  FENCED_MESSAGE,
+  type WriteFence,
+  writeFenceMiddleware,
+  writeRouteGuard,
+} from './http/write-fence.js';
 // the media-token service (the playback route's distinct HS256 auth path) + the
 // in-process revocation denylist. The composition root builds the service from the distinct
 // RAYSPEC_MEDIA_SIGNING_KEY and injects it into the engine. Zero product vocabulary (a generic
@@ -121,7 +130,7 @@ export {
   INVITE_MIN_TTL_SECONDS,
 } from './routes/invites.js';
 export { AuthService } from './services/auth-service.js';
-export { ApiKeyStore } from './stores/api-key-store.js';
+export { ApiKeyStore, type ApiKeyStoreOptions } from './stores/api-key-store.js';
 export { AuditStore } from './stores/audit-store.js';
 export { IdempotencyStore } from './stores/idempotency-store.js';
 export { IdentityStore } from './stores/identity-store.js';

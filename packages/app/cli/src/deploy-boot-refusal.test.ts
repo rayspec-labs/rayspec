@@ -22,6 +22,7 @@ import {
   loadTenantProvisionSecrets,
   makeExtractionBackend,
   ProductBootError,
+  RuntimeApplyError,
 } from '@rayspec/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -225,6 +226,21 @@ describe('rayspec deploy — a fail-closed boot refusal prints the diagnosis and
     const { stderr, exitCode } = await bootRefusal(missingSecret.err);
     expect(stderr).toBe(`[rayspec deploy] ${missingSecret.err.message}\n`);
     expect(exitCode).toBe(1);
+  });
+});
+
+describe('rayspec deploy — a schema change refused by apply exits with its contract class', () => {
+  it.each([
+    ['RAY_RECONCILIATION_REQUIRED', false, 6],
+    ['RAY_POLICY_DENIED', false, 4],
+    ['RAY_LOCK_TIMEOUT', true, 5],
+    ['RAY_PLAN_STALE', false, 3],
+  ] as const)('%s exits with its class and a clean print', async (code, retryable, exit) => {
+    const err = new RuntimeApplyError([{ code, message: 'refused for the test', retryable }]);
+    const { stderr, exitCode } = await bootRefusal(err);
+    expect(exitCode).toBe(exit);
+    expect(stderr).toBe(`[rayspec deploy] ${err.message}\n`);
+    expect(stderr).toContain(code);
   });
 });
 

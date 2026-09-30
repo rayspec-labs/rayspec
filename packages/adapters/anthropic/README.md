@@ -49,7 +49,8 @@ surrounding platform, or of cancellation in general, rather than of this SDK.
   that child starts in turn is therefore not reached by cancelling the run.
 - **A run executing in a separate worker process receives no signal by default.** The
   signal is delivered in-process, so it only reaches a run executing in the process that
-  holds it. Setting `RAYSPEC_RUN_CANCEL_POLL_MS` makes that run's own process re-read its
+  holds it. Setting `RAYSPEC_RUN_CANCEL_POLL_MS` (on by default under
+  `RAYSPEC_HOSTING_POSTURE=managed`) makes that run's own process re-read its
   cancellation record on the configured interval and raise the abort there, so this
   adapter is handed the signal after all and every rung above applies as usual; leave it
   unset and the run keeps going until it returns on its own. Both behaviours are shared by
