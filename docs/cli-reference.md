@@ -422,7 +422,9 @@ inventory (size, CRC-32 and SHA-256, under the extracted-byte limit). It does
 - **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
 - **Passive:** nothing in the archive is extracted, imported, evaluated or run,
   and nothing is written anywhere. A read has a wall-time budget of five minutes.
-- **Flags:** `--json` only; exactly one positional archive path.
+- **Flags:** `--json` only; exactly one positional archive path. A path that
+  is missing or is not a regular file (a directory, a device, a FIFO) is
+  `RAY_USAGE`; a FIFO is refused at once, never waited on.
 - **Output:** the result envelope on stdout (operation `bundle.inspect`), with
   or without `--json`:
 
@@ -490,7 +492,8 @@ bundle, in this order, stopping at the first failure:
    `RAY_BINDING_RESERVED`.
 5. **Spec.** The spec file the manifest names is parsed from the archive (never
    run). `RAY_SPEC_INVALID`, followed by each grammar error as a `SPEC_` code
-   with its path.
+   with its path. The message of each names the rule and, for a YAML error, the
+   line and column; it never quotes the spec, whose text may hold a secret.
 6. **Derived fields.** `requires`, the execution level and the egress hosts
    must be exactly what the spec derives: the capability ids its sections use,
    in code-point order; `in-process` when it declares handlers or extensions,
@@ -499,7 +502,9 @@ bundle, in this order, stopping at the first failure:
    `requires-mismatch`, `execution-mismatch` or `permissions-mismatch`.
 7. **Secret scan.** A payload file named `.env`, `.env.*`, `id_rsa`,
    `id_ecdsa`, `id_ed25519` or `.pgpass`, or one that contains a PEM private-key
-   header. `RAY_SECRET_DETECTED`, naming the path and never the content.
+   header (`-----BEGIN `, words of uppercase letters and digits such as `RSA` or
+   `X25519`, then `PRIVATE KEY-----`). `RAY_SECRET_DETECTED`, naming the path and
+   never the content.
 8. **Signature.** When `--signature` names a file, or `<file.ray>.sig` lies next
    to the archive: the file must be a signature document for this archive's
    SHA-256, name one of the `--trusted-key` public keys, and verify with it.
@@ -508,8 +513,10 @@ bundle, in this order, stopping at the first failure:
    `untrusted-key`). With no signature, `--require-signature` refuses the bundle
    (`malformed`); otherwise it passes with the warning `RAY_W_UNSIGNED`.
 
-A migration bundle is checked for runtime and target only after the
-structural checks; its contents are encrypted and are not read.
+A migration bundle gets the runtime, target and signature checks after the
+structural checks (so `--require-signature` and `RAY_W_UNSIGNED` apply to it
+too), but no capability, binding, spec or secret checks: its contents are
+encrypted and are not read.
 
 - **Postgres:** not needed. **Environment:** none read.
 - **Passive:** as for inspect — nothing is extracted, imported or run, and
@@ -517,7 +524,8 @@ structural checks; its contents are encrypted and are not read.
 - **Flags:** `--runtime <exact-version>` (default: this CLI's version);
   `--signature <file.ray.sig>` (default: `<file.ray>.sig` when present);
   `--trusted-key <ed25519-public-key.pem>`, repeatable — a PEM public key; a
-  private key, an unreadable file or a non-Ed25519 key is a usage error;
+  private key, an unreadable file, one that is not a regular file, one over
+  16 KiB or a non-Ed25519 key is a usage error;
   `--require-signature`; `--json`.
 - **Output:** the result envelope (operation `bundle.verify`):
 

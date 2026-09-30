@@ -61,19 +61,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   archive's identity on the same pass, reports secret findings by path, and writes nothing.
   `extractBundle` runs the same checks while copying into a directory that must not exist: it is
   created with mode 0700 only after the manifest passed, files are created exclusively without
-  following links, and the directory is removed on any failure. Neither ever imports, evaluates or
+  following links, a directory swapped for a link while it runs is noticed before a byte is written
+  into it, and the directory is removed on any failure. Neither ever imports, evaluates or
   executes anything from an archive; a test with a payload that would write a file and open a
   connection if imported shows both untouched, and then imports it on purpose to show the probe
   works. Reads stay inside the size the archive had when it was opened, run under a wall-time
-  budget (`RAY_LIMIT_EXCEEDED` `time-budget`), and refuse an archive whose directory or size
-  changes while it is read. Every limit can only be lowered. Hostile input is answered with a
-  vocabulary code and never thrown, and no message repeats a name from the archive.
+  budget (`RAY_LIMIT_EXCEEDED` `time-budget`) that also bounds the name-set checks, which take
+  time in proportion to the number of names and its logarithm however deep a name is, and refuse
+  an archive whose directory, size or manifest changes while it is read. A path that is not a
+  regular file, a FIFO included, is refused at once. Every limit can only be lowered. Hostile
+  input is answered with a vocabulary code and never thrown, and no message repeats a name from
+  the archive. The private-key scan accepts digits in the header's words (`SM2`, `X25519`), as the
+  contract's reference reader does.
   The ZIP parsing is written for the strict profile rather than taken from a ZIP library, which
   would accept forms the contract refuses.
   `writeBundle` computes the inventory from the prepared files, validates the manifest, writes the
   entries in name order in the strict profile with the canonical manifest last, reads the result
   back through the reader, and moves it into place atomically, never over an existing file unless
-  asked. The same input gives the same bytes in any directory, and the base contract fixture is
+  asked. Payload files over the extracted byte limit are refused before anything is written
+  (`extracted-size`), and a limit the read-back reaches is reported as that limit. The same input gives the same bytes in any directory, and the base contract fixture is
   reproduced byte for byte. `createSignatureFile` and `verifySignatureFile` make and check the
   detached Ed25519 signature in the contract's order (`malformed`, `mismatch`, `untrusted-key`).
   Every case of the golden corpus runs through inspection and extraction with its expected code
@@ -98,6 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   level and egress hosts the spec derives, the secret scan, and the detached Ed25519 signature
   (`--signature`, default `<file.ray>.sig`; `--trusted-key`, repeatable; `--require-signature`).
   An unsigned bundle passes with the warning `RAY_W_UNSIGNED` unless a signature is required.
+  A spec error names its rule and, for YAML, its line and column, never the spec's text. A
+  signature or trusted-key path that is not a regular file, a FIFO included, is refused at once.
   Both write one result envelope to stdout, with or without `--json`, print the operation id
   (and, without `--json`, a short description that never claims the code is safe) on stderr, and
   exit with the class of their first error: 0, 1 spec invalid, 2 invalid input, 3 incompatible,
