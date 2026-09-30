@@ -29,6 +29,7 @@ import { runAgent } from './run-core.js';
 import { isRunTainted } from './run-taint.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -36,6 +37,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 /** How many times the side-effecting handler ACTUALLY fired (the real effect counter). */
 let sideEffectFires = 0;
@@ -152,6 +157,7 @@ function spec(): AgentSpec {
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 beforeEach(async () => {
   await db.$client.unsafe(
@@ -161,12 +167,13 @@ beforeEach(async () => {
   sideEffectFires = 0;
 });
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('non-idempotent tool through dispatchTool — fail-closed on REPLAY', () => {
   it('LIVE: the side-effecting tool fires EXACTLY ONCE and returns opaque tool_data', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new ToolMarshallingBackend();
     const live = await runAgent(tdb, backend, spec(), { tools: [nonIdempotentTool()] });
 
@@ -178,7 +185,7 @@ describe('non-idempotent tool through dispatchTool — fail-closed on REPLAY', (
   });
 
   it('REPLAY: dispatchTool surfaces a tool_error — NEVER re-fires the handler, NEVER fabricates success', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const liveBackend = new ToolMarshallingBackend();
     const live = await runAgent(tdb, liveBackend, spec(), { tools: [nonIdempotentTool()] });
     expect(sideEffectFires).toBe(1); // fired once live
@@ -275,7 +282,7 @@ class ChargeThenTransientLlmBackend implements Backend {
 
 describe('non-idempotent-taint quarantine survives an error-step heal', () => {
   it('a run that charged then errored heals its step on re-run WITHOUT re-firing the charge or losing the taint', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const liveBackend = new ChargeThenTransientLlmBackend();
     const live = await runAgent(tdb, liveBackend, spec(), { tools: [nonIdempotentTool()] });
 

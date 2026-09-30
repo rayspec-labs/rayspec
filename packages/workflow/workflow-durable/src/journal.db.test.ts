@@ -10,7 +10,7 @@
  * CI / RAYSPEC_REQUIRE_DB_TESTS run that lost DATABASE_URL rather than false-greening the isolation proof.
  */
 import { forTenant } from '@rayspec/db';
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import { makeDbWithSchema, type TestAppDb, testAppDb } from '@rayspec/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { TenantDbWorkflowJournalStore } from './journal-store.js';
 import { TenantDbArtifactStore } from './nodes/store.js';
@@ -27,6 +27,8 @@ const TENANT_B = '00000000-0000-0000-0000-0000000000b2';
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+// The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+let app: TestAppDb<DbHandle>;
 let testsRan = 0;
 
 describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => {
@@ -39,6 +41,7 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
       TENANT_A,
       TENANT_B,
     ]);
+    app = await testAppDb(db, url, APP_SCHEMA);
   }, 60_000);
 
   beforeEach(async () => {
@@ -48,6 +51,7 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
   });
 
   afterAll(async () => {
+    await app?.close();
     await db.$client.end();
   });
 
@@ -68,7 +72,7 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
 
   it('ensureRun is single-flight: a second ensureRun returns the existing header (created:false)', async () => {
     testsRan += 1;
-    const store = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_A));
+    const store = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_A));
     const header = {
       workflowRunId: 'run-1',
       workflowId: 'wf',
@@ -91,7 +95,7 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
 
   it('upsertNodeState is idempotent by (tenant, run, node): a re-write OVERWRITES, no duplicate', async () => {
     testsRan += 1;
-    const store = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_A));
+    const store = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_A));
     await store.ensureRun({
       workflowRunId: 'run-2',
       workflowId: 'wf',
@@ -117,7 +121,7 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
 
   it('finalizeRun persists the terminal status + resumable + error', async () => {
     testsRan += 1;
-    const store = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_A));
+    const store = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_A));
     await store.ensureRun({
       workflowRunId: 'run-3',
       workflowId: 'wf',
@@ -145,8 +149,8 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
 
   it("TENANT ISOLATION: tenant B cannot read tenant A's run header or nodes", async () => {
     testsRan += 1;
-    const aStore = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_A));
-    const bStore = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_B));
+    const aStore = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_A));
+    const bStore = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_B));
     await aStore.ensureRun({
       workflowRunId: 'run-a',
       workflowId: 'wf',
@@ -169,8 +173,8 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
 
   it('TENANT ISOLATION: two tenants with the SAME workflowRunId do not collide (each row is tenant-scoped)', async () => {
     testsRan += 1;
-    const aStore = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_A));
-    const bStore = new TenantDbWorkflowJournalStore(forTenant(db, TENANT_B));
+    const aStore = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_A));
+    const bStore = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT_B));
     const header = (wfRunId: string) => ({
       workflowRunId: wfRunId,
       workflowId: 'wf',
@@ -195,8 +199,8 @@ describe.skipIf(!hasDb)('workflow-durable journal + artifact store (DB)', () => 
 
   it('artifact store: content-addressed persist is idempotent; read round-trips; tenant-scoped', async () => {
     testsRan += 1;
-    const aStore = new TenantDbArtifactStore(forTenant(db, TENANT_A), 'run-x');
-    const bStore = new TenantDbArtifactStore(forTenant(db, TENANT_B));
+    const aStore = new TenantDbArtifactStore(forTenant(app.appDb, TENANT_A), 'run-x');
+    const bStore = new TenantDbArtifactStore(forTenant(app.appDb, TENANT_B));
     const input = {
       artifact: { kind: 'summary', content: { text: 'hello' } },
       namespace: 'triage',

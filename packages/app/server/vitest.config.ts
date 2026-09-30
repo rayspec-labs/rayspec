@@ -11,6 +11,8 @@ if (existsSync(envPath)) config({ path: envPath });
 
 export default defineConfig({
   test: {
+    // The runtime-role lane (RAYSPEC_TEST_DATABASE_ISOLATION=roles) wraps every boot; a no-op otherwise.
+    setupFiles: ['./vitest.setup.ts'],
     pool: 'forks',
     // The smoke test creates + drops its OWN throwaway database; run files serially so a parallel
     // file cannot collide on the admin connection / the throwaway DB name.

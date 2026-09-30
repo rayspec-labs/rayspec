@@ -46,6 +46,7 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -95,6 +96,9 @@ async function provisionSchema(db: DbHandle): Promise<void> {
   );
 }
 
+/** The engine databases of each executor, by its sys DB, until its teardown. */
+const engines = new Map<string, EngineDatabases>();
+
 /** Build a started executor against the shared app schema with its OWN uniquely-named sys DB. */
 async function makeExecutor(
   db: DbHandle,
@@ -105,8 +109,16 @@ async function makeExecutor(
   // Drop any leftover sys DB from a prior aborted run BEFORE the engine launches (no live engine yet,
   // so a plain drop suffices — no WITH (FORCE) needed here either).
   await dropSysDbSafely(sysDb);
+  // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+  const engine = await engineDatabases({
+    admin: db,
+    adminUrl: appBaseUrl(),
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: withDbName(appBaseUrl(), sysDb),
+  });
+  engines.set(sysDb, engine);
   const deps: DbosExecutorDeps = {
-    db,
+    db: engine.appDb,
     resolveRun: (job: RunJob): ResolvedRun => {
       if (job.agentId !== 'echo-agent') throw new Error(`unknown agent '${job.agentId}'`);
       return { backend, spec: baseSpec };
@@ -114,7 +126,7 @@ async function makeExecutor(
   };
   const exec = new DbosDurableExecutor(deps, {
     name: `rayspec-safe-${sysSuffix}`,
-    systemDatabaseUrl: withDbName(appBaseUrl(), sysDb),
+    systemDatabaseUrl: engine.systemDatabaseUrl,
     // TEST-ONLY: deregister on shutdown so a FRESH executor (the next describe's) can re-register
     // runAgentJob in the same process (DBOS is a process-global singleton).
     deregisterOnShutdown: true,
@@ -137,6 +149,8 @@ async function teardownExecutor(
     if (exec) await exec.shutdown();
   } finally {
     await dropSysDbSafely(sysDb);
+    await engines.get(sysDb)?.close();
+    engines.delete(sysDb);
   }
 }
 

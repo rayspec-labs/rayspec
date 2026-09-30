@@ -23,6 +23,10 @@ import {
   type SystemCleanupOutcome,
   SystemCleanupScheduler,
 } from './index.js';
+import {
+  type WorkflowSystemDatabase,
+  workflowSystemDatabase,
+} from './test-support/engine-databases.js';
 
 const PID = process.pid;
 const SYS_DB = `rayspec_dbos_schedule_outage_${PID}_sys`;
@@ -58,6 +62,7 @@ describe.skipIf(!baseUrl)(
     let admin: postgres.Sql;
     let appDb: ReturnType<typeof makeDb>;
     let executor: DbosDurableExecutor;
+    let system: WorkflowSystemDatabase | undefined;
     const fired: number[] = [];
     const errors: string[] = [];
     const unhandled: unknown[] = [];
@@ -74,6 +79,8 @@ describe.skipIf(!baseUrl)(
       admin = postgres(withDbName(url, 'postgres'), { max: 1 });
       await admin.unsafe(`DROP DATABASE IF EXISTS "${SYS_DB}" WITH (FORCE)`);
       appDb = makeDb(url, 2);
+      // The engine's system database: the superuser's, or in the runtime-role lane the runtime role's.
+      system = await workflowSystemDatabase(withDbName(url, SYS_DB));
       executor = new DbosDurableExecutor(
         {
           db: appDb,
@@ -81,7 +88,7 @@ describe.skipIf(!baseUrl)(
             throw new Error('resolveRun is not used by a scheduled cleanup');
           },
         },
-        { name: `rayspec-schedule-outage-${PID}`, systemDatabaseUrl: withDbName(url, SYS_DB) },
+        { name: `rayspec-schedule-outage-${PID}`, systemDatabaseUrl: system.url },
       );
       const scheduler = new SystemCleanupScheduler({
         runCleanup: async () => {
@@ -105,6 +112,7 @@ describe.skipIf(!baseUrl)(
         process.off('unhandledRejection', onUnhandled);
         await appDb?.$client.end();
         await admin?.unsafe(`DROP DATABASE IF EXISTS "${SYS_DB}" WITH (FORCE)`);
+        await system?.close();
         await admin?.end();
       }
     }, 60_000);

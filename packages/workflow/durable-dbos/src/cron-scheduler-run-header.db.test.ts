@@ -48,6 +48,7 @@ import { config as loadDotenv } from 'dotenv';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { cronRunId, DbosCronScheduler } from './index.js';
+import { type RuntimeAppDb, runtimeAppDb } from './test-support/engine-databases.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -152,6 +153,7 @@ function manualHandlerDescriptor(name: string): TriggerDescriptor {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let app: RuntimeAppDb;
 let stub: ProbingExecutor;
 
 async function countHeaderRows(runId: string): Promise<number> {
@@ -186,7 +188,7 @@ function makeScheduler(withResolver: boolean): DbosCronScheduler {
       cronAgentDescriptor('cron-agent'),
     ],
     {
-      db,
+      db: app.appDb,
       tenantId: TENANT,
       executor: stub,
       productTables: new Map<string, PgTable>(),
@@ -219,7 +221,7 @@ function makeSchedulerOver(
   return new DbosCronScheduler(
     [manualAgentDescriptor('manual-agent'), manualAgentDescriptor('manual-ghost', 'ghost-agent')],
     {
-      db,
+      db: app.appDb,
       tenantId: TENANT,
       executor,
       productTables: new Map<string, PgTable>(),
@@ -244,6 +246,8 @@ describe.skipIf(!hasDb)(
       await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'hdr', 'hdr')`, [
         TENANT,
       ]);
+      // The scheduler's handle: the suite's own, or in the runtime-role lane the runtime role's.
+      app = await runtimeAppDb({ admin: db, adminUrl: url, schema: APP_SCHEMA });
     }, 60_000);
 
     beforeEach(async () => {
@@ -252,6 +256,7 @@ describe.skipIf(!hasDb)(
     });
 
     afterAll(async () => {
+      await app?.close();
       await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${APP_SCHEMA} CASCADE`);
       await db.$client.end();
     });

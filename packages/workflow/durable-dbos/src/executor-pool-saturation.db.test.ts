@@ -45,6 +45,7 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
+import { engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -159,8 +160,18 @@ async function makeExecutor(
 ): Promise<{ exec: DbosDurableExecutor; teardown: () => Promise<void> }> {
   const sysDb = `${DBOS_SYS_DB}_${sysSuffix}`;
   await dropSysDb(appBaseUrl, sysDb);
-  // A worker DB handle pinned to the SAME isolated schema but with the pool cap under test.
-  const workerDb = makeDbWithSchema(appBaseUrl, APP_SCHEMA, poolMax);
+  // A worker DB handle pinned to the SAME isolated schema but with the pool cap under test — in the
+  // runtime-role lane the runtime role's.
+  const engine = await engineDatabases({
+    admin: ddlDb,
+    adminUrl: appBaseUrl,
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: withDbName(appBaseUrl, sysDb),
+    poolMax,
+  });
+  const workerDb = engine.runtimeRole
+    ? engine.appDb
+    : makeDbWithSchema(appBaseUrl, APP_SCHEMA, poolMax);
   const deps: DbosExecutorDeps = {
     db: workerDb,
     resolveRun: (job: RunJob): ResolvedRun => {
@@ -170,7 +181,7 @@ async function makeExecutor(
   };
   const exec = new DbosDurableExecutor(deps, {
     name: `rayspec-poolsat-${sysSuffix}`,
-    systemDatabaseUrl: withDbName(appBaseUrl, sysDb),
+    systemDatabaseUrl: engine.systemDatabaseUrl,
     workerConcurrency: N,
     deregisterOnShutdown: true,
   });
@@ -187,6 +198,7 @@ async function makeExecutor(
       ]);
       await workerDb.$client.end({ timeout: 5 }).catch(() => {});
       await dropSysDb(appBaseUrl, sysDb);
+      await engine.close();
     },
   };
 }

@@ -12,6 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { makeJournalSink } from './run-core.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -20,11 +21,16 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 const RUN_ID = 'predicate-run';
 const KEY = 'llm:k';
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 
 beforeEach(async () => {
@@ -47,19 +53,20 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('lookup() effective WHERE carries the tenant predicate', () => {
   it('tenant A sees its own cached step', async () => {
-    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN_ID, 'openai', true);
+    const sink = makeJournalSink(forTenant(appDb, TENANT_A), RUN_ID, 'openai', true);
     const hit = await sink.lookup(KEY);
     expect(hit).not.toBeNull();
     expect((hit?.output as { finalText: string }).finalText).toBe('A-CACHED');
   });
 
   it('tenant B does NOT see tenant A’s cached step for the same runId/key (predicate present)', async () => {
-    const sink = makeJournalSink(forTenant(db, TENANT_B), RUN_ID, 'openai', true);
+    const sink = makeJournalSink(forTenant(appDb, TENANT_B), RUN_ID, 'openai', true);
     const miss = await sink.lookup(KEY);
     // If the tenant predicate were dropped, this would wrongly return A's cached step.
     expect(miss).toBeNull();

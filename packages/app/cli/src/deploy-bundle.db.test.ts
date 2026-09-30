@@ -39,6 +39,7 @@ import {
   PLAN_LIFETIME_MS,
   schemaValidator,
 } from '@rayspec/bundle-contract';
+import { type RuntimeRoleEnv, runtimeRoleEnv } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -103,6 +104,8 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
   let deployDir = '';
   let bindings = '';
   let db: postgres.Sql;
+  // The children's connections: the superuser's, or in the runtime-role lane role separation.
+  let roles: RuntimeRoleEnv | undefined;
   const children: ChildProcess[] = [];
   const bundles: Record<string, { path: string; sha: string }> = {};
 
@@ -139,7 +142,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     return {
       PATH: process.env.PATH ?? '',
       HOME: process.env.HOME ?? '',
-      DATABASE_URL: appUrl,
+      ...(roles?.env ?? { DATABASE_URL: appUrl }),
       SHADOW_DATABASE_URL: shadowUrl,
       RAYSPEC_JWT_SIGNING_KEY: pem,
       RAYSPEC_API_KEY_PEPPER: 'bundle-deploy-suite-pepper',
@@ -291,6 +294,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
       await admin.end();
     }
     db = postgres(appUrl, { max: 2 });
+    roles = await runtimeRoleEnv(appUrl, withDbName(baseUrl, `${SUITE_DB}_dbos_sys`));
     const { privateKey } = await generateKeyPair('RS256', { extractable: true });
     pem = await exportPKCS8(privateKey);
     deployDir = temporaryDirectory('bundle-deploy-');
@@ -322,6 +326,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     } finally {
       await admin.end();
     }
+    await roles?.drop();
   }, 60_000);
 
   it('refuses a .ray that is no archive and a YAML spec that does not validate, touching nothing', async () => {

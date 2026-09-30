@@ -33,6 +33,7 @@ import { config as loadDotenv } from 'dotenv';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { cronRunId, DbosCronScheduler, firingKey, TRIGGER_FIRE_SCOPE } from './index.js';
+import { type RuntimeAppDb, runtimeAppDb } from './test-support/engine-databases.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -100,6 +101,7 @@ function agentPlainDescriptor(name: string): TriggerDescriptor {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let app: RuntimeAppDb;
 let stub: CapturingExecutor;
 let scheduler: DbosCronScheduler;
 let persistWiringRan = 0;
@@ -114,6 +116,8 @@ describe.skipIf(!hasDb)(
       await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'cron', 'cron')`, [
         TENANT,
       ]);
+      // The scheduler's handle: the suite's own, or in the runtime-role lane the runtime role's.
+      app = await runtimeAppDb({ admin: db, adminUrl: url, schema: APP_SCHEMA });
     }, 60_000);
 
     beforeEach(async () => {
@@ -124,7 +128,7 @@ describe.skipIf(!hasDb)(
       scheduler = new DbosCronScheduler(
         [agentPersistDescriptor('nightly-extract'), agentPlainDescriptor('nightly-plain')],
         {
-          db,
+          db: app.appDb,
           tenantId: TENANT,
           executor: stub,
           // The cron→agent dispatch path uses neither productTables nor invokeTriggerHandler (those are
@@ -146,6 +150,7 @@ describe.skipIf(!hasDb)(
     });
 
     afterAll(async () => {
+      await app?.close();
       await db.$client.end();
     });
 

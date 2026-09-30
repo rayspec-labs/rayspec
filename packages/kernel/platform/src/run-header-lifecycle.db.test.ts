@@ -37,6 +37,7 @@ import {
 } from './run-header.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -44,6 +45,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 const spec: AgentSpec = {
   name: 'lifecycle_agent',
@@ -159,9 +164,11 @@ describe('run-header lifecycle', () => {
   beforeAll(async () => {
     await resetRunSchema(db);
     await seedOrgs(db, TENANT_A);
+    ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
   });
 
   afterAll(async () => {
+    await closeAppDb();
     await db.$client.end();
   });
 
@@ -172,7 +179,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('SYNC: the header is present at running WHILE the backend executes, and completed afterwards', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new GatedBackend();
     const runId = 'sync-in-flight-run';
 
@@ -197,7 +204,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('ASYNC: an enqueued header transitions enqueued → running → completed, keeping its enqueue instant', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'async-lifecycle-run';
 
     await insertEnqueuedRunHeader(tdb, {
@@ -232,7 +239,7 @@ describe('run-header lifecycle', () => {
 
   it('ASYNC: while the run holds its transaction an outside reader still sees enqueued, then the terminal status', async () => {
     const runId = 'async-visibility-run';
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
 
     await insertEnqueuedRunHeader(tdb, {
       runId,
@@ -245,7 +252,7 @@ describe('run-header lifecycle', () => {
     // one durable step. Every header write the run makes therefore commits with the run, so the
     // `running` transition is not observable from outside it.
     const backend = new GatedBackend();
-    const pending = forTenant(db, TENANT_A).transaction(async (txTdb) => {
+    const pending = forTenant(appDb, TENANT_A).transaction(async (txTdb) => {
       await runAgent(txTdb, backend, spec, { runId });
     });
     await backend.entered;
@@ -259,7 +266,7 @@ describe('run-header lifecycle', () => {
   });
 
   it("a run that RETURNS status:'error' leaves the header at error, not at running", async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'failing-run';
 
     const res = await runAgent(tdb, openGate('error'), spec, { runId });
@@ -268,7 +275,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('a run that THROWS reaches no completing write, so its header stays at running (the non-terminal residual)', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'throwing-run';
 
     // A backend that throws instead of returning a RunResult (a timeout / an exception) — the class
@@ -287,14 +294,14 @@ describe('run-header lifecycle', () => {
     // header write the run makes rolls back with it. The enqueue-time row is written OUTSIDE that
     // transaction, which is what makes the difference between the two cases.
     const withHeader = 'async-throw-with-enqueue-header';
-    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+    await insertEnqueuedRunHeader(forTenant(appDb, TENANT_A), {
       runId: withHeader,
       backend: 'openai',
       agentName: spec.name,
       model: spec.model,
     });
     await expect(
-      forTenant(db, TENANT_A).transaction(async (txTdb) => {
+      forTenant(appDb, TENANT_A).transaction(async (txTdb) => {
         await runAgent(txTdb, new ThrowingBackend(), spec, { runId: withHeader });
       }),
     ).rejects.toThrow('the backend threw');
@@ -302,7 +309,7 @@ describe('run-header lifecycle', () => {
 
     const noHeader = 'async-throw-without-enqueue-header';
     await expect(
-      forTenant(db, TENANT_A).transaction(async (txTdb) => {
+      forTenant(appDb, TENANT_A).transaction(async (txTdb) => {
         await runAgent(txTdb, new ThrowingBackend(), spec, { runId: noHeader });
       }),
     ).rejects.toThrow('the backend threw');
@@ -311,7 +318,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('the completing write records the authMode the RUN resolved, not the pre-run one', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'reconciled-authmode-run';
 
     // An adapter may RECONCILE the auth mode during the run (the Anthropic adapter does, off the live
@@ -331,7 +338,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('the enqueue-time write does NOT wait on the run transaction that holds the header row', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'enqueue-vs-runtx-run';
 
     // The real order: the enqueue path writes the header BEFORE the job exists, so the row is
@@ -352,7 +359,7 @@ describe('run-header lifecycle', () => {
       const held = new Promise<void>((r) => {
         releaseRunTx = r;
       });
-      void forTenant(db, TENANT_A)
+      void forTenant(appDb, TENANT_A)
         .transaction(async (txTdb) => {
           await markRunHeaderRunning(txTdb, {
             runId,
@@ -402,7 +409,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('RECOVERY: a re-dispatch onto a non-terminal header runs and reconciles it to the terminal outcome', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'recovery-redispatch-run';
 
     // A crashed first attempt: the header exists at `running`, the run never reached a terminal write.
@@ -427,7 +434,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('EXACTLY-ONCE: neither non-terminal write can move a completed header', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'completed-header-run';
 
     expect((await runAgent(tdb, openGate(), spec, { runId })).status).toBe('completed');
@@ -454,7 +461,7 @@ describe('run-header lifecycle', () => {
   });
 
   it('EXACTLY-ONCE: a finished error header is not overwritten with running by a re-dispatch', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'error-header-run';
 
     expect((await runAgent(tdb, openGate('error'), spec, { runId })).status).toBe('error');

@@ -32,6 +32,7 @@ import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runAgent } from './run-core.js';
+import { makeSchemaAppDb } from './test-support/test-db.js';
 
 const SCHEMA = 'rayspec_test_persist';
 const TENANT_A = '00000000-0000-0000-0000-0000000000f1';
@@ -247,6 +248,9 @@ describe('output-persist schema — injected-column drift guard', () => {
 
 describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
   let db: ReturnType<typeof makeDbWithSchema>;
+  // The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+  let appDb: ReturnType<typeof makeDbWithSchema>;
+  let closeAppDb: () => Promise<void> = async () => {};
   let productTables: Map<string, PgTable>;
   let unregister: () => void;
 
@@ -255,9 +259,11 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     await db.$client.unsafe(buildPersistSchemaSql());
     productTables = buildProductTables([factsStore, uniqueFactsStore]);
     unregister = registerScopedTables([...productTables.values()]);
+    ({ appDb, close: closeAppDb } = await makeSchemaAppDb(db, SCHEMA));
   });
 
   afterAll(async () => {
+    await closeAppDb();
     unregister?.();
     await db?.$client.end();
   });
@@ -271,21 +277,21 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
 
   async function readFacts(tenant: string): Promise<Record<string, unknown>[]> {
     const facts = productTables.get('extracted_facts') as PgTable;
-    return (await forTenant(db, tenant)
+    return (await forTenant(appDb, tenant)
       .select(facts as never)
       .all()) as Record<string, unknown>[];
   }
 
   async function readUniqueFacts(tenant: string): Promise<Record<string, unknown>[]> {
     const facts = productTables.get('unique_facts') as PgTable;
-    return (await forTenant(db, tenant)
+    return (await forTenant(appDb, tenant)
       .select(facts as never)
       .all()) as Record<string, unknown>[];
   }
 
   it('SYNC: a successful run writes the validated output as a tenant-scoped row', async () => {
     persistTestsRan++;
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new PersistBackend();
 
     const run = await runAgent(tdb, backend, spec, {
@@ -317,7 +323,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     // Mirror the durable executor EXACTLY: each dispatch runs runAgent inside the run's outer
     // transaction (forTenant(db,tenant).transaction) under the SAME pre-minted runId, replay=false.
     const dispatch = () =>
-      forTenant(db, TENANT_A).transaction((txTdb) =>
+      forTenant(appDb, TENANT_A).transaction((txTdb) =>
         runAgent(txTdb, backend, spec, { runId, persistTo: 'extracted_facts', productTables }),
       );
 
@@ -349,7 +355,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     // COMPLETING transition: exactly one wins it (non-empty returning) and persists; the loser's
     // returning is empty and it writes nothing.
     const dispatch = () =>
-      runAgent(forTenant(db, TENANT_A), backend, spec, {
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
         runId,
         persistTo: 'extracted_facts',
         productTables,
@@ -373,7 +379,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
 
     // Run A persists its row (title 'Q3 review') on the sync path — persistRunOutput opens its OWN
     // transaction (no outer tx), so the header-completing upsert + the store insert commit atomically.
-    const a = await runAgent(forTenant(db, TENANT_A), backend, spec, {
+    const a = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {
       runId: 'unique-run-a',
       persistTo: 'unique_facts',
       productTables,
@@ -385,7 +391,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
     // see at deploy. Because the header-completing upsert AND the store insert share ONE transaction, the
     // 23505 rolls BOTH back: run B throws fail-closed (never a completed header with a missing row).
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, {
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
         runId: 'unique-run-b',
         persistTo: 'unique_facts',
         productTables,
@@ -416,7 +422,7 @@ describe.skipIf(!hasDb)('run-core output persistence (persistTo)', () => {
 
   it('does NOT persist when persistTo is set but productTables is absent (inert, no throw)', async () => {
     persistTestsRan++;
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const run = await runAgent(tdb, new PersistBackend(), spec, { persistTo: 'extracted_facts' });
     expect(run.status).toBe('completed');
     // No productTables ⇒ persistTo is inert (nothing written), and the run still completes normally.

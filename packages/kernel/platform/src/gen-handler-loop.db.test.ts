@@ -55,6 +55,7 @@ import { lookupCategories } from '../../../../examples/expense-claim-coder/handl
 import type { ResolvedHandler } from './handlers/handler-runtime.js';
 import { buildToolFactory } from './handlers/resolve-tools.js';
 import { runAgent } from './run-core.js';
+import { makeSchemaAppDb } from './test-support/test-db.js';
 
 const SCHEMA = 'rayspec_test_it2_loop';
 const TENANT_A = '00000000-0000-0000-0000-0000000000a2';
@@ -342,6 +343,9 @@ describe.skipIf(!hasDb)(
   'auto-persist LOOP — generated handlers through the real dispatchTool',
   () => {
     let db: ReturnType<typeof makeDbWithSchema>;
+    // The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+    let appDb: ReturnType<typeof makeDbWithSchema>;
+    let closeAppDb: () => Promise<void> = async () => {};
     let productTables: Map<string, PgTable>;
     let unregister: () => void;
 
@@ -350,9 +354,11 @@ describe.skipIf(!hasDb)(
       await db.$client.unsafe(buildLoopSchemaSql());
       productTables = buildProductTables([categoriesStore, claimsStore]);
       unregister = registerScopedTables([...productTables.values()]);
+      ({ appDb, close: closeAppDb } = await makeSchemaAppDb(db, SCHEMA));
     });
 
     afterAll(async () => {
+      await closeAppDb();
       unregister?.();
       await db?.$client.end();
     });
@@ -366,7 +372,7 @@ describe.skipIf(!hasDb)(
 
     /** Seed the lookup catalog + one submitted claim for TENANT_A; return the claim id. */
     async function seedClaim(tenant: string): Promise<string> {
-      const tdb = forTenant(db, tenant);
+      const tdb = forTenant(appDb, tenant);
       const cat = productTables.get('expense_categories') as PgTable;
       const claims = productTables.get('expense_claims') as PgTable;
       await tdb.insert(
@@ -394,7 +400,7 @@ describe.skipIf(!hasDb)(
       id: string,
     ): Promise<Record<string, unknown> | undefined> {
       const handlerDb = (await import('./handlers/store-facade.js')).makeHandlerDb(
-        forTenant(db, tenant),
+        forTenant(appDb, tenant),
         productTables,
       );
       const rows = await handlerDb.select('expense_claims', { id });
@@ -404,7 +410,7 @@ describe.skipIf(!hasDb)(
     it('LOOP: lookup reads the catalog → code_claim WRITES the coded row back (the auto-persist acceptance)', async () => {
       securityTestsRan++;
       const claimId = await seedClaim(TENANT_A);
-      const tdb = forTenant(db, TENANT_A);
+      const tdb = forTenant(appDb, TENANT_A);
       const tools: NeutralTool[] = buildToolFactory(it2Spec(), handlers, productTables, [
         'lookup_categories',
         'code_claim',
@@ -439,7 +445,7 @@ describe.skipIf(!hasDb)(
     it('idempotency: re-coding the same claim id reconciles ONE row (update-by-id, not a duplicate)', async () => {
       securityTestsRan++;
       const claimId = await seedClaim(TENANT_A);
-      const tdb = forTenant(db, TENANT_A);
+      const tdb = forTenant(appDb, TENANT_A);
       const mk = () =>
         buildToolFactory(it2Spec(), handlers, productTables, ['lookup_categories', 'code_claim'])(
           tdb,
@@ -469,7 +475,7 @@ describe.skipIf(!hasDb)(
       const init = {
         tenantId: TENANT_A,
         db: (await import('./handlers/store-facade.js')).makeHandlerDb(
-          forTenant(db, TENANT_A),
+          forTenant(appDb, TENANT_A),
           productTables,
         ),
       };
@@ -500,7 +506,7 @@ describe.skipIf(!hasDb)(
     it('FK re-validation is load-bearing: a category_code NOT in the catalog is rejected — no write', async () => {
       securityTestsRan++;
       const claimId = await seedClaim(TENANT_A);
-      const tdb = forTenant(db, TENANT_A);
+      const tdb = forTenant(appDb, TENANT_A);
       const tools = buildToolFactory(it2Spec(), handlers, productTables, [
         'lookup_categories',
         'code_claim',
@@ -522,7 +528,7 @@ describe.skipIf(!hasDb)(
     it('the server-side CLAMP is load-bearing: a proposed value above the bound is written AS the bound, and the journal keeps both', async () => {
       securityTestsRan++;
       const claimId = await seedClaim(TENANT_A);
-      const tdb = forTenant(db, TENANT_A);
+      const tdb = forTenant(appDb, TENANT_A);
       const tools = buildToolFactory(it2Spec(), handlers, productTables, [
         'lookup_categories',
         'code_claim',
@@ -560,7 +566,7 @@ describe.skipIf(!hasDb)(
     it('a proposal AT or BELOW the bound is written unchanged and journals no clamp record', async () => {
       securityTestsRan++;
       const claimId = await seedClaim(TENANT_A);
-      const tdb = forTenant(db, TENANT_A);
+      const tdb = forTenant(appDb, TENANT_A);
       const tools = buildToolFactory(it2Spec(), handlers, productTables, [
         'lookup_categories',
         'code_claim',
@@ -587,7 +593,7 @@ describe.skipIf(!hasDb)(
     it("tenant isolation: tenant B cannot read/code tenant A's claim through the generated handlers", async () => {
       securityTestsRan++;
       const aClaimId = await seedClaim(TENANT_A);
-      const bTdb = forTenant(db, TENANT_B);
+      const bTdb = forTenant(appDb, TENANT_B);
       // B seeds its OWN catalog so a lookup is non-empty; then B tries to code A's claim id.
       await bTdb.insert(
         productTables.get('expense_categories') as never,

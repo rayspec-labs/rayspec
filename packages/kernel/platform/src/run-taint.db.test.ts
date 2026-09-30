@@ -20,6 +20,7 @@ import { forTenant } from '@rayspec/db';
 import { makeDbWithSchema } from '@rayspec/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { isRunTainted, markRunTainted, RUN_TAINT_SCOPE } from './run-taint.js';
+import { makeSchemaAppDb } from './test-support/test-db.js';
 
 const SCHEMA = 'rayspec_test_runtaint';
 const TENANT_A = '00000000-0000-0000-0000-0000000000a1';
@@ -37,6 +38,9 @@ if (requireDb && !hasDb) {
 
 describe.skipIf(!hasDb)('run-taint primitive (markRunTainted / isRunTainted)', () => {
   let db: ReturnType<typeof makeDbWithSchema>;
+  // The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+  let appDb: ReturnType<typeof makeDbWithSchema>;
+  let closeAppDb: () => Promise<void> = async () => {};
 
   beforeAll(async () => {
     db = makeDbWithSchema(process.env.DATABASE_URL as string, SCHEMA);
@@ -56,6 +60,7 @@ describe.skipIf(!hasDb)('run-taint primitive (markRunTainted / isRunTainted)', (
       CREATE UNIQUE INDEX idem_tenant_scope_key_idx ON idempotency_keys (tenant_id, scope, idem_key);
       INSERT INTO orgs (id, name) VALUES ('${TENANT_A}', 'A'), ('${TENANT_B}', 'B');
     `);
+    ({ appDb, close: closeAppDb } = await makeSchemaAppDb(db, SCHEMA));
   }, 30_000);
 
   beforeEach(async () => {
@@ -64,11 +69,12 @@ describe.skipIf(!hasDb)('run-taint primitive (markRunTainted / isRunTainted)', (
   });
 
   afterAll(async () => {
+    await closeAppDb();
     await db.$client.end();
   });
 
   it('(a) markRunTainted is IDEMPOTENT: marking the same runId twice yields exactly ONE row', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'run-idem-1';
     await markRunTainted(tdb, runId);
     await markRunTainted(tdb, runId); // second mark is a no-op (ON CONFLICT DO NOTHING)
@@ -83,19 +89,19 @@ describe.skipIf(!hasDb)('run-taint primitive (markRunTainted / isRunTainted)', (
 
   it('(b) isRunTainted is TENANT-SCOPED: mark under A → A reads true, B reads false (no cross-tenant leak)', async () => {
     const runId = 'run-tenant-scope-1';
-    await markRunTainted(forTenant(db, TENANT_A), runId);
+    await markRunTainted(forTenant(appDb, TENANT_A), runId);
 
-    expect(await isRunTainted(forTenant(db, TENANT_A), runId)).toBe(true);
+    expect(await isRunTainted(forTenant(appDb, TENANT_A), runId)).toBe(true);
     // The SAME runId under tenant B is invisible — the TenantDb predicate is structural.
-    expect(await isRunTainted(forTenant(db, TENANT_B), runId)).toBe(false);
+    expect(await isRunTainted(forTenant(appDb, TENANT_B), runId)).toBe(false);
   });
 
   it('(c) a run with NO taint marker reads false (safely re-runnable)', async () => {
-    expect(await isRunTainted(forTenant(db, TENANT_A), 'never-tainted')).toBe(false);
+    expect(await isRunTainted(forTenant(appDb, TENANT_A), 'never-tainted')).toBe(false);
   });
 
   it('(c) NO SCOPE COLLISION: run_started / agent_run / trigger rows under the same runId do NOT taint the run', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const runId = 'run-scope-collision-1';
     // Seed OTHER-scope rows under the same (tenant, idemKey=runId) — these must NOT read as taint.
     for (const scope of ['run_started', 'agent_run', 'trigger']) {

@@ -32,6 +32,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runAgent } from './run-core.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -39,6 +40,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 /** A tool whose handler ALWAYS throws — the dispatcher fail-closes it into a journaled tool_error step. */
 const boomTool: NeutralTool = {
@@ -165,6 +170,7 @@ async function stepRows(runId: string) {
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 beforeEach(async () => {
   await db.$client.unsafe(
@@ -173,12 +179,13 @@ beforeEach(async () => {
   await seedOrgs(db, TENANT_A);
 });
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('the failing step records its class + retry advice as columns, for BOTH step types', () => {
   it('a rate-limited llm step records its class and the Retry-After converted seconds→ms', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new ErrorShapeBackend({ errorClass: 'rate_limited', retryAfterSeconds: 17 }),
@@ -196,7 +203,7 @@ describe('the failing step records its class + retry advice as columns, for BOTH
   });
 
   it('an llm error class with NO retry advice records the class and leaves retry_after_ms null', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new ErrorShapeBackend({ errorClass: 'upstream_4xx' }),
@@ -210,7 +217,7 @@ describe('the failing step records its class + retry advice as columns, for BOTH
   });
 
   it('a tool-error step — which carries no class in its output at all — records `tool_error`', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new ErrorShapeBackend({ errorClass: 'internal', fireFailingTool: true }),
@@ -238,7 +245,7 @@ describe('the failing step records its class + retry advice as columns, for BOTH
     // hand-edited journal — and every consumer filtering on `error_class` would be reading a value the
     // platform never validated. Nothing else in the suite fails if the guard is replaced by a
     // truthiness check, which is why this case exists.
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new ErrorShapeBackend({ rawErrorClass: 'not_a_class', retryAfterSeconds: 30 }),
@@ -258,7 +265,7 @@ describe('the failing step records its class + retry advice as columns, for BOTH
   });
 
   it('a SUCCESSFUL step records neither column', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(tdb, new ErrorShapeBackend(), spec('ok'), {});
     const [step] = await stepRows(res.runId);
     expect(step?.status).toBe('ok');
@@ -267,7 +274,7 @@ describe('the failing step records its class + retry advice as columns, for BOTH
   });
 
   it('an error→ok heal CLEARS both columns (the healed row keeps nothing of the failed attempt)', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new ErrorShapeBackend({ errorClass: 'rate_limited', retryAfterSeconds: 5, healToOk: true }),

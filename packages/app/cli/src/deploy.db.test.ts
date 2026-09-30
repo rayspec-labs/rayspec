@@ -24,6 +24,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeDb } from '@rayspec/db';
+import {
+  type RuntimeRoleEnv,
+  runtimeRoleEnv,
+  tablesWithoutForcedRowSecurity,
+} from '@rayspec/db/testing';
 import { applyMigrations } from '@rayspec/server';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
@@ -77,6 +82,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
   let appDbUrl = '';
   let blobDir = '';
   let childErr = '';
+  let roles: RuntimeRoleEnv | undefined;
 
   beforeAll(async () => {
     if (!baseUrl) return;
@@ -107,6 +113,9 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
       await seed.$client.end();
     }
 
+    // The child's connections: the superuser's, or in the runtime-role lane role separation.
+    roles = await runtimeRoleEnv(appDbUrl, withDbName(baseUrl, DBOS_SYS_DB));
+
     // Boot via the REAL CLI subprocess. LIVE extraction + an INERT OpenAI key (boot makes no provider
     // call); STT_PROVIDER=fake. The deployment tenant is the product tenant. RAYSPEC_SKIP_DOTENV=1 so
     // no stray repo-root .env leaks into the child.
@@ -115,7 +124,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
       env: {
         ...process.env,
         RAYSPEC_SKIP_DOTENV: '1',
-        DATABASE_URL: appDbUrl,
+        ...roles.env,
         RAYSPEC_JWT_SIGNING_KEY: pem,
         RAYSPEC_API_KEY_PEPPER: 'cli-deploy-pepper-only',
         RAYSPEC_PRODUCT_TENANT_ID: TENANT,
@@ -157,7 +166,13 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
         await admin.end();
       }
     }
+    await roles?.drop();
   }, 60_000);
+
+  it('in the runtime-role lane the deployment serves with every tenant table under forced row security', async () => {
+    if (!roles?.runtimeRole) return;
+    expect(await tablesWithoutForcedRowSecurity(appDbUrl)).toEqual([]);
+  });
 
   /** Mint an org-scoped bearer for the product tenant (register → membership → switch), over real HTTP. */
   async function orgToken(): Promise<string> {

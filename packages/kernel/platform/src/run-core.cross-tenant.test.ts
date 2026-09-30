@@ -21,6 +21,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runAgent } from './run-core.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -29,6 +30,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 const SECRET_A = 'SECRET_A_top_secret_value_42';
 const RUN_ID = 'cross-tenant-run-R';
@@ -106,6 +111,7 @@ class TripwireBackend implements Backend {
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 
 beforeEach(async () => {
@@ -153,6 +159,7 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
@@ -164,7 +171,7 @@ describe('run-core cross-tenant replay rejection', () => {
     const aRowBefore = before[0];
 
     const backend = new TripwireBackend();
-    const result = await runAgent(forTenant(db, TENANT_B), backend, spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_B), backend, spec, {
       replayRunId: RUN_ID,
     });
 
@@ -205,7 +212,7 @@ describe('run-core cross-tenant replay rejection', () => {
 
   it('a same-tenant replay of A’s runId still returns A’s cached step (no false rejection)', async () => {
     const backend = new TripwireBackend();
-    const result = await runAgent(forTenant(db, TENANT_A), backend, spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {
       replayRunId: RUN_ID,
     });
     // Same tenant: the pre-check passes, run() is entered, the journal lookup HITS, and

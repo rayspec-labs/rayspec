@@ -18,6 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { rollupRunCost, rollupTenantCost, runAgent } from './run-core.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -26,6 +27,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 /**
  * A fake backend that journals ONE llm step reporting a chosen auth mode + (optionally) a provider
@@ -103,6 +108,7 @@ async function runRow(runId: string) {
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 beforeEach(async () => {
   await db.$client.unsafe(
@@ -111,12 +117,13 @@ beforeEach(async () => {
   await seedOrgs(db, TENANT_A, TENANT_B);
 });
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('per-step cost is RE-COMPUTED from the registry at record() time', () => {
   it('the journaled cost is the registry cost for the usage+model, NOT the adapter’s claimed number', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(tdb, new CostBackend({ authMode: 'api-key' }), spec('reg'), {});
     const step = await stepRow(res.runId);
     // computeCost('gpt-4.1-mini', {1000,500}) = (1000*0.4 + 500*1.6)/1e6 = (400+800)/1e6 = 0.0012.
@@ -133,7 +140,7 @@ describe('per-step cost is RE-COMPUTED from the registry at record() time', () =
 
 describe('pricing-version provenance is PERSISTED + a FALLBACK step is distinguishable', () => {
   it('a KNOWN-model step records pricing_version=`<model>@<effectiveFrom>`', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new CostBackend({ authMode: 'api-key' }),
@@ -146,7 +153,7 @@ describe('pricing-version provenance is PERSISTED + a FALLBACK step is distingui
   });
 
   it('a FALLBACK-priced (UNKNOWN model) step records pricing_version=FALLBACK — distinguishable', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     // An unknown model has NO registry entry → the visible FALLBACK price + the FALLBACK provenance tag.
     const res = await runAgent(
       tdb,
@@ -165,7 +172,7 @@ describe('pricing-version provenance is PERSISTED + a FALLBACK step is distingui
 
 describe('computed-vs-provider reconciliation + drift flag', () => {
   it('provider cost CLOSE to computed → recorded, NO drift', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     // computed = 0.0012; provider 0.00121 is within 5%.
     const res = await runAgent(
       tdb,
@@ -179,7 +186,7 @@ describe('computed-vs-provider reconciliation + drift flag', () => {
   });
 
   it('provider cost FAR from computed → drift flag TRIPS (a real divergence, not a tautology)', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     // computed = 0.0012; provider 0.05 is ~40x — well beyond the threshold.
     const res = await runAgent(
       tdb,
@@ -196,7 +203,7 @@ describe('computed-vs-provider reconciliation + drift flag', () => {
   });
 
   it('NO provider cost reported (OpenAI) → provider_cost_usd is NULL (never fabricated), no drift', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(tdb, new CostBackend({ authMode: 'api-key' }), spec('noprov'), {});
     const step = await stepRow(res.runId);
     expect(step?.providerCostUsd).toBeNull();
@@ -209,7 +216,7 @@ describe('computed-vs-provider reconciliation + drift flag', () => {
 
 describe('subscription-run ledger semantics — billed=0 + attributed cost', () => {
   it('a SUBSCRIPTION step records billed_cost_usd=0 but a NON-ZERO attributed (computed) cost', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new CostBackend({
@@ -234,7 +241,7 @@ describe('subscription-run ledger semantics — billed=0 + attributed cost', () 
   });
 
   it('an API-KEY step records billed_cost_usd = the computed cost (NOT 0)', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(tdb, new CostBackend({ authMode: 'api-key' }), spec('apikey'), {});
     const step = await stepRow(res.runId);
     const computed = Number(step?.costUsd);
@@ -248,7 +255,7 @@ describe('subscription-run ledger semantics — billed=0 + attributed cost', () 
     // must treat it as billed=$0 exactly like the anthropic official-harness path, while still recording
     // the attributed (computed) cost as a value metric. (Fail-the-fix: if isSubscriptionBilling had not
     // been extended to codex-subscription-oauth, billed would equal the non-zero computed cost here.)
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new CostBackend({
@@ -271,7 +278,7 @@ describe('subscription-run ledger semantics — billed=0 + attributed cost', () 
 
 describe('run→tenant cost roll-up (tenant-scoped via TenantDb)', () => {
   it('the run header cost is the journal roll-up; rollupRunCost matches', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const res = await runAgent(
       tdb,
       new CostBackend({ authMode: 'api-key', providerCostUsd: 0.0013 }),
@@ -289,8 +296,8 @@ describe('run→tenant cost roll-up (tenant-scoped via TenantDb)', () => {
   });
 
   it('rollupTenantCost sums a tenant’s runs AND is tenant-scoped (never sees another tenant)', async () => {
-    const tA = forTenant(db, TENANT_A);
-    const tB = forTenant(db, TENANT_B);
+    const tA = forTenant(appDb, TENANT_A);
+    const tB = forTenant(appDb, TENANT_B);
     // Two runs for A, one for B.
     await runAgent(tA, new CostBackend({ authMode: 'api-key' }), spec('a1'), {});
     await runAgent(tA, new CostBackend({ authMode: 'api-key' }), spec('a2'), {});
@@ -305,14 +312,14 @@ describe('run→tenant cost roll-up (tenant-scoped via TenantDb)', () => {
   });
 
   it('rollupTenantCost: provider null when NO step reported a provider cost (OpenAI-only tenant)', async () => {
-    const tA = forTenant(db, TENANT_A);
+    const tA = forTenant(appDb, TENANT_A);
     await runAgent(tA, new CostBackend({ authMode: 'api-key' }), spec('noprovider'), {});
     const total = await rollupTenantCost(tA);
     expect(total.providerCostUsd).toBeNull();
   });
 
   it('a SUBSCRIPTION tenant: rollup billed=0 but computed > 0 (value metric retained)', async () => {
-    const tA = forTenant(db, TENANT_A);
+    const tA = forTenant(appDb, TENANT_A);
     await runAgent(
       tA,
       new CostBackend({ authMode: 'subscription-oauth-official-harness' }),
@@ -327,10 +334,10 @@ describe('run→tenant cost roll-up (tenant-scoped via TenantDb)', () => {
 
 describe('cross-tenant: rollupRunCost carries the tenant predicate (cannot read a foreign run)', () => {
   it('rollupRunCost for B over A’s runId returns an empty roll-up (predicate, not a leak)', async () => {
-    const tA = forTenant(db, TENANT_A);
+    const tA = forTenant(appDb, TENANT_A);
     const res = await runAgent(tA, new CostBackend({ authMode: 'api-key' }), spec('foreign'), {});
     // B asks for A's runId — the tenant predicate filters it out → an all-zero roll-up.
-    const tB = forTenant(db, TENANT_B);
+    const tB = forTenant(appDb, TENANT_B);
     const ru = await rollupRunCost(tB, res.runId);
     expect(ru.computedCostUsd).toBe(0);
     expect(ru.billedCostUsd).toBe(0);

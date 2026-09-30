@@ -59,9 +59,18 @@ export {
 export {
   assertConnectedAsRuntimeRole,
   createIsolatedTestDatabase,
+  createRuntimeRoleLane,
   type IsolatedTestDatabase,
   isolateTestSchema,
   isolationFunctionsSql,
+  type RuntimeRoleEnv,
+  type RuntimeRoleLane,
+  type RuntimeRoleLaneBootUrls,
+  type RuntimeRoleLaneUrls,
+  runtimeRoleEnv,
+  type TestAppDb,
   type TestRuntimeRole,
+  tablesWithoutForcedRowSecurity,
+  testAppDb,
   testDatabaseIsolation,
 } from './testing-isolation.js';

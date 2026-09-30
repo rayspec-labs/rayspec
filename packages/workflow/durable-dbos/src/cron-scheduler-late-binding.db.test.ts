@@ -41,6 +41,7 @@ import { config as loadDotenv } from 'dotenv';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosCronScheduler, firingInstantIso, firingKey, TRIGGER_FIRE_SCOPE } from './index.js';
+import { type RuntimeAppDb, runtimeAppDb } from './test-support/engine-databases.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const envPath = join(here, '..', '..', '..', '..', '.env');
@@ -105,6 +106,7 @@ function manualDescriptor(name: string): TriggerDescriptor {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let app: RuntimeAppDb;
 let stub: CapturingExecutor;
 let logged: string[];
 let probeCalls: number;
@@ -141,7 +143,7 @@ function tenantExistsProbe(): (tenantId: string) => Promise<boolean> {
 /** Build a scheduler over `tenantId` with the counting probe + a capturing log sink. */
 function makeScheduler(tenantId: string): DbosCronScheduler {
   return new DbosCronScheduler([agentDescriptor('nightly-digest'), manualDescriptor('kick-off')], {
-    db,
+    db: app.appDb,
     tenantId,
     executor: stub,
     // The cron→agent dispatch path uses neither of these (they serve the handler-action path), but
@@ -179,6 +181,8 @@ describe.skipIf(!hasDb)('cron firing under a LATE-BOUND deployment tenant', () =
     await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'present', 'present')`, [
       PRESENT_TENANT,
     ]);
+    // The scheduler's handle: the suite's own, or in the runtime-role lane the runtime role's.
+    app = await runtimeAppDb({ admin: db, adminUrl: url, schema: APP_SCHEMA });
   }, 60_000);
 
   beforeEach(async () => {
@@ -190,6 +194,7 @@ describe.skipIf(!hasDb)('cron firing under a LATE-BOUND deployment tenant', () =
   });
 
   afterAll(async () => {
+    await app?.close();
     await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${APP_SCHEMA} CASCADE`);
     await db.$client.end();
   });
