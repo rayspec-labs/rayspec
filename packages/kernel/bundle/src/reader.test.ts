@@ -368,6 +368,21 @@ describe('the archive path', () => {
   it('refuses a directory', async () => {
     expect(outcome(await inspectBundle(workDir()))).toBe('RAY_USAGE/');
   });
+
+  it('follows a symbolic link by default, and refuses one when asked to', async () => {
+    const dir = workDir();
+    const real = join(dir, 'real.ray');
+    writeFileSync(real, base);
+    const linked = join(dir, 'linked.ray');
+    symlinkSync(real, linked);
+    expect(outcome(await inspectBundle(linked))).toBe('ok');
+    const refused = await inspectBundle(linked, { refuseLinks: true });
+    expect(outcome(refused)).toBe('RAY_USAGE/');
+    expect(!refused.ok && refused.errors[0]!.message).toBe('the archive path is a symbolic link');
+    expect(outcome(await inspectBundle(real, { refuseLinks: true }))).toBe('ok');
+    const extracted = await extractBundle(linked, join(dir, 'out'), { refuseLinks: true });
+    expect(outcome(extracted)).toBe('RAY_USAGE/');
+  });
 });
 
 describe('extraction directory', () => {

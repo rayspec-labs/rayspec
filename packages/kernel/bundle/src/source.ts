@@ -49,14 +49,24 @@ export interface ArchiveSource {
 
 /**
  * Open a regular file as a source. A missing path, a directory, a device or a FIFO is a usage
- * error. The file is opened without blocking, so a FIFO with no writer is refused at once instead
+ * error, and so is a symbolic link when `refuseLinks` is set: the last path component is then opened
+ * with `O_NOFOLLOW`, so a link swapped in after any earlier check is refused, never followed. The
+ * file is opened without blocking, so a FIFO with no writer is refused at once instead
  * of holding the open until one appears; the flag changes nothing for a regular file.
  */
-export async function openFileSource(path: string): Promise<ArchiveSource> {
+export async function openFileSource(
+  path: string,
+  options: { refuseLinks?: boolean } = {},
+): Promise<ArchiveSource> {
   let handle: fsp.FileHandle;
+  const flags =
+    constants.O_RDONLY | constants.O_NONBLOCK | (options.refuseLinks ? constants.O_NOFOLLOW : 0);
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
-  } catch {
+    handle = await open(path, flags);
+  } catch (err) {
+    if (options.refuseLinks && (err as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw refusal('RAY_USAGE', 'the archive path is a symbolic link');
+    }
     throw refusal('RAY_USAGE', 'the archive cannot be opened for reading');
   }
   try {
