@@ -13,6 +13,7 @@ import { createSigner, JwksProvider, RateLimiter, type RateLimitPolicy } from '@
 import type { Db } from '@rayspec/db';
 import { forTenant, generateProductSql } from '@rayspec/db';
 import {
+  assertConnectedAsRuntimeRole,
   buildProductTables,
   isolateTestSchema,
   makeDbWithSchema,
@@ -262,6 +263,8 @@ export async function createHarness(
   opts: {
     /** Build the org store in single-tenant mode (RAYSPEC_SINGLE_TENANT=true). Default off. */
     singleTenant?: boolean;
+    /** Hand stream handlers their request without the caller's credential (the hardened posture). */
+    stripHandlerCredentials?: boolean;
     withOidc?: boolean;
     oidcClients?: Configuration['clients'];
     /** Override the provider issuer (default http://127.0.0.1/oidc). A served suite passes its
@@ -518,6 +521,8 @@ export async function createHarness(
   if (testDatabaseIsolation()) {
     runtimeRole = await isolateTestSchema(db.$client, url, SCHEMA);
     appDb = makeDbWithSchema(runtimeRole.url, SCHEMA);
+    // Checked from inside a session, so the lane cannot pass while serving as the superuser.
+    await assertConnectedAsRuntimeRole(appDb.$client, runtimeRole.role);
   }
 
   // A real RS256 key — set into the env so assertBootSecrets passes + the signer signs.
@@ -576,6 +581,7 @@ export async function createHarness(
     inviteStore,
     authService,
     oidcProvider,
+    ...(opts.stripHandlerCredentials === true ? { stripHandlerCredentials: true } : {}),
     allowedOrigins: ['https://app.rayspec.test'],
     // default false (today's cookie-only posture); a body-refresh suite opts in.
     bodyRefreshEnabled: opts.bodyRefreshEnabled ?? false,

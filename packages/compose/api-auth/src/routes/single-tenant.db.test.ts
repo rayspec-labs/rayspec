@@ -8,10 +8,13 @@
  *  - an invite still brings a new account into the one organization;
  *  - the org store refuses a second organization on the operator path too, while resolving the one
  *    that exists stays idempotent;
+ *  - the operator bootstrap route creates the first organization and then refuses, before any
+ *    account row is written;
  *  - with the mode off, nothing changes: a second organization is created as before.
  */
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createAuthApp } from '../app.js';
 import { OrgStore, SingleTenantLimitError } from '../stores/org-store.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
@@ -122,6 +125,35 @@ describe('single-tenant mode', () => {
     });
     expect(accepted.status).toBe(201);
     expect(((await accepted.json()) as { activeOrgId: string }).activeOrgId).toBe(orgId);
+    expect(await orgCount(h)).toBe(1);
+  });
+
+  it('the bootstrap route creates the first organization, then refuses before creating an account', async () => {
+    const gated = createAuthApp({
+      ...h.deps,
+      orgStore: new OrgStore(h.db, { tenantBootstrapEnabled: true, singleTenant: true }),
+    });
+    const first = await jsonRequest(gated, 'POST', '/v1/auth/bootstrap-tenant', {
+      body: {
+        email: 'operator@example.com',
+        password: PASSWORD,
+        orgName: 'The One',
+        orgId: randomUUID(),
+      },
+    });
+    expect(first.status).toBe(201);
+    expect(await orgCount(h)).toBe(1);
+    const second = await jsonRequest(gated, 'POST', '/v1/auth/bootstrap-tenant', {
+      body: {
+        email: 'second-operator@example.com',
+        password: PASSWORD,
+        orgName: 'Second',
+        orgId: randomUUID(),
+      },
+    });
+    expect(second.status).toBe(403);
+    expect(((await second.json()) as { error: { message: string } }).error.message).toBe(REFUSAL);
+    expect(await userExists(h, 'second-operator@example.com')).toBe(false);
     expect(await orgCount(h)).toBe(1);
   });
 

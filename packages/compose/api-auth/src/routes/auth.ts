@@ -120,6 +120,11 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       const rawBody = await readBoundedRequestBytes(c, deps.maxJsonBodyBytes);
       const body = BootstrapTenantRequest.parse(JSON.parse(new TextDecoder().decode(rawBody)));
       const email = normalizeEmail(body.email);
+      // Single-tenant mode: once the one organization exists, a bootstrap is refused before any
+      // account is created, as a registration is; the org store re-checks under its lock.
+      if (deps.orgStore.singleTenant && (await deps.orgStore.orgCount()) > 0) {
+        throw singleTenantRefusal();
+      }
       // Same seam as `register` above: the org is created INSIDE the registration, so the session
       // this operator call hands back is already bound to the tenant it just made. A taken id still
       // aborts before a session exists — it leaves the freshly created user behind, which an operator
