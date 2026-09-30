@@ -4,8 +4,9 @@
  *
  * A bundle never carries a copy of a `@rayspec/*` package: pack removes them from every vendored
  * extension closure. So a handler or an extension in a version directory that imports `@rayspec/...`
- * would find nothing next to it. The resolve hook installed here answers such an import from the
- * installed runtime's own packages, the exact runtime the bundle was admitted against.
+ * would find nothing next to it. The resolve hook installed here answers such an import, and such a
+ * CommonJS `require()`, from the installed runtime's own packages, the exact runtime the bundle was
+ * admitted against. A copy a bundle carries anyway is never loaded.
  *
  * Every other bare import from inside the version directory must resolve inside it: a third-party
  * package the bundle does not carry is refused as not found, rather than picked up from whatever
@@ -105,10 +106,17 @@ export function installBundleModuleResolution(root: string): BundleModuleResolut
     resolve(specifier, context, next) {
       if (!inside(context.parentURL) || !isBare(specifier)) return next(specifier, context);
       if (specifier === '@rayspec' || specifier.startsWith('@rayspec/')) {
+        // A `require()` is resolved by Node's CommonJS resolver, which ignores a replaced
+        // `parentURL` and would search the bundle's own `node_modules` (or any above it). So a
+        // require is resolved here, from the runtime, and never handed on; an import is handed on
+        // with the runtime as its parent. Either way a copy the bundle carries is never used.
+        const required = context.conditions?.includes('require') === true;
         let lastError: unknown;
         for (const parentURL of parents) {
           try {
-            return next(specifier, { ...context, parentURL });
+            if (!required) return next(specifier, { ...context, parentURL });
+            const path = createRequire(parentURL).resolve(specifier);
+            return { url: pathToFileURL(path).href, shortCircuit: true };
           } catch (err) {
             lastError = err;
           }
