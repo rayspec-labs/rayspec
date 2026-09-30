@@ -389,6 +389,23 @@ fi
 echo "  ok: runtime_control_processes refuses an unknown phase"
 assert_eq "open" "SELECT phase FROM runtime_control_processes;" "0013 heartbeat defaults to the open phase"
 
+echo "== ASSERT 0014 end state (the product migration ledger) =="
+assert_eq "1" \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name = 'product_migration_ledger';" \
+  "0014 created product_migration_ledger"
+LEDGER_DIGEST=$(printf 'a%.0s' $(seq 1 64))
+if psql -d "$DRYRUN_DB" -c "INSERT INTO product_migration_ledger (ledger_format_version, operation_id, migration_name, ddl, ddl_sha256, product_schema_before, product_schema_after, schema_after, declared_stores) VALUES (1, '00000000-0000-4000-8000-000000000003', 'm.sql', 'SELECT 1', 'not-a-digest', '$LEDGER_DIGEST', '$LEDGER_DIGEST', '{}', '{}');" >/dev/null 2>&1; then
+  echo "SHADOW DRY-RUN: FAIL — product_migration_ledger accepted a malformed digest" >&2; exit 1
+fi
+echo "  ok: product_migration_ledger refuses a malformed digest"
+psql -d "$DRYRUN_DB" -c "INSERT INTO product_migration_ledger (ledger_format_version, operation_id, migration_name, ddl, ddl_sha256, product_schema_before, product_schema_after, schema_after, declared_stores) VALUES (1, '00000000-0000-4000-8000-000000000003', 'm.sql', 'SELECT 1', '$LEDGER_DIGEST', '$LEDGER_DIGEST', '$LEDGER_DIGEST', '{}', '{}');" >/dev/null
+for STATEMENT in "UPDATE product_migration_ledger SET migration_name = 'x';" "DELETE FROM product_migration_ledger;" "TRUNCATE product_migration_ledger;"; do
+  if psql -d "$DRYRUN_DB" -c "$STATEMENT" >/dev/null 2>&1; then
+    echo "SHADOW DRY-RUN: FAIL — product_migration_ledger accepted: $STATEMENT" >&2; exit 1
+  fi
+done
+assert_eq "1" "SELECT count(*) FROM product_migration_ledger;" "0014 ledger refuses UPDATE, DELETE and TRUNCATE"
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');

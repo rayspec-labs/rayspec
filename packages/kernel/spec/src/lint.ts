@@ -85,7 +85,7 @@ export const RESERVED_COLUMN_NAMES: ReadonlySet<string> = new Set([
 
 /**
  * TABLE names the PLATFORM already owns — the core tenant-scoped tables plus the global identity/auth
- * cluster and the runtime-control tables (see packages/kernel/db/src/schema.ts). A declared store of one of these names emits a
+ * cluster, the runtime-control tables and the product migration ledger (see packages/kernel/db/src/schema.ts). A declared store of one of these names emits a
  * `CREATE TABLE` that collides with the platform's own table, and the boot registrar refuses to admit
  * it fail-closed (`validateProductStore` check 5, @rayspec/db composition.ts), so the deployment never
  * comes up — the linter rejects it here instead, at the stage the author actually sees.
@@ -126,6 +126,8 @@ export const RESERVED_STORE_NAMES: ReadonlySet<string> = new Set([
   'runtime_control_state',
   'runtime_control_receipts',
   'runtime_control_processes',
+  // The global product migration ledger (every product schema change the environment applied).
+  'product_migration_ledger',
 ]);
 
 /**

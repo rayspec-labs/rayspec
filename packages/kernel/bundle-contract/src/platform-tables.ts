@@ -2,9 +2,10 @@
  * Every platform table of the application database with its snapshot data category.
  *
  * The first part restates `contract/snapshot-categories.json` `tables`; `platform-tables.test.ts`
- * holds the two equal. The runtime-control tables follow: the contract names their category
- * (`runtime-control-state`) and leaves the table names to the change that adds them, which is this
- * list, so a snapshot excludes their rows and the product schema head never counts them.
+ * holds the two equal. The runtime-control tables and the product migration ledger follow: the
+ * contract names their categories (`runtime-control-state`, `platform-migration-ledger`) and leaves
+ * the table names to the change that adds them, which is this list, so a snapshot excludes the
+ * runtime-control rows, carries the ledger's, and the product schema head never counts either.
  */
 import type { DataCategory } from './vocabulary.js';
 
@@ -54,10 +55,19 @@ export const RUNTIME_CONTROL_TABLES: readonly PlatformTable[] = [
   t('runtime_control_processes', 'runtime-control-state'),
 ];
 
+/**
+ * The product migration ledger: every product schema change the environment applied, in order. It
+ * defines the product half of the schema head, as the drizzle ledger defines the platform half.
+ */
+export const PRODUCT_LEDGER_TABLES: readonly PlatformTable[] = [
+  t('product_migration_ledger', 'platform-migration-ledger'),
+];
+
 /** Every platform table of the application database. */
 export const PLATFORM_TABLES: readonly PlatformTable[] = [
   ...CONTRACT_PLATFORM_TABLES,
   ...RUNTIME_CONTROL_TABLES,
+  ...PRODUCT_LEDGER_TABLES,
 ];
 
 /** The names of the platform tables in schema `public`: every other table there is a product table. */

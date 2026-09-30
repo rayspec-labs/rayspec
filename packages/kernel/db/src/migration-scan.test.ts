@@ -10,7 +10,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MIGRATION_ALLOWLIST } from './migration-scan.allowlist.js';
-import { scanMigrationSql, stripTerminator } from './migration-scan.js';
+import {
+  DESTRUCTIVE_KINDS,
+  parseAllowlistEntries,
+  scanMigrationSql,
+  stripTerminator,
+} from './migration-scan.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const drizzleDir = join(here, '..', 'drizzle');
@@ -393,5 +398,39 @@ describe('stripTerminator: `.trimEnd()` is byte-identical to the old `/\\s+$/` r
     // implementations — proven above by the byte-parity battery); the trailing `X` has no whitespace to
     // strip, which is the property under test, not full-string identity.
     expect(result).toBe('X');
+  });
+});
+
+describe('parseAllowlistEntries fails closed', () => {
+  const entry = {
+    kind: 'drop-column',
+    match: 'ALTER TABLE "t" DROP COLUMN "c"',
+    reason: 'reviewed',
+  };
+
+  it('accepts reviewed entries of every known kind', () => {
+    const all = DESTRUCTIVE_KINDS.map((kind) => ({ ...entry, kind }));
+    expect(parseAllowlistEntries(all)).toEqual({ ok: true, entries: all });
+    expect(parseAllowlistEntries([])).toEqual({ ok: true, entries: [] });
+  });
+
+  it('knows exactly the kinds the scan reports', () => {
+    // Every kind a finding carries is one the parser accepts: a drop of each kind is flagged and cleared.
+    const drop = scanMigrationSql('ALTER TABLE "t" DROP COLUMN "c";');
+    expect(DESTRUCTIVE_KINDS).toContain(drop.findings[0]?.kind);
+    expect(new Set(DESTRUCTIVE_KINDS).size).toBe(DESTRUCTIVE_KINDS.length);
+  });
+
+  it.each([
+    ['an object', { entries: [entry] }, 'not a JSON array'],
+    ['a string entry', ['drop-column'], 'entry [0] is not an object'],
+    ['an unknown kind', [{ ...entry, kind: 'drop-everything' }], 'entry [0].kind'],
+    ['an empty match', [{ ...entry, match: '' }], 'entry [0].match'],
+    ['a blank reason', [entry, { ...entry, reason: '  ' }], 'entry [1].reason'],
+    ['an unknown member', [{ ...entry, approvedBy: 'x' }], 'unknown member approvedBy'],
+  ])('refuses %s', (_label, data, message) => {
+    const parsed = parseAllowlistEntries(data);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok ? '' : parsed.message).toContain(message);
   });
 });

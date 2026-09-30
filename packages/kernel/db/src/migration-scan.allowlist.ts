@@ -59,4 +59,16 @@ export const MIGRATION_ALLOWLIST: Record<string, AllowlistEntry[]> = {
         'append-only receipts table. It removes nothing.',
     },
   ],
+  '0014_product_migration_ledger.sql': [
+    {
+      kind: 'truncate',
+      match:
+        'CREATE TRIGGER "product_migration_ledger_no_truncate" BEFORE TRUNCATE ON ' +
+        '"product_migration_ledger" FOR EACH STATEMENT EXECUTE FUNCTION ' +
+        '"product_migration_ledger_append_only"();',
+      reason:
+        'Not a TRUNCATE: the statement creates the trigger that REFUSES a truncate of the ' +
+        'append-only product migration ledger. It removes nothing.',
+    },
+  ],
 };

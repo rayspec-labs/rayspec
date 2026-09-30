@@ -97,9 +97,11 @@ export { PRODUCT_TENANT_SCOPED_TABLES } from './generated/product-schema.js';
 export { MIGRATION_ALLOWLIST } from './migration-scan.allowlist.js';
 export {
   type AllowlistEntry,
+  DESTRUCTIVE_KINDS,
   type DestructiveFinding,
   type DestructiveKind,
   formatFindings,
+  parseAllowlistEntries,
   type ScanResult,
   scanMigrationSql,
 } from './migration-scan.js';

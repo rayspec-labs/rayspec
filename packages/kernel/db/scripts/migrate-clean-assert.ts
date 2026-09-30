@@ -35,6 +35,7 @@ import {
   memberships,
   oidcModels,
   orgs,
+  productMigrationLedger,
   runEvents,
   runs,
   runtimeControlProcesses,
@@ -54,7 +55,8 @@ import {
 // workflow_node_states / workflow_artifacts), so the from-clean-DB structural oracle covers the
 // durable workflow journal too, + the tenant event-bus pair (tenant_events / tenant_event_streams),
 // whose composite PK and bigint counter columns are load-bearing for the stream's ordering, + the
-// runtime-control tables (the singleton state row, the append-only receipts and the process heartbeats).
+// runtime-control tables (the singleton state row, the append-only receipts and the process heartbeats)
+// + the append-only product migration ledger.
 const CORE_PLATFORM_TABLES: PgTable[] = [
   orgs,
   users,
@@ -77,6 +79,7 @@ const CORE_PLATFORM_TABLES: PgTable[] = [
   runtimeControlState,
   runtimeControlReceipts,
   runtimeControlProcesses,
+  productMigrationLedger,
 ];
 
 const url = process.env.MIGRATE_CLEAN_URL;

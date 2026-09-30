@@ -155,8 +155,8 @@ stores:
   reserved names are:
 
   `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
-  `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
-  `runtime_control_processes`, `runtime_control_receipts`,
+  `journal_steps`, `memberships`, `oidc_models`, `orgs`, `product_migration_ledger`,
+  `run_events`, `runs`, `runtime_control_processes`, `runtime_control_receipts`,
   `runtime_control_state`, `sessions`, `tenant_event_streams`, `tenant_events`,
   `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
 
