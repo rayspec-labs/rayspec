@@ -364,6 +364,43 @@ and apply it with `rayspec deploy --apply-migration <delta.sql>` (which runs it 
 the same safety gate). See the
 [CLI reference](./cli-reference.md#deploy--boot-and-serve-a-declared-product).
 
+A boot validates before it changes anything: the signing key and the injected spec are checked
+first, so a boot that is going to refuse leaves the database as it found it. Every step that
+changes the schema — the platform migration chain at boot, product-store DDL, `rayspec tenant
+ensure` — takes one shared transaction-scoped advisory lock, `pg_advisory_xact_lock(1918990707,
+1)`, so two of them never run at once against one database. The wait is bounded
+(`RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS`, default 60 s) and running out of it is a retryable refusal
+that changed nothing. The lock is released by commit, rollback or a lost connection, so a
+killed runner never blocks the next one.
+
+### Runtime control
+
+`@rayspec/server` exposes a typed runtime-control library, `createRuntimeControl`, over one
+environment database; it adds no HTTP route. `inspect()` reports what the runtime is — version,
+target, the capability ids whose modules resolve in the process, the contract version, the
+two-part schema head, the active application, the fence and the environment revision — and
+nothing that names a host, a port, a user or a path. `prepare()` plans a `.ray` bundle against the
+live schema without writing to it: it reads the bundle through the reader pipeline, computes the
+product head the bundle's delta would produce in a throwaway database on the shadow server, and
+returns the plan with its digest and an expiry thirty minutes out. Drift, a changed schema head
+and a missing binding are blockers.
+
+The **schema head** has two parts: the tag of the last applied platform migration (the drizzle
+ledger's `created_at` mapped onto the runtime's migration journal; a ledger row the journal does
+not explain means a newer runtime migrated the database) and the SHA-256 of the product schema
+read from the catalog — every table in `public` that is not a platform table, with its columns,
+keys, uniques, indexes and foreign keys in a canonical order.
+
+Mutating operations run under an **operation lease** kept in `runtime_control_state`, one row
+per environment. Taking the lease increments a fencing epoch and records the operation's intent
+in the same transaction, before any effect; every later write of the operation re-checks the
+epoch, the holder and the expiry, by the database clock, inside its own transaction. A holder
+whose lease expired and was taken over therefore cannot write when it wakes up. Each operation
+leaves **receipts** in `runtime_control_receipts` — operation id, actor, kind, lease epoch,
+inputs digest, each step's start and finish with its digest, the outcome — which a trigger keeps
+append-only. A step with a start and no finish is what a crash leaves behind, and the next holder
+must reconcile it before it repeats anything. Neither table is ever exported in a snapshot.
+
 ---
 
 ## The extension model

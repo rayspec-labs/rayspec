@@ -14,6 +14,11 @@ from the contract's closed error vocabulary.
   validated manifest against one runtime.
 - `canonicalJson`, `canonicalJsonFile`, `parseJsonDocument` — keys in code-point order, safe
   integers only, NFC strings, at most 64 nested containers, one trailing LF in a file.
+- `planDigest`, `planExpiresAt`, `isPlanExpired`, `productSchemaDigest`, `bindingRevisionId`,
+  `checkRequestBase`, `checkPrepareRequest` — the pure rules of the runtime-control operations,
+  so a runtime and a caller compute the same plan digest from the same inputs; `SCHEMA_LOCK_*` is
+  the shared schema lock key, and `PLATFORM_TABLES` the platform tables with their snapshot data
+  categories (the committed ones plus the runtime-control pair).
 - `ERROR_CODES`, `CAPABILITIES`, `RESERVED_BINDING_NAMES`, `DEFAULT_READER_LIMITS`,
   `SUPPORTED_TARGETS` and the other vocabularies, plus the types of the result envelope and the
   runtime-control operations.

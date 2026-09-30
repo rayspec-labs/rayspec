@@ -39,10 +39,21 @@ curl -s http://127.0.0.1:8080/health
 | `PORT` | no | TCP port. Default `8080`. A non-numeric/out-of-range value fails closed. |
 | `RAYSPEC_SPEC_PATH` | no | Absolute path to a `rayspec.yaml` to deploy at boot (the declarative engine). The platform ships **none** — the deployer injects it. Absent ⇒ an **auth-only** boot. |
 | `RAYSPEC_HANDLER_ROOT` | no | The path-jail root for declared escape-hatch handlers. Defaults to the spec file's directory. |
+| `RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS` | no | How long a schema change at boot (the migration chain, product-store DDL) waits for the shared schema lock another boot, migration or `rayspec tenant ensure` holds. Default `60000`, at most `3600000`; running out refuses the boot with a retryable error and changes nothing. An invalid value fails closed. |
 | `RAYSPEC_SKIP_DOTENV` | no | Set to `1` to skip the local-DX `.env` loader (prove a pure-ambient-env boot). That loader reads `$PWD/.env` first and the install-root `.env` second (the install root is resolved from the loader's own module location), per key, and never overrides a variable already set. |
 
 Missing `DATABASE_URL` / `RAYSPEC_JWT_SIGNING_KEY` / `RAYSPEC_API_KEY_PEPPER` → the boot aborts
-with an actionable message (fail-closed), never a partial start.
+with an actionable message (fail-closed), never a partial start. A malformed signing key or an
+invalid spec is refused before the migration chain runs, so it leaves the database untouched.
+
+## Runtime control
+
+`createRuntimeControl({ db, shadowDatabaseUrl? })` is the typed runtime-control library over one
+environment database: `inspect()` (what this runtime is, the live two-part schema head, the fence
+and the environment revision) and `prepare()` (a read-only plan for a `.ray` bundle, with its
+digest and a thirty-minute expiry). `acquireOperationLease` runs a mutating operation under the
+environment's operation lease — one holder at a time, a fencing epoch every write re-checks, and
+append-only receipts. None of it adds an HTTP route; see `docs/ARCHITECTURE.md`, "Runtime control".
 
 ### Reading the boot values from a file
 

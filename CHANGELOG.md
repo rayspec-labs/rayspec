@@ -192,6 +192,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edges the workspace has today are listed in the gate with their reasons, and a listed edge that
   disappears fails the gate until it is removed. `pnpm test:tier-direction` drives the gate over
   throwaway workspaces with planted edges.
+- **Runtime control: `inspect()` and `prepare()`, an operation lease, and operation receipts.**
+  `@rayspec/server` exports `createRuntimeControl`, a typed library (no HTTP route) over one
+  environment database. `inspect()` reports the runtime version, target and Node version, the
+  capability ids whose modules resolve in this process, the contract version, the two-part schema
+  head (the last platform migration tag, mapped from the drizzle ledger onto the runtime's journal,
+  and a SHA-256 of the live product schema read from the catalog; null before the first
+  migration; `RAY_SCHEMA_DRIFT` when the ledger holds a migration this runtime does not ship), the
+  active application, the release and managed-posture digests, the fence and the environment
+  revision — never a host, port, user or path. `prepare()` reads a `.ray` bundle at an absolute
+  path without following a link, through the reader pipeline, checks its SHA-256 against the one
+  the caller named, and plans against the LIVE schema: required bindings and whether each has a
+  revision, schema impact (the head before and after, the product delta's SHA-256, destructive),
+  permission changes against the active application, storage, warnings and blockers (drift, a
+  changed schema head, a missing binding, a delta without a shadow database to evaluate it in, a
+  carried delta). The target product head is computed by applying the delta to a throwaway
+  database on the shadow server, never the live one. The result carries the plan digest over the
+  contract's inputs, `preparedAt`, `expiresAt` (exactly thirty minutes later) and the environment
+  revision. `prepare()` takes no lock, stores no plan and writes nothing to the environment's
+  database. The contract package gains the pure rules both sides compute: request checks, the plan
+  digest and its expiry, the product schema digest, binding revision ids, the shared schema lock
+  key and the platform tables with their snapshot categories.
+- **An operation lease with a fencing epoch, and append-only operation receipts.** Two new platform
+  tables (migration `0012_runtime_control`): `runtime_control_state`, one row per environment
+  (environment revision, fence, binding revision key, operation lease, the active application), and
+  `runtime_control_receipts`. `acquireOperationLease` gives one mutating operation at a time the
+  lease, increments its fencing epoch and records the operation's intent in the same transaction,
+  before any effect. Every write of the holder re-checks the epoch, the holder and the expiry (by
+  the database clock) in its own transaction, so a holder whose lease expired and was taken over
+  cannot write when it wakes up; the takeover names the previous holder, and a step it started
+  and never finished stays visible for reconciliation. Receipts record the operation id, actor,
+  kind, lease epoch, inputs digest, each step's start and finish with its digest, timestamps and
+  the outcome; a trigger refuses UPDATE, DELETE and TRUNCATE on them, and an idempotency key names
+  one intent only. Both tables are reserved store names and classified `runtime-control-state`,
+  which a snapshot never exports.
+- **`RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS`**, the bounded wait for the shared schema lock (default 60000,
+  at most one hour; an invalid value aborts the boot). See Fixed.
+- **`@rayspec/bundle`: `refuseLinks`.** A read option that opens the archive path with
+  `O_NOFOLLOW` and refuses a symbolic link with `RAY_USAGE` instead of following it.
 
 ### Changed
 
@@ -225,6 +263,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A boot that refuses leaves the database untouched.** The server applied the platform
+  migration chain before it parsed the injected spec and the signing key, so a deploy with an
+  invalid spec, a Product-YAML document outside the boot scope or a malformed
+  `RAYSPEC_JWT_SIGNING_KEY` still created every platform table in an empty database before it
+  refused. The key and the document are now validated first, with the same refusals as before; a
+  valid deployment boots exactly as it did. Checks that need the merged extensions or a
+  spec-dependent setting (a media signing key, an STT or TTS provider) still run after the
+  platform chain and before any product DDL.
+- **Every schema change takes one lock.** The boot's platform migration chain took no lock, so a
+  boot racing another boot or a `rayspec tenant ensure` against an empty database could die on a
+  duplicate object. The chain, product-store DDL and `tenant ensure` now all take the one shared
+  advisory lock (`pg_advisory_xact_lock(1918990707, 1)`, the pair `tenant ensure` already used),
+  with a bounded wait: a boot that waits longer than `RAYSPEC_SCHEMA_LOCK_TIMEOUT_MS` refuses with
+  a retryable error and changes nothing, and `tenant ensure` reports `SCHEMA_LOCK_TIMEOUT`.
 - **The documented test run passes on a fresh clone.** The shutdown test for the example
   `dev-boot.mjs` wrappers forwarded `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` only
   when they were exported, so without a `.env` the wrapper it spawns aborted on the missing
