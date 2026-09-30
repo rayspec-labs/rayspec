@@ -540,6 +540,8 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
       await db.unsafe('SELECT environment_revision::int AS r FROM runtime_control_state'),
     ).toEqual(revision);
     expect(await db.unsafe("SELECT to_regclass('public.bundle_tags') AS t")).toEqual([{ t: null }]);
+    // Refused before anything was written: not even the version directory was staged.
+    expect(existsSync(join(deployDir, '.rayspec-state', 'versions', bundles.v3!.sha))).toBe(false);
     armsRan += 1;
   }, 240_000);
 

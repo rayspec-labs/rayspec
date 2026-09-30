@@ -46,6 +46,7 @@ import {
   bundleError,
   CONTRACT_VERSION,
   digestOf,
+  formatTimestamp,
   isPlanExpired,
   isReservedBindingName,
   isSha256,
@@ -54,6 +55,7 @@ import {
   planDigestInput,
   schemaValidator,
 } from '@rayspec/bundle-contract';
+import type { Db } from '@rayspec/db';
 import type { ReadApplicationBundle } from '@rayspec/server';
 import type { ServeReport } from './deploy.js';
 import { type Envelope, envelope } from './envelope.js';
@@ -638,8 +640,7 @@ async function deploy(
         });
       }
     }
-    preparedAt = record?.preparedAt ?? new Date(Math.floor(Date.now() / 1000) * 1000).toISOString();
-    preparedAt = preparedAt.replace(/\.000Z$/, 'Z');
+    preparedAt = record?.preparedAt ?? formatTimestamp(new Date());
     const live = await server.liveSchemaHead(db).catch(() => {
       refuse('RAY_INFRA_UNAVAILABLE', 'the environment database could not be read; retry');
     });
@@ -657,6 +658,23 @@ async function deploy(
       { ...runtime, db },
       { preparedAt, requireSignature: parsed.requireSignature },
     );
+    // A reviewed plan that no longer matches is stale, and refused before anything is written —
+    // unless the environment already recorded a deploy under it, which the apply itself answers
+    // (a deploy that was interrupted is continued, one that finished is reported as applied).
+    const recomputed = prepared.envelope.data?.planDigest;
+    if (
+      parsed.planDigest !== undefined &&
+      recomputed !== undefined &&
+      recomputed !== parsed.planDigest &&
+      !(await deployRecorded(db, parsed.planDigest))
+    ) {
+      refuse(
+        'RAY_PLAN_STALE',
+        'the plan no longer matches the environment, the bundle or the bindings; run ' +
+          '`rayspec deploy <file.ray> --dry-run` again and deploy with the new plan digest',
+        { path: '/planDigest' },
+      );
+    }
   } finally {
     await db.$client.end().catch(() => {});
   }
@@ -773,6 +791,17 @@ async function deploy(
     },
   );
   return { kind: 'served' };
+}
+
+/** Whether the environment recorded a deploy under this plan digest, its idempotency key. */
+async function deployRecorded(db: Db, planDigest: string): Promise<boolean> {
+  const { findIntentByIdempotencyKey } = await import('@rayspec/server');
+  try {
+    return (await findIntentByIdempotencyKey(db, planDigest)) !== undefined;
+  } catch {
+    // No receipts table: nothing was ever recorded.
+    return false;
+  }
 }
 
 async function dryRun(
