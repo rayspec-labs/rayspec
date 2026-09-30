@@ -61,7 +61,13 @@ export const ProductIdentity = z
     description: z.string().optional(),
     /** Human ownership metadata (free-form small strings). */
     owners: z.array(z.string().min(1)).optional(),
-    /** Small string metadata — NOT runtime behavior. */
+    /**
+     * Small string metadata — NOT runtime behavior. Free-form: every key is an arbitrary string.
+     * `rayspec pack` reads `id` and `version` from here as the application identity a bundle
+     * carries (unless `--id` and `--version` override them) and checks them against the bundle
+     * manifest's patterns at pack time, not here: documents written before those keys had a meaning
+     * may hold any string under them and still parse.
+     */
     metadata: z.record(z.string(), z.string()).optional(),
   })
   .strict();

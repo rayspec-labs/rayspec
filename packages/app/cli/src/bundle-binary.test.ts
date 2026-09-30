@@ -14,7 +14,7 @@
  *    install hooks that would do the same. Inspect and verify leave both untouched; the control
  *    imports the same module in a child process and trips both, which proves the probe would notice.
  */
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -23,6 +23,7 @@ import { writeBundle } from '@rayspec/bundle';
 import { schemaValidator } from '@rayspec/bundle-contract';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { CLI_DIST, corpusFile, loadExpectations, REPO_ROOT } from './test-support/bundles.js';
+import { FORBIDDEN_MODULES, installModuleProbe, runProbed } from './test-support/module-probe.js';
 
 // The dist guard every suite that spawns the built CLI uses (see deploy-static-profile.test.ts): an
 // unbuilt dist is an ergonomic skip locally and a hard failure under CI.
@@ -77,32 +78,8 @@ handlers:
     kind: route
 `;
 
-/** The module-resolution hook: every resolved URL is appended to the file named by the env. */
-const HOOKS = `import { appendFileSync } from 'node:fs';
-let log;
-export function initialize(data) { log = data.log; }
-export async function resolve(specifier, context, next) {
-  const resolved = await next(specifier, context);
-  appendFileSync(log, resolved.url + '\\n');
-  return resolved;
-}
-`;
-const REGISTER = `import { register } from 'node:module';
-register(new URL('./hooks.mjs', import.meta.url), { data: { log: process.env.RAYSPEC_CLI_TEST_MODULE_LOG } });
-`;
-
-/** Module locations that must never load to inspect or verify a bundle. */
-const FORBIDDEN: readonly [string, RegExp][] = [
-  ['the server', /\/packages\/app\/server\/|\/@rayspec\/server\//],
-  ['the database layer', /\/packages\/kernel\/db\/|\/@rayspec\/db\//],
-  ['the platform and its handler loader', /\/packages\/kernel\/platform\/|\/@rayspec\/platform\//],
-  ['the product composition', /\/packages\/compose\/|\/@rayspec\/product-yaml\//],
-  ['the Postgres driver', /\/node_modules\/postgres\//],
-  ['the durable engine', /@dbos-inc/],
-  ['the HTTP framework', /\/node_modules\/hono\/|@hono\//],
-];
-
 let work: string;
+let register: string;
 let archive: string;
 let canary: string;
 let server: Server;
@@ -111,8 +88,7 @@ let connections = 0;
 beforeAll(async () => {
   work = mkdtempSync(join(tmpdir(), 'rayspec-cli-binary-'));
   canary = join(work, 'canary');
-  writeFileSync(join(work, 'hooks.mjs'), HOOKS);
-  writeFileSync(join(work, 'register.mjs'), REGISTER);
+  register = installModuleProbe(work);
   writeFileSync(join(work, 'payload.mjs'), PAYLOAD);
   server = createServer((socket) => {
     connections++;
@@ -170,29 +146,13 @@ function listenerPort(): string {
 
 /** Run the built CLI, recording every module it resolves. */
 function cli(args: string[], cwd = work) {
-  const log = join(work, `modules-${Math.random().toString(16).slice(2)}.log`);
-  writeFileSync(log, '');
-  const r = spawnSync(
-    process.execPath,
-    ['--import', join(work, 'register.mjs'), CLI_DIST, ...args],
-    {
-      cwd,
-      encoding: 'utf8',
-      // A payload that ran would wait on this process's listener, which cannot answer while
-      // spawnSync blocks; the timeout turns that into a failure instead of a hang.
-      timeout: 30_000,
-      env: {
-        PATH: process.env.PATH,
-        HOME: process.env.HOME,
-        RAYSPEC_SKIP_DOTENV: '1',
-        RAYSPEC_CLI_TEST_MODULE_LOG: log,
-        [CANARY_FILE_ENV]: canary,
-        [CANARY_PORT_ENV]: listenerPort(),
-      },
-    },
-  );
-  const modules = readFileSync(log, 'utf8').split('\n').filter(Boolean);
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr, modules };
+  // A payload that ran would wait on this process's listener, which cannot answer while the
+  // synchronous spawn blocks; the timeout turns that into a failure instead of a hang.
+  return runProbed(register, work, args, {
+    cwd,
+    timeout: 30_000,
+    env: { [CANARY_FILE_ENV]: canary, [CANARY_PORT_ENV]: listenerPort() },
+  });
 }
 
 const settle = () => new Promise((done) => setTimeout(done, 150));
@@ -269,7 +229,7 @@ maybeDescribe('what the bundle verbs load', () => {
       // The bundle codec and the spec grammar are what it runs on: the probe saw the real work.
       expect(r.modules.some((m) => /\/packages\/kernel\/bundle\//.test(m))).toBe(true);
       expect(r.modules.some((m) => /\/packages\/kernel\/spec\//.test(m))).toBe(true);
-      for (const [what, pattern] of FORBIDDEN) {
+      for (const [what, pattern] of FORBIDDEN_MODULES) {
         expect(
           r.modules.filter((m) => pattern.test(m)),
           `${label} loaded ${what}`,
@@ -286,7 +246,7 @@ maybeDescribe('what the bundle verbs load', () => {
     );
     const r = cli(['plan', 'rayspec.yaml'], specDir);
     expect(r.status).toBe(0);
-    expect(r.modules.some((m) => FORBIDDEN[1]![1].test(m))).toBe(true);
+    expect(r.modules.some((m) => FORBIDDEN_MODULES[1]![1].test(m))).toBe(true);
   });
 
   it('the repo root the probe resolves against is this checkout', () => {

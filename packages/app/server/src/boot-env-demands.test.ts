@@ -459,17 +459,19 @@ describe('checkBootEnv — a pack-BEARING document is never a silent green', () 
       'RAYSPEC_API_KEY_PEPPER',
     ]);
     const notChecked = report.notChecked.join(' ');
-    expect(notChecked).toContain('declares 1 extension pack(s)');
+    expect(notChecked).toContain('declares 1 extension(s)');
     expect(notChecked).toContain('stream_pack');
     // BOTH adding directions are named, not just the agent one.
-    expect(notChecked).toContain('pack-contributed api route adds the RAYSPEC_BLOB_ROOT demand');
+    expect(notChecked).toContain(
+      'extension-contributed api route adds the RAYSPEC_BLOB_ROOT demand',
+    );
     expect(notChecked).toContain('RAYSPEC_MEDIA_SIGNING_KEY demand');
     expect(notChecked).toContain('REMOVE one');
   });
 
   it('says nothing about packs for a document that declares none', async () => {
     const report = await checkBootEnv('/s.yaml', backendSpec(), { ...OK3 });
-    expect(report.notChecked.join(' ')).not.toContain('extension pack(s)');
+    expect(report.notChecked.join(' ')).not.toContain('extension(s)');
   });
 });
 

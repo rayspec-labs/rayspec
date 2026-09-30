@@ -40,7 +40,7 @@ top-level `product:` section:
   | `tooling`    | Tools an agent may call, wired to handlers.                   |
   | `triggers`   | Scheduled/event/webhook/manual entry points.                  |
   | `handlers`   | Escape-hatch TypeScript modules for custom logic.             |
-  | `extensions` | Versioned extension packs to merge in.                        |
+  | `extensions` | Versioned extensions to merge in.                             |
   | `deployment` | Deployment properties (e.g. whether a durable worker runs).   |
   | `frontend`   | Static frontend directories to serve alongside the API.       |
 

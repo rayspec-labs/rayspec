@@ -65,10 +65,13 @@ in the platform — everything comes from the spec you inject.
   change against a running deployment is a deliberate, reviewed forward migration
   (`rayspec deploy --apply-migration`) — a drifted schema fails the boot closed rather
   than being altered on its own.
-- **Passive bundle checks.** `rayspec bundle inspect` and `rayspec bundle verify` read a
-  `.ray` application bundle — what it declares, whether its archive and inventory hold
-  together, whether this runtime can deploy it — without extracting or running anything
-  inside it ([CLI reference](./docs/cli-reference.md#bundle-inspect)).
+- **Application bundles.** `rayspec pack` writes a built application into one
+  deterministic `.ray` file — the spec, the compiled code and static files it needs, its
+  third-party packages, an SBOM and the license notices, never a secret — without running
+  any of it ([packing guide](./docs/packing.md)). `rayspec bundle inspect` and
+  `rayspec bundle verify` read a bundle — what it declares, whether its archive and
+  inventory hold together, whether this runtime can deploy it — without extracting or
+  running anything inside it ([CLI reference](./docs/cli-reference.md#bundle-inspect)).
 - **Security by construction, not by convention.** No plaintext secrets, a
   fail-closed tenant chokepoint, an explicit trust boundary around untrusted
   content, and an append-only audit log — from the first boot. That boundary is
@@ -203,7 +206,7 @@ including provisioning the first tenant and making an authenticated request.
 
 The quickstart above deploys a **product-profile** document — pure declaration, no
 build step. A **backend-profile** document that ships custom `.ts` escape-hatch
-handlers (or an extension pack authored in `.ts`) must be compiled to `.js` first:
+handlers (or an extension authored in `.ts`) must be compiled to `.js` first:
 the runtime loads compiled JavaScript only and fail-closed-rejects a `.ts` module
 deterministically. The bundled examples ship a `build.mjs` build step — see
 [getting-started → the backend profile](./docs/getting-started.md#the-backend-profile-direct-agent-boot).

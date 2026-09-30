@@ -91,7 +91,7 @@ valid spec is just a version and a name.
 | `tooling`    | Tools an agent may call, wired to handlers.                   |
 | `triggers`   | Scheduled / event / webhook / manual entry points.            |
 | `handlers`   | Escape-hatch TypeScript modules for custom logic.             |
-| `extensions` | Versioned extension packs to merge in.                        |
+| `extensions` | Versioned extensions to merge in.                             |
 | `deployment` | Deployment properties (e.g. whether a durable worker runs).   |
 | `frontend`   | Static frontend directories to serve alongside the API.       |
 
@@ -107,6 +107,23 @@ metadata:
 
 - `name` — required, non-empty string.
 - `description` — optional string.
+- `id` — optional application id: a lowercase letter followed by up to 62 lowercase
+  letters, digits or hyphens (`^[a-z][a-z0-9-]{0,62}$`).
+- `version` — optional application version: an exact semantic version
+  (`MAJOR.MINOR.PATCH`, optionally `-prerelease`), without `+build` metadata, at most
+  128 characters. Quote it so YAML reads it as a string.
+
+`id` and `version` are the identity an application bundle carries. `rayspec pack`
+takes them from here unless `--id` and `--version` override them, and refuses when
+neither gives a value. Neither is ever derived from `name` or from the runtime
+version. A spec without them parses exactly as before.
+
+```yaml
+metadata:
+  name: acme-notes
+  id: acme-notes
+  version: '1.4.0'
+```
 
 ## `stores`
 
@@ -1467,7 +1484,7 @@ everywhere:
 
 | Field | What it is | Reaches | Configured by |
 | --- | --- | --- | --- |
-| `init.blob` | Tenant-bound binary storage (opaque keys). | `stream`-kind routes (always) and tools | a blob backend — `RAYSPEC_BLOB_ROOT`, or one an extension pack provides — and only built when the spec declares a `stream` route |
+| `init.blob` | Tenant-bound binary storage (opaque keys). | `stream`-kind routes (always) and tools | a blob backend — `RAYSPEC_BLOB_ROOT`, or one an extension provides — and only built when the spec declares a `stream` route |
 | `init.fsSource` | Read-only, path-jailed reader over a deployment-static root. | `handler`-kind routes and tools | `RAYSPEC_FS_SOURCE_ROOT` |
 | `init.mintPlayToken` | Mint a short-lived `?token=` for a `stream` playback route. | `handler`-kind routes | `RAYSPEC_MEDIA_SIGNING_KEY` |
 | `init.enqueue` | Enqueue a durable, off-request agent run. | `handler`-kind routes | a configured durable worker |
@@ -1791,7 +1808,7 @@ resume correct.
 
 ## `extensions`
 
-Optional references to versioned **extension packs** — product code authored and
+Optional references to versioned **extensions** — product code authored and
 versioned in its own repository, merged in by reference. Default `[]`.
 
 ```yaml
@@ -1802,31 +1819,38 @@ extensions:
 ```
 
 - `id` — required logical id, unique within `extensions`.
-- `module` — required pack module/directory reference (path-jailed at load).
+- `module` — required extension module/directory reference (path-jailed at load).
 - `version` — required **exact** semver pin (`MAJOR.MINOR.PATCH`, with optional
   `-prerelease` / `+build`). Ranges, wildcards, floating dist-tags, and partial
-  versions are rejected — a pack must resolve to exactly one version so it can
+  versions are rejected — an extension must resolve to exactly one version so it can
   never drift silently between deploys.
-- `config` — optional opaque configuration validated by the pack itself.
+- `config` — optional opaque configuration validated by the extension itself.
 
-A pack authored in TypeScript must be **compiled to JavaScript** before deploy (the
-runtime fail-closed-rejects a `.ts` module path), and a compiled pack entry keeps its
+An extension authored in TypeScript must be **compiled to JavaScript** before deploy
+(the runtime fail-closed-rejects a `.ts` module path), and a compiled extension entry
+keeps its
 `import { defineExtension } from '@rayspec/platform'` as a **runtime** import. The
 loader imports that entry by the entry's own absolute file URL, so Node resolves the
-bare specifier from the **built file's own location** upward — through the pack
+bare specifier from the **built file's own location** upward — through the extension
 directory and then every ancestor above it, the deployment's own tree included (the
-`module` path-jail keeps every pack inside that tree, so it is always on the walk).
-The pack's own `node_modules` is therefore the first one Node reaches, and the only one
-the pack controls. A pack shipped from its own repository declares `@rayspec/platform`
+`module` path-jail keeps every extension inside that tree, so it is always on the walk).
+The extension's own `node_modules` is therefore the first one Node reaches, and the only
+one the extension controls. An extension shipped from its own repository declares
+`@rayspec/platform`
 (and `@rayspec/handler-sdk`, if its handlers import the capability types) as a
 dependency on the **released** version the deployment runs, installs it, and ships the
-pack **directory** — the compiled output **and** its `node_modules` — to the deploy
+extension **directory** — the compiled output **and** its `node_modules` — to the deploy
 target. Ship the compiled output alone and resolution falls through to whatever the
 deploy tree happens to expose above it: either nothing, and the boot fails with
-`Cannot find package '@rayspec/platform'`, or some other install, and the pack silently
-binds to a platform version it was never pinned to.
-[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-pack-from-its-own-repo)
+`Cannot find package '@rayspec/platform'`, or some other install, and the extension
+silently binds to a platform version it was never pinned to.
+[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-extension-from-its-own-repo)
 walks that shape end to end and ships a copy-ready manifest for it.
+
+An application bundle is different: [`rayspec pack`](./packing.md) leaves every
+`@rayspec/*` package out of the extension's files, because the runtime that deploys
+the bundle provides them, and refuses the bundle when the range the extension's
+`package.json` declares for one excludes the runtime the bundle pins.
 
 ## `deployment`
 
@@ -2091,7 +2115,13 @@ product:
 - `name` — required, non-empty.
 - `description` — optional.
 - `owners` — optional list of ownership strings.
-- `metadata` — optional map of small string metadata.
+- `metadata` — optional map of small string metadata. Every key is a free-form string.
+  `rayspec pack` reads two of them as the identity an application bundle carries, as
+  `metadata.id` and `metadata.version` are for a backend spec: `id` (the application id,
+  `^[a-z][a-z0-9-]{0,62}$`) and `version` (an exact semantic version without `+build`
+  metadata). Pack checks them and refuses a value that does not match; parsing does not,
+  so a document that already used either key for something else still parses. Pack never
+  derives the id from `product.id`.
 
 ## `requires` and `capabilities`
 

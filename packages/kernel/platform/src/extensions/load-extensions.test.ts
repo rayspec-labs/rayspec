@@ -185,7 +185,7 @@ describe('loadExtensions — fail-closed resolution + merge', () => {
     const importer = fakeImporter(new Map([[entry, { default: defineExtension(bad) }]]));
     await expect(
       loadExtensions([ref()], { packsRoot: root, deploymentRoot: root, importer }),
-    ).rejects.toThrow(/traversal|OUTSIDE|UNDER|under the pack's `handlers\/`/);
+    ).rejects.toThrow(/traversal|OUTSIDE|UNDER|under the extension's `handlers\/`/);
   });
 
   it('DUP pack id is rejected', async () => {
@@ -228,7 +228,7 @@ describe('loadExtensions — fail-closed resolution + merge', () => {
       const importer = fakeImporter(new Map([[entry, { default: defineExtension(bad) }]]));
       await expect(
         loadExtensions([ref()], { packsRoot: root, deploymentRoot: root, importer }),
-      ).rejects.toThrow(/not under the pack's `handlers\/` directory/);
+      ).rejects.toThrow(/not under the extension's `handlers\/` directory/);
     });
 
     it('REJECTS a handler module at the pack root (no handlers/ prefix, e.g. x.ts)', async () => {
@@ -242,7 +242,7 @@ describe('loadExtensions — fail-closed resolution + merge', () => {
       const importer = fakeImporter(new Map([[entry, { default: defineExtension(bad) }]]));
       await expect(
         loadExtensions([ref()], { packsRoot: root, deploymentRoot: root, importer }),
-      ).rejects.toThrow(/not under the pack's `handlers\/` directory/);
+      ).rejects.toThrow(/not under the extension's `handlers\/` directory/);
     });
 
     it('ACCEPTS a handler module under handlers/ (incl. a nested handlers/sub/x.ts and a leading ./)', async () => {

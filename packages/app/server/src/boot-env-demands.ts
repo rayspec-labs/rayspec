@@ -629,11 +629,11 @@ class RequirementSet {
 
 /** What NO read-only environment check can establish — stated in the verdict rather than left implied. */
 const NOT_CHECKED = [
-  'no extension pack is loaded (running pack code is exactly what would open a socket, a database or ' +
-    'a credential), so every demand a pack changes is invisible here — it can REMOVE one (a ' +
-    'pack-provided blob backend removes the RAYSPEC_BLOB_ROOT demand) and it can ADD one: a ' +
-    "pack-contributed api route adds the RAYSPEC_BLOB_ROOT demand (any kind:'stream') and the " +
-    "RAYSPEC_MEDIA_SIGNING_KEY demand (mode:'playback'), and a pack-contributed agent adds its " +
+  'no extension is loaded (running extension code is exactly what would open a socket, a database ' +
+    'or a credential), so every demand an extension changes is invisible here — it can REMOVE one (an ' +
+    'extension-provided blob backend removes the RAYSPEC_BLOB_ROOT demand) and it can ADD one: an ' +
+    "extension-contributed api route adds the RAYSPEC_BLOB_ROOT demand (any kind:'stream') and the " +
+    "RAYSPEC_MEDIA_SIGNING_KEY demand (mode:'playback'), and an extension-contributed agent adds its " +
     'backend credential demand. The guards run on the POST-merge document; this reads the base one',
   'a set <VAR>_FILE mount counts as set from the variable alone — the file is never opened, so a ' +
     'missing, unreadable or empty secret file still refuses the boot (it NEVER falls back to the ' +
@@ -673,7 +673,7 @@ const PRODUCT_NOT_CHECKED = [
  * frontend-only static, then backend), because the three have genuinely different demand sets and the
  * static one requires NONE of the three unconditional secrets.
  *
- * It opens no socket, no database and no credential file, and it loads no extension pack — executing
+ * It opens no socket, no database and no credential file, and it loads no extension — executing
  * pack code is precisely what would break that promise. The consequences of not loading packs run in
  * BOTH directions — a pack can REMOVE a demand (it supplies a blob backend) and it can ADD one (its
  * routes and its agents both raise demands, on a document whose own sections may declare neither) —
@@ -866,7 +866,7 @@ function backendReport(
   const notChecked = [...NOT_CHECKED];
   if (spec.extensions.length > 0) {
     notChecked.unshift(
-      `this document declares ${spec.extensions.length} extension pack(s) — ` +
+      `this document declares ${spec.extensions.length} extension(s) — ` +
         `[${spec.extensions.map((ext) => ext.id).join(', ')}] — whose stores, routes, handlers and ` +
         'agents merge into the deployed document BEFORE the boot guards ask their questions. None ' +
         'was loaded, so every demand they carry is missing from this verdict',

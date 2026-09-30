@@ -93,7 +93,7 @@ with a declarative approximation; recommend it as a future iteration or the prod
   **product profile** instead — `file_input` is unlocked there; and a **sync chat / conversational**
   product is authorable in the **product profile** via `conversation_input` [tool-less v1 — see the
   honest boundary below]; see the product-profile reference below.)
-- **`extensions[]`** (extension packs)
+- **`extensions[]`** (extensions)
 - **`{handler}` / `{route}` HTTP handlers** (`kind:'route'`/`'trigger'` handlers; a declared
   `{handler}` *route*) — a later iteration (NOT the update flow — see Phase 7 below)
 - **update-flow** — ✅ **NOW SUPPORTED by Phase 7 (the update flow, below):** re-deploy an
@@ -661,6 +661,27 @@ Report the results honestly. The agent run calls OpenAI live (`gpt-4o-mini`); a 
 surfaces in the run body. The RaySpec cost-ledger journal shows the `lookup`/`persist` tool steps fired
 through `dispatchTool`.
 
+### Packaging the backend as a `.ray` bundle (optional, only when asked)
+
+`rayspec pack` writes the authored backend into one application bundle (`.ray`) that can be checked and
+handed on. It is **not** a deploy and never replaces Phase 5 — say so to the user. It packages files that
+are **already built** and runs nothing: build the generated handlers to `.js` first and pack the spec of
+the built output (a `.ts` handler is refused with `RAY_CLOSURE_INVALID` and the build instruction).
+
+```
+rayspec pack --spec <built-dir>/rayspec.yaml --output <app-id>-<version>.ray --preview   # what goes in; writes nothing
+rayspec pack --spec <built-dir>/rayspec.yaml --output <app-id>-<version>.ray
+rayspec bundle verify <app-id>-<version>.ray                                              # deployable on this runtime?
+```
+
+- The bundle needs an application id and version: set `metadata.id` / `metadata.version` in the spec
+  (product profile: `product.metadata.id` / `product.metadata.version`), or pass `--id` / `--version`.
+  Never invent them from `metadata.name`; ask the user when neither is known.
+- Every command writes one JSON envelope on stdout; read `ok`, `errors[0].code` and `errors[0].reason`.
+  The refusals and their fixes are in `docs/packing.md`. An existing output needs `--force` — only
+  with the user's approval.
+- `--build`, `--against` and `--allowlist` are refused in this release; do not use them.
+
 ---
 
 ## Phase 7 — the UPDATE flow (evolve an EXISTING authored backend)
@@ -867,6 +888,8 @@ version: '1.0'            # REQUIRED, the literal string '1.0' (quote it).
 metadata:                 # REQUIRED
   name: <string>          #   REQUIRED, non-empty — identifies the backend.
   description: <string>   #   optional
+  id: <app-id>            #   optional — application id for `rayspec pack`: ^[a-z][a-z0-9-]{0,62}$ (never derived from name).
+  version: '<semver>'     #   optional — application version for `rayspec pack`: exact MAJOR.MINOR.PATCH[-pre], no +build. Quote it.
 stores: []                # optional (default []) — see StoreSpec
 api: []                   # optional (default []) — see ApiRouteSpec
 agents: []                # optional (default []) — see AgentSpecConfig
@@ -1801,6 +1824,8 @@ and a multi-turn run where turn 2's reply demonstrably used turn 1 (the history 
 version: '1.0'                # REQUIRED — the SAME literal as a backend spec; the `product:` section is the
                               #   PROFILE discriminant (checked FIRST; a bad version → unsupported_version).
 product:                      # REQUIRED — identity: { id (safe-ident), name, description?, owners?, metadata? }.
+                              #   metadata is a string map; its optional `id` (^[a-z][a-z0-9-]{0,62}$) and
+                              #   `version` (exact semver, no +build) are the application identity `rayspec pack` uses.
 requires:                     # capability ids the product depends on: { capabilities: [<id>, ...] }.
 capabilities: []              # Tier-B capability REFERENCES (declaration, not implementation) — see below.
 artifacts: []                # product-owned artifact KINDS + their response contract — see below.

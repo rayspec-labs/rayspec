@@ -1,29 +1,29 @@
 /**
- * The SYNTHETIC stream/blob EXTENSION PACK — the platform's own forcing-function for the
- * `extensions[]` pack mechanism. It carries the ENTIRE stream surface (the blob-pointer store,
+ * The SYNTHETIC stream/blob EXTENSION — the platform's own forcing-function for the
+ * `extensions[]` mechanism. It carries the ENTIRE stream surface (the blob-pointer store,
  * the ingest/playback/mint handlers, the stream + mint routes) as a `defineExtension` manifest, loaded
  * via `extensions: [{ id, module: ./packs/stream-pack, version }]` from this deployment's `rayspec.yaml`.
  *
- * The stream surface rides the PACK mechanism end-to-end. `loadExtensions` resolves THIS manifest
- * (path-jailed directory, version-pin fail-closed), jails each handler against THIS pack root, and
+ * The stream surface rides the extension mechanism end-to-end. `loadExtensions` resolves THIS manifest
+ * (path-jailed directory, version-pin fail-closed), jails each handler against THIS extension root, and
  * merges these fragments into the deployment spec so the UNCHANGED `deploy()` materializes the store
  * (through the UNCHANGED migration gate + chokepoint probe), the api interpreter serves the routes,
- * and the path-jailed loader loads the handlers. A real product pack is the intended consumer of this
+ * and the path-jailed loader loads the handlers. A real product extension is the intended consumer of this
  * exact mechanism, authored in its own repo — this is the platform's synthetic twin.
  *
- * The pack ENTRY (this file) authors against `@rayspec/platform` (where `defineExtension` + the fragment
- * types live). The pack HANDLER modules under `handlers/` import ONLY `@rayspec/handler-sdk` (the
+ * The extension ENTRY (this file) authors against `@rayspec/platform` (where `defineExtension` + the fragment
+ * types live). The extension HANDLER modules under `handlers/` import ONLY `@rayspec/handler-sdk` (the
  * type-only capability contract; the now-manifest-derived `gate:handler-imports` +
- * `gate:extension-capability` scan THIS pack's `handlers/` root). NOTE: this dir is in no tsconfig (an
+ * `gate:extension-capability` scan THIS extension's `handlers/` root). NOTE: this dir is in no tsconfig (an
  * `examples/` fixture, excluded from turbo/CI build). Nothing transforms this file on the way into a
  * deploy: `loadExtensions` loads compiled JavaScript only, so the example's `build.mjs` compiles the
- * pack to `dist/` and a deployment points at that directory. A TEST loads this source through the
+ * extension to `dist/` and a deployment points at that directory. A TEST loads this source through the
  * loader's explicit `typeStrippingImporter` seam instead.
  */
 import { defineExtension } from '@rayspec/platform';
 
 export default defineExtension({
-  // The pack's OWN declared version — `loadExtensions` FAIL-CLOSED-checks it equals the deployment's
+  // The extension's OWN declared version — `loadExtensions` FAIL-CLOSED-checks it equals the deployment's
   // exact `ref.version` pin (a SKEW aborts the deploy, never a silent skip).
   version: '1.0.0',
   fragments: {
@@ -49,8 +49,9 @@ export default defineExtension({
       },
     ],
     // ── handlers ────────────────────────────────────────────────────────────────────────────────
-    // The escape-hatch TS modules the stream/mint routes reference. `module` is relative to THIS PACK
-    // ROOT (loadExtensions jails each against the pack root — a pack handler can never climb out). All
+    // The escape-hatch TS modules the stream/mint routes reference. `module` is relative to THIS
+    // EXTENSION ROOT (loadExtensions jails each against the extension root — an extension handler
+    // can never climb out). All
     // `route`-kind (a stream/mint handler dispatches through the api chokepoint).
     handlers: [
       {

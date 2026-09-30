@@ -1,61 +1,61 @@
-# Stream backend — a synthetic stream/blob backend delivered as an extension pack
+# Stream backend — a synthetic stream/blob backend delivered as an extension
 
 This is a tiny, **synthetic** backend that is the platform's **own** forcing function for the
-`stream` primitive AND the **`extensions[]` pack mechanism**. It is **NOT** a real product pack —
+`stream` primitive AND the **`extensions[]` mechanism**. It is **NOT** a real product extension —
 those ship as product code in their own repos. A tiny synthetic fixture staying in `examples/` keeps
 the platform itself product-free while still proving the mechanism end-to-end.
 
-## The stream surface is an extension PACK
+## The stream surface is an extension
 
 The deployment `rayspec.yaml` is **THIN** — `version` + `metadata` + ONE `extensions[]` ref. The
 whole stream surface (the `blob_chunks` store, the ingest/playback/mint handlers, the stream + mint
-routes) lives in a **`defineExtension` pack** under [`packs/stream-pack/`](./packs/stream-pack):
+routes) lives in an **extension built with `defineExtension`** under [`packs/stream-pack/`](./packs/stream-pack):
 
 ```yaml
 extensions:
   - id: stream_pack
     module: ./packs/stream-pack   # a DIRECTORY (path-jailed at deploy; npm-module refs not exercised here)
-    version: 1.0.0                 # an EXACT pin — a SKEW with the pack manifest aborts the deploy
+    version: 1.0.0                 # an EXACT pin — a SKEW with the extension manifest aborts the deploy
 ```
 
-At boot, `@rayspec/platform`'s `loadExtensions` resolves the pack (directory-only **path-jailed**;
-**version-pin fail-closed** — a skew aborts the deploy, never a silent skip), jails each pack handler
-against the **pack root**, and **merges** the pack's store/handler/route fragments into the
-deployment spec. The **UNCHANGED** `deploy()` then materializes the pack store (through the
+At boot, `@rayspec/platform`'s `loadExtensions` resolves the extension (directory-only **path-jailed**;
+**version-pin fail-closed** — a skew aborts the deploy, never a silent skip), jails each extension handler
+against the **extension root**, and **merges** the extension's store/handler/route fragments into the
+deployment spec. The **UNCHANGED** `deploy()` then materializes the extension store (through the
 **UNCHANGED** migration gate + the chokepoint probe — **no new migration path**), the api interpreter
-serves the routes, and the path-jailed loader loads the handlers. A real product pack is the intended
+serves the routes, and the path-jailed loader loads the handlers. A real product extension is the intended
 consumer of this exact mechanism, shipped from its own repo.
 
 ## It lives OUTSIDE the platform — by design
 
-- The deployment dir is **not** a workspace package (a pure YAML fixture). The PACK
+- The deployment dir is **not** a workspace package (a pure YAML fixture). The EXTENSION
   (`packs/stream-pack`) IS a `@spike/*` workspace member **only** so pnpm links `@rayspec/platform`
-  into its `node_modules` (the pack ENTRY imports `defineExtension` at runtime). That workspace link
+  into its `node_modules` (the extension ENTRY imports `defineExtension` at runtime). That workspace link
   is the **in-repo** form of the platform dependency: the manifest's `workspace:*` specifiers resolve
-  only inside this workspace, so a real pack in its own repo declares the same two dependencies on a
+  only inside this workspace, so a real extension in its own repo declares the same two dependencies on a
   **released** version instead — see
-  [Shipping this pack from its own repo](#shipping-this-pack-from-its-own-repo). It declares **no**
+  [Shipping this extension from its own repo](#shipping-this-extension-from-its-own-repo). It declares **no**
   build/typecheck/test scripts and is excluded from CI by the `--filter='!@spike/*'` rule. It is not
   build-free, though: the deploy runtime loads compiled JavaScript only, so this example ships its own
-  [`build.mjs`](./build.mjs) (see [Shipping this pack from its own repo](#shipping-this-pack-from-its-own-repo)).
+  [`build.mjs`](./build.mjs) (see [Shipping this extension from its own repo](#shipping-this-extension-from-its-own-repo)).
 - **Zero product-specific code enters the platform.** The `stream`/`BlobStore`/`extensions[]`
   primitives are strictly product-agnostic (raw `Request`/`Response`, zero audio/media vocabulary in
-  core). The pack HANDLER modules import ONLY `@rayspec/handler-sdk` (type-only); the
-  manifest-derived `gate:handler-imports` + `gate:extension-capability` discover + scan the pack's
+  core). The extension HANDLER modules import ONLY `@rayspec/handler-sdk` (type-only); the
+  manifest-derived `gate:handler-imports` + `gate:extension-capability` discover + scan the extension's
   `handlers/` root.
 
-## Shipping this pack from its own repo
+## Shipping this extension from its own repo
 
-Copied out of this monorepo, this pack does **not** install as committed: its manifest declares
+Copied out of this monorepo, this extension does **not** install as committed: its manifest declares
 `@rayspec/platform` + `@rayspec/handler-sdk` as `workspace:*`, and the pnpm workspace protocol
 resolves only inside this workspace. Installing it elsewhere fails outright (`npm` →
 `EUNSUPPORTEDPROTOCOL`, `pnpm` → `ERR_PNPM_WORKSPACE_PKG_NOT_FOUND`), so `node_modules` stays empty
-and — in a deploy tree that carries no `@rayspec` install of its own — the pack entry aborts the boot
+and — in a deploy tree that carries no `@rayspec` install of its own — the extension entry aborts the boot
 fail-closed with
 
 ```
-extension 'stream_pack': failed to load pack entry 'index.ts' (…/dist/index.js):
-Cannot find package '@rayspec/platform' imported from …/dist/index.js — a pack's entry
+extension 'stream_pack': failed to load extension entry 'index.ts' (…/dist/index.js):
+Cannot find package '@rayspec/platform' imported from …/dist/index.js — an extension's entry
 module must default-export a defineExtension(...) manifest (fail-closed).
 ```
 
@@ -63,17 +63,17 @@ The trailing clause is the loader's standing advice on that error path, not a se
 entry never ran, so nothing could inspect what it exports.
 
 The **resolution rule** behind that error is the thing to design the delivery around: the loader
-imports the pack entry by the entry's own absolute file URL, so Node resolves the bare
-`@rayspec/platform` specifier from the **built file's own location** upward — the pack directory
-first, then every ancestor above it, the deployment root included. The pack's own `node_modules` is
-the first stop on that walk and the only one the pack controls, so a pack that brings its own
-dependencies is the one that gets the version it pinned. A pack shipped from its own repo needs
+imports the extension entry by the entry's own absolute file URL, so Node resolves the bare
+`@rayspec/platform` specifier from the **built file's own location** upward — the extension directory
+first, then every ancestor above it, the deployment root included. The extension's own `node_modules` is
+the first stop on that walk and the only one the extension controls, so an extension that brings its own
+dependencies is the one that gets the version it pinned. An extension shipped from its own repo needs
 three things.
 
 **1 — a manifest pinning a RELEASED platform.**
 [`packs/stream-pack/package.out-of-repo.json`](./packs/stream-pack/package.out-of-repo.json) is this
-pack's manifest in that form (the file additionally carries a `"//"` note explaining itself); copy it
-over `package.json` after copying the pack out:
+extension's manifest in that form (the file additionally carries a `"//"` note explaining itself); copy it
+over `package.json` after copying the extension out:
 
 ```json
 {
@@ -98,23 +98,23 @@ carried forward rather than re-measured. Check the registry for the current vers
 
 `@rayspec/platform` is a **runtime** dependency: the entry imports `defineExtension` as a VALUE, and
 `tsc` transpiles rather than bundles, so the bare specifier survives into `dist/index.js` and is
-resolved when the pack is loaded. `@rayspec/handler-sdk` is not in the same position — the handlers
+resolved when the extension is loaded. `@rayspec/handler-sdk` is not in the same position — the handlers
 import only its TYPES (`import type`, erased under `verbatimModuleSyntax`), so nothing asks for it at
 runtime. It is pinned here anyway, and deliberately: a handler that later imports a value from it
 would otherwise fail at boot rather than at build, and it costs one entry in a manifest that has to
 be version-locked to the platform regardless.
 
-**2 — an install, so the pack has a real `node_modules`.**
+**2 — an install, so the extension has a real `node_modules`.**
 
 ```bash
 npm install   # -> node_modules/@rayspec/{core,db,handler-sdk,platform,spec}
 ```
 
-**3 — the pack DIRECTORY at the deploy target, `dist/` *and* `node_modules/` together.** Put
+**3 — the extension DIRECTORY at the deploy target, `dist/` *and* `node_modules/` together.** Put
 `node_modules` where the upward walk from `dist/index.js` reaches it first — beside `dist/`, in the
-pack root. Ship `dist/` alone and the walk continues past the pack into the deploy tree, with two
+extension root. Ship `dist/` alone and the walk continues past the extension into the deploy tree, with two
 outcomes and no third: nothing up there provides `@rayspec/platform` and the boot fails with the
-error above, or something does and the pack quietly runs against a platform build it never pinned —
+error above, or something does and the extension quietly runs against a platform build it never pinned —
 exactly the version skew step 1 exists to prevent. The deployment spec then references the built
 directory:
 
@@ -126,28 +126,28 @@ extensions:
 ```
 
 Note the difference from the committed `rayspec.yaml` at the top of this page, which points at
-`./packs/stream-pack` — the pack SOURCE. That is the form this example's tests load, opting into the
+`./packs/stream-pack` — the extension SOURCE. That is the form this example's tests load, opting into the
 loader's explicit `typeStrippingImporter` seam. The seam strips nothing itself — it is the production
 importer minus the compiled-JavaScript assertion, a bare dynamic `import()` — so whether an un-built
 `.ts` entry executes is the RUNTIME's business, and under `pnpm test` it is the test runner's
 transform that handles it. A deploy runtime loads compiled JavaScript only, in this repository as
 much as outside it, so a deployment points at the built directory.
 
-To walk it with this pack: `node examples/stream-backend/build.mjs`, copy `packs/stream-pack/`
+To walk it with this extension: `node examples/stream-backend/build.mjs`, copy `packs/stream-pack/`
 (without its workspace-linked `node_modules`) anywhere outside the repo, do the three steps above.
 The `version` in this manifest is npm's, and nothing in the platform reads it. The version
 `loadExtensions` fail-closed-matches against the deployment's `extensions[].version` is the one the
-pack ENTRY declares — the `version` field passed to `defineExtension(...)` in `index.ts`. They are
+extension ENTRY declares — the `version` field passed to `defineExtension(...)` in `index.ts`. They are
 both `1.0.0` here, which is convenient and not a rule.
 
 ## What it exercises
 
-| Section        | In the pack (`packs/stream-pack/index.ts`)                                                        |
+| Section        | In the extension (`packs/stream-pack/index.ts`)                                                   |
 | -------------- | ------------------------------------------------------------------------------------------------ |
 | `stores`       | `blob_chunks` — a blob **pointer-row** table + a `chunk_ref` **`unique`** idempotency-authority   |
 | `api`          | a `stream`/`ingest` POST + a `play-token` mint POST + a `stream`/`playback` GET — all implemented |
 | `handlers`     | `chunk-ingest.ts` + `chunk-playback.ts` + `play-token-mint.ts` — all **route**-kind               |
-| `extensions`   | the deployment `rayspec.yaml` references THIS pack via one `ExtensionRef` (exact pin `1.0.0`)     |
+| `extensions`   | the deployment `rayspec.yaml` references THIS extension via one `ExtensionRef` (exact pin `1.0.0`) |
 
 ## The ingest contract — and its idempotency authority
 
@@ -166,7 +166,7 @@ prefix two tenants' same `(upload, index)` would collide).
 
 The committed `packs/stream-pack/generated/product-schema.ts` +
 `packs/stream-pack/drizzle/0000_product_stores.sql` are the spec-derived artifacts (`@rayspec/db`
-codegen — read the generated SQL, never blind-apply it) the pack ships; they carry the
+codegen — read the generated SQL, never blind-apply it) the extension ships; they carry the
 `blob_chunks_chunk_ref_unique` index that enforces the contract.
 
 ## The playback contract — the media-streaming read + the SECOND auth path
@@ -195,7 +195,7 @@ the standard (RS256 Bearer) auth chain that, after confirming the caller's tenan
 - `packages/kernel/platform/src/extensions/load-extensions.test.ts` — `loadExtensions` fail-closed
   battery (version-pin skew, path-jail, npm-style ref, non-manifest entry, multi-root merge).
 - `packages/compose/api-auth/src/engine/stream-ingest.db.test.ts` + `stream-playback.db.test.ts` — the
-  ingest + playback surface, loaded **via the pack** (`test-support/stream-pack-support.ts`).
-- `packages/app/server/src/stream-pack.db.test.ts` — the FULL pack mechanism end-to-end through the REAL
+  ingest + playback surface, loaded **via the extension** (`test-support/stream-pack-support.ts`).
+- `packages/app/server/src/stream-pack.db.test.ts` — the FULL extension mechanism end-to-end through the REAL
   composition root + a real DB (deploy → store materializes → ingest 200 → playback 206; version-skew
   aborts).

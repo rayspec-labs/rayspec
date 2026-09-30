@@ -197,14 +197,16 @@ maybeDescribe('rayspec deploy --check-env — the demands, through the built CLI
   it('states the pack boundary rather than hiding it', async () => {
     const { out } = await checkEnv(['--check-env', './compound.rayspec.yaml']);
     const notChecked = (JSON.parse(out).notChecked as string[]).join(' ');
-    expect(notChecked).toContain('no extension pack is loaded');
+    expect(notChecked).toContain('no extension is loaded');
     // BOTH directions, and BOTH of the adding ones: a pack removes a demand by supplying a blob
     // backend, and adds one with a contributed ROUTE as well as with a contributed agent. The route
     // direction is the one a document can hit while declaring no api section of its own at all.
     expect(notChecked).toContain('REMOVE one');
-    expect(notChecked).toContain('pack-contributed api route adds the RAYSPEC_BLOB_ROOT demand');
+    expect(notChecked).toContain(
+      'extension-contributed api route adds the RAYSPEC_BLOB_ROOT demand',
+    );
     expect(notChecked).toContain("RAYSPEC_MEDIA_SIGNING_KEY demand (mode:'playback')");
-    expect(notChecked).toContain('pack-contributed agent adds its backend credential demand');
+    expect(notChecked).toContain('extension-contributed agent adds its backend credential demand');
   });
 
   it("does not invent a refusal for a posture flag this document's boot never reads", async () => {

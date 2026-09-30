@@ -1,7 +1,7 @@
 # @rayspec/platform
 
 The platform composition surface. Ships the extension seam (`defineExtension`) that
-extension packs import, plus concrete deployer-injected backends such as the fs-backed
+extensions import, plus concrete deployer-injected backends such as the fs-backed
 `BlobStore` (tenant-bound by construction and path-jailed; the neutral `BlobStore`
 interface itself lives in `@rayspec/handler-sdk`).
 

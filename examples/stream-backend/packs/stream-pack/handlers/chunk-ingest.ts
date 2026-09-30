@@ -1,12 +1,12 @@
 /**
  * Escape-hatch STREAM ingest handler for the synthetic stream backend.
  *
- * This is the PACK-SIDE contract logic — the platform-owned SYNTHETIC forcing-function for the
- * `stream` (mode:'ingest') primitive, NOT product code (a real product pack ships from its own
+ * This is the EXTENSION-SIDE contract logic — the platform-owned SYNTHETIC forcing-function for the
+ * `stream` (mode:'ingest') primitive, NOT product code (a real product extension ships from its own
  * repo). It is `route`-kind (a stream handler dispatches through the api chokepoint) but receives a
  * `StreamRouteHandlerInit` (the raw Web `Request` + the tenant-bound `init.blob` + `init.db` + the
  * route `params`) and returns a raw Web `Response`. The platform provides ONLY the raw-stream plumbing
- * + the tenant-bound capabilities; the 200-ack / 409-gap / 200-no-op CONTRACT below is pack logic.
+ * + the tenant-bound capabilities; the 200-ack / 409-gap / 200-no-op CONTRACT below is extension logic.
  *
  * Imports `@rayspec/handler-sdk` TYPE-ONLY (erased at runtime); this dir is in no tsconfig, so tsc
  * never compiles it, and the `gate:handler-imports` tripwire confirms it imports nothing else. The

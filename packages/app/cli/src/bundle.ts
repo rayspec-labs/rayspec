@@ -26,6 +26,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { inspectBundle, verifySignatureFile } from '@rayspec/bundle';
+import { checkDerivedFields, deriveManifestFields, parseBundleSpec } from '@rayspec/bundle-closure';
 import {
   type ApplicationManifest,
   type BundleError,
@@ -39,7 +40,6 @@ import {
   SUPPORTED_TARGETS,
   V1_EXECUTION_LEVELS,
 } from '@rayspec/bundle-contract';
-import { checkDerivedFields, deriveManifestFields, parseBundleSpec } from './bundle-spec.js';
 import { type Envelope, envelope, usageEnvelope } from './envelope.js';
 
 /** A problem with the `bundle` group itself (no or an unknown subcommand): exit 2 in index.ts. */

@@ -1,14 +1,14 @@
 /**
  * Escape-hatch STREAM playback handler for the synthetic stream backend.
  *
- * This is the PACK-SIDE contract logic — the platform-owned SYNTHETIC forcing-function for the
- * `stream` (mode:'playback') primitive, NOT product code (a real product pack ships from its own
+ * This is the EXTENSION-SIDE contract logic — the platform-owned SYNTHETIC forcing-function for the
+ * `stream` (mode:'playback') primitive, NOT product code (a real product extension ships from its own
  * repo). It is `route`-kind (a stream handler dispatches through the api chokepoint) but receives a
  * `StreamRouteHandlerInit` (the raw Web `Request` + the tenant-bound `init.blob`/`init.db` + the route
  * `params` + the verified-but-NOT-trusted media `resource` claim) and returns a raw Web `Response`.
  * The platform provides ONLY the tenant-bound capabilities + the media-JWT verification (at the route's
  * middleware tuple); the Range/206 + conditional-GET + 416 CONTRACT and the DB ownership re-validation
- * below are pack logic. Zero media/audio vocabulary enters the platform.
+ * below are extension logic. Zero media/audio vocabulary enters the platform.
  *
  * Imports `@rayspec/handler-sdk` TYPE-ONLY (erased at runtime); the `gate:handler-imports` +
  * `gate:extension-capability` tripwires confirm it imports nothing else + self-constructs no raw

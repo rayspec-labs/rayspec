@@ -22,22 +22,22 @@ documented exception, `--help`, which prints plain text there instead (see
 | ---- | ---------------------------------------------------------------------- |
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
-| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse. |
-| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide. Bundle verbs only. |
-| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify. Bundle verbs only. |
-| `6`  | Interrupted by SIGINT or SIGTERM before the command finished. Bundle verbs only. |
+| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse, and `pack` for an application it cannot package or an output that exists. |
+| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide, or an application declares a `@rayspec/*` range that excludes the runtime it pins. Bundle verbs and `pack` only. |
+| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify. Bundle verbs and `pack` only. |
+| `6`  | Interrupted by SIGINT or SIGTERM before the command finished. Bundle verbs and `pack` only. |
 | `7`  | An unexpected internal failure (a defect, not a verdict). A short JSON error is written to **stderr**. |
 
 The existing commands keep `0`, `1` and `2` for every outcome they have; only
-an unexpected internal failure changed, from `2` to `7`. A bundle verb that
-fails several checks exits with the class that comes first in the order
-7, 6, 4, 3, 2, 1, 5.
+an unexpected internal failure changed, from `2` to `7`. A bundle verb or
+`pack` that fails several checks exits with the class that comes first in the
+order 7, 6, 4, 3, 2, 1, 5.
 
 A bad, missing, or out-of-jail **spec path** given to `doctor`, `plan`, or
 `openapi` is *not* a usage error — it is caught and returned as an `ok: false`
 result on **stdout** (exit `1`), the same channel as an invalid spec.
 
-The commands split into three groups:
+The commands split into these groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
@@ -45,6 +45,9 @@ The commands split into three groups:
   a `.ray` application bundle and never extract, import or run anything from it,
   and write nothing. They answer with the result envelope described under
   [`--json`](#the---json-flag).
+- **`pack`** writes one `.ray` application bundle from an application that is
+  already built. It builds, imports and runs nothing, and writes nothing but its
+  output file. It answers with the result envelope too.
 - A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
   database `DATABASE_URL` names (and applies the committed migration chain to
   it), so it is deliberately *not* under `dev`, which is local-only. It prints no
@@ -134,8 +137,9 @@ switches the answer to the **result envelope**, one JSON object on stdout:
   shutdown (exit `0`), `ok: false` with the refusal as `RAY_CHECK_FAILED` when
   the boot is refused (exit `1`).
 - Without `--json`, every existing command's output is what it has always been.
-- The bundle verbs always answer with the envelope; for them the flag only
-  silences the short description they otherwise print on stderr.
+- The bundle verbs and `pack` always answer with the envelope; for them the
+  flag only silences the short description (for `pack`, the inclusion summary)
+  they otherwise print on stderr.
 
 ### The spec-path jail
 
@@ -400,6 +404,130 @@ the emitted file and deploy, provided the deployment directory resolves `.js` as
 ESM (`"type": "module"` in its nearest `package.json`, which the build wrapper
 also writes). The `nextSteps` field of the envelope states this for the target
 you actually asked for.
+
+---
+
+## `pack`
+
+```
+rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
+             [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
+             [--force] [--json]
+```
+
+Writes an application bundle (`.ray`) from an application that is **already
+built**: the spec, the compiled handler and extension modules with everything
+they import, the built frontend directories, the product configuration files,
+the third-party packages the modules need, the dependency lock, a CycloneDX SBOM
+(`payload/sbom.cdx.json`) and the license notices
+(`payload/THIRD-PARTY-NOTICES.txt`). What goes in, what never does and how to fix
+each refusal are in the [packing guide](./packing.md).
+
+It runs these steps in order and stops at the first failure:
+
+1. **Arguments.** `RAY_USAGE`.
+2. **Spec.** The spec (either profile) is parsed. `RAY_SPEC_INVALID`, followed
+   by each grammar error as a `SPEC_` code.
+3. **Identity.** `metadata.id` and `metadata.version` of a backend spec, or
+   `product.metadata.id` and `product.metadata.version` of a product spec;
+   `--id` and `--version` override them. Neither the name nor the runtime
+   version is ever used instead. `RAY_APPLICATION_IDENTITY_MISSING` with reason
+   `id` or `version`.
+4. **Closure.** The inclusion list is built from what the spec names, never from
+   the directory as a whole, and every path stays inside the directory of the
+   spec. `@rayspec/*` packages are never copied: the runtime provides them, and a
+   declared range that excludes the pinned runtime is `RAY_RUNTIME_UNSUPPORTED`.
+   A missing or uncompiled module (with the build instruction in the message), an
+   unresolved or computed import, a shared peer dependency that would need two
+   copies, a symbolic or hard link, an explicitly named excluded file, a native
+   addon not built for linux/x64 and Node 22, a package binary or `os`/`cpu`
+   field for another platform, or a source map (a file or inlined) without
+   `--source-maps` is `RAY_CLOSURE_INVALID` with reason `unresolved-import`,
+   `escaping-link`, `excluded-file`, `native-module` or
+   `source-map-not-opted-in`.
+5. **Secret scan.** A private key or a secret file name in any file that would
+   go in. `RAY_SECRET_DETECTED`, naming the path and never the content.
+6. **Manifest.** The bundle must stay within the entry, path and size limits
+   (`RAY_LIMIT_EXCEEDED`), and no binding name it declares may be reserved for the
+   operator (`RAY_BINDING_RESERVED`).
+7. **Write.** An existing output is `RAY_OUTPUT_EXISTS` unless `--force` is
+   given; a directory as the output, or an output directory that does not exist,
+   is `RAY_USAGE`. The archive is written to a temporary file in the directory of
+   the output, synced, read back through the bundle reader, compared file by file
+   with the digests the closure was checked under (a file rewritten in between is
+   `RAY_USAGE`), and only then linked to the output path, or renamed over it with
+   `--force`. A refused or interrupted pack leaves neither the output nor a
+   temporary file.
+
+- **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
+- **Runs nothing.** Handlers, extensions and frontends must be built first; pack
+  reads modules with a lexer and never imports, evaluates or installs anything.
+  `--build`, which would run the build in a disposable sandbox, is not available
+  yet: it is refused with `RAY_USAGE` naming the manual build step, and it is not
+  listed in `--help`. `--against` and `--allowlist`, which would carry a product
+  delta, are refused the same way; review and apply a delta with
+  [`plan --against`](#plan) and
+  [`deploy --apply-migration`](#deploy--boot-and-serve-a-declared-product).
+- **Deterministic.** The same prepared files and flags give the same bytes,
+  wherever and whenever they are packed. Bundle paths are relative to the
+  directory of the spec, and the archive carries no timestamp, user, host or
+  absolute path.
+- **Flags:** `--spec <path>` and `--output <file.ray>`, both required (with
+  `--preview` too, although nothing is written then); `--id <application-id>`
+  (a lowercase letter, then up to 62 lowercase letters, digits or hyphens);
+  `--version <semver>` (exact, no build metadata); `--runtime <exact-version>`
+  (default: this CLI's version); `--include <path>`, repeatable, a file or
+  directory relative to the spec; `--source-maps` (carry `*.map` files and
+  scripts or style sheets that inline their source map); `--preview`;
+  `--force`; `--json`.
+- **Output:** the result envelope on stdout (operation `pack`), with or without
+  `--json`:
+
+  ```json
+  {
+    "contractVersion": "1.0.0-draft.2",
+    "ok": true,
+    "operation": "pack",
+    "operationId": "…",
+    "data": {
+      "outputPath": "/home/me/notes-1.4.0.ray",
+      "preview": false,
+      "sha256": "…",
+      "size": 3874,
+      "applicationId": "notes",
+      "applicationVersion": "1.4.0",
+      "runtimeVersion": "1.8.0",
+      "target": { "os": "linux", "arch": "x64", "nodeMajor": 22 },
+      "requires": ["declarative-api", "declarative-stores", "static-frontend"],
+      "bindings": [],
+      "execution": "none",
+      "egressHosts": [],
+      "inclusion": [
+        { "path": "payload/THIRD-PARTY-NOTICES.txt", "size": 192, "sha256": "…", "source": "generated" },
+        { "path": "payload/rayspec.yaml", "size": 431, "sha256": "…", "source": "rayspec.yaml" },
+        { "path": "payload/sbom.cdx.json", "size": 203, "sha256": "…", "source": "generated" },
+        { "path": "payload/web/dist/index.html", "size": 612, "sha256": "…", "source": "web/dist/index.html" }
+      ]
+    },
+    "errors": [],
+    "warnings": []
+  }
+  ```
+
+  `outputPath` is the absolute path written. With `--preview`, `preview` is
+  `true` and `outputPath`, `sha256` and `size` are `null`. On a refusal `ok` is
+  `false` and `data` is `null`. `bindings` lists names, kinds and requiredness,
+  never values. A spec that uses an agent backend but declares no egress hosts
+  gets the warning `RAY_W_EGRESS_UNDECLARED`. On stderr: the operation id and,
+  without `--json`, the inclusion summary — application, runtime and target,
+  capabilities, binding names, execution level, egress hosts, file count and
+  bytes, what was left out and why, warnings, and the output path and SHA-256
+  (`--preview` also lists every file). The summary says that nothing was
+  deployed; check the bundle with [`bundle verify`](#bundle-verify).
+- **Exit:** `0` written (or previewed), `1` spec invalid, `2` usage, identity,
+  closure, limit or an existing output, `3` a `@rayspec/*` range that excludes
+  the pinned runtime, `4` a secret or a reserved binding name, `6` interrupted,
+  `7` internal error.
 
 ---
 
@@ -1002,17 +1130,17 @@ change is applied by the explicit `--apply-migration` flag below.
 
   What it deliberately does not do is in the verdict's `notChecked`, not left to
   inference. It opens **no socket, no database and no credential**, and it loads **no
-  extension pack** — running pack code is what would break that promise — so every
-  demand a pack changes is invisible here. It runs in **both** directions: a
-  pack-supplied blob backend *removes* the `RAYSPEC_BLOB_ROOT` demand, while a
-  pack-contributed `api` route *adds* the `RAYSPEC_BLOB_ROOT` demand (any
+  extension** — running extension code is what would break that promise — so every
+  demand an extension changes is invisible here. It runs in **both** directions: an
+  extension-supplied blob backend *removes* the `RAYSPEC_BLOB_ROOT` demand, while an
+  extension-contributed `api` route *adds* the `RAYSPEC_BLOB_ROOT` demand (any
   `kind: stream`) and the `RAYSPEC_MEDIA_SIGNING_KEY` demand (`mode: playback`), and a
-  pack-contributed agent *adds* its backend's credential demand. The boot guards ask
+  extension-contributed agent *adds* its backend's credential demand. The boot guards ask
   their questions of the **post-merge** document; this reads the base one — so a
-  document whose whole route surface arrives from a pack (the
+  document whose whole route surface arrives from an extension (the
   [`stream-backend` example](../examples/stream-backend/rayspec.yaml) is exactly that
   shape) reports the three unconditional secrets and nothing more. To keep that from
-  reading as a clean bill of health, the verdict **names the packs the document
+  reading as a clean bill of health, the verdict **names the extensions the document
   declares** — parsed off `extensions[]`, never loaded. A set `<VAR>_FILE` mount counts
   as set from the variable alone: the file is
   never opened, so a missing, unreadable or empty secret file still refuses the boot.
@@ -1078,7 +1206,7 @@ change is applied by the explicit `--apply-migration` flag below.
 - **Profiles — declaration vs. custom code.** `deploy` runs a **product-profile**
   document (like `examples/acme-notes/acme-notes.product.yaml`) directly — it is
   pure declaration with no custom code and no build step. A **backend-profile**
-  document may ship custom escape-hatch handler modules (and an extension pack is
+  document may ship custom escape-hatch handler modules (and an extension is
   authored the same way); the runtime loads them as **compiled JavaScript only** —
   it fail-closed-rejects a `.ts` module path at roll-out, deterministically (this
   does not rely on the Node version, even where Node transparently type-strips `.ts`):
@@ -1091,10 +1219,12 @@ change is applied by the explicit `--apply-migration` flag below.
   Compile such handlers to `.js` first and deploy the compiled artifact — the deploy
   runtime ships no turnkey `.ts` loader. The bundled examples ship a build step
   (`build.mjs`): `examples/acme-notes-backend` emits a deploy-ready `dist/rayspec.yaml`,
-  and `examples/stream-backend` compiles its extension pack. A **pack** additionally
+  and `examples/stream-backend` compiles its extension. An **extension** additionally
   resolves `@rayspec/platform` at load starting from its own compiled entry's location, so
-  ship the pack directory to the deploy target with its installed `node_modules` — that is
-  what pins the platform build it runs against. See
+  ship the extension directory to the deploy target with its installed `node_modules` —
+  that is what pins the platform build it runs against. An application bundle written by
+  [`pack`](#pack) is the exception: it leaves `@rayspec/*` out of the extension's files,
+  because the runtime that deploys the bundle provides them. See
   [spec-reference → `extensions`](./spec-reference.md#extensions) for the section grammar and
   [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot)
   for the walkthrough.
@@ -1220,6 +1350,8 @@ It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
 
 ## See also
 
+- **[Packing an application](./packing.md)** — what `pack` puts in a bundle, what
+  it leaves out, and how to fix each refusal.
 - **[Getting started](./getting-started.md)** — these commands in sequence.
 - **[Spec reference](./spec-reference.md)** — the grammar `doctor`/`plan`/`openapi`
   check.
