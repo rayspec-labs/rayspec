@@ -190,6 +190,13 @@ structural gate. It needs:
   both) and generates only what is missing.
 - **`ffmpeg` on the `PATH`** for the media suites. Without it they skip; set
   `RAYSPEC_REQUIRE_MEDIA_TESTS=true` to turn that skip into a failure.
+- **The runtime-role lane.** CI runs the `@rayspec/api-auth` suite a second time
+  with `RAYSPEC_TEST_DATABASE_ISOLATION=roles`: its test harness then serves the app
+  as a runtime role of its own (no superuser, no `BYPASSRLS`, owner of nothing) with
+  every tenant table's row-level policy enabled and forced. Run it locally with
+  `RAYSPEC_TEST_DATABASE_ISOLATION=roles pnpm --filter @rayspec/api-auth test`. The
+  row-level isolation suites of `@rayspec/db` and `@rayspec/server` create their own
+  throwaway roles and run in the ordinary lane.
 - **Time.** The test task runs one package at a time and takes a little over ten
   minutes on a current laptop. `pnpm test` keeps going after a package fails, so the
   summary at the end lists every failed package, and the command still exits

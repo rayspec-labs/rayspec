@@ -370,6 +370,21 @@ jobs:
           PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
             -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
 
+      # The three database roles of the isolated posture (migration, runtime, snapshot), created by
+      # the SAME setup SQL an operator runs — twice, because it must be idempotent — with the dev
+      # container's placeholder passwords, and the runtime role's attributes checked. The suites that
+      # prove row-level isolation create roles of their own through the same file.
+      - name: Create database roles
+        run: |
+          for run in 1 2; do
+            PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d rayspec -v ON_ERROR_STOP=1 \
+              -f packages/kernel/db/sql/database-roles.sql
+          done
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d rayspec -v ON_ERROR_STOP=1 \
+            -f scripts/init-dev-role-passwords.sql
+          test "$(PGPASSWORD=rayspec_runtime psql -h localhost -p 5433 -U rayspec_runtime -d rayspec -tAc \
+            "SELECT rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname = current_user")" = "f"
+
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10.12.4
@@ -442,6 +457,15 @@ jobs:
             --filter='@rayspec/durable-dbos' \
             --filter='@rayspec/workflow-durable' \
             --filter='@rayspec/local-boot'
+
+      # The api-auth suite again, served as a runtime role of its own — no superuser, no BYPASSRLS,
+      # owner of nothing — with every tenant table's row-level policy enabled and forced
+      # (RAYSPEC_TEST_DATABASE_ISOLATION=roles, see the api-auth test harness). The whole surface,
+      # cross-tenant gate included, must pass with the database enforcing tenancy on its own too.
+      - name: Test (api-auth as the runtime role under row-level security)
+        env:
+          RAYSPEC_TEST_DATABASE_ISOLATION: roles
+        run: pnpm exec turbo run test --filter='@rayspec/api-auth'
 
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   # LANE 3 — live providers (OPT-IN, non-blocking). Runs ONLY on a manual workflow_dispatch, so it
