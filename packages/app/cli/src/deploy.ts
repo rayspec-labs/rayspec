@@ -33,6 +33,7 @@
  * into `rayspec doctor` / the read-only floor.
  */
 
+import { writeSync } from 'node:fs';
 import { type ParseArgsConfig, parseArgs } from 'node:util';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
@@ -40,6 +41,7 @@ import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // it — and every other subcommand — loads none of @rayspec/server.
 import type { BootEnvReport } from '@rayspec/server/boot-env';
 import type { FrontendSpec, SpecError } from '@rayspec/spec';
+import { legacyEnvelope } from './envelope.js';
 import { dotenvCandidatePaths } from './read-env.js';
 import { ReadSpecError, readSpecFile, resolveSpecPath } from './read-spec.js';
 
@@ -188,6 +190,16 @@ export type DeployOutcome =
   | { readonly kind: 'served' };
 
 /**
+ * How a serving deploy reports. Plain is today's output: banners on stdout, refusals on stderr. With
+ * `--json` the banners move to stderr and the process writes ONE result envelope on stdout when it
+ * stops — `ok: true` after a signal-driven shutdown, `ok: false` (`RAY_CHECK_FAILED`) when the boot is
+ * refused — so stdout carries nothing but that envelope.
+ */
+export type DeployReporting =
+  | { readonly json: false }
+  | { readonly json: true; readonly operationId: string };
+
+/**
  * `deploy`'s option set — the ONE declaration of which flags the command takes, hoisted out of the
  * `parseArgs` call below so it is readable as a VALUE. `parseDeployArgs` is its only runtime
  * consumer and passes it through unchanged, so the grammar is exactly what it always was.
@@ -253,7 +265,10 @@ export function parseDeployArgs(args: readonly string[]): {
  * through this return — and the open port + signal handlers keep the process alive until
  * SIGINT/SIGTERM).
  */
-export async function runDeploy(args: readonly string[]): Promise<DeployOutcome> {
+export async function runDeploy(
+  args: readonly string[],
+  reporting: DeployReporting = { json: false },
+): Promise<DeployOutcome> {
   const { positionals, dryRun, checkEnv, port, host, applyMigration, allowlist } =
     parseDeployArgs(args);
   // The two one-shot modes answer different questions and neither is a stage of the other: --dry-run
@@ -354,7 +369,7 @@ export async function runDeploy(args: readonly string[]): Promise<DeployOutcome>
     }
   }
 
-  await serveDeployment(specPath, port, migrationPath, allowlistPath, host);
+  await serveDeployment(specPath, port, migrationPath, allowlistPath, host, reporting);
   return { kind: 'served' };
 }
 
@@ -597,7 +612,9 @@ export async function serveDeployment(
   migrationPath?: string,
   allowlistPath?: string,
   hostOverride?: string,
+  reporting: DeployReporting = { json: false },
 ): Promise<void> {
+  const report = serveReport(reporting);
   // RAYSPEC_SPEC_PATH is how loadServerConfig/assembleServer find the doc — set it from the positional
   // (the operator typed the path once). An explicit --port overrides the PORT env.
   process.env.RAYSPEC_SPEC_PATH = specPath;
@@ -653,6 +670,7 @@ export async function serveDeployment(
   } catch (err) {
     if (err instanceof BootConfigError) {
       console.error(`[rayspec deploy] ${err.message}`);
+      report.refused(err.message);
       process.exit(1);
       return; // unreachable in production; keeps a test that stubs process.exit from booting on anyway.
     }
@@ -693,7 +711,7 @@ export async function serveDeployment(
     // wrapper that could drift from the other's.
     const staticBoot = detectStaticProfile(specPath);
     if (staticBoot) {
-      console.log(
+      report.log(
         '[rayspec deploy] booting — static profile (frontend-only): no database, no auth surface…',
       );
       const staticConfig = loadStaticServerConfig();
@@ -701,7 +719,7 @@ export async function serveDeployment(
       const httpStatic = serve(
         { fetch: staticServer.app.fetch, hostname: staticConfig.host, port: staticConfig.port },
         (info) => {
-          console.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
+          report.log(staticBootBanner(staticServer, bootBaseUrl(info.address, info.port)));
         },
       );
       // `serve()` returns with the bind still PENDING, so a taken port arrives as an `'error'` event
@@ -713,7 +731,8 @@ export async function serveDeployment(
         prefix: '[rayspec deploy]',
       });
       const shutdownStatic = (signal: string): void => {
-        console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
+        report.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
+        report.stopped(signal);
         httpStatic.close(async () => {
           await staticServer.close();
           process.exit(0);
@@ -739,7 +758,7 @@ export async function serveDeployment(
       (info) => {
         // Log the ACTUAL bound address (info.address), never a hard-coded loopback (parity with
         // rayspec-serve) — a non-loopback --host/RAYSPEC_HOST bind must show in the banner.
-        console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
+        report.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
       },
     );
     // The same bind refusal the static branch above attaches: a taken port refuses the boot instead
@@ -751,7 +770,8 @@ export async function serveDeployment(
     });
 
     const shutdown = (signal: string): void => {
-      console.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
+      report.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
+      report.stopped(signal);
       httpServer.close(async () => {
         await server.close();
         process.exit(0);
@@ -764,6 +784,7 @@ export async function serveDeployment(
     // sanctioned registration path (a verify-not-register failure means the product tables were not
     // registered through registerProductTables → registerProductStores).
     if (err instanceof DeployError) {
+      report.refused(`roll-out refused: ${err.message}`);
       console.error(
         `[rayspec deploy] roll-out refused: ${err.message}\n` +
           '    (the product stores are registered through the sanctioned registerProductTables ' +
@@ -790,8 +811,10 @@ export async function serveDeployment(
       //
       // A missing-REQUIRED-variable refusal additionally names the `.env` paths the CLI's auto-loader
       // searched — the one fact the operator whose ./.env sits in the invoking project needs.
+      report.refused(`${err.message}${missingEnvSearchedSuffix(err.message)}`);
       console.error(`[rayspec deploy] ${err.message}${missingEnvSearchedSuffix(err.message)}`);
     } else {
+      report.refused('the boot failed unexpectedly; the details are on stderr');
       console.error(
         '[rayspec deploy] boot failed:',
         err instanceof Error ? err.stack : String(err),
@@ -799,6 +822,54 @@ export async function serveDeployment(
     }
     process.exit(1);
   }
+}
+
+interface ServeReport {
+  /** A banner or progress line: stdout when plain, stderr with `--json`. */
+  log(line: string): void;
+  /** Record the refusal the envelope reports if the process now exits non-zero. */
+  refused(message: string): void;
+  /** Record the signal that stopped a served deployment. */
+  stopped(signal: string): void;
+}
+
+/**
+ * The reporting of one serving deploy. With `--json` it registers a process `'exit'` listener that
+ * writes the one envelope synchronously as the process leaves — every way a serving deploy ends is a
+ * `process.exit`, including the bind refusal the server package raises, so no ending escapes it. An
+ * exit without a recorded refusal or stop (a refusal raised outside this module) still reports
+ * `ok: false`, with the reason left on stderr.
+ */
+function serveReport(reporting: DeployReporting): ServeReport {
+  if (!reporting.json) {
+    return { log: (line) => console.log(line), refused: () => {}, stopped: () => {} };
+  }
+  let refusal: string | undefined;
+  let stoppedBy: string | undefined;
+  let written = false;
+  process.on('exit', (code) => {
+    if (written) return;
+    written = true;
+    const ok = code === 0 && refusal === undefined;
+    const result = ok
+      ? { ok: true, mode: 'serve', stoppedBy: stoppedBy ?? null }
+      : {
+          ok: false,
+          mode: 'serve',
+          errors: [refusal ?? 'the deployment stopped with a refusal; the reason is on stderr'],
+        };
+    const envelope = legacyEnvelope('deploy.legacy', reporting.operationId, result, ok);
+    writeSync(1, `${JSON.stringify(envelope, null, 2)}\n`);
+  });
+  return {
+    log: (line) => console.error(line),
+    refused: (message) => {
+      refusal = message;
+    },
+    stopped: (signal) => {
+      stoppedBy = signal;
+    },
+  };
 }
 
 /** A secret-free message from an unknown throw (never echoes env/DB values). */

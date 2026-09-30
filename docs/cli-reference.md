@@ -16,13 +16,22 @@ check against, see the [spec reference](./spec-reference.md).
 
 Every `rayspec` subcommand emits **exactly one JSON object on stdout** — with one
 documented exception, `--help`, which prints plain text there instead (see
-[below](#the---help-flag)) — and uses a three-value exit-code contract:
+[below](#the---help-flag)) — and uses this exit-code contract:
 
 | Exit | Meaning                                                                 |
 | ---- | ---------------------------------------------------------------------- |
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
-| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. |
+| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse. |
+| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide. Bundle verbs only. |
+| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify. Bundle verbs only. |
+| `6`  | Interrupted by SIGINT or SIGTERM before the command finished. Bundle verbs only. |
+| `7`  | An unexpected internal failure (a defect, not a verdict). A short JSON error is written to **stderr**. |
+
+The existing commands keep `0`, `1` and `2` for every outcome they have; only
+an unexpected internal failure changed, from `2` to `7`. A bundle verb that
+fails several checks exits with the class that comes first in the order
+7, 6, 4, 3, 2, 1, 5.
 
 A bad, missing, or out-of-jail **spec path** given to `doctor`, `plan`, or
 `openapi` is *not* a usage error — it is caught and returned as an `ok: false`
@@ -32,6 +41,10 @@ The commands split into three groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
+- The **passive `bundle` group** — `bundle inspect`, `bundle verify`. They read
+  a `.ray` application bundle and never extract, import or run anything from it,
+  and write nothing. They answer with the result envelope described under
+  [`--json`](#the---json-flag).
 - A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
   database `DATABASE_URL` names (and applies the committed migration chain to
   it), so it is deliberately *not* under `dev`, which is local-only. It prints no
@@ -85,6 +98,44 @@ command's own argument grammar, which the top level hands over untouched, so a
 
 Every *other* leading `--flag` remains a usage error (the exit-`2` row above):
 with no subcommand there is nothing to dispatch it to.
+
+### The `--json` flag
+
+`--json` is accepted by every command, anywhere before a `--` terminator. It
+switches the answer to the **result envelope**, one JSON object on stdout:
+
+```json
+{
+  "contractVersion": "1.0.0-draft.2",
+  "ok": false,
+  "operation": "doctor",
+  "operationId": "3f0c2a8e-9b1d-4c47-8e2a-5d7f6b1c9a04",
+  "data": { "ok": false, "errors": [{ "code": "unknown_field", "message": "…", "path": "bogus" }], "warnings": [] },
+  "errors": [{ "code": "SPEC_UNKNOWN_FIELD", "message": "…", "path": "bogus", "retryable": false }],
+  "warnings": [{ "code": "RAY_W_LEGACY_OUTPUT", "message": "this command reports its own result object in data" }]
+}
+```
+
+- `ok` is `true` exactly when `errors` is empty; `errors[0]` is the first check
+  that failed.
+- `operationId` is a fresh random UUID for each invocation. It is also printed
+  as the first line on **stderr** (`operationId: <uuid>`), so a saved envelope
+  and the stderr log of the same run can be matched.
+- On an existing command, `data` is the command's own result object, unchanged,
+  and the warning `RAY_W_LEGACY_OUTPUT` says so. A spec error appears in
+  `errors` as `SPEC_` plus its code in upper case (`unknown_field` becomes
+  `SPEC_UNKNOWN_FIELD`); any other error of the result becomes
+  `RAY_CHECK_FAILED` with its message. A usage error is `RAY_USAGE` (exit `2`)
+  with `data: null`, and the usage text is not printed. The exit code is the one
+  the command has without the flag. `--help` and `--version` put their text or
+  object in `data`.
+- A serving `deploy` with `--json` prints its banners on stderr instead and
+  writes its one envelope when it stops: `ok: true` after a SIGINT/SIGTERM
+  shutdown (exit `0`), `ok: false` with the refusal as `RAY_CHECK_FAILED` when
+  the boot is refused (exit `1`).
+- Without `--json`, every existing command's output is what it has always been.
+- The bundle verbs always answer with the envelope; for them the flag only
+  silences the short description they otherwise print on stderr.
 
 ### The spec-path jail
 
@@ -349,6 +400,165 @@ the emitted file and deploy, provided the deployment directory resolves `.js` as
 ESM (`"type": "module"` in its nearest `package.json`, which the build wrapper
 also writes). The `nextSteps` field of the envelope states this for the target
 you actually asked for.
+
+---
+
+## `bundle inspect`
+
+```
+rayspec bundle inspect <file.ray> [--json]
+```
+
+Reads a `.ray` application or migration bundle and reports what it is. It runs
+the structural checks of the bundle reader, in order, and stops at the first
+failure: the archive size, the ZIP container (the strict profile: stored entries,
+fixed header values, no ZIP64, comments, extra fields or data descriptors, and
+names that cannot escape the payload or collide), the `ray.json` manifest (its
+bytes, schema and semantics), and every entry streamed against the manifest's
+inventory (size, CRC-32 and SHA-256, under the extracted-byte limit). It does
+**not** check the runtime, target, capabilities, spec or signature — that is
+`bundle verify`.
+
+- **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
+- **Passive:** nothing in the archive is extracted, imported, evaluated or run,
+  and nothing is written anywhere. A read has a wall-time budget of five minutes.
+- **Flags:** `--json` only; exactly one positional archive path. A path that
+  is missing or is not a regular file (a directory, a device, a FIFO) is
+  `RAY_USAGE`; a FIFO is refused at once, never waited on.
+- **Output:** the result envelope on stdout (operation `bundle.inspect`), with
+  or without `--json`:
+
+  ```json
+  {
+    "contractVersion": "1.0.0-draft.2",
+    "ok": true,
+    "operation": "bundle.inspect",
+    "operationId": "…",
+    "data": {
+      "sha256": "20331da54f5c5b0911e1d9fe6dc4732b6ebd28448930d845b6a84e0188a9d194",
+      "size": 1807,
+      "entries": 5,
+      "kind": "application",
+      "applicationId": "format-fixture",
+      "applicationVersion": "0.0.0-contract-fixture",
+      "runtimeVersion": "0.0.0-contract-fixture",
+      "target": { "arch": "x64", "nodeMajor": 22, "os": "linux" },
+      "requires": ["static-frontend"],
+      "bindings": [],
+      "execution": "none",
+      "egressHosts": [],
+      "signature": { "present": false, "verified": false, "publicKeySha256": null },
+      "verdict": "structurally-valid"
+    },
+    "errors": [],
+    "warnings": []
+  }
+  ```
+
+  `bindings` lists names, kinds and requiredness, never a value or a
+  description. `signature.present` says whether a `<file.ray>.sig` lies next to
+  the archive; inspect does not check it. On a refused archive `ok` is `false`,
+  `data` is `null`, and `errors[0]` carries the code and reason, for example
+  `RAY_INVALID_ARCHIVE` / `dot-segment`. A message never repeats a name or any
+  other content from the archive. On stderr: the operation id and, without
+  `--json`, a short description of the bundle — what it is and which checks
+  passed, never a claim that its code is safe to run.
+- **Exit:** `0` structurally valid, `2` a refused archive, manifest or
+  inventory (or a usage error), `6` interrupted, `7` internal error.
+
+---
+
+## `bundle verify`
+
+```
+rayspec bundle verify <file.ray> [--runtime <exact-version>] [--signature <file.ray.sig>]
+                      [--trusted-key <ed25519-public-key.pem>]... [--require-signature] [--json]
+```
+
+Everything `bundle inspect` checks, then whether this runtime can deploy the
+bundle, in this order, stopping at the first failure:
+
+1. **Runtime.** The version the bundle pins equals the runtime checked against
+   exactly: this CLI's own version, or the one `--runtime` names
+   (`MAJOR.MINOR.PATCH` with an optional pre-release; a range, `latest` or build
+   metadata is a usage error). `RAY_RUNTIME_UNSUPPORTED`.
+2. **Target.** The runtime supports `linux` / `x64` / Node 22 only.
+   `RAY_TARGET_UNSUPPORTED`.
+3. **Capabilities**, in the order the bundle lists them: an id the capability
+   vocabulary does not know (`unknown-id`), an id this runtime does not provide
+   (`not-provided`), then the execution level (`execution-level`; no runtime
+   provides `sandboxed`). `RAY_CAPABILITY_UNSUPPORTED`.
+4. **Reserved bindings.** A binding name reserved for the operator.
+   `RAY_BINDING_RESERVED`.
+5. **Spec.** The spec file the manifest names is parsed from the archive (never
+   run). `RAY_SPEC_INVALID`, followed by each grammar error as a `SPEC_` code
+   with its path. The message of each names the rule and, for a YAML error, the
+   line and column; it never quotes the spec, whose text may hold a secret.
+6. **Derived fields.** `requires`, the execution level and the egress hosts
+   must be exactly what the spec derives: the capability ids its sections use,
+   in code-point order; `in-process` when it declares handlers or extensions,
+   else `none`; and the egress hosts it declares (the grammar declares none yet,
+   so a manifest that lists one is refused). `RAY_MANIFEST_INVALID` with reason
+   `requires-mismatch`, `execution-mismatch` or `permissions-mismatch`.
+7. **Secret scan.** A payload file named `.env`, `.env.*`, `id_rsa`,
+   `id_ecdsa`, `id_ed25519` or `.pgpass`, or one that contains a PEM private-key
+   header (`-----BEGIN `, words of uppercase letters and digits such as `RSA` or
+   `X25519`, then `PRIVATE KEY-----`). `RAY_SECRET_DETECTED`, naming the path and
+   never the content.
+8. **Signature.** When `--signature` names a file, or `<file.ray>.sig` lies next
+   to the archive: the file must be a signature document for this archive's
+   SHA-256, name one of the `--trusted-key` public keys, and verify with it.
+   `RAY_SIGNATURE_INVALID` with reason `malformed`, `mismatch` or
+   `untrusted-key` (a signed bundle checked with no trusted key is
+   `untrusted-key`). With no signature, `--require-signature` refuses the bundle
+   (`malformed`); otherwise it passes with the warning `RAY_W_UNSIGNED`.
+
+A migration bundle gets the runtime, target and signature checks after the
+structural checks (so `--require-signature` and `RAY_W_UNSIGNED` apply to it
+too), but no capability, binding, spec or secret checks: its contents are
+encrypted and are not read.
+
+- **Postgres:** not needed. **Environment:** none read.
+- **Passive:** as for inspect — nothing is extracted, imported or run, and
+  nothing is written.
+- **Flags:** `--runtime <exact-version>` (default: this CLI's version);
+  `--signature <file.ray.sig>` (default: `<file.ray>.sig` when present);
+  `--trusted-key <ed25519-public-key.pem>`, repeatable — a PEM public key; a
+  private key, an unreadable file, one that is not a regular file, one over
+  16 KiB or a non-Ed25519 key is a usage error;
+  `--require-signature`; `--json`.
+- **Output:** the result envelope (operation `bundle.verify`):
+
+  ```json
+  {
+    "contractVersion": "1.0.0-draft.2",
+    "ok": true,
+    "operation": "bundle.verify",
+    "operationId": "…",
+    "data": {
+      "sha256": "20331da54f5c5b0911e1d9fe6dc4732b6ebd28448930d845b6a84e0188a9d194",
+      "kind": "application",
+      "applicationId": "format-fixture",
+      "applicationVersion": "0.0.0-contract-fixture",
+      "runtimeVersion": "0.0.0-contract-fixture",
+      "checkedAgainstRuntime": "0.0.0-contract-fixture",
+      "signature": { "present": false, "verified": false, "publicKeySha256": null },
+      "verdict": "deployable"
+    },
+    "errors": [],
+    "warnings": [{ "code": "RAY_W_UNSIGNED", "message": "the bundle has no detached signature, so its origin is not established" }]
+  }
+  ```
+
+  A failure after the structural checks keeps `data`, with `verdict`
+  `not-deployable`; a structural failure has `data: null`. A verified signature
+  reports the SHA-256 of the trusted key it verified with. `deployable` means
+  every check above passed for this runtime; it establishes where the bundle
+  came from only when a trusted signature verified, and it never vouches for
+  the code the bundle carries.
+- **Exit:** `0` deployable, `1` spec invalid, `2` a refused archive, manifest
+  or derived field (or a usage error), `3` runtime, target or capability, `4`
+  reserved binding, secret or signature, `6` interrupted, `7` internal error.
 
 ---
 

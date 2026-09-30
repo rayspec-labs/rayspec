@@ -49,13 +49,23 @@ downward.
 
 | Tier            | Packages                                                                    | Role |
 | --------------- | --------------------------------------------------------------------------- | ---- |
-| **kernel**      | `core`, `spec`, `db`, `auth-core`, `platform`, `handler-sdk`, `stt-port`, `bundle-contract` | The neutral types, the spec grammar + parser, the tenant-scoped data layer, the auth primitives, the platform assembly, the handler authoring SDK, the neutral speech-to-text port (the `SttAdapter` contract, registry, media-resolution seam, and fake adapter), and the bundle contract (the JSON Schemas, vocabularies and types of the `.ray` application bundle, the migration snapshot and the managed receipt, their validators, and the canonical JSON form; no I/O and no dependency on any other RaySpec package). |
+| **kernel**      | `core`, `spec`, `db`, `auth-core`, `platform`, `handler-sdk`, `stt-port`, `bundle-contract`, `bundle` | The neutral types, the spec grammar + parser, the tenant-scoped data layer, the auth primitives, the platform assembly, the handler authoring SDK, the neutral speech-to-text port (the `SttAdapter` contract, registry, media-resolution seam, and fake adapter), the bundle contract (the JSON Schemas, vocabularies and types of the `.ray` application bundle, the migration snapshot and the managed receipt, their validators, and the canonical JSON form; no I/O and no dependency on any other RaySpec package), and the bundle codec (the one reader and writer of `.ray` archives: the strict ZIP profile and every hostile-input rule of the contract, passive inspection, extraction into a fresh private directory, deterministic writing and detached Ed25519 signatures; it depends only on `bundle-contract` and Node's own modules, and never executes anything from an archive). |
 | **adapters**    | `adapter-openai`, `adapter-anthropic`, `adapter-pi`, `adapter-codex`, `adapter-deepgram` | One anti-corruption adapter per agent backend, plus the Deepgram speech-to-text provider adapter behind the neutral `stt-port`. Each wraps a hard-pinned vendor SDK behind a neutral interface. |
 | **capabilities**| `audio-runtime`, `conversation-runtime`, `file-runtime`, `record-runtime`, `capability-bridges` | The reusable ingress runtimes (audio/transcription, chat, files, records) and the bridge that wires them into workflows. |
 | **workflow**    | `foundation`, `workflow-durable`, `durable-dbos`, `nodes/*` (`agent-runtime`, `grounding-runtime`, `views-runtime`) | The workflow composition primitives, the durable-execution engine, and the step-node runtimes. |
 | **compose**     | `api-auth`, `product-yaml`, `product-yaml-workflow-bridge`                   | The composition layer: the Hono HTTP server + auth, the deploy composition that turns a spec into a running backend, and the workflow bridge for the product profile. |
 | **app**         | `cli` (bin `rayspec`), `server` (bin `rayspec-serve`)                      | The two entry points: the diagnostic/dev CLI and the boot server. |
 | **test**        | `parity`                                                                    | The cross-backend parity suite that holds every adapter to the same neutral contract. |
+
+`pnpm gate:tier-direction` enforces the direction for every workspace package and
+every dependency field, development dependencies included; the workspace members
+under `examples/` sit above every tier and nothing under `packages/` may depend on
+one. Three upward edges are reviewed exceptions, each named in the gate with its
+reason: `capability-bridges` depends on the workflow tier's `foundation` and
+`workflow-durable`, because joining the capabilities to the durable engine is the
+whole job of that package, and a test of `agent-runtime` uses
+`product-yaml-workflow-bridge` as a development dependency. A new upward edge fails
+the gate; so does an exception whose edge is gone.
 
 The neutral `core` types are the fixed point of the whole system: they sit at the
 bottom, and the adapters above them absorb every difference between vendor SDKs so

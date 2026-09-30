@@ -46,8 +46,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   container cases is not part of this package yet.
   **Nothing uses the package yet**: the CLI and the server do not depend on it, so it is not in the
   publish set and nothing a deployment runs changes.
+- **`@rayspec/bundle`: the one reader and writer of `.ray` archives.** A new kernel package, built
+  on `@rayspec/bundle-contract` and Node's own modules only, that the CLI and a hosting service are
+  meant to share, so both accept and refuse exactly the same archives.
+  `inspectBundle` runs the structural checks of the contract's reader pipeline in its order and
+  stops at the first failure: the archive limit of the operation (the larger kind limit for
+  inspect and verify, the application limit for deploy and prepare, the migration limit for
+  import), the end record, every central record (ZIP64, encryption, data descriptors, flag bits,
+  compression, version, timestamp, extra fields, comments, disks, links, directories, special
+  files, attributes, sizes and every name rule), the name set (duplicates, case-fold,
+  normalization and file-versus-directory collisions, byte order), the layout and each local
+  header byte for byte, the manifest through the contract validator, and every entry streamed
+  against the inventory (size, cumulative extracted bytes, CRC-32, SHA-256). It computes the
+  archive's identity on the same pass, reports secret findings by path, and writes nothing.
+  `extractBundle` runs the same checks while copying into a directory that must not exist: it is
+  created with mode 0700 only after the manifest passed, files are created exclusively without
+  following links, a directory swapped for a link while it runs is noticed before a byte is written
+  into it, and the directory is removed on any failure. Neither ever imports, evaluates or
+  executes anything from an archive; a test with a payload that would write a file and open a
+  connection if imported shows both untouched, and then imports it on purpose to show the probe
+  works. Reads stay inside the size the archive had when it was opened, run under a wall-time
+  budget (`RAY_LIMIT_EXCEEDED` `time-budget`) that also bounds the name-set checks, which take
+  time in proportion to the number of names and its logarithm however deep a name is, and refuse
+  an archive whose directory, size or manifest changes while it is read. A path that is not a
+  regular file, a FIFO included, is refused at once. Every limit can only be lowered. Hostile
+  input is answered with a vocabulary code and never thrown, and no message repeats a name from
+  the archive. The private-key scan accepts digits in the header's words (`SM2`, `X25519`), as the
+  contract's reference reader does.
+  The ZIP parsing is written for the strict profile rather than taken from a ZIP library, which
+  would accept forms the contract refuses.
+  `writeBundle` computes the inventory from the prepared files, validates the manifest, writes the
+  entries in name order in the strict profile with the canonical manifest last, reads the result
+  back through the reader, and moves it into place atomically, never over an existing file unless
+  asked. Payload files over the extracted byte limit are refused before anything is written
+  (`extracted-size`), and a limit the read-back reaches is reported as that limit. The same input gives the same bytes in any directory, and the base contract fixture is
+  reproduced byte for byte. `createSignatureFile` and `verifySignatureFile` make and check the
+  detached Ed25519 signature in the contract's order (`malformed`, `mismatch`, `untrusted-key`).
+  Every case of the golden corpus runs through inspection and extraction with its expected code
+  and reason, including the generated 10,005-entry case; the verify expectations run through the
+  reader, the runtime admission checks, the secret scan and the signature, except for the four
+  cases decided by the spec checks, which are left to the spec parser. Seeded property tests
+  cover generated hostile names, header and end-record fields, every single-byte flip and every
+  truncation.
+  The CLI's `bundle inspect` and `bundle verify` (below) are its first users, so it and the
+  contract package join the publish set with the CLI. `inspectBundle` also reports the entry count
+  and, when asked with `captureSpec`, hands over the bytes of the spec file once they have matched
+  the inventory, so the spec can be parsed without extracting the archive.
+- **`rayspec bundle inspect <file.ray>` and `rayspec bundle verify <file.ray>`.** Two passive
+  commands on top of `@rayspec/bundle`; neither extracts, imports or runs anything from the
+  archive, and neither writes anything or reads the environment. `inspect` runs the structural
+  checks and reports what the bundle declares — application id and version, pinned runtime and
+  target, required capabilities, binding names, execution level, egress hosts, size, SHA-256,
+  entry count and whether a `.sig` file lies next to it — with the verdict `structurally-valid`.
+  `verify` goes on against a runtime (the CLI's own version, or `--runtime <exact-version>`): the
+  runtime version, the target, each required capability (an id the vocabulary does not know is
+  refused), reserved binding names, the spec parsed from the payload, the `requires`, execution
+  level and egress hosts the spec derives, the secret scan, and the detached Ed25519 signature
+  (`--signature`, default `<file.ray>.sig`; `--trusted-key`, repeatable; `--require-signature`).
+  An unsigned bundle passes with the warning `RAY_W_UNSIGNED` unless a signature is required.
+  A spec error names its rule and, for YAML, its line and column, never the spec's text. A
+  signature or trusted-key path that is not a regular file, a FIFO included, is refused at once.
+  Both write one result envelope to stdout, with or without `--json`, print the operation id
+  (and, without `--json`, a short description that never claims the code is safe) on stderr, and
+  exit with the class of their first error: 0, 1 spec invalid, 2 invalid input, 3 incompatible,
+  4 policy refusal, 6 interrupted by SIGINT/SIGTERM, 7 internal. Every case of the golden corpus
+  runs through the commands with its expected envelope and exit code, the spec checks included.
+  A test runs both commands through the built CLI under a module-resolution probe and shows that
+  neither loads the server, the database layer, the platform's handler loader or the Postgres
+  driver; another shows a bundle whose handler would write a file and open a connection if it
+  ran leaves both untouched.
+- **`--json` on every existing command.** It wraps the command's own result object, unchanged, in
+  the same result envelope, with the warning `RAY_W_LEGACY_OUTPUT`; spec errors appear as `SPEC_`
+  codes, every other error as `RAY_CHECK_FAILED`, a usage error as `RAY_USAGE`, and the exit code
+  stays the one the command has without the flag. A serving `deploy --json` prints its banners on
+  stderr and writes its one envelope when it stops or is refused. Without `--json` every command's
+  output is unchanged.
+- **A tier-direction gate.** `pnpm gate:tier-direction` (part of `pnpm gate` and CI) checks that
+  every workspace package depends only on packages of its own tier or a lower one, in every
+  dependency field, with the tier order read against `docs/ARCHITECTURE.md`. The three upward
+  edges the workspace has today are listed in the gate with their reasons, and a listed edge that
+  disappears fails the gate until it is removed. `pnpm test:tier-direction` drives the gate over
+  throwaway workspaces with planted edges.
 
 ### Changed
+
+- **An unexpected internal failure of the CLI exits 7**, not 2, so a script can tell a defect from
+  a usage error. Every other exit code of the existing commands is unchanged.
+- **Each CLI command loads only its own modules.** The entry point now imports a command's module
+  when that command runs, so a light command no longer loads the database layer and the Postgres
+  driver that `plan` and `dev db` need.
 
 - **The Node floor is now `>=22.21.0`.** Every package's `engines.node`, the root manifest's and
   the documented prerequisites moved from `>=22` to the first release on the 22 line that

@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "058a5946400c65793300c7a363c8b1a033af474bcc1ad556e3de13ad5be01b1d",
+  "lockfile_sha256": "5cea490f5f5e99a151f650aad4e4fbfbfa2dea618ddd1d6ba04cc395609fb462",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v24.21.0"
@@ -2233,6 +2233,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/bundle",
         "packages/kernel/bundle-contract",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
@@ -4171,6 +4172,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/bundle",
         "packages/kernel/bundle-contract",
         "packages/kernel/core",
         "packages/kernel/db",
@@ -4259,6 +4261,7 @@
         "packages/compose/product-yaml",
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
+        "packages/kernel/bundle",
         "packages/kernel/bundle-contract",
         "packages/kernel/core",
         "packages/kernel/db",

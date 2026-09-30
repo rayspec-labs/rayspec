@@ -12,6 +12,14 @@
  *                                 to a THROWAWAY DB (never the real target). Mutates NOTHING on it.
  *   rayspec gen-handler …        Render ONE bounded-template handler (.ts or .js) from a holes contract.
  *
+ * PASSIVE BUNDLE COMMANDS (the `bundle` group — read a `.ray` archive; never run it, write nothing):
+ *   rayspec bundle inspect <file.ray>   The structural checks and what the bundle declares.
+ *   rayspec bundle verify <file.ray>    The same, then runtime, target, capability, spec, secret
+ *                                        and signature checks against the running CLI.
+ *   Both always write ONE result envelope to stdout (see envelope.ts) and exit with the class of
+ *   their first error (0 ok, 1 negative verdict, 2 invalid input, 3 incompatible, 4 policy refusal,
+ *   6 interrupted, 7 internal).
+ *
  * PRODUCTION-MUTATING (`tenant` group — writes to the database DATABASE_URL names):
  *   rayspec tenant ensure …      Idempotently create OR resolve one organization under a chosen id,
  *                                 speaking to the database directly (no running server, no HTTP
@@ -42,20 +50,32 @@
  * as its deliberate, documented output. `tenant ensure` is the one mutating command that emits NO
  * credential at all: a minted invite token reaches a mode-600 file and nothing else. The ONE exception
  * to "JSON only" is `--help`, which prints plain help text on stdout and exits 0.
+ *
+ * `--json` is accepted on every command. On an existing command it wraps that command's own result
+ * object, unchanged, in the result envelope (warning `RAY_W_LEGACY_OUTPUT`) and keeps its exit code;
+ * without it the output is what it has always been. An unexpected internal failure exits 7.
+ *
+ * Every command module is imported on its own path only, so a command loads nothing another command
+ * needs: `bundle inspect`/`verify` in particular never load the server, the database layer or a
+ * handler loader.
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { argv } from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { DeployCliError, runDeploy } from './deploy.js';
-import { DevCliError, runDev } from './dev.js';
-import { runDoctor } from './doctor.js';
-import { GenHandlerCliError, runGenHandler } from './gen-handler.js';
-import { InitCliError, runInit } from './init.js';
-import { runOpenapi } from './openapi.js';
-import { runPlan } from './plan.js';
+import type { ResultOperation } from '@rayspec/bundle-contract';
+import {
+  envelopeExitCode,
+  internalEnvelope,
+  interruptedEnvelope,
+  interruptible,
+  legacyEnvelope,
+  newOperationId,
+  usageEnvelope,
+  workAbandoned,
+  writeEnvelope,
+} from './envelope.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
-import { runTenant, TenantCliError } from './tenant.js';
 
 /**
  * The usage text, split ONE BLOCK PER COMMAND under the section headings the general usage prints.
@@ -124,6 +144,46 @@ const HELP_SECTIONS: readonly HelpSection[] = [
         name: 'openapi',
         block: `  rayspec openapi <spec.yaml>  Emit the OpenAPI 3.1 document for a product-profile doc's declared
                                 VIEW surface (read routes → paths/params/response schemas). Product profile only.`,
+      },
+    ],
+  },
+  {
+    heading:
+      'PASSIVE bundle commands (the `bundle` group — read a .ray archive; never run it, write nothing):',
+    commands: [
+      {
+        name: 'bundle inspect',
+        block: `  rayspec bundle inspect <file.ray> [--json]
+                                Check the archive, its manifest and every entry against the
+                                inventory, and report what the bundle is: application id and version,
+                                runtime and target it pins, required capabilities, binding names,
+                                execution level, egress hosts, size, SHA-256, entry count, and whether
+                                a <file.ray>.sig lies next to it. Runtime, target, capability, spec and
+                                signature checks are NOT run. Nothing in the archive is extracted,
+                                imported or run. Writes ONE result envelope to stdout (verdict
+                                structurally-valid, or ok:false with the first failing check); the
+                                operation id and, without --json, a short description go to stderr.
+                                Exit 0 structurally valid / 2 invalid archive, manifest or inventory /
+                                7 internal error.`,
+      },
+      {
+        name: 'bundle verify',
+        block: `  rayspec bundle verify <file.ray> [--runtime <exact-version>] [--signature <file.ray.sig>]
+                        [--trusted-key <ed25519-public-key.pem>]... [--require-signature] [--json]
+                                Everything inspect checks, then against the runtime (default: this
+                                CLI's version; --runtime names another exact version): the pinned
+                                runtime version, the target, each required capability (an id the
+                                vocabulary does not know is refused), reserved binding names, the spec
+                                parsed from the payload, the requires / execution / egress fields the
+                                spec derives, the secret scan, and the detached signature — the file
+                                --signature names, else <file.ray>.sig when present — against the
+                                --trusted-key public keys. --require-signature refuses an unsigned
+                                bundle; an unsigned bundle otherwise passes with warning
+                                RAY_W_UNSIGNED. Nothing is run or written. Writes ONE result envelope
+                                (verdict deployable / not-deployable). Exit 0 deployable / 1 spec
+                                invalid / 2 invalid input / 3 incompatible runtime, target or
+                                capability / 4 reserved binding, secret or signature refusal /
+                                7 internal error.`,
       },
     ],
   },
@@ -241,7 +301,11 @@ const HELP_SECTIONS: readonly HelpSection[] = [
 const TOP_LEVEL_FLAGS = `TOP-LEVEL FLAGS:
   rayspec --version | -v        Print the CLI's own version as a single JSON object. Exit 0.
   rayspec --help | -h           Print this usage text on stdout as plain text. Exit 0. Named after a
-                                command (\`rayspec deploy --help\`) it prints THAT command's help.`;
+                                command (\`rayspec deploy --help\`) it prints THAT command's help.
+  --json                        Accepted on every command: wrap its result in the result envelope
+                                ({contractVersion, ok, operation, operationId, data, errors,
+                                warnings}); an existing command's own result is carried unchanged in
+                                data and its exit code is kept.`;
 
 /** The output/exit contract, printed at the foot of every help text. */
 const OUTPUT_CONTRACT = `Output: a single JSON object on stdout — \`--help\` is the one exception and prints plain text.
@@ -366,11 +430,70 @@ function resolveHelpRequest(args: readonly string[]): string | undefined {
 }
 
 /**
- * The CLI body. RETURNS the numeric exit code (0 ok · 1 not-ok spec/plan · 2 CLI/usage error) instead
- * of calling `process.exit`, so it is testable in-process and the top-level can drain stdout before
- * exiting. A usage/argument problem is raised as a `CliError` and mapped to exit 2 by the
- * top-level handler (which prints it to stderr); a not-ok spec/plan result is printed to stdout (it is
- * the command's normal machine-readable output) and mapped to exit 1.
+ * `--json` is a flag of EVERY command, so it is taken off the vector here, before any subcommand's
+ * own strict parser sees it; everything after a `--` terminator is left alone. The rest of the vector
+ * reaches the subcommand exactly as it would without the flag.
+ */
+function takeJsonFlag(args: readonly string[]): { json: boolean; vector: string[] } {
+  const end = args.indexOf('--');
+  const head = end === -1 ? args : args.slice(0, end);
+  const tail = end === -1 ? [] : args.slice(end);
+  const kept = head.filter((token) => token !== '--json');
+  return { json: kept.length !== head.length, vector: [...kept, ...tail] };
+}
+
+/** The operation name an existing command reports in its envelope; `help` when there is none. */
+function legacyOperation(vector: readonly string[]): ResultOperation {
+  const [command, sub] = vector;
+  if (resolveHelpRequestQuietly(vector)) return 'help';
+  switch (command) {
+    case '--version':
+    case '-v':
+      return 'version';
+    case 'init':
+    case 'doctor':
+    case 'plan':
+    case 'openapi':
+    case 'gen-handler':
+      return command;
+    case 'deploy':
+      return 'deploy.legacy';
+    case 'tenant':
+      return sub === 'ensure' ? 'tenant.ensure' : 'help';
+    case 'dev':
+      return sub === 'gen-secrets' || sub === 'db' || sub === 'bootstrap-tenant'
+        ? `dev.${sub}`
+        : 'help';
+    default:
+      return 'help';
+  }
+}
+
+/** Whether the vector is a help request, without raising the usage error a malformed one is. */
+function resolveHelpRequestQuietly(vector: readonly string[]): boolean {
+  try {
+    return resolveHelpRequest(vector) !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/** What an existing command answered, before it is printed. */
+type Answer =
+  | { readonly kind: 'result'; readonly result: { readonly ok: boolean } }
+  | { readonly kind: 'text'; readonly text: string }
+  | { readonly kind: 'served' };
+
+/** How the invocation reports: plain, as today, or one envelope under this operation id. */
+type Reporting = { readonly json: false } | { readonly json: true; readonly operationId: string };
+
+/**
+ * The CLI body. RETURNS the numeric exit code instead of calling `process.exit`, so it is testable
+ * in-process and the top-level can drain stdout before exiting. Without `--json` an existing command
+ * answers as it always has: its JSON result on stdout, exit 0 ok · 1 not-ok · 2 CLI/usage error (a
+ * usage/argument problem is raised as a `CliError` and mapped to exit 2 by the top-level handler,
+ * which prints it to stderr). With `--json` the same answer is wrapped in the result envelope; the
+ * `bundle` verbs always answer with an envelope.
  *
  * `args` is the subcommand+positionals slice (defaults to `process.argv.slice(2)` — the real CLI
  * path). It is a parameter (not parseArgs's auto-stripping default) so a test can drive `main` with an
@@ -378,13 +501,102 @@ function resolveHelpRequest(args: readonly string[]): string | undefined {
  * vitest shape `process.argv`.
  */
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<number> {
-  // DEV-DX: auto-load a local `.env` — `$PWD/.env` first, then the install-root `.env` (no-override
-  // per key, opt-out via RAYSPEC_SKIP_DOTENV=1) — ONCE at startup so `plan`'s optional shadow-apply
-  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). Harmless to
-  // `doctor` (needs no env); does NOT change plan's read-only guarantee — it only makes DATABASE_URL
-  // readable so the read-only guard has a compare target.
-  loadLocalDotenvIfPresent();
+  const { json, vector } = takeJsonFlag(args);
+  // A help request on the group (`rayspec bundle verify --help`) is answered like any other below.
+  if (vector[0] === 'bundle' && !vector.slice(0, 3).some((token) => isHelpFlag(token))) {
+    return runBundleVerb(vector.slice(1), json);
+  }
+  if (!json) return printAnswer(await answer(vector, { json: false }));
 
+  const operation = legacyOperation(vector);
+  const operationId = newOperationId();
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  try {
+    const answered = await answer(vector, { json: true, operationId });
+    if (answered.kind === 'served') return 0; // deploy writes its own envelope when it stops
+    const result =
+      answered.kind === 'text'
+        ? legacyEnvelope(operation, operationId, { text: answered.text }, true)
+        : legacyEnvelope(operation, operationId, answered.result, answered.result.ok);
+    await writeEnvelope(process.stdout, result);
+    return answered.kind === 'result' && !answered.result.ok ? 1 : 0;
+  } catch (err) {
+    if (err instanceof CliError) {
+      await writeEnvelope(process.stdout, usageEnvelope(operation, operationId, err.message));
+      return 2;
+    }
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    await writeEnvelope(process.stdout, internalEnvelope(operation, operationId));
+    return 7;
+  }
+}
+
+/** Print an existing command's answer the way it has always been printed, and map its exit code. */
+async function printAnswer(answered: Answer): Promise<number> {
+  if (answered.kind === 'text') {
+    await writeDrained(process.stdout, `${answered.text}\n`);
+    return 0;
+  }
+  if (answered.kind === 'served') return 0;
+  await emit(answered.result);
+  return answered.result.ok ? 0 : 1;
+}
+
+/**
+ * `rayspec bundle inspect|verify`. The verbs are new, so they write one envelope on stdout whether
+ * or not `--json` was given, and the operation id on stderr; without `--json` a short description of
+ * the result follows it there. They read no environment, so the `.env` auto-load below is skipped.
+ */
+async function runBundleVerb(rest: readonly string[], json: boolean): Promise<number> {
+  const operation: ResultOperation = rest[0] === 'verify' ? 'bundle.verify' : 'bundle.inspect';
+  const operationId = newOperationId();
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  const { BundleCliError, runBundle } = await import('./bundle.js');
+  try {
+    const run = await interruptible(
+      runBundle(rest, { operationId, cliVersion: readCliVersion(), json }),
+    );
+    if (run.interrupted) {
+      const stopped = interruptedEnvelope(
+        operation,
+        operationId,
+        'nothing was written or changed, so run the command again',
+      );
+      await writeEnvelope(process.stdout, stopped);
+      return envelopeExitCode(stopped);
+    }
+    const outcome = run.value;
+    if (!outcome.json && outcome.summary.length > 0) {
+      await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    await writeEnvelope(process.stdout, outcome.envelope);
+    return envelopeExitCode(outcome.envelope);
+  } catch (err) {
+    if (err instanceof BundleCliError) {
+      // No verb was named, so there is no verb envelope: the group's usage error, as for any other
+      // command, or its envelope under `help` with --json.
+      if (!json) throw new CliError(err.message);
+      await writeEnvelope(process.stdout, usageEnvelope('help', operationId, err.message));
+      return 2;
+    }
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    const failed = internalEnvelope(operation, operationId);
+    await writeEnvelope(process.stdout, failed);
+    return envelopeExitCode(failed);
+  }
+}
+
+/**
+ * Resolve an existing command to its answer. Each command module is imported here, on its own path,
+ * so one command never loads another's dependencies.
+ */
+async function answer(args: readonly string[], reporting: Reporting): Promise<Answer> {
   // The subcommand is the FIRST raw token; the rest is handed to that subcommand UNPARSED (each owns
   // its own arg grammar). `gen-handler` carries its own `--holes/--out/--emit/--file` flags, so the top-level
   // must NOT strict-parse them; `doctor`/`plan` take a single positional path. (A leading `--flag` other
@@ -393,7 +605,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `deploy`, `tenant`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `deploy`, `tenant`, or `dev`)',
     );
   }
   // `--version`/`-v` is the one TOP-LEVEL flag, answered BEFORE the leading-dash check below —
@@ -406,8 +618,8 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
     if (rest.length > 0) {
       throw new CliError(`\`${command}\` takes no arguments, got ${rest.join(' ')}`);
     }
-    await emit({ ok: true, version: readCliVersion() });
-    return 0;
+    const result = { ok: true, version: readCliVersion() };
+    return { kind: 'result', result };
   }
   // `--help`/`-h` is a HELP REQUEST, not a usage error. It is answered at the SAME interception point
   // as `--version` — before the leading-dash check below, and before the vector reaches a subcommand's
@@ -416,80 +628,80 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   // rather than the whole manual. It is the one exception to the single-JSON-object-per-invocation
   // rule: PLAIN TEXT on stdout, exit 0 (documented as such in docs/cli-reference.md).
   const help = resolveHelpRequest(args);
-  if (help !== undefined) {
-    await writeDrained(process.stdout, `${help}\n`);
-    return 0;
-  }
+  if (help !== undefined) return { kind: 'text', text: help };
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
     );
   }
+
+  // DEV-DX: auto-load a local `.env` — `$PWD/.env` first, then the install-root `.env` (no-override
+  // per key, opt-out via RAYSPEC_SKIP_DOTENV=1) — ONCE at startup so `plan`'s optional shadow-apply
+  // picks up SHADOW_DATABASE_URL + DATABASE_URL out of the box (matching the server boot). Harmless to
+  // `doctor` (needs no env); does NOT change plan's read-only guarantee — it only makes DATABASE_URL
+  // readable so the read-only guard has a compare target.
+  loadLocalDotenvIfPresent();
 
   switch (command) {
     case 'init': {
       // GET-STARTED: scaffold a starter project. A usage problem (unknown flag, extra positional,
       // `..`-escape) is an InitCliError → re-thrown as a CliError → exit 2; an existing-spec-without
       // --force is a normal ok:false → exit 1.
-      let result: Awaited<ReturnType<typeof runInit>>;
+      const { InitCliError, runInit } = await import('./init.js');
       try {
-        result = await runInit(rest);
+        return { kind: 'result', result: await runInit(rest) };
       } catch (e) {
         if (e instanceof InitCliError) throw new CliError(e.message);
         throw e;
       }
-      await emit(result);
-      return result.ok ? 0 : 1;
     }
     case 'doctor': {
-      const result = await runDoctor(parsePositionals(rest));
-      await emit(result);
-      return result.ok ? 0 : 1;
+      const { runDoctor } = await import('./doctor.js');
+      return { kind: 'result', result: await runDoctor(parsePositionals(rest)) };
     }
     case 'plan': {
       const { positionals, against, allowlist, reconcileInjectedColumns } = parsePlanArgs(rest);
-      const result = await runPlan(positionals, { against, allowlist, reconcileInjectedColumns });
-      await emit(result);
-      return result.ok ? 0 : 1;
+      const { runPlan } = await import('./plan.js');
+      return {
+        kind: 'result',
+        result: await runPlan(positionals, { against, allowlist, reconcileInjectedColumns }),
+      };
     }
     case 'openapi': {
-      const result = await runOpenapi(parsePositionals(rest));
-      await emit(result);
-      return result.ok ? 0 : 1;
+      const { runOpenapi } = await import('./openapi.js');
+      return { kind: 'result', result: await runOpenapi(parsePositionals(rest)) };
     }
     case 'gen-handler': {
       // gen-handler raises a GenHandlerCliError on a usage problem (missing flag / bad path); re-throw
       // it as a CliError so the top-level maps it to exit 2 (a malformed hole-set is ok:false → exit 1).
-      let result: Awaited<ReturnType<typeof runGenHandler>>;
+      const { GenHandlerCliError, runGenHandler } = await import('./gen-handler.js');
       try {
-        result = await runGenHandler(rest);
+        return { kind: 'result', result: await runGenHandler(rest) };
       } catch (e) {
         if (e instanceof GenHandlerCliError) throw new CliError(e.message);
         throw e;
       }
-      await emit(result);
-      return result.ok ? 0 : 1;
     }
     case 'deploy': {
       // PRODUCTION-MUTATING: `--dry-run` is a one-shot JSON verdict (mapped to 0/1 like the floor); a
       // bare `deploy` is LONG-RUNNING — it boots + serves until SIGINT/SIGTERM, so it does not return a
       // JSON result (the open port + signal handlers keep the process alive). A usage problem is a
       // DeployCliError → exit 2; a fail-closed boot error is handled inside runDeploy (prints + exit 1).
+      const { DeployCliError, runDeploy } = await import('./deploy.js');
       let outcome: Awaited<ReturnType<typeof runDeploy>>;
       try {
-        outcome = await runDeploy(rest);
+        outcome = await runDeploy(rest, reporting);
       } catch (e) {
         if (e instanceof DeployCliError) throw new CliError(e.message);
         throw e;
       }
       if (outcome.kind === 'dry-run' || outcome.kind === 'check-env') {
-        await emit(outcome.result);
-        return outcome.result.ok ? 0 : 1;
+        return { kind: 'result', result: outcome.result };
       }
       // 'served' — the listener has been CREATED, with the bind possibly still pending (`serve()`
       // does not wait for it), so a taken port is refused by that listener's own 'error' handler and
       // never surfaces here; the open port + signal handlers keep the process alive until shutdown.
-      return 0;
+      return { kind: 'served' };
     }
     case 'tenant': {
       // PRODUCTION-MUTATING: the `tenant` group provisions organizations against the database
@@ -498,35 +710,35 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       // why a production deployment had no supported provisioning path. A usage problem inside it is a
       // TenantCliError; re-throw it as a CliError so the top level maps it to exit 2 (an operational
       // failure is returned ok:false → exit 1).
-      let result: Awaited<ReturnType<typeof runTenant>>;
+      const { runTenant, TenantCliError } = await import('./tenant.js');
       try {
-        result = await runTenant(rest);
+        return { kind: 'result', result: await runTenant(rest) };
       } catch (e) {
         if (e instanceof TenantCliError) throw new CliError(e.message);
         throw e;
       }
-      await emit(result);
-      return result.ok ? 0 : 1;
     }
     case 'dev': {
       // The `dev` group is LOCAL-DEV + MUTATING (creates a dev DB / writes secret files) — distinct
       // from the read-only diagnostic floor. A usage problem inside `dev` is a DevCliError; re-throw it
       // as a CliError so the top level maps it to exit 2 (an operational failure is returned ok:false).
-      let result: Awaited<ReturnType<typeof runDev>>;
+      const { DevCliError, runDev } = await import('./dev.js');
       try {
-        result = await runDev(rest);
+        return { kind: 'result', result: await runDev(rest) };
       } catch (e) {
         if (e instanceof DevCliError) throw new CliError(e.message);
         throw e;
       }
-      await emit(result);
-      return result.ok ? 0 : 1;
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
       );
   }
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**
@@ -585,30 +797,31 @@ function parsePlanArgs(args: readonly string[]): {
 
 /**
  * Top-level runner: invoke `main`, set `process.exitCode` (NOT `process.exit` — let the event loop
- * drain stdout), and route CLI/unexpected errors to stderr as exit 2. A `CliError` is a clean
- * usage error (prints the message + USAGE); any other throw is an UNEXPECTED failure (secret-free
- * message only). All error output is drained before the process exits.
+ * drain stdout), and route CLI/unexpected errors to stderr. A `CliError` is a clean usage error
+ * (prints the message + USAGE, exit 2); any other throw is an UNEXPECTED failure (secret-free message
+ * only, exit 7). All error output is drained before the process exits.
  *
- * Exported (IDX-EXIT2-1) so the CliError → exit-2 mapping is directly TESTABLE in-process: a test
- * drives `run([...])` and asserts `process.exitCode` (2 for a usage/CLI error, 0/1 for the ok/not-ok
- * spec paths) — covering the exit-2 branch that `main` only THROWS into. `args` defaults to the real
- * CLI vector so the production call site (`run()`) is unchanged.
+ * Exported so the CliError → exit-2 mapping is directly TESTABLE in-process: a test drives
+ * `run([...])` and asserts `process.exitCode` (2 for a usage/CLI error, 0/1 for the ok/not-ok spec
+ * paths) — covering the exit-2 branch that `main` only THROWS into. `args` defaults to the real CLI
+ * vector so the production call site (`run()`) is unchanged.
  */
 export async function run(args?: readonly string[]): Promise<void> {
   try {
     process.exitCode = args === undefined ? await main() : await main(args);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errMessage(err);
     if (err instanceof CliError) {
       await writeDrained(
         process.stderr,
         `${JSON.stringify({ ok: false, cliError: message })}\n${USAGE}\n`,
       );
+      process.exitCode = 2;
     } else {
       // An UNEXPECTED failure (not a handled spec/plan error — those are returned as ok:false).
       await writeDrained(process.stderr, `${JSON.stringify({ ok: false, cliError: message })}\n`);
+      process.exitCode = 7;
     }
-    process.exitCode = 2;
   }
 }
 
@@ -628,5 +841,9 @@ function isMainEntry(): boolean {
 }
 
 if (isMainEntry()) {
-  run();
+  // An interrupted bundle verb has already written its envelope; the read it abandoned must not keep
+  // the process alive until it finishes.
+  run().then(() => {
+    if (workAbandoned()) process.exit();
+  });
 }

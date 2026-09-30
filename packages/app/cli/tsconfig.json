@@ -5,6 +5,8 @@
     "outDir": "./dist"
   },
   "references": [
+    { "path": "../../kernel/bundle-contract" },
+    { "path": "../../kernel/bundle" },
     { "path": "../../kernel/spec" },
     { "path": "../../kernel/db" },
     { "path": "../../compose/product-yaml" }
@@ -16,5 +18,11 @@
   // compiling the fixture as part of this package would fail on a module that is not ours to resolve.
   // That the rendered code type-checks against the REAL SDK is proven separately, by the tsc --noEmit
   // pass templates.test.ts runs over a temp project with the SDK actually installed.
-  "exclude": ["dist", "node_modules", "**/*.test.ts", "src/**/__fixtures__/**"]
+  "exclude": [
+    "dist",
+    "node_modules",
+    "**/*.test.ts",
+    "src/**/__fixtures__/**",
+    "src/test-support/**"
+  ]
 }
