@@ -351,6 +351,12 @@ export function registerHealthRoute<E extends Env>(
   });
 }
 
+/** What the `beforeSchemaChange` hook reports back to the boot. */
+export interface BeforeSchemaChangeResult {
+  /** The product schema change the hook applied, named by its product migration ledger row. */
+  productChange?: { ledgerRow: number };
+}
+
 /** A built app + the metadata the entrypoint logs in its boot banner. */
 export interface BootedServer {
   /** The assembled Hono app (auth routes + OIDC mount + optional declared routes + /health). */
@@ -379,6 +385,13 @@ export interface BootedServer {
    * `assembleServer` fails closed first.
    */
   deployMode: 'auth-only' | 'materialized' | 'mounted' | 'updated';
+  /**
+   * Set when a bundle deploy applied a product schema change just before this boot (the
+   * `beforeSchemaChange` hook): the product migration ledger row that change wrote. The boot itself
+   * then finds the schema already in place and mounts it, so `deployMode` alone would read as "no
+   * DDL" although the deploy ran some.
+   */
+  bundleProductChange?: { ledgerRow: number };
   /**
    * A Product-YAML boot: the org id this deployment is bound to, AS THE DATABASE STORES IT. Absent on
    * every other boot shape (auth-only, and the classic backend profile, neither of which binds a
@@ -1084,6 +1097,7 @@ export function loadTenantProvisionSecrets(
         `${PROVISION_BOOT_SECRETS.map((s) => s.fileVariant).join(', ')} — ` +
         'naming a file to read the value from, which TAKES PRECEDENCE over the plain variable when ' +
         'set. Fail-closed.',
+      missing,
     );
   }
   return {
@@ -2134,7 +2148,7 @@ async function assembleServerWith(
      * changes any schema: the bundle deploy applies its plan here, so a boot that is going to refuse
      * refuses before the apply writes anything. A throw refuses the boot.
      */
-    beforeSchemaChange?: (db: Db) => Promise<void>;
+    beforeSchemaChange?: (db: Db) => Promise<BeforeSchemaChangeResult | undefined>;
   },
   started: { fence?: RuntimeFence },
 ): Promise<BootedServer> {
@@ -2318,6 +2332,7 @@ async function assembleServerWith(
   //    starts fenced, so its queues register paused and its gates start closed (runtime-fence.ts).
   // Every schema change this boot makes runs as a `runtime.apply` operation with its receipts, and an
   // apply an earlier process left interrupted is reconciled first (deploy-apply.ts).
+  let bundleProductChange: BootedServer['bundleProductChange'];
   const deployApply = new DeployApply({
     db,
     migratePlatform: () => applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs }),
@@ -2326,7 +2341,9 @@ async function assembleServerWith(
     warn: opts.bootWarn ?? consoleWarn,
   });
   try {
-    if (opts.beforeSchemaChange !== undefined) await opts.beforeSchemaChange(db);
+    if (opts.beforeSchemaChange !== undefined) {
+      bundleProductChange = (await opts.beforeSchemaChange(db))?.productChange;
+    }
     await deployApply.platformChain();
     await fence.load();
     started.fence = fence;
@@ -2517,6 +2534,7 @@ async function assembleServerWith(
     declaredAgents,
     declaredCronTriggers,
     deployMode,
+    ...(bundleProductChange !== undefined ? { bundleProductChange } : {}),
     ...(productTenantId ? { productTenantId } : {}),
     drift,
     ...(fireCronNow ? { fireCronNow } : {}),

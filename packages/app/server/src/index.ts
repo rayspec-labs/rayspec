@@ -132,6 +132,7 @@ export {
   applyMigrations,
   assembleServer,
   assembleStaticServer,
+  type BeforeSchemaChangeResult,
   BootConfigError,
   type BootedServer,
   DEFAULT_PORT,

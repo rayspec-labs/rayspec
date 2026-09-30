@@ -197,6 +197,11 @@ export interface AppliedBundle {
   envelope: ResultEnvelope<ApplyData>;
   /** The version directory the deploy activated, when it succeeded. */
   versionRoot?: string;
+  /**
+   * When the plan carried a product change and the deploy succeeded: the product migration ledger
+   * row that recorded it.
+   */
+  productLedgerRow?: number;
 }
 
 function refused(operationId: string, errors: BundleError[]): AppliedBundle {
@@ -467,6 +472,14 @@ export async function applyBundle(options: ApplyBundleOptions): Promise<AppliedB
         ],
       },
     };
+  }
+  if (product !== undefined && product.delta !== null) {
+    const rows = (await query(
+      'SELECT max(id)::int AS id FROM product_migration_ledger WHERE product_schema_after = $1',
+      [plan.plan.schemaImpact.to.product],
+    )) as unknown as { id: number | null }[];
+    const ledgerRow = rows[0]?.id ?? null;
+    if (ledgerRow !== null) return { envelope: result, versionRoot, productLedgerRow: ledgerRow };
   }
   return { envelope: result, versionRoot };
 }
