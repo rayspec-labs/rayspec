@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rayspec pack`: an application bundle from an application that is already built.**
+  `rayspec pack --spec <path> --output <file.ray>` writes one `.ray` application bundle: the
+  spec, the compiled handler and extension modules with what they import, the built frontend,
+  the product configuration files, the third-party packages the modules need (never
+  `@rayspec/*`, which the runtime provides), the dependency lock, a CycloneDX SBOM and the license
+  notices. It builds, installs, imports and runs nothing; a handler, extension or frontend that
+  was not built is refused with the build instruction. The application id and version come from
+  the spec's metadata, `--id` and `--version` override them, and pack refuses when neither gives
+  one. `--runtime` pins another exact runtime than the CLI's own, `--include` adds a file or
+  directory, `--source-maps` carries source maps, and `--preview` prints the inclusion list and
+  writes nothing. The archive is written to a temporary file beside the output, read back through
+  the bundle reader, compared with the digests the files were checked under, and only then moved
+  into place; an existing output is refused without `--force`, and a refused or interrupted pack
+  leaves no file. The same prepared files give the same bytes from any directory at any time.
+  Like the bundle verbs, pack writes one result envelope on stdout and, without `--json`, the
+  inclusion summary and the output SHA-256 on stderr; the summary says that nothing was deployed.
+  It loads no server, database layer or handler loader. `--build` (a build in a disposable
+  sandbox) and `--against` / `--allowlist` (a product delta carried in the bundle) are refused
+  with `RAY_USAGE` naming the manual steps. New: [the packing guide](./docs/packing.md) — what
+  goes in, what never does, and how to fix each refusal.
 - **Application identity in the spec.** A backend spec may declare `metadata.id` and
   `metadata.version`, and a product spec the same two keys in `product.metadata`: the identity an
   application bundle carries. Both are optional. The id is a lowercase letter followed by up to 62
@@ -19,8 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `product.metadata` key stays a free-form string. The three committed JSON Schemas carry the new
   fields. A 1.8 parser refuses a spec that uses them.
 - **`@rayspec/bundle-closure`: the inclusion list of an application bundle, from its spec.** A new
-  kernel package that `rayspec pack` is to build on; no command uses it yet apart from
-  `bundle verify` (below). `resolveClosure` takes a spec path and returns every file the
+  kernel package that `rayspec pack` (above) builds on; `bundle verify` uses it too (below). `resolveClosure` takes a spec path and returns every file the
   application needs at run time and nothing else: the spec; the compiled handler modules and each
   extension's entry and `handlers/` modules, followed through their imports by a lexer
   (`es-module-lexer`) without running them; each frontend directory; for a product spec, the

@@ -20,6 +20,11 @@
  *   their first error (0 ok, 1 negative verdict, 2 invalid input, 3 incompatible, 4 policy refusal,
  *   6 interrupted, 7 internal).
  *
+ * PACKAGING (writes one file; never builds, imports or runs application code):
+ *   rayspec pack --spec <path> --output <file.ray>   Write an application bundle from an application
+ *                                                    that is already built. One result envelope on
+ *                                                    stdout, like the bundle commands (see pack.ts).
+ *
  * PRODUCTION-MUTATING (`tenant` group — writes to the database DATABASE_URL names):
  *   rayspec tenant ensure …      Idempotently create OR resolve one organization under a chosen id,
  *                                 speaking to the database directly (no running server, no HTTP
@@ -56,8 +61,8 @@
  * without it the output is what it has always been. An unexpected internal failure exits 7.
  *
  * Every command module is imported on its own path only, so a command loads nothing another command
- * needs: `bundle inspect`/`verify` in particular never load the server, the database layer or a
- * handler loader.
+ * needs: `bundle inspect`/`verify` and `pack` in particular never load the server, the database
+ * layer or a handler loader.
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { argv } from 'node:process';
@@ -184,6 +189,37 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 invalid / 2 invalid input / 3 incompatible runtime, target or
                                 capability / 4 reserved binding, secret or signature refusal /
                                 7 internal error.`,
+      },
+    ],
+  },
+  {
+    heading:
+      'PACKAGING (the `pack` command — writes one .ray application bundle from files already built; runs none of them):',
+    commands: [
+      {
+        name: 'pack',
+        block: `  rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
+               [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
+               [--force] [--json]
+                                Write an application bundle from an application that is ALREADY
+                                BUILT: the spec, the compiled handler and extension modules and what
+                                they import, the built frontend, the third-party packages they need
+                                (never @rayspec/*, which the runtime provides), the dependency lock,
+                                an SBOM and the license notices. Nothing is built, imported or run.
+                                The id and version come from the spec's metadata.id / metadata.version
+                                (product: product.metadata); --id / --version override them, and pack
+                                refuses when neither gives one. The bundle pins this CLI's version
+                                unless --runtime names another exact version. --include adds a file or
+                                directory relative to the spec; --source-maps carries *.map files.
+                                --preview prints the inclusion list and writes nothing. The archive is
+                                written to a temporary file beside the output, read back, and moved
+                                into place; an existing output is refused unless --force. Writes ONE
+                                result envelope to stdout; the operation id and, without --json, the
+                                inclusion summary and the output SHA-256 go to stderr. Packing is not
+                                deploying: check the result with \`rayspec bundle verify\`. Exit 0
+                                written / 1 spec invalid / 2 usage, identity, closure, limit or an
+                                existing output / 3 a @rayspec/* range that excludes the runtime /
+                                4 a secret or reserved binding / 6 interrupted / 7 internal error.`,
       },
     ],
   },
@@ -506,6 +542,9 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   if (vector[0] === 'bundle' && !vector.slice(0, 3).some((token) => isHelpFlag(token))) {
     return runBundleVerb(vector.slice(1), json);
   }
+  if (vector[0] === 'pack' && !isHelpFlag(vector[1])) {
+    return runPackVerb(vector.slice(1), json);
+  }
   if (!json) return printAnswer(await answer(vector, { json: false }));
 
   const operation = legacyOperation(vector);
@@ -593,6 +632,46 @@ async function runBundleVerb(rest: readonly string[], json: boolean): Promise<nu
 }
 
 /**
+ * `rayspec pack`. A new verb, so it writes one envelope on stdout whether or not `--json` was given,
+ * and the operation id on stderr; without `--json` the inclusion summary follows it there. It reads
+ * no environment, so the `.env` auto-load is skipped. SIGINT and SIGTERM are answered at pack's
+ * next safe point, where it removes what it wrote and reports `RAY_INTERRUPTED`.
+ */
+async function runPackVerb(rest: readonly string[], json: boolean): Promise<number> {
+  const operationId = newOperationId();
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    const { runPack } = await import('./pack.js');
+    const outcome = await runPack(rest, {
+      operationId,
+      cliVersion: readCliVersion(),
+      json,
+      signal: controller.signal,
+    });
+    if (!outcome.json && outcome.summary.length > 0) {
+      await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    await writeEnvelope(process.stdout, outcome.envelope);
+    return envelopeExitCode(outcome.envelope);
+  } catch (err) {
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    const failed = internalEnvelope('pack', operationId);
+    await writeEnvelope(process.stdout, failed);
+    return envelopeExitCode(failed);
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
+}
+
+/**
  * Resolve an existing command to its answer. Each command module is imported here, on its own path,
  * so one command never loads another's dependencies.
  */
@@ -605,7 +684,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `deploy`, `tenant`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `pack`, `deploy`, `tenant`, or `dev`)',
     );
   }
   // `--version`/`-v` is the one TOP-LEVEL flag, answered BEFORE the leading-dash check below —
@@ -631,7 +710,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
   if (help !== undefined) return { kind: 'text', text: help };
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
     );
   }
 
@@ -732,7 +811,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
       );
   }
 }

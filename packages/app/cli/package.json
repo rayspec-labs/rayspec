@@ -7,7 +7,7 @@
   ],
   "license": "FSL-1.1-ALv2",
   "type": "module",
-  "description": "The RaySpec CLI — a READ-ONLY diagnostic floor (`rayspec doctor` static parseSpec, `rayspec plan` read-only deploy front-half, `rayspec gen-handler`, and the passive `rayspec bundle inspect`/`verify` of a .ray bundle; never mutates a real/target DB, never prints secrets) PLUS a clearly-separated LOCAL-DEV, MUTATING `dev` group (`dev gen-secrets` writes the 3 platform boot secrets to a .env idempotently without ever echoing a value, `dev db` creates the dev DB if absent, `dev bootstrap-tenant` creates the first tenant+owner via the shipped auth API). The diagnostic floor wraps already-shipped functions and adds NO new platform mechanism.",
+  "description": "The RaySpec CLI — a READ-ONLY diagnostic floor (`rayspec doctor` static parseSpec, `rayspec plan` read-only deploy front-half, `rayspec gen-handler`, the passive `rayspec bundle inspect`/`verify` of a .ray bundle, and `rayspec pack`, which writes a .ray bundle from an application already built and runs none of it; never mutates a real/target DB, never prints secrets) PLUS a clearly-separated LOCAL-DEV, MUTATING `dev` group (`dev gen-secrets` writes the 3 platform boot secrets to a .env idempotently without ever echoing a value, `dev db` creates the dev DB if absent, `dev bootstrap-tenant` creates the first tenant+owner via the shipped auth API). The diagnostic floor wraps already-shipped functions and adds NO new platform mechanism.",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

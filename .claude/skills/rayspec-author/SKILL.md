@@ -661,6 +661,27 @@ Report the results honestly. The agent run calls OpenAI live (`gpt-4o-mini`); a 
 surfaces in the run body. The RaySpec cost-ledger journal shows the `lookup`/`persist` tool steps fired
 through `dispatchTool`.
 
+### Packaging the backend as a `.ray` bundle (optional, only when asked)
+
+`rayspec pack` writes the authored backend into one application bundle (`.ray`) that can be checked and
+handed on. It is **not** a deploy and never replaces Phase 5 — say so to the user. It packages files that
+are **already built** and runs nothing: build the generated handlers to `.js` first and pack the spec of
+the built output (a `.ts` handler is refused with `RAY_CLOSURE_INVALID` and the build instruction).
+
+```
+rayspec pack --spec <built-dir>/rayspec.yaml --output <app-id>-<version>.ray --preview   # what goes in; writes nothing
+rayspec pack --spec <built-dir>/rayspec.yaml --output <app-id>-<version>.ray
+rayspec bundle verify <app-id>-<version>.ray                                              # deployable on this runtime?
+```
+
+- The bundle needs an application id and version: set `metadata.id` / `metadata.version` in the spec
+  (product profile: `product.metadata.id` / `product.metadata.version`), or pass `--id` / `--version`.
+  Never invent them from `metadata.name`; ask the user when neither is known.
+- Every command writes one JSON envelope on stdout; read `ok`, `errors[0].code` and `errors[0].reason`.
+  The refusals and their fixes are in `docs/packing.md`. An existing output needs `--force` — only
+  with the user's approval.
+- `--build`, `--against` and `--allowlist` are refused in this release; do not use them.
+
 ---
 
 ## Phase 7 — the UPDATE flow (evolve an EXISTING authored backend)

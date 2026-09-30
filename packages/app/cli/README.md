@@ -3,8 +3,10 @@
 The RaySpec CLI: a **read-only diagnostic floor** (`rayspec doctor` for static spec
 diagnosis, `rayspec plan` for a deploy preview), a production-mutating `tenant`
 command group (`rayspec tenant ensure` — idempotently create or resolve the
-organization a deployment binds to), and a clearly separated, local-dev `dev`
-command group (scaffolding, secret minting). Every subcommand emits
+organization a deployment binds to), `rayspec pack` (write a built application into
+one `.ray` application bundle, running none of it), the passive `rayspec bundle inspect`
+and `rayspec bundle verify`, and a clearly separated, local-dev `dev` command group
+(scaffolding, secret minting). Every subcommand emits
 machine-parseable JSON to stdout — `--help` is the one exception and prints plain
 text there — and none of them prints a secret except `rayspec dev bootstrap-tenant`,
 whose org token is its documented output.
