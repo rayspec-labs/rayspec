@@ -357,9 +357,15 @@ async function main() {
     });
     const bundleStop = await bundled.stop();
     check('the bundle deployment stops cleanly', bundleStop.code === 0);
-    const envelope = JSON.parse(bundleStop.stdout.slice(bundleStop.stdout.indexOf('{\n')));
+    // stdout is the one envelope: the durable runtime's startup lines go to stderr.
+    let envelope = {};
+    try {
+      envelope = JSON.parse(bundleStop.stdout);
+    } catch {
+      envelope = {};
+    }
     check(
-      'the bundle deploy reports its envelope',
+      'the bundle deploy reports its envelope, alone on stdout',
       envelope.ok === true && envelope.operation === 'deploy',
     );
     const final = await storedRows(sql);

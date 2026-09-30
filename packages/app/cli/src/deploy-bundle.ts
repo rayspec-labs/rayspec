@@ -32,7 +32,8 @@
  *
  * OUTPUT. One result envelope on stdout, with or without `--json`: `deploy.dry-run` for a dry-run,
  * `deploy` for a deploy, written when the deploy refuses or, once it serves, when it stops. Progress,
- * the boot banner and the operation id go to stderr.
+ * the boot banner and the operation id go to stderr, and so does anything else written to stdout
+ * while the verb runs (the durable runtime's startup lines, a handler's `console.log`).
  */
 import { createPublicKey, type KeyObject } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -58,7 +59,7 @@ import {
 import type { Db } from '@rayspec/db';
 import type { ReadApplicationBundle } from '@rayspec/server';
 import type { ServeReport } from './deploy.js';
-import { type Envelope, envelope } from './envelope.js';
+import { type Envelope, type EnvelopeSink, envelope } from './envelope.js';
 
 /** Bytes a ZIP archive starts with: a local file header, or the end record of an empty archive. */
 const ZIP_SIGNATURES: readonly (readonly number[])[] = [
@@ -109,24 +110,33 @@ export function deployTarget(args: readonly string[]): string | undefined {
   return undefined;
 }
 
-/** The first four bytes of a regular file, or null when it is not one or cannot be read. */
-async function leadingBytes(path: string): Promise<Buffer | null> {
+/**
+ * The first four bytes of a regular file, or why there are none: the path cannot be opened, or it
+ * names something other than a regular file.
+ */
+async function readLeadingBytes(path: string): Promise<Buffer | 'cannot-open' | 'not-a-file'> {
   let handle: Awaited<ReturnType<typeof open>>;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch {
-    return null;
+    return 'cannot-open';
   }
   try {
-    if (!(await handle.stat()).isFile()) return null;
+    if (!(await handle.stat()).isFile()) return 'not-a-file';
     const buffer = Buffer.alloc(4);
     const { bytesRead } = await handle.read(buffer, 0, 4, 0);
     return buffer.subarray(0, bytesRead);
   } catch {
-    return null;
+    return 'cannot-open';
   } finally {
     await handle.close();
   }
+}
+
+/** The first four bytes of a regular file, or null when it is not one or cannot be read. */
+async function leadingBytes(path: string): Promise<Buffer | null> {
+  const bytes = await readLeadingBytes(path);
+  return typeof bytes === 'string' ? null : bytes;
 }
 
 function startsWithZipSignature(bytes: Buffer | null): boolean {
@@ -188,6 +198,8 @@ export interface BundleDeployOptions {
   json: boolean;
   /** The explicit process environment. Default: `process.env`. */
   env?: NodeJS.ProcessEnv;
+  /** Where a served deploy writes its envelope when it stops. Default: stdout. */
+  envelopeOut?: EnvelopeSink;
 }
 
 interface Parsed {
@@ -486,8 +498,12 @@ async function deploy(
 ): Promise<BundleDeployOutcome> {
   const bundlePath = resolve(parsed.file);
 
-  // Dispatch: a `.ray` name whose bytes are not a ZIP archive.
-  if (!startsWithZipSignature(await leadingBytes(bundlePath))) {
+  // Dispatch: a `.ray` name that cannot be read, in the bundle reader's words, or whose bytes are
+  // not a ZIP archive.
+  const leading = await readLeadingBytes(bundlePath);
+  if (leading === 'cannot-open') refuse('RAY_USAGE', 'the archive cannot be opened for reading');
+  if (leading === 'not-a-file') refuse('RAY_USAGE', 'the archive is not a regular file');
+  if (!startsWithZipSignature(leading)) {
     refuse('RAY_INVALID_ARCHIVE', 'the file is not a ZIP archive', { reason: 'not-a-zip' });
   }
 
@@ -558,6 +574,7 @@ async function deploy(
     }
   } catch (err) {
     if (err instanceof server.BootConfigError) {
+      if (parsed.dryRun && err.missing.length > 0) refuse('RAY_USAGE', dryRunMissing(err.missing));
       refuse(
         'RAY_USAGE',
         `${err.message.replace(/^[^—]*— /, '')} A bundle deploy reads its configuration from the ` +
@@ -741,7 +758,7 @@ async function deploy(
   server.installBundleModuleResolution(versionRoot);
 
   const state = { environmentRevision: data.environmentRevision };
-  const report = bundleServeReport(options.operationId, () =>
+  const report = bundleServeReport(options.operationId, options.envelopeOut ?? process.stdout, () =>
     deployData('stopped', state.environmentRevision),
   );
   process.stderr.write(
@@ -787,10 +804,34 @@ async function deploy(
             ),
           ]);
         }
+        return applied.productLedgerRow === undefined
+          ? undefined
+          : { productChange: { ledgerRow: applied.productLedgerRow } };
       },
     },
   );
   return { kind: 'served' };
+}
+
+/** Why a dry-run needs each variable it reads from the environment. */
+const DRY_RUN_NEEDS: Readonly<Record<string, string>> = {
+  DATABASE_URL:
+    'DATABASE_URL names the target database, whose live schema head and environment revision ' +
+    'the plan is prepared against',
+  RAYSPEC_API_KEY_PEPPER:
+    "RAYSPEC_API_KEY_PEPPER is the deployment's API key pepper; the plan's binding revision ids " +
+    'are derived from it until the environment stores its own revision key',
+};
+
+/** The refusal of a dry-run that lacks a variable it needs. */
+function dryRunMissing(missing: readonly string[]): string {
+  const reasons = missing.map((name) => DRY_RUN_NEEDS[name] ?? `${name} is required`);
+  return (
+    `the dry-run cannot plan: required environment variable(s) missing: ${missing.join(', ')}. ` +
+    `${reasons.join('; ')}. Each also accepts a <VAR>_FILE variant naming a file that holds the ` +
+    'value. A bundle deploy reads its configuration from the explicit process environment only; ' +
+    'no .env file is loaded'
+  );
 }
 
 /** Whether the environment recorded a deploy under this plan digest, its idempotency key. */
@@ -885,7 +926,11 @@ async function dryRun(
  * the process leaves — `ok` with status `stopped` after a signal, or the refusal with its typed
  * errors when the boot or the apply refused.
  */
-function bundleServeReport(operationId: string, data: () => DeployData): ServeReport {
+function bundleServeReport(
+  operationId: string,
+  out: EnvelopeSink,
+  data: () => DeployData,
+): ServeReport {
   let refusal: { message: string; cause: unknown } | undefined;
   let written = false;
   process.on('exit', (code) => {
@@ -910,7 +955,7 @@ function bundleServeReport(operationId: string, data: () => DeployData): ServeRe
       { ...data(), status: errors.length === 0 ? 'stopped' : 'refused' },
       errors,
     );
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    out.write(`${JSON.stringify(result, null, 2)}\n`, () => {});
   });
   return {
     log: (line) => console.error(line),

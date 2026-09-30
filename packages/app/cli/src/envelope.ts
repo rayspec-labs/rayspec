@@ -170,10 +170,42 @@ function legacyErrors(result: unknown): BundleError[] {
 }
 
 /** Write an envelope as the one JSON object on a stream, resolving once it has drained. */
-export function writeEnvelope(stream: NodeJS.WritableStream, result: Envelope): Promise<void> {
+export function writeEnvelope(stream: EnvelopeSink, result: Envelope): Promise<void> {
   return new Promise((resolve, reject) => {
     stream.write(`${JSON.stringify(result, null, 2)}\n`, (err) => (err ? reject(err) : resolve()));
   });
+}
+
+/** Where an envelope is written: stdout, or the sink `reserveStdout` hands back. */
+export interface EnvelopeSink {
+  write(chunk: string, callback: (err?: Error | null) => void): unknown;
+}
+
+/** stdout reserved for one envelope; `release` gives stdout back. */
+export interface ReservedStdout {
+  readonly sink: EnvelopeSink;
+  release(): void;
+}
+
+/**
+ * Reserve stdout for a verb's one envelope. From here until `release`, anything else written to
+ * stdout — a `console.log`, a library's log line, the durable runtime's startup messages — goes to
+ * stderr instead, so stdout carries exactly one JSON object. The envelope is written through the
+ * returned sink, which writes to the real stdout.
+ */
+export function reserveStdout(): ReservedStdout {
+  const stdout = process.stdout;
+  const original = stdout.write;
+  const write = original.bind(stdout);
+  const toStderr = ((...args: Parameters<typeof process.stderr.write>) =>
+    process.stderr.write(...args)) as typeof stdout.write;
+  stdout.write = toStderr;
+  return {
+    sink: { write: (chunk, callback) => write(chunk, callback) },
+    release: () => {
+      if (stdout.write === toStderr) stdout.write = original;
+    },
+  };
 }
 
 // ─── interruption ──────────────────────────────────────────────────────────────────────────────

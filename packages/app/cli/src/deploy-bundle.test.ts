@@ -15,8 +15,15 @@
  * answer RAY_INFRA_UNAVAILABLE instead of the refusal the arm expects.
  */
 import { spawnSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, join } from 'node:path';
 import { schemaValidator } from '@rayspec/bundle-contract';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -150,6 +157,75 @@ maybeDescribe('rayspec deploy <file.ray> — refused before any database', () =>
     expect(deployRun.envelope.operation).toBe('deploy');
   });
 
+  it('refuses a .ray path it cannot open in the bundle reader words, as bundle verify does', () => {
+    const cwd = temporaryDirectory('deploy-missing-');
+    const missing = join(cwd, 'nothere.ray');
+    for (const args of [[missing, '--dry-run'], [missing]]) {
+      const run = deploy(args, {}, cwd);
+      expectRefusal(run, 'RAY_USAGE', 2);
+      expect(run.envelope.errors[0].message).toBe('the archive cannot be opened for reading');
+    }
+    const verify = spawnSync(process.execPath, [CLI_DIST, 'bundle', 'verify', missing], {
+      cwd,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    const verified = JSON.parse(verify.stdout) as ParsedJson;
+    expect(verified.errors[0]).toMatchObject({
+      code: 'RAY_USAGE',
+      message: 'the archive cannot be opened for reading',
+    });
+    const directory = join(cwd, 'directory.ray');
+    mkdirSync(directory);
+    const notFile = deploy([directory, '--dry-run'], {}, cwd);
+    expectRefusal(notFile, 'RAY_USAGE', 2);
+    expect(notFile.envelope.errors[0].message).toBe('the archive is not a regular file');
+    expect(existsSync(join(cwd, '.rayspec-state'))).toBe(false);
+  });
+
+  it('refuses an unsigned bundle under --require-signature, before the state directory exists', () => {
+    const cwd = temporaryDirectory('deploy-signature-');
+    for (const args of [
+      [bundle, '--dry-run', '--require-signature'],
+      [bundle, '--require-signature'],
+    ]) {
+      const run = deploy(args, {}, cwd);
+      expectRefusal(run, 'RAY_SIGNATURE_INVALID', 4, 'malformed');
+      expect(run.envelope.errors[0].message).toContain('no signature and one is required');
+    }
+    expect(existsSync(join(cwd, '.rayspec-state'))).toBe(false);
+  });
+
+  it('refuses a private key and a key file others can write as --trusted-key', () => {
+    const cwd = temporaryDirectory('deploy-trusted-key-');
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const keys = temporaryDirectory('deploy-keys-');
+    const privatePem = join(keys, 'private.pem');
+    writeFileSync(privatePem, privateKey.export({ type: 'pkcs8', format: 'pem' }));
+    chmodSync(privatePem, 0o600);
+    const writable = join(keys, 'writable.pub.pem');
+    writeFileSync(writable, publicKey.export({ type: 'spki', format: 'pem' }));
+    chmodSync(writable, 0o664);
+    const readable = join(keys, 'readable.pub.pem');
+    writeFileSync(readable, publicKey.export({ type: 'spki', format: 'pem' }));
+    chmodSync(readable, 0o644);
+
+    const withPrivate = deploy([bundle, '--dry-run', '--trusted-key', privatePem], {}, cwd);
+    expectRefusal(withPrivate, 'RAY_USAGE', 2);
+    expect(withPrivate.envelope.errors[0].message).toContain('holds a private key');
+    const withWritable = deploy([bundle, '--dry-run', '--trusted-key', writable], {}, cwd);
+    expectRefusal(withWritable, 'RAY_BINDINGS_FILE_INSECURE', 4);
+    expect(withWritable.envelope.errors[0].message).toContain('writable by group or others');
+    expect(existsSync(join(cwd, '.rayspec-state'))).toBe(false);
+    // The control: a world-readable public key is accepted, so the run goes on to the database,
+    // which does not exist.
+    expectRefusal(
+      deploy([bundle, '--dry-run', '--trusted-key', readable], {}, cwd),
+      'RAY_INFRA_UNAVAILABLE',
+      5,
+    );
+  });
+
   it('refuses unknown flags and conflicting ones as usage errors', () => {
     expectRefusal(deploy([bundle, '--nope']), 'RAY_USAGE', 2);
     expectRefusal(deploy([bundle, '--dry-run', '--plan-digest', 'a'.repeat(64)]), 'RAY_USAGE', 2);
@@ -235,8 +311,12 @@ maybeDescribe('rayspec deploy <file.ray> — refused before any database', () =>
     const envelope = JSON.parse(run.stdout) as ParsedJson;
     expect(run.status).toBe(2);
     expect(envelope.errors[0].code).toBe('RAY_USAGE');
+    expect(envelope.errors[0].message).toContain('the dry-run cannot plan');
     expect(envelope.errors[0].message).toContain('DATABASE_URL');
+    expect(envelope.errors[0].message).toContain('live schema head');
     expect(envelope.errors[0].message).toContain('no .env file is loaded');
+    // The words of another command's refusal (tenant provisioning) are not reused here.
+    expect(envelope.errors[0].message).not.toMatch(/provision|invite token/);
     expect(`${run.stdout}${run.stderr}`).not.toContain(CANARY);
     // The same .env IS read by the YAML path, which keeps its behavior: its check-env reports the
     // variable as set.
@@ -254,6 +334,25 @@ maybeDescribe('rayspec deploy <file.ray> — refused before any database', () =>
     expect(
       (report.searchedDotenv as string[]).some((p) => p.endsWith(join(basename(cwd), '.env'))),
     ).toBe(true);
+  });
+
+  it('names why a dry-run needs the API key pepper when only that is missing', () => {
+    const run = spawnSync(process.execPath, [CLI_DIST, 'deploy', bundle, '--dry-run'], {
+      cwd: temporaryDirectory('deploy-pepper-'),
+      encoding: 'utf8',
+      env: {
+        PATH: process.env.PATH ?? '',
+        HOME: process.env.HOME ?? '',
+        DATABASE_URL: NO_DATABASE,
+      },
+    });
+    const envelope = JSON.parse(run.stdout) as ParsedJson;
+    expect(run.status).toBe(2);
+    expect(envelope.errors[0].code).toBe('RAY_USAGE');
+    expect(envelope.errors[0].message).toContain('missing: RAYSPEC_API_KEY_PEPPER.');
+    expect(envelope.errors[0].message).toContain('binding revision ids');
+    expect(envelope.errors[0].message).not.toContain('DATABASE_URL names');
+    expect(envelope.errors[0].message).not.toMatch(/provision|invite token/);
   });
 
   it('writes the envelope without --json too, with the operation id on stderr', () => {
@@ -289,6 +388,24 @@ maybeDescribe('the flags of the bundle path are documented', () => {
     const run = spawnSync(process.execPath, [CLI_DIST, 'deploy', '--help'], { encoding: 'utf8' });
     expect(run.status).toBe(0);
     for (const flag of flags) expect(names(run.stdout, flag), flag).toBe(true);
+  });
+
+  it('`deploy --help` lists every exit of the bundle deploy, the boot refusal included', () => {
+    const run = spawnSync(process.execPath, [CLI_DIST, 'deploy', '--help'], { encoding: 'utf8' });
+    const text = run.stdout.replace(/\s+/g, ' ');
+    const block = text.slice(text.indexOf('rayspec deploy <file.ray> [--bindings-file'));
+    for (const exit of [
+      'Exit 0 stopped',
+      '1 the boot refused its configuration (RAY_CHECK_FAILED',
+      '2 usage',
+      '3 runtime',
+      '4 policy',
+      '5 lock',
+      '6 drift',
+      '7 internal error',
+    ]) {
+      expect(block, exit).toContain(exit);
+    }
   });
 
   it("the reference's bundle deploy synopsis names every flag", () => {

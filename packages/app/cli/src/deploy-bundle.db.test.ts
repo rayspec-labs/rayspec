@@ -9,10 +9,11 @@
  *  - a missing binding, a bindings file others can read and a reserved name are refused with the
  *    database still empty, and a `.env` file in the working directory is not read;
  *  - the packed application is deployed from a directory that holds only the bundle — its source
- *    tree is gone — and serves its declared routes and its handler from the version directory;
+ *    tree is gone — and serves its declared routes and its handler from the version directory; it
+ *    runs a durable worker, whose startup lines go to stderr so stdout holds the one envelope;
  *  - an additive update deploys and keeps the rows written before it;
- *  - a destructive change, drift added by hand and a stale plan are refused, leaving the previous
- *    version active and the rows in place;
+ *  - a destructive change, drift added by hand, a stale plan, an expired plan and a state directory
+ *    of another deployment are refused, leaving the previous version active and the rows in place;
  *  - a deploy killed while its product DDL runs, after the first statement of that DDL, leaves the
  *    schema and the active version as they were, and the same deploy run again finishes it.
  *
@@ -24,14 +25,20 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
-import { schemaValidator } from '@rayspec/bundle-contract';
+import { dirname, join } from 'node:path';
+import {
+  digestOf,
+  formatTimestamp,
+  PLAN_LIFETIME_MS,
+  schemaValidator,
+} from '@rayspec/bundle-contract';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -61,9 +68,12 @@ function withDbName(url: string, name: string): string {
   return u.toString();
 }
 
+// A durable worker: the durable runtime prints startup lines to stdout, which the deploy must keep
+// off its one-envelope stdout.
 const notes = (columns: string, extra = '') =>
   backendSpec(
-    `stores:\n  - name: bundle_notes\n    columns:\n${columns}\n${extra}` +
+    'deployment:\n  durableWorker: true\n' +
+      `stores:\n  - name: bundle_notes\n    columns:\n${columns}\n${extra}` +
       "api:\n  - { method: POST, path: '/notes', action: { kind: store, store: bundle_notes, op: create } }\n" +
       "  - { method: GET, path: '/notes', action: { kind: store, store: bundle_notes, op: list } }\n" +
       "  - { method: GET, path: '/hello', action: { kind: handler, handler: hello } }\n" +
@@ -204,11 +214,18 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     return { child, exited };
   }
 
+  /** The stderr of the last deploy `stop` ended: its boot banner. */
+  let lastServeStderr = '';
+
   async function stop(served: Served): Promise<ParsedJson> {
     served.child.kill('SIGTERM');
     const out = await served.exited;
+    lastServeStderr = out.stderr;
     expect(out.code, out.stderr).toBe(0);
     expect(`${out.stdout}${out.stderr}`).not.toContain(KEY);
+    // stdout is the one envelope and nothing else; the durable runtime's lines went to stderr.
+    expect(out.stdout.trimStart().startsWith('{'), out.stdout.slice(0, 200)).toBe(true);
+    expect(out.stderr).toContain('DBOS launched');
     const envelope = JSON.parse(out.stdout) as ParsedJson;
     expect(valid(envelope), JSON.stringify(valid.errors)).toBe(true);
     return envelope;
@@ -268,6 +285,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1 });
     try {
       await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
+      await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}_dbos_sys" WITH (FORCE)`);
       await admin.unsafe(`CREATE DATABASE "${SUITE_DB}"`);
     } finally {
       await admin.end();
@@ -300,6 +318,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1 });
     try {
       await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
+      await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}_dbos_sys" WITH (FORCE)`);
     } finally {
       await admin.end();
     }
@@ -414,6 +433,10 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
       status: 'stopped',
     });
     expect(await active()).toBe(bundles.v1!.sha);
+    // The banner says the deploy created the product schema, not that it mounted one without DDL.
+    expect(lastServeStderr).toContain(
+      'Product DB:   APPLIED by the bundle deploy — product migration ledger row 1',
+    );
     const version = join(deployDir, '.rayspec-state', 'versions', bundles.v1!.sha);
     expect(statSync(join(version, 'payload', 'handlers', 'hello.js')).mode & 0o777).toBe(0o400);
     const state = await db.unsafe(
@@ -437,6 +460,9 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     expect(listed.status).toBe(200);
     expect(listed.text).toContain('kept');
     await stop(served);
+    expect(lastServeStderr).toContain(
+      'Product DB:   APPLIED by the bundle deploy — product migration ledger row 2',
+    );
     expect(await active()).toBe(v2.sha);
     expect(await db.unsafe('SELECT body, tag FROM bundle_notes')).toEqual([
       { body: 'kept', tag: null },
@@ -494,7 +520,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     armsRan += 1;
   }, 240_000);
 
-  it('refuses a stale plan and a plan the state directory does not hold', async () => {
+  it('refuses a stale, an unknown and an expired plan, and another deployment', async () => {
     const plan = dryRun(bundles.v3!.path);
     expect(plan.plan.blockers).toEqual([]);
     const revision = await db.unsafe(
@@ -536,6 +562,65 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     ]);
     expect(unknown.status).toBe(3);
     expect(unknown.envelope.errors[0].code).toBe('RAY_PLAN_STALE');
+
+    // A plan past its lifetime: the dry-run's record, as it would read 30 minutes and more later.
+    // Its digest is recomputed for the older time, so only the expiry can refuse it.
+    const fresh = dryRun(bundles.v3!.path);
+    const record = JSON.parse(readFileSync(fresh.planRecordPath, 'utf8')) as ParsedJson;
+    const preparedAt = new Date(Date.parse(record.preparedAt) - PLAN_LIFETIME_MS - 60_000);
+    record.preparedAt = formatTimestamp(preparedAt);
+    record.expiresAt = formatTimestamp(new Date(preparedAt.getTime() + PLAN_LIFETIME_MS));
+    const { bundlePath: _bundlePath, ...input } = record;
+    const expiredDigest = digestOf(input);
+    writeFileSync(
+      join(dirname(fresh.planRecordPath), `${expiredDigest}.json`),
+      JSON.stringify(record),
+      {
+        mode: 0o600,
+      },
+    );
+    const expired = once([
+      bundles.v3!.path,
+      '--bindings-file',
+      bindings,
+      '--plan-digest',
+      expiredDigest,
+    ]);
+    expect(expired.status).toBe(3);
+    expect(expired.envelope.errors[0]).toMatchObject({
+      code: 'RAY_PLAN_STALE',
+      message: 'the plan has expired; run the dry-run again',
+    });
+
+    // A state directory of another deployment, for a dry-run and a deploy alike.
+    const other = temporaryDirectory('bundle-other-state-');
+    chmodSync(other, 0o700);
+    const otherDeployment = {
+      deploymentFormatVersion: 1,
+      deploymentId: 'fedcba9876543210',
+      createdAt: formatTimestamp(new Date()),
+      applicationId: 'probe-app',
+    };
+    writeFileSync(join(other, 'deployment.json'), JSON.stringify(otherDeployment), { mode: 0o600 });
+    for (const args of [['--dry-run'], ['--plan-digest', plan.planDigest]]) {
+      const refused = once([
+        bundles.v3!.path,
+        '--bindings-file',
+        bindings,
+        '--state-dir',
+        other,
+        ...args,
+      ]);
+      expect(refused.status).toBe(2);
+      expect(refused.envelope.errors[0].code).toBe('RAY_USAGE');
+      expect(refused.envelope.errors[0].message).toContain('belongs to another deployment');
+    }
+    // The other state directory is as it was: no plan record, no version, no active version.
+    expect(readdirSync(other)).toEqual(['deployment.json']);
+    expect(JSON.parse(readFileSync(join(other, 'deployment.json'), 'utf8'))).toEqual(
+      otherDeployment,
+    );
+    expect(await active()).toBe(bundles.v2!.sha);
     expect(
       await db.unsafe('SELECT environment_revision::int AS r FROM runtime_control_state'),
     ).toEqual(revision);

@@ -76,6 +76,7 @@ import {
   interruptible,
   legacyEnvelope,
   newOperationId,
+  reserveStdout,
   usageEnvelope,
   workAbandoned,
   writeEnvelope,
@@ -276,11 +277,12 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 delta and switches the active version; a failed deploy leaves the
                                 previous version active and never reverses a schema change. Writes
                                 ONE envelope to stdout when it refuses or stops. Exit 0 stopped /
-                                2 usage, archive, digest or a missing binding / 3 runtime, target,
-                                capability, a stale plan or a schema change the plan does not
-                                approve / 4 policy, signature, reserved binding, an insecure file /
-                                5 lock or database unavailable / 6 drift, interrupted, or
-                                reconciliation required / 7 internal error.
+                                1 the boot refused its configuration (RAY_CHECK_FAILED; nothing
+                                applied) / 2 usage, archive, digest or a missing binding /
+                                3 runtime, target, capability, a stale plan or a schema change the
+                                plan does not approve / 4 policy, signature, reserved binding, an
+                                insecure file / 5 lock or database unavailable / 6 drift,
+                                interrupted, or reconciliation required / 7 internal error.
   rayspec deploy --dry-run <spec.yaml>
                                 One-shot: validate the document with the grammar of the profile it
                                 boots — a product doc is also COMPOSED against a stubbed rollout, a
@@ -726,14 +728,21 @@ async function runDeployBundleVerb(rest: readonly string[], json: boolean): Prom
   const operationId = newOperationId();
   const operation: ResultOperation = rest.includes('--dry-run') ? 'deploy.dry-run' : 'deploy';
   await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  // The deploy serves the application in this process: whatever the runtime or a library prints
+  // while it runs goes to stderr, and stdout carries the one envelope.
+  const stdout = reserveStdout();
+  let served = false;
   try {
     const { runDeployBundle } = await import('./deploy-bundle.js');
-    const outcome = await runDeployBundle(rest, { operationId, json });
-    if (outcome.kind === 'served') return 0;
+    const outcome = await runDeployBundle(rest, { operationId, json, envelopeOut: stdout.sink });
+    if (outcome.kind === 'served') {
+      served = true;
+      return 0;
+    }
     if (!json && outcome.summary.length > 0) {
       await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
     }
-    await writeEnvelope(process.stdout, outcome.envelope);
+    await writeEnvelope(stdout.sink, outcome.envelope);
     return envelopeExitCode(outcome.envelope);
   } catch (err) {
     await writeDrained(
@@ -741,8 +750,11 @@ async function runDeployBundleVerb(rest: readonly string[], json: boolean): Prom
       `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
     );
     const failed = internalEnvelope(operation, operationId);
-    await writeEnvelope(process.stdout, failed);
+    await writeEnvelope(stdout.sink, failed);
     return envelopeExitCode(failed);
+  } finally {
+    // A served deploy keeps stdout reserved until the process leaves and writes its envelope.
+    if (!served) stdout.release();
   }
 }
 
