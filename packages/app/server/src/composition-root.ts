@@ -2129,6 +2129,12 @@ async function assembleServerWith(
      * observation bound with margin). A test may shorten it.
      */
     fencePollIntervalMs?: number;
+    /**
+     * Run once the signing key, the spec and the preflight have validated and before this boot
+     * changes any schema: the bundle deploy applies its plan here, so a boot that is going to refuse
+     * refuses before the apply writes anything. A throw refuses the boot.
+     */
+    beforeSchemaChange?: (db: Db) => Promise<void>;
   },
   started: { fence?: RuntimeFence },
 ): Promise<BootedServer> {
@@ -2320,6 +2326,7 @@ async function assembleServerWith(
     warn: opts.bootWarn ?? consoleWarn,
   });
   try {
+    if (opts.beforeSchemaChange !== undefined) await opts.beforeSchemaChange(db);
     await deployApply.platformChain();
     await fence.load();
     started.fence = fence;

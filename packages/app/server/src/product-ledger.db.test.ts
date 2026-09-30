@@ -361,6 +361,19 @@ describe.skipIf(!baseUrl)('product schema changes through the ledger', () => {
     // The row written before the change survives it.
     expect(await sql('SELECT body, tag FROM ledger_notes')).toEqual([{ body: 'kept', tag: null }]);
     await expectLedgerAgrees(2);
+
+    // Planned again once its delta has landed, as after a deploy that stopped after its schema
+    // change committed: the same bundle has nothing left to change and nothing in its way.
+    const resumed = (await prepare(second)).data!.plan;
+    expect(resumed.blockers).toEqual([]);
+    expect(resumed.schemaImpact.productDeltaSha256).toBeNull();
+    // A bundle whose delta ends anywhere else is still refused on this schema.
+    const elsewhere = await bundle(V2, {
+      ...carried,
+      manifest: { ...carried.manifest, toProductSchemaDigest: 'f'.repeat(64) },
+    });
+    const codes = (await prepare(elsewhere)).data!.plan.blockers.map((b) => b.code);
+    expect(codes).toContain('RAY_MIGRATION_MISMATCH');
     armsRan += 1;
   }, 120_000);
 

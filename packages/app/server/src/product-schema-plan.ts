@@ -336,6 +336,9 @@ async function planDelta(
   const regenerated = productDelta(from, declared);
   const delta = regenerated.migrationSql;
   if (delta === '') {
+    // The environment already has the schema the bundle migrates to: its delta was applied by an
+    // earlier deploy of this bundle that stopped before it finished. Nothing is left to change.
+    if (migration !== undefined && migration.manifest.toProductSchemaDigest === plan.from) return;
     if (migration !== undefined) {
       plan.blockers.push(
         blockerAt(

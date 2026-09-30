@@ -20,8 +20,9 @@ import { type KeyObject, randomUUID } from 'node:crypto';
 import { constants, readFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { inspectBundle, verifySignatureFile } from '@rayspec/bundle';
+import { type BundleInspection, inspectBundle, verifySignatureFile } from '@rayspec/bundle';
 import {
+  type BundleSpec,
   checkDerivedFields,
   deriveManifestFields,
   networkBackends,
@@ -42,6 +43,7 @@ import {
   checkRuntimeAdmission,
   compareCodePoints,
   type DeploymentPlan,
+  EMPTY_PRODUCT_SCHEMA_DIGEST,
   type ExecutionLevel,
   formatTimestamp,
   type HealthData,
@@ -66,6 +68,7 @@ import {
   SUPPORTED_TARGETS,
   sameSchemaHead,
   V1_EXECUTION_LEVELS,
+  type ValidationResult,
 } from '@rayspec/bundle-contract';
 import type { Db } from '@rayspec/db';
 import { type RunCancelPollSource, resolveRunCancelPoll } from '@rayspec/platform';
@@ -418,18 +421,7 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
     },
 
     async prepare(request: PrepareRequest): Promise<ResultEnvelope<PrepareData>> {
-      const operation = 'runtime.prepare';
-      const operationId = operationIdOf(request);
-      const usage = checkPrepareRequest(request);
-      if (usage.length > 0) return failed(operation, operationId, usage);
-      try {
-        return await prepareBundle(request, operationId, options, query, now);
-      } catch (err) {
-        if (err instanceof InfraError) return failed(operation, operationId, [infraUnavailable()]);
-        return failed(operation, operationId, [
-          bundleError('RAY_INTERNAL', 'preparing the plan failed unexpectedly'),
-        ]);
-      }
+      return (await preparePlan(request, options, { preparedAt: formatTimestamp(now()) })).envelope;
     },
   };
 }
@@ -480,29 +472,53 @@ function difference(a: readonly string[], b: readonly string[]): string[] {
   return [...new Set(a)].filter((x) => !other.has(x)).sort(compareCodePoints);
 }
 
-async function prepareBundle(
-  request: PrepareRequest,
-  operationId: string,
-  options: RuntimeControlOptions,
-  query: CatalogQuery,
-  now: () => Date,
-): Promise<ResultEnvelope<PrepareData>> {
-  const operation = 'runtime.prepare';
-  const refuse = (errors: BundleError[], warnings: BundleWarning[] = []) =>
-    failed<PrepareData>(operation, operationId, errors, warnings);
+/** What the reader pipeline established about an application bundle, steps 1 to 17. */
+export interface ReadApplicationBundle {
+  inspection: BundleInspection;
+  manifest: ApplicationManifest;
+  spec: BundleSpec;
+  /** `RAY_W_UNSIGNED` for a bundle without a signature. */
+  warnings: BundleWarning[];
+}
 
-  // The reader pipeline: the structural steps, then the digest the caller named, then admission,
-  // the spec, the derived fields, the secret scan and the signature.
-  const read = await inspectBundle(request.bundlePath, {
-    operation: 'prepare',
+/** How `readApplicationBundle` reads a bundle. */
+export interface ReadApplicationBundleOptions {
+  /** The operation the read serves: the application archive limit applies to both. */
+  operation: 'deploy' | 'prepare';
+  /** The SHA-256 the caller names; different bytes are refused after reader step 9. */
+  expectedSha256?: string;
+  /** Keys a detached signature is verified against. */
+  trustedKeys?: readonly KeyObject[];
+  /** Refuse a bundle without a detached signature. */
+  requireSignature?: boolean;
+  readerLimits?: Partial<ReaderLimits>;
+  resolvesModule?: (specifier: string) => boolean;
+  /** Keep the product delta and allowlist bytes the manifest names. */
+  captureProductMigration?: boolean;
+}
+
+/**
+ * Read an application bundle through the reader pipeline, steps 1 to 17, in the contract's order:
+ * the archive and manifest, the bytes against the inventory, the digest the caller named, the
+ * runtime, target, capabilities and reserved bindings, the spec, the derived fields, the secret scan
+ * and the signature. Opens no database and runs nothing from the archive. The archive is opened
+ * without following a link.
+ */
+export async function readApplicationBundle(
+  bundlePath: string,
+  options: ReadApplicationBundleOptions,
+): Promise<ValidationResult<ReadApplicationBundle>> {
+  const refuse = (errors: BundleError[]) => ({ ok: false as const, errors });
+  const read = await inspectBundle(bundlePath, {
+    operation: options.operation,
     captureSpec: true,
-    captureProductMigration: true,
+    captureProductMigration: options.captureProductMigration === true,
     refuseLinks: true,
     ...(options.readerLimits !== undefined ? { limits: options.readerLimits } : {}),
   });
   if (!read.ok) return refuse(read.errors);
   const inspection = read.value;
-  if (inspection.archiveSha256 !== request.bundleSha256) {
+  if (options.expectedSha256 !== undefined && inspection.archiveSha256 !== options.expectedSha256) {
     return refuse([
       bundleError('RAY_DIGEST_MISMATCH', 'the bundle bytes do not hash to bundleSha256', {
         reason: 'bundle-sha256',
@@ -512,15 +528,15 @@ async function prepareBundle(
   }
   if (inspection.manifest.kind !== 'application') {
     return refuse([
-      bundleError('RAY_USAGE', 'prepare takes an application bundle', { path: '/bundlePath' }),
+      bundleError('RAY_USAGE', `${options.operation} takes an application bundle`, {
+        path: '/bundlePath',
+      }),
     ]);
   }
   const manifest: ApplicationManifest = inspection.manifest;
-  const capabilities = providedCapabilities(options.resolvesModule);
-  const version = runtimeVersion();
   const admitted = checkRuntimeAdmission(manifest, {
-    version,
-    capabilities,
+    version: runtimeVersion(),
+    capabilities: providedCapabilities(options.resolvesModule),
     targets: SUPPORTED_TARGETS,
     executionLevels: V1_EXECUTION_LEVELS,
   });
@@ -544,7 +560,7 @@ async function prepareBundle(
   }
   const warnings: BundleWarning[] = [];
   if (inspection.signatureFile === 'present') {
-    const signature = await readSignature(`${request.bundlePath}.sig`);
+    const signature = await readSignature(`${bundlePath}.sig`);
     if (signature === null) {
       return refuse([
         bundleError(
@@ -562,19 +578,119 @@ async function prepareBundle(
       options.trustedKeys ?? [],
     );
     if (!verified.ok) return refuse(verified.errors);
+  } else if (options.requireSignature === true) {
+    return refuse([
+      bundleError('RAY_SIGNATURE_INVALID', 'the bundle has no signature and one is required', {
+        reason: 'malformed',
+      }),
+    ]);
   } else {
     warnings.push({
       code: 'RAY_W_UNSIGNED',
       message: 'the bundle has no detached signature, so its origin is not established',
     });
   }
+  return { ok: true, value: { inspection, manifest, spec, warnings } };
+}
+
+/** How `preparePlan` prepares, beyond the request. */
+export interface PreparePlanOptions {
+  /** The time the plan is prepared at: now for a new plan, the plan's own time to recompute one. */
+  preparedAt: string;
+  /** Refuse a bundle without a detached signature. */
+  requireSignature?: boolean;
+  /**
+   * The schema head the environment had before this process ran the platform chain that creates
+   * the runtime-control tables, outside apply. It stands for the live head only while the live head
+   * is exactly what that chain leaves behind: this runtime's platform head and an unchanged product
+   * schema. Any other live head is used as it is, so a change made meanwhile makes the plan stale.
+   */
+  bootstrappedFrom?: { head: SchemaHead | null };
+}
+
+/** A prepared plan, with what the reader and the product planner established on the way. */
+export interface PreparedPlan {
+  envelope: ResultEnvelope<PrepareData>;
+  /** Present when the plan was prepared. */
+  bundle?: ReadApplicationBundle;
+  /** Present when the plan was prepared. */
+  product?: ProductPlan;
+}
+
+/**
+ * Prepare a plan for a bundle: `prepare()` with the time it is prepared at named by the caller, so
+ * `apply` can recompute the digest of a plan prepared earlier. Read-only against the environment.
+ */
+export async function preparePlan(
+  request: PrepareRequest,
+  options: RuntimeControlOptions,
+  extra: PreparePlanOptions,
+): Promise<PreparedPlan> {
+  const operation = 'runtime.prepare';
+  const operationId = operationIdOf(request);
+  const usage = checkPrepareRequest(request);
+  if (usage.length > 0) return { envelope: failed(operation, operationId, usage) };
+  const query: CatalogQuery = async (sql, params = []) =>
+    (await options.db.$client.unsafe(sql, params as never[])) as unknown as Record<
+      string,
+      unknown
+    >[];
+  try {
+    return await prepareBundle(request, operationId, options, query, extra);
+  } catch (err) {
+    if (err instanceof InfraError) {
+      return { envelope: failed(operation, operationId, [infraUnavailable()]) };
+    }
+    return {
+      envelope: failed(operation, operationId, [
+        bundleError('RAY_INTERNAL', 'preparing the plan failed unexpectedly'),
+      ]),
+    };
+  }
+}
+
+async function prepareBundle(
+  request: PrepareRequest,
+  operationId: string,
+  options: RuntimeControlOptions,
+  query: CatalogQuery,
+  extra: PreparePlanOptions,
+): Promise<PreparedPlan> {
+  const operation = 'runtime.prepare';
+  const refuse = (errors: BundleError[], warnings: BundleWarning[] = []): PreparedPlan => ({
+    envelope: failed<PrepareData>(operation, operationId, errors, warnings),
+  });
+
+  // The reader pipeline: the structural steps, then the digest the caller named, then admission,
+  // the spec, the derived fields, the secret scan and the signature.
+  const read = await readApplicationBundle(request.bundlePath, {
+    operation: 'prepare',
+    expectedSha256: request.bundleSha256,
+    captureProductMigration: true,
+    ...(options.trustedKeys !== undefined ? { trustedKeys: options.trustedKeys } : {}),
+    ...(extra.requireSignature === true ? { requireSignature: true } : {}),
+    ...(options.readerLimits !== undefined ? { readerLimits: options.readerLimits } : {}),
+    ...(options.resolvesModule !== undefined ? { resolvesModule: options.resolvesModule } : {}),
+  });
+  if (!read.ok) return refuse(read.errors);
+  const { inspection, manifest, spec } = read.value;
+  const warnings: BundleWarning[] = [...read.value.warnings];
 
   // The live environment: schema head, state row, and the product change planned against the live
   // schema and the product migration ledger (product-schema-plan.ts).
   const blockers: BundleError[] = [];
   const liveHead = await guardedRead(() => readSchemaHead(query));
   const state = await guardedRead(() => readEnvironmentState(query));
-  const from: SchemaHead | null = liveHead.state === 'known' ? liveHead.head : null;
+  let from: SchemaHead | null = liveHead.state === 'known' ? liveHead.head : null;
+  const bootstrapped = extra.bootstrappedFrom;
+  if (
+    bootstrapped !== undefined &&
+    from !== null &&
+    from.platform === runtimePlatformHead() &&
+    from.product === (bootstrapped.head?.product ?? EMPTY_PRODUCT_SCHEMA_DIGEST)
+  ) {
+    from = bootstrapped.head;
+  }
   if (liveHead.state === 'unknown') {
     blockers.push(
       bundleError(
@@ -679,7 +795,7 @@ async function prepareBundle(
     warnings: [...warnings],
   };
 
-  const preparedAt = formatTimestamp(now());
+  const preparedAt = extra.preparedAt;
   const digest = planDigest({
     bundleSha256: plan.bundleSha256,
     releaseManifestSha256: options.releaseManifestSha256 ?? null,
@@ -695,16 +811,20 @@ async function prepareBundle(
     environmentRevision: state.environmentRevision,
     preparedAt,
   });
-  return succeeded(
-    operation,
-    operationId,
-    {
-      plan,
-      planDigest: digest,
-      preparedAt,
-      expiresAt: planExpiresAt(preparedAt),
-      environmentRevision: state.environmentRevision,
-    },
-    warnings,
-  );
+  return {
+    envelope: succeeded(
+      operation,
+      operationId,
+      {
+        plan,
+        planDigest: digest,
+        preparedAt,
+        expiresAt: planExpiresAt(preparedAt),
+        environmentRevision: state.environmentRevision,
+      },
+      warnings,
+    ),
+    bundle: read.value,
+    product,
+  };
 }

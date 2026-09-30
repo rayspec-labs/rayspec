@@ -103,6 +103,22 @@ export {
   resolveBootTimeoutMs,
   withBootTimeout,
 } from './boot-timeout.js';
+// Deploying a bundle on a self-hosted target: the apply `rayspec deploy <file.ray>` runs, the binding
+// revisions its plan is bound to, and how the deployed application's modules resolve.
+export {
+  type AppliedBundle,
+  type ApplyBundleOptions,
+  applyBundle,
+  BUNDLE_DEPLOY_ACTOR,
+  bindingRevisions,
+  type EnvironmentIdentity,
+  initialBindingRevisionKey,
+  liveSchemaHead,
+  planNeedsReview,
+  readEnvironmentIdentity,
+  SCHEMA_CHANGED_RECOVERY,
+} from './bundle-deploy.js';
+export { type BundleModuleResolution, installBundleModuleResolution } from './bundle-modules.js';
 // The composition root. Its STATIC (frontend-only) half — `isStaticProfile` (the fail-closed shape
 // predicate), `detectStaticProfile` (the read+classify wrapper the boot branches on),
 // `loadStaticServerConfig` (the secret-free config) and `assembleStaticServer` (the bare app that never
@@ -150,6 +166,22 @@ export {
   RuntimeApplyError,
   schemaObservers,
 } from './deploy-apply.js';
+// The deployment state directory of a self-hosted bundle deployment: the deployment record, the
+// active version, the immutable version directories and the plan records.
+export {
+  type ActiveRecord,
+  DEFAULT_STATE_DIR,
+  DEPLOYMENT_FORMAT_VERSION,
+  type DeploymentRecord,
+  newDeploymentId,
+  openStateDirectory,
+  protectedFileRefusal,
+  readProtectedFile,
+  removeTree,
+  StateDirectory,
+  StateDirectoryError,
+  verifyVersion,
+} from './deployment-state.js';
 // Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
 export {
   bindingsProbe,
@@ -256,9 +288,15 @@ export {
   CAPABILITY_MODULES,
   createRuntimeControl,
   type HostingReport,
+  type PreparedPlan,
+  type PreparePlanOptions,
+  preparePlan,
   providedCapabilities,
+  type ReadApplicationBundle,
+  type ReadApplicationBundleOptions,
   type RuntimeControlAdapter,
   type RuntimeControlOptions,
+  readApplicationBundle,
   runtimeVersion,
 } from './runtime-control.js';
 // The source fence as one runtime process keeps it: the phases, the producers it stops and restarts,
