@@ -154,7 +154,7 @@ export async function loadExtensions(
   for (const [refIndex, ref] of refs.entries()) {
     if (seenIds.has(ref.id)) {
       throw new ExtensionLoadError(
-        `extension '${ref.id}' is referenced more than once in extensions[] — pack ids must be ` +
+        `extension '${ref.id}' is referenced more than once in extensions[] — extension ids must be ` +
           'unique (fail-closed).',
       );
     }
@@ -167,8 +167,8 @@ export async function loadExtensions(
     if (isBareSpecifier(ref.module)) {
       throw new ExtensionLoadError(
         `extension '${ref.id}': module '${ref.module}' looks like an npm package specifier — the ` +
-          'npm-module branch is NOT built (directory-only). Reference the pack as a directory ' +
-          'path relative to the packs root (fail-closed).',
+          'npm-module branch is NOT built (directory-only). Reference the extension as a ' +
+          'directory path relative to the extensions root (fail-closed).',
       );
     }
     const packRoot = jailModulePathFor(ctx.packsRoot, ref.module, ref.id);
@@ -183,15 +183,15 @@ export async function loadExtensions(
       mod = await importer(entryAbsolute);
     } catch (e) {
       throw new ExtensionLoadError(
-        `extension '${ref.id}': failed to load pack entry '${entryFile}' (${entryAbsolute}): ` +
-          `${e instanceof Error ? e.message : String(e)} — a pack's entry module must default-export ` +
+        `extension '${ref.id}': failed to load extension entry '${entryFile}' (${entryAbsolute}): ` +
+          `${e instanceof Error ? e.message : String(e)} — an extension's entry module must default-export ` +
           'a defineExtension(...) manifest (fail-closed).',
       );
     }
     const manifest = mod.default;
     if (!isDefinedExtension(manifest)) {
       throw new ExtensionLoadError(
-        `extension '${ref.id}': pack entry '${entryFile}' does not default-export a defineExtension ` +
+        `extension '${ref.id}': extension entry '${entryFile}' does not default-export a defineExtension ` +
           '(...) manifest (got ' +
           `${manifest === undefined ? 'no default export' : typeof manifest}) — the entry must be ` +
           '`export default defineExtension({ version, fragments, … })`. Fail-closed.',
@@ -202,9 +202,9 @@ export async function loadExtensions(
     //     pin MUST equal the pack manifest's declared version. A SKEW is a HARD ERROR, never a skip.
     if (manifest.version !== ref.version) {
       throw new ExtensionLoadError(
-        `extension '${ref.id}': version SKEW — the spec pins version '${ref.version}' but the pack ` +
-          `manifest declares version '${manifest.version}'. A version skew is a HARD fail-closed ` +
-          'error (never a silent skip): pin the exact version the pack declares, or update the pack.',
+        `extension '${ref.id}': version SKEW — the spec pins version '${ref.version}' but the ` +
+          `extension manifest declares version '${manifest.version}'. A version skew is a HARD fail-closed ` +
+          'error (never a silent skip): pin the exact version the extension declares, or update the extension.',
       );
     }
 
@@ -230,8 +230,8 @@ export async function loadExtensions(
       // are still rejected by the pack-root jail below; this is the additional handlers/-subtree gate.)
       if (!isUnderHandlersDir(h.module)) {
         throw new ExtensionLoadError(
-          `extension '${ref.id}': handler '${h.id}' module '${h.module}' is not under the pack's ` +
-            '`handlers/` directory. A pack handler module MUST live under `handlers/` (the subtree ' +
+          `extension '${ref.id}': handler '${h.id}' module '${h.module}' is not under the extension's ` +
+            '`handlers/` directory. An extension handler module MUST live under `handlers/` (the subtree ' +
             'BOTH escape-hatch gates scan); a handler outside it would load unscanned (fail-closed).',
         );
       }
@@ -262,7 +262,7 @@ export async function loadExtensions(
       if (virtualToReal.has(virtualAbsolute)) {
         throw new ExtensionLoadError(
           `extension '${ref.id}': handler '${h.id}' rewrites to the virtual path '${virtualModule}' ` +
-            `which is already mapped (from another pack handler). A virtual handler path must map to ` +
+            `which is already mapped (from another extension handler). A virtual handler path must map to ` +
             'exactly one real file — refusing to overwrite (fail-closed collision).',
         );
       }
@@ -293,8 +293,8 @@ export async function loadExtensions(
     if (caps?.blobFactory) {
       if (capabilities.blobFactory) {
         throw new ExtensionLoadError(
-          `extension '${ref.id}': provides a blobFactory capability but another pack already provided ` +
-            'one — at most one pack may own the blob backend (fail-closed collision).',
+          `extension '${ref.id}': provides a blobFactory capability but another extension already ` +
+            'provided one — at most one extension may own the blob backend (fail-closed collision).',
         );
       }
       capabilities.blobFactory = caps.blobFactory;

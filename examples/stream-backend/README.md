@@ -54,8 +54,8 @@ and — in a deploy tree that carries no `@rayspec` install of its own — the e
 fail-closed with
 
 ```
-extension 'stream_pack': failed to load pack entry 'index.ts' (…/dist/index.js):
-Cannot find package '@rayspec/platform' imported from …/dist/index.js — a pack's entry
+extension 'stream_pack': failed to load extension entry 'index.ts' (…/dist/index.js):
+Cannot find package '@rayspec/platform' imported from …/dist/index.js — an extension's entry
 module must default-export a defineExtension(...) manifest (fail-closed).
 ```
 

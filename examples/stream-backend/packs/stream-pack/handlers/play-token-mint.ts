@@ -1,7 +1,7 @@
 /**
  * Escape-hatch PLAY-TOKEN MINT handler for the synthetic stream backend.
  *
- * The PACK-SIDE mint route — a NORMAL `{handler}` route (authed RS256 Bearer, the standard
+ * The EXTENSION-SIDE mint route — a NORMAL `{handler}` route (authed RS256 Bearer, the standard
  * `requireAuth → resolveTenant → requirePermission(store:write)` chain), NOT a stream route. It mints a
  * short-lived `?token=` media-JWT authorizing the CALLER to stream a chunk they OWN. The platform
  * injects `init.mintPlayToken` (bound to the run's SERVER-DERIVED tenant + the authed user — the
@@ -21,7 +21,7 @@ import type { RouteHandler, RouteHandlerInit } from '@rayspec/handler-sdk';
 
 const POINTER_STORE = 'blob_chunks';
 
-/** Default media-token TTL (seconds). A real pack scales it to the recording duration. */
+/** Default media-token TTL (seconds). A real extension scales it to the recording duration. */
 const DEFAULT_TTL_SECONDS = 300;
 
 export const playTokenMint: RouteHandler = async (init: RouteHandlerInit): Promise<unknown> => {

@@ -198,8 +198,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no workflow or document used it. The documentation calls extension packs **extensions**, and
   so do the messages users see: `deploy --check-env` now says "no extension is loaded" and
   "declares N extension(s)", the boot errors about merged extensions and a missing blob backend
-  say "extension", and the example specs and extension manifests describe themselves the same
-  way.
+  say "extension", so do the extension loader's errors (for example "failed to load extension
+  entry" and "is not under the extension's `handlers/` directory"), and the example specs,
+  extension manifests, extension sources and build scripts describe themselves the same way.
 - **An unexpected internal failure of the CLI exits 7**, not 2, so a script can tell a defect from
   a usage error. Every other exit code of the existing commands is unchanged.
 - **Each CLI command loads only its own modules.** The entry point now imports a command's module

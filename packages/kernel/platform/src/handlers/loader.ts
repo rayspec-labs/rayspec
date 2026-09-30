@@ -350,7 +350,7 @@ export async function loadHandlersMultiRoot(
     if (root === undefined) {
       throw new HandlerLoadError(
         `handler '${handler.id}': no escape-hatch root resolved for it (multi-root load) — every ` +
-          'handler must map to a jailed root (the deployment root or an extension-pack root). ' +
+          'handler must map to a jailed root (the deployment root or an extension root). ' +
           'Fail-closed.',
       );
     }

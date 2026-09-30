@@ -1,25 +1,25 @@
 /**
- * Build the stream-backend example pack into a deployable artifact.
+ * Build the stream-backend example extension into a deployable artifact.
  *
- * The stream surface is delivered as a `defineExtension` PACK (packs/stream-pack) authored in
- * TypeScript. The `rayspec` serve/deploy runtime is compiled-JavaScript-only: it loads each pack module
- * with a plain dynamic import that fail-closed-rejects a `.ts` path. So the pack has to be compiled to
- * `.js` before deploy. This script compiles the pack into `packs/stream-pack/dist/`:
+ * The stream surface is delivered as an EXTENSION (a `defineExtension` manifest, packs/stream-pack) authored in
+ * TypeScript. The `rayspec` serve/deploy runtime is compiled-JavaScript-only: it loads each extension module
+ * with a plain dynamic import that fail-closed-rejects a `.ts` path. So the extension has to be compiled to
+ * `.js` before deploy. This script compiles the extension into `packs/stream-pack/dist/`:
  *
- *   1. transpiles the pack's `index.ts` + `handlers/*.ts` -> `packs/stream-pack/dist/*.js` (ESM) via
+ *   1. transpiles the extension's `index.ts` + `handlers/*.ts` -> `packs/stream-pack/dist/*.js` (ESM) via
  *      tsconfig.build.json;
  *   2. writes `dist/package.json` with `{"type":"module"}` so the emitted `.js` loads as ESM;
- *   3. copies the pack's generated schema + migrations so the built pack is self-contained.
+ *   3. copies the extension's generated schema + migrations so the built extension is self-contained.
  *
- * The built pack lives UNDER `packs/stream-pack/`, so its entry resolves `@rayspec/platform` (the pack
- * entry imports `defineExtension` from it) through the pack's own `node_modules`: the loader imports the
+ * The built extension lives UNDER `packs/stream-pack/`, so its entry resolves `@rayspec/platform` (the extension
+ * entry imports `defineExtension` from it) through the extension's own `node_modules`: the loader imports the
  * entry by the ENTRY's own absolute file URL, so Node resolves that bare specifier from the BUILT file's
- * location upward, hitting the pack's own `node_modules` before anything the deploy tree carries above
- * it — ship `dist/` alone and the pack gets whatever is up there, or nothing. IN THIS REPO that
+ * location upward, hitting the extension's own `node_modules` before anything the deploy tree carries above
+ * it — ship `dist/` alone and the extension gets whatever is up there, or nothing. IN THIS REPO that
  * `node_modules` is the pnpm workspace link; out of the repo it is a real install of the RELEASED
- * `@rayspec/platform`, and the pack DIRECTORY (`dist/` + `node_modules/`) is what has to reach the
- * deploy target — see README.md, 'Shipping this pack from its own repo'. Deploy a spec that references
- * the built pack directory `packs/stream-pack/dist` (the loader resolves the compiled `.js` — the
+ * `@rayspec/platform`, and the extension DIRECTORY (`dist/` + `node_modules/`) is what has to reach the
+ * deploy target — see README.md, 'Shipping this extension from its own repo'. Deploy a spec that references
+ * the built extension directory `packs/stream-pack/dist` (the loader resolves the compiled `.js` — the
  * manifest keeps its authored `.ts` module paths, and `.js`-preferred resolution loads the compiled
  * siblings, so no manifest rewrite is needed). Run: `node examples/stream-backend/build.mjs`.
  */
@@ -32,28 +32,28 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 const packDir = join(here, 'packs', 'stream-pack');
-// The built pack lives under the pack dir so it resolves `@rayspec/platform` via the pack's node_modules.
+// The built extension lives under the extension dir so it resolves `@rayspec/platform` via the extension's node_modules.
 const distDir = join(packDir, 'dist');
 
 // (0) Clean the previous artifact so a removed handler never lingers in dist/.
 rmSync(distDir, { recursive: true, force: true });
 mkdirSync(distDir, { recursive: true });
 
-// (1) Transpile the pack (index.ts + handlers/*.ts) -> dist/*.js (ESM). tsconfig.build.json emits to ./dist.
+// (1) Transpile the extension (index.ts + handlers/*.ts) -> dist/*.js (ESM). tsconfig.build.json emits to ./dist.
 const tsc = require.resolve('typescript/bin/tsc');
 execFileSync(process.execPath, [tsc, '-p', join(packDir, 'tsconfig.build.json')], {
   stdio: 'inherit',
 });
 
-// (2) Mark the emitted pack JavaScript as ESM (the emit uses `export`/`import`).
+// (2) Mark the emitted extension JavaScript as ESM (the emit uses `export`/`import`).
 writeFileSync(join(distDir, 'package.json'), `${JSON.stringify({ type: 'module' }, null, 2)}\n`);
 
-// (3) Copy the pack's generated schema + migrations so the built pack is self-contained.
+// (3) Copy the extension's generated schema + migrations so the built extension is self-contained.
 for (const dir of ['generated', 'drizzle']) {
   cpSync(join(packDir, dir), join(distDir, dir), { recursive: true });
 }
 
 console.log(
-  'stream-backend pack built -> packs/stream-pack/dist/ ' +
+  'stream-backend extension built -> packs/stream-pack/dist/ ' +
     '(deploy a spec referencing packs/stream-pack/dist)',
 );
