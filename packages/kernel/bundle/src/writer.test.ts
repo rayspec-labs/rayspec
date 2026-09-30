@@ -236,8 +236,8 @@ describe('refusals', () => {
     expect(outcome(await writeBundle(out, input, { limits: { entryCount: 10_001 } }))).toBe(
       'RAY_USAGE/',
     );
-    const rsa = generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey;
-    expect(outcome(await writeBundle(out, input, { signingKey: rsa }))).toBe('RAY_USAGE/');
+    const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey;
+    expect(outcome(await writeBundle(out, input, { signingKey: ec }))).toBe('RAY_USAGE/');
     const ed = generateKeyPairSync('ed25519').publicKey;
     expect(outcome(await writeBundle(out, input, { signingKey: ed }))).toBe('RAY_USAGE/');
   });

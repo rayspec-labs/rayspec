@@ -55,8 +55,8 @@ describe('createSignatureFile', () => {
       'RAY_USAGE/',
     );
     expect(outcome(createSignatureFile(digest, signer.publicKey))).toBe('RAY_USAGE/');
-    const rsa = generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey;
-    expect(outcome(createSignatureFile(digest, rsa))).toBe('RAY_USAGE/');
+    const ec = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey;
+    expect(outcome(createSignatureFile(digest, ec))).toBe('RAY_USAGE/');
   });
 });
 
