@@ -150,6 +150,7 @@ import type {
 } from '@rayspec/platform';
 import { deleteEnqueuedRunHeader, insertEnqueuedRunHeader } from '@rayspec/platform';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { type ProducerGate, ProducerPausedError } from './producer-gate.js';
 
 /**
  * The narrow trigger-handler shape the cron worker passes to `invokeTriggerHandler`. The platform
@@ -304,6 +305,19 @@ export function cronTenantAbsentLog(triggerName: string, tenantId: string, insta
 }
 
 /**
+ * The one line a scheduled tick logs when the producer gate is closed (the runtime is fenced): the
+ * tick dispatched nothing and wrote no firing marker, and the engine records the interval as run, so
+ * scheduled firing resumes at the first instant after the fence is released.
+ */
+export function cronPausedLog(triggerName: string, instant: Date): string {
+  return (
+    `[cron] PAUSED trigger '${triggerName}' for ${firingInstantIso(instant)} — the runtime is ` +
+    'fenced, so nothing was dispatched and no firing marker was written. Scheduled firing resumes ' +
+    'at the next instant after the fence is released.'
+  );
+}
+
+/**
  * The outcome of a fire, with the enqueued run's id when there is one: `fired` exactly as `fireNow`
  * reports it, plus — iff THIS call won the reserve and dispatched an AGENT action — the deterministic
  * `runId` it enqueued (`cronRunId(name, instant)`), so the consumer control path can hand the caller
@@ -385,6 +399,12 @@ export interface CronSchedulerDeps {
   readonly resolveRunHeaderIdentity?: (
     agentId: string,
   ) => Omit<RunHeaderIdentity, 'runId'> | undefined;
+  /**
+   * The switch a source fence closes. Asked FIRST on every fire: closed, a scheduled tick dispatches
+   * nothing (one `cronPausedLog` line) and an on-demand fire throws `ProducerPausedError`. Absent ⇒
+   * always open.
+   */
+  readonly gate?: ProducerGate;
 }
 
 /** Thrown when a NON-cron trigger reaches the cron SCHEDULING path (per-kind reservation — fail-closed). */
@@ -445,6 +465,7 @@ export class DbosCronScheduler {
   /** Where the one-line skipped-firing notice goes (the injected sink, or `console`). */
   readonly #logger: CronSchedulerLogger;
   #registered = false;
+  #inFlight = 0;
 
   /**
    * @param descriptors EVERY registered descriptor (the full `TriggerRegistry.list()`). Cron ones are
@@ -473,6 +494,11 @@ export class DbosCronScheduler {
       // the platform `TriggerRegistry`; this worker neither schedules NOR fires them. A `fireNow` for a
       // webhook/event (or unknown) name is a clear fail-closed "not a fireable trigger" error.
     }
+  }
+
+  /** How many fires (scheduled or on demand) are dispatching in this process right now. */
+  get inFlight(): number {
+    return this.#inFlight;
   }
 
   /** The names of the cron triggers this scheduler SCHEDULES (for the boot banner / tests). */
@@ -505,6 +531,10 @@ export class DbosCronScheduler {
       const workflowName = `cron:${name}`;
       const body = DBOS.registerWorkflow(
         async (scheduledTime: Date): Promise<void> => {
+          if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+            this.#logger.warn(cronPausedLog(descriptor.name, scheduledTime));
+            return;
+          }
           await this.#fire(descriptor, scheduledTime, { fromSchedule: true });
         },
         { name: workflowName },
@@ -562,6 +592,9 @@ export class DbosCronScheduler {
           '(unknown, or a RESERVED webhook/event kind not built here). Fail-closed.',
       );
     }
+    if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+      throw new ProducerPausedError(`trigger '${name}'`);
+    }
     return this.#fire(descriptor, instant);
   }
 
@@ -589,6 +622,10 @@ export class DbosCronScheduler {
           '(unknown, or a RESERVED webhook/event/manual kind not built here). Fail-closed.',
       );
     }
+    if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+      this.#logger.warn(cronPausedLog(name, instant));
+      return false;
+    }
     return (await this.#fire(descriptor, instant, { fromSchedule: true })).fired;
   }
 
@@ -612,6 +649,19 @@ export class DbosCronScheduler {
    *   that does not exist (yet).
    */
   async #fire(
+    descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
+    instant: Date,
+    opts?: { fromSchedule?: boolean },
+  ): Promise<FireOutcome> {
+    this.#inFlight += 1;
+    try {
+      return await this.#dispatch(descriptor, instant, opts);
+    } finally {
+      this.#inFlight -= 1;
+    }
+  }
+
+  async #dispatch(
     descriptor: TriggerDescriptor & { kind: 'cron' | 'manual' },
     instant: Date,
     opts?: { fromSchedule?: boolean },

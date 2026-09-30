@@ -14,6 +14,7 @@ export {
   type CronSchedulerLogger,
   catchUpSchedulerMode,
   cronAgentInput,
+  cronPausedLog,
   cronRunId,
   cronTenantAbsentLog,
   DbosCronScheduler,
@@ -38,6 +39,10 @@ export {
   RUN_STARTED_BODY_HASH,
   RUN_STARTED_SCOPE,
 } from './executor.js';
+// Pausing a queue's dispatch and closing a scheduler's gate: the stops a source fence uses, both
+// undone by a resume without shutting the engine down.
+export { PausableQueue } from './pausable-queue.js';
+export { type ProducerGate, ProducerPausedError } from './producer-gate.js';
 // The daily SYSTEM/PLATFORM housekeeping scheduled-workflow (OIDC prune LIVE + the
 // operator-gated GDPR purge). A SYSTEM job (NOT a tenant cron trigger); engine-only — the concrete
 // cleanup logic is INJECTED as a neutral `runCleanup()` callback so this package stays api-auth-free.

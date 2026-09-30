@@ -44,6 +44,7 @@ import {
   TenantDbWorkflowJournalStore,
   type WorkflowEnqueuer,
 } from '@rayspec/workflow-durable';
+import { PausableQueue } from './pausable-queue.js';
 
 /**
  * The JSON-serializable payload to reconstruct + execute a workflow run off-request. It carries NO
@@ -229,11 +230,37 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
   #registered = false;
   #launched = false;
   #runWorkflowJob?: (job: WorkflowJob) => Promise<void>;
+  /** The workflow-run queue, pausable without shutting the engine down (see `pausable-queue.ts`). */
+  readonly #queue: PausableQueue;
 
   constructor(deps: DbosWorkflowExecutorDeps, config: { workerConcurrency?: number } = {}) {
     this.#deps = deps;
     this.#logger = deps.logger ?? CONSOLE_LOGGER;
     this.#workerConcurrency = config.workerConcurrency ?? DEFAULT_WORKFLOW_WORKER_CONCURRENCY;
+    this.#queue = new PausableQueue(WORKFLOW_RUNS_QUEUE, this.#workerConcurrency);
+  }
+
+  /**
+   * Stop dequeuing workflow runs without shutting DBOS down; running ones continue (`inFlight`).
+   * Callable before the queue is registered: it is then registered paused.
+   */
+  async pauseDispatch(): Promise<void> {
+    await this.#queue.pause();
+  }
+
+  /** Dequeue workflow runs again after `pauseDispatch`. */
+  async resumeDispatch(): Promise<void> {
+    await this.#queue.resume();
+  }
+
+  /** Whether a pause has settled: no dispatch loop can still claim a job it read before it. */
+  get dispatchSettled(): boolean {
+    return this.#queue.settled;
+  }
+
+  /** How many workflow runs this process is executing right now. */
+  get inFlight(): number {
+    return this.#queue.inFlight;
   }
 
   /**
@@ -244,7 +271,7 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
   registerWorkflowJob(): void {
     if (this.#registered) return;
     this.#runWorkflowJob = DBOS.registerWorkflow(
-      (job: WorkflowJob) => this.#runWorkflowJobBody(job),
+      (job: WorkflowJob) => this.#queue.track(() => this.#runWorkflowJobBody(job)),
       {
         name: 'runWorkflowJob',
         // Cap DBOS recovery so a perpetually-crashing job dead-letters instead of looping. The engine's
@@ -267,10 +294,8 @@ export class DbosWorkflowExecutor implements WorkflowEnqueuer {
     // ON CONFLICT DO NOTHING for every process that is not the newest registered version. It carries
     // the same limit too — the `queues` row is name-keyed and therefore SHARED across deployments on
     // one system database; see the note on the agent queue in executor.ts.
-    await DBOS.registerQueue(WORKFLOW_RUNS_QUEUE, {
-      workerConcurrency: this.#workerConcurrency,
-      onConflict: 'always_update',
-    });
+    // Registered paused when `pauseDispatch` ran first (a boot under a held source fence).
+    await this.#queue.register();
     this.#launched = true;
   }
 

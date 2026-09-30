@@ -44,6 +44,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { DBOS } from '@dbos-inc/dbos-sdk';
 import type { DurableExecutor } from '@rayspec/platform';
+import { type ProducerGate, ProducerPausedError } from './producer-gate.js';
 
 /** The default crontab — 3am daily (a quiet hour). Overridable via `RAYSPEC_CLEANUP_SCHEDULE`. */
 export const DEFAULT_CLEANUP_SCHEDULE = '0 3 * * *';
@@ -94,6 +95,11 @@ export interface SystemCleanupSchedulerDeps {
    * that might dispatch a run. Optional.
    */
   readonly executor?: DurableExecutor;
+  /**
+   * The switch a source fence closes. Closed, a scheduled run does nothing (one log line) and
+   * `runCleanupNow` throws `ProducerPausedError`. Absent ⇒ always open.
+   */
+  readonly gate?: ProducerGate;
 }
 
 /** The default crontab + console logger when not supplied. */
@@ -114,11 +120,17 @@ export class SystemCleanupScheduler {
   readonly #schedule: string;
   readonly #logger: CleanupLogger;
   #registered = false;
+  #inFlight = 0;
 
   constructor(deps: SystemCleanupSchedulerDeps) {
     this.#deps = deps;
     this.#schedule = deps.schedule ?? DEFAULT_CLEANUP_SCHEDULE;
     this.#logger = deps.logger ?? CONSOLE_LOGGER;
+  }
+
+  /** How many cleanup runs are executing in this process right now. */
+  get inFlight(): number {
+    return this.#inFlight;
   }
 
   /** The crontab this scheduler fires on (for the boot banner / tests). */
@@ -136,6 +148,13 @@ export class SystemCleanupScheduler {
     if (this.#registered) return;
     const body = DBOS.registerWorkflow(
       async (_scheduledTime: Date): Promise<void> => {
+        if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+          this.#logger.info(
+            '[cleanup] PAUSED — the runtime is fenced, so this run did nothing; the next scheduled ' +
+              'run after the fence is released does the work.',
+          );
+          return;
+        }
         await this.#run();
       },
       { name: SYSTEM_CLEANUP_WORKFLOW_NAME },
@@ -153,11 +172,15 @@ export class SystemCleanupScheduler {
    * structured result (robust, not log-spying). Naturally idempotent — calling twice is harmless.
    */
   async runCleanupNow(): Promise<SystemCleanupOutcome> {
+    if (this.#deps.gate !== undefined && !this.#deps.gate.open()) {
+      throw new ProducerPausedError('the system cleanup');
+    }
     return this.#run();
   }
 
   /** The shared run path: invoke the injected cleanup, log one summary line, return the outcome. */
   async #run(): Promise<SystemCleanupOutcome> {
+    this.#inFlight += 1;
     try {
       const outcome = await this.#deps.runCleanup();
       this.#logger.info(formatSystemCleanupLog(outcome));
@@ -170,6 +193,8 @@ export class SystemCleanupScheduler {
         `[cleanup] FAILED: ${e instanceof Error ? e.message : String(e)} (the next daily tick retries; ops are idempotent)`,
       );
       throw e;
+    } finally {
+      this.#inFlight -= 1;
     }
   }
 }
