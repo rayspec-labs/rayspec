@@ -8,14 +8,19 @@
  * place links are followed is a dependency lookup in `node_modules`, where package managers link
  * packages into place; there the link's real target must still lie inside the root.
  *
+ * A hard link is no symbolic link, but it is the same file under another name, and that name may
+ * lie outside the root; the digest reports the link count so the resolver can refuse it.
+ *
  * Files are opened without following links and read in chunks; each read computes the size, the
- * SHA-256 and the private-key scan of the bundle's secret rules in one pass.
+ * SHA-256, the private-key scan of the bundle's secret rules and the native-binary header check in
+ * one pass.
  */
 import { createHash } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PrivateKeyScanner } from '@rayspec/bundle';
+import { NATIVE_HEADER_BYTES, nativeBinaryPlatform } from './native.js';
 import { refuse } from './refusal.js';
 
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
@@ -26,6 +31,10 @@ export interface FileDigest {
   size: number;
   sha256: string;
   privateKey: boolean;
+  /** The platform when the file starts like a native binary (ELF, Mach-O or PE). */
+  nativePlatform: string | undefined;
+  /** How many names the file has on disk; more than one is a hard link. */
+  links: number;
 }
 
 /** The size, digest and private-key verdict of bytes in memory. */
@@ -36,6 +45,8 @@ export function digestBytes(bytes: Uint8Array): FileDigest {
     size: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
     privateKey: scanner.found,
+    nativePlatform: nativeBinaryPlatform(bytes.subarray(0, NATIVE_HEADER_BYTES)),
+    links: 1,
   };
 }
 
@@ -199,15 +210,24 @@ export class ApplicationTree {
       const scanner = new PrivateKeyScanner();
       const buffer = Buffer.alloc(CHUNK_BYTES);
       let size = 0;
+      let nativePlatform: string | undefined;
       for (;;) {
         const { bytesRead } = await handle.read(buffer, 0, CHUNK_BYTES, size);
         if (bytesRead === 0) break;
         const chunk = buffer.subarray(0, bytesRead);
+        if (size === 0)
+          nativePlatform = nativeBinaryPlatform(chunk.subarray(0, NATIVE_HEADER_BYTES));
         hash.update(chunk);
         scanner.update(chunk);
         size += bytesRead;
       }
-      return { size, sha256: hash.digest('hex'), privateKey: scanner.found };
+      return {
+        size,
+        sha256: hash.digest('hex'),
+        privateKey: scanner.found,
+        nativePlatform,
+        links: stats.nlink,
+      };
     } finally {
       await handle.close();
     }

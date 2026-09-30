@@ -210,7 +210,8 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 (product: product.metadata); --id / --version override them, and pack
                                 refuses when neither gives one. The bundle pins this CLI's version
                                 unless --runtime names another exact version. --include adds a file or
-                                directory relative to the spec; --source-maps carries *.map files.
+                                directory relative to the spec; --source-maps carries source maps
+                                (*.map files, and scripts that inline theirs).
                                 --preview prints the inclusion list and writes nothing. The archive is
                                 written to a temporary file beside the output, read back, and moved
                                 into place; an existing output is refused unless --force. Writes ONE

@@ -29,7 +29,12 @@ code of the application. Build first:
   finds it.
 - **Native modules** — a package with a compiled addon must be built for
   linux/x64 and Node 22 (or Node-API) in an isolated Linux build, and that tree
-  packed. A build made on macOS or another platform is refused, never copied.
+  packed. A build made on macOS or another platform is refused, never copied:
+  pack reads the header of every file of every package it carries, whatever its
+  name, and refuses a Mach-O, Windows or non-x64 binary. It also refuses a
+  package whose `os` or `cpu` field in its `package.json` excludes linux/x64,
+  such as the `@esbuild/darwin-arm64` a Mac installs; install the dependencies
+  for linux/x64 instead (`npm install --os=linux --cpu=x64`).
 
 A `.js` module must be an ES module: an `.mjs` file, or a `.js` file under a
 `package.json` with `"type": "module"`.
@@ -98,7 +103,15 @@ bundle.
   and lock file of every directory whose `node_modules` supplies a package.
 - Every third-party package the modules import, and the packages those depend
   on, placed so that each import resolves to the version it resolves to on
-  your machine.
+  your machine, and a package several others share (a peer dependency such as
+  `react`) is one copy, as it is one module instance on your machine. A package
+  keeps its path under `node_modules` when Node finds it there from its
+  dependent; a pnpm layout is flattened into a hoisted one. When a shared peer
+  would have to be copied under each dependent, pack refuses instead.
+- A package that a vendored package imports without declaring it in its
+  `package.json` (npm's hoisting lets that work on your machine). Pack reads the
+  literal `import`, `import()` and `require()` calls of every vendored module,
+  carries each such package it finds installed, and notes it in the summary.
 - Each `--include` path, a file or directory relative to the spec.
 - Generated: `payload/sbom.cdx.json` (CycloneDX 1.5) and
   `payload/THIRD-PARTY-NOTICES.txt`, from the packages the bundle carries.
@@ -108,16 +121,30 @@ bundle.
 - **`@rayspec/*` packages.** The runtime that deploys the bundle provides them.
   The range a `package.json` declares for one must include the runtime the bundle
   pins, or pack refuses.
-- **Anything outside the application root**, and any symbolic link: a bundle
-  holds regular files only.
+- **Anything outside the application root**, any symbolic link, and any file
+  of the application with a second name on disk (a hard link), which may be a
+  file outside the root: a bundle holds regular files only. Files of vendored
+  packages are exempt from the hard-link rule, since pnpm links them from its
+  store.
 - In a directory it walks (a frontend, an extension's `handlers/`, an
   `--include` directory), pack leaves out version-control metadata (`.git`,
   `.hg`, `.svn`), caches, `logs/` and `*.log`, environment files (`.env`,
-  `.env.*`), credentials (`id_rsa` and its kin, `.pgpass`, `.netrc`, `.npmrc`,
-  `*.pem`, `*.key`, keystores), database dumps (`*.dump`, `*.sqlite`, `*.db`,
-  `*.bak` and others), local `node_modules` directories, operating-system files
-  and, without `--source-maps`, source maps. The summary lists each with its
-  reason.
+  `.env.*`, `*.env`, `.envrc`), credentials (`id_rsa` and its kin, `.aws/`,
+  `.ssh/` and other credential directories, `credentials`, `.pgpass`, `.netrc`,
+  `.npmrc`, service-account and `client_secret` JSON files, `*.pem`, `*.key`,
+  `*.p8`, keystores), database dumps (`*.dump`, `*.sqlite`, `*.db`, `*.bak` and
+  others), local `node_modules` directories, operating-system files and, without
+  `--source-maps`, source maps. Names match in any letter case. The summary
+  lists each with its reason.
+- Inside a vendored package, pack leaves out only environment and credential
+  files by their exact name (`.env`, `.envrc`, `id_rsa`, `.npmrc` and the like),
+  version-control and credential directories and, without `--source-maps`,
+  source maps. The package's other files, a `*.pem` certificate bundle or a
+  `*.db` data file among them, may be read at run time and go in; a private key
+  among them is still found by its content.
+- **A source map inlined in a script or style sheet** (a `sourceMappingURL`
+  with a `data:` URL, which may carry the original source) without
+  `--source-maps`: pack refuses the file rather than carry it.
 - **A private key or a secret file**, wherever it is: every file, the generated
   ones included, goes through the bundle's secret rules.
 - **A timestamp, your user name, your host name or an absolute path.** The same
@@ -135,11 +162,11 @@ message names the file and the fix.
 | `RAY_USAGE` | 2 | A flag is missing, unknown or malformed; the output is a directory or its directory does not exist; `--build`, `--against` or `--allowlist` was given; a file changed while pack ran. | Fix the command line. For a changed file, run pack again once the build has finished. |
 | `RAY_SPEC_INVALID` | 1 | The spec does not validate; the `SPEC_` errors that follow say where. | Fix the spec; `rayspec doctor <spec>` shows the same errors. |
 | `RAY_APPLICATION_IDENTITY_MISSING` (`id`, `version`) | 2 | Neither the spec nor the flag gives the id or version, or the value does not match its pattern. | Add `metadata.id` and `metadata.version`, or pass `--id` and `--version`. |
-| `RAY_CLOSURE_INVALID` (`unresolved-import`) | 2 | A module, frontend directory or import is missing; a module is TypeScript or CommonJS; a dynamic `import()` names a computed module; a module imports `node:module`. | Build the application and pack the built spec; install the missing package; import modules by a literal name. |
-| `RAY_CLOSURE_INVALID` (`escaping-link`) | 2 | A path leads outside the application root, or is a symbolic link. | Copy the file into the application, or build into a directory without links. |
+| `RAY_CLOSURE_INVALID` (`unresolved-import`) | 2 | A module, frontend directory or import is missing; a module is TypeScript or CommonJS; a dynamic `import()` names a computed module; a module imports `node:module`; a peer dependency several packages share would need two copies. | Build the application and pack the built spec; install the missing package; import modules by a literal name; import the shared peer from the application, or install one version of it (`npm dedupe`). |
+| `RAY_CLOSURE_INVALID` (`escaping-link`) | 2 | A path is absolute or leads outside the application root, or is a symbolic link or a hard link. | Name paths relative to the spec; copy the file into the application, or build into a directory without links. |
 | `RAY_CLOSURE_INVALID` (`excluded-file`) | 2 | A file of an excluded class was named explicitly (by the spec, an import or `--include`), or a file name a bundle path cannot carry (only `A-Z a-z 0-9 _ . - @ +`, no two names that differ only in case). | Leave the file out, or rename it. |
-| `RAY_CLOSURE_INVALID` (`native-module`) | 2 | A native addon is not a linux/x64 build for Node 22 or Node-API, or a native package has no compiled addon. | Build the package for linux/x64 in an isolated Linux build and pack that tree. |
-| `RAY_CLOSURE_INVALID` (`source-map-not-opted-in`) | 2 | A source map was named without `--source-maps`. | Pass `--source-maps`, or leave it out. |
+| `RAY_CLOSURE_INVALID` (`native-module`) | 2 | A native addon is not a linux/x64 build for Node 22 or Node-API; a package file is a binary for another platform; a package's `os` or `cpu` field excludes linux/x64; or a native package has no compiled addon. | Install and build the dependencies for linux/x64 in an isolated Linux build and pack that tree. |
+| `RAY_CLOSURE_INVALID` (`source-map-not-opted-in`) | 2 | A source map was named, or a script or style sheet inlines one, without `--source-maps`. | Pass `--source-maps`, or build without inline source maps. |
 | `RAY_RUNTIME_UNSUPPORTED` | 3 | A `package.json` declares a `@rayspec/*` range that excludes the pinned runtime, or a value that is no range (`workspace:*`, a path). | Declare a range that includes the runtime, or pin the matching runtime with `--runtime`. |
 | `RAY_SECRET_DETECTED` | 4 | A file that would go in carries a PEM private-key header, or has a secret file name (`.env`, `id_rsa`, `.pgpass` and the like) where pack does not leave it out. The message names the path, never the content. | Remove the key or the file; supply secrets as bindings at deploy time. |
 | `RAY_BINDING_RESERVED` | 4 | A binding name the bundle would declare is reserved for the operator. | Use another name. |

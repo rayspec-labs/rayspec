@@ -6,8 +6,10 @@
  * only (the manifest schema's `payloadPath`). The resolver never zips a directory wholesale: it
  * walks only the directories the spec names or `--include` adds, and inside them it leaves out
  * version-control metadata, caches, logs, environment files, credentials, database dumps, local
- * dependency directories and, unless asked for, source maps. A file of those classes that is named
- * explicitly is refused rather than dropped.
+ * dependency directories and, unless asked for, source maps, matching names in any letter case. A
+ * file of those classes that is named explicitly is refused rather than dropped. Inside a vendored
+ * package only environment and credential files by name, version control and, unless asked for,
+ * source maps are left out, since the package may read any other file at run time.
  */
 
 /** One segment of a bundle path. */
@@ -44,6 +46,12 @@ const EXCLUDED_DIRECTORIES: ReadonlyMap<string, ExclusionClass> = new Map([
   ['.git', 'version control metadata'],
   ['.hg', 'version control metadata'],
   ['.svn', 'version control metadata'],
+  ['.aws', 'a credential'],
+  ['.azure', 'a credential'],
+  ['.docker', 'a credential'],
+  ['.gnupg', 'a credential'],
+  ['.kube', 'a credential'],
+  ['.ssh', 'a credential'],
   ['.cache', 'a cache'],
   ['.turbo', 'a cache'],
   ['.parcel-cache', 'a cache'],
@@ -54,9 +62,20 @@ const EXCLUDED_DIRECTORIES: ReadonlyMap<string, ExclusionClass> = new Map([
   ['node_modules', 'a local dependency directory'],
 ]);
 
-const EXCLUDED_FILES: ReadonlyMap<string, ExclusionClass> = new Map([
-  ['.eslintcache', 'a cache'],
+/** The directories left out of a vendored package: its own copy of version control or credentials. */
+const EXCLUDED_PACKAGE_DIRECTORY_CLASSES: ReadonlySet<ExclusionClass> = new Set([
+  'version control metadata',
+  'a credential',
+  'a local dependency directory',
+]);
+
+/**
+ * Files that hold credentials or environment values by their name alone. They are left out of a
+ * vendored package as well as of the application's own directories.
+ */
+const SECRET_FILES: ReadonlyMap<string, ExclusionClass> = new Map([
   ['.env', 'an environment file'],
+  ['.envrc', 'an environment file'],
   ['id_rsa', 'a credential'],
   ['id_dsa', 'a credential'],
   ['id_ecdsa', 'a credential'],
@@ -64,17 +83,28 @@ const EXCLUDED_FILES: ReadonlyMap<string, ExclusionClass> = new Map([
   ['.pgpass', 'a credential'],
   ['.netrc', 'a credential'],
   ['.npmrc', 'a credential'],
+  ['.yarnrc', 'a credential'],
+  ['.pypirc', 'a credential'],
+  ['.dockercfg', 'a credential'],
   ['.git-credentials', 'a credential'],
-  ['.DS_Store', 'operating system metadata'],
-  ['Thumbs.db', 'operating system metadata'],
+]);
+
+const OTHER_FILES: ReadonlyMap<string, ExclusionClass> = new Map([
+  ['.eslintcache', 'a cache'],
+  ['credentials', 'a credential'],
+  ['credentials.json', 'a credential'],
+  ['.ds_store', 'operating system metadata'],
+  ['thumbs.db', 'operating system metadata'],
 ]);
 
 const EXCLUDED_SUFFIXES: readonly (readonly [string, ExclusionClass])[] = [
   ['.log', 'a log'],
   ['.pem', 'a credential'],
   ['.key', 'a credential'],
+  ['.p8', 'a credential'],
   ['.p12', 'a credential'],
   ['.pfx', 'a credential'],
+  ['.ppk', 'a credential'],
   ['.jks', 'a credential'],
   ['.keystore', 'a credential'],
   ['.dump', 'a database dump'],
@@ -86,25 +116,75 @@ const EXCLUDED_SUFFIXES: readonly (readonly [string, ExclusionClass])[] = [
   ['.bak', 'a database dump'],
 ];
 
-/** The class of a directory the resolver never walks into, by its name. */
+/**
+ * The class of a directory the resolver never walks into, by its name in any letter case: a file
+ * system that ignores case opens `.GIT` as `.git`.
+ */
 export function excludedDirectory(name: string): ExclusionClass | undefined {
-  return EXCLUDED_DIRECTORIES.get(name);
+  return EXCLUDED_DIRECTORIES.get(name.toLowerCase());
 }
 
 /**
- * The class of a file that never enters a bundle, by its name. Source maps are left out unless
- * `sourceMaps` is set.
+ * The class of a directory left out of a vendored package. Only version control, credential and
+ * nested dependency directories are: a package's `logs/` or `.cache/` may be code it loads.
+ */
+export function excludedPackageDirectory(name: string): ExclusionClass | undefined {
+  const exclusion = excludedDirectory(name);
+  return exclusion !== undefined && EXCLUDED_PACKAGE_DIRECTORY_CLASSES.has(exclusion)
+    ? exclusion
+    : undefined;
+}
+
+/** An environment or credential file by its name alone, in any letter case. */
+function secretFile(lower: string): ExclusionClass | undefined {
+  const exact = SECRET_FILES.get(lower);
+  if (exact !== undefined) return exact;
+  if (lower.startsWith('.env.') || lower.endsWith('.env')) return 'an environment file';
+  return undefined;
+}
+
+/**
+ * The class of a file that never enters a bundle, by its name in any letter case. Source maps are
+ * left out unless `sourceMaps` is set.
  */
 export function excludedFile(name: string, sourceMaps: boolean): ExclusionClass | undefined {
-  const exact = EXCLUDED_FILES.get(name);
-  if (exact !== undefined) return exact;
-  if (name.startsWith('.env.')) return 'an environment file';
   const lower = name.toLowerCase();
+  const exclusion = secretFile(lower) ?? OTHER_FILES.get(lower);
+  if (exclusion !== undefined) return exclusion;
+  if (
+    lower.endsWith('.json') &&
+    (isServiceAccountKey(lower) || lower.startsWith('client_secret'))
+  ) {
+    return 'a credential';
+  }
   if (!sourceMaps && lower.endsWith('.map')) return 'a source map';
-  for (const [suffix, exclusion] of EXCLUDED_SUFFIXES) {
-    if (lower.endsWith(suffix)) return exclusion;
+  for (const [suffix, suffixClass] of EXCLUDED_SUFFIXES) {
+    if (lower.endsWith(suffix)) return suffixClass;
   }
   return undefined;
+}
+
+/**
+ * The class of a file left out of a vendored package. Only environment and credential files by
+ * their exact name, operating-system metadata and, unless `sourceMaps` is set, source maps are: a
+ * package reads its own `*.pem` certificate bundle or `*.db` data file at run time, and a private
+ * key among its files is found by the secret scan's content rule instead.
+ */
+export function excludedPackageFile(name: string, sourceMaps: boolean): ExclusionClass | undefined {
+  const lower = name.toLowerCase();
+  const exclusion = secretFile(lower);
+  if (exclusion !== undefined) return exclusion;
+  if (lower === '.ds_store' || lower === 'thumbs.db') return 'operating system metadata';
+  if (!sourceMaps && lower.endsWith('.map')) return 'a source map';
+  return undefined;
+}
+
+function isServiceAccountKey(lower: string): boolean {
+  return (
+    lower.includes('service-account') ||
+    lower.includes('service_account') ||
+    lower.includes('serviceaccount')
+  );
 }
 
 /** The dependency lock files the resolver carries when it finds them. */

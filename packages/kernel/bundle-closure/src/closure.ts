@@ -40,11 +40,13 @@ import {
 } from '@rayspec/bundle-contract';
 import { APPLICATION_VERSION_PATTERN, typeScriptSourceExtensionOf } from '@rayspec/spec';
 import { moduleImports } from './imports.js';
-import { inspectAddon } from './native.js';
+import { inspectAddon, packagePlatformExclusion } from './native.js';
 import { ClosureRefusal, refuse } from './refusal.js';
 import {
   excludedDirectory,
   excludedFile,
+  excludedPackageDirectory,
+  excludedPackageFile,
   LOCKFILE_NAMES,
   MAX_PAYLOAD_PATH_LENGTH,
   NATIVE_LOADERS,
@@ -179,6 +181,11 @@ const MODULE_EXTENSIONS: ReadonlySet<string> = new Set(['.js', '.mjs', '.cjs']);
 const DECLARATION_FILE = /\.d\.[cm]?ts$/i;
 const LICENSE_FILE = /^(?:licen[cs]e|copying|notice)(?:[.-].*)?$/i;
 const URL_SIGNIFICANT = /[%#?]/;
+/** A `require()` of one string literal in a CommonJS module. */
+const REQUIRE_CALL = /\brequire\s*\(\s*(['"])([^'"\n]+)\1\s*\)/g;
+/** A source map inlined as a `data:` URL at the end of a script or style sheet. */
+const INLINE_SOURCE_MAP = /\/[/*][#@][ \t]*sourceMappingURL[ \t]*=[ \t]*data:/;
+const INLINE_MAP_EXTENSIONS: ReadonlySet<string> = new Set(['.js', '.mjs', '.cjs', '.css']);
 const SHA256 = /^[a-f0-9]{64}$/;
 
 /**
@@ -219,6 +226,17 @@ interface PackageManifest {
   json: Record<string, unknown>;
 }
 
+/** A dependency of a vendored package. */
+interface PackageDependency {
+  name: string;
+  range: string;
+  optional: boolean;
+  /** Named in `peerDependencies`: every dependent must reach the same copy. */
+  peer: boolean;
+  /** Where an import the package does not declare resolves, found when its modules were read. */
+  found?: { logical: string; real: string };
+}
+
 interface PackageRecord {
   real: string;
   name: string;
@@ -226,8 +244,19 @@ interface PackageRecord {
   license: string | undefined;
   files: string[];
   licenseTexts: { file: string; text: string }[];
-  dependencies: { name: string; range: string; optional: boolean }[];
+  dependencies: PackageDependency[];
   logicalPaths: string[];
+}
+
+/**
+ * One package lookup Node makes in the bundle: from the directory `from` (a bundle-relative
+ * directory, `''` for the root), the package `name` resolves to the placed directory `at`. A later
+ * placement must never change it.
+ */
+interface Resolution {
+  from: string;
+  name: string;
+  at: string;
 }
 
 class Resolver {
@@ -240,6 +269,8 @@ class Resolver {
   private readonly platform = new Map<string, PlatformImport>();
   /** Packages the application's own modules import: logical path → real directory. */
   private readonly topLevel = new Map<string, string>();
+  /** The package lookups the application's own modules make. */
+  private readonly appResolutions: Resolution[] = [];
   private readonly packages = new Map<string, PackageRecord>();
   private readonly configuredBackends: string[] = [];
   private readonly sourceMaps: boolean;
@@ -731,7 +762,9 @@ class Resolver {
         { reason: 'unresolved-import', path: rel },
       );
     }
-    this.topLevel.set(this.tree.relativePath(found.logical), found.real);
+    const at = this.tree.relativePath(found.logical);
+    this.topLevel.set(at, found.real);
+    this.appResolutions.push({ from: this.tree.relativePath(dirname(from)), name, at });
   }
 
   /** Check a platform import against the range the nearest declaring package.json gives it. */
@@ -789,25 +822,30 @@ class Resolver {
   }
 
   /**
-   * Copy every package the modules import, and the packages those depend on, into the layout Node
-   * resolves in the bundle: a package stays at the path it was imported from, and a dependency is
-   * reused where Node would already find the same package from its dependent, and otherwise placed
-   * in its dependent's own `node_modules`. Each package's dependencies are placed before any of
-   * them is processed, so a later placement never hides one an earlier package resolved.
+   * Copy every package the modules import, and the packages those depend on, into a layout where
+   * Node resolves each import to the package it resolves to on the author's machine, and where a
+   * package several others share is one copy, as it is one module instance there.
+   *
+   * A package the application imports stays at the path it was imported from. A dependency is
+   * reused where Node already finds the same package from its dependent. Otherwise it is placed at
+   * the path it has on disk when that path is on its dependent's lookup chain (an npm layout keeps
+   * its shape), or else at the highest `node_modules` of that chain, from the dependent's dependency
+   * root down (a pnpm layout is flattened into a hoisted one). A placement is valid only when the
+   * dependent then finds it and no lookup made so far, the application's own included, changes.
+   * Each package's dependencies are placed before any of them is processed.
+   *
+   * A package named as a peer dependency that still ends up in two places would be two module
+   * instances where the author's machine has one, so it is refused.
    */
   private async vendorPackages(): Promise<void> {
     const placed = new Map<string, string>();
+    const resolutions: Resolution[] = [...this.appResolutions];
+    const peers = new Map<string, string>();
     const queue: { logical: string; real: string }[] = [];
     for (const logical of [...this.topLevel.keys()].sort(compareBytes)) {
       const real = this.topLevel.get(logical)!;
       placed.set(logical, real);
       queue.push({ logical, real });
-    }
-    const dependencyRoots = new Set<string>();
-    for (const logical of placed.keys()) {
-      dependencyRoots.add(
-        logical.slice(0, logical.lastIndexOf('node_modules/')).replace(/\/$/, ''),
-      );
     }
     while (queue.length > 0) {
       const { logical, real } = queue.shift()!;
@@ -827,7 +865,7 @@ class Resolver {
           );
           continue;
         }
-        const found = await this.findPackage(dependency.name, real);
+        const found = dependency.found ?? (await this.findPackage(dependency.name, real));
         if (found === undefined) {
           if (dependency.optional) continue;
           refuse(
@@ -837,15 +875,47 @@ class Resolver {
             { reason: 'unresolved-import', path: logical },
           );
         }
-        const visible = visiblePackage(placed, logical, dependency.name);
-        if (visible !== undefined && placed.get(visible) === found.real) continue;
-        const target = `${logical}/node_modules/${dependency.name}`;
-        if (placed.has(target)) {
-          refuse('RAY_INTERNAL', `two packages were placed at '${target}'`);
+        if (dependency.peer && !peers.has(found.real)) {
+          peers.set(found.real, `${record.name}@${record.version}`);
+        }
+        const visible = visiblePackage((p) => placed.has(p), logical, dependency.name);
+        if (visible !== undefined && placed.get(visible) === found.real) {
+          resolutions.push({ from: logical, name: dependency.name, at: visible });
+          continue;
+        }
+        const target = placementFor(
+          placed,
+          resolutions,
+          logical,
+          dependency.name,
+          this.tree.relativePath(found.logical),
+        );
+        if (target === undefined) {
+          refuse('RAY_INTERNAL', `no place was found for '${dependency.name}' under '${logical}'`);
         }
         placed.set(target, found.real);
+        resolutions.push({ from: logical, name: dependency.name, at: target });
         queue.push({ logical: target, real: found.real });
       }
+    }
+    for (const [real, dependent] of [...peers].sort(([a], [b]) => compareBytes(a, b))) {
+      const copies = [...placed].filter(([, r]) => r === real).map(([p]) => p);
+      if (copies.length < 2) continue;
+      const record = this.packages.get(real)!;
+      refuse(
+        'RAY_CLOSURE_INVALID',
+        `the package ${record.name}@${record.version} is a peer dependency of ${dependent} and is ` +
+          `one copy on disk, but the bundle would need it in ${copies.length} places ` +
+          `(${copies.sort(compareBytes).join(', ')}), which would make it ${copies.length} module ` +
+          'instances; import it from the application, or install the dependencies so that one ' +
+          'version of it is shared (npm dedupe), and pack again',
+        { reason: 'unresolved-import', path: copies[0]! },
+      );
+    }
+    const dependencyRoots = new Set<string>();
+    for (const logical of placed.keys()) {
+      const segments = logical.split('/');
+      dependencyRoots.add(segments.slice(0, segments.indexOf('node_modules')).join('/'));
     }
     for (const dir of [...dependencyRoots].sort(compareBytes)) {
       const base = dir === '' ? this.tree.root : join(this.tree.root, ...dir.split('/'));
@@ -879,13 +949,32 @@ class Resolver {
         { reason: 'unresolved-import', path: logical },
       );
     }
+    const platform = packagePlatformExclusion(manifest);
+    if (platform !== undefined) {
+      refuse(
+        'RAY_CLOSURE_INVALID',
+        `the package ${name}@${version} ('${logical}') is built for ${platform} by its package.json ` +
+          'os and cpu fields, not for linux/x64; a platform-specific package installed on this ' +
+          'machine is never copied. Install the dependencies for linux/x64 in an isolated build ' +
+          '(npm install --os=linux --cpu=x64) and pack that tree',
+        { reason: 'native-module', path: logical },
+      );
+    }
     const files = await this.tree.walk(
       real,
       `the package ${name} file`,
-      (path, entry) => entry !== 'node_modules' && this.keepDirectory(path, entry),
-      (path, entry) => this.keepFile(path, entry),
+      (path, entry) => entry !== 'node_modules' && this.keepPackageDirectory(path, entry),
+      (path, entry) => this.keepPackageFile(path, entry),
     );
     const dependencies = packageDependencies(manifest);
+    const undeclared = await this.undeclaredImports(real, name, manifest, files, dependencies);
+    for (const dependency of undeclared) {
+      this.notes.push(
+        `the package ${name}@${version} imports '${dependency.name}' without declaring it in its ` +
+          'package.json; pack carries the copy it resolves to on this machine',
+      );
+    }
+    dependencies.push(...undeclared);
     const addons = files.filter((f) => f.toLowerCase().endsWith('.node'));
     const buildsNative =
       files.some((f) => basename(f) === 'binding.gyp') ||
@@ -935,6 +1024,68 @@ class Resolver {
     return record;
   }
 
+  /**
+   * The packages a vendored package's modules import without declaring them, as npm's hoisting
+   * lets them: every literal `import`, `import()` and `require()` of its ES and CommonJS modules is
+   * read, and a bare name the package's `package.json` does not declare is looked up the way Node
+   * does from the importing file. One that is installed is carried like a declared dependency; one
+   * that is not fails on the author's machine too, and is left alone.
+   */
+  private async undeclaredImports(
+    real: string,
+    name: string,
+    manifest: Record<string, unknown>,
+    files: readonly string[],
+    declared: readonly PackageDependency[],
+  ): Promise<PackageDependency[]> {
+    const known = new Set([name, ...declared.map((d) => d.name)]);
+    const found = new Map<string, PackageDependency>();
+    const types = new Map<string, unknown>([[real, manifest.type]]);
+    for (const file of files) {
+      if (basename(file) !== 'package.json' || dirname(file) === real) continue;
+      types.set(dirname(file), (await this.readJsonOrUndefined(file))?.type);
+    }
+    const esmScope = (file: string): boolean => {
+      for (let dir = dirname(file); ; dir = dirname(dir)) {
+        if (types.has(dir)) return types.get(dir) === 'module';
+        if (dir === real || dir === dirname(dir)) return false;
+      }
+    };
+    for (const file of files) {
+      const ext = extname(file).toLowerCase();
+      if (!MODULE_EXTENSIONS.has(ext)) continue;
+      const source = (await this.tree.readFile(file)).toString('utf8');
+      const specifiers: string[] = [];
+      if (ext === '.mjs' || (ext === '.js' && esmScope(file))) {
+        for (const entry of (await moduleImports(source)) ?? []) {
+          if (entry.kind !== 'computed') specifiers.push(entry.specifier);
+        }
+      } else {
+        for (const match of source.matchAll(REQUIRE_CALL)) specifiers.push(match[2]!);
+      }
+      for (const specifier of specifiers) {
+        if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('#')) {
+          continue;
+        }
+        if (specifier.startsWith('node:') || isBuiltin(specifier)) continue;
+        if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(specifier)) continue;
+        const imported = packageNameOf(specifier);
+        if (!imported || known.has(imported) || found.has(imported)) continue;
+        if (isPlatformPackage(imported)) continue;
+        const location = await this.findPackage(imported, dirname(file));
+        if (location === undefined) continue;
+        found.set(imported, {
+          name: imported,
+          range: '*',
+          optional: false,
+          peer: false,
+          found: location,
+        });
+      }
+    }
+    return [...found.values()].sort((a, b) => compareBytes(a.name, b.name));
+  }
+
   private async checkAddon(path: string, what: string): Promise<void> {
     const verdict = inspectAddon(await this.tree.readFile(path));
     if (!verdict.ok) {
@@ -981,6 +1132,20 @@ class Resolver {
     return false;
   }
 
+  private keepPackageDirectory(path: string, name: string): boolean {
+    const exclusion = excludedPackageDirectory(name);
+    if (exclusion === undefined) return true;
+    this.excluded.push({ source: this.tree.relativePath(path), reason: exclusion });
+    return false;
+  }
+
+  private keepPackageFile(path: string, name: string): boolean {
+    const exclusion = excludedPackageFile(name, this.sourceMaps);
+    if (exclusion === undefined) return true;
+    this.excluded.push({ source: this.tree.relativePath(path), reason: exclusion });
+    return false;
+  }
+
   private keepFile(path: string, name: string): boolean {
     const exclusion = excludedFile(name, this.sourceMaps);
     if (exclusion === undefined) return true;
@@ -1014,7 +1179,9 @@ class Resolver {
 
   /**
    * Add a file of the application. A file named explicitly (by the spec, an import or `--include`)
-   * that belongs to an excluded class is refused, never dropped.
+   * that belongs to an excluded class is refused, never dropped. A file with a second name on disk
+   * (a hard link) is refused, since that name may lie outside the root, and so is a script or style
+   * sheet that inlines its source map, unless source maps are asked for.
    */
   private async addFile(path: string, role: FileRole, explicit: boolean): Promise<void> {
     const rel = this.tree.relativePath(path);
@@ -1037,6 +1204,27 @@ class Resolver {
     const payload = this.payloadPath(path);
     if (this.files.has(payload)) return;
     const digest = await this.tree.digestFile(path);
+    if (digest.links > 1) {
+      refuse(
+        'RAY_CLOSURE_INVALID',
+        `'${rel}' is a hard link: the same file has ${digest.links} names on disk, and pack cannot ` +
+          'tell whether the others lie outside the application root. Replace it with a copy of ' +
+          'its own and pack again',
+        { reason: 'escaping-link', path: rel },
+      );
+    }
+    if (!this.sourceMaps && INLINE_MAP_EXTENSIONS.has(extname(path).toLowerCase())) {
+      const text = (await this.tree.readFile(path)).toString('utf8');
+      if (INLINE_SOURCE_MAP.test(text)) {
+        refuse(
+          'RAY_CLOSURE_INVALID',
+          `'${rel}' inlines a source map (a sourceMappingURL with a data: URL), which may carry ` +
+            'the original source; build without inline source maps, or pass --source-maps to ' +
+            'carry them',
+          { reason: 'source-map-not-opted-in', path: rel },
+        );
+      }
+    }
     this.put(payload, rel, role, digest, { file: path });
   }
 
@@ -1052,6 +1240,15 @@ class Resolver {
     }
     if (this.files.has(payload)) return;
     const digest = await this.tree.digestFile(file);
+    if (digest.nativePlatform !== undefined && digest.nativePlatform !== 'linux/x64') {
+      refuse(
+        'RAY_CLOSURE_INVALID',
+        `'${logicalPath}' is a native binary built for ${digest.nativePlatform}; a bundle carries ` +
+          'native code only when built for linux/x64. Install the dependencies for linux/x64 in ' +
+          'an isolated build and pack that tree; a local build for another platform is never copied',
+        { reason: 'native-module', path: logicalPath },
+      );
+    }
     this.put(payload, this.tree.relativePath(file), 'package', digest, { file });
   }
 
@@ -1181,6 +1378,15 @@ class Resolver {
     }
   }
 
+  /** A JSON object, or `undefined` when the file is not one; never refuses. */
+  private async readJsonOrUndefined(path: string): Promise<Record<string, unknown> | undefined> {
+    try {
+      return await this.readJson(path);
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The `package.json` in `directory`, cached; `null` when there is none. */
   private async manifestIn(directory: string): Promise<PackageManifest | null> {
     const cached = this.manifests.get(directory);
@@ -1231,10 +1437,8 @@ function declaredRange(json: Record<string, unknown>, name: string): string | un
 }
 
 /** A package's runtime dependencies, sorted by name; development dependencies are not needed. */
-function packageDependencies(
-  json: Record<string, unknown>,
-): { name: string; range: string; optional: boolean }[] {
-  const byName = new Map<string, { name: string; range: string; optional: boolean }>();
+function packageDependencies(json: Record<string, unknown>): PackageDependency[] {
+  const byName = new Map<string, PackageDependency>();
   const field = (key: string) => {
     const value = json[key];
     return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
@@ -1247,37 +1451,75 @@ function packageDependencies(
       typeof meta === 'object' &&
       meta !== null &&
       (meta as { optional?: unknown }).optional === true;
-    byName.set(name, { name, range, optional });
+    byName.set(name, { name, range, optional, peer: true });
   }
   for (const [name, range] of Object.entries(field('optionalDependencies'))) {
-    if (typeof range === 'string') byName.set(name, { name, range, optional: true });
+    if (typeof range !== 'string') continue;
+    byName.set(name, { name, range, optional: true, peer: byName.has(name) });
   }
   for (const [name, range] of Object.entries(field('dependencies'))) {
     if (typeof range !== 'string') continue;
     const optional = Object.hasOwn(field('optionalDependencies'), name);
-    byName.set(name, { name, range, optional });
+    byName.set(name, { name, range, optional, peer: byName.get(name)?.peer === true });
   }
   return [...byName.values()].sort((a, b) => compareBytes(a.name, b.name));
 }
 
 /**
- * The placed package Node would find for `name` from a package at `logical`: the first
- * `node_modules/<name>` among the package's own directory and its parents, skipping directories
- * named `node_modules`.
+ * The placed package Node would find for `name` from the directory `from`: the first
+ * `node_modules/<name>` among the directory and its parents, skipping directories named
+ * `node_modules`.
  */
 function visiblePackage(
-  placed: ReadonlyMap<string, string>,
-  logical: string,
+  isPlaced: (path: string) => boolean,
+  from: string,
   name: string,
 ): string | undefined {
-  const segments = logical.split('/');
+  const segments = from === '' ? [] : from.split('/');
   for (let i = segments.length; i >= 0; i--) {
     if (i > 0 && segments[i - 1] === 'node_modules') continue;
     const base = segments.slice(0, i).join('/');
     const candidate = base === '' ? `node_modules/${name}` : `${base}/node_modules/${name}`;
-    if (placed.has(candidate)) return candidate;
+    if (isPlaced(candidate)) return candidate;
   }
   return undefined;
+}
+
+/**
+ * Where to place `name` for the package at `logical`: its path on disk (`source`) when that is on
+ * the package's lookup chain, otherwise the highest free `node_modules` from the package's
+ * dependency root down to the package itself. A place is taken only when the package then finds
+ * it and every lookup in `resolutions` still finds what it found.
+ */
+function placementFor(
+  placed: ReadonlyMap<string, string>,
+  resolutions: readonly Resolution[],
+  logical: string,
+  name: string,
+  source: string,
+): string | undefined {
+  const segments = logical.split('/');
+  const root = segments.indexOf('node_modules');
+  const onChain: string[] = [];
+  const fallback: string[] = [];
+  for (let i = 0; i <= segments.length; i++) {
+    const packageDirectory = i === segments.length || segments[i] === 'node_modules';
+    if (i > root && !packageDirectory) continue;
+    const base = segments.slice(0, i).join('/');
+    const target = base === '' ? `node_modules/${name}` : `${base}/node_modules/${name}`;
+    onChain.push(target);
+    if (i >= root && packageDirectory) fallback.push(target);
+  }
+  const fits = (target: string): boolean => {
+    if (placed.has(target)) return false;
+    const isPlaced = (p: string) => p === target || placed.has(p);
+    if (visiblePackage(isPlaced, logical, name) !== target) return false;
+    return resolutions.every(
+      (r) => r.name !== name || visiblePackage(isPlaced, r.from, name) === r.at,
+    );
+  };
+  if (onChain.includes(source) && fits(source)) return source;
+  return fallback.find(fits);
 }
 
 async function realpathOrUndefined(path: string): Promise<string | undefined> {

@@ -3,7 +3,7 @@
  * and reason and a message that names the file and the fix. Each case also has its passing twin,
  * so a refusal that fires for the wrong reason, or never, turns a test red.
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BundleError } from '@rayspec/bundle-contract';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -319,6 +319,77 @@ describe('secrets', () => {
     ]);
   });
 
+  it('leaves out environment and credential files in any letter case and their common variants', async () => {
+    const root = temporaryDirectory();
+    const canary = 'CANARY_VALUE_0123456789';
+    writeTree(root, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: web }\n'),
+      'web/index.html': '<p>hi</p>',
+      'web/.ENV': canary,
+      'web/.Env.Production': canary,
+      'web/.envrc': canary,
+      'web/production.env': canary,
+      'web/.aws/credentials': canary,
+      'web/.ssh/id_ed25519': canary,
+      'web/ID_RSA': canary,
+      'web/credentials': canary,
+      'web/service-account.json': canary,
+      'web/client_secret_123.json': canary,
+      'web/key.p8': canary,
+      'web/cert.pem': canary,
+      'web/node_modules/dep/index.js': canary,
+    });
+    const closure = await accepted(root);
+    expect(paths(closure).filter((p) => p.startsWith('payload/web/'))).toEqual([
+      'payload/web/index.html',
+    ]);
+    expect(closure.excluded).toEqual([
+      { source: 'web/.ENV', reason: 'an environment file' },
+      { source: 'web/.Env.Production', reason: 'an environment file' },
+      { source: 'web/.aws', reason: 'a credential' },
+      { source: 'web/.envrc', reason: 'an environment file' },
+      { source: 'web/.ssh', reason: 'a credential' },
+      { source: 'web/ID_RSA', reason: 'a credential' },
+      { source: 'web/cert.pem', reason: 'a credential' },
+      { source: 'web/client_secret_123.json', reason: 'a credential' },
+      { source: 'web/credentials', reason: 'a credential' },
+      { source: 'web/key.p8', reason: 'a credential' },
+      { source: 'web/node_modules', reason: 'a local dependency directory' },
+      { source: 'web/production.env', reason: 'an environment file' },
+      { source: 'web/service-account.json', reason: 'a credential' },
+    ]);
+  });
+
+  it('refuses a script or style sheet that inlines its source map, unless asked', async () => {
+    const inline = '//# sourceMappingURL=data:application/json;base64,e30=\n';
+    const root = handlerApp(`export const handle = 1;\n${inline}`);
+    const errors = await refused(root);
+    expect(errors[0]).toMatchObject({
+      code: 'RAY_CLOSURE_INVALID',
+      reason: 'source-map-not-opted-in',
+      path: 'handlers/h.js',
+    });
+    expect(errors[0]!.message).toContain('inlines a source map');
+    expect(paths(await accepted(root, { sourceMaps: true }))).toContain('payload/handlers/h.js');
+
+    const web = temporaryDirectory();
+    writeTree(web, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: web }\n'),
+      'web/app.css': 'p{}\n/*# sourceMappingURL=data:application/json;base64,e30= */\n',
+    });
+    expect((await refused(web))[0]).toMatchObject({
+      reason: 'source-map-not-opted-in',
+      path: 'web/app.css',
+    });
+  });
+
+  it('carries a script whose source map is a separate file it leaves out', async () => {
+    const root = handlerApp('export const handle = 1;\n//# sourceMappingURL=h.js.map\n', {
+      'handlers/h.js.map': '{}',
+    });
+    expect(paths(await accepted(root))).toContain('payload/handlers/h.js');
+  });
+
   it('carries source maps only when asked', async () => {
     const root = temporaryDirectory();
     writeTree(root, {
@@ -405,6 +476,46 @@ describe('links and paths outside the application root', () => {
     const errors = await refused(root);
     expect(errors[0]).toMatchObject({ code: 'RAY_CLOSURE_INVALID', reason: 'escaping-link' });
     expect(errors[0]!.message).toContain("'linked'");
+  });
+
+  it('refuses a hard link in a frontend directory, which may be a file outside the root', async () => {
+    const outside = temporaryDirectory('outside-');
+    writeFileSync(join(outside, 'secret.txt'), 'outside');
+    const root = temporaryDirectory();
+    writeTree(root, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: web }\n'),
+      'web/index.html': 'x',
+    });
+    linkSync(join(outside, 'secret.txt'), join(root, 'web', 'leak.txt'));
+    const errors = await refused(root);
+    expect(errors[0]).toMatchObject({
+      code: 'RAY_CLOSURE_INVALID',
+      reason: 'escaping-link',
+      path: 'web/leak.txt',
+    });
+    expect(errors[0]!.message).toContain('hard link');
+    expect(errors[0]!.message).not.toContain(outside);
+  });
+
+  it('refuses a module a handler imports when it is a hard link', async () => {
+    const outside = temporaryDirectory('outside-');
+    writeFileSync(join(outside, 'data.js'), 'export const d = 1;\n');
+    const root = handlerApp("import { d } from './data.js';\nexport const handle = d;\n");
+    linkSync(join(outside, 'data.js'), join(root, 'handlers', 'data.js'));
+    expect((await refused(root))[0]).toMatchObject({
+      reason: 'escaping-link',
+      path: 'handlers/data.js',
+    });
+  });
+
+  it('refuses an absolute path even when it lies inside the root', async () => {
+    const root = handlerApp('export const handle = 1;\n', { 'extra/notes.txt': 'x' });
+    const errors = await refused(root, { include: [join(root, 'extra', 'notes.txt')] });
+    expect(errors[0]).toMatchObject({ code: 'RAY_CLOSURE_INVALID', reason: 'escaping-link' });
+    expect(errors[0]!.message).toContain('is an absolute path');
+    expect(paths(await accepted(root, { include: ['extra/notes.txt'] }))).toContain(
+      'payload/extra/notes.txt',
+    );
   });
 
   it('refuses the spec itself when it is a link', async () => {
@@ -521,6 +632,49 @@ describe('identity and usage', () => {
       'web/my file.html': 'x',
     });
     expect((await refused(root))[0]).toMatchObject({ reason: 'excluded-file' });
+  });
+
+  it('refuses two files whose paths differ only in letter case', async () => {
+    const root = temporaryDirectory();
+    writeTree(root, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: public }\n'),
+      'public/readme.txt': 'x',
+    });
+    // A file system that ignores case opens Public/README.txt as the same file; one that does not
+    // holds a second file. Either way the bundle would hold both names.
+    if (!existsSync(join(root, 'Public', 'README.txt'))) {
+      writeTree(root, { 'Public/README.txt': 'y' });
+    }
+    const errors = await refused(root, { include: ['Public/README.txt'] });
+    expect(errors[0]).toMatchObject({ code: 'RAY_CLOSURE_INVALID', reason: 'excluded-file' });
+    expect(errors[0]!.message).toContain('differ only in letter case');
+    expect(errors[0]!.message).toContain('payload/Public/README.txt');
+    expect(errors[0]!.message).toContain('payload/public/readme.txt');
+  });
+
+  it('refuses a file that is also a directory of another bundle path', async () => {
+    // alpha ships a file named node_modules, and gamma@2, which alpha needs and which the top
+    // level cannot hold (the handler imports gamma@1), must go into alpha's own node_modules.
+    const store = 'node_modules/.pnpm/alpha@1.0.0/node_modules';
+    const root = handlerApp(
+      "import alpha from 'alpha';\nimport gamma from 'gamma';\nexport const handle = [alpha, gamma];\n",
+      {
+        ...packageFiles(
+          `${store}/alpha`,
+          { name: 'alpha', version: '1.0.0', dependencies: { gamma: '^2.0.0' } },
+          { node_modules: 'not a directory' },
+        ),
+        ...packageFiles(`${store}/gamma`, { name: 'gamma', version: '2.0.0' }),
+        ...packageFiles('node_modules/gamma', { name: 'gamma', version: '1.0.0' }),
+      },
+    );
+    link(root, 'node_modules/alpha', join(root, store, 'alpha'));
+    const errors = await refused(root);
+    expect(errors[0]).toMatchObject({ code: 'RAY_CLOSURE_INVALID', reason: 'excluded-file' });
+    expect(errors[0]!.message).toContain(
+      "'payload/node_modules/alpha/node_modules' is a file and also a directory of " +
+        "'payload/node_modules/alpha/node_modules/gamma/index.js'",
+    );
   });
 
   it('refuses an application file at a path the bundle reserves', async () => {

@@ -44,19 +44,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extension's entry and `handlers/` modules, followed through their imports by a lexer
   (`es-module-lexer`) without running them; each frontend directory; for a product spec, the
   extraction, responder and normalizer configuration files and the prompt and schema files they
-  name; the third-party packages the modules import, with the packages those depend on, placed so
-  that Node resolves each import to the version it resolved to on the author's machine; the
-  dependency lock; a CycloneDX 1.5 SBOM and the license notices of every redistributed package.
+  name; the third-party packages the modules import, with the packages those depend on and the
+  packages their modules import without declaring them, placed so that Node resolves each import
+  to the version it resolved to on the author's machine and a package several others share (a
+  peer such as `react`) stays one copy; the dependency lock; a CycloneDX 1.5 SBOM and the license notices of every redistributed package.
   `@rayspec/*` packages are never copied: the range a `package.json` declares for one must include
   the pinned runtime version, or the closure is refused with `RAY_RUNTIME_UNSUPPORTED`. Refused
   before any output, with the file and the fix in the message (`RAY_CLOSURE_INVALID`): an import
   that does not resolve inside the application directory, a dynamic `import()` of a computed name,
   `node:module`, a CommonJS or TypeScript module, a native addon that its ELF header does not show
-  as a linux/x64 shared object for Node 22 or Node-API (it is read, never loaded), a native package
-  without a compiled addon, a symbolic link, a path outside the directory of the spec, and an
+  as a linux/x64 shared object for Node 22 or Node-API (it is read, never loaded), any other
+  package file whose header shows a binary for another platform, a package whose `os` or `cpu`
+  field excludes linux/x64, a native package without a compiled addon, a shared peer dependency
+  that would need two copies, a symbolic or hard link, a path outside the directory of the spec, a
+  script or style sheet with an inline source map unless source maps are asked for, and an
   explicitly named file of an excluded class. Walked directories leave out version-control
-  metadata, caches, logs, `.env` files, credentials, database dumps, local `node_modules` and,
-  unless asked for, source maps, and list each with its reason. Every file then goes through the
+  metadata, caches, logs, environment files (`.env`, `.env.*`, `*.env`, `.envrc`), credentials
+  (`.aws/`, `.ssh/`, `credentials`, key files and others), database dumps, local `node_modules`
+  and, unless asked for, source maps, matching names in any letter case, and list each with its
+  reason. Inside a vendored package only environment and credential files by name are left out,
+  so a certificate bundle or data file it reads at run time goes in. Every file then goes through the
   bundle's secret rules, and a hit is `RAY_SECRET_DETECTED` naming the path only. The identity
   comes from `--id`/`--version` or the spec's metadata and never from the name or the runtime; the
   bindings are the platform-grantable credentials of the agent backends the spec uses.

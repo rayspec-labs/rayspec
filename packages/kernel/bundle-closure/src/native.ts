@@ -7,6 +7,11 @@
  * addon exports: an addon built on Node-API exports `napi_register_module_v1` and runs on every Node
  * release; an addon built against one Node release exports `node_register_module_v<N>`, and only
  * `N` = 127 is Node 22. An addon exporting neither cannot be checked and is refused.
+ *
+ * Any other file of a vendored package is checked by its first bytes as well: an ELF, Mach-O or
+ * Windows PE binary (an executable a package spawns, a shared library it loads) must be an ELF file
+ * for x86-64 Linux. A package whose `os` or `cpu` field in its `package.json` excludes linux or x64
+ * is a platform-specific build for another machine and is refused as well.
  */
 
 /** The Node module ABI version of Node 22. */
@@ -57,6 +62,73 @@ export function inspectAddon(bytes: Uint8Array): AddonVerdict {
     builtFor: `linux/x64 for Node module ABI ${[...versions].sort((x, y) => x - y).join(', ')}`,
   };
 }
+
+/** How many leading bytes `nativeBinaryPlatform` needs. */
+export const NATIVE_HEADER_BYTES = 4096;
+
+/**
+ * The platform of a native binary from its first bytes, or `undefined` when the bytes are not the
+ * start of an ELF, Mach-O or Windows PE file. `linux/x64` is the one platform a bundle carries.
+ */
+export function nativeBinaryPlatform(head: Uint8Array): string | undefined {
+  const b = Buffer.from(head.buffer, head.byteOffset, head.byteLength);
+  if (b.length >= 4 && ELF_MAGIC.every((byte, i) => b[i] === byte)) {
+    if (b.length < 20) return 'a truncated ELF file';
+    const little = b[5] === ELFDATA2LSB;
+    const machine = little ? b.readUInt16LE(18) : b.readUInt16BE(18);
+    const osAbi = b[7];
+    if (
+      b[4] === ELFCLASS64 &&
+      little &&
+      (osAbi === ELFOSABI_SYSV || osAbi === ELFOSABI_LINUX) &&
+      machine === EM_X86_64
+    ) {
+      return 'linux/x64';
+    }
+    return `linux/${ELF_MACHINES[machine] ?? `machine ${machine}`}`;
+  }
+  if (b.length >= 8) {
+    const magic = b.readUInt32BE(0);
+    if (MACH_O_MAGICS.has(magic)) return 'macOS';
+    // A universal Mach-O starts like a Java class file; its next word counts architectures, where
+    // a class file has its version, 45 or more.
+    if (magic === 0xcafebabe && b.readUInt32BE(4) < 45) return 'macOS (universal binary)';
+  }
+  if (b.length >= 0x40 && b[0] === 0x4d && b[1] === 0x5a) {
+    const offset = b.readUInt32LE(0x3c);
+    if (offset + 4 <= b.length && b.readUInt32BE(offset) === PE_SIGNATURE) return 'Windows';
+  }
+  return undefined;
+}
+
+/**
+ * Whether a package's `os` and `cpu` fields let it install on linux/x64. Each field is a list of
+ * allowed names, or of names prefixed with `!` that are denied; an absent field allows everything.
+ * Returns the platform the fields name when they exclude linux/x64.
+ */
+export function packagePlatformExclusion(manifest: Record<string, unknown>): string | undefined {
+  const os = fieldList(manifest.os);
+  const cpu = fieldList(manifest.cpu);
+  const allows = (list: string[] | undefined, value: string) => {
+    if (list === undefined || list.length === 0) return true;
+    if (list.includes(`!${value}`)) return false;
+    const allowed = list.filter((entry) => !entry.startsWith('!'));
+    return allowed.length === 0 || allowed.includes(value);
+  };
+  if (allows(os, 'linux') && allows(cpu, 'x64')) return undefined;
+  return `${os?.join(', ') ?? 'any os'} / ${cpu?.join(', ') ?? 'any cpu'}`;
+}
+
+function fieldList(value: unknown): string[] | undefined {
+  if (typeof value === 'string') return [value];
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((entry): entry is string => typeof entry === 'string');
+}
+
+const MACH_O_MAGICS: ReadonlySet<number> = new Set([
+  0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe,
+]);
+const PE_SIGNATURE = 0x50450000;
 
 /** The platform a binary's header names, as `os/arch` or a description. */
 function platformOf(b: Buffer): string {

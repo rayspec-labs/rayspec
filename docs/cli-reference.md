@@ -438,8 +438,10 @@ It runs these steps in order and stops at the first failure:
    spec. `@rayspec/*` packages are never copied: the runtime provides them, and a
    declared range that excludes the pinned runtime is `RAY_RUNTIME_UNSUPPORTED`.
    A missing or uncompiled module (with the build instruction in the message), an
-   unresolved or computed import, a link, an explicitly named excluded file, a
-   native addon not built for linux/x64 and Node 22, or a source map without
+   unresolved or computed import, a shared peer dependency that would need two
+   copies, a symbolic or hard link, an explicitly named excluded file, a native
+   addon not built for linux/x64 and Node 22, a package binary or `os`/`cpu`
+   field for another platform, or a source map (a file or inlined) without
    `--source-maps` is `RAY_CLOSURE_INVALID` with reason `unresolved-import`,
    `escaping-link`, `excluded-file`, `native-module` or
    `source-map-not-opted-in`.
@@ -475,8 +477,9 @@ It runs these steps in order and stops at the first failure:
   (a lowercase letter, then up to 62 lowercase letters, digits or hyphens);
   `--version <semver>` (exact, no build metadata); `--runtime <exact-version>`
   (default: this CLI's version); `--include <path>`, repeatable, a file or
-  directory relative to the spec; `--source-maps`; `--preview`; `--force`;
-  `--json`.
+  directory relative to the spec; `--source-maps` (carry `*.map` files and
+  scripts or style sheets that inline their source map); `--preview`;
+  `--force`; `--json`.
 - **Output:** the result envelope on stdout (operation `pack`), with or without
   `--json`:
 

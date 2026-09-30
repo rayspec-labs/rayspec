@@ -65,10 +65,20 @@ A vendored package is copied whole, with its `package.json` and license files, a
 `node_modules` and the excluded classes below. Its `dependencies`, `optionalDependencies` and
 `peerDependencies` are resolved from its real location, as Node does; a missing required one is
 refused. Package managers link packages into `node_modules` (pnpm does throughout); such a link is
-followed only when its target lies inside the root. In the bundle, a package stays where the
-application's module imported it from, and a dependency is reused where Node would already find
-the same package from its dependent, and otherwise placed in the dependent's own `node_modules`,
-so each import resolves to the version it resolved to on the author's machine.
+followed only when its target lies inside the root. The literal `import`, `import()` and
+`require()` calls of every vendored module are read as well: a package the module imports without
+declaring it (npm's hoisting lets that work) is carried like a declared dependency when it is
+installed, with a note.
+
+In the bundle, a package stays where the application's module imported it from. A dependency is
+reused where Node already finds the same package from its dependent. Otherwise it is placed at the
+path it has on disk when that path is on its dependent's lookup chain, so an npm layout keeps its
+shape, or else at the highest `node_modules` from the dependent's dependency root down, so a pnpm
+layout becomes a hoisted one. A place is taken only when the dependent then finds it and no lookup
+made so far, the application's own included, changes. Each import therefore resolves to the
+version it resolved to on the author's machine, and a package several others share stays one copy
+and one module instance. A package named in `peerDependencies` that would still need two copies is
+refused (`unresolved-import`).
 
 A package is native when it ships a `.node` addon or a `binding.gyp`, sets `gypfile`, or depends on
 a known native loader (`bindings`, `node-gyp-build`, `prebuild-install`, `node-addon-api` and
@@ -77,22 +87,35 @@ Node 22: the ELF header must name a 64-bit little-endian x86-64 shared object fo
 GNU/Linux, and the addon must export `napi_register_module_v1` (Node-API) or
 `node_register_module_v127`. The file is read, never loaded. Anything else is `RAY_CLOSURE_INVALID`
 `native-module`, naming the package, the file and the platform it was built for; an application
-module importing a native loader itself is refused the same way.
+module importing a native loader itself is refused the same way. Every other file of a vendored
+package is checked by its first bytes too: an ELF, Mach-O or Windows PE binary must be an ELF file
+for x86-64 Linux. A package whose `os` or `cpu` field excludes linux or x64 is refused, optional or
+not: it is a platform-specific build installed for the author's machine.
 
 ### What never enters
 
 The resolver walks only the directories the spec names or `include` adds, and there it leaves out
 version-control metadata (`.git`, `.hg`, `.svn`), caches, `logs/` and `*.log`, environment files
-(`.env`, `.env.*`), credentials (`id_rsa` and its kin, `.pgpass`, `.netrc`, `.npmrc`, `*.pem`,
-`*.key`, keystores), database dumps (`*.dump`, `*.sqlite`, `*.db`, `*.bak` and others), local
-`node_modules` directories, operating-system metadata and, unless `sourceMaps` is set, source maps.
-Each is listed in `excluded` with its reason. A file of those classes named explicitly (by the
-spec, an import or `include`) is refused instead: `excluded-file`, or `source-map-not-opted-in`
-for a source map.
+(`.env`, `.env.*`, `*.env`, `.envrc`), credentials (`id_rsa` and its kin, credential directories
+such as `.aws/` and `.ssh/`, `credentials`, `.pgpass`, `.netrc`, `.npmrc`, service-account and
+`client_secret` JSON files, `*.pem`, `*.key`, `*.p8`, keystores), database dumps (`*.dump`,
+`*.sqlite`, `*.db`, `*.bak` and others), local `node_modules` directories, operating-system
+metadata and, unless `sourceMaps` is set, source maps. Names match in any letter case. Each is
+listed in `excluded` with its reason. A file of those classes named explicitly (by the spec, an
+import or `include`) is refused instead: `excluded-file`, or `source-map-not-opted-in` for a
+source map. A script or style sheet of the application that inlines its source map as a `data:`
+URL is refused with `source-map-not-opted-in` unless `sourceMaps` is set.
+
+Inside a vendored package only environment and credential files by their exact name,
+version-control and credential directories and, unless `sourceMaps` is set, source maps are left
+out: the package may read its `*.pem` certificates, `*.db` data or `logs/` modules at run time. A
+private key among its files is still found by the secret scan's content rule.
 
 Every path is anchored in the root. A reference that is absolute or lands outside the root is
 refused (`escaping-link`), and so is any symbolic link met on the way or in a walked directory,
-because a bundle holds regular files only. A name a bundle path cannot carry (only
+because a bundle holds regular files only. A file of the application with more than one name on
+disk (a hard link) is refused the same way, since its other name may lie outside the root; files
+of vendored packages are exempt, because pnpm hard-links them from its store. A name a bundle path cannot carry (only
 `A-Z a-z 0-9 _ . - @ +` per segment), two names that differ only in letter case, and a file that
 is also another file's directory are refused before the writer would.
 

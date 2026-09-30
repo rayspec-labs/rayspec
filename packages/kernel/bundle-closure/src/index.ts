@@ -35,7 +35,13 @@ export {
   closurePreview,
   type PreviewEntry,
 } from './preview.js';
-export { type ExclusionClass, excludedDirectory, excludedFile } from './rules.js';
+export {
+  type ExclusionClass,
+  excludedDirectory,
+  excludedFile,
+  excludedPackageDirectory,
+  excludedPackageFile,
+} from './rules.js';
 export { noticesText, packageUrl, sbomBytes, type VendoredPackage } from './sbom.js';
 export {
   type ApplicationIdentity,
