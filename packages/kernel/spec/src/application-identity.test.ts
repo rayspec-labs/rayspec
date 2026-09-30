@@ -2,11 +2,11 @@
  * The application identity fields: backend `metadata.id` / `metadata.version` and product
  * `product.metadata.id` / `product.metadata.version`.
  *
- * Both are optional. When present they must match the patterns the bundle manifest uses for
- * `application.id` and `application.version`, so a document the grammar accepts carries an identity
- * `rayspec pack` can write. A document without them parses exactly as it did before they existed, and
- * the product profile's other metadata keys stay free-form strings. The exported JSON Schema enforces
- * the same patterns as the parser.
+ * Both are optional. In a backend spec they are new keys, so the parser holds them to the patterns the
+ * bundle manifest uses for `application.id` and `application.version`. In a product spec `metadata`
+ * was already a free-form string map, so a document may hold any string under `id` or `version` and
+ * still parses; `rayspec pack` checks those two values when it reads them. A document without them
+ * parses exactly as it did before they existed. The exported JSON Schemas match the parsers.
  */
 import type { Ajv2020 as Ajv2020Class } from 'ajv/dist/2020.js';
 import * as Ajv2020Module from 'ajv/dist/2020.js';
@@ -130,16 +130,13 @@ describe('product metadata.id and metadata.version', () => {
     }
   });
 
-  it.each(BAD_IDS)('refuses the id %j at product.metadata.id', (id) => {
-    const parsed = parseProductSpec(product(`    id: '${id}'`));
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.errors.map((e) => e.path)).toContain('product.metadata.id');
-  });
-
-  it.each(BAD_VERSIONS)('refuses the version %j at product.metadata.version', (version) => {
-    const parsed = parseProductSpec(product(`    version: '${version}'`));
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.errors.map((e) => e.path)).toContain('product.metadata.version');
+  it.each([
+    ...BAD_IDS,
+    ...BAD_VERSIONS,
+  ])('still parses %j under product.metadata.id and .version, which pack checks instead', (value) => {
+    const parsed = parseProductSpec(product(`    id: '${value}'\n    version: '${value}'`));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.value.product.metadata).toEqual({ id: value, version: value });
   });
 
   it('keeps every other key a string', () => {
@@ -161,7 +158,7 @@ describe('product metadata.id and metadata.version', () => {
   });
 });
 
-describe('the exported schemas enforce the identity patterns', () => {
+describe('the exported schemas match the parsers', () => {
   const ajv = new Ajv2020Ctor({ strict: false, allErrors: true });
   const backendSchema = ajv.compile(exportJsonSchema());
   const productSchema = ajv.compile(exportProductJsonSchema());
@@ -173,14 +170,14 @@ describe('the exported schemas enforce the identity patterns', () => {
     expect(backendSchema(doc({ name: 'n', version: '1.0.0+b' }))).toBe(false);
   });
 
-  it('product: accepts a good identity and refuses a bad one', () => {
+  it('product: keeps metadata a free-form string map, as the parser does', () => {
     const doc = (metadata: Record<string, unknown>) => ({
       version: '1.0',
       product: { id: 'notes_app', name: 'Notes', metadata },
     });
     expect(productSchema(doc({ id: 'notes', version: '1.0.0', team: 'x' }))).toBe(true);
-    expect(productSchema(doc({ id: 'Notes' }))).toBe(false);
-    expect(productSchema(doc({ version: '1' }))).toBe(false);
+    expect(productSchema(doc({ id: 'Notes', version: '1' }))).toBe(true);
+    expect(productSchema(doc({ team: 3 }))).toBe(false);
   });
 
   it('carries the same pattern text as the grammar', () => {

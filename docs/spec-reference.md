@@ -2115,12 +2115,13 @@ product:
 - `name` — required, non-empty.
 - `description` — optional.
 - `owners` — optional list of ownership strings.
-- `metadata` — optional map of small string metadata. Two keys have a fixed form:
-  `id` (the application id, `^[a-z][a-z0-9-]{0,62}$`) and `version` (the application
-  version, an exact semantic version without `+build` metadata). They are the
-  identity an application bundle carries, as `metadata.id` and `metadata.version` are
-  for a backend spec; `rayspec pack` never derives them from `product.id`. Every other
-  key is a free-form string.
+- `metadata` — optional map of small string metadata. Every key is a free-form string.
+  `rayspec pack` reads two of them as the identity an application bundle carries, as
+  `metadata.id` and `metadata.version` are for a backend spec: `id` (the application id,
+  `^[a-z][a-z0-9-]{0,62}$`) and `version` (an exact semantic version without `+build`
+  metadata). Pack checks them and refuses a value that does not match; parsing does not,
+  so a document that already used either key for something else still parses. Pack never
+  derives the id from `product.id`.
 
 ## `requires` and `capabilities`
 

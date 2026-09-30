@@ -31,14 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names it quotes, so a hostile name cannot write terminal escapes. New: [the packing guide](./docs/packing.md) — what
   goes in, what never does, and how to fix each refusal.
 - **Application identity in the spec.** A backend spec may declare `metadata.id` and
-  `metadata.version`, and a product spec the same two keys in `product.metadata`: the identity an
-  application bundle carries. Both are optional. The id is a lowercase letter followed by up to 62
-  lowercase letters, digits or hyphens; the version is an exact semantic version with an optional
-  pre-release and no build metadata, at most 128 characters. These are the patterns of
-  `application.id` and `application.version` in the bundle manifest, so a value the grammar accepts
-  is one a bundle can carry. A document without them parses exactly as before, and every other
-  `product.metadata` key stays a free-form string. The three committed JSON Schemas carry the new
-  fields. A 1.8 parser refuses a spec that uses them.
+  `metadata.version`: the identity an application bundle carries. Both are optional. The id is a
+  lowercase letter followed by up to 62 lowercase letters, digits or hyphens; the version is an exact
+  semantic version with an optional pre-release and no build metadata, at most 128 characters. These
+  are the patterns of `application.id` and `application.version` in the bundle manifest, so a value
+  the backend grammar accepts is one a bundle can carry. A product spec uses the same two keys in
+  `product.metadata`, which stays a free-form string map: the parser accepts any string there, as it
+  always has, so a document that already used either key for something else still parses, and
+  `rayspec pack` checks the two values when it reads them. A document without them parses exactly as
+  before. `spec.schema.json` and `version-1.0.schema.json` carry the new backend fields;
+  `product.schema.json` is byte-unchanged. A 1.8 parser refuses a backend spec that uses them.
 - **`@rayspec/bundle-closure`: the inclusion list of an application bundle, from its spec.** A new
   kernel package that `rayspec pack` (above) builds on; `bundle verify` uses it too (below). `resolveClosure` takes a spec path and returns every file the
   application needs at run time and nothing else: the spec; the compiled handler modules and each
