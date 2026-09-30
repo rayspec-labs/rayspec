@@ -260,7 +260,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that it is running and its system database answers. Its body keeps `status`, `db` and
   `frontend` and adds `live`, `ready` and `checks` (each check's name with its boolean).
 - **`RAYSPEC_HOSTING_POSTURE`** (`local`, the default, or `managed`). Under `managed` the public
-  `/recovery-scope` probe is not registered; nothing else changes.
+  `/recovery-scope` probe is not registered, and cross-process run cancellation is on (see
+  Changed).
 - **`RAYSPEC_SHUTDOWN_DRAIN_MS`**, the bounded graceful shutdown (default 10000, at most 600000).
   On SIGINT or SIGTERM both `rayspec-serve` and `rayspec deploy` stop accepting connections, let
   in-flight requests finish for that long, then close every connection still open and the
@@ -270,9 +271,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   executors stop and restart dequeuing (the queue's worker concurrency set to 0 and back) without
   shutting DBOS down, and `inFlight` counts the jobs running; the cron and cleanup schedulers take
   a `gate` and count their fires in flight.
+- **Runtime control: apply, with crash reconciliation.** `runApply` (in `@rayspec/server`) runs a
+  list of steps against an environment in the contract's order: the idempotency key is looked up
+  (a key recorded with another plan digest is `RAY_IDEMPOTENCY_CONFLICT`; a succeeded operation
+  answers `already-applied` with its original receipts and runs nothing), the plan digest is
+  recomputed from the live state and the expected environment revision compared (`RAY_PLAN_STALE`,
+  also for an expired plan, and nothing is written), blockers and a held fence are
+  `RAY_POLICY_DENIED` (`plan-has-blockers`, `fenced`), then the operation lease is taken with the
+  intent receipt, the checks run again under it, and each step runs with a receipt before and
+  after; a schema-changing step takes the shared schema lock. The environment revision increases
+  by one in the transaction of the outcome when a step ran. Before any step, every apply an earlier
+  process left unsettled is reconciled from its receipts and the live state: a step whose effect
+  commits with its finish receipt is proven not applied by a start without a finish; any other step
+  is read back through the observer its start receipt names and closed as applied or not applied;
+  a step whose outcome cannot be established — an external effect nothing can read back — is never
+  replayed and blocks every apply with `RAY_RECONCILIATION_REQUIRED` (exit class 6) until an
+  operator records what it did with `resolveInterruptedStep`. Schema changes are never reversed
+  automatically. The contract package gains `checkApplyRequest`, `checkApplyControl` and
+  `isIdempotencyKey`. New: [the runtime operations guide](./docs/runtime-operations.md) — the
+  lifecycle operations, the receipts and how to recover from each interruption.
+- **The hosting report beside `inspect()`.** `inspectHosting()` on the runtime-control adapter
+  reports the hosting posture and whether cross-process run cancellation is on, with its interval
+  and whether the variable or the posture set it. The contract's inspect result has no member for
+  it, so it is not part of `inspect()`.
 
 ### Changed
 
+- **The legacy YAML deploy changes the schema through apply.** Every schema change a boot makes
+  (`rayspec deploy <spec.yaml>` and `rayspec-serve`) — the platform migration chain when the
+  ledger is behind the runtime, and each product-store migration — runs as a `runtime.apply`
+  operation: under the operation lease, after reconciling any interrupted apply, with receipts,
+  the environment revision raised and, for product DDL, the product schema digest recorded in the
+  same transaction as the DDL. A successful deploy boots and prints exactly as before; a restart
+  with nothing to change takes no lease and writes nothing. New refusals, each with a message and
+  its contract exit class from `rayspec deploy` (`rayspec-serve` keeps exit 1): a schema change on
+  a fenced environment (`RAY_POLICY_DENIED`, 4), a plan made stale by a concurrent change
+  (`RAY_PLAN_STALE`, 3; the platform chain plans again instead), another operation holding the
+  lease past the wait (`RAY_LOCK_TIMEOUT`, 5) and an interrupted apply that needs manual
+  reconciliation (`RAY_RECONCILIATION_REQUIRED`, 6). The chain that first creates the receipt
+  tables on an older database runs as before, under the schema lock.
+- **Cross-process run cancellation is on under the managed hosting posture.** With
+  `RAYSPEC_HOSTING_POSTURE=managed` and no `RAYSPEC_RUN_CANCEL_POLL_MS`, an executing run re-reads
+  its cancellation record every 2000 ms, so a cancellation reaches it in whichever worker process
+  it runs. An explicit interval still wins; the local posture keeps it off unless the variable
+  sets one.
 - **The release script `release:pack` is now `release:tarballs`**, so that "pack" means only
   `rayspec pack`. It runs the same `node scripts/publish.mjs --pack`; the old name is gone, because
   no workflow or document used it. The documentation calls extension packs **extensions**, and

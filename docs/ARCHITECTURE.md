@@ -373,6 +373,15 @@ ensure` — takes one shared transaction-scoped advisory lock, `pg_advisory_xact
 that changed nothing. The lock is released by commit, rollback or a lost connection, so a
 killed runner never blocks the next one.
 
+The boot runs in this order: validate the signing key and the spec; reconcile any apply an
+earlier process left interrupted; apply the platform migration chain if the ledger is behind the
+runtime; read the source fence; assemble the application, whose deployer applies product-store
+DDL. Each schema change is a `runtime.apply` operation (below): it takes the operation lease
+first and the shared schema lock inside it, so a boot, an export's quiesce and an operator's
+apply never interleave, and `tenant ensure` still only waits on the lock. The chain that creates
+the receipt tables on an older database runs before them, under the schema lock alone. A restart
+that has nothing to change takes neither.
+
 ### Runtime control
 
 `@rayspec/server` exposes a typed runtime-control library, `createRuntimeControl`, over one
@@ -400,6 +409,20 @@ leaves **receipts** in `runtime_control_receipts` — operation id, actor, kind,
 inputs digest, each step's start and finish with its digest, the outcome — which a trigger keeps
 append-only. A step with a start and no finish is what a crash leaves behind, and the next holder
 must reconcile it before it repeats anything. Neither table is ever exported in a snapshot.
+
+**Apply** (`runApply`) is how anything changes an environment. It recomputes the plan digest from
+the live state instead of trusting a stored plan, compares the expected environment revision,
+refuses blockers and a held fence, answers a replayed idempotency key from the receipts, and only
+then takes the lease and runs its steps, each between a start and a finish receipt; the revision
+rises by one when a step ran. Crash safety comes from what each step's receipts can prove. A step
+whose effect runs in the lease-checked transaction that writes its finish receipt (product DDL)
+has no in-between state: a start without a finish means the transaction rolled back. Any other
+step records, when it starts, the observer that reads its state, what it read and what it
+expects; the next apply reads it again and closes the step as applied or not applied. A step
+nothing can read back is unknown, and an unknown step blocks every apply
+(`RAY_RECONCILIATION_REQUIRED`) until an operator records its outcome — nothing is replayed
+blindly and no schema change is reversed. The legacy YAML deploy is the first caller; the
+operator's view is in [Runtime operations](./runtime-operations.md).
 
 The **source fence** is what `quiesce()` takes and `resume()` releases, for an export or a
 migration. It lives in `runtime_control_state` (`fence_state`, `fence_epoch`, and the write
@@ -429,7 +452,8 @@ Readiness (`GET /health`) covers the database, the platform schema (a database m
 runtime is refused at boot and reported not ready), the boot secrets mounted as files, the frontend
 mounts and the durable worker with its system database; liveness (`GET /livez`) only says the
 process answers. Neither names a host, a path or a secret. Under `RAYSPEC_HOSTING_POSTURE=managed`
-the public `/recovery-scope` probe is not registered.
+the public `/recovery-scope` probe is not registered, and cross-process run cancellation is on
+by default (`RAYSPEC_RUN_CANCEL_POLL_MS` 2000 unless set); `inspectHosting()` reports both.
 
 ---
 
@@ -460,3 +484,5 @@ across every product built on it.
 
 - **[Concepts](./concepts.md)** — the definitions this document builds on.
 - **[Getting started](./getting-started.md)** — run the stack and make a request.
+- **[Runtime operations](./runtime-operations.md)** — apply, quiesce, resume and recovery from an
+  interrupted operation, for operators.

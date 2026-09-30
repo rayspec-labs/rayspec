@@ -1204,7 +1204,12 @@ change is applied by the explicit `--apply-migration` flag below.
   destructive statements in that delta.
 - **Exit:** the serve path stays up until a signal; a fail-closed boot error (a
   missing secret, an unreviewed destructive migration) prints an actionable
-  message and exits `1`.
+  message and exits `1`. Every schema change the boot makes runs as a
+  `runtime.apply` operation with receipts, and a refusal of one exits with its
+  contract class: `3` a plan made stale by a concurrent change, `4` a fenced
+  environment, `5` another operation holding the lease past the wait, `6` an
+  interrupted earlier apply that needs manual reconciliation. See
+  [Runtime operations](./runtime-operations.md).
 - **Profiles — declaration vs. custom code.** `deploy` runs a **product-profile**
   document (like `examples/acme-notes/acme-notes.product.yaml`) directly — it is
   pure declaration with no custom code and no build step. A **backend-profile**
@@ -1354,6 +1359,8 @@ It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
 
 - **[Packing an application](./packing.md)** — what `pack` puts in a bundle, what
   it leaves out, and how to fix each refusal.
+- **[Runtime operations](./runtime-operations.md)** — what a deploy records, and how
+  to recover from an interrupted one.
 - **[Getting started](./getting-started.md)** — these commands in sequence.
 - **[Spec reference](./spec-reference.md)** — the grammar `doctor`/`plan`/`openapi`
   check.
