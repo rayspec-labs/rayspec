@@ -70,6 +70,12 @@ export interface ReadOptions {
    */
   captureSpec?: boolean;
   /**
+   * Keep the bytes of the product delta and allowlist the manifest's `productMigration` names, once
+   * they have matched the inventory, so a runtime can compare the delta with the one it regenerates
+   * without extracting the archive. Application bundles only.
+   */
+  captureProductMigration?: boolean;
+  /**
    * Refuse an archive path whose last component is a symbolic link instead of following it. A
    * runtime reading a path another process placed sets it.
    */
@@ -101,6 +107,12 @@ export interface BundleInspection {
    * when `captureSpec` was asked for and the bundle is an application bundle.
    */
   specBytes?: Buffer;
+  /**
+   * The bytes of the product delta and, when the bundle carries one, its allowlist, after they
+   * matched their inventory size and SHA-256. Present only when `captureProductMigration` was asked
+   * for and the manifest names a product migration.
+   */
+  productMigrationFiles?: { delta: Buffer; allowlist?: Buffer };
 }
 
 export interface BundleExtraction extends BundleInspection {
@@ -175,6 +187,7 @@ interface Settings {
   timeBudgetMs: number;
   clock: Clock;
   captureSpec: boolean;
+  captureProductMigration: boolean;
   refuseLinks: boolean;
 }
 
@@ -201,9 +214,21 @@ function resolveSettings(options: ReadOptions | null | undefined): Settings {
   if (typeof clock !== 'function') throw refusal('RAY_USAGE', 'the clock is not a function');
   const captureSpec = options?.captureSpec ?? false;
   if (typeof captureSpec !== 'boolean') throw refusal('RAY_USAGE', 'captureSpec is not a boolean');
+  const captureProductMigration = options?.captureProductMigration ?? false;
+  if (typeof captureProductMigration !== 'boolean') {
+    throw refusal('RAY_USAGE', 'captureProductMigration is not a boolean');
+  }
   const refuseLinks = options?.refuseLinks ?? false;
   if (typeof refuseLinks !== 'boolean') throw refusal('RAY_USAGE', 'refuseLinks is not a boolean');
-  return { limits, operation, timeBudgetMs, clock, captureSpec, refuseLinks };
+  return {
+    limits,
+    operation,
+    timeBudgetMs,
+    clock,
+    captureSpec,
+    captureProductMigration,
+    refuseLinks,
+  };
 }
 
 function operationLimit(settings: Settings): number {
@@ -266,11 +291,20 @@ async function readBundle(
   const manifest = validated.value;
 
   await target?.create();
+  const capture = new Map<string, CaptureRole>();
+  if (manifest.kind === 'application') {
+    if (settings.captureSpec) capture.set(manifest.spec, 'spec');
+    const migration = manifest.productMigration;
+    if (settings.captureProductMigration && migration !== undefined) {
+      capture.set(migration.deltaPath, 'delta');
+      if (migration.allowlistPath !== undefined) capture.set(migration.allowlistPath, 'allowlist');
+    }
+  }
   const streamed = await streamEntries(source, directory.entries, manifest, manifestBytes, {
     limits,
     deadline,
     target,
-    captureName: settings.captureSpec && manifest.kind === 'application' ? manifest.spec : null,
+    capture,
   });
 
   const archiveHash = streamed.archiveHash;
@@ -293,16 +327,29 @@ async function readBundle(
     archiveSize: source.size,
     secretFindings: streamed.secretFindings,
     entryCount: directory.entries.length,
-    ...(streamed.captured === null ? {} : { specBytes: streamed.captured }),
+    ...(streamed.captured.spec === undefined ? {} : { specBytes: streamed.captured.spec }),
+    ...(streamed.captured.delta === undefined
+      ? {}
+      : {
+          productMigrationFiles: {
+            delta: streamed.captured.delta,
+            ...(streamed.captured.allowlist === undefined
+              ? {}
+              : { allowlist: streamed.captured.allowlist }),
+          },
+        }),
   };
 }
+
+/** Which of the captured files an entry is. */
+type CaptureRole = 'spec' | 'delta' | 'allowlist';
 
 interface StreamContext {
   limits: ReaderLimits;
   deadline: Deadline;
   target: ExtractionTarget | null;
-  /** The entry whose bytes are kept for the caller, or null. */
-  captureName: string | null;
+  /** The entries whose bytes are kept for the caller, by path. */
+  capture: ReadonlyMap<string, CaptureRole>;
 }
 
 /**
@@ -345,7 +392,7 @@ async function streamEntries(
     : context.limits.extractedBytes;
   const archiveHash = createHash('sha256');
   const secretFindings: SecretFinding[] = [];
-  let captured: Buffer | null = null;
+  const captured: Partial<Record<CaptureRole, Buffer>> = {};
   let extracted = 0;
 
   for (const e of entries) {
@@ -379,7 +426,8 @@ async function streamEntries(
       );
     }
     const scanner = migration ? null : new PrivateKeyScanner();
-    const chunks: Buffer[] | null = e.name === context.captureName ? [] : null;
+    const role = context.capture.get(e.name);
+    const chunks: Buffer[] | null = role === undefined ? null : [];
     const data = await copyEntry(source, e, context, archiveHash, scanner, chunks);
     if (data.crc32 !== e.crc32) throw crcMismatch();
     if (data.sha256 !== entry.sha256) {
@@ -392,7 +440,7 @@ async function streamEntries(
         },
       );
     }
-    if (chunks !== null) captured = Buffer.concat(chunks);
+    if (chunks !== null && role !== undefined) captured[role] = Buffer.concat(chunks);
     if (!migration && isSecretPath(entry.path)) {
       secretFindings.push({ path: entry.path, rule: 'secret-path' });
     } else if (scanner?.found) {

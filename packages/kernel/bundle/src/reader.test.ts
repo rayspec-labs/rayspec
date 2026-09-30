@@ -477,6 +477,74 @@ describe('findings and presence', () => {
     expect(outcome(r)).toBe('RAY_USAGE/');
   });
 
+  describe('the product migration files', () => {
+    const delta = Buffer.from('ALTER TABLE "notes" ADD COLUMN "tag" text;\n');
+    const allowlist = Buffer.from('[]\n');
+    function withMigration(options: { allowlist: boolean; forgeDelta?: boolean }): Buffer {
+      const files = baseFiles(expectations);
+      files.set('payload/migrations/product-delta.sql', delta);
+      if (options.allowlist) files.set('payload/migrations/product-allowlist.json', allowlist);
+      const entries = bundleEntries(expectations, {
+        files,
+        manifestPatch: (manifest) => {
+          manifest.productMigration = {
+            fromProductSchemaDigest: 'a'.repeat(64),
+            toProductSchemaDigest: 'b'.repeat(64),
+            deltaPath: 'payload/migrations/product-delta.sql',
+            ...(options.allowlist
+              ? { allowlistPath: 'payload/migrations/product-allowlist.json' }
+              : {}),
+            destructive: false,
+          };
+        },
+      });
+      return rawZip(
+        options.forgeDelta === true
+          ? entries.map((e) =>
+              e.name === 'payload/migrations/product-delta.sql'
+                ? { ...e, data: Buffer.from(e.data).fill(0x20) }
+                : e,
+            )
+          : entries,
+      );
+    }
+
+    it('keeps the delta and the allowlist only when asked', async () => {
+      const archive = withMigration({ allowlist: true });
+      const asked = await inspectBundle(archive, { captureProductMigration: true });
+      expect(asked.ok).toBe(true);
+      const files = asked.ok ? asked.value.productMigrationFiles : undefined;
+      expect(files?.delta.equals(delta)).toBe(true);
+      expect(files?.allowlist?.equals(allowlist)).toBe(true);
+      const plain = await inspectBundle(archive, { captureSpec: true });
+      expect(plain.ok && 'productMigrationFiles' in plain.value).toBe(false);
+      expect(plain.ok && plain.value.specBytes !== undefined).toBe(true);
+    });
+
+    it('keeps a delta without an allowlist, and nothing for a bundle without a delta', async () => {
+      const bare = await inspectBundle(withMigration({ allowlist: false }), {
+        captureProductMigration: true,
+      });
+      expect(bare.ok && bare.value.productMigrationFiles?.delta.equals(delta)).toBe(true);
+      expect(bare.ok && bare.value.productMigrationFiles !== undefined).toBe(true);
+      expect(bare.ok && 'allowlist' in bare.value.productMigrationFiles!).toBe(false);
+      const none = await inspectBundle(base, { captureProductMigration: true });
+      expect(none.ok && 'productMigrationFiles' in none.value).toBe(false);
+    });
+
+    it('refuses a delta whose bytes do not match the inventory instead of handing them over', async () => {
+      const r = await inspectBundle(withMigration({ allowlist: false, forgeDelta: true }), {
+        captureProductMigration: true,
+      });
+      expect(outcome(r)).toBe('RAY_DIGEST_MISMATCH/entry-sha256');
+    });
+
+    it('refuses a captureProductMigration that is not a boolean', async () => {
+      const r = await inspectBundle(base, { captureProductMigration: 1 as never });
+      expect(outcome(r)).toBe('RAY_USAGE/');
+    });
+  });
+
   it('reports whether a signature file lies next to the archive', async () => {
     const dir = workDir();
     const path = join(dir, 'app.ray');
