@@ -1,10 +1,11 @@
 /**
- * The spec checks of a bundle: parse the spec a bundle carries, and derive from it the manifest
- * fields that must equal what the spec uses — `requires`, `permissions.execution` and
- * `permissions.egressHosts`.
+ * The spec checks shared by `rayspec pack` and `rayspec bundle verify`: parse the spec a bundle
+ * carries, resolve the application identity, and derive from the spec the manifest fields that must
+ * equal what the spec uses — `requires`, `permissions.execution` and `permissions.egressHosts` —
+ * together with the bindings its agent backends read.
  *
- * `rayspec pack` writes these fields from the same derivation, and `rayspec bundle verify` re-derives
- * them from the spec inside the archive and refuses a manifest that asks for more or less. The spec
+ * pack writes these fields from this derivation, and verify re-derives them from the spec inside the
+ * archive and refuses a manifest that asks for more or less, so the two can never disagree. The spec
  * is parsed as YAML text and checked against the grammar; nothing it names is resolved, imported or
  * run.
  *
@@ -15,13 +16,22 @@
  * that lists a host is refused until the grammar can declare it.
  */
 import {
+  type BindingDeclaration,
   type BundleError,
   bundleError,
   compareCodePoints,
   type RayManifest,
   specEnvelopeCode,
+  type ValidationResult,
 } from '@rayspec/bundle-contract';
-import { type ProductSpec, parseAnySpec, type RaySpec } from '@rayspec/spec';
+import {
+  APPLICATION_ID_PATTERN,
+  APPLICATION_VERSION_MAX_LENGTH,
+  APPLICATION_VERSION_PATTERN,
+  type ProductSpec,
+  parseAnySpec,
+  type RaySpec,
+} from '@rayspec/spec';
 
 /** The manifest fields a spec decides. */
 export interface DerivedFields {
@@ -174,4 +184,134 @@ function sorted(values: Iterable<string>): string[] {
 
 function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, i) => value === b[i]);
+}
+
+// ─── application identity ──────────────────────────────────────────────────────────────────────
+
+/** The id and version an application bundle carries. */
+export interface ApplicationIdentity {
+  id: string;
+  version: string;
+}
+
+/**
+ * The application identity of a spec: `--id` and `--version` when given, otherwise the spec's own
+ * `metadata.id` and `metadata.version` (backend profile) or `product.metadata.id` and
+ * `product.metadata.version` (product profile). Nothing else is a source: the id is never taken from
+ * `metadata.name` or `product.id`, and the version never from the runtime version. A missing value,
+ * or one that does not match the manifest pattern, is `RAY_APPLICATION_IDENTITY_MISSING` with the
+ * reason `id` or `version`; the id is checked first.
+ */
+export function resolveApplicationIdentity(
+  parsed: BundleSpec,
+  overrides: { id?: string | undefined; version?: string | undefined } = {},
+): ValidationResult<ApplicationIdentity> {
+  const metadata =
+    parsed.kind === 'product' ? (parsed.spec.product.metadata ?? {}) : parsed.spec.metadata;
+  const where = parsed.kind === 'product' ? 'product.metadata' : 'metadata';
+  const id = overrides.id ?? metadata.id;
+  const version = overrides.version ?? metadata.version;
+  if (id === undefined || !APPLICATION_ID_PATTERN.test(id)) {
+    return {
+      ok: false,
+      errors: [
+        bundleError(
+          'RAY_APPLICATION_IDENTITY_MISSING',
+          id === undefined
+            ? `the application has no id: add ${where}.id to the spec, or pass --id`
+            : 'the application id must be a lowercase letter followed by up to 62 lowercase ' +
+                'letters, digits or hyphens',
+          { reason: 'id' },
+        ),
+      ],
+    };
+  }
+  if (
+    version === undefined ||
+    version.length > APPLICATION_VERSION_MAX_LENGTH ||
+    !APPLICATION_VERSION_PATTERN.test(version)
+  ) {
+    return {
+      ok: false,
+      errors: [
+        bundleError(
+          'RAY_APPLICATION_IDENTITY_MISSING',
+          version === undefined
+            ? `the application has no version: add ${where}.version to the spec, or pass --version`
+            : 'the application version must be an exact semantic version (MAJOR.MINOR.PATCH with ' +
+                'an optional -prerelease and no +build metadata)',
+          { reason: 'version' },
+        ),
+      ],
+    };
+  }
+  return { ok: true, value: { id, version } };
+}
+
+// ─── bindings ──────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The platform-grantable bindings each agent backend reads (reserved-bindings.json
+ * `platformGrantable`). A backend with one credential requires it. The anthropic backend accepts
+ * either of two, and codex can run on a login the operator places in `CODEX_HOME`, so those
+ * bindings are declared but not required. A backend absent from this table reads no application
+ * binding.
+ */
+const BACKEND_BINDINGS: Readonly<Record<string, readonly { name: string; required: boolean }[]>> = {
+  openai: [{ name: 'OPENAI_API_KEY', required: true }],
+  pi: [{ name: 'OPENAI_API_KEY', required: true }],
+  anthropic: [
+    { name: 'ANTHROPIC_API_KEY', required: false },
+    { name: 'CLAUDE_CODE_OAUTH_TOKEN', required: false },
+  ],
+  codex: [{ name: 'CODEX_API_KEY', required: false }],
+};
+
+const BINDING_DESCRIPTIONS: Readonly<Record<string, string>> = {
+  OPENAI_API_KEY: 'The OpenAI API key the openai and pi agent backends call the model with.',
+  ANTHROPIC_API_KEY:
+    'The Anthropic API key for the anthropic agent backend. Give it or CLAUDE_CODE_OAUTH_TOKEN.',
+  CLAUDE_CODE_OAUTH_TOKEN:
+    'The subscription token for the anthropic agent backend. Give it or ANTHROPIC_API_KEY.',
+  CODEX_API_KEY:
+    'An API key for the codex agent backend. Without it the backend uses the login the operator ' +
+    'places in CODEX_HOME.',
+};
+
+/**
+ * The bindings a spec's agent backends read, sorted by name, each named once. A backend profile
+ * names its backends in `agents[]`; a product profile names them in its extraction, responder and
+ * normalizer configuration files, which the caller reads and passes as `configuredBackends`.
+ * Declaring a binding grants nothing: it tells the deployer which names to supply.
+ */
+export function deriveBindings(
+  parsed: BundleSpec,
+  configuredBackends: readonly string[] = [],
+): BindingDeclaration[] {
+  const backends = new Set<string>(configuredBackends);
+  if (parsed.kind === 'rayspec')
+    for (const agent of parsed.spec.agents) backends.add(agent.backend);
+  const required = new Map<string, boolean>();
+  for (const backend of backends) {
+    for (const binding of BACKEND_BINDINGS[backend] ?? []) {
+      required.set(binding.name, (required.get(binding.name) ?? false) || binding.required);
+    }
+  }
+  return sorted(required.keys()).map((name) => ({
+    name,
+    kind: 'secret',
+    required: required.get(name) === true,
+    description: BINDING_DESCRIPTIONS[name] ?? name,
+  }));
+}
+
+/** The agent backends a spec names that call a provider over the network. */
+export function networkBackends(
+  parsed: BundleSpec,
+  configuredBackends: readonly string[] = [],
+): string[] {
+  const backends = new Set<string>(configuredBackends);
+  if (parsed.kind === 'rayspec')
+    for (const agent of parsed.spec.agents) backends.add(agent.backend);
+  return sorted([...backends].filter((b) => Object.hasOwn(BACKEND_BINDINGS, b)));
 }

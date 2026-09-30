@@ -1,17 +1,27 @@
 /**
- * The spec checks of `bundle verify`: the manifest fields a spec derives, per the `derivedFrom`
- * rule of each capability id, and the comparison that refuses a manifest asking for more or less.
- * The corpus reaches only a frontend-only spec; the documents here reach every rule.
+ * The spec checks shared by `pack` and `bundle verify`: the manifest fields a spec derives, per the
+ * `derivedFrom` rule of each capability id, and the comparison that refuses a manifest asking for
+ * more or less; the application identity; the bindings the agent backends read. The corpus reaches
+ * only a frontend-only spec; the documents here reach every rule.
  */
 import { readFileSync } from 'node:fs';
-import { CAPABILITIES, type RayManifest } from '@rayspec/bundle-contract';
+import {
+  CAPABILITIES,
+  CONTRACT_SCHEMAS,
+  isReservedBindingName,
+  PLATFORM_GRANTABLE_BINDINGS,
+  type RayManifest,
+} from '@rayspec/bundle-contract';
+import { APPLICATION_ID_PATTERN, APPLICATION_VERSION_PATTERN } from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import {
   type BundleSpec,
   checkDerivedFields,
+  deriveBindings,
   deriveManifestFields,
   parseBundleSpec,
-} from './bundle-spec.js';
+  resolveApplicationIdentity,
+} from './spec-fields.js';
 
 const EVERY_BACKEND_FEATURE = `version: '1.0'
 metadata:
@@ -233,5 +243,111 @@ describe('parseBundleSpec', () => {
     expect(r.ok).toBe(false);
     if (!r.ok)
       expect(r.errors.map((e) => e.code)).toEqual(['RAY_SPEC_INVALID', 'SPEC_YAML_PARSE_ERROR']);
+  });
+});
+
+describe('the application identity', () => {
+  const backend = (metadata: string) => parsed(`version: '1.0'\nmetadata:\n  name: n\n${metadata}`);
+  const product = (metadata: string) =>
+    parsed(
+      `version: '1.0'\nproduct:\n  id: p_app\n  name: P\n${metadata === '' ? '' : `  metadata:\n${metadata}`}`,
+    );
+
+  it('uses the grammar patterns the manifest schema uses', () => {
+    const defs = (CONTRACT_SCHEMAS.manifest as { $defs: Record<string, { pattern: string }> })
+      .$defs;
+    expect(APPLICATION_ID_PATTERN.source).toBe(defs.applicationId!.pattern);
+    expect(APPLICATION_VERSION_PATTERN.source).toBe(defs.exactVersion!.pattern);
+  });
+
+  it('takes the backend metadata, and the product metadata map', () => {
+    expect(resolveApplicationIdentity(backend("  id: notes\n  version: '1.2.3'\n"))).toEqual({
+      ok: true,
+      value: { id: 'notes', version: '1.2.3' },
+    });
+    expect(resolveApplicationIdentity(product("    id: notes\n    version: '1.2.3'\n"))).toEqual({
+      ok: true,
+      value: { id: 'notes', version: '1.2.3' },
+    });
+  });
+
+  it('lets the overrides win over the spec', () => {
+    expect(
+      resolveApplicationIdentity(backend("  id: notes\n  version: '1.2.3'\n"), {
+        id: 'other',
+        version: '2.0.0',
+      }),
+    ).toEqual({ ok: true, value: { id: 'other', version: '2.0.0' } });
+  });
+
+  it('never derives the id from the name or the product id', () => {
+    const fromName = resolveApplicationIdentity(backend("  version: '1.0.0'\n"));
+    expect(fromName).toMatchObject({
+      ok: false,
+      errors: [{ code: 'RAY_APPLICATION_IDENTITY_MISSING', reason: 'id' }],
+    });
+    const fromProduct = resolveApplicationIdentity(product(''), { version: '1.0.0' });
+    expect(fromProduct).toMatchObject({ ok: false, errors: [{ reason: 'id' }] });
+    if (!fromProduct.ok) expect(fromProduct.errors[0]!.message).toContain('product.metadata.id');
+  });
+
+  it('refuses a missing version, and an override that breaks a pattern', () => {
+    expect(resolveApplicationIdentity(backend('  id: notes\n'))).toMatchObject({
+      ok: false,
+      errors: [{ reason: 'version' }],
+    });
+    expect(
+      resolveApplicationIdentity(backend(''), { id: 'Notes', version: '1.0.0' }),
+    ).toMatchObject({
+      ok: false,
+      errors: [{ reason: 'id' }],
+    });
+    expect(
+      resolveApplicationIdentity(backend(''), { id: 'n', version: '1.0.0+build' }),
+    ).toMatchObject({
+      ok: false,
+      errors: [{ reason: 'version' }],
+    });
+  });
+});
+
+describe('the bindings', () => {
+  const withAgents = (...backends: string[]) =>
+    parsed(
+      `version: '1.0'\nmetadata:\n  name: n\nagents:\n${backends
+        .map((b, i) => `  - { id: a${i}, name: a${i}, backend: ${b}, instructions: x, model: m }\n`)
+        .join('')}`,
+    );
+
+  it('declares the credential each agent backend reads, once, sorted by name', () => {
+    expect(deriveBindings(withAgents('openai', 'pi')).map((b) => [b.name, b.required])).toEqual([
+      ['OPENAI_API_KEY', true],
+    ]);
+    expect(
+      deriveBindings(withAgents('anthropic', 'codex')).map((b) => [b.name, b.required]),
+    ).toEqual([
+      ['ANTHROPIC_API_KEY', false],
+      ['CLAUDE_CODE_OAUTH_TOKEN', false],
+      ['CODEX_API_KEY', false],
+    ]);
+  });
+
+  it('takes the product backends from the configuration files the caller read', () => {
+    const product = parsed("version: '1.0'\nproduct:\n  id: p\n  name: P\n");
+    expect(deriveBindings(product)).toEqual([]);
+    expect(deriveBindings(product, ['openai', 'unknown-backend']).map((b) => b.name)).toEqual([
+      'OPENAI_API_KEY',
+    ]);
+  });
+
+  it('declares only platform-grantable secrets, never a reserved name', () => {
+    const all = deriveBindings(withAgents('openai', 'pi', 'anthropic', 'codex'));
+    const grantable = new Set(PLATFORM_GRANTABLE_BINDINGS.map((b) => b.name));
+    for (const binding of all) {
+      expect(grantable.has(binding.name)).toBe(true);
+      expect(isReservedBindingName(binding.name)).toBe(false);
+      expect(binding.kind).toBe('secret');
+      expect(binding.description.length).toBeGreaterThan(0);
+    }
   });
 });

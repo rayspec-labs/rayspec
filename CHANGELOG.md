@@ -18,6 +18,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is one a bundle can carry. A document without them parses exactly as before, and every other
   `product.metadata` key stays a free-form string. The three committed JSON Schemas carry the new
   fields. A 1.8 parser refuses a spec that uses them.
+- **`@rayspec/bundle-closure`: the inclusion list of an application bundle, from its spec.** A new
+  kernel package that `rayspec pack` is to build on; no command uses it yet apart from
+  `bundle verify` (below). `resolveClosure` takes a spec path and returns every file the
+  application needs at run time and nothing else: the spec; the compiled handler modules and each
+  extension's entry and `handlers/` modules, followed through their imports by a lexer
+  (`es-module-lexer`) without running them; each frontend directory; for a product spec, the
+  extraction, responder and normalizer configuration files and the prompt and schema files they
+  name; the third-party packages the modules import, with the packages those depend on, placed so
+  that Node resolves each import to the version it resolved to on the author's machine; the
+  dependency lock; a CycloneDX 1.5 SBOM and the license notices of every redistributed package.
+  `@rayspec/*` packages are never copied: the range a `package.json` declares for one must include
+  the pinned runtime version, or the closure is refused with `RAY_RUNTIME_UNSUPPORTED`. Refused
+  before any output, with the file and the fix in the message (`RAY_CLOSURE_INVALID`): an import
+  that does not resolve inside the application directory, a dynamic `import()` of a computed name,
+  `node:module`, a CommonJS or TypeScript module, a native addon that its ELF header does not show
+  as a linux/x64 shared object for Node 22 or Node-API (it is read, never loaded), a native package
+  without a compiled addon, a symbolic link, a path outside the directory of the spec, and an
+  explicitly named file of an excluded class. Walked directories leave out version-control
+  metadata, caches, logs, `.env` files, credentials, database dumps, local `node_modules` and,
+  unless asked for, source maps, and list each with its reason. Every file then goes through the
+  bundle's secret rules, and a hit is `RAY_SECRET_DETECTED` naming the path only. The identity
+  comes from `--id`/`--version` or the spec's metadata and never from the name or the runtime; the
+  bindings are the platform-grantable credentials of the agent backends the spec uses.
+  `closurePreview` returns the inclusion summary pack prints, and `closureManifest` and
+  `closureFiles` the input of the `@rayspec/bundle` writer.
 - **`@rayspec/bundle-contract`: the application bundle contract in code.** A new kernel package
   carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
   managed hosting receipt, as a proposed contract version `1.0.0-draft.2`. It commits the contract's
@@ -144,6 +169,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Each CLI command loads only its own modules.** The entry point now imports a command's module
   when that command runs, so a light command no longer loads the database layer and the Postgres
   driver that `plan` and `dev db` need.
+- **`bundle verify` derives the manifest fields with the code pack uses.** Parsing a bundle's spec
+  and re-deriving `requires`, the execution level and the egress hosts moved from the CLI into
+  `@rayspec/bundle-closure`, unchanged, so the fields pack writes and the fields verify checks come
+  from one function. `@rayspec/bundle`'s `BundleManifestInput` now keeps the members of each
+  manifest kind, so an application manifest with `spec`, `requires` and `productMigration` can be
+  passed to `writeBundle` without a cast.
 
 - **The Node floor is now `>=22.21.0`.** Every package's `engines.node`, the root manifest's and
   the documented prerequisites moved from `>=22` to the first release on the 22 line that

@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "5cea490f5f5e99a151f650aad4e4fbfbfa2dea618ddd1d6ba04cc395609fb462",
+  "lockfile_sha256": "ec4ab1c416a5b38a87f594a064bdf509e7d43230c9bde68d535ad9ab92740796",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v24.21.0"
@@ -2234,6 +2234,7 @@
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
         "packages/kernel/bundle",
+        "packages/kernel/bundle-closure",
         "packages/kernel/bundle-contract",
         "packages/kernel/spec",
         "packages/kernel/stt-port",
@@ -2743,7 +2744,8 @@
       "version": "2.1.0",
       "license": "MIT",
       "license_file_present": true,
-      "installed": true
+      "installed": true,
+      "direct_dependents": ["packages/kernel/bundle-closure"]
     },
     {
       "name": "es-object-atoms",
@@ -3882,7 +3884,8 @@
       "version": "7.8.0",
       "license": "ISC",
       "license_file_present": true,
-      "installed": true
+      "installed": true,
+      "direct_dependents": ["packages/kernel/bundle-closure"]
     },
     {
       "name": "send",
@@ -4173,6 +4176,7 @@
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
         "packages/kernel/bundle",
+        "packages/kernel/bundle-closure",
         "packages/kernel/bundle-contract",
         "packages/kernel/core",
         "packages/kernel/db",
@@ -4262,6 +4266,7 @@
         "packages/compose/product-yaml-workflow-bridge",
         "packages/kernel/auth-core",
         "packages/kernel/bundle",
+        "packages/kernel/bundle-closure",
         "packages/kernel/bundle-contract",
         "packages/kernel/core",
         "packages/kernel/db",
