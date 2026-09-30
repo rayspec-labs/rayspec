@@ -301,9 +301,10 @@ further hardening layer that it does **not** include.
   member. Reads trust the token's role for the token's lifetime.
 - **Handlers get a sanitized principal and scoped facades** — the caller as plain
   values, a store facade over its own organization's stores, and capabilities bound
-  to that organization; never a database handle or the migration connection. A
-  stream handler's request arrives without `authorization`, `proxy-authorization`,
-  `cookie` or a playback `?token=`; an error it throws answers a bare `500`.
+  to that organization; never a database handle or the migration connection. In
+  the hardened posture a stream handler's request arrives without `authorization`,
+  `proxy-authorization`, `cookie` or a playback `?token=`; an error a handler throws
+  answers a bare `500`.
 - **Single-tenant mode, opt-in** — `RAYSPEC_SINGLE_TENANT=true` holds the runtime to
   one organization: a second is refused on every path and accounts join by invite.
   With role separation and the managed hosting posture it makes up the hardened

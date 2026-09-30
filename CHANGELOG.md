@@ -400,7 +400,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and behaves as before. The boot then checks, from the catalog, that the runtime role is no
   superuser, bypasses no row security, may create no role, database, schema, table or temporary
   table, owns nothing, holds no `TRUNCATE` on a tenant table and starts with no preset tenant, and
-  that every tenant table is covered; it reports the result as `BootedServer.databaseIsolation`
+  that every tenant table carries exactly the tenant policy and no other permissive policy; it also
+  names every view or materialized view the runtime role can read that reads a tenant table with
+  its owner's rights, and every `SECURITY DEFINER` function owned by a bypassing role that the
+  runtime role can call other than the two lookups, unchanged. It reports the result as `BootedServer.databaseIsolation`
   and prints one warning line naming each failed check, while still serving. The durable worker's
   own tables are migrated as the migration role before the engine starts as the runtime role, and
   `rayspec tenant ensure` provisions over the migration role when the variable is set. The three
@@ -411,16 +414,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Database roles and row-level security](./docs/database-isolation.md).
 - **The runtime-control adapter reports the database isolation posture.**
   `inspectDatabaseIsolation()` runs the same catalog check for the adapter's `runtimeRole`, and
-  `inspect()` reports `managedPosture.supported` only when the release carries a capability receipt
-  **and** that posture is active; without `runtimeRole` it is never supported.
+  `inspect()` reports `managedPosture.supported` only when the release carries a capability receipt,
+  that posture is active **and** single-tenant mode (`RAYSPEC_SINGLE_TENANT=true`) is on; without
+  `runtimeRole` it is never supported.
 - **The tenant chokepoint gate fails a migration that adds a tenant table without its row-level
   policy.** `scripts/check-tenant-chokepoint.mjs` reads the committed platform chain and names every
-  table with a `tenant_id` column that no migration gives the canonical `tenant_isolation` policy.
-  `gate:migrate-clean` asserts the policies on every tenant table and row security enabled on none
+  table with a `tenant_id` column (created quoted or not, or given the column by adding or renaming
+  one) that no migration gives the canonical `tenant_isolation` policy. It also fails a migration
+  that creates any other policy, changes a policy, creates a view without `security_invoker` or a
+  materialized view, creates a `SECURITY DEFINER` function other than the two lookups, or switches
+  a table's row security off. `gate:migrate-clean` asserts the policies on every tenant table and row security enabled on none
   after the chain.
 - **A test lane served as the runtime role.** With `RAYSPEC_TEST_DATABASE_ISOLATION=roles` the
   `@rayspec/api-auth` test harness serves the app as a runtime role of its own with every tenant
-  table's policy enabled and forced; CI runs the whole api-auth suite that way as well. The new
+  table's policy enabled and forced, and checks from inside a session that it is connected as that
+  role; any other value of the variable fails the run. CI runs the whole api-auth suite that way as
+  well. `GLOBAL_TABLES` in `@rayspec/db` lists the tables without a tenant column, and the
+  database-backed suite holds it equal to the catalog. The new
   row-level isolation suites of `@rayspec/db` and `@rayspec/server` create throwaway roles through
   the setup SQL and prove, as the runtime role, that one tenant cannot read, update, delete,
   insert or reference another's rows or receive its events, that no, forged or stale tenant context
@@ -433,9 +443,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator bootstrap route, and `rayspec tenant ensure` (which reads the same variable, keeps
   resolving the existing organization idempotently and reports `SINGLE_TENANT_LIMIT` for a second).
   Open registration only creates that first organization; after it an account is made by redeeming
-  an invite. A refusal is a `403` with one fixed message; the registration check runs before an
-  account is created, so only the loser of two registrations racing for the first organization is
-  left with an account and no organization. A boot of a database that already holds more than one organization is refused. Any value other than
+  an invite. A refusal is a `403` with one fixed message; the registration and bootstrap checks run
+  before an account is created, so only the loser of two registrations racing for the first
+  organization is left with an account and no organization. A boot of a database that already holds more than one organization is refused. Any value other than
   `true` or `false` refuses the boot. `BootedServer.singleTenant` reports it, and the
   runtime-control adapter's `inspectHosting()` reports the tenant limit as
   `applicationTenants: { singleTenantMode, maxApplicationTenants }`. Unset, nothing changes.
@@ -601,12 +611,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **A stream handler no longer receives the caller's credential.** The Web `Request` a `stream`
-  route handler is handed (`init.request`) no longer carries `authorization`, `proxy-authorization`
-  or `cookie`, and a playback handler's request URL and `params` no longer carry the `?token=` media
-  token. Every other header and the body arrive unchanged; the caller is `init.principal`. The
-  platform exports the view as `withoutCredentials` and the header list as
-  `CREDENTIAL_REQUEST_HEADERS`.
+- **In the hardened posture a stream handler no longer receives the caller's credential.** With
+  role separation or single-tenant mode turned on, the Web `Request` a `stream` route handler is
+  handed (`init.request`) no longer carries `authorization`, `proxy-authorization` or `cookie`, and
+  a playback handler's request URL and `params` no longer carry the `?token=` media token. Every
+  other header and the body arrive unchanged; the caller is `init.principal`. Without either
+  setting the handler sees the request as before. The platform exports the view as
+  `withoutCredentials` and the header list as `CREDENTIAL_REQUEST_HEADERS`; `createAuthApp` takes
+  `stripHandlerCredentials`.
 - **A playback token stops working once its user is no longer a member.** The media-token check now
   also rereads the token user's membership in the token's organization on every request, so a
   member removed after the mint loses playback at once instead of at the token's expiry (up to 24
@@ -669,13 +681,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `database-write-role` needs the runtime-control adapter's connection to be the migration role's.
 - **Nothing about the hardened posture changes unless it is turned on.** Without
   `RAYSPEC_SINGLE_TENANT` the number of organizations is not limited and registration stays open;
-  without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. Four checks apply to every
-  deployment from this release on, and each refuses only a principal that no longer has access or
-  removes something handler code should not use: `agent:run` rereads the membership; a queued agent
-  run is re-checked when it starts (a run enqueued before the upgrade carries no requester and runs
-  as before); a playback token needs a current member; and a stream handler no longer sees the
-  credential headers or the playback `?token=` — a handler that read the caller from them reads
-  `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
+  without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves, and a stream handler sees
+  the request as before. Three checks apply to every deployment from this release on, and each
+  refuses only a principal that no longer has access: `agent:run` rereads the membership; a queued
+  agent run is re-checked when it starts (a run enqueued before the upgrade carries no requester and
+  runs as before); and a playback token needs a current member. With either setting on, a stream
+  handler no longer sees the credential headers or the playback `?token=` — a handler that read the
+  caller from them reads `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
 - **`rayspec deploy` of a `.ray` file is a new path.** It used to read the file as YAML. Now a
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,

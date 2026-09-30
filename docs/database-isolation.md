@@ -22,7 +22,7 @@ posture as supported.
 | The source fence's database barrier | a stopped source only | the runtime role's writes revoked (`database-write-role`) |
 | What the runtime reports | `single-role` | `role-separated`, active only when every check passes |
 
-Every statement the application issues runs in a transaction that first sets the transaction-local
+Every statement of the tenant chokepoint runs in a transaction that first sets the transaction-local
 setting `app.current_tenant` to the tenant the server derived from the authenticated principal
 (or, for a background job, a scheduled firing and the retention sweep, from the job's own
 server-created tenant). It is never read from a request. The policy on each tenant table compares
@@ -33,11 +33,20 @@ server-created tenant). It is never read from a request. The policy on each tena
 - a tenant set in an earlier transaction: gone — the setting ends with its transaction, so a pooled
   connection carries no tenant from one request into the next.
 
+Nothing resets a session-level value (`set_config('app.current_tenant', …, false)`) when a pooled
+connection is reused; only code in the runtime process can set one. A chokepoint statement is not
+affected by it (its own transaction-local value wins), but a statement outside the chokepoint on
+that connection would read as that tenant.
+
 The global tables — `orgs`, `users`, `memberships`, `sessions`, `api_keys`, `auth_audit`,
-`oidc_models`, the runtime-control tables and the two migration ledgers — have no tenant column and
-no policy. They are reached before a tenant is known (sign-in, token checks) or belong to the
-environment rather than to a tenant; they are the documented exceptions, and the platform's global
-stores are the only code that reads them.
+`oidc_models`, the three runtime-control tables and the two migration ledgers, listed as
+`GLOBAL_TABLES` in `packages/kernel/db/src/tenant-isolation.ts` — have no tenant column and no
+policy. They are reached before a tenant is known (sign-in, token checks) or belong to the
+environment rather than to a tenant; they are the documented exceptions. `memberships`, `api_keys`,
+`sessions` and `auth_audit` carry an organization column that row security does not cover: the
+chokepoint refuses every global table, and the build gate lets only the platform's global stores
+hold the handle that reads them. The database-backed isolation suite holds the list equal to the
+catalog, so a new table without a tenant column fails it until it is listed here.
 
 Two lookups must find a tenant row before any tenant is known, and each goes through one narrow
 database function created by the platform migrations: the invite redemption resolves the tenant of
@@ -115,7 +124,22 @@ The boot checks, from the catalog, that the runtime role:
 - starts its sessions with no preset `app.current_tenant`, `row_security`, `search_path` or `role`;
 
 and that every tenant table — every table with a `tenant_id` column, read from the catalog — has
-row security enabled and forced and carries the tenant policy.
+row security enabled and forced and carries the tenant policy exactly (permissive, for every command
+and role, with the canonical expression), and no other permissive policy: Postgres ORs permissive
+policies, so a second one such as `USING (true)` would open every tenant's rows. It also names:
+
+- every view or materialized view the runtime role can read, directly or through another view, that
+  reads a tenant table with its owner's rights (a view runs as its owner unless it is created
+  `WITH (security_invoker = true)`, and the owner bypasses row security);
+- every `SECURITY DEFINER` function owned by a role that is a superuser or bypasses row security
+  that the runtime role may call, other than `rayspec_invite_tenant` and
+  `rayspec_run_owned_elsewhere` with exactly the signature, body and search path the platform
+  migration gives them.
+
+The build gate (`scripts/check-tenant-chokepoint.mjs`) refuses the same things in a platform
+migration: a policy other than the canonical one, a changed policy, a view without
+`security_invoker`, a materialized view, another `SECURITY DEFINER` function, and row security
+switched off.
 
 When a check fails the server still starts and serves as before, prints one warning line naming each
 failure, and does not report the posture as active. An embedder reads the result as
@@ -152,3 +176,8 @@ reported. To remove it completely, run `ALTER TABLE … NO FORCE ROW LEVEL SECUR
 - Restore a dump into a role-separated database as the migration role: it bypasses row security, so
   every tenant's rows load; the runtime role could load only rows of the tenant it has set.
 - The policies do not replace the chokepoint: both apply, and a statement must satisfy both.
+- Not every statement runs with a tenant set: the global stores read the global tables without one,
+  and so does the invite redemption's first lookup (through `rayspec_invite_tenant`).
+- The workflow system database is outside row security. The durable engine's tables there hold
+  every tenant's queued jobs (tenant id, input, instructions, requester), and the runtime role may
+  read and write all of them; the posture check looks at the application database only.

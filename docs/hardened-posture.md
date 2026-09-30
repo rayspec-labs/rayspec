@@ -66,7 +66,7 @@ Within an organization, members share its data; a role decides what they may adm
 
 | Surface | Authorization decision |
 | --- | --- |
-| Organization, member, invite and API-key routes | the permission for the action, from the **live** membership row (never the token's claim); the organization in the URL must be the caller's |
+| Organization, member, invite and API-key routes | a write or administrative action (create, change or remove an organization, member, invite or API key) takes its permission from the **live** membership row, never the token's claim; `org:read` and `apikey:read` trust the token's role for its lifetime (see below); the organization in the URL must be the caller's |
 | Declared store routes (list, get, create, update, delete) | `store:read` or `store:write`; a write rereads the membership; the row must belong to the caller's organization |
 | Agent runs: start, cancel | `agent:run`, from the live membership; a run id of another organization is `404` |
 | Agent runs: read, event replay | `agent:read`; the run must belong to the caller's organization |
@@ -92,8 +92,10 @@ Every write, run start and administrative action rereads the membership.
   is closed before the server serves;
 - a `{handler}` route receives only an allowlist of request headers (conditional-read and
   content-negotiation headers);
-- a stream handler receives the request **without** `authorization`, `proxy-authorization` and
-  `cookie`, and a playback handler without its `?token=`; every other header and the body arrive.
+- in the hardened posture (role separation or single-tenant mode on) a stream handler receives the
+  request **without** `authorization`, `proxy-authorization` and `cookie`, and a playback handler
+  without its `?token=`; every other header and the body arrive. Without either setting it receives
+  the request as the caller sent it, as before.
 
 An error a handler throws answers `500` with `Internal server error.` and nothing else; a streamed
 run that fails ends with an `error` frame carrying the neutral class and a fixed message. The detail
@@ -124,16 +126,15 @@ goes to the server log.
 
 Nothing about the posture changes unless you turn it on: without `RAYSPEC_SINGLE_TENANT` the number
 of organizations is not limited and registration stays open; without
-`RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves.
+`RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. With either setting on, a stream
+handler no longer sees `authorization`, `proxy-authorization`, `cookie`, or a playback route's
+`?token=` — a handler that read the caller from them reads `init.principal` instead.
 
 These checks apply to every deployment from this release on, whether or not the posture is on. Each
-refuses only a principal that no longer has access, or removes something handler code should not
-use:
+refuses only a principal that no longer has access, or removes internal detail from an answer:
 
 - starting or cancelling an agent run rereads the membership, like every other write;
 - a durable agent run is re-checked when the worker starts it;
 - a playback token stops working once its user is no longer a member;
-- a stream handler no longer sees `authorization`, `proxy-authorization`, `cookie`, or a playback
-  route's `?token=` — a handler that read the caller from them reads `init.principal` instead;
 - the `error` frame of a streamed run carries a fixed message per class instead of the thrown
   error's text.
