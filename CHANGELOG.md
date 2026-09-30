@@ -27,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inclusion summary and the output SHA-256 on stderr; the summary says that nothing was deployed.
   It loads no server, database layer or handler loader. `--build` (a build in a disposable
   sandbox) and `--against` / `--allowlist` (a product delta carried in the bundle) are refused
-  with `RAY_USAGE` naming the manual steps. New: [the packing guide](./docs/packing.md) — what
+  with `RAY_USAGE` naming the manual steps. The summary escapes control characters in the file
+  names it quotes, so a hostile name cannot write terminal escapes. New: [the packing guide](./docs/packing.md) — what
   goes in, what never does, and how to fix each refusal.
 - **Application identity in the spec.** A backend spec may declare `metadata.id` and
   `metadata.version`, and a product spec the same two keys in `product.metadata`: the identity an

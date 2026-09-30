@@ -139,11 +139,39 @@ interface PackArgs {
   json: boolean;
 }
 
-/** Run `rayspec pack ...`. Every outcome, a refusal included, is an envelope. */
+/**
+ * Run `rayspec pack ...`. Every outcome, a refusal included, is an envelope. The summary quotes
+ * file names from the application tree, so every control character in it is escaped before it can
+ * reach a terminal; the envelope carries them as JSON escapes.
+ */
 export async function runPack(
   args: readonly string[],
   options: PackRunOptions,
 ): Promise<PackOutcome> {
+  const outcome = await pack(args, options);
+  return { ...outcome, summary: outcome.summary.map(printable) };
+}
+
+/**
+ * A line with every C0 and C1 control character, DEL and bidirectional formatting character
+ * written as a `\u` escape, so a hostile file name cannot move the cursor, recolor the terminal or
+ * reorder what the line shows.
+ */
+export function printable(line: string): string {
+  let out = '';
+  for (const char of line) {
+    const code = char.codePointAt(0)!;
+    const hidden =
+      code < 0x20 ||
+      (code >= 0x7f && code <= 0x9f) ||
+      (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069);
+    out += hidden ? `\\u${code.toString(16).padStart(4, '0')}` : char;
+  }
+  return out;
+}
+
+async function pack(args: readonly string[], options: PackRunOptions): Promise<PackOutcome> {
   let parsed: PackArgs;
   try {
     parsed = parsePackArgs(args, options);

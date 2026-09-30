@@ -9,11 +9,19 @@ import { join } from 'node:path';
 import { exitCodeFor, schemaValidator } from '@rayspec/bundle-contract';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  backendSpec,
   handlerApp,
   removeTemporaryDirectories,
   temporaryDirectory,
+  writeTree,
 } from '../../../kernel/bundle-closure/src/test-support/app.js';
-import { PACK_ERROR_CODES, type PackOutcome, reservedBindingErrors, runPack } from './pack.js';
+import {
+  PACK_ERROR_CODES,
+  type PackOutcome,
+  printable,
+  reservedBindingErrors,
+  runPack,
+} from './pack.js';
 import { CONTRACT_ROOT } from './test-support/bundles.js';
 
 afterAll(removeTemporaryDirectories);
@@ -152,6 +160,44 @@ describe('the write', () => {
     });
     expect(exitCodeFor(outcome.envelope.errors)).toBe(4);
     expect(readdirSync(outDir)).toEqual([]);
+  });
+});
+
+describe('the summary on stderr', () => {
+  it('escapes control characters of a file name it quotes, and the envelope keeps the name', async () => {
+    const root = temporaryDirectory();
+    const esc = String.fromCharCode(0x1b);
+    const hostile = `a${esc}[31mRED${esc}[0m\nnext`;
+    writeTree(root, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: public }\n'),
+      [`public/${hostile}`]: 'x',
+    });
+    const outcome = checked(
+      await runPack(['--spec', join(root, 'rayspec.yaml'), '--output', join(root, 'out.ray')], {
+        operationId: OPERATION_ID,
+        cliVersion: '1.8.0',
+      }),
+    );
+    expect(outcome.envelope.errors[0]).toMatchObject({
+      code: 'RAY_CLOSURE_INVALID',
+      reason: 'excluded-file',
+    });
+    const summary = outcome.summary.join('\n');
+    expect(summary).toContain('public/a\\u001b[31mRED\\u001b[0m\\u000anext');
+    expect(summary).not.toContain(esc);
+    expect(outcome.summary.every((line) => !line.includes('\n'))).toBe(true);
+    expect(outcome.envelope.errors[0]!.message).toContain(`public/${hostile}`);
+  });
+
+  it('writes C0, C1, DEL and bidirectional controls as escapes and keeps other text', () => {
+    expect(printable('tab\there')).toBe('tab\\u0009here');
+    expect(printable(`x${String.fromCharCode(0x7f)}${String.fromCharCode(0x9b)}y`)).toBe(
+      'x\\u007f\\u009by',
+    );
+    expect(printable(`a${String.fromCharCode(0x202e)}b${String.fromCharCode(0x2067)}c`)).toBe(
+      'a\\u202eb\\u2067c',
+    );
+    expect(printable('notes 1.4.0 — café ✓')).toBe('notes 1.4.0 — café ✓');
   });
 });
 
