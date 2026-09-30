@@ -73,7 +73,10 @@ export async function readDirectory(
 ): Promise<ArchiveDirectory> {
   const end = await readEndRecord(source, options);
   const records = await readCentralRecords(source, end, options);
-  const reason = checkNameSet(records.entries.map((e) => e.name));
+  const reason = checkNameSet(
+    records.entries.map((e) => e.name),
+    () => options.deadline.check(),
+  );
   if (reason !== null) throw invalid(reason, NAME_SET_MESSAGES[reason] ?? 'the entry names clash');
   await checkLayout(source, records.entries, end.directoryOffset, options);
   if (!records.entries.some((e) => e.name === options.rootDocument)) {
@@ -304,34 +307,28 @@ function directoryShort() {
 
 // ─── layout and local headers ──────────────────────────────────────────────────────────────────
 
+/**
+ * The offsets of every entry first (leading data, overlap, gaps, where the central directory
+ * starts), then every local header against its central record, so the reason reported for an
+ * archive with both kinds of fault is the offset one.
+ */
 async function checkLayout(
   source: ArchiveSource,
   entries: readonly ArchiveEntry[],
   directoryOffset: number,
   options: DirectoryOptions,
 ): Promise<void> {
-  if (entries.length > 0 && entries.every((e) => e.offset > 0)) {
+  options.deadline.check();
+  if (entries.length > 0 && entries[0]!.offset > 0) {
     throw invalid('leading-data', 'bytes precede the first local header');
   }
   let expected = 0;
   for (const entry of entries) {
-    options.deadline.check();
     if (entry.offset < expected) {
       throw invalid('overlapping-entries', 'two entries share bytes of the archive');
     }
     if (entry.offset > expected) {
       throw invalid('header-directory-mismatch', 'the archive has a gap between two entries');
-    }
-    const headerLength = LOCAL_HEADER_SIZE + entry.nameBytes.length;
-    if (entry.offset + headerLength > directoryOffset) {
-      throw invalid('header-directory-mismatch', 'a local header runs into the central directory');
-    }
-    const actual = await source.read(entry.offset, headerLength);
-    if (!actual.equals(expectedLocalHeader(entry))) {
-      throw invalid(
-        'header-directory-mismatch',
-        'a local header does not match its central record',
-      );
     }
     expected = entry.dataOffset + entry.size;
   }
@@ -340,6 +337,16 @@ async function checkLayout(
       'header-directory-mismatch',
       'the central directory does not start where the last entry ends',
     );
+  }
+  for (const entry of entries) {
+    options.deadline.check();
+    const actual = await source.read(entry.offset, entry.dataOffset - entry.offset);
+    if (!actual.equals(expectedLocalHeader(entry))) {
+      throw invalid(
+        'header-directory-mismatch',
+        'a local header does not match its central record',
+      );
+    }
   }
 }
 

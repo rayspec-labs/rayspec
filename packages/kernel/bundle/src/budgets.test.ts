@@ -9,8 +9,10 @@ import { join } from 'node:path';
 import type { BundleError } from '@rayspec/bundle-contract';
 import { afterAll, describe, expect, it } from 'vitest';
 import { DEFAULT_TIME_BUDGET_MS, extractBundle, inspectBundle } from './index.js';
+import { checkNameSet } from './names.js';
+import { bytesSource, Deadline, SequentialReader } from './source.js';
 import { loadExpectations } from './test-support/contract.js';
-import { baseFiles, bundleEntries, rawZip } from './test-support/raw-zip.js';
+import { baseFiles, bundleEntries, type RawEntry, rawZip } from './test-support/raw-zip.js';
 
 const expectations = loadExpectations();
 const app = rawZip(bundleEntries(expectations));
@@ -198,6 +200,117 @@ describe('the time budget', () => {
 
   it('a real clock with the default budget reads the base bundle', async () => {
     expect(outcome(await inspectBundle(app))).toBe('ok');
+  });
+});
+
+describe('the time budget inside the container checks', () => {
+  const jumpingClock = (calls: number) => {
+    let n = 0;
+    return () => (n++ < calls ? 0 : 10 * DEFAULT_TIME_BUDGET_MS);
+  };
+  /** How many clock readings a read of `bytes` takes before it answers. */
+  async function readingsOf(bytes: Buffer): Promise<number> {
+    let readings = 0;
+    await inspectBundle(bytes, {
+      clock: () => {
+        readings++;
+        return 0;
+      },
+    });
+    return readings;
+  }
+
+  it('is checked before each window of the central directory is read', async () => {
+    let now = 0;
+    const reader = new SequentialReader(
+      bytesSource(Buffer.alloc(200_000)),
+      0,
+      200_000,
+      new Deadline(10, () => now),
+    );
+    await reader.take(1000);
+    now = 100;
+    // Inside the window already read, nothing is read and the clock is not consulted.
+    await reader.take(1000);
+    await expect(reader.take(70_000)).rejects.toMatchObject({
+      error: { code: 'RAY_LIMIT_EXCEEDED', reason: 'time-budget' },
+    });
+  });
+
+  it('is checked during the name-set checks', async () => {
+    const names = Array.from({ length: 600 }, (_, i) => `payload/n/${String(i).padStart(4, '0')}`);
+    const archive = (list: string[]) => rawZip(list.map((name): RawEntry => ({ name, data: '' })));
+    // A duplicate is found before the name-set checks consult the clock; two names out of order
+    // only after them. Both archives take the same readings up to the name set.
+    const duplicate = [...names];
+    duplicate[1] = duplicate[0]!;
+    const unordered = [...names];
+    [unordered[1], unordered[2]] = [unordered[2]!, unordered[1]!];
+    expect(outcome(await inspectBundle(archive(unordered)))).toBe(
+      'RAY_INVALID_ARCHIVE/entry-order',
+    );
+    const before = await readingsOf(archive(duplicate));
+    expect(outcome(await inspectBundle(archive(unordered), { clock: jumpingClock(before) }))).toBe(
+      'RAY_LIMIT_EXCEEDED/time-budget',
+    );
+  });
+
+  it('is checked between the local headers', async () => {
+    const offsetsFail = bundleEntries(expectations);
+    offsetsFail.at(-1)!.central = { offset: 1 };
+    const headerFails = bundleEntries(expectations);
+    headerFails.at(-1)!.local = { time: 1 };
+    // A bad offset is found before the first local header is read; a bad last header only after
+    // every other header has been compared.
+    expect(outcome(await inspectBundle(rawZip(headerFails)))).toBe(
+      'RAY_INVALID_ARCHIVE/header-directory-mismatch',
+    );
+    const before = await readingsOf(rawZip(offsetsFail));
+    expect(outcome(await inspectBundle(rawZip(headerFails), { clock: jumpingClock(before) }))).toBe(
+      'RAY_LIMIT_EXCEEDED/time-budget',
+    );
+  });
+
+  it('the name-set checks stay fast for thousands of deep names', () => {
+    // Each name has 2,041 segments; a check that looked up every directory prefix of every name
+    // would hash tens of billions of characters.
+    const names = Array.from(
+      { length: 9_999 },
+      (_, i) => `payload/${'a/'.repeat(2040)}${String(i).padStart(5, '0')}`,
+    );
+    names.push('ray.json');
+    const started = performance.now();
+    expect(checkNameSet(names)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(3000);
+  });
+
+  it('the directory rule agrees with a direct check of every prefix on generated names', () => {
+    let seed = 0x5eed_0011;
+    const next = () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return seed >>> 16;
+    };
+    const parts = ['a', 'A', 'b', 'a.b', 'a!', 'a0'];
+    let collisions = 0;
+    for (let round = 0; round < 500; round++) {
+      const set = new Set<string>();
+      for (let i = 0; i < 1 + (next() % 6); i++) {
+        const depth = 1 + (next() % 3);
+        set.add(
+          `payload/${Array.from({ length: depth }, () => parts[next() % parts.length]).join('/')}`,
+        );
+      }
+      const names = [...set].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+      const folded = new Set(names.map((n) => n.toLowerCase()));
+      const direct = names.some((n) =>
+        [...n].some((ch, i) => ch === '/' && folded.has(n.toLowerCase().slice(0, i))),
+      );
+      const reason = checkNameSet(names);
+      if (reason === 'duplicate-name' || reason === 'case-fold-collision') continue;
+      if (direct) collisions++;
+      expect(reason === 'path-prefix-collision', names.join(' ')).toBe(direct);
+    }
+    expect(collisions).toBeGreaterThan(20);
   });
 });
 

@@ -4,6 +4,7 @@
  * signature presence, and hostile arguments.
  */
 
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -18,6 +19,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { crc32 } from 'node:zlib';
 import type { BundleError } from '@rayspec/bundle-contract';
 import { afterAll, describe, expect, it } from 'vitest';
 import { extractBundle, inspectBundle } from './index.js';
@@ -118,10 +120,28 @@ describe('container forms', () => {
     const f = entries();
     f[0]!.central = { offset: 1 };
     f[1]!.central = { offset: 0 };
-    // Swapped offsets: a local header does sit at 0, so this is not leading data.
-    expect(outcome(await inspectBundle(rawZip(f)))).toBe(
-      'RAY_INVALID_ARCHIVE/header-directory-mismatch',
-    );
+    // The first central record decides: another entry's header at 0 does not make up for it.
+    expect(outcome(await inspectBundle(rawZip(f)))).toBe('RAY_INVALID_ARCHIVE/leading-data');
+  });
+
+  it('the offsets of every entry are checked before any local header', async () => {
+    const e = entries();
+    const offsets = localOffsets(base);
+    // The first local header differs from its record, and the second entry overlaps the first.
+    e[0]!.local = { time: 1 };
+    e[1]!.central = { offset: offsets[1]! - 1 };
+    expect(outcome(await inspectBundle(rawZip(e)))).toBe('RAY_INVALID_ARCHIVE/overlapping-entries');
+  });
+
+  it('a ray.json whose CRC-32 is wrong in both headers is a CRC mismatch', async () => {
+    // Stricter than the letter of the inventory step, which lists CRC-32 for inventory entries:
+    // a manifest whose stored CRC-32 is wrong is refused like any other entry.
+    const e = entries();
+    const manifest = e.at(-1)!;
+    const wrong = (crc32(Buffer.from(manifest.data as string)) ^ 1) >>> 0;
+    manifest.central = { crc: wrong };
+    manifest.local = { crc: wrong };
+    expect(outcome(await inspectBundle(rawZip(e)))).toBe('RAY_INVALID_ARCHIVE/crc-mismatch');
   });
 
   it('a local header whose flags differ from its central record is a mismatch', async () => {
@@ -175,7 +195,7 @@ describe('an archive that changes while it is read', () => {
    * Write the base archive to a file and change it from inside the clock, at the reading the read
    * reaches once the directory and the manifest have been checked.
    */
-  async function readWhileChanging(change: (fd: number) => void) {
+  async function readWhileChanging(change: (fd: number) => void, fromEnd = 1) {
     const dir = workDir();
     const path = join(dir, 'app.ray');
     writeFileSync(path, base);
@@ -186,7 +206,7 @@ describe('an archive that changes while it is read', () => {
         return 0;
       },
     });
-    const at = readings - 1;
+    const at = readings - fromEnd;
     let n = 0;
     return inspectBundle(path, {
       clock: () => {
@@ -210,6 +230,33 @@ describe('an archive that changes while it is read', () => {
     );
     expect(outcome(r)).toBe('RAY_INVALID_ARCHIVE/header-directory-mismatch');
     expect(!r.ok && r.errors[0]!.message).toBe('the archive changed while it was read');
+  });
+
+  it('a manifest changed after it was parsed is refused, even with the same CRC-32', async () => {
+    const manifest = entries().at(-1)!.data as string;
+    const manifestBytes = Buffer.from(manifest, 'utf8');
+    const variant = sameCrcVariant(manifestBytes);
+    expect(variant.equals(manifestBytes)).toBe(false);
+    expect(crc32(variant)).toBe(crc32(manifestBytes));
+    const manifestAt = base.readUInt32LE(base.length - 6) - manifestBytes.length;
+    // The second reading from the end is the one before the manifest entry is streamed.
+    const r = await readWhileChanging(
+      (fd) => writeSync(fd, variant, 0, variant.length, manifestAt),
+      2,
+    );
+    expect(outcome(r)).toBe('RAY_INVALID_ARCHIVE/header-directory-mismatch');
+    expect(!r.ok && r.errors[0]!.message).toBe('the archive changed while it was read');
+  });
+
+  it('bytes given to the reader are copied, so changing them during the read changes nothing', async () => {
+    const bytes = Buffer.from(base);
+    const baseSha256 = createHash('sha256').update(base).digest('hex');
+    const reading = inspectBundle(bytes);
+    // The first byte of the first entry's data: the reader would see a CRC mismatch.
+    bytes[localOffsets(base)[0]! + 30 + Buffer.byteLength(entries()[0]!.name as string)]! ^= 0xff;
+    const r = await reading;
+    expect(outcome(r)).toBe('ok');
+    expect(r.ok && r.value.archiveSha256).toBe(baseSha256);
   });
 
   it('bytes appended while reading are refused', async () => {
@@ -266,6 +313,61 @@ describe('a change at any point of the read', () => {
   });
 });
 
+/**
+ * `data` with its first four bytes changed and the next four chosen so the CRC-32 stays the same.
+ * CRC-32 is affine over XOR: flipping a set of bits changes the CRC by the XOR of what flipping each
+ * bit alone does, so the bits to flip in bytes 4 to 7 are the solution of a 32 by 32 system over
+ * GF(2).
+ */
+function sameCrcVariant(data: Buffer): Buffer {
+  const target = crc32(data);
+  const out = Buffer.from(data);
+  for (let i = 0; i < 4; i++) out[i]! ^= 0x20;
+  const start = crc32(out);
+  const pivots = new Map<number, { vector: number; bits: number }>();
+  for (let bit = 0; bit < 32; bit++) {
+    const flipped = Buffer.from(out);
+    flipped[4 + (bit >> 3)]! ^= 1 << (bit & 7);
+    let vector = (crc32(flipped) ^ start) >>> 0;
+    let bits = (1 << bit) >>> 0;
+    while (vector !== 0) {
+      const top = 31 - Math.clz32(vector);
+      const pivot = pivots.get(top);
+      if (pivot === undefined) {
+        pivots.set(top, { vector, bits });
+        break;
+      }
+      vector = (vector ^ pivot.vector) >>> 0;
+      bits = (bits ^ pivot.bits) >>> 0;
+    }
+  }
+  let want = (start ^ target) >>> 0;
+  let bits = 0;
+  while (want !== 0) {
+    const pivot = pivots.get(31 - Math.clz32(want))!;
+    want = (want ^ pivot.vector) >>> 0;
+    bits = (bits ^ pivot.bits) >>> 0;
+  }
+  for (let bit = 0; bit < 32; bit++) {
+    if ((bits >>> bit) & 1) out[4 + (bit >> 3)]! ^= 1 << (bit & 7);
+  }
+  return out;
+}
+
+describe('the archive path', () => {
+  it('refuses a FIFO at once instead of waiting for a writer', { timeout: 5000 }, async () => {
+    const fifo = join(workDir(), 'pipe.ray');
+    execFileSync('mkfifo', [fifo]);
+    const r = await inspectBundle(fifo);
+    expect(outcome(r)).toBe('RAY_USAGE/');
+    expect(!r.ok && r.errors[0]!.message).toBe('the archive is not a regular file');
+  });
+
+  it('refuses a directory', async () => {
+    expect(outcome(await inspectBundle(workDir()))).toBe('RAY_USAGE/');
+  });
+});
+
 describe('extraction directory', () => {
   it('refuses a destination that exists, and leaves it as it was', async () => {
     const dir = workDir();
@@ -317,6 +419,13 @@ describe('findings and presence', () => {
       ]);
       expect(JSON.stringify(r.value.secretFindings)).not.toContain('AAAA');
     }
+  });
+
+  it('a secret file name that also holds a private key is one finding, by its name', async () => {
+    const files = baseFiles(expectations);
+    files.set('payload/.env', Buffer.from('-----BEGIN RSA PRIVATE KEY-----\nAAAA\n'));
+    const r = await inspectBundle(rawZip(bundleEntries(expectations, { files })));
+    expect(r.ok && r.value.secretFindings).toEqual([{ path: 'payload/.env', rule: 'secret-path' }]);
   });
 
   it('keeps the spec bytes only when asked, and counts the entries', async () => {

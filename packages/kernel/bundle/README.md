@@ -18,7 +18,13 @@ on, apart from Node's own modules.
 - `extractBundle(archive, destination, options?)` — the same checks, copying each entry into
   `destination` as it streams. The directory must not exist and its parent must; it is created
   with mode 0700 once the manifest has passed, files are created exclusively with mode 0600
-  without following links, and nothing is overwritten. On any failure the directory is removed.
+  without following links, and nothing is overwritten. Before a file is opened, and again once it
+  is open, the real path of its directory must be the one it has under the root and the path must
+  lead to the opened file, so a directory swapped for a link while extraction runs is refused
+  (`RAY_INTERNAL`) before a byte is written. On any failure the directory is removed.
+
+A path that is not a regular file (a directory, a device, a FIFO) is `RAY_USAGE`; it is opened
+without blocking, so a FIFO with no writer is answered at once.
 
 Both return `{ ok: true, value }` or `{ ok: false, errors }`, where `errors[0]` carries a code and
 reason from the contract vocabulary. Hostile input never throws, and a message never repeats a
@@ -41,9 +47,11 @@ Options:
   archive limit that applies before the kind is known: the larger of the two kind limits for
   `inspect` and `verify`, the application limit for `deploy` and `prepare`, the migration limit
   for `import`.
-- `timeBudgetMs` — the wall-time budget, at most `DEFAULT_TIME_BUDGET_MS` (five minutes);
-  checked between reads, so it caps CPU time too. Exceeding it is `RAY_LIMIT_EXCEEDED`
-  `time-budget`.
+- `timeBudgetMs` — the wall-time budget, at most `DEFAULT_TIME_BUDGET_MS` (five minutes),
+  started before the archive is opened. It is checked before each read, between the steps of the
+  name-set checks and before each local header and entry; no step between two checks grows faster
+  than the number of names times its logarithm, so the budget also caps CPU time, overshooting it
+  by at most one such step. Exceeding it is `RAY_LIMIT_EXCEEDED` `time-budget`.
 - `captureSpec` — keep the bytes of the spec file the manifest names, once they have matched
   their inventory size and SHA-256, as `specBytes`, so a caller can parse the spec without
   extracting the archive. Application bundles only; the bytes are bounded by the extracted byte
@@ -72,7 +80,9 @@ written: no timestamp, path or attribute of the host reaches the archive.
 The archive is written to a temporary file beside the destination, read back through the reader,
 and then moved into place: linked, which fails if the destination exists, or renamed over it with
 `overwrite: true`. A bundle over the kind's archive limit is refused before anything is written
-(`archive-size`, or `migration-size` for a migration bundle).
+(`archive-size`, or `migration-size` for a migration bundle), and so are payload files that add up
+to more than the kind's extracted byte limit (`extracted-size`). A limit the read-back reaches is
+reported as that limit; any other refusal of the read-back is `RAY_INTERNAL`.
 
 ## Signatures
 
@@ -90,7 +100,10 @@ a bundle is safe.
 
 `isSecretPath` and `PrivateKeyScanner` are the one rule set pack and verify share: a secret file
 name (`.env`, `.env.*`, `id_rsa`, `id_ecdsa`, `id_ed25519`, `.pgpass`) and a PEM private-key
-header, found while the bytes stream. The reader reports findings for application bundles.
+header (`-----BEGIN `, words of uppercase letters and digits such as `RSA`, `SM2` or `X25519` each
+followed by a space, then `PRIVATE KEY-----`), found while the bytes stream. The reader reports
+findings for application bundles, one per file: a file with a secret name is reported by its name
+whatever it contains.
 
 Part of [RaySpec](https://rayspec.dev) — **file-deployable AI infrastructure**: describe a
 product's backend in one declarative YAML file, and RaySpec stands up accounts and

@@ -112,9 +112,10 @@ export async function inspectBundle(
 ): Promise<ValidationResult<BundleInspection>> {
   return guarded(async () => {
     const settings = resolveSettings(options);
+    const deadline = new Deadline(settings.timeBudgetMs, settings.clock);
     const source = await openSource(archive);
     try {
-      const inspection = await readBundle(source, settings, null);
+      const inspection = await readBundle(source, settings, deadline, null);
       return {
         ok: true,
         value: { ...inspection, signatureFile: await signaturePresence(archive) },
@@ -139,10 +140,11 @@ export async function extractBundle(
 ): Promise<ValidationResult<BundleExtraction>> {
   return guarded(async () => {
     const settings = resolveSettings(options);
+    const deadline = new Deadline(settings.timeBudgetMs, settings.clock);
     const target = await ExtractionTarget.prepare(destination);
     const source = await openSource(archive);
     try {
-      const inspection = await readBundle(source, settings, target);
+      const inspection = await readBundle(source, settings, deadline, target);
       return {
         ok: true,
         value: {
@@ -225,10 +227,10 @@ async function signaturePresence(
 async function readBundle(
   source: ArchiveSource,
   settings: Settings,
+  deadline: Deadline,
   target: ExtractionTarget | null,
 ): Promise<Omit<BundleInspection, 'signatureFile'>> {
   const { limits } = settings;
-  const deadline = new Deadline(settings.timeBudgetMs, settings.clock);
 
   if (source.size > operationLimit(settings)) {
     throw refusal('RAY_LIMIT_EXCEEDED', 'the archive is larger than the archive limit', {

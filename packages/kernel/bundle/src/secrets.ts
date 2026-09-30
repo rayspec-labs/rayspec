@@ -4,8 +4,9 @@
  *
  *   - a payload path whose last segment is `.env`, starts with `.env.`, or is `id_rsa`,
  *     `id_ecdsa`, `id_ed25519` or `.pgpass`;
- *   - a payload file containing a PEM private-key header: `-----BEGIN `, optional uppercase words
- *     each followed by a space, then `PRIVATE KEY-----`.
+ *   - a payload file containing a PEM private-key header: `-----BEGIN `, optional words of
+ *     uppercase letters and digits (`RSA`, `SM2`, `X25519`) each followed by a space, then
+ *     `PRIVATE KEY-----`.
  *
  * A finding names the path and the rule, never the content. The content rule runs as a small
  * automaton over the bytes as they stream, so a header split across two reads is still found and
@@ -43,7 +44,8 @@ const IN_WORD = 12;
 const SUFFIX_BASE = 12;
 const ACCEPT = SUFFIX_BASE + SUFFIX.length;
 
-const isUpper = (b: number) => b >= 0x41 && b <= 0x5a;
+/** A byte a word of the header may hold: A to Z or 0 to 9. */
+const isWordByte = (b: number) => (b >= 0x41 && b <= 0x5a) || (b >= 0x30 && b <= 0x39);
 
 function step(states: number, byte: number): number {
   let next = 1; // the scan may start anywhere
@@ -53,11 +55,11 @@ function step(states: number, byte: number): number {
     }
   }
   if (states & (1 << WORD_START)) {
-    if (isUpper(byte)) next |= 1 << IN_WORD;
+    if (isWordByte(byte)) next |= 1 << IN_WORD;
     if (byte === SUFFIX[0]) next |= 1 << (SUFFIX_BASE + 1);
   }
   if (states & (1 << IN_WORD)) {
-    if (isUpper(byte)) next |= 1 << IN_WORD;
+    if (isWordByte(byte)) next |= 1 << IN_WORD;
     if (byte === 0x20) next |= 1 << WORD_START;
   }
   for (let j = 1; j < SUFFIX.length; j++) {

@@ -1,9 +1,18 @@
 /**
  * The extraction directory in isolation: a file is created exclusively and never through a link,
- * a directory that appears under the root is not followed, and discarding removes only what the
- * target created.
+ * a directory that appears under the root is not followed, a directory swapped for a link during
+ * extraction is noticed before a byte is written, and discarding removes only what the target
+ * created.
  */
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -51,6 +60,34 @@ describe('ExtractionTarget', () => {
     symlinkSync(elsewhere, join(target.root, 'payload'));
     await expect(target.openFile('payload/x')).rejects.toMatchObject({ code: 'EEXIST' });
     expect(readdirSync(elsewhere)).toEqual([]);
+  });
+
+  it('refuses to write into a directory swapped for a link after it was created', async () => {
+    const dir = workDir();
+    const target = await created(dir);
+    await (await target.openFile('payload/app/first')).close();
+    const outside = join(dir, 'outside');
+    mkdirSync(outside);
+    renameSync(join(target.root, 'payload/app'), join(dir, 'moved'));
+    symlinkSync(outside, join(target.root, 'payload/app'));
+    await expect(target.openFile('payload/app/second')).rejects.toMatchObject({
+      error: { code: 'RAY_INTERNAL' },
+    });
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('refuses when a directory above the file is swapped, however deep', async () => {
+    const dir = workDir();
+    const target = await created(dir);
+    await (await target.openFile('payload/a/b/c/first')).close();
+    const outside = join(dir, 'outside');
+    mkdirSync(join(outside, 'b', 'c'), { recursive: true });
+    renameSync(join(target.root, 'payload/a'), join(dir, 'moved'));
+    symlinkSync(outside, join(target.root, 'payload/a'));
+    await expect(target.openFile('payload/a/b/c/second')).rejects.toMatchObject({
+      error: { code: 'RAY_INTERNAL' },
+    });
+    expect(readdirSync(join(outside, 'b', 'c'))).toEqual([]);
   });
 
   it('refuses a name that resolves outside the root', async () => {

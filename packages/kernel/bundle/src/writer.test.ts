@@ -207,6 +207,29 @@ describe('refusals', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  it('refuses payload files that add up past the extracted byte limit, before writing', async () => {
+    const dir = workDir();
+    const r = await writeBundle(
+      join(dir, 'app.ray'),
+      { manifest: manifestInput(), files: byteFiles() },
+      { limits: { extractedBytes: 100 } },
+    );
+    expect(outcome(r)).toBe('RAY_LIMIT_EXCEEDED/extracted-size');
+    const { inventory: _drop, ...migration } = structuredClone(
+      expectations.bases.migration.manifest,
+    ) as unknown as RayManifest;
+    const m = await writeBundle(
+      join(dir, 'm.ray'),
+      {
+        manifest: migration,
+        files: [...baseFiles(expectations, 'migration')].map(([path, bytes]) => ({ path, bytes })),
+      },
+      { limits: { migrationExtractedBytes: 1 } },
+    );
+    expect(outcome(m)).toBe('RAY_LIMIT_EXCEEDED/extracted-size');
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
   it('refuses a raised limit and a key that is not an Ed25519 private key', async () => {
     const out = join(workDir(), 'app.ray');
     const input = { manifest: manifestInput(), files: byteFiles() };

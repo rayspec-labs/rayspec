@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { isSecretPath, PrivateKeyScanner } from './index.js';
 
 /** The content rule of the contract as a regular expression over the whole text. */
-const PEM_HEADER = /-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----/;
+const PEM_HEADER = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
 
 function scan(chunks: readonly Buffer[]): boolean {
   const scanner = new PrivateKeyScanner();
@@ -41,6 +41,11 @@ describe('the private-key header', () => {
     ['-----BEGIN OPENSSH PRIVATE KEY-----', true],
     ['x------BEGIN EC PRIVATE KEY-----y', true],
     ['-----BEGIN PRIVATE PRIVATE KEY-----', true],
+    ['-----BEGIN SM2 PRIVATE KEY-----', true],
+    ['-----BEGIN X25519 PRIVATE KEY-----', true],
+    ['-----BEGIN ED448 PRIVATE KEY-----', true],
+    ['-----BEGIN 2 PRIVATE KEY-----', true],
+    ['-----BEGIN SM-2 PRIVATE KEY-----', false],
     ['-----BEGIN PUBLIC KEY-----', false],
     ['-----BEGIN rsa PRIVATE KEY-----', false],
     ['-----BEGIN RSA  PRIVATE KEY-----', false],
@@ -67,6 +72,8 @@ describe('the private-key header', () => {
       'PRIVATE ',
       'KEY',
       'RSA ',
+      'X25519 ',
+      '2',
       ' ',
       'A',
       'a',

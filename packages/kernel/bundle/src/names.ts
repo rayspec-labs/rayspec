@@ -59,35 +59,62 @@ export function checkEntryName(
  * Check a list of names that each passed `checkEntryName`, in archive order: exact duplicates,
  * names equal after ASCII lowercasing, names equal after NFC, a name that is the directory of
  * another after lowercasing, and strictly increasing byte order. Returns the first reason found.
+ *
+ * The work grows with the number of names times the logarithm of that number, never with the
+ * number of segments of a name, so a set of deep names cannot hold the reader up. `tick`, when
+ * given, is called between names; the reader passes its time budget.
  */
-export function checkNameSet(names: readonly string[]): ErrorReason<'RAY_INVALID_ARCHIVE'> | null {
+export function checkNameSet(
+  names: readonly string[],
+  tick: () => void = () => {},
+): ErrorReason<'RAY_INVALID_ARCHIVE'> | null {
   const exact = new Set<string>();
   for (const name of names) {
     if (exact.has(name)) return 'duplicate-name';
     exact.add(name);
   }
+  tick();
   const folded = new Set<string>();
   for (const name of names) {
     const lower = asciiLower(name);
     if (folded.has(lower)) return 'case-fold-collision';
     folded.add(lower);
   }
+  tick();
   const normalized = new Set<string>();
   for (const name of names) {
     const nfc = name.normalize('NFC');
     if (normalized.has(nfc)) return 'normalization-collision';
     normalized.add(nfc);
   }
-  for (const name of names) {
-    const lower = asciiLower(name);
-    for (let i = lower.indexOf('/'); i >= 0; i = lower.indexOf('/', i + 1)) {
-      if (folded.has(lower.slice(0, i))) return 'path-prefix-collision';
-    }
-  }
+  tick();
+  if (isDirectoryOfAnother([...folded], tick)) return 'path-prefix-collision';
   for (let i = 1; i < names.length; i++) {
     if (compareBytes(names[i - 1]!, names[i]!) >= 0) return 'entry-order';
   }
   return null;
+}
+
+/**
+ * Whether one of the distinct `names` followed by `/` starts another. In sorted order the names
+ * that start with `n/` follow one another, and the first name not below `n/` is one of them if
+ * any name is, so one binary search per name decides it.
+ */
+function isDirectoryOfAnother(names: string[], tick: () => void): boolean {
+  const sorted = names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  for (let i = 0; i < sorted.length; i++) {
+    if (i % 256 === 0) tick();
+    const directory = `${sorted[i]!}/`;
+    let low = i + 1;
+    let high = sorted.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (sorted[middle]! < directory) low = middle + 1;
+      else high = middle;
+    }
+    if (low < sorted.length && sorted[low]!.startsWith(directory)) return true;
+  }
+  return false;
 }
 
 function isAscii(name: string): boolean {

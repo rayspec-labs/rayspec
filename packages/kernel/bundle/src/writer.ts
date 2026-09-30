@@ -142,6 +142,16 @@ export async function writeBundle(
         { reason: manifest.kind === 'migration' ? 'migration-size' : 'archive-size' },
       );
     }
+    const payloadBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const extractedLimit =
+      manifest.kind === 'migration' ? limits.migrationExtractedBytes : limits.extractedBytes;
+    if (payloadBytes > extractedLimit) {
+      throw refusal(
+        'RAY_LIMIT_EXCEEDED',
+        'the payload files add up to more than the extracted byte limit',
+        { reason: 'extracted-size' },
+      );
+    }
 
     const archiveTemp = temporaryPath(path);
     temporary.push(archiveTemp);
@@ -149,6 +159,10 @@ export async function writeBundle(
 
     const readBack = await inspectBundle(archiveTemp, { limits });
     if (!readBack.ok) {
+      // A limit the read-back reaches (its time budget, say) is reported as that limit; any other
+      // refusal means the writer produced an archive its own reader refuses.
+      const first = readBack.errors[0];
+      if (first?.code === 'RAY_LIMIT_EXCEEDED') throw new Refusal(first);
       throw refusal('RAY_INTERNAL', 'the written archive does not pass the reader');
     }
     const { archiveSha256 } = readBack.value;

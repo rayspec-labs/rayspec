@@ -47,11 +47,15 @@ export interface ArchiveSource {
   close(): Promise<void>;
 }
 
-/** Open a regular file as a source. A missing path, a directory or a device is a usage error. */
+/**
+ * Open a regular file as a source. A missing path, a directory, a device or a FIFO is a usage
+ * error. The file is opened without blocking, so a FIFO with no writer is refused at once instead
+ * of holding the open until one appears; the flag changes nothing for a regular file.
+ */
 export async function openFileSource(path: string): Promise<ArchiveSource> {
   let handle: fsp.FileHandle;
   try {
-    handle = await open(path, constants.O_RDONLY);
+    handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   } catch {
     throw refusal('RAY_USAGE', 'the archive cannot be opened for reading');
   }
