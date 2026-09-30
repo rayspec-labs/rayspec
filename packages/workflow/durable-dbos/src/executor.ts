@@ -60,10 +60,17 @@ import type {
   DurableExecutor,
   DurableExecutorIdentity,
   DurableJobStatus,
+  DurableRunAuthorizer,
   EnqueueResult,
   RunJob,
 } from '@rayspec/platform';
-import { isRunCancelled, isRunTainted, recordRunCancelled, runAgent } from '@rayspec/platform';
+import {
+  isRunCancelled,
+  isRunTainted,
+  markRunCancelled,
+  recordRunCancelled,
+  runAgent,
+} from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { PausableQueue } from './pausable-queue.js';
@@ -111,6 +118,25 @@ export interface DbosExecutorDeps {
    * run). Throws if the agent id is unknown (fail-closed — the worker surfaces the run as failed).
    */
   readonly resolveRun: (job: RunJob) => ResolvedRun;
+  /**
+   * Re-check, when the job is about to execute, that the identity it was enqueued for may still run
+   * an agent in its tenant. A denial ends the run before anything runs: it is marked like a
+   * cancellation (so no recovery re-dispatch runs it either) and recorded terminal with
+   * {@link runNotAuthorizedMessage}. A throw fails the job without running it. Absent ⇒ no re-check,
+   * as before this option existed.
+   */
+  readonly authorizeRun?: DurableRunAuthorizer;
+}
+
+/**
+ * What a run ended by the execution-time authorization re-check reports. It names no identity: the
+ * run's reader may not be the member who asked for it.
+ */
+export function runNotAuthorizedMessage(runId: string): string {
+  return (
+    `run ${runId} was not started: the member or API key that requested it may no longer run ` +
+    'agents in this organization.'
+  );
 }
 
 /** The DBOS config the executor needs (the composition root derives `systemDatabaseUrl` from env). */
@@ -447,6 +473,18 @@ export class DbosDurableExecutor implements DurableExecutor {
           // side (the cancel surface gave up on the header row the run was holding), and without this
           // the header would stay non-terminal for good while the caller had been told the run ended.
           await recordRunCancelled(tdb, job.runId);
+          return;
+        }
+
+        // ── Authorization, re-checked now that the job executes ────────────────────────────────
+        // The enqueue was authorized when it was made; a member removed, or a key revoked, while the
+        // job waited must not have it run on their behalf. A denial is made durable the same way a
+        // cancellation is — the marker first, so a recovery re-dispatch refuses it too — and the run
+        // is recorded terminal with the reason. A throw from the check propagates: the job fails
+        // without running, never runs on an unresolved answer.
+        if (this.#deps.authorizeRun && !(await this.#deps.authorizeRun(job))) {
+          await markRunCancelled(tdb, job.runId);
+          await recordRunCancelled(tdb, job.runId, { message: runNotAuthorizedMessage(job.runId) });
           return;
         }
 

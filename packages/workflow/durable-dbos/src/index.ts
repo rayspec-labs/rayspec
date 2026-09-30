@@ -38,6 +38,7 @@ export {
   type ResolvedRun,
   RUN_STARTED_BODY_HASH,
   RUN_STARTED_SCOPE,
+  runNotAuthorizedMessage,
 } from './executor.js';
 // Pausing a queue's dispatch and closing a scheduler's gate: the stops a source fence uses, both
 // undone by a resume without shutting the engine down.

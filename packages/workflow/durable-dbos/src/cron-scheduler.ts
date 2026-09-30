@@ -810,6 +810,8 @@ export class DbosCronScheduler {
         // A fixed, self-describing marker input (the agent's declared instructions drive it — a fire has
         // no client body). Honest by kind so the journal/run header reads truthfully for a manual fire.
         input: triggerAgentInput(descriptor.kind, descriptor.name),
+        // A trigger fires for the deployment, not for a member: the job runs as the platform.
+        requestedBy: { kind: 'system' },
         // Carry the action's optional output-persist target so the off-request run writes its validated
         // output into the declared store (exactly-once via the run-header completing-transition gate).
         ...(descriptor.action.persistTo !== undefined
