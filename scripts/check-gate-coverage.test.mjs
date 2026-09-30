@@ -182,6 +182,18 @@ try {
     );
   }
   {
+    const files = populated(CHOKEPOINT_ROOTS);
+    files['packages/kernel/db/drizzle/0001_open.sql'] =
+      'CREATE POLICY "allow_all" ON "public"."runs" AS PERMISSIVE FOR ALL TO PUBLIC ' +
+      'USING (true) WITH CHECK (true);\n';
+    const { ws, script: s } = throwawayRepo('check-tenant-chokepoint.mjs', files);
+    created.push(ws);
+    const r = runGate(s);
+    assert.notEqual(r.code, 0, '(P/side-door) a second permissive policy must FAIL');
+    assert.match(r.err, /0001_open\.sql: a policy other than the canonical tenant policy/);
+    console.log(`ok (P/side-door) — a policy beside the tenant policy fails (exit ${r.code})`);
+  }
+  {
     const files = populated(CHOKEPOINT_ROOTS.filter((r) => !r.endsWith('/drizzle')));
     const { ws, script: s } = throwawayRepo('check-tenant-chokepoint.mjs', files);
     created.push(ws);
