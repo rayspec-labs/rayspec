@@ -12,16 +12,20 @@
  *     for global/auth tables (orgs, users, sessions, api_keys, memberships, auth_audit, the
  *     OIDC store). The grep/lint gate forbids `.unscoped()` outside whitelisted modules.
  *
- * EVERY STATEMENT RUNS UNDER THE TENANT CONTEXT. The tenant is also written into the transaction-local
- * setting `app.current_tenant` (the exported `TENANT_GUC`), which the database's row-level policies
- * compare every row with (`tenant-isolation.ts`). A statement built here therefore never runs without
- * it:
+ * THE TENANT CONTEXT. The tenant is also written into the transaction-local setting
+ * `app.current_tenant` (the exported `TENANT_GUC`), which the database's row-level policies compare
+ * every row with (`tenant-isolation.ts`):
  *   - `transaction(fn)` sets it first, and every statement of `fn` runs in that transaction;
- *   - a statement built on a handle over the POOL is executed in its own short transaction that sets
- *     the context first — the builder is recorded and replayed on the transaction's handle when it is
- *     awaited, so the call sites keep the plain Drizzle chain (`.where().limit()`, `.returning()`);
  *   - a statement built on a handle over a transaction someone else opened sets the context in that
- *     transaction right before it runs.
+ *     transaction right before it runs;
+ *   - a statement built on a handle over a POOL that serves under row-level security (marked with
+ *     `requireTenantContext`) is executed in its own short transaction that sets the context first —
+ *     the builder is recorded and replayed on the transaction's handle when it is awaited, so the
+ *     call sites keep the plain Drizzle chain (`.where().limit()`, `.returning()`). On any other pool
+ *     it runs on its own, as a single statement: without row security the predicate this class
+ *     injects is the whole of the isolation, and the context would only add three round trips.
+ * Under row security a pool that was not marked therefore fails closed: its standalone statements
+ * carry no tenant and the policies admit no row.
  * The setting is transaction-local (`set_config(name, value, true)`), so a pooled connection carries
  * no tenant from one transaction into the next. `set_config` is used rather than `SET LOCAL`: SET's
  * grammar rejects a bind parameter, so a `SET LOCAL app.current_tenant = ${tenantId}` interpolation
@@ -61,6 +65,38 @@ export const TENANT_GUC = 'app.current_tenant';
  * callback. Every other handle sets the context itself before each statement.
  */
 const CONTEXT_SET = new WeakSet<TenantDb>();
+
+/**
+ * Whether a raw handle serves under row-level security: true for a pool marked with
+ * `requireTenantContext`, and for a transaction `transaction()` opened, what its pool says.
+ */
+const ROW_SECURITY = new WeakMap<object, boolean>();
+
+/**
+ * Whether statements on `raw` run under row-level security. A transaction this module did not open
+ * cannot say where it came from, so it is treated as if it did: its statements set the context and
+ * the lookups ask the platform's functions, which is correct either way.
+ */
+function underRowSecurity(raw: Db): boolean {
+  return ROW_SECURITY.get(raw) ?? is(raw, PgTransaction);
+}
+
+/**
+ * Mark `db` as a pool that serves under row-level security, and return it: every chokepoint statement
+ * built on it runs under the tenant context, and the lookups that must see past the policies (the run
+ * ownership probe, the invite resolution) ask the platform's functions. The composition root marks
+ * the runtime role's pools when role separation is on. An unmarked pool runs each statement on its
+ * own, as it always has.
+ */
+export function requireTenantContext<D extends Db>(db: D): D {
+  ROW_SECURITY.set(db, true);
+  return db;
+}
+
+/** Whether `db` was marked with {@link requireTenantContext}. */
+export function tenantContextRequired(db: Db): boolean {
+  return ROW_SECURITY.get(db) === true;
+}
 
 /**
  * Builder members that describe the statement rather than run it. Reading one replays the recorded
@@ -259,11 +295,12 @@ export class TenantDb {
 
   /**
    * Run `work` under this handle's tenant context: directly when the handle's transaction already
-   * carries it, after setting it when the handle is a transaction someone else opened, and otherwise
-   * in a new short transaction that sets it first.
+   * carries it, after setting it when the handle is a transaction someone else opened, in a new short
+   * transaction that sets it first when the handle is a pool marked with `requireTenantContext`, and
+   * directly on any other pool.
    */
   private async inContext<R>(work: (h: Db) => Promise<R>): Promise<R> {
-    if (CONTEXT_SET.has(this)) return work(this.raw);
+    if (CONTEXT_SET.has(this) || !underRowSecurity(this.raw)) return work(this.raw);
     if (is(this.raw, PgTransaction)) {
       await setContext(this.raw, this.tenantId);
       return work(this.raw);
@@ -277,13 +314,14 @@ export class TenantDb {
 
   /**
    * A query builder that runs under the tenant context. On a handle whose transaction already carries
-   * the context it is the plain Drizzle builder. Otherwise the returned value records the builder
+   * the context, or that does not serve under row-level security, it is the plain Drizzle builder.
+   * Otherwise the returned value records the builder
    * chain the caller adds (`.where()`, `.limit()`, `.returning()`, …) and, when it is awaited or
    * executed, replays that chain on the handle `inContext` provides and runs it there. It is typed as
    * the builder `build` returns, so a call site cannot tell the two apart.
    */
   private inContextBuilder<B>(build: (h: Db) => B): B {
-    if (CONTEXT_SET.has(this)) return build(this.raw);
+    if (CONTEXT_SET.has(this) || !underRowSecurity(this.raw)) return build(this.raw);
     const run = (calls: readonly RecordedCall[]): Promise<unknown> =>
       this.inContext(async (h) => (await replay(build(h), calls)) as unknown);
     const record = (calls: readonly RecordedCall[]): unknown =>
@@ -345,6 +383,8 @@ export class TenantDb {
         const ms = String(Math.ceil(lockTimeoutMs as number));
         await txRaw.execute(sql`select set_config('lock_timeout', ${ms}, true)`);
       }
+      // A transaction serves under row security exactly when its pool does.
+      ROW_SECURITY.set(txRaw, underRowSecurity(this.raw));
       // txRaw is a Drizzle transaction handle structurally compatible with Db's query API.
       const txTenant = new TenantDb(txRaw as unknown as Db, this.tenantId);
       CONTEXT_SET.add(txTenant);
@@ -377,6 +417,8 @@ export class TenantDb {
         .limit(1);
       const owner = rows[0]?.tenantId;
       if (owner !== undefined) return owner === this.tenantId ? 'owned' : 'foreign';
+      // Without row security the plain read saw every tenant's row: its miss is the answer.
+      if (!underRowSecurity(h)) return 'absent';
       const schema = await platformFunctionSchema(h, 'runs', 'rayspec_run_owned_elsewhere(text)');
       if (schema === undefined) return 'absent';
       const elsewhere = (await h.execute(
@@ -487,6 +529,8 @@ export async function inviteTenantByTokenHash(
     sql`select tenant_id::text as tenant from invites where token_hash = ${tokenHash} limit 1`,
   )) as unknown as { tenant: string }[];
   if (rows[0] !== undefined) return rows[0].tenant;
+  // Without row security the plain read saw every invite: its miss is the answer.
+  if (!underRowSecurity(db)) return undefined;
   const schema = await platformFunctionSchema(db, 'invites', 'rayspec_invite_tenant(text)');
   if (schema === undefined) return undefined;
   const resolved = (await db.execute(

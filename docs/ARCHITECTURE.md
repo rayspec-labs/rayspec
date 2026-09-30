@@ -181,11 +181,11 @@ storage), and each exemption is explicit and reviewed. The practical consequence
 there is no ergonomic path to a cross-tenant read, because the unscoped handle is
 not the one application code is given.
 
-Every statement the chokepoint issues runs in a transaction that first sets the
-transaction-local `app.current_tenant` to the server-derived tenant, and every
-tenant table carries a row-level policy that compares `tenant_id` with it. With
-**role separation** turned on (`RAYSPEC_MIGRATION_DATABASE_URL`, opt-in) the
-database enforces that policy on its own: the server serves as a runtime role that
+Every tenant table carries a row-level policy that compares `tenant_id` with the
+transaction-local `app.current_tenant`, which a chokepoint transaction sets to the
+server-derived tenant first. With **role separation** turned on
+(`RAYSPEC_MIGRATION_DATABASE_URL`, opt-in) every statement the chokepoint issues
+runs in such a transaction and the database enforces that policy on its own: the server serves as a runtime role that
 owns nothing and cannot bypass row security, the migration role owns the schema,
 and a statement that lost or never had its tenant reaches no tenant row. Without it
 the policies exist but are not enabled, and one role migrates and serves as before.

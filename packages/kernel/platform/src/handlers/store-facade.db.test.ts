@@ -13,7 +13,7 @@
  *
  * Skips when DATABASE_URL is absent (turbo passes it in CI; a credential-free run self-skips).
  */
-import { forTenant, INJECTED_COLUMN_NAMES } from '@rayspec/db';
+import { forTenant, INJECTED_COLUMN_NAMES, requireTenantContext } from '@rayspec/db';
 import {
   assertConnectedAsRuntimeRole,
   buildProductTables,
@@ -392,7 +392,7 @@ describe.skipIf(!hasDb)('makeHandlerDb — over the real TenantDb chokepoint', (
     appDb = db;
     if (testDatabaseIsolation()) {
       runtimeRole = await isolateTestSchema(db.$client, process.env.DATABASE_URL as string, SCHEMA);
-      appDb = makeDbWithSchema(runtimeRole.url, SCHEMA);
+      appDb = requireTenantContext(makeDbWithSchema(runtimeRole.url, SCHEMA));
       await assertConnectedAsRuntimeRole(appDb.$client, runtimeRole.role);
     }
     productTables = buildProductTables([

@@ -22,11 +22,11 @@ posture as supported.
 | The source fence's database barrier | a stopped source only | the runtime role's writes revoked (`database-write-role`) |
 | What the runtime reports | `single-role` | `role-separated`, active only when every check passes |
 
-Every statement of the tenant chokepoint runs in a transaction that first sets the transaction-local
-setting `app.current_tenant` to the tenant the server derived from the authenticated principal
-(or, for a background job, a scheduled firing and the retention sweep, from the job's own
-server-created tenant). It is never read from a request. The policy on each tenant table compares
-`tenant_id` with that setting:
+With role separation, every statement of the tenant chokepoint runs in a transaction that first sets
+the transaction-local setting `app.current_tenant` to the tenant the server derived from the
+authenticated principal (or, for a background job, a scheduled firing and the retention sweep, from
+the job's own server-created tenant). It is never read from a request. The policy on each tenant
+table compares `tenant_id` with that setting:
 
 - no tenant set: a read returns nothing and a write fails;
 - a value that is not a tenant id: the statement fails;
@@ -37,6 +37,13 @@ Nothing resets a session-level value (`set_config('app.current_tenant', …, fal
 connection is reused; only code in the runtime process can set one. A chokepoint statement is not
 affected by it (its own transaction-local value wins), but a statement outside the chokepoint on
 that connection would read as that tenant.
+
+A standalone chokepoint statement (one not already inside a transaction) therefore costs a `BEGIN`, a
+`set_config` and a `COMMIT` more under role separation. On a local Postgres a single-row-page read
+took about 1.35 ms instead of 0.59 ms, and 32 concurrent callers over a pool of ten ran about 2,700
+such statements a second instead of 6,400. Statements a handler or a run already issues inside a
+transaction pay nothing extra. Without role separation a standalone statement runs on its own, as it
+always has; the server marks only the runtime role's pools (`requireTenantContext` in `@rayspec/db`).
 
 The global tables — `orgs`, `users`, `memberships`, `sessions`, `api_keys`, `auth_audit`,
 `oidc_models`, the three runtime-control tables and the two migration ledgers, listed as

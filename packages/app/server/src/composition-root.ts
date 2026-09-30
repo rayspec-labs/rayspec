@@ -83,6 +83,7 @@ import {
   type IsolationFinding,
   makeDb,
   migrationsDir,
+  requireTenantContext,
   verifyTenantIsolation,
 } from '@rayspec/db';
 import {
@@ -1490,6 +1491,18 @@ export function hardenedPosture(
 }
 
 /**
+ * A pool over the serving connection (`DATABASE_URL`): with role separation it serves as the runtime
+ * role under row-level security, so it is marked to run every chokepoint statement under the tenant
+ * context (`requireTenantContext`). Without, it is returned as it is.
+ */
+export function servingPool<D extends Db>(
+  config: Pick<ServerConfig, 'migrationDatabaseUrl'>,
+  pool: D,
+): D {
+  return config.migrationDatabaseUrl !== undefined ? requireTenantContext(pool) : pool;
+}
+
+/**
  * The execution-time check the durable worker runs before it starts a queued agent run: in the
  * hardened posture, whether the member or key that enqueued the job may still run agents in its
  * tenant (`makeRunAuthorizer`). Outside it, none, so a queued job runs as it always did.
@@ -2428,7 +2441,9 @@ async function assembleServerWith(
   if (config.specPath) validateInjectedSpec(config.specPath);
 
   // 2. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
-  const db = makeDb(config.databaseUrl);
+  //    With role separation it serves under row-level security, so every chokepoint statement on it
+  //    runs under the tenant context; without, each runs on its own, as always.
+  const db = servingPool(config, makeDb(config.databaseUrl));
   //    With role separation, the migration role's own small pool: every schema change of this boot
   //    runs over it, and it is closed once the boot's schema work is done, so a serving process holds
   //    no connection that could change the schema. Without, the one pool does both, as always.
@@ -3806,7 +3821,7 @@ async function deployDeclaredSpec(
     //    PROVEN minimum, not a guess. INVARIANT (by construction): `WORKER_POOL_MAX > workerConcurrency`.
     const workerConcurrency = DEFAULT_WORKER_CONCURRENCY;
     const WORKER_POOL_MAX = workerConcurrency + 1; // strict headroom over concurrency (sufficient — fix E)
-    const workerDb = makeDb(config.databaseUrl, WORKER_POOL_MAX);
+    const workerDb = servingPool(config, makeDb(config.databaseUrl, WORKER_POOL_MAX));
     const runAuthorizer = durableRunAuthorizer(baseDeps);
     const executor = new DbosDurableExecutor(
       {

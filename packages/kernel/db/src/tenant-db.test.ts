@@ -7,7 +7,15 @@
  */
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { type Db, forTenant, schema, TENANT_GUC, type TenantDb } from './index.js';
+import {
+  type Db,
+  forTenant,
+  requireTenantContext,
+  schema,
+  TENANT_GUC,
+  type TenantDb,
+  tenantContextRequired,
+} from './index.js';
 import { makeDbWithSchema } from './testing.js';
 
 const TENANT_A = '00000000-0000-0000-0000-0000000000aa';
@@ -252,7 +260,16 @@ describe('transaction populates the RLS GUC (set_config seam)', () => {
   });
 });
 
-describe('every statement runs under the tenant context', () => {
+describe('on a pool that serves under row-level security, every statement runs under the tenant context', () => {
+  // A second pool over the same schema, marked the way the composition root marks the runtime role's.
+  let db: Db;
+  beforeAll(() => {
+    db = requireTenantContext(makeDbWithSchema(process.env.DATABASE_URL as string, TEST_SCHEMA));
+  });
+  afterAll(async () => {
+    await db?.$client.end();
+  });
+
   /** The tenant setting at the moment the statement runs, captured into the row it writes. */
   const settingNow = sql`to_jsonb(current_setting(${TENANT_GUC}, true))`;
 
@@ -349,5 +366,92 @@ describe('every statement runs under the tenant context', () => {
       .insert(schema.journalSteps, { runId: 'missing-required-columns' })
       .catch((err: unknown) => err);
     expect(caught).toBeInstanceOf(Error);
+  });
+});
+
+describe('on any other pool a chokepoint statement runs on its own, as before', () => {
+  /** The statements Drizzle issued through `handle` while `fn` ran, the transaction's included. */
+  async function issued(handle: Db, fn: () => Promise<unknown>): Promise<string[]> {
+    type Logger = { logQuery(query: string, params: unknown[]): void };
+    const session = (
+      handle as unknown as { session: { logger: Logger; options: { logger?: Logger } } }
+    ).session;
+    const previous = session.logger;
+    const previousOption = session.options.logger;
+    const seen: string[] = [];
+    const capture: Logger = { logQuery: (query) => void seen.push(query) };
+    session.logger = capture;
+    session.options.logger = capture;
+    try {
+      await fn();
+    } finally {
+      session.logger = previous;
+      session.options.logger = previousOption;
+    }
+    return seen;
+  }
+
+  it('is not marked unless asked, and marking is per pool', () => {
+    expect(tenantContextRequired(db)).toBe(false);
+    const other = makeDbWithSchema(process.env.DATABASE_URL as string, TEST_SCHEMA);
+    try {
+      expect(requireTenantContext(other)).toBe(other);
+      expect(tenantContextRequired(other)).toBe(true);
+      expect(tenantContextRequired(db)).toBe(false);
+    } finally {
+      void other.$client.end();
+    }
+  });
+
+  it('a select, insert, update and delete are each one statement with no tenant setting', async () => {
+    const a = forTenant(db, TENANT_A);
+    const statements = await issued(db, async () => {
+      await insertStep(a, 'plain', 'k-plain', 's');
+      await a.select(schema.journalSteps).all();
+      await a
+        .update(schema.journalSteps, { status: 'done' })
+        .where(eq(schema.journalSteps.runId, 'plain'));
+      await a.delete(schema.journalSteps).where(eq(schema.journalSteps.runId, 'plain'));
+    });
+    expect(statements).toHaveLength(4);
+    expect(statements.some((q) => q.includes('set_config'))).toBe(false);
+    // The statement ran with no tenant setting: nothing but the predicate scoped it.
+    const seen = await forTenant(db, TENANT_A)
+      .select(schema.journalSteps, { guc: sql<string>`current_setting(${TENANT_GUC}, true)` })
+      .all();
+    expect(seen).toEqual([]);
+    await insertStep(a, 'plain-2', 'k-plain-2', 's');
+    const withSetting = await forTenant(db, TENANT_A)
+      .select(schema.journalSteps, { guc: sql<string>`current_setting(${TENANT_GUC}, true)` })
+      .all();
+    expect(withSetting.map((r) => r.guc ?? '')).toEqual(['']);
+  });
+
+  it('the run ownership probe answers from the plain read alone', async () => {
+    await db.$client.unsafe(`
+      CREATE TABLE IF NOT EXISTS runs (
+        run_id text PRIMARY KEY,
+        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+        backend text NOT NULL, auth_mode text NOT NULL, agent_name text NOT NULL,
+        model text NOT NULL, status text NOT NULL, final_text text, output jsonb,
+        cost_usd numeric NOT NULL DEFAULT '0', created_at timestamptz NOT NULL DEFAULT now()
+      );
+      TRUNCATE runs CASCADE;
+    `);
+    const statements = await issued(db, async () => {
+      expect(await forTenant(db, TENANT_A).runHeaderOwnership('nowhere')).toBe('absent');
+    });
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).not.toContain('set_config');
+  });
+
+  it('a transaction still sets the tenant first, as it always has', async () => {
+    const statements = await issued(db, async () => {
+      await forTenant(db, TENANT_A).transaction(async (tx) => {
+        await tx.select(schema.journalSteps).all();
+      });
+    });
+    expect(statements[0]).toContain('set_config');
+    expect(statements).toHaveLength(2);
   });
 });

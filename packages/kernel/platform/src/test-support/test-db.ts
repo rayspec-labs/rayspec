@@ -9,7 +9,7 @@
  * code). The canonical schema is packages/db/src/schema.ts; this DDL mirrors it for an
  * isolated, dependency-free test schema and is updated alongside the schema retrofit.
  */
-import { forTenant } from '@rayspec/db';
+import { forTenant, requireTenantContext } from '@rayspec/db';
 // Raw-handle factory lives on the test/bootstrap subpath, NOT the main surface, so request
 // code cannot import it. This is test-support, so reaching for it here is legitimate.
 import {
@@ -48,7 +48,7 @@ export async function makeTestAppDb(admin: ReturnType<typeof makeTestDb>): Promi
 }> {
   if (!testDatabaseIsolation()) return { appDb: admin, close: async () => {} };
   const role = await isolateTestSchema(admin.$client, testDatabaseUrl(), TEST_SCHEMA);
-  const appDb = makeDbWithSchema(role.url, TEST_SCHEMA);
+  const appDb = requireTenantContext(makeDbWithSchema(role.url, TEST_SCHEMA));
   await assertConnectedAsRuntimeRole(appDb.$client, role.role);
   return {
     appDb,

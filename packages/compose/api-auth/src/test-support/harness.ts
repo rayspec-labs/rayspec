@@ -11,7 +11,7 @@
 
 import { createSigner, JwksProvider, RateLimiter, type RateLimitPolicy } from '@rayspec/auth-core';
 import type { Db } from '@rayspec/db';
-import { forTenant, generateProductSql } from '@rayspec/db';
+import { forTenant, generateProductSql, requireTenantContext } from '@rayspec/db';
 import {
   assertConnectedAsRuntimeRole,
   buildProductTables,
@@ -520,7 +520,7 @@ export async function createHarness(
   let appDb: Db = db;
   if (testDatabaseIsolation()) {
     runtimeRole = await isolateTestSchema(db.$client, url, SCHEMA);
-    appDb = makeDbWithSchema(runtimeRole.url, SCHEMA);
+    appDb = requireTenantContext(makeDbWithSchema(runtimeRole.url, SCHEMA));
     // Checked from inside a session, so the lane cannot pass while serving as the superuser.
     await assertConnectedAsRuntimeRole(appDb.$client, runtimeRole.role);
   }

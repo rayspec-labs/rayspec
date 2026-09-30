@@ -53,7 +53,7 @@ import {
   sessions,
   users,
 } from './schema.js';
-import { forTenant, TENANT_GUC } from './tenant-db.js';
+import { forTenant, requireTenantContext, TENANT_GUC } from './tenant-db.js';
 import {
   applyTenantIsolation,
   GLOBAL_TABLES,
@@ -157,7 +157,7 @@ describeDb('row-level tenant isolation, connected as the runtime role', () => {
     );
 
     runtime = postgres(iso.urls.runtime, { max: 1, onnotice: () => {} });
-    runtimeDb = makeDb(iso.urls.runtime, 2);
+    runtimeDb = requireTenantContext(makeDb(iso.urls.runtime, 2));
   }, 60_000);
 
   afterAll(async () => {
@@ -775,7 +775,7 @@ describeDb('row-level tenant isolation, connected as the runtime role', () => {
 
   it('a session-level tenant set by code in the process does not reach a chokepoint statement', async () => {
     // One connection, so the session value and the chokepoint statement share the session.
-    const one = makeDb(iso.urls.runtime, 1);
+    const one = requireTenantContext(makeDb(iso.urls.runtime, 1));
     try {
       await one.$client.unsafe(`SELECT set_config('${TENANT_GUC}', $1, false)`, [TENANT_A]);
       // A bare statement on that session reads as A: the session value is not reset on reuse.

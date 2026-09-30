@@ -8,12 +8,14 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { makeDb, tenantContextRequired } from '@rayspec/db';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   BootConfigError,
   databaseIsolationWarning,
   loadServerConfig,
   SINGLE_ROLE_ISOLATION,
+  servingPool,
 } from './composition-root.js';
 
 const BASE = {
@@ -125,5 +127,22 @@ describe('the database isolation status', () => {
     expect(line).toContain('the runtime role is a superuser');
     expect(line).toContain('public.notes');
     expect(line).not.toMatch(/postgres:\/\//);
+  });
+});
+
+describe('the serving pool', () => {
+  it('runs every chokepoint statement under the tenant context only with role separation', async () => {
+    // makeDb opens no connection until a statement runs.
+    const plain = makeDb(BASE.DATABASE_URL, 1);
+    const separated = makeDb(BASE.DATABASE_URL, 1);
+    try {
+      expect(servingPool({}, plain)).toBe(plain);
+      expect(tenantContextRequired(plain)).toBe(false);
+      expect(servingPool({ migrationDatabaseUrl: MIGRATION }, separated)).toBe(separated);
+      expect(tenantContextRequired(separated)).toBe(true);
+    } finally {
+      await plain.$client.end();
+      await separated.$client.end();
+    }
   });
 });

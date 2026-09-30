@@ -481,14 +481,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid for its backend.` without the validator's detail, which is logged. Outside the posture
   both carry the detail, as before.
 
-- **Every statement of the tenant chokepoint runs under the tenant context.** A `TenantDb` built on
-  the pool used to run each statement on its own, without the transaction-local `app.current_tenant`
-  set; now each such statement runs in a short transaction that sets it first, and a statement on a
-  transaction the chokepoint did not open sets it before it runs. Results are the same; a standalone
-  statement costs a `BEGIN`, a `set_config` and a `COMMIT` more. The invite redemption resolves the
-  invite's tenant from its token hash first and reads the invite through the chokepoint, and the
-  event-bus retention sweep runs once per organization under that tenant's context
-  (`TenantDb.sweepEvents`); both return what they returned before.
+- **With role separation every statement of the tenant chokepoint runs under the tenant context.**
+  A `TenantDb` built on a pool marked with the new `requireTenantContext` (the server marks the
+  runtime role's pools when `RAYSPEC_MIGRATION_DATABASE_URL` is set) runs each standalone statement
+  in a short transaction that sets the transaction-local `app.current_tenant` first; a statement on
+  a transaction the chokepoint did not open sets it before it runs. Results are the same; such a
+  statement costs a `BEGIN`, a `set_config` and a `COMMIT` more (measured locally at about 1.35 ms
+  instead of 0.59 ms for a small read). On an unmarked pool a standalone statement still runs on its
+  own, as before. The invite redemption resolves the invite's tenant from its token hash first and
+  reads the invite through the chokepoint, and the event-bus retention sweep runs once per
+  organization under that tenant's context (`TenantDb.sweepEvents`); both return what they returned
+  before.
 - **The legacy YAML deploy changes the schema through apply.** Every schema change a boot makes
   (`rayspec deploy <spec.yaml>` and `rayspec-serve`) — the platform migration chain when the
   ledger is behind the runtime, and each product-store migration — runs as a `runtime.apply`
