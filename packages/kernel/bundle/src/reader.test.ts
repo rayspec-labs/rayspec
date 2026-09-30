@@ -28,6 +28,8 @@ import { loadExpectations } from './test-support/contract.js';
 import { baseFiles, bundleEntries, type RawEntry, rawZip } from './test-support/raw-zip.js';
 
 const expectations = loadExpectations();
+/** Five dashes for a PEM header built at run time, so this file holds no header the secret scan reports. */
+const D = '-'.repeat(5);
 const entries = () => bundleEntries(expectations);
 const base = rawZip(entries());
 
@@ -408,7 +410,7 @@ describe('findings and presence', () => {
     files.set('payload/config/.env.production', Buffer.from('A=1\n'));
     files.set(
       'payload/keys/deploy.pem',
-      Buffer.from('-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n'),
+      Buffer.from(`${D}BEGIN OPENSSH PRIVATE KEY${D}\nAAAA\n${D}END OPENSSH PRIVATE KEY${D}\n`),
     );
     const r = await inspectBundle(rawZip(bundleEntries(expectations, { files })));
     expect(r.ok).toBe(true);
@@ -423,7 +425,7 @@ describe('findings and presence', () => {
 
   it('a secret file name that also holds a private key is one finding, by its name', async () => {
     const files = baseFiles(expectations);
-    files.set('payload/.env', Buffer.from('-----BEGIN RSA PRIVATE KEY-----\nAAAA\n'));
+    files.set('payload/.env', Buffer.from(`${D}BEGIN RSA PRIVATE KEY${D}\nAAAA\n`));
     const r = await inspectBundle(rawZip(bundleEntries(expectations, { files })));
     expect(r.ok && r.value.secretFindings).toEqual([{ path: 'payload/.env', rule: 'secret-path' }]);
   });

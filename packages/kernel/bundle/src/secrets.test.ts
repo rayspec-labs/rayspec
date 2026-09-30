@@ -2,8 +2,17 @@
  * The secret scan: the path rule, and the streaming private-key automaton checked against the
  * contract's pattern as a regular expression, on generated text split at every chunk boundary.
  */
+import { readdirSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { isSecretPath, PrivateKeyScanner } from './index.js';
+import { PACKAGE_ROOT } from './test-support/contract.js';
+
+/**
+ * Five dashes, joined into every header at run time. A header written out whole in this file would be
+ * reported by the repository's own secret scan, so none is.
+ */
+const D = '-'.repeat(5);
 
 /** The content rule of the contract as a regular expression over the whole text. */
 const PEM_HEADER = /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----/;
@@ -35,23 +44,23 @@ describe('the path rule', () => {
 
 describe('the private-key header', () => {
   it.each([
-    ['-----BEGIN PRIVATE KEY-----', true],
-    ['-----BEGIN RSA PRIVATE KEY-----', true],
-    ['-----BEGIN ENCRYPTED PRIVATE KEY-----', true],
-    ['-----BEGIN OPENSSH PRIVATE KEY-----', true],
-    ['x------BEGIN EC PRIVATE KEY-----y', true],
-    ['-----BEGIN PRIVATE PRIVATE KEY-----', true],
-    ['-----BEGIN SM2 PRIVATE KEY-----', true],
-    ['-----BEGIN X25519 PRIVATE KEY-----', true],
-    ['-----BEGIN ED448 PRIVATE KEY-----', true],
-    ['-----BEGIN 2 PRIVATE KEY-----', true],
-    ['-----BEGIN SM-2 PRIVATE KEY-----', false],
-    ['-----BEGIN PUBLIC KEY-----', false],
-    ['-----BEGIN rsa PRIVATE KEY-----', false],
-    ['-----BEGIN RSA  PRIVATE KEY-----', false],
-    ['-----BEGIN PRIVATE KEY----', false],
-    ['-----BEGINPRIVATE KEY-----', false],
-    ['----BEGIN PRIVATE KEY-----', false],
+    [`${D}BEGIN PRIVATE KEY${D}`, true],
+    [`${D}BEGIN RSA PRIVATE KEY${D}`, true],
+    [`${D}BEGIN ENCRYPTED PRIVATE KEY${D}`, true],
+    [`${D}BEGIN OPENSSH PRIVATE KEY${D}`, true],
+    [`x-${D}BEGIN EC PRIVATE KEY${D}y`, true],
+    [`${D}BEGIN PRIVATE PRIVATE KEY${D}`, true],
+    [`${D}BEGIN SM2 PRIVATE KEY${D}`, true],
+    [`${D}BEGIN X25519 PRIVATE KEY${D}`, true],
+    [`${D}BEGIN ED448 PRIVATE KEY${D}`, true],
+    [`${D}BEGIN 2 PRIVATE KEY${D}`, true],
+    [`${D}BEGIN SM-2 PRIVATE KEY${D}`, false],
+    [`${D}BEGIN PUBLIC KEY${D}`, false],
+    [`${D}BEGIN rsa PRIVATE KEY${D}`, false],
+    [`${D}BEGIN RSA  PRIVATE KEY${D}`, false],
+    [`${D}BEGIN PRIVATE KEY----`, false],
+    [`${D}BEGINPRIVATE KEY${D}`, false],
+    [`----BEGIN PRIVATE KEY${D}`, false],
   ])('%s is %s', (text, found) => {
     expect(scan([Buffer.from(text)])).toBe(found);
     expect(PEM_HEADER.test(text)).toBe(found);
@@ -97,7 +106,23 @@ describe('the private-key header', () => {
   });
 
   it('finds a header that arrives one byte per chunk after a long run of other bytes', () => {
-    const text = `${'x'.repeat(100_000)}-----BEGIN DSA PRIVATE KEY-----`;
+    const text = `${'x'.repeat(100_000)}${D}BEGIN DSA PRIVATE KEY${D}`;
     expect(scan([...Buffer.from(text)].map((b) => Buffer.from([b])))).toBe(true);
+  });
+});
+
+describe('the package files', () => {
+  it('hold no private-key header, so the repository secret scan stays clean', () => {
+    const files = [
+      join(PACKAGE_ROOT, 'README.md'),
+      ...readdirSync(join(PACKAGE_ROOT, 'src'), { recursive: true, withFileTypes: true })
+        .filter((d) => d.isFile())
+        .map((d) => join(d.parentPath, d.name)),
+    ];
+    expect(files.length).toBeGreaterThan(20);
+    const carrying = files
+      .filter((f) => scan([readFileSync(f)]))
+      .map((f) => relative(PACKAGE_ROOT, f));
+    expect(carrying).toEqual([]);
   });
 });
