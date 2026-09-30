@@ -95,6 +95,10 @@ const SENSITIVE = new Set<Permission>([
   // demoted principal must not write product data on a stale JWT claim (the same write-bypass
   // reasoning that makes the api-key/org-management ops sensitive). store:read stays claim-trusted.
   'store:write',
+  // Starting (or cancelling) an agent run spends model calls and enqueues work that runs later on the
+  // caller's behalf, so a member removed or demoted since their token was minted must not do it on
+  // the stale claim. The worker re-checks the same thing when a queued run executes.
+  'agent:run',
 ]);
 
 /** True if `permission` requires a live membership check (never trust the JWT claim). */

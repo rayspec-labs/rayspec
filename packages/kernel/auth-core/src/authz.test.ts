@@ -72,11 +72,13 @@ describe('isSensitive', () => {
     expect(isSensitive('org:switch')).toBe(true);
   });
   it('marks read-mostly ops NOT sensitive (claim role acceptable)', () => {
-    expect(isSensitive('agent:run')).toBe(false);
     expect(isSensitive('agent:read')).toBe(false);
     expect(isSensitive('org:read')).toBe(false);
     expect(isSensitive('apikey:read')).toBe(false);
     expect(isSensitive('store:read')).toBe(false);
+  });
+  it('marks agent:run SENSITIVE — starting or cancelling a run re-checks live membership', () => {
+    expect(isSensitive('agent:run')).toBe(true);
   });
   it('marks store:write SENSITIVE — a product-data mutation re-checks live membership', () => {
     expect(isSensitive('store:write')).toBe(true);
