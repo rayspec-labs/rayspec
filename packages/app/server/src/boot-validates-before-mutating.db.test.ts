@@ -11,20 +11,31 @@
  * environment does not satisfy — a stream route without a blob root, a playback route without a
  * media signing key, an unsupported speech provider, a frontend mount with nothing to serve — and for
  * a Product-YAML document whose deployment tenant is unset, malformed or names no org, or whose
- * document needs a blob root or an audio capability the deployment lacks. The last arm boots a valid
- * spec on the same database, so the reordering changes nothing for a deployment that validates.
+ * document needs a blob root, an audio capability, a responder or a normalizer the deployment lacks.
+ * And it holds for every refusal the deploy itself makes from the configuration and the document —
+ * a cron trigger no durable worker would fire or whose schedule does not parse, an agent on a backend
+ * the deployment does not supply, a handler module that is not there, a route under a reserved
+ * prefix, a store no registrar admitted — which the preflight now makes by rehearsing the deploy.
+ * The valid-spec arm boots a valid spec on the same database, so the reordering changes nothing for
+ * a deployment that validates.
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { AgentSpec, Backend, BackendId, RunContext, RunResult } from '@rayspec/core';
 import { registerScopedTables } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, BootConfigError, loadServerConfig } from './composition-root.js';
+import {
+  type AssembleServerOptions,
+  assembleServer,
+  BootConfigError,
+  loadServerConfig,
+} from './composition-root.js';
 import { ProductBootError } from './product-boot.js';
 
 const baseUrl = process.env.DATABASE_URL;
@@ -67,6 +78,67 @@ version: "1.0"
 product: { name: Broken }
 `;
 
+// A cron trigger on a handler, fired by the durable worker the document declares.
+const CRON_SPEC = `
+version: '1.0'
+metadata:
+  name: validates-first
+  description: a cron trigger fired by the durable worker
+deployment:
+  durableWorker: true
+handlers:
+  - { id: tick_handler, module: handlers/tick.mjs, export: tick, kind: trigger }
+triggers:
+  - name: every-minute
+    kind: cron
+    schedule: '* * * * *'
+    action: { kind: handler, handler: tick_handler }
+`;
+
+// An agent on a backend the deployment's factory does not build.
+const OTHER_BACKEND_SPEC = `
+version: '1.0'
+metadata:
+  name: validates-first
+  description: an agent on a backend the deployment does not supply
+agents:
+  - id: helper
+    name: helper-agent
+    backend: anthropic
+    model: claude-sonnet-4-5
+    instructions: Help.
+    maxTurns: 2
+`;
+
+/** A network-free backend, the only one the deployment supplies. */
+class OpenAiOnly implements Backend {
+  readonly id = 'openai' as const;
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+  async run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    return {
+      runId: ctx.runId,
+      backend: this.id,
+      authMode: 'api-key',
+      status: 'completed',
+      finalText: '',
+      output: null,
+      error: null,
+      errorClass: null,
+      conversation: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      costUsd: 0,
+      stepCount: 0,
+    };
+  }
+}
+
+const withOpenAi: AssembleServerOptions = {
+  registerProductTables: (tables) => registerScopedTables([...tables.values()]),
+  agentBackendsFactory: () => new Map<BackendId, Backend>([['openai', new OpenAiOnly()]]),
+};
+
 function withDbName(url: string, name: string): string {
   const u = new URL(url);
   u.pathname = `/${name}`;
@@ -90,6 +162,9 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     'RAYSPEC_MEDIA_SIGNING_KEY',
     'STT_PROVIDER',
     'RAYSPEC_PRODUCT_TENANT_ID',
+    'RAYSPEC_CRON_TENANT_ID',
+    'RAYSPEC_RESPONDER_MODE',
+    'RAYSPEC_NORMALIZE_MODE',
   ] as const;
 
   /** Every relation outside the system schemas, plus whether a `drizzle` schema exists. */
@@ -115,13 +190,19 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     return path;
   }
 
-  async function bootWith(specPath: string | undefined, jwtKey = validKey) {
+  const registrar: AssembleServerOptions = {
+    registerProductTables: (tables) => registerScopedTables([...tables.values()]),
+  };
+
+  async function bootWith(
+    specPath: string | undefined,
+    jwtKey = validKey,
+    opts: AssembleServerOptions = registrar,
+  ) {
     process.env.RAYSPEC_JWT_SIGNING_KEY = jwtKey;
     if (specPath === undefined) delete process.env.RAYSPEC_SPEC_PATH;
     else process.env.RAYSPEC_SPEC_PATH = specPath;
-    return assembleServer(loadServerConfig(), {
-      registerProductTables: (tables) => registerScopedTables([...tables.values()]),
-    });
+    return assembleServer(loadServerConfig(), opts);
   }
 
   beforeAll(async () => {
@@ -148,6 +229,9 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
     delete process.env.STT_PROVIDER;
     delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
+    delete process.env.RAYSPEC_CRON_TENANT_ID;
+    delete process.env.RAYSPEC_RESPONDER_MODE;
+    delete process.env.RAYSPEC_NORMALIZE_MODE;
     expect(await footprint()).toEqual({ relations: 0, drizzle: false });
   }, 60_000);
 
@@ -241,7 +325,7 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
       await sql.unsafe('INSERT INTO orgs (id) VALUES ($1)', [orgId]);
       const before = await footprint();
       process.env.RAYSPEC_PRODUCT_TENANT_ID = orgId;
-      const cases: { fixture: string; message: RegExp }[] = [
+      const cases: { fixture: string; env?: Record<string, string>; message: RegExp }[] = [
         {
           fixture: 'file-ingest.product.yaml',
           message: /the file_input capability moves binary bytes .* RAYSPEC_BLOB_ROOT is unset/,
@@ -250,12 +334,33 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
           fixture: 'stt-no-audio.product.yaml',
           message: /declares an 'stt\.\*' workflow step.* but no audio capability/,
         },
+        // The responder and the normalizer are built from the environment and their sidecar
+        // configurations; both used to be built after the platform chain.
+        {
+          fixture: 'conversation-intake.product.yaml',
+          message: /RAYSPEC_RESPONDER_MODE is required/,
+        },
+        {
+          fixture: 'conversation-intake.product.yaml',
+          env: { RAYSPEC_RESPONDER_MODE: 'deterministic' },
+          message:
+            /RAYSPEC_RESPONDER_MODE=deterministic requires an injected deterministic reply Backend/,
+        },
+        {
+          fixture: join('record-normalize', 'record-normalize.product.yaml'),
+          message: /RAYSPEC_NORMALIZE_MODE is required/,
+        },
       ];
       for (const c of cases) {
-        const refused = await bootWith(join(FIXTURES, c.fixture)).catch((e: unknown) => e);
-        expect(refused, c.fixture).toBeInstanceOf(ProductBootError);
-        expect((refused as Error).message, c.fixture).toMatch(c.message);
-        expect(await footprint(), c.fixture).toEqual(before);
+        for (const [k, v] of Object.entries(c.env ?? {})) process.env[k] = v;
+        try {
+          const refused = await bootWith(join(FIXTURES, c.fixture)).catch((e: unknown) => e);
+          expect(refused, c.fixture).toBeInstanceOf(ProductBootError);
+          expect((refused as Error).message, c.fixture).toMatch(c.message);
+          expect(await footprint(), c.fixture).toEqual(before);
+        } finally {
+          for (const k of Object.keys(c.env ?? {})) delete process.env[k];
+        }
       }
       expect(before.drizzle).toBe(false);
     } finally {
@@ -318,6 +423,83 @@ ${handler}`,
     armsRan += 1;
   }, 90_000);
 
+  it('a backend document the deploy itself would refuse from its configuration is refused before anything is written', async () => {
+    // Each of these used to be raised by the deploy after the platform chain (and, for a document
+    // with stores, after its product DDL): the preflight now makes it, or rehearses the deploy that
+    // makes it, with nothing written.
+    mkdirSync(join(dir, 'handlers'), { recursive: true });
+    writeFileSync(join(dir, 'handlers', 'tick.mjs'), 'export async function tick() {}\n', 'utf8');
+    const cases: {
+      name: string;
+      spec: string;
+      opts?: AssembleServerOptions;
+      env?: Record<string, string>;
+      message: RegExp;
+    }[] = [
+      {
+        // No agent backends, so no durable worker to fire the cron trigger.
+        name: 'no-worker.yaml',
+        spec: CRON_SPEC,
+        env: { RAYSPEC_CRON_TENANT_ID: '0d7e9a52-6c1b-4f0e-a7f3-2b9d8c4e5f60' },
+        message: /declares 1 cron\/manual trigger\(s\) but no durable worker is wired/,
+      },
+      {
+        name: 'bad-schedule.yaml',
+        spec: CRON_SPEC.replace("schedule: '* * * * *'", "schedule: 'every day'"),
+        opts: withOpenAi,
+        env: { RAYSPEC_CRON_TENANT_ID: '0d7e9a52-6c1b-4f0e-a7f3-2b9d8c4e5f60' },
+        message:
+          /cron trigger 'every-minute' has the schedule 'every day', which the scheduler cannot parse/,
+      },
+      {
+        name: 'other-backend.yaml',
+        spec: OTHER_BACKEND_SPEC,
+        opts: withOpenAi,
+        message:
+          /agent 'helper' selects backend 'anthropic' which is not in the injected agentBackends map/,
+      },
+      {
+        name: 'missing-handler.yaml',
+        spec: `${VALID_SPEC}  - method: GET
+    path: /absent
+    action: { kind: handler, handler: absent_handler }
+handlers:
+  - { id: absent_handler, module: handlers/absent.mjs, export: absent, kind: route }
+`,
+        message: /deploy aborted at \[roll out\]: handler load failed/,
+      },
+      {
+        name: 'reserved-route.yaml',
+        spec: VALID_SPEC.replace("path: '/first-notes'", "path: '/v1/first-notes'"),
+        message: /route POST \/v1\/first-notes is under a RESERVED platform prefix/,
+      },
+      {
+        // No registrar: the product table never reaches the chokepoint.
+        name: 'no-registrar.yaml',
+        spec: VALID_SPEC,
+        opts: {},
+        message: /store 'first_notes' is declared in the spec but its table is NOT registered/,
+      },
+    ];
+    for (const c of cases) {
+      for (const [k, v] of Object.entries(c.env ?? {})) process.env[k] = v;
+      try {
+        const refused = await bootWith(
+          specFile(c.name, c.spec),
+          validKey,
+          c.opts ?? registrar,
+        ).catch((e: unknown) => e);
+        expect(refused, c.name).toBeInstanceOf(Error);
+        expect((refused as Error).message, c.name).toMatch(c.message);
+        expect((refused as Error).message, c.name).not.toContain('ALREADY COMMITTED');
+        expect(await footprint(), c.name).toEqual({ relations: 0, drizzle: false });
+      } finally {
+        for (const k of Object.keys(c.env ?? {})) delete process.env[k];
+      }
+    }
+    armsRan += 1;
+  }, 120_000);
+
   it('a valid spec on the same empty database boots exactly as before', async () => {
     const server = await bootWith(specFile('valid.yaml', VALID_SPEC));
     try {
@@ -354,6 +536,6 @@ ${handler}`,
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(9);
+  if (dbRequired) expect(armsRan).toBe(10);
   else expect(true).toBe(true);
 });

@@ -23,6 +23,9 @@
  *   6. FAIL-CLOSED (unset): a cron spec with NO RAYSPEC_CRON_TENANT_ID at all → boot ABORTS with the
  *      exact, unchanged message. Pinned VERBATIM: "the org may not exist yet" must never erode into
  *      "the deployment may not name a tenant at all".
+ *   7. WHAT A REFUSAL LEAVES BEHIND: the configuration refusals above leave no product table; a
+ *      refusal the database raises after this boot committed DDL (a reviewed delta whose second
+ *      migration the live schema refuses) says which migration committed.
  *
  * The actual fire→dispatch→tenant-tx behavior (the GUC-populated handler run + exactly-once) is proven
  * on ground truth in @rayspec/durable-dbos's cron-scheduler.db.test.ts (which drives the SAME
@@ -167,8 +170,43 @@ const RENAME_DELTA: PlannedMigration = {
   allowlist: [],
 };
 
-/** The first-materialization migration both deployers plan for a clean database. */
-const MATERIALIZE_MIGRATION = '0000_product_stores.sql';
+/**
+ * The SAME store, in a document with no trigger and no durable worker: what materializes the store on
+ * an arm's database before the arm's own boot, with nothing to launch.
+ */
+const STORE_ONLY_YAML = `
+version: '1.0'
+metadata:
+  name: cron-boot-test
+stores:
+  - name: cron_boot_notes
+    columns:
+      - { name: body, type: text }
+`;
+
+/** Its next revision: the store gains a `title` column. */
+const STORE_ONLY_TITLED_YAML = STORE_ONLY_YAML.replace(
+  '      - { name: body, type: text }',
+  '      - { name: body, type: text }\n      - { name: title, type: text }',
+);
+
+/** A reviewed forward delta adding that column. */
+const ADD_TITLE: PlannedMigration = {
+  name: '0001_add_title.sql',
+  sql: `ALTER TABLE "${STORE_TABLE}" ADD COLUMN "${RENAMED_COLUMN}" text;`,
+  allowlist: [],
+};
+
+/**
+ * A second migration of the same delta that the LIVE schema refuses once the first has committed (it
+ * adds the same column again). Nothing but the database decides this refusal, and it comes after DDL
+ * this boot committed.
+ */
+const ADD_TITLE_AGAIN: PlannedMigration = {
+  name: '0002_add_title_again.sql',
+  sql: `ALTER TABLE "${STORE_TABLE}" ADD COLUMN "${RENAMED_COLUMN}" text;`,
+  allowlist: [],
+};
 
 const CRON_TENANT = '00000000-0000-0000-0000-0000000000cc';
 
@@ -486,10 +524,11 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   );
 
   maybe(
-    'post-migrate refusal: the unset-tenant abort on a STORE-declaring spec now comes before any DDL, and the no-worker abort after it names the DDL it committed',
+    'post-migrate refusal: configuration refusals of a STORE-declaring spec come before any DDL; a migration the live schema refuses after an earlier one committed names the DDL it committed',
     async () => {
-      // The arm that measures the DATABASE after a refusal. An unset cron tenant is a configuration
-      // demand, checked before the boot changes anything: the store table is not created.
+      // The arm that measures the DATABASE after a refusal. An unset cron tenant, and a cron trigger
+      // no durable worker would fire (no agent backends), are configuration demands, checked before the
+      // boot changes anything: the store table is not created.
       process.env.DATABASE_URL = appliedDbUrl;
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_SPEC_YAML, 'unset-tenant-store.yaml');
       delete process.env.RAYSPEC_CRON_TENANT_ID;
@@ -504,28 +543,51 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       expect((early as BootConfigError).message).toBe(UNSET_TENANT_ABORT);
       expect(await tableExists(appliedDbUrl, STORE_TABLE)).toBe(false);
 
-      // A refusal the deploy can only raise once the worker would be wired — no agent backends, so no
-      // durable worker for the cron trigger — comes after the migrate step has materialized the store.
       process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
-      const err = await assembleServer(loadServerConfig(), assembleOptsNoBackend()).then(
+      const noWorker = await assembleServer(loadServerConfig(), assembleOptsNoBackend()).then(
         (s) => {
           created.push(s);
           return null;
         },
         (e: unknown) => e,
       );
-      expect(err).toBeInstanceOf(BootConfigError);
+      expect(noWorker).toBeInstanceOf(BootConfigError);
+      expect((noWorker as Error).message).toMatch(/durable[\s\S]*worker is wired/i);
+      expect((noWorker as Error).message).not.toContain('ALREADY COMMITTED');
+      expect(await tableExists(appliedDbUrl, STORE_TABLE)).toBe(false);
 
-      // GROUND TRUTH: the store table survives the refusal — there is no rollback, and none is
-      // wanted (recovery in RaySpec is a reviewed forward migration).
+      // A deployment materializes the store.
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(STORE_ONLY_YAML, 'store-only.yaml');
+      const first = await assembleServer(loadServerConfig(), assembleOptsNoBackend());
+      await first.close();
       expect(await tableExists(appliedDbUrl, STORE_TABLE)).toBe(true);
 
-      // …and the refusal SAYS so: the unchanged gate text, then the note, in the SAME error object
-      // (a re-wrap would have re-added the class's own prefix, which the CLI printer switches on).
-      const message = (err as BootConfigError).message;
-      expect(message).toMatch(/durable[\s\S]*worker is wired/i);
+      // Its next revision arrives as a reviewed delta in two migrations; the live schema accepts the
+      // first and refuses the second, after the first has committed.
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(STORE_ONLY_TITLED_YAML, 'store-only-titled.yaml');
+      const err = await assembleServer(loadServerConfig(), {
+        ...assembleOptsNoBackend(),
+        updateMigrations: [ADD_TITLE, ADD_TITLE_AGAIN],
+      }).then(
+        (s) => {
+          created.push(s);
+          return null;
+        },
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(Error);
+      const message = (err as Error).message;
+      expect(message).toContain('deploy aborted at [migrate]');
+      expect(message).toContain(ADD_TITLE_AGAIN.name);
+
+      // GROUND TRUTH: the first migration survives the refusal — there is no rollback, and none is
+      // wanted (recovery in RaySpec is a reviewed forward migration).
+      expect(await columnExists(appliedDbUrl, STORE_TABLE, RENAMED_COLUMN)).toBe(true);
+
+      // …and the refusal SAYS so: the refusal's own text, then the note naming exactly the migration
+      // that committed, in the SAME error object (a re-wrap would have re-added the class's prefix).
       expect(
-        message.endsWith(`\n${appliedProductDdlBootNote([MATERIALIZE_MIGRATION], [STORE_TABLE])}`),
+        message.endsWith(`\n${appliedProductDdlBootNote([ADD_TITLE.name], [STORE_TABLE])}`),
       ).toBe(true);
     },
     120_000,
@@ -571,16 +633,10 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       // `applyMigration` actually applied does not: the gate blocks before the migrate step.
       process.env.DATABASE_URL = gatedDbUrl;
 
-      // Step 1 — a PRIOR deployment materializes the store on this database. Same fixture and same
-      // refusal as the post-migrate arm above: the CREATE TABLE is committed, then the boot is refused.
-      process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_SPEC_YAML, 'gated-store.yaml');
-      process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
-      await assembleServer(loadServerConfig(), assembleOptsNoBackend()).then(
-        (s) => {
-          created.push(s);
-        },
-        () => {},
-      );
+      // Step 1 — a PRIOR deployment materializes the store on this database.
+      process.env.RAYSPEC_SPEC_PATH = writeSpec(STORE_ONLY_YAML, 'gated-store.yaml');
+      const prior = await assembleServer(loadServerConfig(), assembleOptsNoBackend());
+      await prior.close();
       expect(await tableExists(gatedDbUrl, STORE_TABLE)).toBe(true);
       expect(await columnExists(gatedDbUrl, STORE_TABLE, RENAMED_COLUMN)).toBe(false);
 
