@@ -26,6 +26,7 @@ import type {
 import type { RaySpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type Provider from 'oidc-provider';
+import type { WriteFence } from './http/write-fence.js';
 import type { MediaTokenService } from './media/media-token.js';
 import type { AuthService } from './services/auth-service.js';
 import type { ApiKeyStore } from './stores/api-key-store.js';
@@ -465,6 +466,12 @@ export interface AppDeps {
    * by the composition root; the platform main line ships none.
    */
   manualTriggerFirer?: ManualTriggerFirer;
+  /**
+   * The runtime's source fence, as the HTTP surface sees it (`http/write-fence.ts`). When wired, a
+   * mutation is refused with 503 SERVICE_UNAVAILABLE while the runtime is fenced and open event
+   * streams close when it starts draining. Absent ⇒ no fence middleware at all.
+   */
+  writeFence?: WriteFence;
   /**
    * OPTIONAL override for the per-request JSON/body byte cap the route interpreters enforce on
    * body-bearing routes (register/login, the declared `{handler}` + store CRUD routes, reprocess). A

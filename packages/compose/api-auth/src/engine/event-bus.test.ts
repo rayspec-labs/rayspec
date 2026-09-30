@@ -228,3 +228,30 @@ describe('init.emit — the tenant is the handle, never an argument', () => {
     expect(b.batches).toEqual([[{ topic: 'b.one', payload: {} }]]);
   });
 });
+
+describe('init.emit — the source fence', () => {
+  it('refuses a flush and an immediate append with 503 while the fence refuses writes', async () => {
+    let admits = false;
+    const bus = makeTenantEventBus({ admitsWrites: () => admits });
+    const tdb = fakeTdb();
+
+    const { emit, flush } = bus.buffered(tdb);
+    await emit('note.created', { id: 1 });
+    await expect(flush()).rejects.toMatchObject({ code: 'SERVICE_UNAVAILABLE' });
+    await expect(bus.immediate(tdb)('note.created')).rejects.toMatchObject({
+      code: 'SERVICE_UNAVAILABLE',
+    });
+    expect(tdb.batches).toEqual([]);
+
+    // Resumed: the same bus writes again.
+    admits = true;
+    await bus.immediate(tdb)('note.created');
+    const second = bus.buffered(tdb);
+    await second.emit('note.updated');
+    await second.flush();
+    expect(tdb.batches.map((b) => b.map((e) => e.topic))).toEqual([
+      ['note.created'],
+      ['note.updated'],
+    ]);
+  });
+});
