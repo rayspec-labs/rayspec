@@ -320,10 +320,10 @@ describe.skipIf(!baseUrl)('apply after a crash', () => {
     ]);
     expect(record[2]?.detail).toMatchObject({ observed: 'not-applied', state: before });
 
-    await boot.productMigration({
-      name: '0000_product_stores.sql',
-      sql: 'CREATE TABLE "crash_a" ("id" text PRIMARY KEY);',
-    });
+    await boot.productMigration(
+      { name: '0000_product_stores.sql', sql: 'CREATE TABLE "crash_a" ("id" text PRIMARY KEY);' },
+      { stores: [] },
+    );
     const after = await readProductSchemaDigest(query(db));
     expect(after).not.toBe(before);
     const [state] = await sql<{ applied: string }[]>`
@@ -335,13 +335,14 @@ describe.skipIf(!baseUrl)('apply after a crash', () => {
 
   it('killed after the platform chain committed and before its receipt: a boot reconciles it as applied', async () => {
     // One migration behind this runtime, as a database left by the previous release is.
-    await sql`DROP TABLE runtime_control_processes`;
+    await sql`DROP TABLE product_migration_ledger`;
+    await sql`DROP FUNCTION product_migration_ledger_append_only()`;
     await sql`DELETE FROM drizzle.__drizzle_migrations
                WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`;
     await runAndKill('legacy-platform', 'after-step-effect');
     const killed = { operationId: await startedBy('platform-migrations') };
     const [ledger] = await sql<{ present: boolean }[]>`
-      SELECT to_regclass('public.runtime_control_processes') IS NOT NULL AS present`;
+      SELECT to_regclass('public.product_migration_ledger') IS NOT NULL AS present`;
     expect(ledger?.present).toBe(true);
 
     const db = processDb();
@@ -419,7 +420,10 @@ describe.skipIf(!baseUrl)('apply after a crash', () => {
     }
     if (boot === undefined) throw new Error('no restart ran');
     const refused = await boot
-      .productMigration({ name: 'blocked.sql', sql: 'CREATE TABLE blocked_ddl (id int);' })
+      .productMigration(
+        { name: 'blocked.sql', sql: 'CREATE TABLE blocked_ddl (id int);' },
+        { stores: [] },
+      )
       .then(
         () => null,
         (err: unknown) => err,

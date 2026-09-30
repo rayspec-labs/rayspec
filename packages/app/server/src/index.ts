@@ -45,6 +45,7 @@ export {
   type ApplyOptions,
   type ApplyPlanCheck,
   type ApplyStep,
+  ApplyStepRefusal,
   DEFAULT_APPLY_LEASE_TTL_MS,
   hasUnsettledApplies,
   MAX_STEP_NAME_LENGTH,
@@ -56,6 +57,7 @@ export {
   resolveInterruptedStep,
   runApply,
   type StateObservers,
+  type StepContext,
   type StepEffect,
 } from './apply-operation.js';
 export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
@@ -143,7 +145,10 @@ export {
   DeployApply,
   type DeployApplyOptions,
   LEGACY_DEPLOY_PLAN_FORMAT_VERSION,
+  type ProductDdlStepInput,
+  productDdlStep,
   RuntimeApplyError,
+  schemaObservers,
 } from './deploy-apply.js';
 // Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
 export {
@@ -201,6 +206,34 @@ export {
   validateProductYamlSpec,
   WIRED_EXTRACTION_BACKENDS,
 } from './product-boot.js';
+// The product migration ledger: every product schema change an environment applied, with the digests
+// before and after it, read fail-closed.
+export {
+  type DeclaredProductStores,
+  describeProductDrift,
+  ledgerDrift,
+  PRODUCT_LEDGER_FORMAT_VERSION,
+  type ProductLedger,
+  type ProductLedgerRow,
+  readProductLedger,
+} from './product-ledger.js';
+// Product schema planning: the delta regenerated from the ledger and the spec, the shadow replay that
+// computes the head after it, and the plan of a bundle's product change against the live schema.
+export {
+  affectedObject,
+  BUNDLED_DELTA_NAME,
+  DESTRUCTIVE_REVIEW_STEP,
+  declaredStoresOf,
+  PRODUCT_DELTA_LABEL,
+  type ProductPlan,
+  type ProductPlanInput,
+  ProductPlanReadError,
+  planProductSchema,
+  productDelta,
+  type ShadowDigests,
+  shadowProductDigests,
+  uncoveredDestructiveMessage,
+} from './product-schema-plan.js';
 // The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicates
 // and the installer are exported so the gate can be asserted directly (a runtime that implements
 // NODE_USE_ENV_PROXY + the opt-in + a named proxy ⇒ installed; anything else ⇒ the two

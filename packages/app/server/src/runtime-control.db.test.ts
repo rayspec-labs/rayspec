@@ -30,10 +30,11 @@ import {
   schemaValidator,
 } from '@rayspec/bundle-contract';
 import { type Db, generateProductSql, makeDb } from '@rayspec/db';
-import { parseSpec } from '@rayspec/spec';
+import { parseSpec, type StoreSpec } from '@rayspec/spec';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { applyMigrations } from './composition-root.js';
+import { DeployApply } from './deploy-apply.js';
 import {
   CAPABILITY_MODULES,
   createRuntimeControl,
@@ -356,10 +357,8 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
       destructive: false,
       allowlisted: false,
     });
-    expect(plan.warnings.map((w) => w.code)).toEqual([
-      'RAY_W_UNSIGNED',
-      'RAY_W_PRODUCT_SCHEMA_UNLEDGERED',
-    ]);
+    // No product table exists yet, so there is nothing the ledger could have missed.
+    expect(plan.warnings.map((w) => w.code)).toEqual(['RAY_W_UNSIGNED']);
     expect(plan.permissionChanges).toEqual({
       executionFrom: null,
       executionTo: 'none',
@@ -460,29 +459,44 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
       'RAY_PLAN_STALE',
       'RAY_SCHEMA_DRIFT',
     ]);
-    // When that live shape is the one the last apply recorded, the gap is a delta to review.
-    await sql(
-      `INSERT INTO runtime_control_state (id, binding_revision_key, applied_product_schema)
-       VALUES (1, '${'0'.repeat(64)}', '${after.product}')`,
+    // The tables were created by hand, so no ledger records them: the head is introspected.
+    expect(drifted.data!.plan.warnings.map((w) => w.code)).toContain(
+      'RAY_W_PRODUCT_SCHEMA_UNLEDGERED',
     );
-    const recorded = await adapter().prepare(prepareRequest({ expectedSchemaHead: after }));
-    expect(recorded.data!.plan.blockers.map((b) => b.code)).toEqual(['RAY_MIGRATION_REQUIRED']);
-    await sql('ALTER TABLE plan_notes ALTER COLUMN body TYPE text');
 
-    // The spec matches again. Recorded as applied, a column added by hand is drift even though every
-    // declared store still matches: the head moved outside apply.
-    const matching = (await liveHead())!;
-    await sql(`UPDATE runtime_control_state SET applied_product_schema = '${matching.product}'`);
-    expect(
-      (await adapter().prepare(prepareRequest({ expectedSchemaHead: matching }))).data!.plan
-        .blockers,
-    ).toEqual([]);
+    // Materialized again through an apply, the product migration ledger records the schema.
+    await sql('DROP TABLE plan_notes');
+    const stores = (parseSpec(SPEC) as { ok: true; value: { stores: StoreSpec[] } }).value.stores;
+    await new DeployApply({ db, migratePlatform: () => applyMigrations(db) }).productMigration(
+      { name: '0000_product_stores.sql', sql: generateProductSql(stores) },
+      { stores },
+    );
+    const ledgered = (await liveHead())!;
+    const clean = await adapter().prepare(prepareRequest({ expectedSchemaHead: ledgered }));
+    expect(clean.data!.plan.blockers).toEqual([]);
+    expect(clean.data!.plan.warnings.map((w) => w.code)).not.toContain(
+      'RAY_W_PRODUCT_SCHEMA_UNLEDGERED',
+    );
+
+    // Against the ledger, a changed column and a column no apply added are both drift, named.
+    await sql('ALTER TABLE plan_notes ALTER COLUMN body TYPE varchar(64)');
+    const changed = await adapter().prepare(
+      prepareRequest({ expectedSchemaHead: await liveHead() }),
+    );
+    expect(changed.data!.plan.blockers.map((b) => b.code)).toEqual(['RAY_SCHEMA_DRIFT']);
+    expect(changed.data!.plan.blockers[0]?.message).toContain(
+      'column plan_notes.body is character varying(64) not null, not text not null',
+    );
+    await sql('ALTER TABLE plan_notes ALTER COLUMN body TYPE text');
     await sql('ALTER TABLE plan_notes ADD COLUMN edited_by_hand text');
     const added = await adapter().prepare(prepareRequest({ expectedSchemaHead: await liveHead() }));
     expect(added.data!.plan.blockers.map((b) => b.code)).toEqual(['RAY_SCHEMA_DRIFT']);
+    expect(added.data!.plan.blockers[0]?.message).toContain(
+      'column plan_notes.edited_by_hand exists but no applied change added it',
+    );
     await sql('ALTER TABLE plan_notes DROP COLUMN edited_by_hand');
     armsRan += 1;
-  }, 60_000);
+  }, 120_000);
 
   it('the plan carries binding satisfaction and the grants the active application holds', async () => {
     await sql(`UPDATE runtime_control_state

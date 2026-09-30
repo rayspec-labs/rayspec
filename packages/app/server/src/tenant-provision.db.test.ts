@@ -388,7 +388,8 @@ describe.skipIf(!baseUrl)('provisionTenant — the operator create-or-resolve', 
 
       // One platform migration behind: the chain runs as an apply, which a held fence refuses.
       const ledger = await scalar('SELECT count(*) FROM drizzle.__drizzle_migrations');
-      await rows('DROP TABLE runtime_control_processes');
+      await rows('DROP TABLE product_migration_ledger');
+      await rows('DROP FUNCTION product_migration_ledger_append_only()');
       await rows(
         `DELETE FROM drizzle.__drizzle_migrations
           WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`,

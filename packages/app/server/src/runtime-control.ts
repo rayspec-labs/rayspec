@@ -16,13 +16,12 @@
  * `runtime.prepare`, echoing the request's `operationId`. No result carries a secret, a binding
  * value, a connection string, a host name or a file path.
  */
-import { createHash, type KeyObject, randomBytes, randomUUID } from 'node:crypto';
+import { type KeyObject, randomUUID } from 'node:crypto';
 import { constants, readFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { inspectBundle, verifySignatureFile } from '@rayspec/bundle';
 import {
-  type BundleSpec,
   checkDerivedFields,
   deriveManifestFields,
   networkBackends,
@@ -53,10 +52,8 @@ import {
   isUuidV4,
   type PrepareData,
   type PrepareRequest,
-  type ProductTable,
   planDigest,
   planExpiresAt,
-  productSchemaDigest,
   type QuiesceData,
   type QuiesceRequest,
   type ReaderLimits,
@@ -70,22 +67,9 @@ import {
   sameSchemaHead,
   V1_EXECUTION_LEVELS,
 } from '@rayspec/bundle-contract';
-import {
-  classifyProductSchema,
-  type Db,
-  detectDrift,
-  generateProductSql,
-  makeDb,
-  scanMigrationSql,
-} from '@rayspec/db';
+import type { Db } from '@rayspec/db';
 import { type RunCancelPollSource, resolveRunCancelPoll } from '@rayspec/platform';
-import {
-  composeCapabilityStores,
-  deriveConflictKeys,
-  deriveProductStores,
-} from '@rayspec/product-yaml';
-import type { StoreSpec } from '@rayspec/spec';
-import { applyMigrations, type HostingPosture, parseHostingPosture } from './composition-root.js';
+import { type HostingPosture, parseHostingPosture } from './composition-root.js';
 import {
   type FenceOperationOptions,
   healthOperation,
@@ -93,11 +77,12 @@ import {
   resumeOperation,
 } from './fence-operations.js';
 import {
-  type CatalogQuery,
-  readProductTables,
-  readSchemaHead,
-  runtimePlatformHead,
-} from './schema-head.js';
+  declaredStoresOf,
+  type ProductPlan,
+  ProductPlanReadError,
+  planProductSchema,
+} from './product-schema-plan.js';
+import { type CatalogQuery, readSchemaHead, runtimePlatformHead } from './schema-head.js';
 
 /**
  * How this runtime is hosted, beside what `inspect()` reports: the contract's inspect result is a
@@ -281,7 +266,6 @@ interface EnvironmentState {
   applicationVersion: string | null;
   applicationDigest: string | null;
   activeGrants: ActiveGrants | null;
-  appliedProductSchema: string | null;
 }
 
 const FRESH_ENVIRONMENT: EnvironmentState = {
@@ -291,7 +275,6 @@ const FRESH_ENVIRONMENT: EnvironmentState = {
   applicationVersion: null,
   applicationDigest: null,
   activeGrants: null,
-  appliedProductSchema: null,
 };
 
 function readGrants(value: unknown): ActiveGrants | null {
@@ -320,7 +303,7 @@ async function readEnvironmentState(query: CatalogQuery): Promise<EnvironmentSta
   const rows = await query(
     `SELECT environment_revision::text AS environment_revision, fence_state,
             fence_epoch::text AS fence_epoch, application_id, application_version,
-            application_digest, active_grants, applied_product_schema
+            application_digest, active_grants
        FROM runtime_control_state WHERE id = 1`,
   );
   const row = rows[0];
@@ -335,7 +318,6 @@ async function readEnvironmentState(query: CatalogQuery): Promise<EnvironmentSta
     applicationVersion: (row.application_version as string | null) ?? null,
     applicationDigest: isSha256(row.application_digest) ? row.application_digest : null,
     activeGrants: readGrants(row.active_grants),
-    appliedProductSchema: isSha256(row.applied_product_schema) ? row.applied_product_schema : null,
   };
 }
 
@@ -493,61 +475,9 @@ async function readSignature(path: string): Promise<Buffer | null> {
   }
 }
 
-/** The stores a spec materializes, with the conflict keys the product generator needs. */
-function specStores(spec: BundleSpec): {
-  stores: StoreSpec[];
-  conflictKeys: ReturnType<typeof deriveConflictKeys> | undefined;
-} {
-  if (spec.kind === 'rayspec') return { stores: [...spec.spec.stores], conflictKeys: undefined };
-  const capability = composeCapabilityStores(spec.spec);
-  const derived = deriveProductStores(spec.spec, capability.names);
-  const stores = [...capability.stores, ...derived.stores];
-  return { stores, conflictKeys: deriveConflictKeys(spec.spec, stores) };
-}
-
-const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
-
 function difference(a: readonly string[], b: readonly string[]): string[] {
   const other = new Set(b);
   return [...new Set(a)].filter((x) => !other.has(x)).sort(compareCodePoints);
-}
-
-function databaseUrlWithName(url: string, name: string): string {
-  const u = new URL(url);
-  u.pathname = `/${name}`;
-  return u.toString();
-}
-
-/**
- * The product tables a delta creates, learned by applying the platform chain and the delta to a
- * throwaway database on the shadow server and reading its catalog. The database is dropped on every
- * path out.
- */
-async function tablesCreatedByDelta(shadowUrl: string, delta: string): Promise<ProductTable[]> {
-  // Hex only, so the name is a safe identifier by construction.
-  const name = `rayspec_plan_${randomBytes(8).toString('hex')}`;
-  const admin = makeDb(databaseUrlWithName(shadowUrl, 'postgres'), 1);
-  let scratch: Db | undefined;
-  try {
-    await admin.$client.unsafe(`CREATE DATABASE "${name}"`);
-    scratch = makeDb(databaseUrlWithName(shadowUrl, name), 2);
-    await applyMigrations(scratch);
-    await scratch.$client.begin(async (tx) => {
-      await tx.unsafe(delta.replace(/-->\s*statement-breakpoint/g, ''));
-    });
-    const scratchDb = scratch;
-    return await readProductTables(
-      async (sql, params = []) =>
-        (await scratchDb.$client.unsafe(sql, params as never[])) as unknown as Record<
-          string,
-          unknown
-        >[],
-    );
-  } finally {
-    await scratch?.$client.end();
-    await admin.$client.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`).catch(() => {});
-    await admin.$client.end();
-  }
 }
 
 async function prepareBundle(
@@ -566,6 +496,7 @@ async function prepareBundle(
   const read = await inspectBundle(request.bundlePath, {
     operation: 'prepare',
     captureSpec: true,
+    captureProductMigration: true,
     refuseLinks: true,
     ...(options.readerLimits !== undefined ? { limits: options.readerLimits } : {}),
   });
@@ -638,12 +569,11 @@ async function prepareBundle(
     });
   }
 
-  // The live environment: schema head, state row and the product schema against the spec.
+  // The live environment: schema head, state row, and the product change planned against the live
+  // schema and the product migration ledger (product-schema-plan.ts).
   const blockers: BundleError[] = [];
   const liveHead = await guardedRead(() => readSchemaHead(query));
   const state = await guardedRead(() => readEnvironmentState(query));
-  const liveTables = await guardedRead(() => readProductTables(query));
-  const liveProduct = productSchemaDigest(liveTables);
   const from: SchemaHead | null = liveHead.state === 'known' ? liveHead.head : null;
   if (liveHead.state === 'unknown') {
     blockers.push(
@@ -662,68 +592,37 @@ async function prepareBundle(
     );
   }
 
-  const { stores, conflictKeys } = specStores(spec);
-  const preDrift = await guardedRead(() =>
-    detectDrift(stores, 'public', (sql, params) => query(sql, params)),
-  );
-  const schemaState = classifyProductSchema(stores, preDrift);
-  let delta: string | null = null;
-  let toProduct = liveProduct;
-  // The product head the last apply recorded, when one did: a live head that differs from it was
-  // changed outside apply, which the store-by-store comparison alone cannot see when the change
-  // only ADDS (a column or a table the spec does not name).
-  const changedOutsideApply =
-    state.appliedProductSchema !== null && state.appliedProductSchema !== liveProduct;
-  if (changedOutsideApply && schemaState !== 'drifted') {
-    blockers.push(
-      bundleError(
-        'RAY_SCHEMA_DRIFT',
-        'the live product schema changed since the last apply recorded it',
-      ),
-    );
+  const migrationFiles = inspection.productMigrationFiles;
+  if (manifest.productMigration !== undefined && migrationFiles === undefined) {
+    return refuse([bundleError('RAY_INTERNAL', 'the product delta was not kept by the reader')]);
   }
-  if (schemaState === 'drifted') {
-    blockers.push(
-      state.appliedProductSchema !== null && state.appliedProductSchema === liveProduct
-        ? bundleError(
-            'RAY_MIGRATION_REQUIRED',
-            'the live product schema is the one the last apply left, and the bundle needs a ' +
-              'reviewed product delta from it',
-          )
-        : bundleError(
-            'RAY_SCHEMA_DRIFT',
-            'the live product schema matches neither the active application nor this bundle',
-          ),
-    );
-  } else if (schemaState === 'absent') {
-    delta = generateProductSql(stores, conflictKeys);
-    if (options.shadowDatabaseUrl === undefined) {
-      blockers.push(
-        bundleError(
-          'RAY_MIGRATION_REQUIRED',
-          'the bundle creates product tables, and without a shadow database the schema head ' +
-            'they produce cannot be computed',
-        ),
-      );
-    } else {
-      const shadowUrl = options.shadowDatabaseUrl;
-      const created = await guardedRead(() => tablesCreatedByDelta(shadowUrl, delta as string));
-      toProduct = productSchemaDigest([...liveTables, ...created]);
-    }
+  let product: ProductPlan;
+  try {
+    product = await planProductSchema({
+      query,
+      declared: declaredStoresOf(spec),
+      ...(manifest.productMigration !== undefined && migrationFiles !== undefined
+        ? {
+            migration: {
+              manifest: manifest.productMigration,
+              delta: migrationFiles.delta,
+              ...(migrationFiles.allowlist === undefined
+                ? {}
+                : { allowlist: migrationFiles.allowlist }),
+            },
+          }
+        : {}),
+      ...(options.shadowDatabaseUrl === undefined
+        ? {}
+        : { shadowDatabaseUrl: options.shadowDatabaseUrl }),
+    });
+  } catch (err) {
+    if (err instanceof ProductPlanReadError) throw new InfraError(err.message, { cause: err });
+    throw err;
   }
-  if (manifest.productMigration !== undefined) {
-    blockers.push(
-      bundleError(
-        'RAY_MIGRATION_REQUIRED',
-        manifest.productMigration.fromProductSchemaDigest === liveProduct
-          ? 'the bundle carries a product delta, which this runtime does not apply yet'
-          : 'the bundle carries a product delta from a schema head that is not the live one',
-        { path: '/productMigration' },
-      ),
-    );
-  }
-  const productDeltaSha256 = delta === null ? null : sha256(delta);
-  const destructive = delta !== null && !scanMigrationSql(delta, []).pass;
+  blockers.push(...product.blockers);
+  warnings.push(...product.warnings);
+  const productDeltaSha256 = product.productDeltaSha256;
 
   const revisions = new Map(request.bindingRevision.map((b) => [b.name, b.revisionId]));
   const requiredBindings = manifest.bindings.map((b) => ({
@@ -742,11 +641,6 @@ async function prepareBundle(
     }
   }
 
-  warnings.push({
-    code: 'RAY_W_PRODUCT_SCHEMA_UNLEDGERED',
-    message:
-      'the product schema head was computed by introspection: no product migration ledger exists yet',
-  });
   if (networkBackends(spec).length > 0 && manifest.permissions.egressHosts.length === 0) {
     warnings.push({
       code: 'RAY_W_EGRESS_UNDECLARED',
@@ -756,13 +650,19 @@ async function prepareBundle(
   }
 
   const active = state.activeGrants;
-  const to: SchemaHead = { platform: runtimePlatformHead(), product: toProduct };
+  const to: SchemaHead = { platform: runtimePlatformHead(), product: product.to };
   const plan: DeploymentPlan = {
     bundleSha256: inspection.archiveSha256,
     applicationId: manifest.application.id,
     applicationVersion: manifest.application.version,
     requiredBindings,
-    schemaImpact: { from, to, productDeltaSha256, destructive, allowlisted: false },
+    schemaImpact: {
+      from,
+      to,
+      productDeltaSha256,
+      destructive: product.destructive,
+      allowlisted: product.allowlisted,
+    },
     permissionChanges: {
       executionFrom: active?.execution ?? null,
       executionTo: manifest.permissions.execution,

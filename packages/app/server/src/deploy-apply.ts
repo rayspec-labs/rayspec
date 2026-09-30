@@ -9,10 +9,13 @@
  *    migrator (all pending migrations in one transaction, on its own connection, under the shared
  *    schema lock). Its receipts name the platform head it started from and the one it must reach, so
  *    after a crash the live ledger says which of the two it is.
- *  - each product-store migration the deployer applies. The DDL, the product schema digest the
- *    environment now has (`applied_product_schema`) and the step's finish receipt commit in ONE
- *    transaction, under the shared schema lock: a crash anywhere inside it leaves nothing but a start
- *    receipt, which proves the DDL was rolled back.
+ *  - each product-store migration the deployer applies. The DDL, its row in the product migration
+ *    ledger (`product-ledger.ts`), the product schema digest the environment now has
+ *    (`applied_product_schema`) and the step's finish receipt commit in ONE transaction, under the
+ *    shared schema lock: a crash anywhere inside it leaves nothing but a start receipt, which proves
+ *    the DDL was rolled back. The step first checks, under the same lock, that the live product
+ *    schema is the one the ledger recorded last, and refuses drift (`RAY_SCHEMA_DRIFT`) and a ledger
+ *    written by a newer runtime before running any DDL.
  *
  * THE PLAN. The legacy deploy prepares and applies in one process, so its plan digest covers what the
  * change starts from — the spec document, the platform head, the product schema digest and the
@@ -35,6 +38,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   type BundleError,
   type BundleErrorCode,
+  bundleError,
   CONTRACT_VERSION,
   DEFAULT_SCHEMA_LOCK_TIMEOUT_MS,
   digestOf,
@@ -47,6 +51,7 @@ import type { Db } from '@rayspec/db';
 import {
   type ApplyCheckpoint,
   type ApplyStep,
+  ApplyStepRefusal,
   DEFAULT_APPLY_LEASE_TTL_MS,
   hasUnsettledApplies,
   previewReconciliation,
@@ -56,6 +61,13 @@ import {
 } from './apply-operation.js';
 import { BootConfigError } from './boot-config-error.js';
 import type { LeaseTx } from './operation-lease.js';
+import {
+  type DeclaredProductStores,
+  ledgerDrift,
+  readProductLedger,
+  recordProductMigration,
+  runnableDdl,
+} from './product-ledger.js';
 import {
   type CatalogQuery,
   readPlatformHead,
@@ -161,13 +173,7 @@ export class DeployApply {
   }
 
   #observers(): StateObservers {
-    return {
-      'platform-head': async () => {
-        const head = await readPlatformHead(this.#query);
-        return head.state === 'known' ? head.tag : head.state;
-      },
-      'product-schema': async () => productSchemaDigest(await readProductTables(this.#query)),
-    };
+    return schemaObservers(this.#query);
   }
 
   async #revision(): Promise<number> {
@@ -310,31 +316,102 @@ export class DeployApply {
   }
 
   /**
-   * Apply one product-store migration as an apply: the DDL, the environment's product schema digest
-   * and the finish receipt commit together. A DDL error is rethrown as it was raised, after its
-   * receipts are written.
+   * Apply one product-store migration as an apply: the DDL, its ledger row, the environment's
+   * product schema digest and the finish receipt commit together. `declared` is the set of stores
+   * the product schema implements once the migration has run. A DDL error is rethrown as it was
+   * raised, after its receipts are written; drift and a newer ledger are refused as the apply's own
+   * errors.
    */
-  async productMigration(migration: { name: string; sql: string }): Promise<void> {
-    const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
-    const step: ApplyStep = {
-      kind: 'transaction',
-      name: 'product-ddl',
-      schemaChange: true,
-      observer: 'product-schema',
-      run: async (tx) => {
-        await tx.unsafe(ddl);
-        const product = productSchemaDigest(await readProductTables(txQuery(tx)));
-        await tx.unsafe(
-          'UPDATE runtime_control_state SET applied_product_schema = $1, updated_at = now() WHERE id = 1',
-          [product],
-        );
-        return { digest: product };
-      },
-    };
+  async productMigration(
+    migration: { name: string; sql: string },
+    declared: DeclaredProductStores,
+  ): Promise<void> {
+    const step = productDdlStep({ name: migration.name, sql: migration.sql, declared });
     const result = await this.#apply(
-      { step: 'product-ddl', migration: migration.name, ddlSha256: sha256(ddl) },
+      {
+        step: 'product-ddl',
+        migration: migration.name,
+        ddlSha256: sha256(runnableDdl(migration.sql)),
+      },
       [step],
     );
     if (!result.ok) throw new RuntimeApplyError(result.errors);
   }
+}
+
+/**
+ * The observers the schema-changing steps name: the platform head and the product schema digest,
+ * read through `query`. An apply that runs `productDdlStep` passes them.
+ */
+export function schemaObservers(query: CatalogQuery): StateObservers {
+  return {
+    'platform-head': async () => {
+      const head = await readPlatformHead(query);
+      return head.state === 'known' ? head.tag : head.state;
+    },
+    'product-schema': async () => productSchemaDigest(await readProductTables(query)),
+  };
+}
+
+/** One product migration, as `productDdlStep` runs and records it. */
+export interface ProductDdlStepInput {
+  /** The name the migration is recorded under in the ledger. */
+  name: string;
+  /** The generated SQL; statement-breakpoint markers are removed before it runs. */
+  sql: string;
+  /** The stores the product schema implements once the migration has run. */
+  declared: DeclaredProductStores;
+  /** The product schema digest the migration must produce, when a plan computed it in advance. */
+  expectedAfter?: string;
+}
+
+/**
+ * The apply step that runs one product migration: under the shared schema lock and in one
+ * transaction, it refuses a ledger written by a newer runtime and a live product schema the ledger
+ * does not describe, runs the DDL, records it in the ledger with the operation that ran it, and
+ * refuses a result other than `expectedAfter` — rolling the DDL back with it.
+ */
+export function productDdlStep(input: ProductDdlStepInput): ApplyStep {
+  const ddl = runnableDdl(input.sql);
+  return {
+    kind: 'transaction',
+    name: 'product-ddl',
+    schemaChange: true,
+    observer: 'product-schema',
+    run: async (tx, context) => {
+      const query = txQuery(tx);
+      const ledger = await readProductLedger(query);
+      if (ledger.state === 'unreadable') {
+        throw new ApplyStepRefusal(bundleError('RAY_SCHEMA_DRIFT', ledger.message));
+      }
+      const before = await readProductTables(query);
+      if (ledger.state === 'ledgered') {
+        const drift = ledgerDrift(ledger.head, before);
+        if (drift !== null) throw new ApplyStepRefusal(bundleError('RAY_SCHEMA_DRIFT', drift));
+      }
+      await tx.unsafe(ddl);
+      const product = await recordProductMigration(query, {
+        operationId: context.operationId,
+        migrationName: input.name,
+        ddl,
+        productSchemaBefore: productSchemaDigest(before),
+        tablesAfter: await readProductTables(query),
+        declared: input.declared,
+      });
+      if (input.expectedAfter !== undefined && product !== input.expectedAfter) {
+        throw new ApplyStepRefusal(
+          bundleError(
+            'RAY_MIGRATION_MISMATCH',
+            'the product migration did not produce the product schema head the plan computed; it ' +
+              'was rolled back',
+          ),
+        );
+      }
+      await tx.unsafe(
+        'UPDATE runtime_control_state SET applied_product_schema = $1, updated_at = now() WHERE id = 1',
+        [product],
+      );
+      return { digest: product };
+    },
+  };
 }

@@ -3157,11 +3157,15 @@ export async function deployProductYamlSpec(
     async applyMigration(migration: PlannedMigration): Promise<void> {
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
       if (opts.deployApply !== undefined) {
-        // As an apply: under the operation lease, with receipts, the DDL and its finish receipt in
-        // one transaction under the shared schema lock (deploy-apply.ts). deploy() re-wraps whatever
+        // As an apply: under the operation lease, with receipts, the DDL, its product ledger row
+        // (recording the stores the schema now implements) and its finish receipt in one
+        // transaction under the shared schema lock (deploy-apply.ts). deploy() re-wraps whatever
         // this throws; an apply refusal is kept so the catch below can raise it as itself.
         try {
-          await opts.deployApply.productMigration(migration);
+          await opts.deployApply.productMigration(migration, {
+            stores: composedStores,
+            conflictKeys,
+          });
         } catch (err) {
           if (err instanceof RuntimeApplyError) applyRefusal = err;
           throw err;
