@@ -747,24 +747,30 @@ class BlobRemuxSttMediaResolver implements SttMediaResolver {
   }
 }
 
+/** The speech provider the environment selects, with its credential, or the refusal it earns. */
+function selectSttProvider(
+  env: NodeJS.ProcessEnv,
+): { provider: 'fake' } | { provider: 'deepgram'; apiKey: string } {
+  const provider = requireEnv(env, STT_PROVIDER);
+  if (provider === 'fake') return { provider };
+  if (provider === 'deepgram') return { provider, apiKey: requireEnv(env, DEEPGRAM_API_KEY) };
+  throw new ProductBootError(
+    `STT_PROVIDER '${provider}' is not supported (wired: deepgram | fake).`,
+  );
+}
+
 export function buildSttAdapter(
   env: NodeJS.ProcessEnv,
   blob: ReturnType<BlobStoreFactory>,
   defaultModel: string | undefined,
 ): SttAdapter {
-  const provider = requireEnv(env, STT_PROVIDER);
-  if (provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
-  if (provider === 'deepgram') {
-    const apiKey = requireEnv(env, DEEPGRAM_API_KEY);
-    return new DeepgramSttAdapter({
-      apiKey,
-      ...(defaultModel ? { model: defaultModel } : {}),
-      resolver: new BlobRemuxSttMediaResolver(blob),
-    });
-  }
-  throw new ProductBootError(
-    `STT_PROVIDER '${provider}' is not supported (wired: deepgram | fake).`,
-  );
+  const selected = selectSttProvider(env);
+  if (selected.provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
+  return new DeepgramSttAdapter({
+    apiKey: selected.apiKey,
+    ...(defaultModel ? { model: defaultModel } : {}),
+    resolver: new BlobRemuxSttMediaResolver(blob),
+  });
 }
 
 // ── the LIVE extraction executor (env `live`) ──────────────────────────────────────────────────
@@ -2388,6 +2394,14 @@ export function validateProductYamlSpec(specSource: string, specPath: string): P
  * It is not hypothetical: `uuidgen` prints upper case on macOS/BSD.
  */
 export async function assertProductTenantBootable(db: Db, tenantId: string): Promise<string> {
+  assertProductTenantShape(db, tenantId);
+  const storedId = await resolveLiveTenantOrgId(db, tenantId);
+  if (storedId === undefined) throw productTenantAbsent(tenantId);
+  return storedId;
+}
+
+/** The first half of `assertProductTenantBootable`: the configured value is an org id at all. */
+function assertProductTenantShape(db: Db, tenantId: string): void {
   try {
     forTenant(db, tenantId);
   } catch {
@@ -2397,19 +2411,174 @@ export async function assertProductTenantBootable(db: Db, tenantId: string): Pro
         '(8-4-4-4-12 UUID). Fail-closed.',
     );
   }
-  const storedId = await resolveLiveTenantOrgId(db, tenantId);
-  if (storedId === undefined) {
+}
+
+/** The refusal for a deployment tenant that names no live org. */
+function productTenantAbsent(tenantId: string): ProductBootError {
+  return new ProductBootError(
+    `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' does not name a live org (a soft-deleted org counts ` +
+      'as absent). Every principal of this deployment is bound to that tenant, so it would serve ' +
+      'nobody: 404 on the reprocess seam, cross_tenant on the first capability event. Create the ' +
+      'org FIRST — run `rayspec tenant ensure --org-id <this id> --name <n>` against the same ' +
+      'DATABASE_URL (no server needed), then deploy with that id. Locally you can instead boot the ' +
+      'auth surface alone (`rayspec-serve` with no spec) and run `rayspec dev bootstrap-tenant ' +
+      '--org-id <this id>` against it. Fail-closed.',
+  );
+}
+
+// ── the environment a document demands, checked before anything changes ─────────────────────────
+
+/**
+ * The blob backend a document that moves binary bytes needs: audio (chunk ingest + playback) and
+ * file_input (bounded upload ingest). A document with neither demands no RAYSPEC_BLOB_ROOT and gets
+ * none. The audio refusal wins when both are declared, and a file-only document's refusal names
+ * file_input.
+ */
+function productBlobFactory(
+  config: ServerConfig,
+  withAudio: boolean,
+  withFileInput: boolean,
+): BlobStoreFactory | undefined {
+  if (!withAudio && !withFileInput) return undefined;
+  if (!config.blobRoot) {
+    if (withAudio) {
+      throw new ProductBootError(
+        'the audio capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT is ' +
+          'unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
+      );
+    }
     throw new ProductBootError(
-      `RAYSPEC_PRODUCT_TENANT_ID='${tenantId}' does not name a live org (a soft-deleted org counts ` +
-        'as absent). Every principal of this deployment is bound to that tenant, so it would serve ' +
-        'nobody: 404 on the reprocess seam, cross_tenant on the first capability event. Create the ' +
-        'org FIRST — run `rayspec tenant ensure --org-id <this id> --name <n>` against the same ' +
-        'DATABASE_URL (no server needed), then deploy with that id. Locally you can instead boot the ' +
-        'auth surface alone (`rayspec-serve` with no spec) and run `rayspec dev bootstrap-tenant ' +
-        '--org-id <this id>` against it. Fail-closed.',
+      'the file_input capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT ' +
+        'is unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
     );
   }
-  return storedId;
+  return makeFsBlobStoreFactory(config.blobRoot);
+}
+
+/**
+ * The read-only fs-source root, when one is configured. `makeFsSourceFactory` refuses a root that is
+ * missing or not a directory; that refusal is re-raised as the named `ProductBootError` every other
+ * environment refusal of this boot throws.
+ */
+function productFsSourceFactory(config: ServerConfig): FsSourceFactory | undefined {
+  if (!config.fsSourceRoot) return undefined;
+  try {
+    return makeFsSourceFactory(config.fsSourceRoot);
+  } catch (e) {
+    if (!(e instanceof FsSourceConfigError)) throw e;
+    throw new ProductBootError(
+      `RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a directory. It is ` +
+        'the READ-ONLY source root `init.fsSource` reads under; point it at an existing directory ' +
+        'on the box (nothing here creates it). Fail-closed.',
+    );
+  }
+}
+
+/** The media-token service an audio document's playback route verifies with; none otherwise. */
+function productMediaTokenService(
+  config: ServerConfig,
+  withAudio: boolean,
+): ReturnType<typeof createMediaTokenService> | undefined {
+  if (!withAudio) return undefined;
+  if (!config.mediaSigningKey) {
+    throw new ProductBootError(
+      'the audio capability declares a playback route but RAYSPEC_MEDIA_SIGNING_KEY is unset (the ' +
+        'media-JWT verifier). Set a high-entropy secret ≥ 32 bytes. Fail-closed.',
+    );
+  }
+  try {
+    return createMediaTokenService(config.mediaSigningKey);
+  } catch (e) {
+    throw new ProductBootError(`RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * The extraction mode an agent-declaring document runs in: `live`, or `deterministic` with an
+ * injected executor (the platform ships none). A document without agents demands no mode.
+ */
+function productExtractionMode(
+  env: NodeJS.ProcessEnv,
+  hasAgents: boolean,
+  deterministicAgents: AgentRuntimeRegistry | undefined,
+): 'live' | 'deterministic' | undefined {
+  if (!hasAgents) return undefined;
+  const mode = requireEnv(env, EXTRACTION_MODE);
+  if (mode === 'live') return mode;
+  if (mode === 'deterministic') {
+    if (!deterministicAgents) {
+      throw new ProductBootError(
+        'RAYSPEC_EXTRACTION_MODE=deterministic requires an injected deterministic executor (the ' +
+          'platform ships none — product-free). Use live mode in production. Fail-closed.',
+      );
+    }
+    return mode;
+  }
+  throw new ProductBootError(
+    `RAYSPEC_EXTRACTION_MODE '${mode}' is not supported (wired: live | deterministic).`,
+  );
+}
+
+/**
+ * An `stt.*` step's demands: the real STT resolver reads the AUDIO capability's blob chunks, so a
+ * document that transcribes without the audio capability is refused (a file-only document has a
+ * blob backend but no audio chunks), and the environment must select a supported provider with its
+ * credential. A deployment-supplied adapter supersedes the provider selection.
+ */
+function assertSttSelectable(
+  env: NodeJS.ProcessEnv,
+  withAudio: boolean,
+  injectedAdapter: boolean,
+): void {
+  if (injectedAdapter) return;
+  if (!withAudio) {
+    throw new ProductBootError(
+      "the document declares an 'stt.*' workflow step, whose media resolver reads the audio " +
+        "capability's blob-backed chunks, but no audio capability (audio_input/media_playback) is " +
+        'declared — declare the audio capability or remove the stt step. Fail-closed.',
+    );
+  }
+  selectSttProvider(env);
+}
+
+/**
+ * Everything a Product-YAML deploy demands of its environment that can be checked BEFORE the boot
+ * changes anything, so a boot that is going to refuse leaves the database as it found it: the
+ * deployment tenant is set, is an org id, and names a live org (on a database without the platform
+ * tables no org exists yet, so the refusal is the same); a reviewed update delta and its allowlist
+ * read; a blob root, a media signing key, a readable fs-source root, an extraction mode and a speech
+ * provider are present wherever the document needs them. The checks run in the order the deploy path
+ * runs them, with the same refusals, and the deploy path makes them again. What stays after the
+ * platform chain: the live schema's drift, and the sidecar configurations of live agents, the
+ * responder and the normalizer, which are read while the model calls are built.
+ */
+export async function preflightProductYamlSpec(
+  db: Db,
+  config: ServerConfig,
+  opts: Pick<DeployProductYamlOpts, 'env' | 'deterministicAgents' | 'sttAdapter'> = {},
+): Promise<void> {
+  const env = opts.env ?? process.env;
+  const specPath = config.specPath as string;
+  const spec = validateProductYamlSpec(readFileSync(specPath, 'utf8'), specPath);
+  const tenantId = requireEnv(env, PRODUCT_TENANT_ID);
+  const [platform] = (await db.$client.unsafe(
+    "SELECT to_regclass('public.orgs') IS NOT NULL AS present",
+  )) as unknown as { present: boolean }[];
+  if (platform?.present) await assertProductTenantBootable(db, tenantId);
+  else {
+    assertProductTenantShape(db, tenantId);
+    throw productTenantAbsent(tenantId);
+  }
+  readProductUpdateMigrations({
+    migrationPath: env.RAYSPEC_UPDATE_MIGRATION,
+    allowlistPath: env.RAYSPEC_UPDATE_ALLOWLIST,
+  });
+  const withAudio = declaresAudio(spec);
+  productBlobFactory(config, withAudio, declaresFileInput(spec));
+  productFsSourceFactory(config);
+  productMediaTokenService(config, withAudio);
+  productExtractionMode(env, spec.extractors.length > 0, opts.deterministicAgents);
+  if (declaresSttStep(spec)) assertSttSelectable(env, withAudio, opts.sttAdapter !== undefined);
 }
 
 // ── the boot ─────────────────────────────────────────────────────────────────────────────────────
@@ -2546,58 +2715,14 @@ export async function deployProductYamlSpec(
   // consumer). A non-audio, non-file doc demands NEITHER (and builds no blob factory / media-token
   // service). An audio-declaring product ⇒ both stay demanded with the EXACT messages in the EXACT
   // order (blob before media), byte-behavior-identical; a file-only doc's blob demand NAMES file_input.
-  let blobFactory: BlobStoreFactory | undefined;
-  let mediaTokenService: ReturnType<typeof createMediaTokenService> | undefined;
-  const withBlob = withAudio || withFileInput;
-  if (withBlob) {
-    if (!config.blobRoot) {
-      if (withAudio) {
-        throw new ProductBootError(
-          'the audio capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT is ' +
-            'unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
-        );
-      }
-      throw new ProductBootError(
-        'the file_input capability moves binary bytes through a stream route but RAYSPEC_BLOB_ROOT ' +
-          'is unset. Set it to a writable directory (one subdir per tenant). Fail-closed.',
-      );
-    }
-    blobFactory = makeFsBlobStoreFactory(config.blobRoot);
-    // Object writes stop once the process has drained under a source fence; reads never do.
-    if (opts.fence) blobFactory = opts.fence.blobFactory(blobFactory);
-  }
+  let blobFactory = productBlobFactory(config, withAudio, withFileInput);
+  // Object writes stop once the process has drained under a source fence; reads never do.
+  if (blobFactory && opts.fence) blobFactory = opts.fence.blobFactory(blobFactory);
   // The READ-ONLY fs-source (`init.fsSource`) — purely deploy-config-gated (no capability KIND demands
-  // it, unlike the blob byte-movers above): build the factory when RAYSPEC_FS_SOURCE_ROOT is configured,
-  // else leave it undefined (`init.fsSource` absent; a handler that needs it fail-closes loudly).
-  // `makeFsSourceFactory` fail-closes at build if the root is missing / not a directory — it takes a
-  // plain `root` and knows nothing about the environment, so that refusal is re-raised here as the
-  // NAMED ProductBootError every other env refusal in this boot throws.
-  let fsSourceFactory: FsSourceFactory | undefined;
-  if (config.fsSourceRoot) {
-    try {
-      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
-    } catch (e) {
-      if (!(e instanceof FsSourceConfigError)) throw e;
-      throw new ProductBootError(
-        `RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a directory. It is ` +
-          'the READ-ONLY source root `init.fsSource` reads under; point it at an existing directory ' +
-          'on the box (nothing here creates it). Fail-closed.',
-      );
-    }
-  }
-  if (withAudio) {
-    if (!config.mediaSigningKey) {
-      throw new ProductBootError(
-        'the audio capability declares a playback route but RAYSPEC_MEDIA_SIGNING_KEY is unset (the ' +
-          'media-JWT verifier). Set a high-entropy secret ≥ 32 bytes. Fail-closed.',
-      );
-    }
-    try {
-      mediaTokenService = createMediaTokenService(config.mediaSigningKey);
-    } catch (e) {
-      throw new ProductBootError(`RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(e as Error).message}`);
-    }
-  }
+  // it, unlike the blob byte-movers above): built when RAYSPEC_FS_SOURCE_ROOT is configured, else
+  // undefined (`init.fsSource` absent; a handler that needs it fail-closes loudly).
+  const fsSourceFactory = productFsSourceFactory(config);
+  const mediaTokenService = productMediaTokenService(config, withAudio);
 
   // ── 3b. the OPTIONAL deployment-supplied product backend factory ───────────────────────────────
   // Reached ONLY when the option is present. An omitting boot never executes a byte of this block and
@@ -2618,27 +2743,14 @@ export async function deployProductYamlSpec(
   // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is
   // only read inside the `hasAgents` guard). An agent-declaring product ⇒ the demand + the live/
   // deterministic dispatch stay exactly as before.
-  let extractionMode: string | undefined;
+  const extractionMode = productExtractionMode(env, hasAgents, opts.deterministicAgents);
   let liveAgent: ProductYamlRollout['liveAgent'] | undefined;
   let agents: AgentRuntimeRegistry | undefined;
-  if (hasAgents) {
-    extractionMode = requireEnv(env, EXTRACTION_MODE);
-    if (extractionMode === 'live') {
-      // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
-      liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
-    } else if (extractionMode === 'deterministic') {
-      if (!opts.deterministicAgents) {
-        throw new ProductBootError(
-          'RAYSPEC_EXTRACTION_MODE=deterministic requires an injected deterministic executor (the ' +
-            'platform ships none — product-free). Use live mode in production. Fail-closed.',
-        );
-      }
-      agents = opts.deterministicAgents;
-    } else {
-      throw new ProductBootError(
-        `RAYSPEC_EXTRACTION_MODE '${extractionMode}' is not supported (wired: live | deterministic).`,
-      );
-    }
+  if (extractionMode === 'live') {
+    // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
+    liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
+  } else if (extractionMode === 'deterministic') {
+    agents = opts.deterministicAgents;
   }
 
   // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step ───────────────────────────
@@ -2648,18 +2760,10 @@ export async function deployProductYamlSpec(
   // declares stt without audio is a fail-closed misconfiguration (never a crash on an absent factory).
   let stt: SttAdapter | undefined;
   if (usesStt) {
+    assertSttSelectable(env, withAudio, opts.sttAdapter !== undefined);
     if (opts.sttAdapter) {
       stt = opts.sttAdapter;
-    } else if (!withAudio || !blobFactory) {
-      // keyed on `withAudio`, NOT on the (now-generalized) blobFactory — a file-only doc
-      // HAS a blob factory but no audio chunks for the STT resolver to read, so an stt.* step
-      // without the audio capability keeps failing closed with this same named error.
-      throw new ProductBootError(
-        "the document declares an 'stt.*' workflow step, whose media resolver reads the audio " +
-          "capability's blob-backed chunks, but no audio capability (audio_input/media_playback) is " +
-          'declared — declare the audio capability or remove the stt step. Fail-closed.',
-      );
-    } else {
+    } else if (blobFactory) {
       stt = buildSttAdapter(env, blobFactory(tenantId), providerDefaultModel(spec, 'deepgram'));
     }
   }

@@ -8,7 +8,8 @@
  *    `checks.assets` false while `/livez` stays 200.
  *  - The mounted-secret check reads nothing but the file's presence; the worker checks report a
  *    stopped worker and an unreachable system database; a probe that hangs counts as failed after the
- *    bound instead of hanging the probe.
+ *    bound instead of hanging the probe, and a database that hangs gets `/health` a 503 within that
+ *    bound rather than no answer.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,7 @@ import {
 import {
   bindingsProbe,
   durableWorkerReadiness,
+  READINESS_PROBE_TIMEOUT_MS,
   type ReadinessProbe,
   runReadiness,
   staticProbe,
@@ -101,6 +103,24 @@ describe('the routes', () => {
     });
     expect((await get(app, '/livez')).status).toBe(200);
   });
+
+  it('answers 503 within the probe bound when the database hangs instead of refusing', async () => {
+    const app = new Hono();
+    registerHealthRoute(app, () => new Promise<void>(() => {}), undefined);
+    const started = Date.now();
+    const health = await get(app, '/health');
+    expect(Date.now() - started).toBeLessThan(READINESS_PROBE_TIMEOUT_MS + 1_500);
+    expect(health).toEqual({
+      status: 503,
+      body: {
+        status: 'degraded',
+        db: 'unreachable',
+        live: true,
+        ready: false,
+        checks: { database: false },
+      },
+    });
+  }, 10_000);
 
   it('a static boot with an unservable mount is not ready, and is live', async () => {
     const app = assembleStaticServer(loadStaticServerConfig({}), {

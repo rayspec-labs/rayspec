@@ -153,6 +153,7 @@ import {
   makeSchemaProbe,
   type ProductAgentBackendsFactory,
   planUpdateBoot,
+  preflightProductYamlSpec,
   validateProductYamlSpec,
 } from './product-boot.js';
 import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
@@ -300,8 +301,9 @@ function healthResponse(
  * every part of the application a deploy tool waits on:
  *
  *  - `probeDatabase` — a real round-trip per call, so the probe reflects DB reachability rather than
- *    just process liveness. `undefined` for a boot with no database (the static profile): the `db`
- *    field is then OMITTED rather than reported `ok`, which would be a lie.
+ *    just process liveness. It is bounded by the same timeout as the other probes: a database that
+ *    does not answer counts as unreachable. `undefined` for a boot with no database (the static
+ *    profile): the `db` field is then OMITTED rather than reported `ok`, which would be a lie.
  *  - `frontend` — the BOOT-TIME readiness of the declared static mounts (`frontendMountsReadiness`),
  *    computed once by the caller and passed in as a value. It is deliberately NOT recomputed here: a
  *    load balancer polls this route every second, and a per-call filesystem access would put that load
@@ -325,16 +327,24 @@ export function registerHealthRoute<E extends Env>(
 ): void {
   registerLivenessRoute(app);
   app.get('/health', async (c) => {
-    let db: 'ok' | 'unreachable' | undefined;
-    if (probeDatabase !== undefined) {
-      try {
-        await probeDatabase();
-        db = 'ok';
-      } catch {
-        db = 'unreachable';
-      }
-    }
-    const checks = probes.length === 0 ? [] : await runReadiness(probes);
+    // The round trip is bounded like every other probe, so a database that hangs rather than
+    // refuses still gets a 503 answer instead of none.
+    const [dbCheck, checks] = await Promise.all([
+      probeDatabase === undefined
+        ? undefined
+        : runReadiness([
+            {
+              name: 'database',
+              check: async () => {
+                await probeDatabase();
+                return null;
+              },
+            },
+          ]).then(([check]) => check),
+      probes.length === 0 ? [] : runReadiness(probes),
+    ]);
+    const db: 'ok' | 'unreachable' | undefined =
+      dbCheck === undefined ? undefined : dbCheck.ok ? 'ok' : 'unreachable';
     const { ready, body } = healthResponse(db, frontend, checks);
     return ready ? c.json(body, 200) : c.json(body, 503);
   });
@@ -2196,13 +2206,25 @@ async function assembleServerWith(
   //    A backend-profile document's configuration demands, checked with nothing changed yet: its
   //    extension packs load and merge, and the environment must satisfy what the merged document
   //    needs (preflightDeclaredSpec). The deploy path below re-checks them on the same result.
+  //    A Product-YAML document's environment demands (its deployment tenant, a blob root, a media
+  //    signing key, an extraction mode, a speech provider) are checked the same way
+  //    (preflightProductYamlSpec).
   let preflight: PreflightedSpec | undefined;
-  if (config.specPath && detectSpecKind(readFileSync(config.specPath, 'utf8')) !== 'product') {
+  if (config.specPath) {
     try {
-      preflight = await preflightDeclaredSpec(db, config, config.specPath, {
-        ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
-        ...(opts.agentBackendsFactory ? { agentBackendsFactory: opts.agentBackendsFactory } : {}),
-      });
+      if (detectSpecKind(readFileSync(config.specPath, 'utf8')) === 'product') {
+        await preflightProductYamlSpec(db, config, {
+          ...(opts.productDeterministicAgents
+            ? { deterministicAgents: opts.productDeterministicAgents }
+            : {}),
+          ...(opts.productSttAdapter ? { sttAdapter: opts.productSttAdapter } : {}),
+        });
+      } else {
+        preflight = await preflightDeclaredSpec(db, config, config.specPath, {
+          ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
+          ...(opts.agentBackendsFactory ? { agentBackendsFactory: opts.agentBackendsFactory } : {}),
+        });
+      }
     } catch (err) {
       await db.$client.end();
       throw err;
@@ -2677,9 +2699,9 @@ function validateDeclaredSpec(specSource: string, specPath: string): RaySpec {
  *
  * Scope, stated so it is not read wider: this is the document itself. For a backend document,
  * `preflightDeclaredSpec` then checks, still before anything is mutated, what the environment must
- * satisfy for it once its extensions are merged. A Product-YAML document's environment demands (its
- * deployment tenant, a blob root, a media signing key, a speech provider) are still checked inside its
- * deploy path, after the platform chain and before any product DDL.
+ * satisfy for it once its extensions are merged; for a Product-YAML document,
+ * `preflightProductYamlSpec` does the same for its deployment tenant, blob root, media signing key,
+ * extraction mode and speech provider.
  */
 export function validateInjectedSpec(specPath: string): void {
   const specSource = readFileSync(specPath, 'utf8');

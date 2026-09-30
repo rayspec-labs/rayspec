@@ -9,7 +9,7 @@
  *    append its searched-`.env`-paths diagnostic (`required env var(s) missing: …` and `<VAR> is required
  *    (…)`) cannot be normalized away. The rule is per RECORD: a record a boot site consumes composes
  *    that site's refusal, and every such record is pinned as a whole literal string. The ones reachable
- *    WITHOUT a database are pinned here; the two raised only from inside `deployProductYamlSpec` —
+ *    WITHOUT a database are pinned here; the two raised only by the Product-YAML boot —
  *    `RAYSPEC_PRODUCT_TENANT_ID` and `RAYSPEC_EXTRACTION_MODE` — are pinned in
  *    `product-boot-conditional-env.db.test.ts`, through a real boot, because that is the only place
  *    they can be provoked. Measured by replacing each `what` in turn with a marker: 16 of the 24

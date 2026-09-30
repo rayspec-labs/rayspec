@@ -9,8 +9,10 @@
  * refusal is the one the deploy path always gave, and then checks the database still holds no
  * relation and no `drizzle` schema. The same holds for a backend document whose CONFIGURATION the
  * environment does not satisfy — a stream route without a blob root, a playback route without a
- * media signing key, an unsupported speech provider, a frontend mount with nothing to serve. The last arm boots a valid spec on the same database, so the
- * reordering changes nothing for a deployment that validates.
+ * media signing key, an unsupported speech provider, a frontend mount with nothing to serve — and for
+ * a Product-YAML document whose deployment tenant is unset, malformed or names no org, or whose
+ * document needs a blob root or an audio capability the deployment lacks. The last arm boots a valid
+ * spec on the same database, so the reordering changes nothing for a deployment that validates.
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
@@ -87,6 +89,7 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     'RAYSPEC_BLOB_ROOT',
     'RAYSPEC_MEDIA_SIGNING_KEY',
     'STT_PROVIDER',
+    'RAYSPEC_PRODUCT_TENANT_ID',
   ] as const;
 
   /** Every relation outside the system schemas, plus whether a `drizzle` schema exists. */
@@ -144,6 +147,7 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     delete process.env.RAYSPEC_BLOB_ROOT;
     delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
     delete process.env.STT_PROVIDER;
+    delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
     expect(await footprint()).toEqual({ relations: 0, drizzle: false });
   }, 60_000);
 
@@ -198,6 +202,70 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     expect(await footprint()).toEqual({ relations: 0, drizzle: false });
     armsRan += 1;
   }, 60_000);
+
+  it('a Product-YAML document whose deployment tenant is unset, malformed or absent is refused, database untouched', async () => {
+    const path = join(FIXTURES, 'non-audio-intake.product.yaml');
+    const cases: { tenant?: string; message: RegExp }[] = [
+      { message: /RAYSPEC_PRODUCT_TENANT_ID is required/ },
+      {
+        tenant: 'not-an-org',
+        message: /RAYSPEC_PRODUCT_TENANT_ID='not-an-org' is not a valid org UUID/,
+      },
+      {
+        tenant: '5b0c43de-2f55-4f4e-9d0a-0c4f3f1b8a11',
+        message: /RAYSPEC_PRODUCT_TENANT_ID='5b0c43de-[0-9a-f-]+' does not name a live org/,
+      },
+    ];
+    for (const c of cases) {
+      if (c.tenant === undefined) delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
+      else process.env.RAYSPEC_PRODUCT_TENANT_ID = c.tenant;
+      try {
+        const refused = await bootWith(path).catch((e: unknown) => e);
+        expect(refused, c.tenant).toBeInstanceOf(ProductBootError);
+        expect((refused as Error).message, c.tenant).toMatch(c.message);
+        expect(await footprint(), c.tenant).toEqual({ relations: 0, drizzle: false });
+      } finally {
+        delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
+      }
+    }
+    armsRan += 1;
+  }, 90_000);
+
+  it('a Product-YAML document whose other environment demands are unmet is refused before the platform chain', async () => {
+    // A live org, and nothing else: the tenant check passes, so what refuses is the document's own
+    // demand, and the platform chain has not run when it does.
+    const orgId = '0d7e9a52-6c1b-4f0e-a7f3-2b9d8c4e5f60';
+    const sql = postgres(dbUrl, { max: 1 });
+    try {
+      await sql.unsafe('CREATE TABLE orgs (id uuid PRIMARY KEY, deleted_at timestamptz)');
+      await sql.unsafe('INSERT INTO orgs (id) VALUES ($1)', [orgId]);
+      const before = await footprint();
+      process.env.RAYSPEC_PRODUCT_TENANT_ID = orgId;
+      const cases: { fixture: string; message: RegExp }[] = [
+        {
+          fixture: 'file-ingest.product.yaml',
+          message: /the file_input capability moves binary bytes .* RAYSPEC_BLOB_ROOT is unset/,
+        },
+        {
+          fixture: 'stt-no-audio.product.yaml',
+          message: /declares an 'stt\.\*' workflow step.* but no audio capability/,
+        },
+      ];
+      for (const c of cases) {
+        const refused = await bootWith(join(FIXTURES, c.fixture)).catch((e: unknown) => e);
+        expect(refused, c.fixture).toBeInstanceOf(ProductBootError);
+        expect((refused as Error).message, c.fixture).toMatch(c.message);
+        expect(await footprint(), c.fixture).toEqual(before);
+      }
+      expect(before.drizzle).toBe(false);
+    } finally {
+      delete process.env.RAYSPEC_PRODUCT_TENANT_ID;
+      await sql.unsafe('DROP TABLE IF EXISTS orgs');
+      await sql.end();
+    }
+    expect(await footprint()).toEqual({ relations: 0, drizzle: false });
+    armsRan += 1;
+  }, 90_000);
 
   it('a backend document whose configuration the environment does not satisfy is refused, database untouched', async () => {
     const handler = `
@@ -286,6 +354,6 @@ ${handler}`,
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(7);
+  if (dbRequired) expect(armsRan).toBe(9);
   else expect(true).toBe(true);
 });

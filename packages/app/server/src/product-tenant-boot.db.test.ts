@@ -21,7 +21,8 @@
  *      deliberately booted with the SHOUTED spelling, which is what pins that the deployment binds
  *      what the gate resolved.
  *
- * Arms 1–3 abort at step 2 of `deployProductYamlSpec`, before the DBOS executor is constructed, and
+ * Arms 1–3 abort in the Product-YAML preflight (`preflightProductYamlSpec`, the same gate the deploy
+ * path runs again), before the DBOS executor is constructed, and
  * arm 4 never boots at all — so this file performs exactly ONE full launch (arm 5, last). The
  * platform migration chain is applied up front (so `orgs` exists to seed), which the boot's own
  * `applyMigrations` then no-ops over.
