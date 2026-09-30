@@ -373,16 +373,22 @@ ensure` — takes one shared transaction-scoped advisory lock, `pg_advisory_xact
 that changed nothing. The lock is released by commit, rollback or a lost connection, so a
 killed runner never blocks the next one.
 
-The boot runs in this order: validate the signing key and the spec, and the environment the
-spec demands (for a backend spec, once its extensions are merged; for a Product-YAML document, its
-deployment tenant, blob root, media signing key, extraction mode and speech provider); reconcile any apply an earlier process left interrupted; apply the platform migration chain if the ledger is behind the
-runtime; read the source fence; assemble the application, whose deployer applies product-store
-DDL. Each schema change is a `runtime.apply` operation (below): it takes the operation lease
+The boot runs in this order: validate the signing key and the spec; build what the spec needs
+from the environment (for a backend spec, once its extensions are merged: its capabilities, its
+agent backends, a durable worker and a deployment tenant for a cron or manual trigger, the product
+tables; for a Product-YAML document, its deployment tenant, byte movers, model calls, speech
+adapter, responder and normalizer) and rehearse the deploy on it with no migration to apply, so
+every refusal that follows from the configuration and the document comes before anything is
+written; reconcile any apply an earlier process left interrupted; apply the platform migration
+chain if the ledger is behind the runtime; read the source fence; assemble the application, whose
+deployer applies product-store DDL. What can still refuse after that depends on the database: the
+live product schema, each migration's apply and the durable worker's launch. Each schema change is a `runtime.apply` operation (below): it takes the operation lease
 first and the shared schema lock inside it, so a boot, an export's quiesce and an operator's
 apply never interleave; `tenant ensure` runs its chain the same way, and refuses to create or
 resolve an organization while the source fence is held. The chain that creates
 the receipt tables on an older database runs before them, under the schema lock alone. A restart
-that has nothing to change takes neither.
+that has nothing to change takes neither, unless an interrupted apply is there that it can settle;
+on an environment blocked on a step whose outcome no one can establish it warns and writes nothing.
 
 ### Runtime control
 

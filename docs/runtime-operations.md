@@ -80,7 +80,9 @@ as its own apply with the actor `runtime-boot`:
   or a reviewed delta from `--apply-migration`. The DDL, the product schema digest the
   environment now has and the step's finish receipt commit in one transaction.
 
-A restart that has nothing to change takes no lease and writes nothing. Two replicas starting at
+A restart that has nothing to change takes no lease and writes nothing; if an earlier apply was
+interrupted and its receipts and the live state settle it, the restart settles it first (below).
+On a blocked environment it writes nothing at all. Two replicas starting at
 once serialize on the lease; the platform chain of the second finds nothing left to do. A deploy
 that would change the schema of a fenced environment is refused, and `resume()` has to release
 the fence first. The chain that first creates the two tables above, on a database from before

@@ -314,7 +314,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operation: under the operation lease, after reconciling any interrupted apply, with receipts,
   the environment revision raised and, for product DDL, the product schema digest recorded in the
   same transaction as the DDL. A successful deploy boots and prints exactly as before; a restart
-  with nothing to change takes no lease and writes nothing. New refusals, each with a message and
+  with nothing to change takes no lease and writes nothing — unless an interrupted apply is there
+  that it can settle, and not even then when the environment is blocked on a step whose outcome no
+  one can establish: that restart warns, serves the schema it finds, and writes nothing. New
+  refusals, each with a message and
   its contract exit class from `rayspec deploy` (`rayspec-serve` keeps exit 1): a schema change on
   a fenced environment (`RAY_POLICY_DENIED`, 4), a plan made stale by a concurrent change
   (`RAY_PLAN_STALE`, 3; the platform chain plans again instead), another operation holding the
@@ -371,18 +374,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid spec, a Product-YAML document outside the boot scope or a malformed
   `RAYSPEC_JWT_SIGNING_KEY` still created every platform table in an empty database before it
   refused. The key and the document are now validated first, with the same refusals as before; a
-  valid deployment boots exactly as it did. For a backend spec, the environment it demands is
-  checked first too, with its extension packs loaded and merged: a stream route without a blob
-  root, a playback route without a valid media signing key, an unsupported STT or TTS provider or
-  a missing credential for one, an unreadable `RAYSPEC_FS_SOURCE_ROOT`, a frontend mount with
-  nothing to serve and a cron or manual trigger without `RAYSPEC_CRON_TENANT_ID` are refused before
-  the platform chain runs. For a Product-YAML document the same holds for its deployment tenant
-  (`RAYSPEC_PRODUCT_TENANT_ID` set, an org id, and naming a live org; on a database without the
-  platform tables no org exists yet, so that refusal comes first), a reviewed update delta and its
-  allowlist, a blob root, a media signing key, a readable `RAYSPEC_FS_SOURCE_ROOT`, the extraction
-  mode and the speech provider. What still runs after the platform chain, before any product DDL:
-  the live schema's drift check, and the sidecar configurations of live agents, the responder and
-  the normalizer.
+  valid deployment boots exactly as it did. Every other refusal the deploy can decide from the
+  configuration and the document is made before the platform chain runs too, with the same
+  message. For a backend spec, with its extension packs loaded and merged: a stream route without
+  a blob root, a playback route without a valid media signing key, an unsupported STT or TTS
+  provider or a missing credential for one, an unreadable `RAYSPEC_FS_SOURCE_ROOT`, a frontend
+  mount with nothing to serve, a cron or manual trigger without `RAYSPEC_CRON_TENANT_ID` or with no
+  durable worker to fire it (no `deployment.durableWorker`, or no agent backends supplied), a cron
+  schedule the scheduler cannot parse (a new refusal: it failed only when the worker launched), an
+  agent whose backend the deployment does not build, and whatever the deploy itself refuses — the
+  merged document, a handler module that does not load, a route under a reserved prefix, a store
+  table the registrar did not admit — which the boot finds by rehearsing the deploy with no
+  migration to apply. For a Product-YAML document: its deployment tenant (`RAYSPEC_PRODUCT_TENANT_ID`
+  set, an org id, and naming a live org; on a database without the platform tables no org exists
+  yet, so that refusal comes first), a reviewed update delta and its allowlist, a blob root, a
+  media signing key, a readable `RAYSPEC_FS_SOURCE_ROOT`, `RAYSPEC_MEDIA_PREP`, the extraction mode,
+  the speech provider, the responder and the normalizer with their sidecar configurations, a
+  deployment's model-call factory, and the composed deploy, rehearsed the same way. What is left
+  after the first write depends on the database: the platform chain and the source fence, the live
+  product schema (its drift, the update plan, and so whether a reviewed delta is applied and gated),
+  each migration's apply, the post-update drift gate, and the durable worker's launch.
+- **A server no longer exits when its workflow system database is briefly unreachable.** DBOS's
+  scheduler started each scheduled workflow from a loop that did not catch: when the workflow
+  system database refused a connection at a scheduled instant (a failover, a restart, a database
+  not accepting connections), the rejection went unhandled and the process exited with code 1 —
+  and every server with a durable worker schedules at least the system cleanup. Scheduled
+  workflows (cron triggers and the system cleanup) now run on a loop of the runtime's own with the
+  same instants, workflow ids, modes and make-up watermark; an instant that cannot be started is
+  reported once and retried, the server stays live and reports not ready, and the schedule fires
+  again once the database is back. A trigger without make-up work does not fire the instants
+  missed meanwhile; a catch-up trigger makes them up.
 - **`GET /health` answers when the database hangs.** Its database round trip had no time bound, so
   a database that stopped answering (rather than refusing connections) left the probe without an
   answer. It is now bounded like the other readiness checks (2 s) and reports `db: unreachable`
