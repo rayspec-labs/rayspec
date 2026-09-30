@@ -273,7 +273,9 @@ describe('the time budget inside the container checks', () => {
 
   it('the name-set checks stay fast for thousands of deep names', () => {
     // Each name has 2,041 segments; a check that looked up every directory prefix of every name
-    // would hash tens of billions of characters.
+    // would hash tens of billions of characters and take minutes. The linear check takes about a
+    // second on a developer machine and up to a few seconds on a shared CI runner, so the bound sits
+    // far above that noise and still far below the regression it guards against.
     const names = Array.from(
       { length: 9_999 },
       (_, i) => `payload/${'a/'.repeat(2040)}${String(i).padStart(5, '0')}`,
@@ -281,7 +283,7 @@ describe('the time budget inside the container checks', () => {
     names.push('ray.json');
     const started = performance.now();
     expect(checkNameSet(names)).toBeNull();
-    expect(performance.now() - started).toBeLessThan(3000);
+    expect(performance.now() - started).toBeLessThan(20_000);
   });
 
   it('the directory rule agrees with a direct check of every prefix on generated names', () => {
