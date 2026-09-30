@@ -52,10 +52,15 @@ export interface BundleFile {
   file?: string;
 }
 
-/** A manifest to write. The writer computes the inventory; one given must equal it. */
-export type BundleManifestInput = Omit<RayManifest, 'inventory'> & {
-  inventory?: InventoryEntry[];
-};
+/**
+ * A manifest to write, of either kind. The writer computes the inventory; one given must equal it.
+ * The omission distributes over the two kinds, so each keeps its own members.
+ */
+export type BundleManifestInput = RayManifest extends infer M
+  ? M extends RayManifest
+    ? Omit<M, 'inventory'> & { inventory?: InventoryEntry[] }
+    : never
+  : never;
 
 export interface WriteOptions {
   /** Replace an existing archive (and signature file) at the destination. Off by default. */
