@@ -411,8 +411,8 @@ you actually asked for.
 
 ```
 rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
-             [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
-             [--force] [--json]
+             [--runtime <exact-version>] [--include <path>]... [--against <old-spec>
+             [--allowlist <file.json>]] [--source-maps] [--preview] [--force] [--json]
 ```
 
 Writes an application bundle (`.ray`) from an application that is **already
@@ -425,7 +425,15 @@ each refusal are in the [packing guide](./packing.md).
 
 It runs these steps in order and stops at the first failure:
 
-1. **Arguments.** `RAY_USAGE`.
+1. **Arguments.** `RAY_USAGE`; `--allowlist` without `--against` too.
+   With `--against <old-spec>`, the product delta comes next: the previous spec
+   must parse (`RAY_SPEC_INVALID`) and be of the same profile, the delta from its
+   stores to the new spec's is generated as `plan --against` generates it, a
+   destructive statement the `--allowlist` file does not clear is refused naming
+   the store and column and the review step, and the product schema digests the
+   delta migrates between are computed on a throwaway database on the server
+   `SHADOW_DATABASE_URL` names (missing or unusable: `RAY_USAGE`, never naming the
+   server). Each of these refusals is `RAY_USAGE`.
 2. **Spec.** The spec (either profile) is parsed. `RAY_SPEC_INVALID`, followed
    by each grammar error as a `SPEC_` code.
 3. **Identity.** `metadata.id` and `metadata.version` of a backend spec, or
@@ -459,15 +467,20 @@ It runs these steps in order and stops at the first failure:
    `--force`. A refused or interrupted pack leaves neither the output nor a
    temporary file.
 
-- **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
+- **Postgres:** not needed, except with `--against`, which creates and drops one
+  throwaway database on the server `SHADOW_DATABASE_URL` names. **Environment:**
+  `SHADOW_DATABASE_URL` with `--against`, nothing otherwise; no `.env` is loaded.
 - **Runs nothing.** Handlers, extensions and frontends must be built first; pack
   reads modules with a lexer and never imports, evaluates or installs anything.
   `--build`, which would run the build in a disposable sandbox, is not available
   yet: it is refused with `RAY_USAGE` naming the manual build step, and it is not
-  listed in `--help`. `--against` and `--allowlist`, which would carry a product
-  delta, are refused the same way; review and apply a delta with
-  [`plan --against`](#plan) and
-  [`deploy --apply-migration`](#deploy--boot-and-serve-a-declared-product).
+  listed in `--help`.
+- **Product delta.** `--against <old-spec>` carries, under `payload/migrations/`,
+  the delta from the stores of the spec the environment runs to this spec's, the
+  `--allowlist` file byte for byte, and in the manifest's `productMigration` the
+  product schema digests before and after it and whether it is destructive. The
+  target regenerates the delta from its product migration ledger and refuses any
+  difference; see the [packing guide](./packing.md#a-product-schema-change).
 - **Deterministic.** The same prepared files and flags give the same bytes,
   wherever and whenever they are packed. Bundle paths are relative to the
   directory of the spec, and the archive carries no timestamp, user, host or
@@ -478,7 +491,9 @@ It runs these steps in order and stops at the first failure:
   `--version <semver>` (exact, no build metadata); `--runtime <exact-version>`
   (default: this CLI's version); `--include <path>`, repeatable, a file or
   directory relative to the spec; `--source-maps` (carry `*.map` files and
-  scripts or style sheets that inline their source map); `--preview`;
+  scripts or style sheets that inline their source map); `--against <old-spec>`
+  (the spec the target environment runs); `--allowlist <file.json>` (the
+  reviewed allowlist, with `--against` only); `--preview`;
   `--force`; `--json`.
 - **Output:** the result envelope on stdout (operation `pack`), with or without
   `--json`:
@@ -1029,6 +1044,11 @@ rayspec deploy --dry-run <spec.yaml>
 rayspec deploy --check-env <spec.yaml>
 ```
 
+A file that starts with a ZIP signature or whose name ends in `.ray` is an application bundle
+and takes the bundle path instead — see [Deploying a bundle](#deploying-a-bundle) below. The check
+reads at most four bytes, before any configuration is loaded; every other file is a spec and is
+deployed exactly as described here.
+
 **Production-mutating.** `deploy` boots the platform from the ambient environment,
 mounts the declared product's routes, and **serves** it on `PORT` (default `8080`)
 until `SIGINT` / `SIGTERM` — the GitOps-from-one-file path. It reads the same
@@ -1254,6 +1274,78 @@ change is applied by the explicit `--apply-migration` flag below.
   apply the change with [`--apply-migration`](#deploy--boot-and-serve-a-declared-product)
   above.
 
+### Deploying a bundle
+
+```
+rayspec deploy <file.ray> --dry-run [--bindings-file <file>] [--state-dir <dir>]
+               [--trusted-key <ed25519-public-key.pem>]... [--require-signature] [--json]
+rayspec deploy <file.ray> [--bindings-file <file>] [--plan-digest <sha256>] [--state-dir <dir>]
+               [--port <n>] [--host <addr>] [--trusted-key <ed25519-public-key.pem>]...
+               [--require-signature] [--json]
+```
+
+**Production-mutating** (without `--dry-run`). Deploys an application bundle written by
+[`pack`](#pack) on an explicitly configured self-hosted target and serves it. The walkthrough —
+inspect, bind, review, apply, readiness, update, recovery — is
+[Deploying a bundle on your own server](./self-hosted-deployment.md).
+
+- **Configuration comes from the explicit process environment only.** No `.env` file is loaded on
+  this path, whatever `RAYSPEC_SKIP_DOTENV` says. `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER` (or
+  their `_FILE` variants) are required for a dry-run; a deploy also needs everything the boot
+  needs (`RAYSPEC_JWT_SIGNING_KEY`, …). `SHADOW_DATABASE_URL` names the server where a plan with a
+  schema change computes the head after it, on a throwaway database. A missing variable is refused
+  with `RAY_USAGE`, naming it.
+- **`--bindings-file <file>`** — the application's binding values, JSON
+  `{"bindingsFormatVersion": 1, "bindings": [{"name", "value"}]}`. A regular file, not a link,
+  owned by you, mode 0600 or stricter (`RAY_BINDINGS_FILE_INSECURE` otherwise); a reserved operator
+  name (`DATABASE_URL`, `RAYSPEC_…`, `NODE_…`, a provider key's `_FILE` variant, …) is refused with
+  `RAY_BINDING_RESERVED`. Bindings come only from this file and the process environment. Values
+  never appear in output, logs, plans or receipts; plans carry revision ids.
+- **`--dry-run`** — plan only: the bundle is read and verified by the one bundle reader (nothing is
+  extracted or run), then planned against the live database. Prints the plan — required bindings,
+  schema impact, permission changes, storage, blockers, warnings — with `planDigest`, `preparedAt`
+  and `expiresAt` (30 minutes later), and writes the plan record `<state-dir>/plans/<planDigest>.json`.
+  No SQL changes anything. A plan with blockers is still `ok: true`; the deploy refuses it.
+- **`--plan-digest <sha256>`** — the plan to deploy, as a dry-run printed it. Required when the plan
+  changes the schema or the grants (a first deploy always does). The plan is recomputed at its own
+  `preparedAt`; a missing record, another bundle, an expired plan or any covered input that changed
+  since (a binding value, the schema, the environment revision) is `RAY_PLAN_STALE`.
+- **`--state-dir <dir>`** — the deployment state directory (default `.rayspec-state`): mode 0700,
+  owned by you, holding one deployment — `deployment.json`, `active.json`, the read-only version
+  directories `versions/<bundleSha256>/` and the plan records.
+- **`--trusted-key`**, **`--require-signature`** — as for [`bundle verify`](#bundle-verify): an
+  unsigned bundle is accepted with `RAY_W_UNSIGNED` unless a signature is required.
+- **`--port`**, **`--host`** — where the deployment serves, as for a spec deploy.
+
+**Order.** Nothing opens the database until the arguments, the bindings file, the trusted keys, the
+state directory, the bundle (every reader check) and the bindings file's names have been checked.
+Nothing changes the database until the plan is accepted and the boot has validated the signing key,
+the spec and the rest of its preflight. The bundle is extracted into its version directory and
+verified before the boot; the apply then runs the platform chain, the product change and the
+switch of `active.json`, each with a receipt, under the operation lease and the shared schema lock.
+A deploy that fails leaves the previous version active and reverses no schema change; the refusal
+says how to finish it. The application is served from the active version directory, with
+`@rayspec/*` resolved from the installed runtime and every other package from the bundle.
+
+**Output.** One result envelope on stdout, with or without `--json`: `deploy.dry-run` with
+`{bundleSha256, plan, planDigest, environmentRevision, preparedAt, expiresAt, planRecordPath}`, or
+`deploy` with `{bundleSha256, deploymentId, planDigest, environmentRevision, status}` —
+written when the deploy refuses (`status: refused`) or, once it serves, when it stops
+(`status: stopped`). The operation id, the boot banner and, without `--json`, a summary of the plan
+go to stderr, and so does anything else printed while the deploy runs (the durable runtime's
+startup lines, a handler's `console.log`), so stdout holds the one envelope. After a deploy that
+changed the product schema the banner's `Product DB` line names the product migration ledger row
+that change wrote. A `.ray` path that cannot be opened is refused as `RAY_USAGE`, in the words
+`rayspec bundle verify` uses.
+
+**Exit codes.** `0` a dry-run that planned, or a deployment that stopped on `SIGINT`/`SIGTERM` ·
+`1` the boot refused its configuration after the plan was accepted (`RAY_CHECK_FAILED`, with the
+boot's message; nothing was applied) · `2` usage, an invalid archive, a digest mismatch or a missing binding · `3` runtime, target or
+capability not supported, a stale plan, a schema change the plan does not approve · `4` a
+signature, reserved binding, insecure file or policy refusal · `5` the environment is busy
+(`RAY_LOCK_TIMEOUT`) or the database is unavailable (both retryable) · `6` drift, an interrupted
+deploy, or reconciliation required · `7` an internal error.
+
 ---
 
 ## `rayspec-serve` — the boot server
@@ -1363,6 +1455,8 @@ It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
 
 - **[Packing an application](./packing.md)** — what `pack` puts in a bundle, what
   it leaves out, and how to fix each refusal.
+- **[Deploying a bundle on your own server](./self-hosted-deployment.md)** — inspect,
+  bind, review, apply, readiness, update and recovery of a `.ray` deployment.
 - **[Runtime operations](./runtime-operations.md)** — what a deploy records, and how
   to recover from an interrupted one.
 - **[Getting started](./getting-started.md)** — these commands in sequence.

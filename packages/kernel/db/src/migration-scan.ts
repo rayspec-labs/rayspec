@@ -380,3 +380,63 @@ export function formatFindings(result: ScanResult): string {
     )
     .join('\n');
 }
+
+/** Every kind the scan reports, in the order of the `DestructiveKind` union. */
+export const DESTRUCTIVE_KINDS: readonly DestructiveKind[] = [
+  'truncate',
+  'using-cast',
+  'type-change-no-using',
+  'drop-column',
+  'drop-table',
+  'drop-database',
+  'drop-owned',
+  'drop-schema',
+  'drop-view',
+  'drop-constraint',
+  'drop-index',
+  'delete-from',
+  'delete-no-where',
+  'update-no-where',
+  'rename-table',
+  'rename-column',
+  'add-column-not-null-no-default',
+  'set-not-null',
+];
+
+const KNOWN_KINDS: ReadonlySet<string> = new Set(DESTRUCTIVE_KINDS);
+
+/**
+ * Check parsed JSON as a reviewed allowlist, failing closed: an array of `{kind, match, reason}`
+ * objects with a known kind, a non-empty match and a non-empty reason, and no other member. The
+ * message names the first entry that is not one, so a malformed allowlist can never clear a finding
+ * by accident.
+ */
+export function parseAllowlistEntries(
+  data: unknown,
+): { ok: true; entries: AllowlistEntry[] } | { ok: false; message: string } {
+  if (!Array.isArray(data)) {
+    return { ok: false, message: 'the allowlist is not a JSON array of { kind, match, reason }' };
+  }
+  const entries: AllowlistEntry[] = [];
+  for (const [i, raw] of data.entries()) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return { ok: false, message: `allowlist entry [${i}] is not an object` };
+    }
+    const extra = Object.keys(raw).filter((k) => k !== 'kind' && k !== 'match' && k !== 'reason');
+    if (extra.length > 0) {
+      return { ok: false, message: `allowlist entry [${i}] has an unknown member ${extra[0]}` };
+    }
+    const { kind, match, reason } = raw as Record<string, unknown>;
+    if (typeof kind !== 'string' || !KNOWN_KINDS.has(kind)) {
+      return { ok: false, message: `allowlist entry [${i}].kind is not a known destructive kind` };
+    }
+    if (typeof match !== 'string' || match.length === 0) {
+      return { ok: false, message: `allowlist entry [${i}].match is not a non-empty string` };
+    }
+    if (typeof reason !== 'string' || reason.trim().length === 0) {
+      return { ok: false, message: `allowlist entry [${i}].reason is not a non-empty string` };
+    }
+    entries.push({ kind: kind as DestructiveKind, match, reason });
+  }
+  return { ok: true, entries };
+}

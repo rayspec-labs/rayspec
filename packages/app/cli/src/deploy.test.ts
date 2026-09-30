@@ -311,7 +311,9 @@ describe('rayspec deploy — structural guards (stays on the sanctioned path)', 
     // + the env-driven agent-backend factory) — NOT a hand-rolled bare `{ registerProductTables }`, which
     // would DROP the agent factory so a backend-profile spec WITH agents would boot without its agents.
     expect(code).not.toMatch(/buildProductTables/);
-    expect(code).toMatch(/assembleServer\(\s*config,\s*assembleOptsFromEnv\(config\)\s*\)/);
+    // The opts are the shared builder's, spread first; a bundle deploy adds only its hook that runs
+    // before the boot changes any schema.
+    expect(code).toMatch(/assembleServer\(\s*config,\s*\{\s*\.\.\.assembleOptsFromEnv\(config\),/);
     // REDs if the CLI reverts to the pre-parity bare registrar (the form that dropped the agent factory).
     expect(code).not.toMatch(/registerProductTables:\s*registerProductStores/);
   });

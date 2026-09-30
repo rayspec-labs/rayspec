@@ -1,0 +1,156 @@
+/**
+ * How a deployed bundle's modules resolve, in a REAL Node process: a module in a version directory
+ * gets `@rayspec/*` from the installed runtime and third-party packages from the bundle, and a
+ * package the bundle does not carry is not picked up from a `node_modules` above the version
+ * directory. The control run without the hook shows the opposite on the same tree, so each arm
+ * proves what the hook changes.
+ *
+ * The child imports the BUILT module (`dist/bundle-modules.js`), the one `rayspec deploy` loads.
+ */
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { CONTRACT_VERSION } from '@rayspec/bundle-contract';
+import { afterAll, describe, expect, it } from 'vitest';
+
+const DIST = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'bundle-modules.js');
+
+const outer = mkdtempSync(join(tmpdir(), 'bundle-modules-'));
+const root = join(outer, 'state', 'versions', 'a'.repeat(64));
+
+function write(path: string, text: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+}
+
+// A package that lies ABOVE the version directory, as an operator's own project would.
+write(
+  join(outer, 'node_modules', 'outer-only', 'package.json'),
+  JSON.stringify({ name: 'outer-only', type: 'module', main: 'index.js' }),
+);
+write(join(outer, 'node_modules', 'outer-only', 'index.js'), "export const value = 'outer';\n");
+// A package the bundle vendors.
+write(
+  join(root, 'payload', 'node_modules', 'vendored', 'package.json'),
+  JSON.stringify({ name: 'vendored', type: 'module', main: 'index.js' }),
+);
+write(
+  join(root, 'payload', 'node_modules', 'vendored', 'index.js'),
+  "export const value = 'vendored';\n",
+);
+write(join(root, 'payload', 'package.json'), JSON.stringify({ type: 'module' }));
+write(
+  join(root, 'payload', 'handlers', 'platform.js'),
+  "import { CONTRACT_VERSION } from '@rayspec/bundle-contract';\nexport const value = CONTRACT_VERSION;\n",
+);
+// A copy of a platform package the bundle carries itself: never loaded, by import or by require.
+write(
+  join(root, 'payload', 'node_modules', '@rayspec', 'bundle-contract', 'package.json'),
+  JSON.stringify({ name: '@rayspec/bundle-contract', main: 'index.js' }),
+);
+write(
+  join(root, 'payload', 'node_modules', '@rayspec', 'bundle-contract', 'index.js'),
+  "exports.CONTRACT_VERSION = 'bundled-copy';\n",
+);
+// A package the bundle vendors as CommonJS.
+write(
+  join(root, 'payload', 'node_modules', 'vendored-cjs', 'package.json'),
+  JSON.stringify({ name: 'vendored-cjs', main: 'index.js' }),
+);
+write(
+  join(root, 'payload', 'node_modules', 'vendored-cjs', 'index.js'),
+  "exports.value = 'vendored-cjs';\n",
+);
+write(
+  join(outer, 'node_modules', 'outer-cjs', 'package.json'),
+  JSON.stringify({ name: 'outer-cjs', main: 'index.js' }),
+);
+write(join(outer, 'node_modules', 'outer-cjs', 'index.js'), "exports.value = 'outer-cjs';\n");
+write(join(root, 'payload', 'handlers', 'vendored.js'), "export { value } from 'vendored';\n");
+// The same imports made with CommonJS require().
+write(
+  join(root, 'payload', 'handlers', 'platform-cjs.cjs'),
+  "module.exports = { value: require('@rayspec/bundle-contract').CONTRACT_VERSION };\n",
+);
+write(
+  join(root, 'payload', 'handlers', 'vendored-cjs.cjs'),
+  "module.exports = { value: require('vendored-cjs').value };\n",
+);
+write(
+  join(root, 'payload', 'handlers', 'outer-cjs.cjs'),
+  "module.exports = { value: require('outer-cjs').value };\n",
+);
+write(join(root, 'payload', 'handlers', 'outer.js'), "export { value } from 'outer-only';\n");
+write(
+  join(root, 'payload', 'handlers', 'builtin.js'),
+  "export { sep as value } from 'node:path';\n",
+);
+
+afterAll(() => rmSync(outer, { recursive: true, force: true }));
+
+/** Import each handler in a fresh Node process, with or without the hook, and report what came back. */
+function importAll(withHook: boolean): Record<string, string> {
+  const handlers = [
+    'platform.js',
+    'vendored.js',
+    'outer.js',
+    'builtin.js',
+    'platform-cjs.cjs',
+    'vendored-cjs.cjs',
+    'outer-cjs.cjs',
+  ];
+  const script = `
+    const results = {};
+    ${
+      withHook
+        ? `const { installBundleModuleResolution } = await import(${JSON.stringify(pathToFileURL(DIST).href)});
+    installBundleModuleResolution(${JSON.stringify(root)});`
+        : ''
+    }
+    for (const name of ${JSON.stringify(handlers)}) {
+      const url = new URL('handlers/' + name, ${JSON.stringify(`${pathToFileURL(join(root, 'payload')).href}/`)});
+      try {
+        const loaded = await import(url.href);
+        results[name.slice(0, name.lastIndexOf('.'))] = String(loaded.value ?? loaded.default.value);
+      } catch (err) {
+        results[name.slice(0, name.lastIndexOf('.'))] = 'error:' + (err.code ?? err.message);
+      }
+    }
+    process.stdout.write(JSON.stringify(results));
+  `;
+  const run = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: outer,
+    encoding: 'utf8',
+  });
+  expect(run.status, run.stderr).toBe(0);
+  return JSON.parse(run.stdout) as Record<string, string>;
+}
+
+describe('installBundleModuleResolution', () => {
+  it('without the hook, a version directory reaches the outer node_modules and its own platform copy', () => {
+    const results = importAll(false);
+    expect(results.outer).toBe('outer');
+    expect(results.platform).toBe('bundled-copy');
+    expect(results.vendored).toBe('vendored');
+    expect(results['outer-cjs']).toBe('outer-cjs');
+    expect(results['platform-cjs']).toBe('bundled-copy');
+    expect(results['vendored-cjs']).toBe('vendored-cjs');
+  });
+
+  it('with the hook, @rayspec/* comes from the runtime and only bundled packages resolve', () => {
+    const results = importAll(true);
+    expect(results.platform).toBe(CONTRACT_VERSION);
+    expect(results.vendored).toBe('vendored');
+    expect(results.outer).toBe('error:ERR_MODULE_NOT_FOUND');
+    expect(results.builtin).toBe('/');
+  });
+
+  it('with the hook, a CommonJS require() resolves the same way as an import', () => {
+    const results = importAll(true);
+    expect(results['platform-cjs']).toBe(CONTRACT_VERSION);
+    expect(results['vendored-cjs']).toBe('vendored-cjs');
+    expect(results['outer-cjs']).toMatch(/^error:(ERR_)?MODULE_NOT_FOUND$/);
+  });
+});

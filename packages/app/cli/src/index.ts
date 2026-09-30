@@ -62,7 +62,7 @@
  *
  * Every command module is imported on its own path only, so a command loads nothing another command
  * needs: `bundle inspect`/`verify` and `pack` in particular never load the server, the database
- * layer or a handler loader.
+ * layer or a handler loader (`pack --against` alone loads the product schema planner).
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { argv } from 'node:process';
@@ -76,6 +76,7 @@ import {
   interruptible,
   legacyEnvelope,
   newOperationId,
+  reserveStdout,
   usageEnvelope,
   workAbandoned,
   writeEnvelope,
@@ -199,8 +200,8 @@ const HELP_SECTIONS: readonly HelpSection[] = [
       {
         name: 'pack',
         block: `  rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
-               [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
-               [--force] [--json]
+               [--runtime <exact-version>] [--include <path>]... [--against <old-spec>
+               [--allowlist <file.json>]] [--source-maps] [--preview] [--force] [--json]
                                 Write an application bundle from an application that is ALREADY
                                 BUILT: the spec, the compiled handler and extension modules and what
                                 they import, the built frontend, the third-party packages they need
@@ -212,6 +213,15 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 unless --runtime names another exact version. --include adds a file or
                                 directory relative to the spec; --source-maps carries source maps
                                 (*.map files, and scripts that inline theirs).
+                                --against <old-spec> carries the product delta from the stores of the
+                                spec the environment runs to this spec's, the product schema digests
+                                it migrates between (computed on a throwaway database on the server
+                                SHADOW_DATABASE_URL names, read from the environment, never a .env
+                                file) and, with --allowlist, the reviewed allowlist; a destructive
+                                delta the allowlist does not clear is refused. The target regenerates
+                                the delta from its own product migration ledger and refuses any
+                                difference. Review a destructive delta with \`rayspec plan <spec>
+                                --against <old-spec>\` first.
                                 --preview prints the inclusion list and writes nothing. The archive is
                                 written to a temporary file beside the output, read back, and moved
                                 into place; an existing output is refused unless --force. Writes ONE
@@ -245,6 +255,34 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 \`rayspec plan <new-spec> --against <old-spec>\`. Drop --apply-migration
                                 from the NEXT deploy once the delta has landed (a delta is not
                                 idempotent).
+  rayspec deploy <file.ray> --dry-run [--bindings-file <file>] [--state-dir <dir>]
+                 [--trusted-key <pem>]... [--require-signature]
+                                Plan a bundle deploy: read and verify the bundle with the one bundle
+                                reader, prepare the plan against the live database (DATABASE_URL,
+                                RAYSPEC_API_KEY_PEPPER; SHADOW_DATABASE_URL for a schema change) and
+                                print it — binding names, schema impact, permission changes,
+                                warnings, blockers and the plan digest, valid 30 minutes. Writes only
+                                the plan record to the state directory (default .rayspec-state); no
+                                SQL changes anything and nothing from the bundle runs. A file that
+                                starts with a ZIP signature or is named .ray takes this path; no
+                                .env file is loaded on it.
+  rayspec deploy <file.ray> [--bindings-file <file>] [--plan-digest <sha256>] [--state-dir <dir>]
+                 [--port <n>] [--host <addr>] [--trusted-key <pem>]... [--require-signature]
+                                Deploy the bundle and serve it. A plan that changes the schema or the
+                                grants must be the reviewed one: pass the planDigest the dry-run
+                                printed. Bindings come only from --bindings-file (JSON, mode 0600,
+                                owned by you; never printed) and the process environment. The bundle
+                                is staged into an immutable version directory, the boot validates
+                                everything, then the apply runs the platform chain and the product
+                                delta and switches the active version; a failed deploy leaves the
+                                previous version active and never reverses a schema change. Writes
+                                ONE envelope to stdout when it refuses or stops. Exit 0 stopped /
+                                1 the boot refused its configuration (RAY_CHECK_FAILED; nothing
+                                applied) / 2 usage, archive, digest or a missing binding /
+                                3 runtime, target, capability, a stale plan or a schema change the
+                                plan does not approve / 4 policy, signature, reserved binding, an
+                                insecure file / 5 lock or database unavailable / 6 drift,
+                                interrupted, or reconciliation required / 7 internal error.
   rayspec deploy --dry-run <spec.yaml>
                                 One-shot: validate the document with the grammar of the profile it
                                 boots — a product doc is also COMPOSED against a stubbed rollout, a
@@ -547,6 +585,12 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   if (vector[0] === 'pack' && !isHelpFlag(vector[1])) {
     return runPackVerb(vector.slice(1), json);
   }
+  // `deploy <file.ray>`: a file that starts with a ZIP signature or is named `.ray` takes the bundle
+  // path, decided on at most four bytes and before any configuration or `.env` file is read.
+  if (vector[0] === 'deploy' && !vector.slice(1).some((token) => isHelpFlag(token))) {
+    const { isBundleDeploy } = await import('./deploy-bundle.js');
+    if (await isBundleDeploy(vector.slice(1))) return runDeployBundleVerb(vector.slice(1), json);
+  }
   if (!json) return printAnswer(await answer(vector, { json: false }));
 
   const operation = legacyOperation(vector);
@@ -635,8 +679,9 @@ async function runBundleVerb(rest: readonly string[], json: boolean): Promise<nu
 
 /**
  * `rayspec pack`. A new verb, so it writes one envelope on stdout whether or not `--json` was given,
- * and the operation id on stderr; without `--json` the inclusion summary follows it there. It reads
- * no environment, so the `.env` auto-load is skipped. SIGINT and SIGTERM are answered at pack's
+ * and the operation id on stderr; without `--json` the inclusion summary follows it there. The
+ * `.env` auto-load is skipped: the one value pack reads, `SHADOW_DATABASE_URL` for `--against`,
+ * comes from the process environment. SIGINT and SIGTERM are answered at pack's
  * next safe point, where it removes what it wrote and reports `RAY_INTERRUPTED`.
  */
 async function runPackVerb(rest: readonly string[], json: boolean): Promise<number> {
@@ -670,6 +715,46 @@ async function runPackVerb(rest: readonly string[], json: boolean): Promise<numb
   } finally {
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
+  }
+}
+
+/**
+ * `rayspec deploy <file.ray>`. A new verb: one `deploy` or `deploy.dry-run` envelope on stdout,
+ * with or without `--json`, and the operation id on stderr; without `--json` a short description of
+ * the plan or the refusal follows it there. A deploy that serves writes its envelope when it stops.
+ * No `.env` file is loaded: the bindings come from `--bindings-file` and the process environment.
+ */
+async function runDeployBundleVerb(rest: readonly string[], json: boolean): Promise<number> {
+  const operationId = newOperationId();
+  const operation: ResultOperation = rest.includes('--dry-run') ? 'deploy.dry-run' : 'deploy';
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  // The deploy serves the application in this process: whatever the runtime or a library prints
+  // while it runs goes to stderr, and stdout carries the one envelope.
+  const stdout = reserveStdout();
+  let served = false;
+  try {
+    const { runDeployBundle } = await import('./deploy-bundle.js');
+    const outcome = await runDeployBundle(rest, { operationId, json, envelopeOut: stdout.sink });
+    if (outcome.kind === 'served') {
+      served = true;
+      return 0;
+    }
+    if (!json && outcome.summary.length > 0) {
+      await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    await writeEnvelope(stdout.sink, outcome.envelope);
+    return envelopeExitCode(outcome.envelope);
+  } catch (err) {
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    const failed = internalEnvelope(operation, operationId);
+    await writeEnvelope(stdout.sink, failed);
+    return envelopeExitCode(failed);
+  } finally {
+    // A served deploy keeps stdout reserved until the process leaves and writes its envelope.
+    if (!served) stdout.release();
   }
 }
 

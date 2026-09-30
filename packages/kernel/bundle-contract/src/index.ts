@@ -47,6 +47,7 @@ export {
   CONTRACT_PLATFORM_TABLES,
   PLATFORM_TABLES,
   type PlatformTable,
+  PRODUCT_LEDGER_TABLES,
   PUBLIC_PLATFORM_TABLE_NAMES,
   RUNTIME_CONTROL_TABLES,
 } from './platform-tables.js';

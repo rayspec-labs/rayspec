@@ -174,3 +174,22 @@ describe('bootBanner — the observed agent trace-export posture', () => {
     expect(banner).not.toContain('Trace export:          OFF');
   });
 });
+
+describe('bootBanner — the product schema line after a bundle deploy', () => {
+  it('names the change the bundle deploy applied, not a mount without DDL', () => {
+    const banner = bootBanner(
+      booted({ deployMode: 'mounted', bundleProductChange: { ledgerRow: 2 } }),
+      BASE,
+    );
+    expect(banner).toContain(
+      'Product DB:   APPLIED by the bundle deploy — product migration ledger row 2',
+    );
+    expect(banner).not.toContain('no DDL');
+  });
+
+  it('keeps the mount line when the deploy changed no product schema', () => {
+    const banner = bootBanner(booted({ deployMode: 'mounted' }), BASE);
+    expect(banner).toContain('Product DB:   MOUNTED');
+    expect(banner).not.toContain('APPLIED by the bundle deploy');
+  });
+});

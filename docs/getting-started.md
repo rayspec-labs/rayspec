@@ -16,6 +16,14 @@ real authenticated request. You will:
 > bearer-guarded. The auth request/response JSON shapes are checked against the
 > source; the token/id values shown are illustrative — yours will differ.
 
+**Which guide is yours.** This walkthrough builds RaySpec **from source**: you clone
+the repository, build it, and deploy a spec from the working tree — the path for
+developing RaySpec itself or an application next to it. To **run an application
+someone packed** as a `.ray` bundle, on a server with the published CLI and no
+source tree, follow [Deploying a bundle on your own server](./self-hosted-deployment.md)
+instead; to produce such a bundle from your application, see
+[Packing an application](./packing.md).
+
 ---
 
 ## Prerequisites
@@ -810,6 +818,9 @@ Override either verbatim to match your app.
 
 ## Where to go next
 
+- **[Deploying a bundle on your own server](./self-hosted-deployment.md)** — ship the
+  application as one `.ray` file and deploy it with the published CLI: inspect, bind,
+  review the plan, apply, update and recover.
 - **[Concepts](./concepts.md)** — the full mental model: profiles, agents, stores,
   tools, triggers, workflows, capabilities, views, the run journal, and tenancy.
 - **[Architecture](./ARCHITECTURE.md)** — how the layers fit together and why.

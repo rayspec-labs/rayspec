@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rayspec deploy <file.ray>`: deploy an application bundle on a self-hosted target.** A file
+  that starts with a ZIP signature or whose name ends in `.ray` takes the bundle path, decided on
+  at most four bytes before any configuration is read; every other file takes the YAML deploy,
+  unchanged. `rayspec deploy <file.ray> --dry-run` reads and verifies the bundle with the one bundle
+  reader, prepares the plan against the live database and prints it — binding names and whether
+  each is set, schema impact, permission changes, storage, warnings, blockers and the plan digest,
+  valid 30 minutes — writing only the plan record to the deployment state directory
+  (`--state-dir`, default `.rayspec-state`); it changes no row and runs nothing from the bundle.
+  `rayspec deploy <file.ray> --plan-digest <digest>` deploys that plan: it is recomputed at its own
+  time and refused as `RAY_PLAN_STALE` when anything it covers changed (the bundle, a binding value,
+  the schema head, the environment revision) or when the state directory holds no record of it, and
+  a plan that changes the schema or the grants is never deployed without it. The bundle is
+  extracted into an immutable, content-addressed version directory
+  (`<state-dir>/versions/<bundleSha256>/`, read-only, verified file by file against the inventory),
+  the boot validates the signing key, the spec and its preflight, and only then does one apply run
+  the platform chain, the regenerated product change with its ledger row, the application's record
+  and the switch of `active.json`, each step with receipts; its idempotency key is the plan digest,
+  so the same deploy run again after an interruption, while its plan is valid (30 minutes from the
+  dry-run), continues the interrupted operation; once the plan has expired, run the dry-run again
+  and deploy the new digest. A deploy that fails leaves the previous version active and reverses no
+  schema change; its refusal names the forward step that finishes it. When the live product schema
+  is already the one the bundle's delta migrates to — the delta landed in a deploy that stopped
+  before it finished — the dry-run plans no further product change, so the deploy is finished
+  forward; a carried delta that ends anywhere else is refused. The boot banner names the product
+  migration ledger row the deploy's product change wrote. The application is served from the active
+  version directory: `@rayspec/*` imports and `require()` calls resolve to the installed runtime (a
+  copy the bundle carries is never loaded), every other package to the bundle, and a package the
+  bundle does not carry is not found even when a `node_modules` above the state directory has it. Bindings come from `--bindings-file` (JSON, the contract's schema, a regular
+  file owned by the user with mode 0600 or stricter, otherwise `RAY_BINDINGS_FILE_INSECURE`) and
+  the explicit process environment only: no `.env` file is loaded on this path, a reserved operator
+  name in the file is refused with `RAY_BINDING_RESERVED`, a required binding without a value is
+  `RAY_BINDING_MISSING`, and no value reaches any output, plan or receipt — plans carry HMAC
+  revision ids. The verb writes one `deploy.dry-run` or `deploy` envelope on stdout, with or without
+  `--json`, and exits with the contract class of its first error; whatever else is printed while it
+  runs (the durable runtime's startup lines, a handler's `console.log`) goes to stderr. New: the guide
+  [Deploying a bundle on your own server](./docs/self-hosted-deployment.md) — inspect, bind, review,
+  apply, readiness, update, recovery.
+- **An upgrade check with data, run in CI.** `pnpm test:upgrade-with-data`
+  (`scripts/upgrade-with-data.mjs`) installs the previous published release from npm with install
+  scripts disabled, deploys the `notes-ui` example with it, registers a user, creates an
+  organization, mints an API key and writes notes through the API; then it boots this working tree
+  on the same database and checks that every stored row of the notes, users, organizations,
+  memberships and API keys is byte-identical, that the user logs in with the same password, that
+  the API key reads the notes and that a new note can be written; finally it packs the example and
+  deploys it as a bundle onto the upgraded environment and checks the same again. It runs in about a
+  minute and is a required step of the database lane.
+- **`@rayspec/server` exports the bundle deploy's building blocks**: `readApplicationBundle` (reader
+  steps 1 to 17 without a database), `preparePlan` (`prepare()` at a given `preparedAt`),
+  `applyBundle`, `bindingRevisions`, `initialBindingRevisionKey`, `planNeedsReview`, the
+  deployment state directory (`openStateDirectory`, `StateDirectory`, `readProtectedFile`) and
+  `installBundleModuleResolution`. `assembleServer` accepts `beforeSchemaChange`, run after the
+  boot validated everything and before it changes any schema, which may report the product change
+  it applied (`BeforeSchemaChangeResult`, shown on the boot banner), and `ensureRuntimeControlState`
+  accepts the binding revision key a first apply stores.
+
 - **`rayspec pack`: an application bundle from an application that is already built.**
   `rayspec pack --spec <path> --output <file.ray>` writes one `.ray` application bundle: the
   spec, the compiled handler and extension modules with what they import, the built frontend,
@@ -25,11 +80,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves no file. The same prepared files give the same bytes from any directory at any time.
   Like the bundle verbs, pack writes one result envelope on stdout and, without `--json`, the
   inclusion summary and the output SHA-256 on stderr; the summary says that nothing was deployed.
-  It loads no server, database layer or handler loader. `--build` (a build in a disposable
-  sandbox) and `--against` / `--allowlist` (a product delta carried in the bundle) are refused
-  with `RAY_USAGE` naming the manual steps. The summary escapes control characters in the file
+  Without `--against` it loads no server, database layer or handler loader. `--build` (a build in
+  a disposable sandbox) is refused with `RAY_USAGE` naming the manual step. The summary escapes control characters in the file
   names it quotes, so a hostile name cannot write terminal escapes. New: [the packing guide](./docs/packing.md) — what
   goes in, what never does, and how to fix each refusal.
+- **Product schema changes bound to the live schema: the product migration ledger, and
+  `rayspec pack --against`.** A new platform migration, `0014_product_migration_ledger`, adds the
+  append-only table `product_migration_ledger` (a reserved store name now): every product DDL a
+  deploy applies is recorded in the transaction that runs it, with its SHA-256, the product schema
+  digest before and after, the schema description after, the declared stores it leaves in place and
+  the operation that applied it. `rayspec pack --spec <new> --against <old-spec> [--allowlist
+  <file.json>]` carries the product delta from the previous spec's stores to the new spec's, the
+  reviewed allowlist byte for byte, and in `productMigration` the product schema digests the delta
+  migrates between, computed on a throwaway database on the server `SHADOW_DATABASE_URL` names
+  (from the environment only); a destructive delta the allowlist does not clear is refused, naming
+  each store and column and the review step. The runtime's `prepare()` trusts none of it: it
+  regenerates the delta from the ledger's latest row and the bundled spec and refuses a carried
+  delta, from-digest or to-digest that differs (`RAY_MIGRATION_MISMATCH`, `RAY_MIGRATION_REQUIRED`),
+  scans the delta itself (the bundle's `destructive` flag is advisory) and blocks a destructive
+  change the bundle's allowlist does not clear, computes the head after the delta on a throwaway
+  database where the ledger's changes, regenerated from the stores each row records, must first
+  reproduce the live schema, and reports a live product schema the ledger does not describe as
+  `RAY_SCHEMA_DRIFT`, naming each table and column. The product DDL step checks the ledger again
+  under the schema lock and refuses drift, a ledger row a newer runtime wrote, and a result other
+  than the planned head, rolling its DDL back. `schemaImpact.destructive` and `allowlisted` now say
+  what the scanner found. The bundle reader can hand back a bundle's product delta and allowlist
+  (`captureProductMigration`). An environment deployed before the ledger keeps working: its product
+  head is introspected with `RAY_W_PRODUCT_SCHEMA_UNLEDGERED`, and its first product change through
+  `rayspec deploy <spec.yaml>` starts the ledger. See
+  [Runtime operations → Product schema changes](./docs/runtime-operations.md#product-schema-changes)
+  and [the packing guide](./docs/packing.md#a-product-schema-change).
 - **Application identity in the spec.** A backend spec may declare `metadata.id` and
   `metadata.version`: the identity an application bundle carries. Both are optional. The id is a
   lowercase letter followed by up to 62 lowercase letters, digits or hyphens; the version is an exact
@@ -477,6 +557,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package that the consumer tree holds in two versions; today that includes `hono` (`4.13.9` for
   `@rayspec/server` and `@rayspec/api-auth`, the newest `4.13.x` for the `@hono/*` packages that
   take it as a peer).
+
+### Upgrade notes
+
+- **`rayspec deploy` of a `.ray` file is a new path.** It used to read the file as YAML. Now a
+  `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
+  no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,
+  `SHADOW_DATABASE_URL` in the process environment. A YAML spec deploys exactly as before.
+- **A bundle pins its runtime.** After upgrading the CLI, repack the application with the new
+  release before deploying it; a bundle packed for another runtime version is refused with
+  `RAY_RUNTIME_UNSUPPORTED`.
+- **The first bundle deploy onto an environment a YAML deploy created** plans against the product
+  tables that deploy made. When those tables were created before the product migration ledger
+  existed, a bundle that only matches them, or only adds whole stores, deploys; a bundle that
+  carries a product delta is refused until one change through `rayspec deploy <spec.yaml>` has
+  started the ledger.
+- **Version directories are read-only.** Remove one that is no longer active with
+  `chmod -R u+w <dir> && rm -rf <dir>`.
 
 ## [1.8.0] - 2026-08-15
 

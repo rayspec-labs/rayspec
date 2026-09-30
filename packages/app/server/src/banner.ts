@@ -39,7 +39,12 @@ export function bootBanner(server: BootedServer, base: string): string {
   lines.push(`  OIDC issuer:  ${server.issuer}`);
   // tell the operator whether this boot MOUNTED an existing product schema (data preserved)
   // or MATERIALIZED a fresh one — so a restart that should preserve data is visibly confirmed.
-  if (server.deployMode === 'mounted') {
+  if (server.bundleProductChange !== undefined) {
+    // the bundle deploy applied its product change just before this boot, which then mounted it.
+    lines.push(
+      `  Product DB:   APPLIED by the bundle deploy — product migration ledger row ${server.bundleProductChange.ledgerRow}; existing data survived`,
+    );
+  } else if (server.deployMode === 'mounted') {
     lines.push(
       '  Product DB:   MOUNTED — existing product stores were preserved (no DDL; data survived)',
     );

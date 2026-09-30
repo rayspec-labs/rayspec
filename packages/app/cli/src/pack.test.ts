@@ -235,3 +235,101 @@ describe('reservedBindingErrors', () => {
     ]);
   });
 });
+
+describe('--against and --allowlist, before any database is needed', () => {
+  const stores = (columns: string) =>
+    backendSpec(
+      `stores:\n  - name: notes\n    columns:\n${columns}\n` +
+        "api:\n  - { method: POST, path: '/notes', action: { kind: store, store: notes, op: create } }\n",
+    );
+  const V1 = stores('      - { name: body, type: text }');
+  const V2 = stores(
+    '      - { name: body, type: text }\n      - { name: tag, type: text, nullable: true }',
+  );
+  const DROPPED = stores('      - { name: tag, type: text, nullable: true }');
+
+  function specs(next: string, previous: string, extra: Record<string, string> = {}) {
+    const root = temporaryDirectory('pack-against-');
+    writeTree(root, { 'rayspec.yaml': next, 'previous.yaml': previous, ...extra });
+    const outDir = temporaryDirectory('pack-out-');
+    return {
+      args: (...more: string[]) => [
+        '--spec',
+        join(root, 'rayspec.yaml'),
+        '--output',
+        join(outDir, 'app.ray'),
+        '--against',
+        join(root, 'previous.yaml'),
+        ...more,
+      ],
+      root,
+      outDir,
+    };
+  }
+
+  const run = (args: string[], env: NodeJS.ProcessEnv = {}) =>
+    runPack(args, { operationId: OPERATION_ID, cliVersion: '1.8.0', env }).then(checked);
+
+  it('packs without a delta when the stores did not change, and says so', async () => {
+    const s = specs(V1, V1);
+    const outcome = await run(s.args());
+    expect(outcome.envelope.ok).toBe(true);
+    expect(outcome.envelope.data).toMatchObject({ outputPath: join(s.outDir, 'app.ray') });
+    expect(
+      (outcome.envelope.data as { inclusion: { path: string }[] }).inclusion.map((f) => f.path),
+    ).not.toContain('payload/migrations/product-delta.sql');
+    expect(outcome.summary.join('\n')).toContain('product delta: none');
+  });
+
+  it('refuses --allowlist without --against', async () => {
+    const s = specs(V2, V1, { 'allow.json': '[]' });
+    const args = s.args().slice(0, 4);
+    const outcome = await run([...args, '--allowlist', join(s.root, 'allow.json')]);
+    expect(outcome.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+    expect(outcome.envelope.errors[0]!.message).toContain('--allowlist requires --against');
+  });
+
+  it('refuses a destructive delta no allowlist covers, naming the column and the review step', async () => {
+    const s = specs(DROPPED, V1);
+    const outcome = await run(s.args(), { SHADOW_DATABASE_URL: 'postgres://unused.invalid/x' });
+    expect(outcome.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+    const message = outcome.envelope.errors[0]!.message;
+    expect(message).toContain('drop-column on notes.body');
+    expect(message).toContain('rayspec plan <new-spec> --against');
+    expect(readdirSync(s.outDir)).toEqual([]);
+  });
+
+  it('refuses a malformed allowlist, and one that covers a delta that does not exist', async () => {
+    const malformed = specs(DROPPED, V1, { 'allow.json': '[{"kind":"drop-column"}]' });
+    const refused = await run(malformed.args('--allowlist', join(malformed.root, 'allow.json')));
+    expect(refused.envelope.errors[0]!.message).toContain('--allowlist: allowlist entry [0].match');
+    const unchanged = specs(V1, V1, { 'allow.json': '[]' });
+    const needless = await run(unchanged.args('--allowlist', join(unchanged.root, 'allow.json')));
+    expect(needless.envelope.errors[0]!.message).toContain('there is no delta for it to cover');
+  });
+
+  it('needs SHADOW_DATABASE_URL for a delta, and never names the server it could not use', async () => {
+    const s = specs(V2, V1);
+    const missing = await run(s.args());
+    expect(missing.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+    expect(missing.envelope.errors[0]!.message).toContain('SHADOW_DATABASE_URL');
+    const unreachable = await run(s.args(), {
+      SHADOW_DATABASE_URL: 'postgres://secret-user:secret-pass@127.0.0.1:1/shadow',
+    });
+    expect(unreachable.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+    expect(JSON.stringify(unreachable.envelope)).not.toContain('secret-pass');
+    expect(JSON.stringify(unreachable.envelope)).not.toContain('127.0.0.1');
+    expect(readdirSync(s.outDir)).toEqual([]);
+  });
+
+  it('refuses a previous spec that does not parse, or is of the other profile', async () => {
+    const broken = specs(V2, 'version: [');
+    const refused = await run(broken.args());
+    expect(refused.envelope.errors[0]).toMatchObject({ code: 'RAY_SPEC_INVALID' });
+    expect(refused.envelope.errors[0]!.message).toContain('--against');
+    const other = specs(V2, "version: '1.0'\nproduct:\n  id: p\n  name: P\n");
+    const mixed = await run(other.args());
+    expect(mixed.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+    expect(mixed.envelope.errors[0]!.message).toContain('another profile');
+  });
+});

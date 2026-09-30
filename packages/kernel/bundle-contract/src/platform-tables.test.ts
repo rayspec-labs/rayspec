@@ -1,11 +1,13 @@
 /**
  * The platform table list restates the committed snapshot categories and adds only the
- * runtime-control tables, under the category the contract reserves for them.
+ * runtime-control tables and the product migration ledger, under the categories the contract
+ * reserves for them.
  */
 import { describe, expect, it } from 'vitest';
 import {
   CONTRACT_PLATFORM_TABLES,
   PLATFORM_TABLES,
+  PRODUCT_LEDGER_TABLES,
   PUBLIC_PLATFORM_TABLE_NAMES,
   RUNTIME_CONTROL_TABLES,
 } from './platform-tables.js';
@@ -40,7 +42,26 @@ describe('platform tables', () => {
     for (const table of RUNTIME_CONTROL_TABLES) {
       expect(table).toMatchObject({ schema: 'public', category: 'runtime-control-state' });
     }
-    expect(PLATFORM_TABLES).toEqual([...CONTRACT_PLATFORM_TABLES, ...RUNTIME_CONTROL_TABLES]);
+    expect(PLATFORM_TABLES).toEqual([
+      ...CONTRACT_PLATFORM_TABLES,
+      ...RUNTIME_CONTROL_TABLES,
+      ...PRODUCT_LEDGER_TABLES,
+    ]);
+  });
+
+  it('add the product migration ledger under the category the contract reserves for it', () => {
+    const reserved = categories.proposedTables
+      .filter((p) => p.purpose.includes('product migration ledger'))
+      .map((p) => p.category);
+    expect(reserved).toEqual(['platform-migration-ledger']);
+    expect(PRODUCT_LEDGER_TABLES).toEqual([
+      {
+        database: 'application',
+        schema: 'public',
+        table: 'product_migration_ledger',
+        category: 'platform-migration-ledger',
+      },
+    ]);
   });
 
   it('name each table once, each under a known category', () => {
@@ -49,10 +70,11 @@ describe('platform tables', () => {
     for (const p of PLATFORM_TABLES) expect(DATA_CATEGORIES).toContain(p.category);
   });
 
-  it('list the public names the product schema head leaves out, the ledger not among them', () => {
+  it('list the public names the product schema head leaves out, the drizzle ledger not among them', () => {
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('orgs')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('runtime_control_receipts')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('runtime_control_processes')).toBe(true);
+    expect(PUBLIC_PLATFORM_TABLE_NAMES.has('product_migration_ledger')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('__drizzle_migrations')).toBe(false);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.size).toBe(PLATFORM_TABLES.length - 1);
   });

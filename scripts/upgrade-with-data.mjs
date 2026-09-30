@@ -1,0 +1,434 @@
+#!/usr/bin/env node
+/**
+ * upgrade-with-data — an existing deployment, with data in it, upgraded from the PREVIOUS PUBLISHED
+ * release to this working tree.
+ *
+ * WHY. Every other database check starts from an empty database. A real upgrade starts from the
+ * database a released runtime created and has been writing to: its users, their password hashes,
+ * their API keys, the application's rows. This harness builds exactly that with the released
+ * package from npm, then boots the working tree on it and checks that nothing a user relies on was
+ * lost or changed.
+ *
+ * WHAT IT DOES, against a throwaway database on the server DATABASE_URL names:
+ *   1. Installs `rayspec@<previous>` from npm into a temporary directory (`--from <version>`,
+ *      default: the version npm reports as latest), with install scripts disabled.
+ *   2. Deploys the `examples/notes-ui` application with that release's `rayspec deploy`, registers a
+ *      user, creates an organization, mints an API key and writes notes through the declared API.
+ *   3. Records the rows and the credential rows exactly as they are stored.
+ *   4. Deploys the same spec with this working tree's `rayspec deploy`: the platform chain upgrades
+ *      the database in place.
+ *   5. Checks that every recorded row is byte-identical, that the user logs in with the same
+ *      password, that the API key still reads the notes, and that a new note can be written.
+ *   6. Packs the application with this working tree and deploys it as a bundle onto the upgraded
+ *      environment — a dry-run, then the reviewed plan — and checks rows and credentials again.
+ *
+ * It prints one JSON summary on stdout and exits 1 on the first failed check. The server logs of
+ * each boot go to `--log-dir <dir>` when it is given; `--port <n>` picks the listen port. No password, API key, signing key or pepper
+ * is printed: they are generated here and stay in this process and its children.
+ *
+ * Needs: DATABASE_URL (a server where a database may be created and dropped), the working tree
+ * built (`pnpm build`), npm with access to the registry. SHADOW_DATABASE_URL is used for the plan
+ * of the bundle deploy when set, and DATABASE_URL's server otherwise.
+ */
+import { execFileSync, spawn } from 'node:child_process';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseArgs } from 'node:util';
+import postgres from 'postgres';
+
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
+const EXAMPLE = join(REPO, 'examples', 'notes-ui');
+
+const baseUrl = process.env.DATABASE_URL;
+if (!baseUrl)
+  fail('DATABASE_URL is not set: it names the server the throwaway database is created on');
+if (!existsSync(CLI))
+  fail(`the working tree is not built (${CLI} is missing): run pnpm build first`);
+
+const { values: flags } = parseArgs({
+  options: { from: { type: 'string' }, 'log-dir': { type: 'string' }, port: { type: 'string' } },
+});
+const logDir = flags['log-dir'];
+const port = Number(flags.port ?? 18_600 + (process.pid % 900));
+const suiteDb = `rayspec_upgrade_${process.pid}`;
+const appUrl = withDbName(baseUrl, suiteDb);
+const shadowUrl = process.env.SHADOW_DATABASE_URL ?? baseUrl;
+const work = mkdtempSync(join(tmpdir(), 'rayspec-upgrade-'));
+const children = new Set();
+const summary = { from: null, to: null, checks: [] };
+
+function fail(message) {
+  process.stderr.write(`UPGRADE-WITH-DATA: FAIL — ${message}\n`);
+  process.exitCode = 1;
+  throw new Error(message);
+}
+
+function check(name, ok, detail = '') {
+  summary.checks.push({ name, ok });
+  if (!ok) fail(`${name}${detail === '' ? '' : `: ${detail}`}`);
+}
+
+function withDbName(url, name) {
+  const u = new URL(url);
+  u.pathname = `/${name}`;
+  return u.toString();
+}
+
+function log(line) {
+  process.stderr.write(`[upgrade-with-data] ${line}\n`);
+}
+
+/** The environment every boot gets: the explicit configuration and nothing from this process. */
+function bootEnv(secrets) {
+  return {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    DATABASE_URL: appUrl,
+    SHADOW_DATABASE_URL: shadowUrl,
+    RAYSPEC_JWT_SIGNING_KEY: secrets.jwt,
+    RAYSPEC_API_KEY_PEPPER: secrets.pepper,
+    RAYSPEC_SKIP_DOTENV: '1',
+    ALLOWED_ORIGINS: '',
+  };
+}
+
+/** Start a deploy that serves, and wait until /health answers 200. */
+async function serve(label, command, args, cwd, env) {
+  const child = spawn(process.execPath, [command, ...args, '--port', String(port)], { cwd, env });
+  children.add(child);
+  let output = '';
+  let stdout = '';
+  child.stdout.on('data', (d) => {
+    output += String(d);
+    stdout += String(d);
+  });
+  child.stderr.on('data', (d) => {
+    output += String(d);
+  });
+  const exited = new Promise((r) => child.on('exit', (code) => r(code)));
+  const deadline = Date.now() + 180_000;
+  for (;;) {
+    if (child.exitCode !== null) {
+      await exited;
+      save(label, output);
+      fail(`the ${label} deploy exited ${child.exitCode} before it served`);
+    }
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/health`)).status === 200) break;
+    } catch {
+      // not listening yet
+    }
+    if (Date.now() > deadline) {
+      save(label, output);
+      fail(`the ${label} deploy did not serve within 180 s`);
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return {
+    async stop() {
+      child.kill('SIGTERM');
+      const code = await exited;
+      children.delete(child);
+      save(label, output);
+      return { code, stdout };
+    },
+  };
+}
+
+function save(label, output) {
+  if (!logDir) return;
+  mkdirSync(logDir, { recursive: true });
+  writeFileSync(join(logDir, `${label}.log`), output);
+}
+
+async function api(method, path, { bearer, body } = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method,
+    headers: {
+      ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+      ...(body ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
+  return { status: res.status, json, text };
+}
+
+/** Every row of the tables a user relies on, as stored: an ordered digest per table. */
+async function storedRows(sql) {
+  const tables = {
+    notes: 'SELECT id, tenant_id, title, body, created_at FROM notes ORDER BY id',
+    users: 'SELECT id, email, password_hash FROM users ORDER BY id',
+    orgs: 'SELECT id, name, slug FROM orgs ORDER BY id',
+    memberships: 'SELECT org_id, user_id, role, status FROM memberships ORDER BY org_id, user_id',
+    api_keys:
+      'SELECT id, org_id, key_prefix, key_hash, scopes, revoked_at FROM api_keys ORDER BY id',
+  };
+  const out = {};
+  for (const [name, query] of Object.entries(tables)) {
+    const rows = await sql.unsafe(query);
+    out[name] = {
+      count: rows.length,
+      sha256: createHash('sha256').update(JSON.stringify(rows)).digest('hex'),
+    };
+  }
+  return out;
+}
+
+async function main() {
+  const from =
+    flags.from ?? execFileSync('npm', ['view', 'rayspec', 'version'], { encoding: 'utf8' }).trim();
+  const to = JSON.parse(
+    readFileSync(join(REPO, 'packages', 'app', 'cli', 'package.json'), 'utf8'),
+  ).version;
+  summary.from = from;
+  summary.to = `${to} (working tree)`;
+  if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(from)) fail('--from is not a version');
+
+  // 1. The previous release, from npm, with install scripts disabled.
+  const previous = join(work, 'previous');
+  mkdirSync(previous);
+  writeFileSync(join(previous, 'package.json'), '{"private":true}\n');
+  log(`installing rayspec@${from} from npm`);
+  execFileSync(
+    'npm',
+    ['install', '--no-audit', '--no-fund', '--ignore-scripts', '--no-save', `rayspec@${from}`],
+    { cwd: previous, stdio: ['ignore', 'ignore', 'inherit'] },
+  );
+  const previousCli = join(previous, 'node_modules', 'rayspec', 'dist', 'bin.js');
+  check('the previous release is installed', existsSync(previousCli));
+
+  // A throwaway database, the application and fresh secrets.
+  const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
+  await admin.unsafe(`DROP DATABASE IF EXISTS "${suiteDb}" WITH (FORCE)`);
+  await admin.unsafe(`CREATE DATABASE "${suiteDb}"`);
+  await admin.end();
+  const app = join(work, 'app');
+  cpSync(EXAMPLE, app, { recursive: true });
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const secrets = {
+    jwt: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+    pepper: randomBytes(32).toString('hex'),
+  };
+  const env = bootEnv(secrets);
+  const sql = postgres(appUrl, { max: 2, onnotice: () => {} });
+
+  try {
+    // 2. The previous release deploys the example; a user writes data through it.
+    log(`deploying with rayspec ${from}`);
+    const old = await serve('previous', previousCli, ['deploy', 'rayspec.yaml'], app, env);
+    const email = `upgrade-${randomBytes(4).toString('hex')}@example.com`;
+    const password = randomBytes(18).toString('base64url');
+    const registered = await api('POST', '/v1/auth/register', { body: { email, password } });
+    check(
+      'register on the previous release',
+      [200, 201].includes(registered.status),
+      registered.text,
+    );
+    const org = await api('POST', '/v1/orgs', {
+      bearer: registered.json.accessToken,
+      body: { name: 'Upgrade', slug: `upgrade-${randomBytes(3).toString('hex')}` },
+    });
+    check('create an organization on the previous release', org.status === 201, org.text);
+    const switched = await api('POST', `/v1/orgs/${org.json.id}/switch`, {
+      bearer: registered.json.accessToken,
+    });
+    check('switch into the organization', switched.status === 200, switched.text);
+    const token = switched.json.accessToken;
+    const minted = await api('POST', `/v1/orgs/${org.json.id}/api-keys`, {
+      bearer: token,
+      body: { name: 'upgrade', scopes: ['store:read'] },
+    });
+    check('mint an API key on the previous release', minted.status === 201, minted.text);
+    const apiKey = minted.json.plaintext;
+    const titles = ['first note', 'second note', 'third note'];
+    for (const title of titles) {
+      const created = await api('POST', '/api/notes', {
+        bearer: token,
+        body: { title, body: `${title} body` },
+      });
+      check(`write "${title}" on the previous release`, created.status === 201, created.text);
+    }
+    const stopped = await old.stop();
+    check('the previous release stops cleanly', stopped.code === 0);
+
+    // 3. What is stored before the upgrade.
+    const before = await storedRows(sql);
+    const headBefore = await sql.unsafe(
+      'SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations',
+    );
+
+    // 4. The working tree boots the same spec on that database.
+    log('deploying the same spec with the working tree');
+    const upgraded = await serve('upgraded', CLI, ['deploy', 'rayspec.yaml'], app, env);
+    const headAfter = await sql.unsafe(
+      'SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations',
+    );
+    summary.platformMigrations = { before: headBefore[0].n, after: headAfter[0].n };
+    check('the platform chain moved forward', headAfter[0].n >= headBefore[0].n);
+
+    // 5. Rows, credentials and behavior.
+    const after = await storedRows(sql);
+    for (const table of Object.keys(before)) {
+      check(
+        `${table}: every stored row is unchanged`,
+        JSON.stringify(after[table]) === JSON.stringify(before[table]),
+      );
+    }
+    await verifyServing('after the upgrade', {
+      email,
+      password,
+      orgId: org.json.id,
+      apiKey,
+      titles,
+    });
+    const added = await api('POST', '/api/notes', {
+      bearer: (await login(email, password, org.json.id)).token,
+      body: { title: 'written after the upgrade', body: 'new' },
+    });
+    check('write a note after the upgrade', added.status === 201, added.text);
+    titles.push('written after the upgrade');
+    check('the upgraded deployment stops cleanly', (await upgraded.stop()).code === 0);
+
+    // 6. The same application as a bundle, deployed onto the upgraded environment.
+    log('packing the application and deploying it as a bundle');
+    const packed = execFileSync(
+      process.execPath,
+      [
+        CLI,
+        'pack',
+        '--spec',
+        'rayspec.yaml',
+        '--output',
+        'notes-ui.ray',
+        '--id',
+        'notes-ui',
+        '--version',
+        '1.0.0',
+      ],
+      { cwd: app, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+    check('pack the application', JSON.parse(packed).ok === true);
+    const planned = JSON.parse(
+      execFileSync(process.execPath, [CLI, 'deploy', 'notes-ui.ray', '--dry-run'], {
+        cwd: app,
+        env,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }),
+    );
+    check('plan the bundle deploy', planned.ok === true, JSON.stringify(planned.errors));
+    check(
+      'the plan has no blocker',
+      planned.data.plan.blockers.length === 0,
+      JSON.stringify(planned.data.plan.blockers),
+    );
+    const bundled = await serve(
+      'bundle',
+      CLI,
+      ['deploy', 'notes-ui.ray', '--plan-digest', planned.data.planDigest],
+      app,
+      env,
+    );
+    await verifyServing('after the bundle deploy', {
+      email,
+      password,
+      orgId: org.json.id,
+      apiKey,
+      titles,
+    });
+    const bundleStop = await bundled.stop();
+    check('the bundle deployment stops cleanly', bundleStop.code === 0);
+    // stdout is the one envelope: the durable runtime's startup lines go to stderr.
+    let envelope = {};
+    try {
+      envelope = JSON.parse(bundleStop.stdout);
+    } catch {
+      envelope = {};
+    }
+    check(
+      'the bundle deploy reports its envelope, alone on stdout',
+      envelope.ok === true && envelope.operation === 'deploy',
+    );
+    const final = await storedRows(sql);
+    check(
+      'users, orgs, memberships and api_keys are unchanged by the bundle deploy',
+      ['users', 'orgs', 'memberships', 'api_keys'].every(
+        (t) => JSON.stringify(final[t]) === JSON.stringify(before[t]),
+      ),
+    );
+  } finally {
+    await sql.end().catch(() => {});
+  }
+}
+
+async function login(email, password, orgId) {
+  const res = await api('POST', '/v1/auth/login', { body: { email, password } });
+  check('log in with the password set before the upgrade', res.status === 200, res.text);
+  const switched = await api('POST', `/v1/orgs/${orgId}/switch`, { bearer: res.json.accessToken });
+  check('switch into the organization', switched.status === 200, switched.text);
+  return { token: switched.json.accessToken };
+}
+
+async function verifyServing(when, { email, password, orgId, apiKey, titles }) {
+  const { token } = await login(email, password, orgId);
+  const byUser = await api('GET', '/api/notes', { bearer: token });
+  check(
+    `the user reads every note ${when}`,
+    byUser.status === 200 && titles.every((t) => byUser.text.includes(t)),
+    byUser.text,
+  );
+  const byKey = await api('GET', '/api/notes', { bearer: apiKey });
+  check(
+    `the API key reads every note ${when}`,
+    byKey.status === 200 && titles.every((t) => byKey.text.includes(t)),
+    String(byKey.status),
+  );
+  const live = await fetch(`http://127.0.0.1:${port}/livez`);
+  check(`/livez answers ${when}`, live.status === 200);
+}
+
+async function cleanup() {
+  for (const child of children) child.kill('SIGKILL');
+  try {
+    const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
+    await admin.unsafe(`DROP DATABASE IF EXISTS "${suiteDb}" WITH (FORCE)`);
+    await admin.end();
+  } catch {
+    // the database server is gone; nothing left to drop
+  }
+  execFileSync('chmod', ['-R', 'u+w', work]);
+  rmSync(work, { recursive: true, force: true });
+}
+
+const started = Date.now();
+try {
+  await main();
+  summary.ok = true;
+} catch (err) {
+  summary.ok = false;
+  summary.error = err instanceof Error ? err.message : String(err);
+  process.exitCode = 1;
+} finally {
+  await cleanup();
+  summary.seconds = Math.round((Date.now() - started) / 1000);
+  process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+}

@@ -2,8 +2,8 @@
  * `rayspec pack` — write an application bundle (`.ray`) from an application that is already built.
  *
  *   rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
- *                [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
- *                [--force] [--json]
+ *                [--runtime <exact-version>] [--include <path>]... [--against <old-spec>
+ *                [--allowlist <file.json>]] [--source-maps] [--preview] [--force] [--json]
  *
  * The steps run in the order of the pack pipeline, and the first failing one ends the run: the
  * arguments; the spec, parsed; the application identity; the closure, resolved from what the spec
@@ -26,8 +26,16 @@
  * `--json`; the operation id and, without `--json`, the inclusion summary go to stderr. The summary
  * says what was packed; it never suggests that anything was deployed.
  *
+ * With `--against <old-spec>` the bundle also carries the product delta from the stores the previous
+ * spec declares to the ones the new spec declares, the reviewed `--allowlist` for its destructive
+ * statements, and the product schema digests it migrates between (`pack-against.ts`). A destructive
+ * delta the allowlist does not clear is refused. The target runtime regenerates the delta and the
+ * digests from its own product migration ledger and refuses any difference.
+ *
  * The import graph of this module is the closure resolver, the bundle codec, the contract, the spec
  * grammar and Node's own modules: no server, database layer or handler loader is loaded to pack.
+ * Only `--against` loads the product schema planner, and with it the server and the database layer,
+ * to compute the digests on a throwaway database.
  */
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -41,6 +49,7 @@ import {
   closureFiles,
   closureManifest,
   closurePreview,
+  type ProductMigrationInput,
   resolveClosure,
 } from '@rayspec/bundle-closure';
 import {
@@ -76,13 +85,6 @@ export const BUILD_REFUSAL =
   'native module for linux/x64 and Node 22 in an isolated build), then pack the spec of the built ' +
   'output without --build';
 
-/** Why `--against` and `--allowlist` are refused, with the commands that do the work today. */
-export const AGAINST_REFUSAL =
-  '--against and --allowlist are not available yet: a bundled product delta must name the product ' +
-  'schema heads it migrates between, which are read from a database and not from spec files. ' +
-  'Review the delta with `rayspec plan <spec> --against <old-spec> [--allowlist <file.json>]` and ' +
-  'apply it with `rayspec deploy <spec> --apply-migration <delta.sql>`';
-
 const MAX_VERSION_LENGTH = 128;
 
 export interface PackRunOptions {
@@ -94,6 +96,11 @@ export interface PackRunOptions {
   json?: boolean;
   /** Raised on SIGINT or SIGTERM. Pack stops at the next safe point and removes what it wrote. */
   signal?: AbortSignal;
+  /**
+   * The environment `--against` reads `SHADOW_DATABASE_URL` from. Default: `process.env`, never a
+   * `.env` file.
+   */
+  env?: NodeJS.ProcessEnv;
   /**
    * Called once the closure is resolved, before anything is written. A test changes a file or
    * raises the signal here, to reach the checks that guard the write.
@@ -133,6 +140,8 @@ interface PackArgs {
   version: string | undefined;
   runtime: string;
   include: string[];
+  against: string | undefined;
+  allowlist: string | undefined;
   sourceMaps: boolean;
   preview: boolean;
   force: boolean;
@@ -185,6 +194,23 @@ async function pack(args: readonly string[], options: PackRunOptions): Promise<P
     };
   }
 
+  // The product delta against the previous spec, when one is named.
+  let productMigration: ProductMigrationInput | undefined;
+  let deltaLines: string[] = [];
+  if (parsed.against !== undefined) {
+    const { productMigrationAgainst } = await import('./pack-against.js');
+    const shadowDatabaseUrl = (options.env ?? process.env).SHADOW_DATABASE_URL;
+    const against = await productMigrationAgainst({
+      spec: parsed.spec,
+      against: parsed.against,
+      ...(parsed.allowlist === undefined ? {} : { allowlist: parsed.allowlist }),
+      ...(shadowDatabaseUrl === undefined ? {} : { shadowDatabaseUrl }),
+    });
+    if (!against.ok) return refused(against.errors, parsed.json, options);
+    productMigration = against.migration;
+    deltaLines = against.lines;
+  }
+
   // Spec, identity, closure and secret scan: the resolver runs them in the pipeline's order.
   const resolved = await resolveClosure({
     specPath: parsed.spec,
@@ -193,6 +219,7 @@ async function pack(args: readonly string[], options: PackRunOptions): Promise<P
     version: parsed.version,
     include: parsed.include,
     sourceMaps: parsed.sourceMaps,
+    ...(productMigration === undefined ? {} : { productMigration }),
   });
   if (!resolved.ok) return refused(resolved.errors, parsed.json, options);
   const closure = resolved.value;
@@ -211,6 +238,7 @@ async function pack(args: readonly string[], options: PackRunOptions): Promise<P
       envelope: envelope(OPERATION, options.operationId, data, [], preview.warnings),
       summary: [
         ...describe(preview, true),
+        ...deltaLines,
         'preview only: nothing was written. Run the command again without --preview to write the bundle.',
       ],
       json: parsed.json,
@@ -228,6 +256,7 @@ async function pack(args: readonly string[], options: PackRunOptions): Promise<P
     envelope: envelope(OPERATION, options.operationId, data, [], preview.warnings),
     summary: [
       ...describe(preview, false),
+      ...deltaLines,
       `wrote ${written.path}`,
       `  ${written.size} bytes, sha256 ${written.sha256}`,
       'This is a package, not a deployment: nothing was deployed, started or run. Check it with',
@@ -261,9 +290,6 @@ function parsePackArgs(args: readonly string[], options: PackRunOptions): PackAr
     },
   });
   if (values.build === true) throw new Error(BUILD_REFUSAL);
-  if (values.against !== undefined || values.allowlist !== undefined) {
-    throw new Error(AGAINST_REFUSAL);
-  }
   if (values.spec === undefined || values.spec === '') {
     throw new Error('--spec <path> is required: the spec file of the built application');
   }
@@ -278,6 +304,13 @@ function parsePackArgs(args: readonly string[], options: PackRunOptions): PackAr
   }
   const include = values.include ?? [];
   if (include.some((path) => path === '')) throw new Error('--include needs a path');
+  if (values.against === '') throw new Error('--against needs the path of the previous spec');
+  if (values.allowlist === '') throw new Error('--allowlist needs the path of the allowlist file');
+  if (values.allowlist !== undefined && values.against === undefined) {
+    throw new Error(
+      '--allowlist requires --against: a reviewed allowlist only covers a delta generated against a previous spec',
+    );
+  }
   return {
     spec: values.spec,
     output: values.output,
@@ -285,6 +318,8 @@ function parsePackArgs(args: readonly string[], options: PackRunOptions): PackAr
     version: values.version,
     runtime,
     include,
+    against: values.against,
+    allowlist: values.allowlist,
     sourceMaps: values['source-maps'] === true,
     preview: values.preview === true,
     force: values.force === true,

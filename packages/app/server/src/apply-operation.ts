@@ -88,6 +88,25 @@ export const MAX_STEP_NAME_LENGTH = 128;
 /** How long an apply's lease lives between renewals, unless the caller says otherwise. */
 export const DEFAULT_APPLY_LEASE_TTL_MS = 60_000;
 
+/** What a step is told when it runs. */
+export interface StepContext {
+  /** The operation running the step: the request's, or the one it continues. */
+  operationId: string;
+}
+
+/**
+ * A step's refusal: the step found, before changing anything, that it must not run. The apply
+ * reports the step's own error instead of `RAY_INTERNAL`.
+ */
+export class ApplyStepRefusal extends Error {
+  readonly error: BundleError;
+  constructor(error: BundleError) {
+    super(error.message);
+    this.name = 'ApplyStepRefusal';
+    this.error = error;
+  }
+}
+
 /** What a step reports when it finishes. */
 export interface StepEffect {
   /** SHA-256 of what the step produced, when it has one; reported in the step's receipt. */
@@ -116,9 +135,12 @@ export type ApplyStep =
       kind: 'transaction';
       /** Take the shared schema lock first, in the same transaction. */
       schemaChange: boolean;
-      run: (tx: LeaseTx) => Promise<StepEffect | undefined>;
+      run: (tx: LeaseTx, context: StepContext) => Promise<StepEffect | undefined>;
     })
-  | (StepBase & { kind: 'effect'; run: () => Promise<StepEffect | undefined> });
+  | (StepBase & {
+      kind: 'effect';
+      run: (context: StepContext) => Promise<StepEffect | undefined>;
+    });
 
 /** Readers of the state a step changes, keyed by the name a step's receipt records. */
 export type StateObservers = Readonly<Record<string, () => Promise<string>>>;
@@ -172,7 +194,8 @@ export interface ApplyOptions {
   leaseWaitMs?: number;
   /**
    * Rethrow a step's own error after its receipts are written, instead of reporting it as
-   * `RAY_INTERNAL`: for a caller whose callers already handle that error.
+   * `RAY_INTERNAL`: for a caller whose callers already handle that error. A step's refusal
+   * (`ApplyStepRefusal`) is always reported as its own error, never rethrown.
    */
   rethrowStepErrors?: boolean;
   /** Told about every operation reconciliation settled or found blocked. */
@@ -729,6 +752,7 @@ async function underLease(
     );
     let stepError: unknown;
     let failedStep: string | undefined;
+    const context: StepContext = { operationId: lease.identity.operationId };
     for (const step of steps) {
       if (finishedEarlier.has(step.name)) continue;
       await lease.renew(ttlMs);
@@ -757,7 +781,7 @@ async function underLease(
         if (step.kind === 'transaction') {
           await lease.mutate(
             async (tx) => {
-              const effect = await step.run(tx);
+              const effect = await step.run(tx, context);
               await checkpoint('after-step-effect', step.name);
               await lease.recordIn(tx, {
                 event: 'step-finished',
@@ -773,7 +797,7 @@ async function underLease(
               : {},
           );
         } else {
-          const effect = await step.run();
+          const effect = await step.run(context);
           await checkpoint('after-step-effect', step.name);
           await lease.record({
             event: 'step-finished',
@@ -816,7 +840,9 @@ async function underLease(
           },
         )
         .catch(() => undefined);
-      if (options.rethrowStepErrors === true && !(stepError instanceof OperationLeaseError)) {
+      const ownError =
+        stepError instanceof OperationLeaseError || stepError instanceof ApplyStepRefusal;
+      if (options.rethrowStepErrors === true && !ownError) {
         throw new StepFailure(stepError);
       }
       return envelope(replyId, null, [error]);
@@ -859,6 +885,7 @@ class StepFailure extends Error {
 
 function stepErrorFor(err: unknown, step: string): BundleError {
   if (err instanceof OperationLeaseError) return bundleError(err.code, err.message);
+  if (err instanceof ApplyStepRefusal) return err.error;
   if (err instanceof SchemaLockTimeoutError) return bundleError('RAY_LOCK_TIMEOUT', err.message);
   return bundleError('RAY_INTERNAL', `the step ${step} failed; its receipts record where`);
 }

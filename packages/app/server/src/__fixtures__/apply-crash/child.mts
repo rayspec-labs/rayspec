@@ -70,12 +70,15 @@ async function main(): Promise<void> {
   if (scenario === 'legacy-platform') {
     await deployApply.platformChain();
   } else {
-    await deployApply.productMigration({
-      name: '0000_product_stores.sql',
-      sql:
-        'CREATE TABLE "crash_a" ("id" text PRIMARY KEY);\n--> statement-breakpoint\n' +
-        'CREATE TABLE "crash_b" ("id" text PRIMARY KEY, "a" text REFERENCES "crash_a" ("id"));',
-    });
+    await deployApply.productMigration(
+      {
+        name: '0000_product_stores.sql',
+        sql:
+          'CREATE TABLE "crash_a" ("id" text PRIMARY KEY);\n--> statement-breakpoint\n' +
+          'CREATE TABLE "crash_b" ("id" text PRIMARY KEY, "a" text REFERENCES "crash_a" ("id"));',
+      },
+      { stores: [] },
+    );
   }
   process.stdout.write('DONE {}\n');
 }

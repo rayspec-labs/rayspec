@@ -132,12 +132,23 @@ function checkIdentity(identity: OperationIdentity): void {
 
 /**
  * Create the environment's state row when it does not exist yet, with a fresh random binding revision
- * key. Idempotent: an existing row, and its key, are left alone.
+ * key, or with `bindingRevisionKey` when the caller already computed revision ids under a key the
+ * environment is to keep. Idempotent: an existing row, and its key, are left alone.
  */
-export async function ensureRuntimeControlState(tx: LeaseTx): Promise<void> {
+export async function ensureRuntimeControlState(
+  tx: LeaseTx,
+  bindingRevisionKey?: Uint8Array,
+): Promise<void> {
+  if (
+    bindingRevisionKey !== undefined &&
+    bindingRevisionKey.length !== BINDING_REVISION_KEY_BYTES
+  ) {
+    throw new RangeError(`the binding revision key must be ${BINDING_REVISION_KEY_BYTES} bytes`);
+  }
+  const key = bindingRevisionKey ?? randomBytes(BINDING_REVISION_KEY_BYTES);
   await tx.unsafe(
     'INSERT INTO runtime_control_state (id, binding_revision_key) VALUES (1, $1) ON CONFLICT (id) DO NOTHING',
-    [randomBytes(BINDING_REVISION_KEY_BYTES).toString('hex')],
+    [Buffer.from(key).toString('hex')],
   );
 }
 

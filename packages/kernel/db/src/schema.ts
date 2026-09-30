@@ -868,6 +868,58 @@ export const runtimeControlProcesses = pgTable(
 );
 
 /**
+ * product_migration_ledger — the APPEND-ONLY record of every product schema change applied to the
+ * environment, in the order it was applied: the DDL itself and its SHA-256, the product schema digest
+ * before and after it, the product schema description after it, the declared stores the schema then
+ * implements (so the next delta can be regenerated from them), and the operation that applied it.
+ *
+ * The latest row is the product half of what the environment is supposed to look like: a live
+ * catalog whose digest differs from its `product_schema_after` was changed outside an apply (drift),
+ * and replaying the rows' DDL in order on an empty database reproduces the live product schema. A
+ * trigger created with the table (migration `0014_product_migration_ledger`) refuses UPDATE, DELETE
+ * and TRUNCATE.
+ *
+ * `ledger_format_version` says how a row is to be read. A runtime that meets a version it does not
+ * know refuses to plan or apply a product change rather than guess (the row was written by a newer
+ * runtime).
+ *
+ * GLOBAL/predicate-exempt. It holds DDL, digests, store declarations and operation ids, never a
+ * secret or a row of application data; the category is `platform-migration-ledger`, so it travels
+ * with a snapshot like the platform ledger does.
+ */
+export const productMigrationLedger = pgTable(
+  'product_migration_ledger',
+  {
+    /** An identity column: the rows read back in the order they were applied. */
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    ledgerFormatVersion: smallint('ledger_format_version').notNull(),
+    /** The apply operation that ran the DDL (its receipts are in `runtime_control_receipts`). */
+    operationId: uuid('operation_id').notNull(),
+    /** The name the change was applied under, for example `0000_product_stores.sql`. */
+    migrationName: text('migration_name').notNull(),
+    /** The DDL exactly as it ran, statement-breakpoint markers removed. */
+    ddl: text('ddl').notNull(),
+    ddlSha256: text('ddl_sha256').notNull(),
+    productSchemaBefore: text('product_schema_before').notNull(),
+    productSchemaAfter: text('product_schema_after').notNull(),
+    /** The product schema description the digest after was computed from. */
+    schemaAfter: jsonb('schema_after').notNull(),
+    /** `{stores, conflictKeys}`: the declared stores the product schema implements after the change. */
+    declaredStores: jsonb('declared_stores').notNull(),
+    appliedAt: timestamp('applied_at', { withTimezone: true })
+      .notNull()
+      .default(sql`clock_timestamp()`),
+  },
+  (t) => [
+    check('product_migration_ledger_format', sql`${t.ledgerFormatVersion} >= 1`),
+    check(
+      'product_migration_ledger_digests',
+      sql`${t.ddlSha256} ~ '^[a-f0-9]{64}$' AND ${t.productSchemaBefore} ~ '^[a-f0-9]{64}$' AND ${t.productSchemaAfter} ~ '^[a-f0-9]{64}$'`,
+    ),
+  ],
+);
+
+/**
  * The set of tenant-scoped tables that the TenantDb chokepoint auto-scopes by tenant_id.
  * DENY-BY-DEFAULT: a tenant-scoped table NOT registered here throws on access (it must
  * never silently fall through to unscoped). Global/auth tables (orgs, users, sessions,

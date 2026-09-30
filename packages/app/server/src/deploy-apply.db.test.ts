@@ -208,7 +208,8 @@ describe.skipIf(!baseUrl)('the legacy deploy through apply', () => {
     const setup = makeDb(dbUrl, 2);
     try {
       await applyMigrations(setup);
-      await setup.$client.unsafe('DROP TABLE runtime_control_processes');
+      await setup.$client.unsafe('DROP TABLE product_migration_ledger');
+      await setup.$client.unsafe('DROP FUNCTION product_migration_ledger_append_only()');
       await setup.$client.unsafe(
         `DELETE FROM drizzle.__drizzle_migrations
           WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`,
