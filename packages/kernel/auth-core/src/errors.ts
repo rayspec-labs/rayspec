@@ -22,6 +22,7 @@ export const ErrorCode = z.enum([
   'UPSTREAM_ERROR', // 502 — an upstream provider 5xx surfaced on a live run
   'NOT_IMPLEMENTED', // 501 — reserved seam (WorkOS SSO stub)
   'GATEWAY_TIMEOUT', // 504 — a held in-request run exceeded its wall-clock timeout
+  'SERVICE_UNAVAILABLE', // 503 — the runtime is fenced: mutations wait until it is resumed (Retry-After)
 ]);
 export type ErrorCode = z.infer<typeof ErrorCode>;
 
@@ -40,6 +41,7 @@ export const STATUS_BY_CODE: Record<ErrorCode, number> = {
   UPSTREAM_ERROR: 502,
   NOT_IMPLEMENTED: 501,
   GATEWAY_TIMEOUT: 504,
+  SERVICE_UNAVAILABLE: 503,
 };
 
 /** The wire error envelope. */

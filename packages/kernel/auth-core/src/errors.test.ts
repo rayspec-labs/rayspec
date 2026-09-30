@@ -23,6 +23,7 @@ const ALL_CODES: ErrorCode[] = [
   'UPSTREAM_ERROR',
   'NOT_IMPLEMENTED',
   'GATEWAY_TIMEOUT',
+  'SERVICE_UNAVAILABLE',
 ];
 
 describe('errorEnvelope details-strip', () => {
@@ -83,5 +84,10 @@ describe('errorEnvelope details-strip', () => {
       leaked: true,
     });
     expect('details' in env.error).toBe(false);
+  });
+
+  it('maps SERVICE_UNAVAILABLE to HTTP 503, bare (a fenced runtime says nothing more than that)', () => {
+    expect(STATUS_BY_CODE.SERVICE_UNAVAILABLE).toBe(503);
+    expect(DETAILS_ALLOWED.has('SERVICE_UNAVAILABLE')).toBe(false);
   });
 });
