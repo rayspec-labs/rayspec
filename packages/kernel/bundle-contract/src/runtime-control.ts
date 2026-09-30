@@ -152,6 +152,51 @@ export function checkPrepareRequest(request: unknown): BundleError[] {
   return checkSchemaHead(r.expectedSchemaHead, '/expectedSchemaHead');
 }
 
+/** The longest reason a quiesce may record. */
+export const MAX_QUIESCE_REASON_LENGTH = 1024;
+
+/**
+ * Check a quiesce request after its common members: a reason of 1 to 1024 characters without control
+ * characters, a whole-second UTC `deadline` and a boolean `sourceStopped`.
+ */
+export function checkQuiesceRequest(request: unknown): BundleError[] {
+  const base = checkRequestBase(request);
+  if (base.length > 0) return base;
+  const r = request as Record<string, unknown>;
+  if (
+    typeof r.reason !== 'string' ||
+    r.reason.length === 0 ||
+    r.reason.length > MAX_QUIESCE_REASON_LENGTH ||
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the control range is what is refused
+    /[\u0000-\u001f\u007f]/.test(r.reason)
+  ) {
+    return [
+      usage(
+        `reason must be 1 to ${MAX_QUIESCE_REASON_LENGTH} characters without control characters`,
+        '/reason',
+      ),
+    ];
+  }
+  if (parseTimestamp(r.deadline) === null) {
+    return [usage('deadline must be a whole-second UTC timestamp ending in Z', '/deadline')];
+  }
+  if (typeof r.sourceStopped !== 'boolean') {
+    return [usage('sourceStopped must be a boolean', '/sourceStopped')];
+  }
+  return [];
+}
+
+/** Check a resume request after its common members: `fenceEpoch` is a non-negative safe integer. */
+export function checkResumeRequest(request: unknown): BundleError[] {
+  const base = checkRequestBase(request);
+  if (base.length > 0) return base;
+  const epoch = (request as Record<string, unknown>).fenceEpoch;
+  if (typeof epoch !== 'number' || !Number.isSafeInteger(epoch) || epoch < 0) {
+    return [usage('fenceEpoch must be a non-negative safe integer', '/fenceEpoch')];
+  }
+  return [];
+}
+
 // ─── timestamps ────────────────────────────────────────────────────────────────────────────────
 
 const TIMESTAMP =

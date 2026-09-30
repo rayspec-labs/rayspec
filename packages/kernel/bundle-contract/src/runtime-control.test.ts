@@ -10,7 +10,9 @@ import { describe, expect, it } from 'vitest';
 import {
   bindingRevisionId,
   checkPrepareRequest,
+  checkQuiesceRequest,
   checkRequestBase,
+  checkResumeRequest,
   EMPTY_PRODUCT_SCHEMA_DIGEST,
   formatTimestamp,
   isPlanExpired,
@@ -123,6 +125,66 @@ describe('checkPrepareRequest', () => {
   ])('refuses %s', (_label, request, path) => {
     const errors = checkPrepareRequest(request);
     expect(errors[0]).toMatchObject({ code: 'RAY_USAGE', path });
+  });
+});
+
+describe('checkQuiesceRequest', () => {
+  const quiesce = {
+    ...base,
+    reason: 'export before a host move',
+    deadline: '2026-09-29T12:05:00Z',
+    sourceStopped: false,
+  };
+
+  it('accepts a well-formed request', () => {
+    expect(checkQuiesceRequest(quiesce)).toEqual([]);
+    expect(checkQuiesceRequest({ ...quiesce, sourceStopped: true })).toEqual([]);
+  });
+
+  it.each([
+    ['a base member that is wrong', { ...quiesce, actor: '' }, '/actor'],
+    ['an empty reason', { ...quiesce, reason: '' }, '/reason'],
+    ['a reason over 1024 characters', { ...quiesce, reason: 'r'.repeat(1025) }, '/reason'],
+    ['a reason with a control character', { ...quiesce, reason: 'a\u0007b' }, '/reason'],
+    [
+      'a deadline with fractional seconds',
+      { ...quiesce, deadline: '2026-09-29T12:05:00.5Z' },
+      '/deadline',
+    ],
+    [
+      'a deadline with an offset',
+      { ...quiesce, deadline: '2026-09-29T12:05:00+01:00' },
+      '/deadline',
+    ],
+    ['a missing deadline', { ...base, reason: 'r', sourceStopped: false }, '/deadline'],
+    [
+      'a sourceStopped that is not a boolean',
+      { ...quiesce, sourceStopped: 'yes' },
+      '/sourceStopped',
+    ],
+  ])('refuses %s', (_label, request, path) => {
+    const errors = checkQuiesceRequest(request);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: 'RAY_USAGE', path });
+  });
+});
+
+describe('checkResumeRequest', () => {
+  it('accepts epoch 0 and a positive epoch', () => {
+    expect(checkResumeRequest({ ...base, fenceEpoch: 0 })).toEqual([]);
+    expect(checkResumeRequest({ ...base, fenceEpoch: 7 })).toEqual([]);
+  });
+
+  it.each([
+    ['a negative epoch', -1],
+    ['a fractional epoch', 1.5],
+    ['an epoch past the safe integers', 2 ** 53],
+    ['an epoch given as a string', '3'],
+    ['a missing epoch', undefined],
+  ])('refuses %s', (_label, fenceEpoch) => {
+    const errors = checkResumeRequest({ ...base, fenceEpoch });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: 'RAY_USAGE', path: '/fenceEpoch' });
   });
 });
 

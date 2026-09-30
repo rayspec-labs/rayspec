@@ -51,6 +51,7 @@ export const CONTRACT_PLATFORM_TABLES: readonly PlatformTable[] = [
 export const RUNTIME_CONTROL_TABLES: readonly PlatformTable[] = [
   t('runtime_control_state', 'runtime-control-state'),
   t('runtime_control_receipts', 'runtime-control-state'),
+  t('runtime_control_processes', 'runtime-control-state'),
 ];
 
 /** Every platform table of the application database. */

@@ -52,6 +52,7 @@ describe('platform tables', () => {
   it('list the public names the product schema head leaves out, the ledger not among them', () => {
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('orgs')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('runtime_control_receipts')).toBe(true);
+    expect(PUBLIC_PLATFORM_TABLE_NAMES.has('runtime_control_processes')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('__drizzle_migrations')).toBe(false);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.size).toBe(PLATFORM_TABLES.length - 1);
   });
