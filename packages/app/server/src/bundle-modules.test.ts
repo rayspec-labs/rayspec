@@ -65,7 +65,7 @@ function importAll(withHook: boolean): Record<string, string> {
         : ''
     }
     for (const name of ${JSON.stringify(handlers)}) {
-      const url = new URL('handlers/' + name + '.js', ${JSON.stringify(pathToFileURL(join(root, 'payload')).href + '/')});
+      const url = new URL('handlers/' + name + '.js', ${JSON.stringify(`${pathToFileURL(join(root, 'payload')).href}/`)});
       try {
         results[name] = String((await import(url.href)).value);
       } catch (err) {
