@@ -27,8 +27,9 @@
  *
  * ONE ORDERING LIMIT. The receipts live in platform tables, so the chain that creates them on a
  * database that predates them runs outside apply — under the schema lock and atomically, as before.
- * A restart that finds nothing to change takes no lease and writes nothing, except to reconcile an
- * interrupted operation.
+ * A restart that finds nothing to change takes no lease and writes nothing, except to settle an
+ * interrupted operation it can settle; on an environment blocked on a step whose outcome cannot be
+ * established it writes nothing at all.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
@@ -48,6 +49,7 @@ import {
   type ApplyStep,
   DEFAULT_APPLY_LEASE_TTL_MS,
   hasUnsettledApplies,
+  previewReconciliation,
   type ReconciledOperation,
   runApply,
   type StateObservers,
@@ -193,6 +195,17 @@ export class DeployApply {
     (this.#options.warn ?? ((l: string) => console.warn(l)))(line);
   }
 
+  /**
+   * A boot with nothing to change on a blocked environment: the process may serve the schema it
+   * finds. Every schema change stays refused until an operator records the step's outcome.
+   */
+  #warnBlocked(message: string): void {
+    this.#warn(
+      `[rayspec] WARNING — ${message}. This boot changes no schema and continues; every schema ` +
+        'change is refused until the step is resolved.',
+    );
+  }
+
   #report(operations: readonly ReconciledOperation[]): void {
     const warn = (line: string) => this.#warn(line);
     for (const op of operations) {
@@ -256,7 +269,16 @@ export class DeployApply {
         return;
       }
       const pending = head.state !== 'known' || head.tag !== target;
-      if (!pending && !(await hasUnsettledApplies(this.#db))) return;
+      if (!pending) {
+        if (!(await hasUnsettledApplies(this.#db))) return;
+        // Nothing to change: take the lease only when reconciliation has something to settle. An
+        // environment blocked on a step whose outcome no one can establish gets nothing written.
+        const preview = await previewReconciliation(this.#db, this.#observers());
+        if (!preview.settles) {
+          if (preview.blocked !== null) this.#warnBlocked(preview.blocked.message);
+          return;
+        }
+      }
       const step: ApplyStep = {
         kind: 'effect',
         name: 'platform-migrations',
@@ -279,12 +301,8 @@ export class DeployApply {
       // Another boot changed the environment while this one waited: plan again.
       if (result.errors[0].code === 'RAY_PLAN_STALE' && Date.now() < deadline) continue;
       if (!pending && result.errors[0].code === 'RAY_RECONCILIATION_REQUIRED') {
-        // Nothing to change: the process may serve the schema it finds. Every schema change stays
-        // refused until an operator records the step's outcome.
-        this.#warn(
-          `[rayspec] WARNING — ${result.errors[0].message}. This boot changes no schema and ` +
-            'continues; every schema change is refused until the step is resolved.',
-        );
+        // It settled what it could; one step is still unknown.
+        this.#warnBlocked(result.errors[0].message);
         return;
       }
       throw new RuntimeApplyError(result.errors);

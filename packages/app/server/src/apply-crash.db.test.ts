@@ -396,14 +396,28 @@ describe.skipIf(!baseUrl)('apply after a crash', () => {
     // change is refused with the same code and exit class.
     const second = await restartApply(db, [markerStep(db, 'blocked')]);
     expect(second.result.errors[0]).toMatchObject({ code: 'RAY_RECONCILIATION_REQUIRED' });
+    // Two restarts with nothing to change: each warns, and neither writes a receipt or takes the lease.
+    const written = async () =>
+      await sql`SELECT (SELECT count(*)::int FROM runtime_control_receipts) AS receipts,
+                       lease_epoch::int AS epoch, lease_operation_id::text AS holder,
+                       environment_revision::int AS revision
+                  FROM runtime_control_state WHERE id = 1`;
+    const beforeRestarts = await written();
     const bootWarnings: string[] = [];
-    const boot = new DeployApply({
-      db,
-      migratePlatform: () => applyMigrations(db),
-      warn: (line) => bootWarnings.push(line),
-    });
-    await boot.platformChain();
-    expect(bootWarnings.join('\n')).toContain('every schema change is refused');
+    let boot: DeployApply | undefined;
+    for (let restart = 1; restart <= 2; restart += 1) {
+      boot = new DeployApply({
+        db,
+        migratePlatform: () => applyMigrations(db),
+        warn: (line) => bootWarnings.push(line),
+      });
+      await boot.platformChain();
+      expect(await written(), `restart ${restart}`).toEqual(beforeRestarts);
+      expect(bootWarnings.length, `restart ${restart}`).toBe(restart);
+      expect(bootWarnings[restart - 1]).toContain('every schema change is refused');
+      expect(bootWarnings[restart - 1]).toContain(killed.operationId);
+    }
+    if (boot === undefined) throw new Error('no restart ran');
     const refused = await boot
       .productMigration({ name: 'blocked.sql', sql: 'CREATE TABLE blocked_ddl (id int);' })
       .then(

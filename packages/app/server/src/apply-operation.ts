@@ -414,6 +414,46 @@ function latestStart(receipts: readonly OperationReceipt[], step: string) {
   return [...receipts].reverse().find((r) => r.event === 'step-started' && r.step === step);
 }
 
+/** What reconciliation finds for one unsettled operation, before it records anything. */
+interface Settlement {
+  target: { operationId: string; kind: string; inputsDigest: string };
+  entry: ReconciledOperation;
+  /** Every step is settled and the operation has no outcome: it is closed as interrupted. */
+  closes: boolean;
+}
+
+/**
+ * Read every unsettled apply operation and observe its open steps, writing nothing. `own` is the
+ * operation holding the lease, if any, which is unsettled only through steps it left open itself.
+ */
+async function surveyUnsettled(
+  db: Db,
+  observers: StateObservers,
+  own: string | undefined,
+): Promise<Settlement[]> {
+  const found = await unsettledOperations((sql) => db.$client.unsafe(sql));
+  const ids = [...new Set([...found.open.map((o) => o.operationId), ...found.interrupted])];
+  const settlements: Settlement[] = [];
+  for (const operationId of ids) {
+    if (operationId === own && !found.open.some((o) => o.operationId === own)) continue;
+    const receipts = await readOperationReceipts(db, operationId);
+    const first = receipts[0];
+    if (first === undefined) continue;
+    const entry: ReconciledOperation = { operationId, steps: [], settled: true };
+    for (const open of found.open.filter((o) => o.operationId === operationId)) {
+      const { observed, state } = await observeStep(latestStart(receipts, open.step), observers);
+      entry.steps.push({ step: open.step, observed, state });
+      if (observed === 'unknown') entry.settled = false;
+    }
+    settlements.push({
+      target: { operationId, kind: first.operationKind, inputsDigest: first.inputsDigest },
+      entry,
+      closes: entry.settled && operationId !== own && found.interrupted.includes(operationId),
+    });
+  }
+  return settlements;
+}
+
 /**
  * Settle every unsettled apply operation under `lease`. A step observed applied is closed with a
  * finish receipt, one observed not applied with a skip receipt; an unknown step is left open and
@@ -425,49 +465,44 @@ export async function reconcileUnsettled(
   lease: OperationLease,
   observers: StateObservers,
 ): Promise<ReconciledOperation[]> {
-  const found = await unsettledOperations((sql) => db.$client.unsafe(sql));
-  const ids = [...new Set([...found.open.map((o) => o.operationId), ...found.interrupted])];
-  const report: ReconciledOperation[] = [];
-  const own = lease.identity.operationId;
-  for (const operationId of ids) {
-    // The operation holding the lease is unsettled only through steps it left open itself.
-    if (operationId === own && !found.open.some((o) => o.operationId === own)) continue;
-    const receipts = await readOperationReceipts(db, operationId);
-    const first = receipts[0];
-    if (first === undefined) continue;
-    const target = {
-      operationId,
-      kind: first.operationKind,
-      inputsDigest: first.inputsDigest,
-    };
-    const entry: ReconciledOperation = { operationId, steps: [], settled: true };
-    for (const open of found.open.filter((o) => o.operationId === operationId)) {
-      const started = latestStart(receipts, open.step);
-      const { observed, state } = await observeStep(started, observers);
-      entry.steps.push({ step: open.step, observed, state });
-      const detail = { reconciledBy: lease.identity.operationId, observed, state };
+  const reconciledBy = lease.identity.operationId;
+  const settlements = await surveyUnsettled(db, observers, reconciledBy);
+  for (const { target, entry, closes } of settlements) {
+    for (const { step, observed, state } of entry.steps) {
+      const detail = { reconciledBy, observed, state };
       if (observed === 'applied') {
-        await lease.recordFor(target, { event: 'step-finished', step: open.step, detail });
+        await lease.recordFor(target, { event: 'step-finished', step, detail });
       } else if (observed === 'not-applied') {
-        await lease.recordFor(target, { event: 'step-skipped', step: open.step, detail });
-      } else {
-        entry.settled = false;
+        await lease.recordFor(target, { event: 'step-skipped', step, detail });
       }
     }
-    if (
-      entry.settled &&
-      operationId !== lease.identity.operationId &&
-      found.interrupted.includes(operationId)
-    ) {
+    if (closes) {
       await lease.recordFor(target, {
         event: 'outcome',
         outcome: 'failed',
-        detail: { interrupted: true, reconciledBy: lease.identity.operationId },
+        detail: { interrupted: true, reconciledBy },
       });
     }
-    report.push(entry);
   }
-  return report;
+  return settlements.map((s) => s.entry);
+}
+
+/**
+ * What reconciling now would do, read-only: whether it would record anything (settle a step or close
+ * an interrupted operation), and the refusal for the steps whose outcome it cannot establish. A boot
+ * with nothing to change asks this, and takes the lease only when there is something to settle.
+ */
+export async function previewReconciliation(
+  db: Db,
+  observers: StateObservers,
+): Promise<{ settles: boolean; blocked: BundleError | null }> {
+  const settlements = await surveyUnsettled(db, observers, undefined);
+  return {
+    settles: settlements.some(
+      (s) => s.closes || s.entry.steps.some((step) => step.observed !== 'unknown'),
+    ),
+    blocked: blockedError(settlements.map((s) => s.entry)),
+  };
 }
 
 function blockedError(report: readonly ReconciledOperation[]): BundleError | null {
