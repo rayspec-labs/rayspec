@@ -50,6 +50,24 @@ export class OrgTombstonedError extends Error {
   }
 }
 
+/**
+ * A second organization refused because the deployment runs in single-tenant mode. The routes map it
+ * to a 403; the provisioning command reports it by its own code.
+ */
+export class SingleTenantLimitError extends Error {
+  constructor() {
+    super('this deployment holds a single organization and refuses to create another');
+    this.name = 'SingleTenantLimitError';
+  }
+}
+
+/**
+ * The transaction-scoped advisory lock every org creation takes in single-tenant mode, so two
+ * concurrent creations cannot both find no organization and both insert one. The namespace is the
+ * one the shared schema lock uses; slot 2 is this lock's own (slot 1 is the schema lock).
+ */
+export const ORG_CREATION_LOCK = { namespace: 0x72617973, slot: 2 } as const;
+
 export class OrgStore {
   /**
    * `tenantBootstrapEnabled` is the deployment's operator posture (RAYSPEC_TENANT_BOOTSTRAP_ENABLED),
@@ -59,11 +77,31 @@ export class OrgStore {
    */
   readonly tenantBootstrapEnabled: boolean;
 
+  /**
+   * Single-tenant mode (RAYSPEC_SINGLE_TENANT): once one organization exists, creating another is
+   * refused here, under {@link ORG_CREATION_LOCK}, whichever path asks — the HTTP routes, the operator
+   * bootstrap or the provisioning command. The routes read it too, to limit registration to invites.
+   * Default `false`: any number of organizations, as before the mode existed.
+   */
+  readonly singleTenant: boolean;
+
   constructor(
     private readonly db: Db,
-    opts: { tenantBootstrapEnabled?: boolean } = {},
+    opts: { tenantBootstrapEnabled?: boolean; singleTenant?: boolean } = {},
   ) {
     this.tenantBootstrapEnabled = opts.tenantBootstrapEnabled ?? false;
+    this.singleTenant = opts.singleTenant ?? false;
+  }
+
+  /**
+   * How many organizations the database holds, soft-deleted ones included: a tombstoned organization
+   * still owns its tenant's rows, so it still counts against the single-tenant limit.
+   */
+  async orgCount(): Promise<number> {
+    const rows = (await this.db.execute(
+      sql`SELECT count(*)::int AS n FROM ${schema.orgs}`,
+    )) as unknown as Array<{ n: number }>;
+    return Number(rows[0]?.n ?? 0);
   }
 
   /**
@@ -99,6 +137,17 @@ export class OrgStore {
       );
     }
     return this.db.transaction(async (tx) => {
+      // Single-tenant mode: serialize creations and refuse once an organization exists. The lock is
+      // released with this transaction, so a concurrent creation waits and then sees the committed one.
+      if (this.singleTenant) {
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(${ORG_CREATION_LOCK.namespace}::int4, ${ORG_CREATION_LOCK.slot}::int4)`,
+        );
+        const existing = (await tx.execute(
+          sql`SELECT count(*)::int AS n FROM ${schema.orgs}`,
+        )) as unknown as Array<{ n: number }>;
+        if (Number(existing[0]?.n ?? 0) > 0) throw new SingleTenantLimitError();
+      }
       // The chosen-id INSERT alone carries `ON CONFLICT (id) DO NOTHING`, so a taken id comes back as
       // an empty RETURNING (→ OrgIdInUseError) instead of a driver 23505 that would poison the tx. The
       // no-id INSERT is untouched — including the slug collision it has always thrown.
@@ -183,6 +232,17 @@ export class OrgStore {
     const tenantId = input.id.toLowerCase();
     return forTenant(this.db, tenantId).transaction(async (ttx) => {
       const raw = ttx.unscoped();
+      // Single-tenant mode: resolving the one organization stays idempotent, reserving a second id is
+      // refused — under the same lock `createOrgWithOwner` takes, so the two paths cannot race.
+      if (this.singleTenant) {
+        await raw.execute(
+          sql`SELECT pg_advisory_xact_lock(${ORG_CREATION_LOCK.namespace}::int4, ${ORG_CREATION_LOCK.slot}::int4)`,
+        );
+        const others = (await raw.execute(
+          sql`SELECT count(*)::int AS n FROM ${schema.orgs} WHERE ${schema.orgs.id} <> ${tenantId}::uuid`,
+        )) as unknown as Array<{ n: number }>;
+        if (Number(others[0]?.n ?? 0) > 0) throw new SingleTenantLimitError();
+      }
       const insertedRows = await raw
         .insert(schema.orgs)
         .values({ id: tenantId, name: input.name, slug: input.slug })

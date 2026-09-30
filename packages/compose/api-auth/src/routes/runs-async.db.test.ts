@@ -182,6 +182,26 @@ describe('POST /v1/agents/:id/runs (async:true) — 202 + enqueue with a durable
     expect(job.agentId).toBe('echo-agent');
     expect(job.input).toBe('summarize this');
     expect(job.maxTurns).toBe(3);
+    // The job records the member who asked, for the worker's execution-time re-check.
+    expect(job.requestedBy?.kind).toBe('user');
+  });
+
+  it('a run enqueued with an API key records the key (not a member) as its requester', async () => {
+    h.deps.durableExecutor = stub;
+    const { orgId, token } = await principal('asynckey@example.com', 'AsyncKey');
+    const minted = await jsonRequest(h.app, 'POST', `/v1/orgs/${orgId}/api-keys`, {
+      body: { scopes: ['agent:run'] },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(minted.status).toBe(201);
+    const key = (await minted.json()) as { id: string; plaintext: string };
+    const res = await jsonRequest(h.app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'by key', async: true },
+      headers: { authorization: `Bearer ${key.plaintext}`, accept: 'application/json' },
+    });
+    expect(res.status).toBe(202);
+    expect(stub.enqueued).toHaveLength(1);
+    expect(stub.enqueued[0]!.job.requestedBy).toEqual({ kind: 'apikey', apiKeyId: key.id });
   });
 
   it('reserves the returned runId (reserve-before-enqueue) when an Idempotency-Key is supplied', async () => {

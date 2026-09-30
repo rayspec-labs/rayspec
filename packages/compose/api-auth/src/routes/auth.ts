@@ -32,7 +32,7 @@ import {
 } from '../http/cookies.js';
 import { requireAuth } from '../http/middleware.js';
 import { SESSION_TTL_MS } from '../services/auth-service.js';
-import { OrgIdInUseError } from '../stores/org-store.js';
+import { OrgIdInUseError, SingleTenantLimitError } from '../stores/org-store.js';
 
 const SESSION_TTL_SECONDS = Math.floor(SESSION_TTL_MS / 1000);
 
@@ -56,6 +56,12 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     // The optional auto-created org is handed to `register` rather than created after it, so the
     // session row, the minted token and the reported `activeOrgId` agree — see its docblock.
     const orgName = body.orgName;
+    // Single-tenant mode: open registration only creates the ONE organization, while none exists.
+    // After that an account is made by redeeming an invite (POST /v1/invites/accept). Checked before
+    // any account is created; the org store re-checks under its lock for two racing registrations.
+    if (deps.orgStore?.singleTenant && (!orgName || (await deps.orgStore.orgCount()) > 0)) {
+      throw singleTenantRefusal();
+    }
     const reg = await deps.authService.register(
       email,
       body.password,
@@ -64,12 +70,18 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
         ? {
             createFirstOrg: async (userId: string) => {
               const slug = await deps.orgStore.deriveUniqueSlug(orgName);
-              const org = await deps.orgStore.createOrgWithOwner({
-                name: orgName,
-                slug,
-                ownerUserId: userId,
-              });
-              return { orgId: org.id, role: 'owner' };
+              try {
+                const org = await deps.orgStore.createOrgWithOwner({
+                  name: orgName,
+                  slug,
+                  ownerUserId: userId,
+                });
+                return { orgId: org.id, role: 'owner' };
+              } catch (e) {
+                // A concurrent registration created the one organization first.
+                if (e instanceof SingleTenantLimitError) throw singleTenantRefusal();
+                throw e;
+              }
             },
           }
         : {},
@@ -133,6 +145,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
               if (e instanceof OrgIdInUseError) {
                 throw new ApiError('CONFLICT', 'That org id already exists.');
               }
+              if (e instanceof SingleTenantLimitError) throw singleTenantRefusal();
               throw e;
             }
           },
@@ -296,6 +309,17 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
 }
 
 // ---- helpers -------------------------------------------------------------------------------
+
+/**
+ * The refusal a single-tenant deployment answers for a registration or an organization it will not
+ * create. The same text on every path, so it says nothing about which check refused.
+ */
+export function singleTenantRefusal(): ApiError {
+  return new ApiError(
+    'FORBIDDEN',
+    'This deployment holds a single organization; new accounts join it by invitation.',
+  );
+}
 
 function tokenResponse(
   accessToken: string,

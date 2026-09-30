@@ -963,6 +963,12 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
       const frames = await parseSse(res);
       // The stream ends with a terminal event:error frame (the run failed mid-stream).
       expect(frames.at(-1)?.event).toBe('error');
+      // The frame names the class with a fixed message; the thrown error's own text stays server-side.
+      expect(JSON.parse(frames.at(-1)?.data ?? '{}')).toEqual({
+        message: 'The run failed.',
+        errorClass: 'internal',
+      });
+      expect(frames.map((f) => f.data).join('\n')).not.toContain('mid-run-explosion');
       // run_events still holds whatever was persisted BEFORE the throw (persist-before-flush durability
       // on the LIVE path) — at least run_started (seq 0), asserted at the route layer via a SELECT.
       const runStartedRows = await h.db.$client.unsafe(

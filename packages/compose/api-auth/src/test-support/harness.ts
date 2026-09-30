@@ -260,6 +260,8 @@ const ALL_TABLES =
  */
 export async function createHarness(
   opts: {
+    /** Build the org store in single-tenant mode (RAYSPEC_SINGLE_TENANT=true). Default off. */
+    singleTenant?: boolean;
     withOidc?: boolean;
     oidcClients?: Configuration['clients'];
     /** Override the provider issuer (default http://127.0.0.1/oidc). A served suite passes its
@@ -530,7 +532,7 @@ export async function createHarness(
   const jwksProvider = new JwksProvider([signer.publicKeyJwk()]);
 
   const identityStore = new IdentityStore(appDb);
-  const orgStore = new OrgStore(appDb);
+  const orgStore = new OrgStore(appDb, { singleTenant: opts.singleTenant === true });
   const apiKeyStore = new ApiKeyStore(appDb);
   const auditStore = new AuditStore(appDb);
   const idempotency = new IdempotencyStore(appDb);

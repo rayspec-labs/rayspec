@@ -130,9 +130,16 @@ export {
   INVITE_MIN_TTL_SECONDS,
 } from './routes/invites.js';
 export { AuthService } from './services/auth-service.js';
+export { makeRunAuthorizer, type RunAuthorizerStores } from './services/run-authorizer.js';
 export { ApiKeyStore, type ApiKeyStoreOptions } from './stores/api-key-store.js';
 export { AuditStore } from './stores/audit-store.js';
 export { IdempotencyStore } from './stores/idempotency-store.js';
 export { IdentityStore } from './stores/identity-store.js';
 export { InviteStore } from './stores/invite-store.js';
-export { OrgIdInUseError, OrgStore, OrgTombstonedError } from './stores/org-store.js';
+export {
+  ORG_CREATION_LOCK,
+  OrgIdInUseError,
+  OrgStore,
+  OrgTombstonedError,
+  SingleTenantLimitError,
+} from './stores/org-store.js';

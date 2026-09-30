@@ -41,9 +41,12 @@ import type { AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { readRefreshCookie } from '../http/cookies.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
+import { SingleTenantLimitError } from '../stores/org-store.js';
+import { singleTenantRefusal } from './auth.js';
 
 export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
-  // POST /v1/orgs — Bearer required (mutating). Any authenticated user may create an org.
+  // POST /v1/orgs — Bearer required (mutating). Any authenticated user may create an org, except on
+  // a single-tenant deployment once its one organization exists (the org store refuses it).
   app.post('/v1/orgs', requireAuth(), requireBearerForMutation(), async (c) => {
     const principal = c.get('principal');
     if (!principal?.userId) throw forbidden();
@@ -59,6 +62,7 @@ export function registerOrgRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): void
         ownerUserId: principal.userId,
       });
     } catch (err) {
+      if (err instanceof SingleTenantLimitError) throw singleTenantRefusal();
       // slug unique-index collision → 409.
       if (String(err).includes('orgs_slug_lower_idx') || String(err).includes('duplicate')) {
         throw new ApiError('CONFLICT', 'Org slug already taken.');

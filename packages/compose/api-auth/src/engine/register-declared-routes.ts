@@ -584,7 +584,16 @@ export function registerDeclaredRoutes(
         app,
         route.method,
         honoPath,
-        mediaAuth(mediaTokenService),
+        mediaAuth(mediaTokenService, {
+          // Re-checked on every playback request: a token minted for a member who has since been
+          // removed stops working at once (no `identityStore` only in partial-deps unit suites).
+          ...(deps.identityStore
+            ? {
+                isLiveMember: async (userId: string, tenantId: string) =>
+                  (await deps.identityStore.liveMembership(userId, tenantId)) !== undefined,
+              }
+            : {}),
+        }),
         perUserStreamSemaphore(
           config.playbackMaxStreamsPerUser !== undefined
             ? { maxPerUser: config.playbackMaxStreamsPerUser }

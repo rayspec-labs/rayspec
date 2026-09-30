@@ -35,7 +35,7 @@ import { streamSSE } from 'hono/streaming';
 import type { AppDeps, AppEnv } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import type { MediaTokenService } from '../media/media-token.js';
-import { makeEnqueueAgentRunCapability } from '../routes/runs.js';
+import { jobPrincipalOf, makeEnqueueAgentRunCapability } from '../routes/runs.js';
 import { handlerPrincipal, principalActor } from './principal-actor.js';
 
 /**
@@ -238,7 +238,12 @@ export function makeRouteHandler(args: {
     // the server-derived `tenantId` captured here + CLOSED OVER (the closure exposes NO tenant param), so
     // a pack handler can never enqueue cross-tenant. `undefined` when no durable worker is wired ⇒
     // init.enqueue is omitted (a handler that needs it fail-closes loudly — like blob/mintPlayToken).
-    const enqueue = makeEnqueueAgentRunCapability(deps, tenantId);
+    // The job records THIS request's caller, so the worker re-checks that caller when it executes.
+    const enqueue = makeEnqueueAgentRunCapability(
+      deps,
+      tenantId,
+      jobPrincipalOf(c.get('principal')),
+    );
     // read the request body for a body-bearing method (DATA the handler may use). Drained under the
     // configured byte cap (a body over the cap is a 413 BEFORE any handler side effect), then parsed
     // best-effort like the store-route CRUD path — an absent/invalid body yields `undefined` ⇒
