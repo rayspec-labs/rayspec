@@ -28,6 +28,25 @@ import { RuntimeApplyError } from './deploy-apply.js';
 import { createRuntimeControl } from './runtime-control.js';
 import { readProductSchemaDigest, runtimePlatformHead } from './schema-head.js';
 
+/**
+ * Undo the newest platform migration (the row-level tenant policies and the isolation functions), so
+ * the database is one migration behind this runtime, as a database left by the previous release is.
+ */
+const UNDO_NEWEST_MIGRATION = `
+DROP FUNCTION rayspec_same_tenant_reference();
+DROP FUNCTION rayspec_invite_tenant(text);
+DROP FUNCTION rayspec_run_owned_elsewhere(text);
+DO $undo$
+DECLARE t text;
+BEGIN
+  FOR t IN SELECT c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+            WHERE p.polname = 'tenant_isolation' LOOP
+    EXECUTE format('DROP POLICY tenant_isolation ON %I', t);
+  END LOOP;
+END
+$undo$;
+`;
+
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 if (dbRequired && !baseUrl) {
@@ -208,8 +227,7 @@ describe.skipIf(!baseUrl)('the legacy deploy through apply', () => {
     const setup = makeDb(dbUrl, 2);
     try {
       await applyMigrations(setup);
-      await setup.$client.unsafe('DROP TABLE product_migration_ledger');
-      await setup.$client.unsafe('DROP FUNCTION product_migration_ledger_append_only()');
+      await setup.$client.unsafe(UNDO_NEWEST_MIGRATION);
       await setup.$client.unsafe(
         `DELETE FROM drizzle.__drizzle_migrations
           WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`,

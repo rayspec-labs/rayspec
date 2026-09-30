@@ -34,6 +34,25 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
 import { provisionTenant, type TenantProvisionSecrets } from './tenant-provision.js';
 
+/**
+ * Undo the newest platform migration (the row-level tenant policies and the isolation functions), so
+ * the database is one migration behind this runtime, as a database left by the previous release is.
+ */
+const UNDO_NEWEST_MIGRATION = `
+DROP FUNCTION rayspec_same_tenant_reference();
+DROP FUNCTION rayspec_invite_tenant(text);
+DROP FUNCTION rayspec_run_owned_elsewhere(text);
+DO $undo$
+DECLARE t text;
+BEGIN
+  FOR t IN SELECT c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+            WHERE p.polname = 'tenant_isolation' LOOP
+    EXECUTE format('DROP POLICY tenant_isolation ON %I', t);
+  END LOOP;
+END
+$undo$;
+`;
+
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let armsRan = 0;
@@ -388,8 +407,7 @@ describe.skipIf(!baseUrl)('provisionTenant — the operator create-or-resolve', 
 
       // One platform migration behind: the chain runs as an apply, which a held fence refuses.
       const ledger = await scalar('SELECT count(*) FROM drizzle.__drizzle_migrations');
-      await rows('DROP TABLE product_migration_ledger');
-      await rows('DROP FUNCTION product_migration_ledger_append_only()');
+      await rows(UNDO_NEWEST_MIGRATION);
       await rows(
         `DELETE FROM drizzle.__drizzle_migrations
           WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`,

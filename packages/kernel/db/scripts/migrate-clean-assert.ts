@@ -28,6 +28,7 @@ import postgres from 'postgres';
 import {
   apiKeys,
   authAudit,
+  CORE_TENANT_SCOPED_TABLES,
   conversationItems,
   idempotencyKeys,
   invites,
@@ -49,6 +50,7 @@ import {
   workflowNodeStates,
   workflowRuns,
 } from '../src/schema.js';
+import { listTenantTables } from '../src/tenant-isolation.js';
 
 // The full core platform table set. Drift on ANY of these fails the gate. The base 12 platform
 // tables the PRD enumerates + the workflow-runtime journal trio (workflow_runs /
@@ -416,6 +418,32 @@ async function main(): Promise<void> {
     }
   }
 
+  // --- the row-level tenant policy: present on every tenant table, enabled on none ---
+  // The policies are deliberately not declared in schema.ts (see drizzle/0015_tenant_row_security.sql),
+  // so push lists them as statements to drop and migrate-clean.sh subtracts exactly those lines. This
+  // is the check that holds them instead: every table with a tenant_id column carries the canonical
+  // policy, every CORE_TENANT_SCOPED_TABLES entry is one of them, and the chain enabled row security
+  // on none (a single-role deployment must see no change).
+  const tenantTables = await listTenantTables(sql);
+  const tenantNames = new Set(tenantTables.map((t) => t.table));
+  for (const table of CORE_TENANT_SCOPED_TABLES) {
+    const name = getTableName(table);
+    if (!tenantNames.has(name)) fail(`tenant table "${name}" has no tenant_id column in the DB.`);
+  }
+  for (const t of tenantTables) {
+    if (!t.policy) fail(`tenant table "${t.table}" has no canonical tenant_isolation policy.`);
+  }
+  const secured = await sql<{ name: string }[]>`
+    SELECT format('%I.%I', n.nspname, c.relname) AS name
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.relkind IN ('r', 'p') AND (c.relrowsecurity OR c.relforcerowsecurity)
+       AND n.nspname NOT IN ('pg_catalog', 'information_schema')`;
+  for (const t of secured) {
+    fail(
+      `table ${t.name} has row security enabled by the chain; only the opt-in step may enable it.`,
+    );
+  }
+
   await sql.end({ timeout: 5 });
 
   if (failures.length > 0) {
@@ -425,7 +453,8 @@ async function main(): Promise<void> {
   }
   console.log(
     `  ok: complete structural cross-check PASSED for all ${CORE_PLATFORM_TABLES.length} core platform tables ` +
-      `(columns incl. type/nullability/DEFAULT/array-elem, PRIMARY KEYs, FKs both directions, indexes incl. ordered cols/partial-WHERE/expression body both directions).`,
+      `(columns incl. type/nullability/DEFAULT/array-elem, PRIMARY KEYs, FKs both directions, indexes incl. ordered cols/partial-WHERE/expression body both directions), ` +
+      `and the tenant_isolation policy on all ${tenantTables.length} tenant tables with row security left off.`,
   );
 }
 

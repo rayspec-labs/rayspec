@@ -330,25 +330,36 @@ describe('store-facade schema — injected-column drift guard', () => {
  * fails closed rather than silently: if a version bump moves the seam, no statement is captured and
  * the assertions below fail on an empty string instead of quietly passing. If that happens, this
  * helper — not the facade — is what needs updating.
+ *
+ * The chokepoint runs every statement under the tenant context, so a statement on the pool is
+ * preceded by the `set_config` that sets it; that statement is left out, and what is returned is the
+ * statements the facade itself issued.
  */
 async function capturedSql(
   db: ReturnType<typeof makeDbWithSchema>,
   fn: () => Promise<unknown>,
 ): Promise<string[]> {
+  type Logger = { logQuery(query: string, params: unknown[]): void };
   const session = db as unknown as {
-    session: { logger: { logQuery(query: string, params: unknown[]): void } };
+    session: { logger: Logger; options: { logger?: Logger } };
   };
   const previous = session.session.logger;
+  const previousOption = session.session.options.logger;
   const statements: string[] = [];
-  session.session.logger = {
+  const capture: Logger = {
     logQuery: (query) => {
-      statements.push(query);
+      if (!query.startsWith('select set_config(')) statements.push(query);
     },
   };
+  // A transaction's session is built from the pool session's OPTIONS, so the logger is swapped there
+  // too: the statements the chokepoint runs inside its context transaction are captured as well.
+  session.session.logger = capture;
+  session.session.options.logger = capture;
   try {
     await fn();
   } finally {
     session.session.logger = previous;
+    session.session.options.logger = previousOption;
   }
   return statements;
 }

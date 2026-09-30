@@ -24,6 +24,15 @@
  * reference it).
  */
 export { type Db, makeDb } from './client.js';
+export {
+  type DatabaseKind,
+  type DatabaseRoleNames,
+  DEFAULT_DATABASE_ROLES,
+  databaseRolesSql,
+  databaseRolesSqlPath,
+  prepareDatabaseRoles,
+  type RolesAdminSql,
+} from './database-roles.js';
 // The pure delta-diff core: old→new `StoreSpec[]` -> forward-migration SQL + a
 // byte-faithful machine-proposed allowlist + the versioned migration-naming convention. Product-
 // agnostic platform mechanism (the update analogue of the CREATE-only generator).
@@ -127,4 +136,21 @@ export { CORE_TENANT_SCOPED_TABLES } from './schema.js';
 // to fold `deleted_at IS NULL` into reads/updates + stamp the tombstone on delete (parity with the CRUD
 // routes). Mirrors the `registerScopedTables` identity-set pattern (no wide param plumbing).
 export { isSoftDeleteTable, markSoftDeleteTable } from './soft-delete-registry.js';
-export { forTenant, TENANT_GUC, TenantDb } from './tenant-db.js';
+export { forTenant, inviteTenantByTokenHash, TENANT_GUC, TenantDb } from './tenant-db.js';
+// Row-level tenant isolation beneath the chokepoint: the policy every tenant table carries, the step
+// the migration role runs to enable and force it (product stores included), and the catalog check the
+// runtime reports its posture from. Plus the setup SQL of the three database roles it relies on.
+export {
+  applyTenantIsolation,
+  CURRENT_TENANT_EXPRESSION,
+  type IsolationFinding,
+  type IsolationSql,
+  listTenantTables,
+  MIGRATION_ONLY_TABLES,
+  TENANT_POLICY_NAME,
+  type TenantIsolationChanges,
+  type TenantIsolationReport,
+  type TenantTableState,
+  tenantPolicySql,
+  verifyTenantIsolation,
+} from './tenant-isolation.js';

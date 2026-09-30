@@ -11,38 +11,84 @@
  *   - `unscoped()` is the ONE loud, greppable escape hatch returning the raw Drizzle handle
  *     for global/auth tables (orgs, users, sessions, api_keys, memberships, auth_audit, the
  *     OIDC store). The grep/lint gate forbids `.unscoped()` outside whitelisted modules.
- *   - `transaction(fn)` populates the `app.current_tenant` GUC first (its name is the exported
- *     `TENANT_GUC` constant — single source of truth) via
- *     `select set_config(TENANT_GUC, <tenantId>, true)`, so Postgres row-level-security
- *     policies (when RLS is enabled) bind to an already-populated GUC with zero call-site churn. `set_config`
- *     is used rather than `SET LOCAL` deliberately: SET's grammar rejects a bind parameter, so
- *     a `SET LOCAL app.current_tenant = ${tenantId}` interpolation (which Drizzle/postgres-js
- *     compile to `$1`) is a hard syntax error; set_config IS a function and accepts the value
- *     as a bind parameter, which also keeps the tenantId out of raw SQL (no injection seam).
+ *
+ * EVERY STATEMENT RUNS UNDER THE TENANT CONTEXT. The tenant is also written into the transaction-local
+ * setting `app.current_tenant` (the exported `TENANT_GUC`), which the database's row-level policies
+ * compare every row with (`tenant-isolation.ts`). A statement built here therefore never runs without
+ * it:
+ *   - `transaction(fn)` sets it first, and every statement of `fn` runs in that transaction;
+ *   - a statement built on a handle over the POOL is executed in its own short transaction that sets
+ *     the context first — the builder is recorded and replayed on the transaction's handle when it is
+ *     awaited, so the call sites keep the plain Drizzle chain (`.where().limit()`, `.returning()`);
+ *   - a statement built on a handle over a transaction someone else opened sets the context in that
+ *     transaction right before it runs.
+ * The setting is transaction-local (`set_config(name, value, true)`), so a pooled connection carries
+ * no tenant from one transaction into the next. `set_config` is used rather than `SET LOCAL`: SET's
+ * grammar rejects a bind parameter, so a `SET LOCAL app.current_tenant = ${tenantId}` interpolation
+ * (which Drizzle/postgres-js compile to `$1`) is a hard syntax error; set_config IS a function and
+ * accepts the value as a bind parameter, which also keeps the tenantId out of raw SQL (no injection
+ * seam).
  *
  * Built as a purpose-shaped wrapper over the documented Drizzle 0.45.2 query builder
  * (select().from().where(), insert().values(), update().set().where(), delete().where())
  * rather than monkey-patching Drizzle internals, so an ORM bump cannot silently strip the
  * predicate.
  */
-import { and, eq, getTableColumns, type SQL, sql } from 'drizzle-orm';
-import type { PgTable } from 'drizzle-orm/pg-core';
+import { and, eq, getTableColumns, is, type SQL, sql } from 'drizzle-orm';
+import { type PgTable, PgTransaction } from 'drizzle-orm/pg-core';
 import type { Db } from './client.js';
 import {
   appendTenantEvents,
   readTenantEventPage,
+  sweepTenantEvents,
   type TenantEventAppendResult,
   type TenantEventInput,
   type TenantEventPage,
+  type TenantEventSweepResult,
 } from './event-bus.js';
 import { runs, TENANT_SCOPED_TABLES } from './schema.js';
 
 /**
- * The Postgres GUC the transaction seam populates and row-level-security policies (when RLS is enabled) read back. Exported as
- * the single source of truth so the set_config write site (here) and any read-back (current_setting
- * in tests / future RLS policy SQL) reference one constant — a rename cannot silently desync them.
+ * The Postgres setting every statement of the chokepoint runs under and the row-level policies read
+ * back. Exported as the single source of truth so the set_config write site (here), the policy SQL
+ * (`tenant-isolation.ts`) and any read-back in tests reference one constant — a rename cannot
+ * silently desync them.
  */
 export const TENANT_GUC = 'app.current_tenant';
+
+/**
+ * Handles whose transaction already carries this handle's tenant: the ones `transaction()` hands its
+ * callback. Every other handle sets the context itself before each statement.
+ */
+const CONTEXT_SET = new WeakSet<TenantDb>();
+
+/**
+ * Builder members that describe the statement rather than run it. Reading one replays the recorded
+ * chain on the raw handle and returns the real member, so the SQL text of a statement can still be
+ * inspected without executing it.
+ */
+const DESCRIBE_ONLY = new Set<string | symbol>(['toSQL', 'getSQL', 'getSelectedFields', '_']);
+
+interface RecordedCall {
+  readonly member: string | symbol;
+  readonly args: readonly unknown[];
+}
+
+function replay(builder: unknown, calls: readonly RecordedCall[]): unknown {
+  let current = builder as Record<string | symbol, (...a: unknown[]) => unknown>;
+  for (const call of calls) {
+    const method = current[call.member];
+    if (typeof method !== 'function') {
+      throw new Error(`TenantDb: the query builder has no method '${String(call.member)}'`);
+    }
+    current = method.apply(current, call.args as unknown[]) as typeof current;
+  }
+  return current;
+}
+
+async function setContext(handle: Db, tenantId: string): Promise<void> {
+  await handle.execute(sql`select set_config(${TENANT_GUC}, ${tenantId}, true)`);
+}
 
 /** The set of tables forTenant() will auto-scope. Anything else throws (deny-by-default). */
 const SCOPED = new Set<PgTable>(TENANT_SCOPED_TABLES as readonly PgTable[]);
@@ -148,15 +194,12 @@ export class TenantDb {
   select<T extends TenantScopedTable>(table: T, columns?: Parameters<Db['select']>[0]) {
     assertScoped(table);
     const tenantPredicate = eq(tenantColumn(table), this.tenantId);
-    const base = (columns ? this.raw.select(columns) : this.raw.select()).from(table as PgTable);
+    const from = (h: Db) => (columns ? h.select(columns) : h.select()).from(table as PgTable);
     return {
-      where(extra?: SQL | undefined) {
-        return base.where(and(tenantPredicate, extra));
-      },
+      where: (extra?: SQL | undefined) =>
+        this.inContextBuilder((h) => from(h).where(and(tenantPredicate, extra))),
       // No explicit .where() ⇒ still tenant-scoped.
-      all() {
-        return base.where(tenantPredicate);
-      },
+      all: () => this.inContextBuilder((h) => from(h).where(tenantPredicate)),
     };
   }
 
@@ -168,7 +211,7 @@ export class TenantDb {
     assertScoped(table);
     const stamp = (v: Record<string, unknown>) => ({ ...v, tenantId: this.tenantId });
     const stamped = Array.isArray(values) ? values.map(stamp) : stamp(values);
-    return this.raw.insert(table as PgTable).values(stamped as never);
+    return this.inContextBuilder((h) => h.insert(table as PgTable).values(stamped as never));
   }
 
   /**
@@ -195,10 +238,12 @@ export class TenantDb {
     const { tenantId: _stripped, ...safeSet } = set;
     return {
       where: (extra?: SQL | undefined) =>
-        this.raw
-          .update(table as PgTable)
-          .set(safeSet as never)
-          .where(and(tenantPredicate, extra)),
+        this.inContextBuilder((h) =>
+          h
+            .update(table as PgTable)
+            .set(safeSet as never)
+            .where(and(tenantPredicate, extra)),
+        ),
     };
   }
 
@@ -208,14 +253,69 @@ export class TenantDb {
     const tenantPredicate = eq(tenantColumn(table), this.tenantId);
     return {
       where: (extra?: SQL | undefined) =>
-        this.raw.delete(table as PgTable).where(and(tenantPredicate, extra)),
+        this.inContextBuilder((h) => h.delete(table as PgTable).where(and(tenantPredicate, extra))),
     };
   }
 
   /**
-   * Run `fn` inside a transaction that populates the `app.current_tenant` GUC first — the
-   * RLS-ready seam (for row-level security when enabled). The callback receives a TenantDb bound to the SAME tenant over
-   * the transactional handle.
+   * Run `work` under this handle's tenant context: directly when the handle's transaction already
+   * carries it, after setting it when the handle is a transaction someone else opened, and otherwise
+   * in a new short transaction that sets it first.
+   */
+  private async inContext<R>(work: (h: Db) => Promise<R>): Promise<R> {
+    if (CONTEXT_SET.has(this)) return work(this.raw);
+    if (is(this.raw, PgTransaction)) {
+      await setContext(this.raw, this.tenantId);
+      return work(this.raw);
+    }
+    return this.raw.transaction(async (tx) => {
+      const h = tx as unknown as Db;
+      await setContext(h, this.tenantId);
+      return work(h);
+    });
+  }
+
+  /**
+   * A query builder that runs under the tenant context. On a handle whose transaction already carries
+   * the context it is the plain Drizzle builder. Otherwise the returned value records the builder
+   * chain the caller adds (`.where()`, `.limit()`, `.returning()`, …) and, when it is awaited or
+   * executed, replays that chain on the handle `inContext` provides and runs it there. It is typed as
+   * the builder `build` returns, so a call site cannot tell the two apart.
+   */
+  private inContextBuilder<B>(build: (h: Db) => B): B {
+    if (CONTEXT_SET.has(this)) return build(this.raw);
+    const run = (calls: readonly RecordedCall[]): Promise<unknown> =>
+      this.inContext(async (h) => (await replay(build(h), calls)) as unknown);
+    const record = (calls: readonly RecordedCall[]): unknown =>
+      new Proxy(Object.create(null) as object, {
+        get: (_target, member) => {
+          if (member === 'then') {
+            return (onFulfilled?: (v: unknown) => unknown, onRejected?: (e: unknown) => unknown) =>
+              run(calls).then(onFulfilled, onRejected);
+          }
+          if (member === 'catch') {
+            return (onRejected?: (e: unknown) => unknown) => run(calls).catch(onRejected);
+          }
+          if (member === 'finally') {
+            return (onFinally?: () => void) => run(calls).finally(onFinally);
+          }
+          if (member === 'execute') return () => run(calls);
+          if (DESCRIBE_ONLY.has(member)) {
+            const described = replay(build(this.raw), calls) as Record<string | symbol, unknown>;
+            const value = described[member];
+            return typeof value === 'function' ? value.bind(described) : value;
+          }
+          if (typeof member === 'symbol') return undefined;
+          return (...args: unknown[]) => record([...calls, { member, args }]);
+        },
+      });
+    return record([]) as B;
+  }
+
+  /**
+   * Run `fn` inside a transaction that populates the `app.current_tenant` setting first, so every
+   * statement of `fn` runs under the tenant context the row-level policies read. The callback
+   * receives a TenantDb bound to the SAME tenant over the transactional handle.
    *
    * Uses `set_config(name, value, is_local := true)` rather than `SET LOCAL name = value`:
    * Drizzle/postgres-js compile the `${this.tenantId}` interpolation to a `$1` bind parameter,
@@ -247,6 +347,7 @@ export class TenantDb {
       }
       // txRaw is a Drizzle transaction handle structurally compatible with Db's query API.
       const txTenant = new TenantDb(txRaw as unknown as Db, this.tenantId);
+      CONTEXT_SET.add(txTenant);
       return fn(txTenant);
     });
   }
@@ -261,16 +362,28 @@ export class TenantDb {
    *   - 'absent'  — no runs row for this runId (a genuine cache-miss; safe to run live);
    *   - 'owned'   — the row exists and belongs to this tenant (safe to replay);
    *   - 'foreign' — the row exists under a DIFFERENT tenant ⇒ reject before backend.run.
+   *
+   * Under row-level security the read sees only this tenant's rows, so a row it does not see is asked
+   * about once more through `rayspec_run_owned_elsewhere`, which the platform chain creates beside
+   * `runs`: it answers whether the id is taken by another tenant, and nothing else. A schema without
+   * the function (a hand-built test schema) keeps the plain read's answer.
    */
   async runHeaderOwnership(runId: string): Promise<'absent' | 'owned' | 'foreign'> {
-    const rows = await this.raw
-      .select({ tenantId: runs.tenantId })
-      .from(runs)
-      .where(eq(runs.runId, runId))
-      .limit(1);
-    const owner = rows[0]?.tenantId;
-    if (owner === undefined) return 'absent';
-    return owner === this.tenantId ? 'owned' : 'foreign';
+    return this.inContext(async (h) => {
+      const rows = await h
+        .select({ tenantId: runs.tenantId })
+        .from(runs)
+        .where(eq(runs.runId, runId))
+        .limit(1);
+      const owner = rows[0]?.tenantId;
+      if (owner !== undefined) return owner === this.tenantId ? 'owned' : 'foreign';
+      const schema = await platformFunctionSchema(h, 'runs', 'rayspec_run_owned_elsewhere(text)');
+      if (schema === undefined) return 'absent';
+      const elsewhere = (await h.execute(
+        sql`select ${sql.identifier(schema)}.rayspec_run_owned_elsewhere(${runId}) as taken`,
+      )) as unknown as { taken: boolean }[];
+      return elsewhere[0]?.taken === true ? 'foreign' : 'absent';
+    });
   }
 
   /**
@@ -286,12 +399,14 @@ export class TenantDb {
    *
    * Called on the TRANSACTIONAL handle inside a route handler's engine-opened transaction (the events
    * commit with the handler's own writes), and on a plain handle from a tool handler (which has no
-   * outer transaction by design). Returns the allocated seq range, or undefined for an empty batch.
+   * outer transaction by design; the append then commits in its own short transaction under the
+   * tenant context). Returns the allocated seq range, or undefined for an empty batch.
    */
   async appendEvents(
     events: readonly TenantEventInput[],
   ): Promise<TenantEventAppendResult | undefined> {
-    return appendTenantEvents(this.raw, this.tenantId, events);
+    if (events.length === 0) return undefined;
+    return this.inContext((h) => appendTenantEvents(h, this.tenantId, events));
   }
 
   /**
@@ -309,18 +424,75 @@ export class TenantDb {
     readonly limit: number;
     readonly topics?: readonly string[];
   }): Promise<TenantEventPage> {
-    return readTenantEventPage(this.raw, this.tenantId, opts);
+    return this.inContext((h) => readTenantEventPage(h, this.tenantId, opts));
+  }
+
+  /**
+   * Delete THIS tenant's events older than `cutoff` and raise its truncation floor, in one statement
+   * (see `sweepTenantEvents`). The scheduled cleanup calls it once per tenant, so the retention sweep
+   * runs under each tenant's context like every other statement.
+   */
+  async sweepEvents(cutoff: Date): Promise<TenantEventSweepResult> {
+    return this.inContext((h) => sweepTenantEvents(h, { cutoff, tenantId: this.tenantId }));
   }
 
   /**
    * The ONE sanctioned escape hatch: the raw Drizzle handle for GLOBAL/auth tables that are
    * deliberately NOT tenant-scoped (orgs, users, sessions, api_keys, memberships, auth_audit,
    * the OIDC model store). Loud + greppable on purpose; the CI gate forbids `.unscoped()`
-   * outside whitelisted global-table modules.
+   * outside whitelisted global-table modules. A statement run on it carries no tenant context of
+   * its own, so under row-level security it reaches a tenant table only inside a transaction that
+   * set one.
    */
   unscoped(): Db {
     return this.raw;
   }
+}
+
+/**
+ * The schema holding `table` (as the unqualified name resolves on this connection) when that schema
+ * also holds the platform chain's function `fn` (`name(argtypes)`), else undefined. The function is
+ * asked only about the table it reads: the one in its own schema. A schema without the function (a
+ * hand-built test schema) keeps the plain read's answer.
+ */
+async function platformFunctionSchema(h: Db, table: string, fn: string): Promise<string | undefined> {
+  // MATERIALIZED: the function lookup must run for the table's own schema only. Folded into one scan
+  // the planner may evaluate it for other schemas first, and a role without USAGE on one of those
+  // (`pg_toast`) would fail the statement.
+  const rows = (await h.execute(sql`
+    with resolved as materialized (
+      select n.nspname::text as schema
+        from pg_class c join pg_namespace n on n.oid = c.relnamespace
+       where c.oid = to_regclass(${table})
+    )
+    select schema from resolved
+     where to_regprocedure(format('%I.%s', schema, ${fn}::text)) is not null
+  `)) as unknown as { schema: string }[];
+  return rows[0]?.schema;
+}
+
+/**
+ * The tenant of the invite whose token hashes to `tokenHash`, or undefined — the ONE read that must
+ * find an invite before any tenant is known (the redeemer holds only the token). A plain read answers
+ * it where row security does not apply; under row security that read sees nothing without a tenant,
+ * and `rayspec_invite_tenant` (created by the platform chain beside `invites`) answers it: it returns the tenant id and nothing else,
+ * for a hash only the holder of a live token and the pepper can compute. The caller then reads the
+ * invite itself through `forTenant` under that tenant.
+ */
+export async function inviteTenantByTokenHash(
+  db: Db,
+  tokenHash: string,
+): Promise<string | undefined> {
+  const rows = (await db.execute(
+    sql`select tenant_id::text as tenant from invites where token_hash = ${tokenHash} limit 1`,
+  )) as unknown as { tenant: string }[];
+  if (rows[0] !== undefined) return rows[0].tenant;
+  const schema = await platformFunctionSchema(db, 'invites', 'rayspec_invite_tenant(text)');
+  if (schema === undefined) return undefined;
+  const resolved = (await db.execute(
+    sql`select ${sql.identifier(schema)}.rayspec_invite_tenant(${tokenHash})::text as tenant`,
+  )) as unknown as { tenant: string | null }[];
+  return resolved[0]?.tenant ?? undefined;
 }
 
 /** Bind the raw Drizzle handle to one tenant. The ONLY way request/run-core code gets a Db. */

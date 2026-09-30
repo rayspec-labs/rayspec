@@ -56,3 +56,11 @@ export {
   injectedColumnLinesSql,
   parseCreateTableColumnNames,
 } from './testing-ddl.js';
+export {
+  createIsolatedTestDatabase,
+  type IsolatedTestDatabase,
+  isolateTestSchema,
+  isolationFunctionsSql,
+  type TestRuntimeRole,
+  testDatabaseIsolation,
+} from './testing-isolation.js';

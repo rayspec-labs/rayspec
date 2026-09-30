@@ -251,3 +251,103 @@ describe('transaction populates the RLS GUC (set_config seam)', () => {
     expect(rows[0]?.tenantId).toBe(TENANT_A);
   });
 });
+
+describe('every statement runs under the tenant context', () => {
+  /** The tenant setting at the moment the statement runs, captured into the row it writes. */
+  const settingNow = sql`to_jsonb(current_setting(${TENANT_GUC}, true))`;
+
+  function insertCapturing(tdb: TenantDb, runId: string) {
+    return tdb.insert(schema.journalSteps, {
+      runId,
+      backend: 'openai',
+      type: 'llm',
+      idempotencyKey: runId,
+      inputHash: 'h',
+      output: settingNow,
+      status: 'ok',
+      authMode: 'api-key',
+    });
+  }
+
+  async function capturedFor(runId: string): Promise<unknown> {
+    const rows = await db
+      .select({ output: schema.journalSteps.output })
+      .from(schema.journalSteps)
+      .where(eq(schema.journalSteps.runId, runId));
+    return rows[0]?.output;
+  }
+
+  it('a statement built on the pool runs in its own transaction with the tenant set', async () => {
+    await insertCapturing(forTenant(db, TENANT_A), 'ctx-pool');
+    expect(await capturedFor('ctx-pool')).toBe(TENANT_A);
+    const read = await forTenant(db, TENANT_B)
+      .select(schema.journalSteps, { guc: sql<string>`current_setting(${TENANT_GUC}, true)` })
+      .all();
+    // B has no rows, so a select over B reads nothing; the setting is proven on a row of B's own.
+    expect(read).toEqual([]);
+    await insertCapturing(forTenant(db, TENANT_B), 'ctx-pool-b');
+    const seen = await forTenant(db, TENANT_B)
+      .select(schema.journalSteps, { guc: sql<string>`current_setting(${TENANT_GUC}, true)` })
+      .all();
+    expect(seen).toEqual([{ guc: TENANT_B }]);
+  });
+
+  it('the setting does not outlive the statement on the pooled connection', async () => {
+    await insertCapturing(forTenant(db, TENANT_A), 'ctx-after');
+    const after = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        db.execute(sql`select current_setting(${TENANT_GUC}, true) as v`),
+      ),
+    );
+    for (const rows of after) {
+      expect((rows as unknown as { v: string | null }[])[0]?.v ?? '').toBe('');
+    }
+  });
+
+  it('a statement on a transaction the chokepoint did not open sets the tenant in it', async () => {
+    await db.transaction(async (tx) => {
+      await insertCapturing(forTenant(tx as unknown as Db, TENANT_B), 'ctx-foreign-tx');
+    });
+    expect(await capturedFor('ctx-foreign-tx')).toBe(TENANT_B);
+  });
+
+  it('events are appended and read under the tenant context from a pool handle', async () => {
+    await db.$client.unsafe(`
+      CREATE TABLE IF NOT EXISTS tenant_event_streams (
+        tenant_id uuid PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+        last_seq bigint NOT NULL DEFAULT 0, truncated_through bigint NOT NULL DEFAULT 0,
+        updated_at timestamptz NOT NULL DEFAULT now());
+      CREATE TABLE IF NOT EXISTS tenant_events (
+        tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE, seq bigint NOT NULL,
+        topic text NOT NULL, payload jsonb NOT NULL, at timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (tenant_id, seq));
+    `);
+    const a = forTenant(db, TENANT_A);
+    expect(await a.appendEvents([])).toBeUndefined();
+    expect(await a.appendEvents([{ topic: 't', payload: { n: 1 } }])).toEqual({
+      firstSeq: 1,
+      lastSeq: 1,
+    });
+    const page = await a.readEventPage({ after: 0, limit: 10 });
+    expect(page.events.map((e) => e.topic)).toEqual(['t']);
+    expect(await forTenant(db, TENANT_B).readEventPage({ after: 0, limit: 10 })).toMatchObject({
+      lastSeq: 0,
+      events: [],
+    });
+  });
+
+  it('a pooled builder still describes its SQL without running, and its failures reject', async () => {
+    const built = forTenant(db, TENANT_A).select(schema.journalSteps).all();
+    const described = built.toSQL();
+    expect(described.sql).toContain('"tenant_id"');
+    expect(described.params).toContain(TENANT_A);
+    expect(await capturedFor('never-ran')).toBeUndefined();
+    // `.execute()` runs it like an await does.
+    expect(await forTenant(db, TENANT_A).select(schema.journalSteps).all().execute()).toEqual([]);
+    // A failing statement rejects through `.catch` as it does through `await`.
+    const caught = await forTenant(db, TENANT_A)
+      .insert(schema.journalSteps, { runId: 'missing-required-columns' })
+      .catch((err: unknown) => err);
+    expect(caught).toBeInstanceOf(Error);
+  });
+});

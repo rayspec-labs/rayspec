@@ -132,6 +132,8 @@ let appBaseUrl: string;
 
 /** Captures the GUC read INSIDE the handler's own tdb.transaction() (the GUC read-back). */
 const capturedGuc: { value: string | null } = { value: null };
+/** How many times the trigger handler body ran; the GUC is read back only in a transaction that ran it. */
+let handlerInvocations = 0;
 
 /**
  * A trigger HANDLER (the `nightly-digest` shape): write a `cron_marks` row via the facade (proving it
@@ -142,6 +144,7 @@ const capturedGuc: { value: string | null } = { value: null };
 const cronHandlerFn: ResolvedHandler & { kind: 'trigger' } = {
   kind: 'trigger',
   fn: async (init) => {
+    handlerInvocations += 1;
     await init.db.insert('cron_marks', { note: `fired:${init.triggerName}` });
   },
 };
@@ -219,6 +222,8 @@ function handlerCatchUpDescriptor(name: string): TriggerDescriptor {
  * Wrap the raw Db so the GUC inside the handler's own tdb.transaction() is OBSERVED — invokeTriggerHandler
  * opens forTenant(db,tenantId).transaction(), and this proxy reads current_setting on that same tx handle
  * AFTER the handler body runs (the GUC read-back pattern). Proves the handler ran in the GUC-populated tx.
+ * Only a transaction in which the handler body ran is read back: every other chokepoint statement (the
+ * firing reserve among them) runs in a short context transaction of its own.
  */
 function wrapDb(raw: Db): Db {
   const realTransaction = raw.transaction.bind(raw);
@@ -228,7 +233,9 @@ function wrapDb(raw: Db): Db {
         return (inner: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
           realTransaction(
             async (tx: unknown) => {
+              const ranBefore = handlerInvocations;
               const r = await inner(tx);
+              if (handlerInvocations === ranBefore) return r;
               const rows = (await (tx as Db).execute(
                 sql`select current_setting(${TENANT_GUC}, true) as tenant`,
               )) as unknown as Array<{ tenant: string | null }>;
