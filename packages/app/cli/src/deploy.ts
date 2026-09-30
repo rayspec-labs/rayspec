@@ -35,6 +35,7 @@
 
 import { writeSync } from 'node:fs';
 import { type ParseArgsConfig, parseArgs } from 'node:util';
+import type { Db } from '@rayspec/db';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
 // FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
@@ -613,8 +614,9 @@ export async function serveDeployment(
   allowlistPath?: string,
   hostOverride?: string,
   reporting: DeployReporting = { json: false },
+  extra: ServeExtras = {},
 ): Promise<void> {
-  const report = serveReport(reporting);
+  const report = extra.report ?? serveReport(reporting);
   // RAYSPEC_SPEC_PATH is how loadServerConfig/assembleServer find the doc — set it from the positional
   // (the operator typed the path once). An explicit --port overrides the PORT env.
   process.env.RAYSPEC_SPEC_PATH = specPath;
@@ -670,7 +672,7 @@ export async function serveDeployment(
   } catch (err) {
     if (err instanceof BootConfigError) {
       console.error(`[rayspec deploy] ${err.message}`);
-      report.refused(err.message);
+      report.refused(err.message, err);
       process.exit(1);
       return; // unreachable in production; keeps a test that stubs process.exit from booting on anyway.
     }
@@ -754,7 +756,12 @@ export async function serveDeployment(
     // when the spec is a backend-profile doc WITH agents — so `rayspec deploy <backend-spec-with-agents>`
     // boots the declared agents directly (parity with rayspec-serve), not just the bare registrar. A
     // missing agent credential surfaces as a fail-closed BootConfigError the catch below clean-prints.
-    server = await assembleServer(config, assembleOptsFromEnv(config));
+    server = await assembleServer(config, {
+      ...assembleOptsFromEnv(config),
+      ...(extra.beforeSchemaChange !== undefined
+        ? { beforeSchemaChange: extra.beforeSchemaChange }
+        : {}),
+    });
     // Shut the sanctioned door after the ONE boot registration (deploy owns its process, boots once).
     sealProductStores();
 
@@ -790,7 +797,7 @@ export async function serveDeployment(
     // sanctioned registration path (a verify-not-register failure means the product tables were not
     // registered through registerProductTables → registerProductStores).
     if (err instanceof DeployError) {
-      report.refused(`roll-out refused: ${err.message}`);
+      report.refused(`roll-out refused: ${err.message}`, err);
       console.error(
         `[rayspec deploy] roll-out refused: ${err.message}\n` +
           '    (the product stores are registered through the sanctioned registerProductTables ' +
@@ -817,10 +824,10 @@ export async function serveDeployment(
       //
       // A missing-REQUIRED-variable refusal additionally names the `.env` paths the CLI's auto-loader
       // searched — the one fact the operator whose ./.env sits in the invoking project needs.
-      report.refused(`${err.message}${missingEnvSearchedSuffix(err.message)}`);
+      report.refused(`${err.message}${missingEnvSearchedSuffix(err.message)}`, err);
       console.error(`[rayspec deploy] ${err.message}${missingEnvSearchedSuffix(err.message)}`);
     } else {
-      report.refused('the boot failed unexpectedly; the details are on stderr');
+      report.refused('the boot failed unexpectedly; the details are on stderr', err);
       console.error(
         '[rayspec deploy] boot failed:',
         err instanceof Error ? err.stack : String(err),
@@ -833,13 +840,21 @@ export async function serveDeployment(
   }
 }
 
-interface ServeReport {
+/** How a serving deploy reports its progress and how it ended. */
+export interface ServeReport {
   /** A banner or progress line: stdout when plain, stderr with `--json`. */
   log(line: string): void;
-  /** Record the refusal the envelope reports if the process now exits non-zero. */
-  refused(message: string): void;
+  /** Record the refusal the envelope reports if the process now exits non-zero, and its cause. */
+  refused(message: string, cause?: unknown): void;
   /** Record the signal that stopped a served deployment. */
   stopped(signal: string): void;
+}
+
+/** What a bundle deploy adds to a serving deploy: its own report and the apply it runs in the boot. */
+export interface ServeExtras {
+  report?: ServeReport;
+  /** Run by the boot after it validated everything and before it changes any schema. */
+  beforeSchemaChange?: (db: Db) => Promise<void>;
 }
 
 /**
