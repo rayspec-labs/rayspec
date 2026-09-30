@@ -164,7 +164,7 @@ const TIMESTAMP =
 export function formatTimestamp(at: Date): Timestamp {
   const ms = at.getTime();
   if (!Number.isFinite(ms)) throw new RangeError('the time is not a valid date');
-  return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace('.000Z', 'Z');
+  return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.000Z$/, 'Z');
 }
 
 /** Parse a timestamp in the form `formatTimestamp` writes; null for anything else. */

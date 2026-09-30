@@ -30,7 +30,7 @@ describe('lockSchemaInTransaction', () => {
     const { sent, tx } = recordingTx();
     await lockSchemaInTransaction(tx, 1500);
     expect(sent).toEqual([
-      { query: "SET LOCAL lock_timeout = '1500ms'" },
+      { query: "SELECT set_config('lock_timeout', $1, true)", parameters: ['1500ms'] },
       {
         query: 'SELECT pg_advisory_xact_lock($1::int4, $2::int4)',
         parameters: [SCHEMA_LOCK_NAMESPACE, SCHEMA_LOCK_SLOT],

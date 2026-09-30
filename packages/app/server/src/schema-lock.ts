@@ -66,8 +66,8 @@ export async function lockSchemaInTransaction(
   timeoutMs: number = DEFAULT_SCHEMA_LOCK_TIMEOUT_MS,
 ): Promise<void> {
   checkTimeout(timeoutMs);
-  // SET LOCAL takes no bind parameter; the value is a checked integer, never caller text.
-  await tx.unsafe(`SET LOCAL lock_timeout = '${timeoutMs}ms'`);
+  // set_config(..., true) is SET LOCAL with a bind parameter: the wait ends with the transaction.
+  await tx.unsafe("SELECT set_config('lock_timeout', $1, true)", [`${timeoutMs}ms`]);
   try {
     await tx.unsafe('SELECT pg_advisory_xact_lock($1::int4, $2::int4)', [
       SCHEMA_LOCK_NAMESPACE,
