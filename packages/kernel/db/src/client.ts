@@ -53,9 +53,22 @@ export function logNotice(notice: postgres.Notice): void {
  * (which holds ONE connection across the whole LLM call inside `tdb.transaction()`) cannot starve
  * the HTTP pool — see `@rayspec/server` composition-root.ts (fix B). Pass it explicitly there; the
  * default keeps the HTTP pool at 4 (backward-compatible).
+ *
+ * `options.applicationName` tags every session of the pool (`application_name`), so a check over
+ * `pg_stat_activity` can tell the sessions of this pool from everyone else's. Omitted ⇒ no tag.
  */
-export function makeDb(databaseUrl: string, maxPoolSize: number = DEFAULT_POOL_MAX) {
-  const sql = postgres(databaseUrl, { max: maxPoolSize, onnotice: logNotice });
+export function makeDb(
+  databaseUrl: string,
+  maxPoolSize: number = DEFAULT_POOL_MAX,
+  options: { applicationName?: string } = {},
+) {
+  const sql = postgres(databaseUrl, {
+    max: maxPoolSize,
+    onnotice: logNotice,
+    ...(options.applicationName !== undefined
+      ? { connection: { application_name: options.applicationName } }
+      : {}),
+  });
   const db = drizzle(sql, { schema });
   return Object.assign(db, { $client: sql });
 }

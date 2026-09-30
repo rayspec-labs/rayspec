@@ -378,6 +378,17 @@ for STATEMENT in "UPDATE runtime_control_receipts SET actor = 'x';" "DELETE FROM
 done
 assert_eq "1" "SELECT count(*) FROM runtime_control_receipts;" "0012 receipts refuse UPDATE, DELETE and TRUNCATE"
 
+echo "== ASSERT 0013 end state (runtime control: the process heartbeats) =="
+assert_eq "1" \
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name = 'runtime_control_processes';" \
+  "0013 created runtime_control_processes"
+psql -d "$DRYRUN_DB" -c "INSERT INTO runtime_control_processes (process_id) VALUES ('00000000-0000-4000-8000-000000000002');" >/dev/null
+if psql -d "$DRYRUN_DB" -c "UPDATE runtime_control_processes SET phase = 'paused';" >/dev/null 2>&1; then
+  echo "SHADOW DRY-RUN: FAIL — runtime_control_processes accepted an unknown phase" >&2; exit 1
+fi
+echo "  ok: runtime_control_processes refuses an unknown phase"
+assert_eq "open" "SELECT phase FROM runtime_control_processes;" "0013 heartbeat defaults to the open phase"
+
 echo "== ASSERT run_events FK CASCADE: deleting an org removes its run_events rows =="
 psql -d "$DRYRUN_DB" >/dev/null <<'SQL'
 INSERT INTO orgs (id, name, slug) VALUES ('00000000-0000-0000-0000-0000000000e1', 'EventsOrg', 'eventsorg');

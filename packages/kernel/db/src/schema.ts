@@ -835,6 +835,39 @@ export const runtimeControlReceipts = pgTable(
 );
 
 /**
+ * runtime_control_processes — one row per RUNNING runtime process of the environment, written by the
+ * process itself: which fence epoch it has observed, whether it has stopped its producers and drained
+ * its in-flight work, what each producer is doing, and which external services it talks to that no
+ * fence can stop. A quiesce reads these rows to learn whether every live process has drained; a
+ * process that stops heartbeating (`seen_at` goes stale) is no longer counted as live.
+ *
+ * GLOBAL/predicate-exempt. It holds no application data and never a secret; the category is
+ * `runtime-control-state`, so it is never exported. It is the one table a database write barrier
+ * leaves writable to the runtime, so a fenced process can still report that it drained.
+ */
+export const runtimeControlProcesses = pgTable(
+  'runtime_control_processes',
+  {
+    processId: uuid('process_id').primaryKey(),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    /** The database clock at the process's last heartbeat. */
+    seenAt: timestamp('seen_at', { withTimezone: true }).notNull().default(sql`clock_timestamp()`),
+    /** The fence epoch the process last observed. */
+    fenceEpoch: bigint('fence_epoch', { mode: 'number' }).notNull().default(0),
+    /** `open`, `draining` (producers stopped, in-flight work still running) or `fenced` (drained). */
+    phase: text('phase').notNull().default('open'),
+    /** `[{producer, state}]`: each producer's state as the process sees it. */
+    producers: jsonb('producers').notNull().default(sql`'[]'::jsonb`),
+    /** The external services this process calls that a fence cannot stop, by name. */
+    unfencedExternal: jsonb('unfenced_external').notNull().default(sql`'[]'::jsonb`),
+  },
+  (t) => [
+    check('runtime_control_processes_phase', sql`${t.phase} IN ('open', 'draining', 'fenced')`),
+    check('runtime_control_processes_epoch', sql`${t.fenceEpoch} >= 0`),
+  ],
+);
+
+/**
  * The set of tenant-scoped tables that the TenantDb chokepoint auto-scopes by tenant_id.
  * DENY-BY-DEFAULT: a tenant-scoped table NOT registered here throws on access (it must
  * never silently fall through to unscoped). Global/auth tables (orgs, users, sessions,

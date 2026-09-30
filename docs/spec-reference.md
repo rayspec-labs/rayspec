@@ -156,9 +156,9 @@ stores:
 
   `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
   `journal_steps`, `memberships`, `oidc_models`, `orgs`, `run_events`, `runs`,
-  `runtime_control_receipts`, `runtime_control_state`, `sessions`,
-  `tenant_event_streams`, `tenant_events`, `users`, `workflow_artifacts`,
-  `workflow_node_states`, `workflow_runs`.
+  `runtime_control_processes`, `runtime_control_receipts`,
+  `runtime_control_state`, `sessions`, `tenant_event_streams`, `tenant_events`,
+  `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
 
   Several are names a product would plausibly reach for on its own — `sessions`
   for a chat application, `invites`, `runs`. The match is exact, so a
