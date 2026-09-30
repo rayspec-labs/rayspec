@@ -27,11 +27,17 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OrgStore } from '@rayspec/api-auth';
-import { makeDb } from '@rayspec/db';
+import { listTenantTables, makeDb } from '@rayspec/db';
+import { createIsolatedTestDatabase, type IsolatedTestDatabase } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
+import {
+  assembleServer,
+  type BootedServer,
+  loadServerConfig,
+  loadTenantProvisionSecrets,
+} from './composition-root.js';
 import { provisionTenant, type TenantProvisionSecrets } from './tenant-provision.js';
 
 /**
@@ -441,8 +447,52 @@ describe.skipIf(!baseUrl)('provisionTenant — the operator create-or-resolve', 
   }, 180_000);
 });
 
+describe.skipIf(!baseUrl)('provisionTenant with role separation', () => {
+  let iso: IsolatedTestDatabase;
+
+  beforeAll(async () => {
+    iso = await createIsolatedTestDatabase(baseUrl as string);
+  }, 60_000);
+
+  afterAll(async () => {
+    await iso?.drop();
+  });
+
+  it('reads the migration connection like the boot does, and provisions as the migration role under row security', async () => {
+    const secrets = loadTenantProvisionSecrets(
+      {
+        DATABASE_URL: iso.urls.runtime,
+        RAYSPEC_API_KEY_PEPPER: PEPPER,
+        RAYSPEC_MIGRATION_DATABASE_URL: iso.urls.migration,
+      },
+      () => {},
+    );
+    expect(secrets.migrationDatabaseUrl).toBe(iso.urls.migration);
+    const out = await provisionTenant(secrets, { orgId: CHOSEN, name: 'Isolated Co' });
+    expect(out.org).toBe('created');
+
+    const admin = postgres(iso.urls.admin, { max: 1, onnotice: () => {} });
+    try {
+      // The chain ran as the migration role and the tenant tables came out isolated.
+      const owners = (await admin.unsafe(
+        `SELECT DISTINCT pg_get_userbyid(c.relowner)::text AS owner
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind IN ('r', 'p') AND n.nspname IN ('public', 'drizzle')`,
+      )) as unknown as { owner: string }[];
+      expect(owners.map((o) => o.owner)).toEqual([iso.roles.migration]);
+      const tables = await listTenantTables(admin);
+      expect(tables.length).toBeGreaterThan(0);
+      expect(tables.filter((t) => !t.rowSecurity || !t.forced || !t.policy)).toEqual([]);
+      expect(await admin.unsafe('SELECT 1 FROM orgs WHERE id = $1', [CHOSEN])).toHaveLength(1);
+    } finally {
+      await admin.end();
+    }
+    armsRan += 1;
+  }, 120_000);
+});
+
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(6);
+  if (dbRequired) expect(armsRan).toBe(7);
   else expect(true).toBe(true);
 });
