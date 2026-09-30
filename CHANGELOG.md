@@ -235,16 +235,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the operation lease (the fence epoch and the environment revision increase in one transaction,
   with receipts) and waits, until the deadline, for every running runtime process to stop its
   producers and drain its in-flight work. Each process reads the fence every 500 ms and, while it
-  is held, refuses every HTTP mutation (uploads, trigger fires and run starts included) and every
-  new event stream with `503 SERVICE_UNAVAILABLE` and `Retry-After` (reads keep answering), closes
-  open event streams after the chunk in flight, skips cron ticks and the daily system cleanup, and
-  pauses the run queues without shutting the durable engine down; once it has drained it also
-  refuses event-bus appends and object writes. Status `fenced` means every live process reported
-  drained at the new epoch; otherwise the result is `timed-out` with `ok: false` and
-  `RAY_SOURCE_NOT_QUIESCENT`, and the fence stays held. The result lists each producer's state,
+  is held, refuses every HTTP mutation (uploads, trigger fires and run starts included, and any
+  request to a declared route whose action writes — a store create, update or delete, an agent
+  run, a handler not declared `readonly`, a stream ingest — whatever its method) and every new
+  event stream with `503 SERVICE_UNAVAILABLE` and `Retry-After` (reads keep answering, and a read
+  authenticated with an api key does not stamp the key's last use), closes open event streams
+  after the chunk in flight, skips cron ticks and the daily system cleanup, and pauses the run
+  queues without shutting the durable engine down; once it has drained it also refuses event-bus
+  appends and object writes. A mutation counts as in flight until its work has ended: the drain
+  closes a streamed run's stream for its client, and the run behind it finishes and is waited for.
+  A process is counted from the moment its boot reads the fence, before it attaches any producer,
+  so a quiesce during a boot waits for that process too. Status `fenced` means every live process
+  reported drained at the new epoch; otherwise the result is `timed-out` with `ok: false` and
+  `RAY_SOURCE_NOT_QUIESCENT`, and the fence stays held; quiesce renews its lease while it waits,
+  however far away the deadline is. The result lists each producer's state,
   the write barriers and the external services no fence reaches (`RAY_W_EXTERNAL_EFFECTS_UNFENCED`).
   The database barrier is taken only after a full drain: with role separation (`runtimeRole`) the
-  runtime role's write privileges are revoked in both databases and recorded; without it, a source
+  runtime role's write privileges are revoked in both databases and recorded (refused as
+  `unavailable` when the role, or a role it can switch to with `SET ROLE`, owns a table, holds a
+  write that survives, is a superuser, bypasses row security or may create roles); without it, a source
   the operator attests is stopped holds `database-stopped-source` when no other session is
   connected; otherwise it is reported `database-write-role: unavailable`. `resume(fenceEpoch)`
   releases only the fence held at that epoch (`RAY_FENCE_MISMATCH` otherwise), grants back exactly
@@ -287,7 +296,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a step whose outcome cannot be established — an external effect nothing can read back — is never
   replayed and blocks every apply with `RAY_RECONCILIATION_REQUIRED` (exit class 6) until an
   operator records what it did with `resolveInterruptedStep`. Schema changes are never reversed
-  automatically. The contract package gains `checkApplyRequest`, `checkApplyControl` and
+  automatically. A live lease is never taken over, not even by a retry under the same operation
+  id, so two retries of one interrupted apply cannot both run its steps; a retry under the key of
+  an apply that another apply closed as interrupted continues that operation. The contract package gains `checkApplyRequest`, `checkApplyControl` and
   `isIdempotencyKey`. New: [the runtime operations guide](./docs/runtime-operations.md) — the
   lifecycle operations, the receipts and how to recover from each interruption.
 - **The hosting report beside `inspect()`.** `inspectHosting()` on the runtime-control adapter
@@ -309,7 +320,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`RAY_PLAN_STALE`, 3; the platform chain plans again instead), another operation holding the
   lease past the wait (`RAY_LOCK_TIMEOUT`, 5) and an interrupted apply that needs manual
   reconciliation (`RAY_RECONCILIATION_REQUIRED`, 6). The chain that first creates the receipt
-  tables on an older database runs as before, under the schema lock.
+  tables on an older database runs as before, under the schema lock. `rayspec tenant ensure` runs
+  its platform chain the same way (actor `tenant-ensure`), and while the environment is fenced it
+  creates, resolves and migrates nothing: it reports `ENVIRONMENT_FENCED`, or `MIGRATION_REFUSED`
+  for another refusal of its chain.
 - **Cross-process run cancellation is on under the managed hosting posture.** With
   `RAYSPEC_HOSTING_POSTURE=managed` and no `RAYSPEC_RUN_CANCEL_POLL_MS`, an executing run re-reads
   its cancellation record every 2000 ms, so a cancellation reaches it in whichever worker process
@@ -357,9 +371,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid spec, a Product-YAML document outside the boot scope or a malformed
   `RAYSPEC_JWT_SIGNING_KEY` still created every platform table in an empty database before it
   refused. The key and the document are now validated first, with the same refusals as before; a
-  valid deployment boots exactly as it did. Checks that need the merged extensions or a
-  spec-dependent setting (a media signing key, an STT or TTS provider) still run after the
-  platform chain and before any product DDL.
+  valid deployment boots exactly as it did. For a backend spec, the environment it demands is
+  checked first too, with its extension packs loaded and merged: a stream route without a blob
+  root, a playback route without a valid media signing key, an unsupported STT or TTS provider or
+  a missing credential for one, an unreadable `RAYSPEC_FS_SOURCE_ROOT`, a frontend mount with
+  nothing to serve and a cron or manual trigger without `RAYSPEC_CRON_TENANT_ID` are refused before
+  the platform chain runs. A Product-YAML document's environment demands (its deployment tenant, a
+  blob root, a media signing key, a speech provider) still run after the platform chain and before
+  any product DDL.
 - **Every schema change takes one lock.** The boot's platform migration chain took no lock, so a
   boot racing another boot or a `rayspec tenant ensure` against an empty database could die on a
   duplicate object. The chain, product-store DDL and `tenant ensure` now all take the one shared

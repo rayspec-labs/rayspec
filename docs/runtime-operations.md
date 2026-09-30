@@ -38,7 +38,9 @@ lease** in `runtime_control_state` first. A second one is refused with `RAY_LOCK
 (retryable) or, when its caller waits, runs after the first has finished. An apply's lease lives
 60 seconds and is renewed while the apply runs, so the lease of a process that died expires within
 a minute (a boot waits that long, plus the schema lock wait, before it gives up); a holder that
-stalled past its expiry and was replaced can no longer write anything.
+stalled past its expiry and was replaced can no longer write anything. A live lease is never taken
+over, not even by a retry under the same operation id: the earlier attempt may still be running a
+step, so the retry is refused with `RAY_LOCK_TIMEOUT` until that lease has expired.
 
 ## Apply
 
@@ -60,8 +62,12 @@ which makes every plan prepared before it stale.
 
 Replaying an apply with the **same idempotency key** and the same plan returns the recorded result
 (`already-applied`, with the original receipts) and runs nothing again. A key whose apply was
-refused before it changed anything can be retried; one whose apply failed returns the recorded
-failure — use a new key with a new plan.
+refused before it changed anything can be retried, and so can one whose apply was interrupted —
+also after another apply or a boot closed it as interrupted (`interrupted: true` below): the
+retry continues that operation under its own operation id, through the same checks, and does not
+run a step it already finished. One whose apply failed returns the recorded failure — use a new
+key with a new plan. Two retries of one interrupted apply at once do not both continue it: the
+second is refused with `RAY_LOCK_TIMEOUT`.
 
 ## What a deploy records
 

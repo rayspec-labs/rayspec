@@ -783,7 +783,11 @@ attempt got through.
   not be applied — that one reports `MIGRATION_FAILED` and creates nothing, and
   one that waited longer than 60 seconds for the shared schema lock a booting
   server or another migration held reports `SCHEMA_LOCK_TIMEOUT`, creates
-  nothing and can simply be run again); `2` on a usage error.
+  nothing and can simply be run again; on an environment quiesced by the
+  runtime's source fence it reports `ENVIRONMENT_FENCED` and creates, resolves
+  and migrates nothing until the fence is released; a migration chain the
+  runtime refused for another reason reports `MIGRATION_REFUSED`); `2` on a
+  usage error.
 
 ### The owner handoff, and why it creates no user
 

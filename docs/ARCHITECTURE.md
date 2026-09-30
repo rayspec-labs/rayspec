@@ -373,12 +373,13 @@ ensure` — takes one shared transaction-scoped advisory lock, `pg_advisory_xact
 that changed nothing. The lock is released by commit, rollback or a lost connection, so a
 killed runner never blocks the next one.
 
-The boot runs in this order: validate the signing key and the spec; reconcile any apply an
-earlier process left interrupted; apply the platform migration chain if the ledger is behind the
+The boot runs in this order: validate the signing key and the spec, and for a backend spec the
+environment its merged extensions demand; reconcile any apply an earlier process left interrupted; apply the platform migration chain if the ledger is behind the
 runtime; read the source fence; assemble the application, whose deployer applies product-store
 DDL. Each schema change is a `runtime.apply` operation (below): it takes the operation lease
 first and the shared schema lock inside it, so a boot, an export's quiesce and an operator's
-apply never interleave, and `tenant ensure` still only waits on the lock. The chain that creates
+apply never interleave; `tenant ensure` runs its chain the same way, and refuses to create or
+resolve an organization while the source fence is held. The chain that creates
 the receipt tables on an older database runs before them, under the schema lock alone. A restart
 that has nothing to change takes neither.
 
@@ -404,7 +405,9 @@ Mutating operations run under an **operation lease** kept in `runtime_control_st
 per environment. Taking the lease increments a fencing epoch and records the operation's intent
 in the same transaction, before any effect; every later write of the operation re-checks the
 epoch, the holder and the expiry, by the database clock, inside its own transaction. A holder
-whose lease expired and was taken over therefore cannot write when it wakes up. Each operation
+whose lease expired and was taken over therefore cannot write when it wakes up. Only an expired
+lease is taken over, even by a retry of the same operation, so one operation never has two live
+holders. Each operation
 leaves **receipts** in `runtime_control_receipts` — operation id, actor, kind, lease epoch,
 inputs digest, each step's start and finish with its digest, the outcome — which a trigger keeps
 append-only. A step with a start and no finish is what a crash leaves behind, and the next holder
@@ -429,20 +432,26 @@ migration. It lives in `runtime_control_state` (`fence_state`, `fence_epoch`, an
 barriers recorded with it), so every runtime process of the environment sees it: each one re-reads
 it every 500 ms and moves through three phases. *Open*: everything runs. *Draining*: new work is
 refused — HTTP mutations and new event streams answer `503 SERVICE_UNAVAILABLE` with
-`Retry-After` from a middleware in front of every route, cron ticks and the system cleanup pass
+`Retry-After` from a middleware in front of every route (a declared route whose action writes is a
+mutation whatever its method, through a guard it carries), cron ticks and the system cleanup pass
 their producer gate as no-ops, and the run queues stop dequeuing (their worker concurrency set to
 0, the engine left running) — open event streams close after the chunk in flight, and work already
-running continues. *Fenced*: that work has finished; event-bus appends and object writes are now
+running continues: a mutation stays in flight until its work has ended, so a streamed run whose
+client stream the drain closed is still waited for. *Fenced*: that work has finished; event-bus appends and object writes are now
 refused too. Each process reports its phase, its producers and the external services it calls in
 its heartbeat (`runtime_control_processes`), and `quiesce()` reports `fenced` only once every live
-process has drained at the new epoch — otherwise `timed-out`, with the fence still held. Because
+process has drained at the new epoch — otherwise `timed-out`, with the fence still held. A process
+writes its first heartbeat before it reads the fence at boot, so one that is still booting counts as
+live and undrained. Because
 the fence is in the database, a process that boots under it starts fenced (its queues register
 paused), and a `resume()` from another process reaches a running server within one poll.
 
 The database write barrier the export relies on is taken only after a full drain and is never
 assumed. With role separation (the runtime connects as a role that owns no table) `quiesce()`
 revokes that role's INSERT, UPDATE, DELETE and TRUNCATE on every table of both databases, checks
-with `has_table_privilege` that nothing survived, and records exactly what it revoked; `resume()`
+with `has_table_privilege` that nothing survived for the role or any role it can switch to with
+`SET ROLE`, refuses a role that can switch to a table owner, a superuser, a role that bypasses row
+security or one that may create roles, and records exactly what it revoked; `resume()`
 grants back exactly that. Without role separation the only barrier is a stopped source: the
 operator attests that no runtime process runs, and no session other than the caller's own is
 connected to either database. In every other case the barrier is reported unavailable, and an
