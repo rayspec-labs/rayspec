@@ -14,9 +14,12 @@ import type { Db } from '@rayspec/db';
 import { forTenant, generateProductSql } from '@rayspec/db';
 import {
   buildProductTables,
+  isolateTestSchema,
   makeDbWithSchema,
   registerScopedTables,
   type StoreConflictKeys,
+  type TestRuntimeRole,
+  testDatabaseIsolation,
 } from '@rayspec/db/testing';
 import type { ResolvedHandler } from '@rayspec/platform';
 import type { RaySpec } from '@rayspec/spec';
@@ -504,6 +507,17 @@ export async function createHarness(
     };
   }
 
+  // With RAYSPEC_TEST_DATABASE_ISOLATION=roles the app is served as a runtime role of its own — no
+  // superuser, no BYPASSRLS, owner of nothing — with every tenant table of the schema under the
+  // enabled, forced tenant policy: the posture a role-separated deployment serves in. `db` (the
+  // superuser that built the schema) stays the handle the suite seeds and inspects through.
+  let runtimeRole: TestRuntimeRole | undefined;
+  let appDb: Db = db;
+  if (testDatabaseIsolation()) {
+    runtimeRole = await isolateTestSchema(db.$client, url, SCHEMA);
+    appDb = makeDbWithSchema(runtimeRole.url, SCHEMA);
+  }
+
   // A real RS256 key — set into the env so assertBootSecrets passes + the signer signs.
   const { privateKey } = await generateKeyPair('RS256', { extractable: true });
   const pkcs8 = await exportPKCS8(privateKey);
@@ -515,12 +529,12 @@ export async function createHarness(
   const signer = await createSigner(pkcs8, 'RS256', opts.accessTokenTtlSeconds);
   const jwksProvider = new JwksProvider([signer.publicKeyJwk()]);
 
-  const identityStore = new IdentityStore(db);
-  const orgStore = new OrgStore(db);
-  const apiKeyStore = new ApiKeyStore(db);
-  const auditStore = new AuditStore(db);
-  const idempotency = new IdempotencyStore(db);
-  const inviteStore = new InviteStore(db);
+  const identityStore = new IdentityStore(appDb);
+  const orgStore = new OrgStore(appDb);
+  const apiKeyStore = new ApiKeyStore(appDb);
+  const auditStore = new AuditStore(appDb);
+  const idempotency = new IdempotencyStore(appDb);
+  const inviteStore = new InviteStore(appDb);
   // A short grace window (30ms) so the reuse-detection tests exercise both sides of the grace
   // boundary. Production uses the default ~10s window. When `useFakeClock` is set, the grace tests
   // drive an injected clock (advance/reset) so the boundary is deterministic — no wall-clock race.
@@ -535,7 +549,7 @@ export async function createHarness(
     const providerJwk = await exportJWK(privateKey);
     oidcProvider = createOidcProvider({
       issuer: opts.oidcIssuer ?? 'http://127.0.0.1/oidc',
-      db,
+      db: appDb,
       jwks: { keys: [{ ...providerJwk, use: 'sig', alg: 'RS256' }] },
       clients: opts.oidcClients ?? [],
       proxy: true,
@@ -546,7 +560,7 @@ export async function createHarness(
     // GUC seam: the declared-route engine reads deps.db; wrap it (test-only) to capture the in-handler
     // transaction GUC. The stores hold the UNWRAPPED handle (they ran the DDL on it) — only the
     // engine/run path sees the wrapper.
-    db: opts.wrapDb ? opts.wrapDb(db) : db,
+    db: opts.wrapDb ? opts.wrapDb(appDb) : appDb,
     signer,
     jwks: jwksProvider,
     // The policy seam: undefined ⇒ the constructor default (DEFAULT_POLICIES) — every existing
@@ -598,6 +612,10 @@ export async function createHarness(
       // Unregister the product tables from the deny-by-default Set (the persistent registration must
       // not leak into another suite's chokepoint state).
       unregisterTables?.();
+      if (runtimeRole !== undefined) {
+        await appDb.$client.end();
+        await runtimeRole.drop();
+      }
       await db.$client.end();
     },
   };

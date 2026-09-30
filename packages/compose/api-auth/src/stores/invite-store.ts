@@ -19,7 +19,7 @@
  */
 import { hashInviteToken } from '@rayspec/auth-core';
 import type { Db, TenantDb } from '@rayspec/db';
-import { forTenant, schema } from '@rayspec/db';
+import { forTenant, inviteTenantByTokenHash, schema } from '@rayspec/db';
 import { and, eq, gt, isNull } from 'drizzle-orm';
 
 /**
@@ -99,19 +99,21 @@ export class InviteStore {
 
   /**
    * RESOLVE a presented plaintext invite token to its invite row (the redeem lookup). Tenant-agnostic
-   * by necessity — the token is the ONLY thing the redeemer holds — so it is a hash-equality lookup on
-   * the unique `token_hash` index via the raw injected Db (the whitelisted bearer-resolution seam). The
-   * org is read FROM the row. Returns undefined for an unknown token (no existence leak). Validation
-   * (expiry / consumed) is the caller's job on the returned row.
+   * by necessity — the token is the ONLY thing the redeemer holds — so the tenant is first resolved
+   * from the hash on the unique `token_hash` index (`inviteTenantByTokenHash`, which also answers under
+   * row-level security), and the row is then read through `forTenant` under that tenant. The org is
+   * read FROM the token, never from the request. Returns undefined for an unknown token (no existence
+   * leak). Validation (expiry / consumed) is the caller's job on the returned row.
    */
   async resolveByToken(presentedToken: string): Promise<ResolvedInvite | undefined> {
     const tokenHash = hashInviteToken(presentedToken);
-    const rows = await this.db
-      .select()
-      .from(schema.invites)
+    const tenantId = await inviteTenantByTokenHash(this.db, tokenHash);
+    if (tenantId === undefined) return undefined;
+    const rows = (await forTenant(this.db, tenantId)
+      .select(schema.invites)
       .where(eq(schema.invites.tokenHash, tokenHash))
-      .limit(1);
-    const row = rows[0] as typeof schema.invites.$inferSelect | undefined;
+      .limit(1)) as Array<typeof schema.invites.$inferSelect>;
+    const row = rows[0];
     if (!row) return undefined;
     return {
       id: row.id,

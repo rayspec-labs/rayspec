@@ -378,6 +378,18 @@ export class OrgStore {
     return rows[0] as OrgRow | undefined;
   }
 
+  /**
+   * Every org id, tombstoned ones included — what a per-tenant housekeeping pass (the event-bus
+   * retention sweep) iterates, running each tenant's work under that tenant's context.
+   */
+  async allOrgIds(): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: schema.orgs.id })
+      .from(schema.orgs)
+      .orderBy(schema.orgs.id);
+    return rows.map((r) => r.id);
+  }
+
   /** Count active OWNER memberships in an org (the last-owner invariant). */
   async ownerCount(orgId: string): Promise<number> {
     const rows = await this.db
