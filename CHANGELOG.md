@@ -429,10 +429,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a table's row security off. `gate:migrate-clean` asserts the policies on every tenant table and row security enabled on none
   after the chain.
 - **A test lane served as the runtime role.** With `RAYSPEC_TEST_DATABASE_ISOLATION=roles` the
-  `@rayspec/api-auth` test harness serves the app as a runtime role of its own with every tenant
-  table's policy enabled and forced, and checks from inside a session that it is connected as that
-  role; any other value of the variable fails the run. CI runs the whole api-auth suite that way as
-  well. `GLOBAL_TABLES` in `@rayspec/db` lists the tables without a tenant column, and the
+  database-backed suites of api-auth, platform, workflow-durable, durable-dbos, server and cli run
+  the code under test as a runtime role with every tenant table's policy enabled and forced: a
+  hand-built test schema is served as a role of its own (`testAppDb` in `@rayspec/db/testing`),
+  every server boot is handed role separation (the server's `vitest.setup.ts` wraps
+  `assembleServer` and `provisionTenant`), a workflow engine launches as the runtime role, and a
+  spawned CLI or server gets both connections (`runtimeRoleEnv`). Each lane checks from inside a
+  session that it is connected as the runtime role; any other value of the variable fails the run.
+  CI runs all six packages that way as well. `GLOBAL_TABLES` in `@rayspec/db` lists the tables without a tenant column, and the
   database-backed suite holds it equal to the catalog. The new
   row-level isolation suites of `@rayspec/db` and `@rayspec/server` create throwaway roles through
   the setup SQL and prove, as the runtime role, that one tenant cannot read, update, delete,

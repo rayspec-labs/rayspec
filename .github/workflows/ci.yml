@@ -458,23 +458,27 @@ jobs:
             --filter='@rayspec/workflow-durable' \
             --filter='@rayspec/local-boot'
 
-      # The api-auth suite again, served as a runtime role of its own — no superuser, no BYPASSRLS,
-      # owner of nothing — with every tenant table's row-level policy enabled and forced
-      # (RAYSPEC_TEST_DATABASE_ISOLATION=roles, see the api-auth test harness). The whole surface,
-      # cross-tenant gate included, must pass with the database enforcing tenancy on its own too.
-      - name: Test (api-auth as the runtime role under row-level security)
+      # The database-backed suites of the packages the isolated posture touches, again, with every
+      # boot and every engine as the runtime role under row-level security
+      # (RAYSPEC_TEST_DATABASE_ISOLATION=roles): the api-auth harness and the platform, workflow and
+      # workflow-engine suites serve a hand-built schema as a runtime role of its own (no superuser,
+      # no BYPASSRLS, owner of nothing) with every tenant table's policy enabled and forced; each
+      # server boot migrates as a migration role and serves as a runtime role prepared by the shipped
+      # setup SQL (server vitest.setup.ts); the CLI deploy suites hand the spawned CLI both roles.
+      # Each lane checks from inside a session that it is the runtime role. --concurrency=1 for the
+      # same reason as the step above: two real workflow engines must not overlap on one database.
+      - name: Test (DB-backed suites as the runtime role under row-level security)
         env:
           RAYSPEC_TEST_DATABASE_ISOLATION: roles
-        run: pnpm exec turbo run test --filter='@rayspec/api-auth'
-
-      # The platform suites that support the same switch — the store facade and run cancellation —
-      # run over a runtime role of their own too (see test-support/test-db.ts `makeTestAppDb`).
-      - name: Test (platform store facade and run cancellation as the runtime role)
-        env:
-          RAYSPEC_TEST_DATABASE_ISOLATION: roles
-        run: >-
-          pnpm --filter='@rayspec/platform' exec vitest run
-          src/handlers/store-facade.db.test.ts src/run-cancel.db.test.ts
+        run: |
+          pnpm exec turbo run test \
+            --concurrency=1 \
+            --filter='@rayspec/api-auth' \
+            --filter='@rayspec/platform' \
+            --filter='@rayspec/workflow-durable' \
+            --filter='@rayspec/durable-dbos' \
+            --filter='@rayspec/server' \
+            --filter='@rayspec/cli'
 
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   # LANE 3 — live providers (OPT-IN, non-blocking). Runs ONLY on a manual workflow_dispatch, so it
