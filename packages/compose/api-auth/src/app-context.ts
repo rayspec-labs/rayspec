@@ -398,6 +398,13 @@ export interface AppDeps {
   authService: AuthService;
   /** Optional mounted OIDC provider (omit to skip the /oidc mount in unit-only suites). */
   oidcProvider?: Provider;
+  /**
+   * Hand a stream handler its request without the caller's credential: no `authorization`,
+   * `proxy-authorization` or `cookie` header, and for a playback route no `?token=` in its URL or
+   * params. On in the hardened posture (the server turns it on with role separation or single-tenant
+   * mode). Omitted or false: the request as the caller sent it, as before.
+   */
+  stripHandlerCredentials?: boolean;
   /** Allowed Origins for cookie-authenticated CSRF checks. */
   allowedOrigins: string[];
   /**

@@ -2472,6 +2472,10 @@ async function assembleServerWith(
     bodyRefreshEnabled: config.bodyRefreshEnabled,
     // The source fence: while the runtime is fenced every mutation answers 503 before it runs.
     writeFence: fence,
+    // The hardened posture (role separation or single-tenant mode): a stream handler is handed its
+    // request without the caller's credential. Off otherwise, so an existing handler sees what it saw.
+    stripHandlerCredentials:
+      config.migrationDatabaseUrl !== undefined || config.singleTenant === true,
   };
 
   //    Every refusal the deploy can decide from the configuration and the document alone, made with

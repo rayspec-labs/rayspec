@@ -2,9 +2,11 @@
  * What custom handler code is handed, and what it can leak — through the real createAuthApp chain,
  * DB-backed:
  *
- *  - a stream INGEST handler that reads every request header sees no `authorization`, no `cookie` and
- *    no `proxy-authorization`, while the body, the content headers and a custom header still arrive;
- *  - a stream PLAYBACK handler sees neither the `?token=` media token in the URL nor in its params;
+ *  - in the hardened posture, a stream INGEST handler that reads every request header sees no
+ *    `authorization`, no `cookie` and no `proxy-authorization`, while the body, the content headers
+ *    and a custom header still arrive, and a stream PLAYBACK handler sees neither the `?token=` media
+ *    token in the URL nor in its params;
+ *  - outside it, both see the request as the caller sent it, as before;
  *  - a `{handler}` route sees only its allowlisted headers;
  *  - a playback token stops working the moment its member is removed, not at its expiry;
  *  - a handler (JSON or stream) that throws with internal detail in its message answers the bare
@@ -17,6 +19,7 @@ import type { RouteHandlerInit, StreamRouteHandlerInit } from '@rayspec/handler-
 import { makeFsBlobStoreFactory, type ResolvedHandler } from '@rayspec/platform';
 import { parseSpec } from '@rayspec/spec';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createAuthApp } from '../app.js';
 import { createMediaTokenService } from '../media/media-token.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
 
@@ -140,6 +143,7 @@ describe.skipIf(!hasDb)('what handler code is handed', () => {
       blobFactory: makeFsBlobStoreFactory(blobDir),
       mediaTokenService: createMediaTokenService('media-secret-at-least-32-bytes-xxxxxxxx'),
       schema: 'rayspec_test_handler_credentials',
+      stripHandlerCredentials: true,
     });
   });
   beforeEach(async () => {
@@ -247,6 +251,36 @@ describe.skipIf(!hasDb)('what handler code is handed', () => {
     expect(Object.keys(seen.headers)).not.toContain('cookie');
     expect(seen.headers.range).toBe('bytes=0-9');
     expect(seen.resource).toBe('res-p1');
+  });
+
+  it('outside the hardened posture a stream handler sees the request as the caller sent it', async () => {
+    const asBefore = createAuthApp({ ...h.deps, stripHandlerCredentials: false });
+    const { token } = await owner('as-before@example.com');
+    const ingest = await asBefore.request('/echo/one', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        cookie: 'theme=dark',
+        'content-type': 'application/octet-stream',
+      },
+      body: 'raw-bytes',
+    });
+    expect(ingest.status).toBe(200);
+    const seenIngest = (await ingest.json()) as { headers: Record<string, string> };
+    expect(seenIngest.headers.authorization).toBe(`Bearer ${token}`);
+    expect(seenIngest.headers.cookie).toBe('theme=dark');
+
+    const minted = await jsonRequest(asBefore, 'POST', '/echo/p1/token', {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const playToken = ((await minted.json()) as { token: string }).token;
+    const playback = await asBefore.request(
+      `/echo/p1/playback?token=${encodeURIComponent(playToken)}`,
+    );
+    expect(playback.status).toBe(200);
+    const seenPlayback = (await playback.json()) as { url: string; params: Record<string, string> };
+    expect(new URL(seenPlayback.url).searchParams.get('token')).toBe(playToken);
+    expect(seenPlayback.params.token).toBe(playToken);
   });
 
   it('a {handler} route sees only its allowlisted headers', async () => {

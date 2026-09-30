@@ -831,10 +831,11 @@ export interface StreamRouteHandlerInit extends HandlerInit {
   /** Path/query params bound by the route (e.g. `{upload_id}` → `params.upload_id`). All DATA. */
   readonly params: Readonly<Record<string, string>>;
   /**
-   * The Web-standard request (binary body / Range headers) — the body is UNTRUSTED DATA. It carries
-   * no credential: `authorization`, `proxy-authorization` and `cookie` are removed before the handler
-   * runs, and so is the playback route's `?token=` (the caller was authenticated before the handler
-   * runs; `principal` says who it is). Every other header is kept.
+   * The Web-standard request (binary body / Range headers) — the body is UNTRUSTED DATA. In the
+   * hardened posture (role separation or single-tenant mode turned on) it carries no credential:
+   * `authorization`, `proxy-authorization` and `cookie` are removed before the handler runs, and so
+   * is the playback route's `?token=` (the caller was authenticated before the handler runs;
+   * `principal` says who it is). Every other header is kept. Otherwise it is the request as sent.
    */
   readonly request: Request;
   /**

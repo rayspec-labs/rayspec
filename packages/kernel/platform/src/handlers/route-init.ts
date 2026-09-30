@@ -35,7 +35,6 @@ import {
 } from '@rayspec/handler-sdk';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { TenantEventBus } from './event-bus.js';
-import { withoutCredentials } from './handler-request.js';
 import { getHandlerRuntime } from './handler-runtime.js';
 import { makeHandlerDb } from './store-facade.js';
 
@@ -372,9 +371,9 @@ export async function invokeStreamRouteHandler(
       // handler moves bytes; the deploy fail-closes if no backend is wired, so this is never absent).
       blob: blobFactory(txTdb.tenantId),
       params,
-      // The Web Request with its credentials removed (handler-request.ts) — the headers and the
-      // binary body a handler reads are kept; the body is UNTRUSTED DATA the handler treats as bytes.
-      request: withoutCredentials(request),
+      // The Web Request the caller built (in the hardened posture already without its credentials,
+      // see handler-request.ts) — the body is UNTRUSTED DATA the handler treats as bytes.
+      request,
       // Spread so the field is ABSENT (not `undefined`) on the ingest path, keeping the init shape exact.
       ...(mediaResource !== undefined ? { mediaResource } : {}),
       // The authenticated caller (spread so ABSENT when no principal was resolved — the playback
