@@ -799,6 +799,10 @@ async function underLease(
     if (err instanceof OperationLeaseError) {
       return envelope(replyId, null, [bundleError(err.code, err.message)]);
     }
+    // A caller's own mistake (a step naming an observer it did not pass), not the database.
+    if (err instanceof RangeError) {
+      return envelope(replyId, null, [bundleError('RAY_INTERNAL', err.message)]);
+    }
     return envelope(replyId, null, [infraUnavailable()]);
   } finally {
     clearInterval(renewal);

@@ -326,6 +326,13 @@ describe.skipIf(!baseUrl)('apply', () => {
     const next = await freshApply(db, [markerStep(db, 'after-failure')]);
     expect(next.ok).toBe(true);
     expect(await markers()).toEqual(['after-failure']);
+
+    // A step naming an observer the caller did not pass is refused before it starts.
+    await sql`DELETE FROM apply_probe`;
+    const unobserved = await freshApply(db, [{ ...markerStep(db, 'x'), observer: 'missing' }]);
+    expect(unobserved.errors[0]).toMatchObject({ code: 'RAY_INTERNAL' });
+    expect(unobserved.errors[0]?.message).toContain('no observer named missing');
+    expect((await freshApply(db, [])).ok).toBe(true);
     armsRan += 1;
   }, 60_000);
 });
