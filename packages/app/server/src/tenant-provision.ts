@@ -46,6 +46,13 @@
  * (`schema-lock.ts`) that a booting server and every other schema-mutating path take too, so two runs
  * fanned out at the same instant against an EMPTY database — or a run racing a first boot — converge
  * here too and not only at the reservation.
+ *
+ * IT RESPECTS THE SOURCE FENCE. On a database that already has the runtime-control tables, the chain
+ * runs as a `runtime.apply` (`deploy-apply.ts`) — under the operation lease, with its receipts, and
+ * refused while the environment is fenced for an export or a migration, exactly as a boot's is. The
+ * reservation itself reads the fence in its own transaction with a share lock on the state row, so a
+ * quiesce cannot take the fence between that read and the commit: while the fence is held, nothing is
+ * created, resolved or migrated (`ENVIRONMENT_FENCED`).
  */
 
 import { randomUUID } from 'node:crypto';
@@ -61,8 +68,18 @@ import {
 } from '@rayspec/api-auth';
 import { mintInviteToken, normalizeEmail } from '@rayspec/auth-core';
 import { isUniqueViolation, makeDb } from '@rayspec/db';
+import { sql } from 'drizzle-orm';
 import { applyMigrations } from './composition-root.js';
+import { DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { SchemaLockTimeoutError } from './schema-lock.js';
+
+/** The actor tenant ensure records on the receipts of the migration chain it runs. */
+export const TENANT_ENSURE_ACTOR = 'tenant-ensure';
+
+const FENCED_MESSAGE =
+  'The environment is fenced (quiesced for an export or a migration), so no organization was ' +
+  'created or resolved and nothing was migrated. Run the command again once the fence is released ' +
+  'with resume.';
 
 /** The two secrets the provisioning path uses — resolved by `loadTenantProvisionSecrets`. */
 export interface TenantProvisionSecrets {
@@ -224,11 +241,26 @@ export async function provisionTenant(
     // code: the migrator's rejection is a multi-line query dump, and an operator handed one has no
     // way to tell that nothing was reserved.
     try {
-      await applyMigrations(
+      const lockOptions =
+        opts.schemaLockTimeoutMs === undefined ? {} : { lockTimeoutMs: opts.schemaLockTimeoutMs };
+      await new DeployApply({
         db,
-        opts.schemaLockTimeoutMs === undefined ? {} : { lockTimeoutMs: opts.schemaLockTimeoutMs },
-      );
+        migratePlatform: () => applyMigrations(db, lockOptions),
+        ...lockOptions,
+        actor: TENANT_ENSURE_ACTOR,
+        warn: () => {},
+      }).platformChain();
     } catch (err) {
+      if (err instanceof RuntimeApplyError) {
+        if (err.errors[0]?.reason === 'fenced') {
+          throw new TenantProvisionError('ENVIRONMENT_FENCED', FENCED_MESSAGE);
+        }
+        throw new TenantProvisionError(
+          err.code === 'RAY_LOCK_TIMEOUT' ? 'SCHEMA_LOCK_TIMEOUT' : 'MIGRATION_REFUSED',
+          `The migration chain was refused (${err.code}), so no organization was created or ` +
+            `resolved: ${err.errors[0]?.message ?? 'the apply failed'}.`,
+        );
+      }
       if (err instanceof SchemaLockTimeoutError) {
         // Nothing is wrong with the database: another migration, boot or deploy holds the shared
         // schema lock. Its own code, because the remedy is to retry, not to inspect DATABASE_URL.
@@ -337,7 +369,22 @@ export async function provisionTenant(
         writtenTokenFile = undefined;
       }
       const slug = await orgStore.deriveUniqueSlug(input.name);
-      return orgStore.reserveOrgById({ id: input.orgId, name: input.name, slug }, claim);
+      return orgStore.reserveOrgById(
+        { id: input.orgId, name: input.name, slug },
+        async (ttx, org, st) => {
+          // The fence, read under a share lock that a quiesce's fence update waits for: the
+          // reservation either commits before the fence is taken or is refused.
+          const rows = (await ttx
+            .unscoped()
+            .execute(
+              sql`SELECT fence_state FROM runtime_control_state WHERE id = 1 FOR SHARE`,
+            )) as unknown as { fence_state: string }[];
+          if (rows[0]?.fence_state === 'fenced') {
+            throw new TenantProvisionError('ENVIRONMENT_FENCED', FENCED_MESSAGE);
+          }
+          await claim(ttx, org, st);
+        },
+      );
     };
 
     // THE SLUG RACE, and why exactly ONE retry closes it. `deriveUniqueSlug` is a read-then-derive

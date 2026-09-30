@@ -18,7 +18,8 @@
  * after; a crash in between leaves exactly the evidence the next holder needs: a start without a
  * finish. The next holder sees the takeover (`takenOver`, and a `lease-taken-over` receipt) and must
  * reconcile that step before it repeats anything — expiry alone never authorizes a second external
- * effect.
+ * effect. Only an EXPIRED lease is ever taken over, even by a retry under the same operation id: a
+ * live holder may still be running a step, and two holders of one operation would both run it.
  *
  * RECEIPTS ARE APPEND-ONLY. `runtime_control_receipts` refuses UPDATE, DELETE and TRUNCATE by
  * trigger. Every receipt names the operation id, the actor, the kind, the lease epoch and the inputs
@@ -93,7 +94,7 @@ export interface LeaseTakeover {
   operationId: string;
   kind: string | null;
   leaseEpoch: number;
-  /** Whether the previous lease had expired; false when the same operation id retried early. */
+  /** Whether the previous lease had expired (a live lease is never taken over, so always true). */
   expired: boolean;
 }
 
@@ -199,10 +200,11 @@ async function appendReceipt(
 /**
  * Take the operation lease for `identity`, in one transaction with its intent receipt.
  *
- * Refused with `RAY_LOCK_TIMEOUT` (retryable) while ANOTHER operation holds a live lease. A lease
- * whose holder expired, or that the SAME operation id holds (a retry after a crash), is taken over:
- * the epoch still increases, so the earlier holder can no longer write, and the takeover is recorded
- * as a `lease-taken-over` receipt and returned as `takenOver`.
+ * Refused with `RAY_LOCK_TIMEOUT` (retryable) while ANY holder has a live lease, including an earlier
+ * attempt of the same operation id: that attempt may still be running, and the check and the take
+ * happen under one row lock, so two concurrent retries of one operation cannot both hold it. A lease
+ * whose holder expired is taken over: the epoch increases, so the earlier holder can no longer write,
+ * and the takeover is recorded as a `lease-taken-over` receipt and returned as `takenOver`.
  */
 export async function acquireOperationLease(
   db: Db,
@@ -219,11 +221,14 @@ export async function acquireOperationLease(
     if (row === undefined) throw new Error('the runtime-control state row is missing');
     const holder = row.lease_operation_id;
     const live = row.live === true;
-    if (holder !== null && live && holder !== identity.operationId) {
+    if (holder !== null && live) {
       throw new OperationLeaseError(
         'RAY_LOCK_TIMEOUT',
-        'another runtime-control operation holds the lease for this environment; retry once it ' +
-          'has finished or its lease has expired',
+        holder === identity.operationId
+          ? 'an earlier attempt of this operation still holds the lease; retry once it has ' +
+              'finished or its lease has expired'
+          : 'another runtime-control operation holds the lease for this environment; retry once it ' +
+              'has finished or its lease has expired',
       );
     }
     const updated = (await tx.unsafe(

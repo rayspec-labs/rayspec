@@ -221,13 +221,33 @@ describe.skipIf(!baseUrl)('the operation lease', () => {
     armsRan += 1;
   }, 60_000);
 
-  it('the same operation retried while its lease is live takes it over at a new epoch', async () => {
+  it('the same operation retried while its lease is live is refused; only an expired one is taken over', async () => {
     const id = identity();
-    const crashed = await acquireOperationLease(processDb(), id, { ttlMs: 60_000 });
-    const retried = await acquireOperationLease(processDb(), id, { ttlMs: 60_000 });
-    expect(retried.epoch).toBe(crashed.epoch + 1);
-    expect(retried.takenOver).toMatchObject({ operationId: id.operationId, expired: false });
-    await expect(crashed.mutate(async () => undefined)).rejects.toMatchObject({
+    const first = await acquireOperationLease(processDb(), id, { ttlMs: 60_000 });
+    // An earlier attempt that may still be running a step: a retry under the same id waits its turn.
+    await expect(acquireOperationLease(processDb(), id, { ttlMs: 60_000 })).rejects.toMatchObject({
+      code: 'RAY_LOCK_TIMEOUT',
+      retryable: true,
+    });
+    await first.mutate(async () => undefined);
+
+    // Two retries of that operation at once, once its lease has expired: exactly one holds it.
+    await expireLease();
+    const retries = await Promise.allSettled([
+      acquireOperationLease(processDb(), id, { ttlMs: 60_000 }),
+      acquireOperationLease(processDb(), id, { ttlMs: 60_000 }),
+    ]);
+    const won = retries.filter((r) => r.status === 'fulfilled');
+    expect(won).toHaveLength(1);
+    expect(
+      (retries.find((r) => r.status === 'rejected') as PromiseRejectedResult).reason,
+    ).toMatchObject({ code: 'RAY_LOCK_TIMEOUT' });
+    const retried = (
+      won[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof acquireOperationLease>>>
+    ).value;
+    expect(retried.epoch).toBe(first.epoch + 1);
+    expect(retried.takenOver).toMatchObject({ operationId: id.operationId, expired: true });
+    await expect(first.mutate(async () => undefined)).rejects.toMatchObject({
       code: 'RAY_FENCE_MISMATCH',
     });
     await retried.release('succeeded');

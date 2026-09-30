@@ -13,7 +13,11 @@
  *     With the same digest: a succeeded operation answers `already-applied` with its original receipts
  *     and runs nothing; a failed one answers its recorded failure; one still running is
  *     `RAY_LOCK_TIMEOUT`; one that was refused (it changed nothing) or interrupted is continued under
- *     its own operation id, through the checks below — the steps it finished are not run again.
+ *     its own operation id, through the checks below — the steps it finished are not run again. An
+ *     operation another apply's reconciliation (or an operator) closed as interrupted counts as
+ *     interrupted, not as failed: its recorded outcome says `interrupted`, and a retry under its key
+ *     continues it. Two retries at once cannot both continue it: the lease is taken over only once
+ *     it has expired, under the state row's lock.
  *  2. Plan freshness and revision, read-only: the expected environment revision must be the live one,
  *     the plan must not have expired, and the recomputed digest must equal `planDigest`, else
  *     `RAY_PLAN_STALE`. A stale plan writes nothing.
@@ -589,7 +593,9 @@ export async function runApply(options: ApplyOptions): Promise<ResultEnvelope<Ap
             receipts: reportedReceipts(sinceLastIntent(receipts)),
           });
         }
-        if (outcome?.outcome === 'failed') return envelope(replyId, null, [recordedError(outcome)]);
+        if (outcome?.outcome === 'failed' && outcome.detail?.interrupted !== true) {
+          return envelope(replyId, null, [recordedError(outcome)]);
+        }
         if (outcome === null && (await holdsLiveLease(db, intent.operationId))) {
           return envelope(replyId, null, [
             bundleError(

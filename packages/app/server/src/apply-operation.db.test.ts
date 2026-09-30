@@ -15,6 +15,9 @@
  *     lease is held, or, when it waits, that its plan went stale.
  *  6. A step that fails inside its transaction is recorded as not applied, the apply reports it, and
  *     the next apply is not blocked by it.
+ *  7. An apply interrupted before its outcome is continued under its own operation id by a retry with
+ *     its key, also after another apply reconciled it as interrupted; two such retries at once run the
+ *     step once.
  *
  * Skips without DATABASE_URL; the ran-guard hard-fails a REQUIRED run that did not run.
  */
@@ -32,6 +35,7 @@ import {
 } from './__fixtures__/apply-crash/scenario.mjs';
 import { type ApplyStep, runApply } from './apply-operation.js';
 import { applyMigrations } from './composition-root.js';
+import { acquireOperationLease } from './operation-lease.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -335,10 +339,80 @@ describe.skipIf(!baseUrl)('apply', () => {
     expect((await freshApply(db, [])).ok).toBe(true);
     armsRan += 1;
   }, 60_000);
+
+  it('continues an interrupted apply under its own id when retried with its key, once, also after reconciliation', async () => {
+    const db = processDb();
+    /** An apply that took the lease with key `k` and died before any step: its lease then expires. */
+    async function interrupted(k: string): Promise<{ operationId: string; planDigest: string }> {
+      const planDigest = await probePlan(db, 'probe');
+      const operationId = randomUUID();
+      await acquireOperationLease(
+        db,
+        {
+          operationId,
+          actor: 'operator:apply-crash',
+          kind: 'runtime.apply',
+          inputsDigest: planDigest,
+          idempotencyKey: k,
+        },
+        { ttlMs: 60_000 },
+      );
+      await sql`UPDATE runtime_control_state
+                   SET lease_expires_at = clock_timestamp() - interval '1 second' WHERE id = 1`;
+      return { operationId, planDigest };
+    }
+    const retry = (k: string, planDigest: string, revision: number, other = db) =>
+      runApply({
+        db: other,
+        request: control(randomUUID(), planDigest, revision, k),
+        plan: { recompute: () => probePlan(other, 'probe') },
+        steps: [markerStep(other, 'continued')],
+        observers: observers(other),
+      });
+
+    // Reconciled by another apply first: closed as interrupted, and still continued by its own key.
+    const k1 = key();
+    const first = await interrupted(k1);
+    const revision = await liveRevision(db);
+    const reconciling = await freshApply(db, []);
+    expect(reconciling.ok).toBe(true);
+    const [closed] = await sql<{ detail: { interrupted?: boolean } }[]>`
+      SELECT detail FROM runtime_control_receipts
+       WHERE operation_id = ${first.operationId} AND event = 'outcome'`;
+    expect(closed?.detail.interrupted).toBe(true);
+    const continued = await retry(k1, first.planDigest, revision);
+    expect(continued.errors).toEqual([]);
+    expect(continued.data?.status).toBe('applied');
+    expect(await markers()).toEqual(['continued']);
+    const events = await sql<{ event: string; outcome: string | null }[]>`
+      SELECT event, outcome FROM runtime_control_receipts
+       WHERE operation_id = ${first.operationId} ORDER BY id`;
+    expect(events.at(-1)).toEqual({ event: 'outcome', outcome: 'succeeded' });
+    // Replayed once more: the continued operation's result.
+    expect((await retry(k1, first.planDigest, revision)).data?.status).toBe('already-applied');
+
+    // Two retries of one interrupted apply at once: one continues it, the other waits its turn.
+    await sql`DELETE FROM apply_probe`;
+    const k2 = key();
+    const second = await interrupted(k2);
+    const rev2 = await liveRevision(db);
+    const results = await Promise.all([
+      retry(k2, second.planDigest, rev2, processDb()),
+      retry(k2, second.planDigest, rev2, processDb()),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.find((r) => !r.ok)?.errors[0]).toMatchObject({ code: 'RAY_LOCK_TIMEOUT' });
+    expect(await markers()).toEqual(['continued']);
+    const starts = await sql<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM runtime_control_receipts
+       WHERE operation_id = ${second.operationId} AND event = 'step-started'`;
+    expect(starts[0]?.n).toBe('1');
+    armsRan += 1;
+  }, 60_000);
 });
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(6);
+  if (dbRequired) expect(armsRan).toBe(7);
   else expect(true).toBe(true);
 });
