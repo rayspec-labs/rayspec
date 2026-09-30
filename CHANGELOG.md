@@ -25,11 +25,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   leaves no file. The same prepared files give the same bytes from any directory at any time.
   Like the bundle verbs, pack writes one result envelope on stdout and, without `--json`, the
   inclusion summary and the output SHA-256 on stderr; the summary says that nothing was deployed.
-  It loads no server, database layer or handler loader. `--build` (a build in a disposable
-  sandbox) and `--against` / `--allowlist` (a product delta carried in the bundle) are refused
-  with `RAY_USAGE` naming the manual steps. The summary escapes control characters in the file
+  Without `--against` it loads no server, database layer or handler loader. `--build` (a build in
+  a disposable sandbox) is refused with `RAY_USAGE` naming the manual step. The summary escapes control characters in the file
   names it quotes, so a hostile name cannot write terminal escapes. New: [the packing guide](./docs/packing.md) — what
   goes in, what never does, and how to fix each refusal.
+- **Product schema changes bound to the live schema: the product migration ledger, and
+  `rayspec pack --against`.** A new platform migration, `0014_product_migration_ledger`, adds the
+  append-only table `product_migration_ledger` (a reserved store name now): every product DDL a
+  deploy applies is recorded in the transaction that runs it, with its SHA-256, the product schema
+  digest before and after, the schema description after, the declared stores it leaves in place and
+  the operation that applied it. `rayspec pack --spec <new> --against <old-spec> [--allowlist
+  <file.json>]` carries the product delta from the previous spec's stores to the new spec's, the
+  reviewed allowlist byte for byte, and in `productMigration` the product schema digests the delta
+  migrates between, computed on a throwaway database on the server `SHADOW_DATABASE_URL` names
+  (from the environment only); a destructive delta the allowlist does not clear is refused, naming
+  each store and column and the review step. The runtime's `prepare()` trusts none of it: it
+  regenerates the delta from the ledger's latest row and the bundled spec and refuses a carried
+  delta, from-digest or to-digest that differs (`RAY_MIGRATION_MISMATCH`, `RAY_MIGRATION_REQUIRED`),
+  scans the delta itself (the bundle's `destructive` flag is advisory) and blocks a destructive
+  change the bundle's allowlist does not clear, computes the head after the delta on a throwaway
+  database where the ledger's changes, regenerated from the stores each row records, must first
+  reproduce the live schema, and reports a live product schema the ledger does not describe as
+  `RAY_SCHEMA_DRIFT`, naming each table and column. The product DDL step checks the ledger again
+  under the schema lock and refuses drift, a ledger row a newer runtime wrote, and a result other
+  than the planned head, rolling its DDL back. `schemaImpact.destructive` and `allowlisted` now say
+  what the scanner found. The bundle reader can hand back a bundle's product delta and allowlist
+  (`captureProductMigration`). An environment deployed before the ledger keeps working: its product
+  head is introspected with `RAY_W_PRODUCT_SCHEMA_UNLEDGERED`, and its first product change through
+  `rayspec deploy <spec.yaml>` starts the ledger. See
+  [Runtime operations → Product schema changes](./docs/runtime-operations.md#product-schema-changes)
+  and [the packing guide](./docs/packing.md#a-product-schema-change).
 - **Application identity in the spec.** A backend spec may declare `metadata.id` and
   `metadata.version`: the identity an application bundle carries. Both are optional. The id is a
   lowercase letter followed by up to 62 lowercase letters, digits or hyphens; the version is an exact

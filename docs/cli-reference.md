@@ -411,8 +411,8 @@ you actually asked for.
 
 ```
 rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
-             [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
-             [--force] [--json]
+             [--runtime <exact-version>] [--include <path>]... [--against <old-spec>
+             [--allowlist <file.json>]] [--source-maps] [--preview] [--force] [--json]
 ```
 
 Writes an application bundle (`.ray`) from an application that is **already
@@ -425,7 +425,15 @@ each refusal are in the [packing guide](./packing.md).
 
 It runs these steps in order and stops at the first failure:
 
-1. **Arguments.** `RAY_USAGE`.
+1. **Arguments.** `RAY_USAGE`; `--allowlist` without `--against` too.
+   With `--against <old-spec>`, the product delta comes next: the previous spec
+   must parse (`RAY_SPEC_INVALID`) and be of the same profile, the delta from its
+   stores to the new spec's is generated as `plan --against` generates it, a
+   destructive statement the `--allowlist` file does not clear is refused naming
+   the store and column and the review step, and the product schema digests the
+   delta migrates between are computed on a throwaway database on the server
+   `SHADOW_DATABASE_URL` names (missing or unusable: `RAY_USAGE`, never naming the
+   server). Each of these refusals is `RAY_USAGE`.
 2. **Spec.** The spec (either profile) is parsed. `RAY_SPEC_INVALID`, followed
    by each grammar error as a `SPEC_` code.
 3. **Identity.** `metadata.id` and `metadata.version` of a backend spec, or
@@ -459,15 +467,20 @@ It runs these steps in order and stops at the first failure:
    `--force`. A refused or interrupted pack leaves neither the output nor a
    temporary file.
 
-- **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
+- **Postgres:** not needed, except with `--against`, which creates and drops one
+  throwaway database on the server `SHADOW_DATABASE_URL` names. **Environment:**
+  `SHADOW_DATABASE_URL` with `--against`, nothing otherwise; no `.env` is loaded.
 - **Runs nothing.** Handlers, extensions and frontends must be built first; pack
   reads modules with a lexer and never imports, evaluates or installs anything.
   `--build`, which would run the build in a disposable sandbox, is not available
   yet: it is refused with `RAY_USAGE` naming the manual build step, and it is not
-  listed in `--help`. `--against` and `--allowlist`, which would carry a product
-  delta, are refused the same way; review and apply a delta with
-  [`plan --against`](#plan) and
-  [`deploy --apply-migration`](#deploy--boot-and-serve-a-declared-product).
+  listed in `--help`.
+- **Product delta.** `--against <old-spec>` carries, under `payload/migrations/`,
+  the delta from the stores of the spec the environment runs to this spec's, the
+  `--allowlist` file byte for byte, and in the manifest's `productMigration` the
+  product schema digests before and after it and whether it is destructive. The
+  target regenerates the delta from its product migration ledger and refuses any
+  difference; see the [packing guide](./packing.md#a-product-schema-change).
 - **Deterministic.** The same prepared files and flags give the same bytes,
   wherever and whenever they are packed. Bundle paths are relative to the
   directory of the spec, and the archive carries no timestamp, user, host or
@@ -478,7 +491,9 @@ It runs these steps in order and stops at the first failure:
   `--version <semver>` (exact, no build metadata); `--runtime <exact-version>`
   (default: this CLI's version); `--include <path>`, repeatable, a file or
   directory relative to the spec; `--source-maps` (carry `*.map` files and
-  scripts or style sheets that inline their source map); `--preview`;
+  scripts or style sheets that inline their source map); `--against <old-spec>`
+  (the spec the target environment runs); `--allowlist <file.json>` (the
+  reviewed allowlist, with `--against` only); `--preview`;
   `--force`; `--json`.
 - **Output:** the result envelope on stdout (operation `pack`), with or without
   `--json`:

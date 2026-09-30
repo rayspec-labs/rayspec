@@ -397,16 +397,29 @@ environment database; it adds no HTTP route. `inspect()` reports what the runtim
 target, the capability ids whose modules resolve in the process, the contract version, the
 two-part schema head, the active application, the fence and the environment revision — and
 nothing that names a host, a port, a user or a path. `prepare()` plans a `.ray` bundle against the
-live schema without writing to it: it reads the bundle through the reader pipeline, computes the
-product head the bundle's delta would produce in a throwaway database on the shadow server, and
-returns the plan with its digest and an expiry thirty minutes out. Drift, a changed schema head
-and a missing binding are blockers.
+live schema without writing to it: it reads the bundle through the reader pipeline, regenerates
+the product delta from the product migration ledger and the bundled spec, computes the product
+head the delta would produce in a throwaway database on the shadow server, and returns the plan
+with its digest and an expiry thirty minutes out. Drift, a changed schema head, a missing binding,
+a carried delta or digest the runtime does not regenerate, and a destructive delta the bundle's
+reviewed allowlist does not clear are blockers.
 
 The **schema head** has two parts: the tag of the last applied platform migration (the drizzle
 ledger's `created_at` mapped onto the runtime's migration journal; a ledger row the journal does
 not explain means a newer runtime migrated the database) and the SHA-256 of the product schema
 read from the catalog — every table in `public` that is not a platform table, with its columns,
 keys, uniques, indexes and foreign keys in a canonical order.
+
+The product half has a ledger of its own, `product_migration_ledger`: every product DDL an apply
+runs is recorded in the same transaction, with its SHA-256, the product schema digest before and
+after it, the schema description after it, the declared stores it leaves in place and the
+operation that ran it. The latest row is what the live product schema must be; a live digest that
+differs is drift, named table by table. Regenerating each row's change from the declared stores
+it records, and running them in order on an empty database, reproduces the live product schema,
+which is how the head after a new delta is computed without touching the live database (the DDL
+text a row holds is never run again), and the next delta is regenerated from the latest row's
+declared stores. A row of a ledger format the runtime does not know stops every product change: an older
+runtime never plans or applies on top of a schema a newer one changed.
 
 Mutating operations run under an **operation lease** kept in `runtime_control_state`, one row
 per environment. Taking the lease increments a fencing epoch and records the operation's intent

@@ -158,6 +158,53 @@ bundle.
   prepared files and flags give the same bytes, from any directory and at any
   time.
 
+## A product schema change
+
+When the new release changes the stores, pack it against the spec the
+environment runs:
+
+```bash
+SHADOW_DATABASE_URL=postgresql://user:pass@localhost:5432/scratch \
+  rayspec pack --spec build/rayspec.yaml --output app-1.1.0.ray \
+    --against deployed/rayspec.yaml [--allowlist reviewed-allowlist.json]
+```
+
+The bundle then carries, under `payload/migrations/`:
+
+| File | Content |
+| --- | --- |
+| `product-delta.sql` | the forward delta from the previous spec's stores to the new spec's, generated as `rayspec plan --against` generates it |
+| `product-allowlist.json` | the `--allowlist` file, byte for byte, when one was given |
+
+and the manifest's `productMigration` names both files, the product schema
+digests the delta migrates between and whether the delta is destructive. Pack
+computes the digests on a throwaway database it creates and drops on the server
+`SHADOW_DATABASE_URL` names: the platform migrations and the previous spec's
+stores give the digest before, the delta the digest after. `SHADOW_DATABASE_URL`
+is read from the environment only, never from a `.env` file, and nothing else on
+that server is touched. When the stores did not change, the bundle carries no
+delta and the summary says so.
+
+A **destructive** delta (a dropped store or column, a tightened type or
+constraint, a non-nullable column without a default) is refused unless every
+statement is cleared by an entry of the `--allowlist` file. The refusal names each
+store and column. To review it:
+
+1. Run `rayspec plan build/rayspec.yaml --against deployed/rayspec.yaml`. Its
+   `proposedAllowlist` lists one entry per destructive statement.
+2. Copy the entries you approve into a JSON file, each with the reason you
+   accepted it: `[{"kind": "drop-column", "match": "ALTER TABLE \"notes\" DROP COLUMN \"body\"", "reason": "…"}]`.
+3. Pack again with `--allowlist <that file>`.
+
+The target runtime trusts none of this. Its plan regenerates the delta from its
+own product migration ledger and the bundled spec, and refuses a bundle whose
+delta differs (`RAY_MIGRATION_MISMATCH`), whose digest before is not the live
+one (`RAY_MIGRATION_REQUIRED`), or whose digest after is not the one the delta
+produces there (`RAY_MIGRATION_MISMATCH`). The manifest's `destructive` flag is
+advisory: the runtime scans the delta itself, and only the allowlist the bundle
+carries clears a finding. See
+[Runtime operations → Product schema changes](./runtime-operations.md#product-schema-changes).
+
 ## Refusals and how to fix them
 
 Pack checks everything before it writes anything, and a refusal leaves no file
@@ -166,7 +213,7 @@ message names the file and the fix.
 
 | Code (reason) | Exit | What happened | Fix |
 | --- | --- | --- | --- |
-| `RAY_USAGE` | 2 | A flag is missing, unknown or malformed; the output is a directory or its directory does not exist; `--build`, `--against` or `--allowlist` was given; a file changed while pack ran. | Fix the command line. For a changed file, run pack again once the build has finished. |
+| `RAY_USAGE` | 2 | A flag is missing, unknown or malformed; the output is a directory or its directory does not exist; `--build` was given, or `--allowlist` without `--against`; a file changed while pack ran. With `--against`: the previous spec cannot be read or is of the other profile; the allowlist is malformed or has no delta to cover; a destructive delta the allowlist does not clear (the message names each store and column and the review step); `SHADOW_DATABASE_URL` is missing or cannot be used. | Fix the command line. For a changed file, run pack again once the build has finished. For a destructive delta, review it as described under [A product schema change](#a-product-schema-change). |
 | `RAY_SPEC_INVALID` | 1 | The spec does not validate; the `SPEC_` errors that follow say where. | Fix the spec; `rayspec doctor <spec>` shows the same errors. |
 | `RAY_APPLICATION_IDENTITY_MISSING` (`id`, `version`) | 2 | Neither the spec nor the flag gives the id or version, or the value does not match its pattern. | Add `metadata.id` and `metadata.version`, or pass `--id` and `--version`. |
 | `RAY_CLOSURE_INVALID` (`unresolved-import`) | 2 | A module, frontend directory or import is missing; a module is TypeScript or CommonJS; a dynamic `import()` names a computed module; a module imports `node:module`; a peer dependency several packages share would need two copies. | Build the application and pack the built spec; install the missing package; import modules by a literal name; import the shared peer from the application, or install one version of it (`npm dedupe`). |
@@ -190,8 +237,4 @@ declared hosts would deny its calls.
 
 - **`--build`** is refused: pack does not run builds. Build the application
   yourself as described above.
-- **`--against` and `--allowlist`** are refused: a product delta carried in a
-  bundle must name the product schema heads it migrates between, and those are
-  read from a database, not from spec files. Review a delta with
-  `rayspec plan <spec> --against <old-spec> [--allowlist <file.json>]` and apply
-  it with `rayspec deploy <spec> --apply-migration <delta.sql>`.
+

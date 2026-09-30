@@ -6,16 +6,18 @@ them was interrupted. The design behind it is in
 [Architecture → Runtime control](./ARCHITECTURE.md#runtime-control).
 
 An **environment** is one application database (with its workflow system database and blob root)
-and every runtime process that serves it. Its runtime-control state lives in two platform tables
-of the application database:
+and every runtime process that serves it. Its runtime-control state lives in platform tables of
+the application database:
 
 | Table | Holds |
 | --- | --- |
 | `runtime_control_state` | one row: the environment revision, the source fence and its epoch, the operation lease (holder, fencing epoch, expiry), the binding revision key, the product schema digest the last apply left |
 | `runtime_control_receipts` | append-only receipts of every operation that changed the environment: who, what, each step's start and finish, the outcome |
+| `product_migration_ledger` | append-only, one row per applied product schema change: the DDL and its SHA-256, the product schema digest before and after, the schema description after, the declared stores, the operation that applied it |
 
-Neither table is ever exported in a snapshot, and no receipt holds a secret, a binding value or a
-connection string.
+The two runtime-control tables are never exported in a snapshot; the ledger is, like the platform
+migration ledger, because it describes the product tables the snapshot carries. No receipt or
+ledger row holds a secret, a binding value or a connection string.
 
 ## The operations
 
@@ -77,8 +79,10 @@ as its own apply with the actor `runtime-boot`:
 - **`platform-migrations`**: the platform migration chain, when the database's ledger is behind
   this runtime (an upgrade). All pending migrations run in one transaction.
 - **`product-ddl`**: each product-store migration — the first materialization of a spec's stores,
-  or a reviewed delta from `--apply-migration`. The DDL, the product schema digest the
-  environment now has and the step's finish receipt commit in one transaction.
+  or a reviewed delta from `--apply-migration`. The DDL, its row in the product migration
+  ledger, the product schema digest the environment now has and the step's finish receipt commit
+  in one transaction. Before any DDL runs, the step refuses with `RAY_SCHEMA_DRIFT` a live product
+  schema the ledger's latest row does not describe, and a ledger row a newer runtime wrote.
 
 A restart that has nothing to change takes no lease and writes nothing; if an earlier apply was
 interrupted and its receipts and the live state settle it, the restart settles it first (below).
@@ -96,6 +100,54 @@ SELECT operation_id, event, step, outcome, detail, recorded_at
   FROM runtime_control_receipts
  ORDER BY id DESC
  LIMIT 50;
+```
+
+## Product schema changes
+
+Product stores are generated from the spec, so their tables have no migration files of their own.
+The **product migration ledger** is their record. Its latest row is what the live product schema
+must be, and it holds the declared stores the schema implements, so the next change can be
+generated from it. `prepare()` plans a bundle's product change from the live database and the
+ledger, never from what the bundle says about itself:
+
+| Finding | Blocker | Exit class |
+| --- | --- | --- |
+| The live product schema differs from the ledger's latest row (the message names each table and column), or the ledger's changes, regenerated from the stores each row records, do not reproduce it on a throwaway database | `RAY_SCHEMA_DRIFT` | 6 |
+| A ledger row has a format this runtime does not read: a newer runtime changed the product schema | `RAY_SCHEMA_DRIFT` | 6 |
+| The bundle changes the stores but carries no delta (pack it `--against` the running spec) | `RAY_MIGRATION_REQUIRED` | 3 |
+| The bundle's delta migrates from a product schema digest that is not the live one | `RAY_MIGRATION_REQUIRED` | 3 |
+| The bundle's delta differs by one byte from the delta regenerated from the ledger and the bundled spec, or its digest after is not the one the delta produces | `RAY_MIGRATION_MISMATCH` | 3 |
+| The regenerated delta is destructive and the bundle's reviewed allowlist does not clear every statement (the message names each store and column and the review step) | `RAY_MIGRATION_REQUIRED` | 3 |
+| The product schema changes and no shadow database is configured | `RAY_MIGRATION_REQUIRED` | 3 |
+
+The digest after a delta is computed on a throwaway database on the shadow server: the platform
+chain, then every ledger row's change regenerated from the declared stores it records (the DDL
+text a row holds is never run again), then the delta. The bundle's own `destructive` flag
+is advisory; the runtime's destructive-statement scanner reads the regenerated delta. The plan's
+`schemaImpact` says whether the delta is destructive and whether the allowlist cleared it.
+
+The apply step (`productDdlStep`) checks the ledger again under the shared schema lock, runs the
+DDL, writes the ledger row, and refuses a result other than the head the plan computed; any refusal
+rolls the DDL back with it.
+
+**An environment deployed before the ledger existed** has product tables and no ledger rows. Its
+product schema head is introspected (warning `RAY_W_PRODUCT_SCHEMA_UNLEDGERED`), a bundle whose
+stores match it or only add whole tables is planned as before, and a bundle that carries a delta is
+refused, because there is no record to regenerate it from. Deploying a product change once through
+`rayspec deploy <spec.yaml>` (a first materialization or `--apply-migration`) starts the ledger.
+
+**When drift is reported**, undo the change by hand until the live schema is the one the ledger
+describes (the message names what differs), then make the change you wanted through a reviewed
+product change: a bundle packed `--against` the running spec, or `rayspec deploy --apply-migration`.
+Every product DDL step refuses to run on a drifted schema. The ledger is append-only: a trigger
+refuses UPDATE, DELETE and TRUNCATE, and no runtime rewrites a row.
+
+To read it:
+
+```sql
+SELECT id, migration_name, product_schema_before, product_schema_after, operation_id, applied_at
+  FROM product_migration_ledger
+ ORDER BY id;
 ```
 
 ## Recovering from an interrupted operation
