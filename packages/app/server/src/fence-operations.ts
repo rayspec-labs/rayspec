@@ -79,6 +79,11 @@ export interface FenceOperationOptions {
   workflowSystemDatabaseName?: string;
   /** How often quiesce re-reads the process heartbeats while it waits. Default 200 ms. */
   quiescePollMs?: number;
+  /**
+   * The operation lease's lifetime between renewals while quiesce runs. Default 60 s; quiesce renews
+   * it every third of that until it ends, however far away its deadline is.
+   */
+  quiesceLeaseTtlMs?: number;
   /** The readiness probes the in-process server adds to `health()`. */
   readiness?: readonly ReadinessProbe[];
 }
@@ -164,6 +169,9 @@ function reportedBarriers(record: BarrierRecord): QuiesceData['barriers'] {
 }
 
 // ─── quiesce ───────────────────────────────────────────────────────────────────────────────────
+
+/** The quiesce lease's lifetime between renewals. */
+export const DEFAULT_QUIESCE_LEASE_TTL_MS = 60_000;
 
 const PRODUCER_RANK: Record<ProducerState, number> = { stopped: 0, drained: 1, 'still-running': 2 };
 
@@ -320,9 +328,11 @@ export async function quiesceOperation(
 ): Promise<ResultEnvelope<QuiesceData>> {
   const operation = 'runtime.quiesce';
   const deadline = parseTimestamp(request.deadline) as Date;
+  // A lease of fixed lifetime, renewed while quiesce runs: the drain may wait for a deadline further
+  // away than one lease may last, and a holder that died stops renewing and lets it expire.
   const ttlMs = Math.min(
     MAX_LEASE_TTL_MS,
-    Math.max(60_000, deadline.getTime() - Date.now() + 60_000),
+    options.quiesceLeaseTtlMs ?? DEFAULT_QUIESCE_LEASE_TTL_MS,
   );
   let lease: OperationLease;
   try {
@@ -344,6 +354,13 @@ export async function quiesceOperation(
     return envelope(operation, operationId, null, [leaseRefusal(err) ?? infraUnavailable()]);
   }
 
+  const renewal = setInterval(
+    () => {
+      lease.renew(ttlMs).catch(() => {});
+    },
+    Math.max(100, Math.floor(ttlMs / 3)),
+  );
+  renewal.unref();
   try {
     // 1. The fence.
     const fence = await lease.step('take-fence', async (l) => {
@@ -447,6 +464,8 @@ export async function quiesceOperation(
   } catch (err) {
     await lease.release('failed').catch(() => {});
     return envelope(operation, operationId, null, [leaseRefusal(err) ?? infraUnavailable()]);
+  } finally {
+    clearInterval(renewal);
   }
 }
 

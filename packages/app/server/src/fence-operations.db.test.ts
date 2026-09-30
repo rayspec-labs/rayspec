@@ -30,6 +30,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { applyMigrations } from './composition-root.js';
 import { readOperationReceipts } from './operation-lease.js';
 import { createRuntimeControl, type RuntimeControlOptions } from './runtime-control.js';
+import { RuntimeFence } from './runtime-fence.js';
 import { openControlDatabase } from './write-barrier.js';
 
 const baseUrl = process.env.DATABASE_URL;
@@ -45,6 +46,9 @@ const SUITE_DB = `rayspec_fence_ops_${process.pid}`;
 const SYS_DB = `${SUITE_DB}_dbos_sys`;
 const ROLE = `rayspec_fence_rt_${process.pid}`;
 const OWNER_ROLE = `rayspec_fence_owner_${process.pid}`;
+const WRITER_ROLE = `rayspec_fence_writer_${process.pid}`;
+const MEMBER_ROLE = `rayspec_fence_member_${process.pid}`;
+const CREATOR_ROLE = `rayspec_fence_creator_${process.pid}`;
 const ROLE_PASSWORD = randomBytes(18).toString('hex');
 
 const validEnvelope = schemaValidator('resultEnvelope');
@@ -149,10 +153,19 @@ describe.skipIf(!baseUrl)('quiesce, resume and health', () => {
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SYS_DB}" WITH (FORCE)`);
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
     await admin.unsafe(`CREATE DATABASE "${SUITE_DB}"`);
-    for (const role of [ROLE, OWNER_ROLE]) {
+    for (const role of [ROLE, OWNER_ROLE, MEMBER_ROLE, WRITER_ROLE, CREATOR_ROLE]) {
       await admin.unsafe(`DROP ROLE IF EXISTS "${role}"`);
+    }
+    for (const role of [ROLE, OWNER_ROLE]) {
       await admin.unsafe(`CREATE ROLE "${role}" LOGIN PASSWORD '${ROLE_PASSWORD}'`);
     }
+    // A runtime role that does not inherit its memberships, a role holding writes it can switch to,
+    // and a role that may create roles.
+    await admin.unsafe(`CREATE ROLE "${MEMBER_ROLE}" LOGIN NOINHERIT PASSWORD '${ROLE_PASSWORD}'`);
+    await admin.unsafe(`CREATE ROLE "${WRITER_ROLE}" NOLOGIN`);
+    await admin.unsafe(
+      `CREATE ROLE "${CREATOR_ROLE}" LOGIN CREATEROLE PASSWORD '${ROLE_PASSWORD}'`,
+    );
     const migrator = makeDb(dbUrl);
     try {
       await applyMigrations(migrator);
@@ -172,7 +185,7 @@ describe.skipIf(!baseUrl)('quiesce, resume and health', () => {
     if (!baseUrl) return;
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SYS_DB}" WITH (FORCE)`);
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
-    for (const role of [ROLE, OWNER_ROLE]) {
+    for (const role of [MEMBER_ROLE, CREATOR_ROLE, ROLE, OWNER_ROLE, WRITER_ROLE]) {
       await admin.unsafe(`DROP ROLE IF EXISTS "${role}"`).catch(() => {});
     }
     await admin.end();
@@ -334,6 +347,55 @@ describe.skipIf(!baseUrl)('quiesce, resume and health', () => {
       expect.objectContaining({ code: 'RAY_W_EXTERNAL_EFFECTS_UNFENCED' }),
     ]);
     await appOwner.unsafe('DELETE FROM runtime_control_processes');
+    await resumeCurrent();
+  });
+
+  it('does not report fenced while a process is booting: it is live from load(), before start()', async () => {
+    // A runtime process between reading the fence and serving: its producers are still being wired
+    // and its queues are about to launch. It has written its heartbeat but not observed any fence.
+    const booting = new RuntimeFence({ db: control, pollIntervalMs: 60_000 });
+    await booting.load();
+    try {
+      const request = quiesceRequest({ deadline: formatTimestamp(new Date(Date.now() + 1_500)) });
+      const result = await adapter().quiesce(request);
+      expectValidEnvelope(result);
+      expect(result.ok).toBe(false);
+      expect(result.errors[0]?.code).toBe('RAY_SOURCE_NOT_QUIESCENT');
+      expect(result.data).toMatchObject({
+        status: 'timed-out',
+        producers: [{ producer: 'runtime-process', state: 'still-running' }],
+        barriers: [
+          { barrier: 'database-write-role', state: 'unavailable' },
+          { barrier: 'object-writes', state: 'unavailable' },
+        ],
+      });
+
+      // Once it observes the fence (its first poll after start) and has nothing running, it drains.
+      await booting.start();
+      const fenced = await adapter().quiesce(quiesceRequest());
+      expect(fenced.data?.status).toBe('fenced');
+    } finally {
+      await booting.stop();
+    }
+    await resumeCurrent();
+  });
+
+  it('renews its lease while it waits: a deadline longer than one lease still ends in timed-out', async () => {
+    const pid = await heartbeat({ epoch: 0, phase: 'open' });
+    try {
+      // The lease lives 600 ms between renewals; the drain waits 2 s for a process that never drains.
+      const result = await adapter({ quiesceLeaseTtlMs: 600 }).quiesce(
+        quiesceRequest({ deadline: formatTimestamp(new Date(Date.now() + 2_000)) }),
+      );
+      expectValidEnvelope(result);
+      expect(result.errors[0]?.code).toBe('RAY_SOURCE_NOT_QUIESCENT');
+      expect(result.data?.status).toBe('timed-out');
+      expect(result.data?.fenceEpoch).toBe(Number((await fenceRow()).fence_epoch));
+      const receipts = await readOperationReceipts(control, result.operationId);
+      expect(receipts.at(-1)).toMatchObject({ event: 'outcome', outcome: 'failed' });
+    } finally {
+      await appOwner.unsafe('DELETE FROM runtime_control_processes WHERE process_id = $1', [pid]);
+    }
     await resumeCurrent();
   });
 
@@ -547,6 +609,69 @@ describe.skipIf(!baseUrl)('quiesce, resume and health', () => {
     } finally {
       await owner.unsafe('DROP TABLE IF EXISTS owned_by_runtime');
       await owner.end();
+    }
+  });
+
+  it('refuses the role barrier for a role that can switch to a writer or an owner, or create roles', async () => {
+    await appOwner.unsafe(
+      `GRANT CONNECT ON DATABASE "${SUITE_DB}" TO "${MEMBER_ROLE}", "${CREATOR_ROLE}"`,
+    );
+    await appOwner.unsafe(`GRANT USAGE ON SCHEMA public TO "${MEMBER_ROLE}", "${WRITER_ROLE}"`);
+    await appOwner.unsafe(`GRANT SELECT, INSERT ON fence_items TO "${WRITER_ROLE}"`);
+    await appOwner.unsafe(`GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO "${WRITER_ROLE}"`);
+    await admin.unsafe(`GRANT "${WRITER_ROLE}" TO "${MEMBER_ROLE}"`);
+    const member = postgres(asRole(dbUrl, MEMBER_ROLE), { max: 1 });
+    try {
+      // The threat: without inheriting anything, the member still writes by switching role.
+      const [direct] = await appOwner.unsafe(
+        `SELECT has_table_privilege($1, 'fence_items', 'INSERT') AS insert`,
+        [MEMBER_ROLE],
+      );
+      expect(direct).toEqual({ insert: false });
+      await member.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL ROLE "${WRITER_ROLE}"`);
+        await tx.unsafe(`INSERT INTO fence_items (body) VALUES ('switched')`);
+      });
+
+      const writer = await adapter({ runtimeRole: MEMBER_ROLE }).quiesce(quiesceRequest());
+      expect(writer.data?.barriers[0]).toEqual({
+        barrier: 'database-write-role',
+        state: 'unavailable',
+      });
+      await resumeCurrent();
+
+      // A member of a table's owner, by the same switch.
+      await admin.unsafe(`REVOKE "${WRITER_ROLE}" FROM "${MEMBER_ROLE}"`);
+      await admin.unsafe(`GRANT "${OWNER_ROLE}" TO "${MEMBER_ROLE}"`);
+      await appOwner.unsafe(`GRANT CREATE ON SCHEMA public TO "${OWNER_ROLE}"`);
+      await appOwner.unsafe(`GRANT CONNECT ON DATABASE "${SUITE_DB}" TO "${OWNER_ROLE}"`);
+      const owner = postgres(asRole(dbUrl, OWNER_ROLE), { max: 1 });
+      try {
+        // The owner even gives up its own writes: only ownership lets it grant them back.
+        await owner.unsafe('CREATE TABLE owned_by_other (id int)');
+        await owner.unsafe(
+          `REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON owned_by_other FROM "${OWNER_ROLE}"`,
+        );
+        const ownerMember = await adapter({ runtimeRole: MEMBER_ROLE }).quiesce(quiesceRequest());
+        expect(ownerMember.data?.barriers[0]?.state).toBe('unavailable');
+        await resumeCurrent();
+        await owner.unsafe('DROP TABLE owned_by_other');
+      } finally {
+        await owner.end();
+      }
+      await admin.unsafe(`REVOKE "${OWNER_ROLE}" FROM "${MEMBER_ROLE}"`);
+
+      // With no such membership left, the same role holds the barrier.
+      const held = await adapter({ runtimeRole: MEMBER_ROLE }).quiesce(quiesceRequest());
+      expect(held.data?.barriers[0]).toEqual({ barrier: 'database-write-role', state: 'held' });
+      await resumeCurrent();
+
+      // A role that may create roles could grant itself back into one.
+      const creator = await adapter({ runtimeRole: CREATOR_ROLE }).quiesce(quiesceRequest());
+      expect(creator.data?.barriers[0]?.state).toBe('unavailable');
+      await resumeCurrent();
+    } finally {
+      await member.end();
     }
   });
 

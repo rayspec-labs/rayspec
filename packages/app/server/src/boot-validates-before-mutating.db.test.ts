@@ -7,7 +7,9 @@
  * input — a backend spec that does not lint, a Product-YAML document that does not parse, one that
  * parses but fails the boot-scope gate, a malformed signing key — at an empty database, checks the
  * refusal is the one the deploy path always gave, and then checks the database still holds no
- * relation and no `drizzle` schema. The last arm boots a valid spec on the same database, so the
+ * relation and no `drizzle` schema. The same holds for a backend document whose CONFIGURATION the
+ * environment does not satisfy — a stream route without a blob root, a playback route without a
+ * media signing key, an unsupported speech provider, a frontend mount with nothing to serve. The last arm boots a valid spec on the same database, so the
  * reordering changes nothing for a deployment that validates.
  *
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
@@ -82,6 +84,9 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     'PORT',
     'RAYSPEC_SPEC_PATH',
     'DBOS_SYSTEM_DATABASE_URL',
+    'RAYSPEC_BLOB_ROOT',
+    'RAYSPEC_MEDIA_SIGNING_KEY',
+    'STT_PROVIDER',
   ] as const;
 
   /** Every relation outside the system schemas, plus whether a `drizzle` schema exists. */
@@ -136,6 +141,9 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     delete process.env.ALLOWED_ORIGINS;
     process.env.PORT = '8814';
     delete process.env.DBOS_SYSTEM_DATABASE_URL;
+    delete process.env.RAYSPEC_BLOB_ROOT;
+    delete process.env.RAYSPEC_MEDIA_SIGNING_KEY;
+    delete process.env.STT_PROVIDER;
     expect(await footprint()).toEqual({ relations: 0, drizzle: false });
   }, 60_000);
 
@@ -191,6 +199,57 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     armsRan += 1;
   }, 60_000);
 
+  it('a backend document whose configuration the environment does not satisfy is refused, database untouched', async () => {
+    const handler = `
+handlers:
+  - { id: bytes_handler, module: handlers/bytes.mjs, export: bytes, kind: route }
+`;
+    const cases: { name: string; spec: string; env?: Record<string, string>; message: RegExp }[] = [
+      {
+        name: 'stream.yaml',
+        spec: `${VALID_SPEC}  - method: POST
+    path: /uploads/{id}
+    action: { kind: stream, handler: bytes_handler, mode: ingest }
+${handler}`,
+        message: /declares a 'stream' route but no blob backend is configured/,
+      },
+      {
+        name: 'playback.yaml',
+        spec: `${VALID_SPEC}  - method: GET
+    path: /media/{id}
+    action: { kind: stream, handler: bytes_handler, mode: playback }
+${handler}`,
+        env: { RAYSPEC_BLOB_ROOT: dir },
+        message: /stream PLAYBACK route but no media signing key is configured/,
+      },
+      {
+        name: 'stt.yaml',
+        spec: VALID_SPEC,
+        env: { STT_PROVIDER: 'no-such-provider' },
+        message: /STT_PROVIDER 'no-such-provider' is not supported/,
+      },
+      {
+        name: 'frontend.yaml',
+        spec: `${VALID_SPEC}frontend:
+  - { route: /, dir: ./no-such-build, spa: true }
+`,
+        message: /static directory '\.\/no-such-build' .* is missing or unreadable/,
+      },
+    ];
+    for (const c of cases) {
+      for (const [k, v] of Object.entries(c.env ?? {})) process.env[k] = v;
+      try {
+        const refused = await bootWith(specFile(c.name, c.spec)).catch((e: unknown) => e);
+        expect(refused, c.name).toBeInstanceOf(BootConfigError);
+        expect((refused as Error).message, c.name).toMatch(c.message);
+        expect(await footprint(), c.name).toEqual({ relations: 0, drizzle: false });
+      } finally {
+        for (const k of Object.keys(c.env ?? {})) delete process.env[k];
+      }
+    }
+    armsRan += 1;
+  }, 90_000);
+
   it('a valid spec on the same empty database boots exactly as before', async () => {
     const server = await bootWith(specFile('valid.yaml', VALID_SPEC));
     try {
@@ -205,10 +264,28 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     }
     armsRan += 1;
   }, 90_000);
+
+  it('a boot refused after it read the source fence leaves no heartbeat behind', async () => {
+    // The previous arm materialized the store; take a column away so the next boot refuses on drift,
+    // after the platform chain and after it announced itself to the fence.
+    const sql = postgres(dbUrl, { max: 1 });
+    try {
+      await sql.unsafe('ALTER TABLE first_notes DROP COLUMN body');
+      const refused = await bootWith(specFile('valid.yaml', VALID_SPEC)).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(BootConfigError);
+      expect((refused as Error).message).toMatch(/DRIFTED/);
+      // Not a live, undrained process to the next quiesce.
+      const [row] = await sql.unsafe('SELECT count(*)::int AS n FROM runtime_control_processes');
+      expect(row).toEqual({ n: 0 });
+    } finally {
+      await sql.end();
+    }
+    armsRan += 1;
+  }, 90_000);
 });
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(5);
+  if (dbRequired) expect(armsRan).toBe(7);
   else expect(true).toBe(true);
 });

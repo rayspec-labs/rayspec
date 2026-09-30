@@ -486,16 +486,28 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
   );
 
   maybe(
-    'post-migrate refusal: the SAME unset-tenant abort on a STORE-declaring spec names the product-store DDL it already committed — and the table is really there',
+    'post-migrate refusal: the unset-tenant abort on a STORE-declaring spec now comes before any DDL, and the no-worker abort after it names the DDL it committed',
     async () => {
-      // The one arm that measures the DATABASE after a refusal. The store makes the boot materialize
-      // `cron_boot_notes` (the migrate step, committed in its own transaction) and only THEN reach
-      // the cron-tenant gate, so the refusal is raised on a schema that already carries the DDL.
+      // The arm that measures the DATABASE after a refusal. An unset cron tenant is a configuration
+      // demand, checked before the boot changes anything: the store table is not created.
       process.env.DATABASE_URL = appliedDbUrl;
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_SPEC_YAML, 'unset-tenant-store.yaml');
       delete process.env.RAYSPEC_CRON_TENANT_ID;
-      const config = loadServerConfig();
-      const err = await assembleServer(config, assembleOpts()).then(
+      const early = await assembleServer(loadServerConfig(), assembleOpts()).then(
+        (s) => {
+          created.push(s);
+          return null;
+        },
+        (e: unknown) => e,
+      );
+      expect(early).toBeInstanceOf(BootConfigError);
+      expect((early as BootConfigError).message).toBe(UNSET_TENANT_ABORT);
+      expect(await tableExists(appliedDbUrl, STORE_TABLE)).toBe(false);
+
+      // A refusal the deploy can only raise once the worker would be wired — no agent backends, so no
+      // durable worker for the cron trigger — comes after the migrate step has materialized the store.
+      process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
+      const err = await assembleServer(loadServerConfig(), assembleOptsNoBackend()).then(
         (s) => {
           created.push(s);
           return null;
@@ -510,9 +522,11 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
 
       // …and the refusal SAYS so: the unchanged gate text, then the note, in the SAME error object
       // (a re-wrap would have re-added the class's own prefix, which the CLI printer switches on).
-      expect((err as BootConfigError).message).toBe(
-        `${UNSET_TENANT_ABORT}\n${appliedProductDdlBootNote([MATERIALIZE_MIGRATION], [STORE_TABLE])}`,
-      );
+      const message = (err as BootConfigError).message;
+      expect(message).toMatch(/durable[\s\S]*worker is wired/i);
+      expect(
+        message.endsWith(`\n${appliedProductDdlBootNote([MATERIALIZE_MIGRATION], [STORE_TABLE])}`),
+      ).toBe(true);
     },
     120_000,
   );
@@ -560,8 +574,8 @@ describe('cron-worker boot — composition root wires the scheduler + fail-close
       // Step 1 — a PRIOR deployment materializes the store on this database. Same fixture and same
       // refusal as the post-migrate arm above: the CREATE TABLE is committed, then the boot is refused.
       process.env.RAYSPEC_SPEC_PATH = writeSpec(CRON_STORE_SPEC_YAML, 'gated-store.yaml');
-      delete process.env.RAYSPEC_CRON_TENANT_ID;
-      await assembleServer(loadServerConfig(), assembleOpts()).then(
+      process.env.RAYSPEC_CRON_TENANT_ID = CRON_TENANT;
+      await assembleServer(loadServerConfig(), assembleOptsNoBackend()).then(
         (s) => {
           created.push(s);
         },

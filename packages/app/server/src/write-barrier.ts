@@ -10,11 +10,14 @@
  * fenced process can still report that it drained; it holds no application data and is never
  * exported.
  *
- * The barrier is checked, never assumed: it is refused (and nothing is revoked) when the role does not
- * exist, is a superuser, bypasses row security or can act as the owner of any table, and after the
- * REVOKE every table is re-checked with `has_table_privilege`, which also sees privileges held through
- * PUBLIC or another role. A write privilege that survives means the barrier is `unavailable`, and the
- * transaction that tried is rolled back.
+ * The barrier is checked, never assumed. Membership counts whether or not it is inherited: a member of
+ * a role can `SET ROLE` to it and use its privileges, so every check covers the runtime role AND every
+ * role it is a member of. The barrier is refused (and nothing is revoked) when the role does not
+ * exist, when it or a role it belongs to is a superuser, bypasses row security or may create roles
+ * (a role that can create roles can grant itself membership), or owns any table; and after the REVOKE
+ * every table is re-checked with `has_table_privilege` for the role and each role it belongs to, which
+ * also sees privileges held through PUBLIC. A write privilege that survives means the barrier is
+ * `unavailable`, and the transaction that tried is rolled back.
  *
  * `database-stopped-source` — without role separation nothing the runtime can do stops its own
  * writes, so the only barrier is a source that is not running: the operator attests that every
@@ -82,21 +85,31 @@ function isWritePrivilege(value: unknown): value is WritePrivilege {
  * `tx` back.
  */
 export async function revokeWrites(tx: BarrierTx, role: string): Promise<RecordedGrant[]> {
-  const [roleRow] = await rows<{ rolsuper: boolean; rolbypassrls: boolean }>(
+  const [roleRow] = await rows<{ n: number }>(
     tx,
-    'SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = $1',
+    'SELECT count(*)::int AS n FROM pg_roles WHERE rolname = $1',
     [role],
   );
-  if (roleRow === undefined) throw new BarrierUnavailableError('the runtime role does not exist');
-  if (roleRow.rolsuper || roleRow.rolbypassrls) {
+  if ((roleRow?.n ?? 0) === 0) throw new BarrierUnavailableError('the runtime role does not exist');
+  // The role itself and every role it can SET ROLE to (MEMBER, not USAGE: an uninherited membership
+  // still lets it switch).
+  const [powerful] = await rows<{ n: number }>(
+    tx,
+    `SELECT count(*)::int AS n FROM pg_roles m
+      WHERE pg_has_role($1, m.oid, 'MEMBER')
+        AND (m.rolsuper OR m.rolbypassrls OR m.rolcreaterole)`,
+    [role],
+  );
+  if ((powerful?.n ?? 0) > 0) {
     throw new BarrierUnavailableError(
-      'the runtime role is a superuser or bypasses row security, so no privilege can fence it',
+      'the runtime role, or a role it is a member of, is a superuser, bypasses row security or may ' +
+        'create roles, so no privilege can fence it',
     );
   }
   const owned = await rows<{ n: number }>(
     tx,
     `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE c.relkind IN ('r', 'p') AND ${SCHEMAS_FILTER} AND pg_has_role($1, c.relowner, 'USAGE')`,
+      WHERE c.relkind IN ('r', 'p') AND ${SCHEMAS_FILTER} AND pg_has_role($1, c.relowner, 'MEMBER')`,
     [role],
   );
   if ((owned[0]?.n ?? 0) > 0) {
@@ -131,17 +144,21 @@ export async function revokeWrites(tx: BarrierTx, role: string): Promise<Recorde
   }
   const surviving = await rows<{ n: number }>(
     tx,
-    `SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    `SELECT count(*)::int AS n
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       CROSS JOIN pg_roles m
       WHERE c.relkind IN ('r', 'p') AND ${SCHEMAS_FILTER}
         AND (n.nspname || '.' || c.relname) <> $2
-        AND (has_table_privilege($1, c.oid, 'INSERT') OR has_table_privilege($1, c.oid, 'UPDATE')
-             OR has_table_privilege($1, c.oid, 'DELETE') OR has_table_privilege($1, c.oid, 'TRUNCATE'))`,
+        AND pg_has_role($1, m.oid, 'MEMBER')
+        AND (has_table_privilege(m.oid, c.oid, 'INSERT') OR has_table_privilege(m.oid, c.oid, 'UPDATE')
+             OR has_table_privilege(m.oid, c.oid, 'DELETE')
+             OR has_table_privilege(m.oid, c.oid, 'TRUNCATE'))`,
     [role, BARRIER_EXEMPT_TABLE],
   );
   if ((surviving[0]?.n ?? 0) > 0) {
     throw new BarrierUnavailableError(
-      'the runtime role keeps a write privilege after the revoke (through PUBLIC or another role, ' +
-        'or the control connection may not revoke it)',
+      'the runtime role keeps a write privilege after the revoke (through PUBLIC, a role it can ' +
+        'switch to, or because the control connection may not revoke it)',
     );
   }
   return recorded;

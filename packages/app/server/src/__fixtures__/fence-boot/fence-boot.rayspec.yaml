@@ -29,6 +29,9 @@ api:
   - method: GET
     path: /emit-on-read
     action: { kind: handler, handler: emit_handler }
+  - method: GET
+    path: /write-on-read
+    action: { kind: handler, handler: write_handler }
   - method: POST
     path: /uploads/{upload_id}
     action: { kind: stream, handler: ingest_handler, mode: ingest }
@@ -58,6 +61,11 @@ handlers:
   - id: emit_handler
     module: handlers/emit.mjs
     export: emitOnRead
+    kind: route
+    readonly: true
+  - id: write_handler
+    module: handlers/write.mjs
+    export: writeOnRead
     kind: route
   - id: ingest_handler
     module: handlers/ingest.mjs

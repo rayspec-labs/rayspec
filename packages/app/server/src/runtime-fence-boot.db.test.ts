@@ -12,7 +12,8 @@
  *     reads keep answering; after resume every one of them works again, in the same process.
  *  3. Work in flight is drained, not cut: a quiesce whose deadline passes while runs are held in
  *     flight reports `timed-out` (ok: false, RAY_SOURCE_NOT_QUIESCENT) and keeps the fence; once they
- *     finish it reports `fenced`; a job queued before the fence is not dequeued until resume.
+ *     finish it reports `fenced`; a job queued before the fence is not dequeued until resume. A run
+ *     streamed to its client counts until the run has ended, although the drain closed its stream.
  *  4. The fence survives a restart: a server booted under a held fence starts fenced.
  *  5. Readiness goes false for a missing dependency — the database, the workflow system database,
  *     the schema, a mounted secret — while liveness stays true, and recovers with it.
@@ -330,6 +331,9 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     const events = await count('tenant_events');
     expect((await http('/emit-on-read')).status).toBe(200);
     expect(await count('tenant_events')).toBe(events + 1);
+    const notes = await count('fence_notes');
+    expect((await http('/write-on-read')).status).toBe(200);
+    expect(await count('fence_notes')).toBe(notes + 1);
     const upload = await http('/uploads/before', {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
@@ -351,6 +355,23 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     armsRan += 1;
     const stream = await openStream();
     expect(stream.status).toBe(200);
+    // An api key minted before the fence: a read it authenticates must keep answering while fenced,
+    // and must not stamp the key's last use (a write).
+    const minted = await post(`/v1/orgs/${TENANT}/api-keys`, { scopes: ['store:read'] });
+    expect(minted.status).toBe(201);
+    const apiKey = (await minted.json()).plaintext as string;
+    const keyRead = () =>
+      fetch(`http://127.0.0.1:${server?.port}/fence-notes`, {
+        headers: { authorization: `Bearer ${apiKey}` },
+      });
+    expect((await keyRead()).status).toBe(200);
+    const lastUsed = async () =>
+      String(
+        (
+          await sql`SELECT last_used_at::text AS t FROM api_keys WHERE key_prefix = ${apiKey.split('.')[0]}`
+        )[0]?.t,
+      );
+    const stampedBefore = await lastUsed();
 
     const result = await quiesce();
     expect(result.ok, JSON.stringify(result)).toBe(true);
@@ -409,12 +430,18 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     expect(await count('runs')).toBe(runs);
     expect(blobFiles()).toBe(1);
 
-    // Event-bus writes: refused even from a READ route once the runtime has drained.
+    // Event-bus writes: refused even from a route declared read-only once the runtime has drained.
     const events = await count('tenant_events');
     const emit = await http('/emit-on-read');
     expect(emit.status).toBe(503);
     expect((await emit.json()).error.code).toBe('SERVICE_UNAVAILABLE');
     expect(await count('tenant_events')).toBe(events);
+
+    // A GET whose handler writes a store row is a mutation to the fence: refused before it runs.
+    const writeOnRead = await http('/write-on-read');
+    expect(writeOnRead.status).toBe(503);
+    expect(writeOnRead.headers.get('retry-after')).toBe('30');
+    expect(await count('fence_notes')).toBe(notes);
 
     // EVERY mutation route the app serves refuses — the list comes from the booted app itself.
     const routes = JSON.parse(readFileSync(routesFile, 'utf8')) as {
@@ -441,9 +468,11 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     expect(await count('orgs')).toBe(orgs);
     expect(await count('fence_notes')).toBe(notes);
 
-    // Reads continue.
+    // Reads continue, including one authenticated with an api key, which stamps nothing.
     expect((await http('/fence-notes')).status).toBe(200);
     expect((await http('/health')).status).toBe(200);
+    expect((await keyRead()).status).toBe(200);
+    expect(await lastUsed()).toBe(stampedBefore);
 
     // A resume at the wrong epoch changes nothing.
     for (const wrong of [0, epoch + 1]) {
@@ -478,6 +507,9 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     );
     expect((await http('/emit-on-read')).status).toBe(200);
     expect(await count('tenant_events')).toBe(events + 1);
+    const notesAfter = await count('fence_notes');
+    expect((await http('/write-on-read')).status).toBe(200);
+    expect(await count('fence_notes')).toBe(notesAfter + 1);
     const upload = await http('/uploads/after', {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
@@ -549,6 +581,77 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     await eventually(
       () => status(waiting),
       (s) => s !== 'enqueued' && s !== 'running',
+    );
+  }, 120_000);
+
+  it('counts a streamed run in flight until it has ended, although the drain closed its stream', async () => {
+    armsRan += 1;
+    const entered = () => readdirSync(dir).filter((f) => f.startsWith('hold.entered.')).length;
+    const enteredBefore = entered();
+    const runStatuses = async () =>
+      new Map(
+        (await sql`SELECT run_id, status FROM runs`).map((r) => [
+          r.run_id as string,
+          r.status as string,
+        ]),
+      );
+    const runsBefore = await runStatuses();
+    const streamedRun = async () =>
+      [...(await runStatuses()).entries()].find(([id]) => !runsBefore.has(id))?.[1];
+    writeFileSync(holdFile, 'hold');
+    // A synchronous run streamed to its client: the run executes inside this request.
+    const res = await http('/v1/agents/echo/runs', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body: JSON.stringify({ input: 'streamed and held' }),
+    });
+    expect(res.status).toBe(200);
+    const reader = res.body?.getReader();
+    let clientEnded = false;
+    const pump = (async () => {
+      for (;;) {
+        const chunk = await reader?.read().catch(() => ({ done: true }));
+        if (!chunk || chunk.done) {
+          clientEnded = true;
+          return;
+        }
+      }
+    })();
+    await eventually(
+      async () => entered(),
+      (n) => n === enteredBefore + 1,
+    );
+
+    const timedOut = await quiesce(3_000);
+    // Released whatever happens below, so a failed assertion does not leave the next arms fenced.
+    const epoch = timedOut.data?.fenceEpoch ?? (await fenceEpoch());
+    try {
+      expect(timedOut.ok).toBe(false);
+      expect(timedOut.errors[0]?.code).toBe('RAY_SOURCE_NOT_QUIESCENT');
+      expect(timedOut.data?.status).toBe('timed-out');
+      expect(timedOut.data?.producers).toContainEqual({
+        producer: 'http-mutations',
+        state: 'still-running',
+      });
+      // The drain closed the client's stream; the run behind it is still held, and still counted.
+      await Promise.race([pump, pause(2_000)]);
+      expect(clientEnded).toBe(true);
+      expect(await streamedRun()).toBe('running');
+
+      rmSync(holdFile);
+      const fenced = await quiesce();
+      expect(fenced.ok, JSON.stringify(fenced)).toBe(true);
+      expect(fenced.data?.status).toBe('fenced');
+      // The run ran to its end and was recorded before the fence reported drained.
+      expect(await streamedRun()).toBe('completed');
+    } finally {
+      rmSync(holdFile, { force: true });
+      await resumeAt(epoch);
+    }
+    await eventually(
+      async () => (await post('/fence-notes', { body: 'after the streamed run' })).status,
+      (status) => status === 201,
+      5_000,
     );
   }, 120_000);
 

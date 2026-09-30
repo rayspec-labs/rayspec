@@ -2035,6 +2035,24 @@ export function attachAppliedProductDdlNote(
  */
 export async function assembleServer(
   config: ServerConfig,
+  opts: AssembleServerOptions = {},
+): Promise<BootedServer> {
+  // A boot that fails after it read the source fence stops watching it and removes its heartbeat, so
+  // a refused boot is not counted as a live, undrained process by the next quiesce.
+  const started: { fence?: RuntimeFence } = {};
+  try {
+    return await assembleServerWith(config, opts, started);
+  } catch (err) {
+    await started.fence?.stop().catch(() => {});
+    throw err;
+  }
+}
+
+/** The boot seams `assembleServer` accepts beside the validated config. */
+export type AssembleServerOptions = Parameters<typeof assembleServerWith>[1];
+
+async function assembleServerWith(
+  config: ServerConfig,
   opts: {
     agentBackendsFactory?: AgentBackendsFactory;
     /** LOCAL table-registration stand-in — register the built product tables (the dev wrapper supplies this). */
@@ -2100,7 +2118,8 @@ export async function assembleServer(
      * observation bound with margin). A test may shorten it.
      */
     fencePollIntervalMs?: number;
-  } = {},
+  },
+  started: { fence?: RuntimeFence },
 ): Promise<BootedServer> {
   // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
   // Importing this boot closure pulls in undici v8, whose module-import-time side effect overwrites the
@@ -2174,6 +2193,22 @@ export async function assembleServer(
   // 2. The ONE raw Db handle (composition root — app-context.ts). Production factory, not /testing.
   const db = makeDb(config.databaseUrl);
 
+  //    A backend-profile document's configuration demands, checked with nothing changed yet: its
+  //    extension packs load and merge, and the environment must satisfy what the merged document
+  //    needs (preflightDeclaredSpec). The deploy path below re-checks them on the same result.
+  let preflight: PreflightedSpec | undefined;
+  if (config.specPath && detectSpecKind(readFileSync(config.specPath, 'utf8')) !== 'product') {
+    try {
+      preflight = await preflightDeclaredSpec(db, config, config.specPath, {
+        ...(opts.moduleImporter ? { moduleImporter: opts.moduleImporter } : {}),
+        ...(opts.agentBackendsFactory ? { agentBackendsFactory: opts.agentBackendsFactory } : {}),
+      });
+    } catch (err) {
+      await db.$client.end();
+      throw err;
+    }
+  }
+
   // 3. Apply the committed migration chain (idempotent — safe to re-run) under the SHARED SCHEMA
   //    LOCK, so a concurrent boot, tenant ensure or deploy against the same database waits its turn.
   //    Then read the SOURCE FENCE before anything that produces work exists: a boot under a held fence
@@ -2194,6 +2229,7 @@ export async function assembleServer(
   try {
     await deployApply.platformChain();
     await fence.load();
+    started.fence = fence;
   } catch (err) {
     // A refused boot hands no pool back, so end it here rather than leave its connections open.
     await db.$client.end();
@@ -2216,7 +2252,8 @@ export async function assembleServer(
   // decides whether an org id may be chosen, so a route that forgot to check could not smuggle one
   // past it, and the gated route keys its own registration off the same value (one source of truth).
   const orgStore = new OrgStore(db, { tenantBootstrapEnabled: config.tenantBootstrapEnabled });
-  const apiKeyStore = new ApiKeyStore(db);
+  // A read authenticated with an api key stamps its last use, a write a source fence withholds.
+  const apiKeyStore = new ApiKeyStore(db, { stampsLastUse: () => fence.admitsWrites() });
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
   const inviteStore = new InviteStore(db);
@@ -2341,6 +2378,7 @@ export async function assembleServer(
     const deployed = await deployDeclaredSpec(db, config, baseDeps, {
       fence,
       deployApply,
+      ...(preflight ? { preflight } : {}),
       agentBackendsFactory: opts.agentBackendsFactory,
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
@@ -2637,10 +2675,11 @@ function validateDeclaredSpec(specSource: string, specPath: string): RaySpec {
  * deploy path runs the same checks again; what this adds is the ORDER: an invalid document now
  * refuses the boot while the database is still untouched.
  *
- * Scope, stated so it is not read wider: this is the document itself. Checks that need the merged
- * extension fragments or a spec-dependent environment demand (a media signing key, an STT or TTS
- * provider, the blob root) still run inside the deploy path, after the platform chain and before
- * any product DDL.
+ * Scope, stated so it is not read wider: this is the document itself. For a backend document,
+ * `preflightDeclaredSpec` then checks, still before anything is mutated, what the environment must
+ * satisfy for it once its extensions are merged. A Product-YAML document's environment demands (its
+ * deployment tenant, a blob root, a media signing key, a speech provider) are still checked inside its
+ * deploy path, after the platform chain and before any product DDL.
  */
 export function validateInjectedSpec(specPath: string): void {
   const specSource = readFileSync(specPath, 'utf8');
@@ -2649,6 +2688,177 @@ export function validateInjectedSpec(specPath: string): void {
     return;
   }
   validateDeclaredSpec(specSource, specPath);
+}
+
+/** What `preflightDeclaredSpec` resolved: the parsed document and its merged extensions. */
+export interface PreflightedSpec {
+  readonly parsedSpec: RaySpec;
+  readonly merged: MergedExtensions;
+}
+
+/**
+ * The blob backend a document's `kind:'stream'` routes move bytes through: a pack's own when a pack
+ * provided one, else the fs backend over RAYSPEC_BLOB_ROOT, else a refusal. Undefined when the
+ * document declares no stream route. Asked through the SHARED predicate (boot-env-demands.ts), on the
+ * POST-MERGE spec, so the read-only report asks the identical question of the base document.
+ */
+function streamBlobFactory(
+  effectiveSpec: RaySpec,
+  config: ServerConfig,
+  packBlobFactory: BlobStoreFactory | undefined,
+  specPath: string,
+): BlobStoreFactory | undefined {
+  if (!declaresStreamRoute(effectiveSpec.api)) return undefined;
+  // A PACK may PROVIDE its own blob backend (an ExtensionCapabilities.blobFactory — e.g. an S3
+  // backend). When a pack provided one, prefer it (the pack owns the bytes); else the default fs
+  // backend over RAYSPEC_BLOB_ROOT. A stream route with NEITHER is fail-closed (nowhere to put bytes).
+  // The pack-provided factory is still tenant-bound BY CONSTRUCTION (the BlobStore contract).
+  if (packBlobFactory) return packBlobFactory;
+  if (config.blobRoot) return makeFsBlobStoreFactory(config.blobRoot);
+  throw new BootConfigError(
+    `Boot aborted — the deployed spec at ${specPath} declares a 'stream' route but no blob backend ` +
+      'is configured (RAYSPEC_BLOB_ROOT is unset and no extension provided one). A stream ' +
+      'route moves binary bytes through the tenant-bound BlobStore; set RAYSPEC_BLOB_ROOT to a ' +
+      'writable directory (the fs blob backend writes one subdir per tenant under it), or load a ' +
+      'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',
+  );
+}
+
+/**
+ * The READ-ONLY, path-jailed fs-source factory over RAYSPEC_FS_SOURCE_ROOT, or undefined when no root
+ * is configured. `makeFsSourceFactory` fail-closes on a missing root without knowing the environment,
+ * so the refusal is re-raised here naming the VARIABLE the operator has to fix.
+ */
+function fsSourceFactoryFor(config: ServerConfig): FsSourceFactory | undefined {
+  if (!config.fsSourceRoot) return undefined;
+  try {
+    return makeFsSourceFactory(config.fsSourceRoot);
+  } catch (err) {
+    if (!(err instanceof FsSourceConfigError)) throw err;
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a ` +
+        'directory. It is the READ-ONLY source root `init.fsSource` reads under; point it at an ' +
+        'existing directory on the box (nothing here creates it). Fail-closed.',
+    );
+  }
+}
+
+/**
+ * The media-token service a stream PLAYBACK route is authenticated by (a signed `?token=` media-JWT,
+ * HS256, a DISTINCT key from the RS256 API chain), or undefined when no playback route is declared.
+ * A playback route without a valid media signing key is refused: it would be unauthenticated.
+ */
+function mediaTokenServiceFor(
+  effectiveSpec: RaySpec,
+  config: ServerConfig,
+  specPath: string,
+): ReturnType<typeof createMediaTokenService> | undefined {
+  if (!declaresPlaybackRoute(effectiveSpec.api)) return undefined;
+  if (!config.mediaSigningKey) {
+    throw new BootConfigError(
+      `Boot aborted — the deployed spec at ${specPath} declares a stream PLAYBACK route but no media ` +
+        'signing key is configured (RAYSPEC_MEDIA_SIGNING_KEY is unset). A playback route is ' +
+        'authenticated by a signed ?token= media-JWT (HS256, a DISTINCT key from the RS256 API chain ' +
+        '— a leaked media URL must not grant API access). Set RAYSPEC_MEDIA_SIGNING_KEY to a ' +
+        'high-entropy secret of at least 32 bytes. Fail-closed (a playback route requires the media ' +
+        'verifier).',
+    );
+  }
+  // createMediaTokenService fail-closes on a too-short secret; wrap that as a BootConfigError so the
+  // abort is uniform + actionable at the entrypoint.
+  try {
+    return createMediaTokenService(config.mediaSigningKey);
+  } catch (err) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(err as Error).message}`,
+    );
+  }
+}
+
+/**
+ * Refuse a declared frontend mount that cannot be served, on the SAME per-mount check `/health`
+ * reports (`mountUnservableReason`, the one definition of servable).
+ */
+function assertFrontendMountsServable(effectiveSpec: RaySpec, specPath: string): void {
+  const frontendSpecDir = dirname(specPath);
+  for (const mount of effectiveSpec.frontend ?? []) {
+    const unservable = mountUnservableReason(mount, frontendSpecDir);
+    if (unservable === undefined) continue;
+    const resolvedDir = resolve(frontendSpecDir, mount.dir);
+    if (unservable === 'dir') {
+      throw new BootConfigError(
+        `Boot aborted — the deployed spec at ${specPath} declares a frontend at route '${mount.route}' ` +
+          `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) is missing or unreadable. ` +
+          'Point frontend.dir at a readable directory of built assets. Fail-closed.',
+      );
+    }
+    throw new BootConfigError(
+      `Boot aborted — the deployed spec at ${specPath} declares an spa frontend at route '${mount.route}' ` +
+        `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) has no readable index.html. ` +
+        'An spa mount serves index.html for every unmatched deep link, so without it the mount cannot ' +
+        'answer one. Build the frontend into frontend.dir, or set spa: false. Fail-closed.',
+    );
+  }
+}
+
+/**
+ * The deployment tenant a cron or manual trigger fires under. A document that declares one without
+ * RAYSPEC_CRON_TENANT_ID is refused: firing under an unknown tenant is never silently OK.
+ */
+function requireCronTenant(fireable: number, config: ServerConfig): string {
+  if (!config.cronTenantId) {
+    throw new BootConfigError(
+      `Boot aborted — the spec declares ${fireable} cron/manual trigger(s) but ` +
+        'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
+        'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
+        'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
+    );
+  }
+  return config.cronTenantId;
+}
+
+/**
+ * Everything a backend-profile (`rayspec.yaml`) deploy demands of its configuration, checked BEFORE
+ * the boot changes anything — so a boot that is going to refuse leaves the database as it found it:
+ * the document parses and lints, its extension packs load and merge, and the environment satisfies
+ * what the merged document needs (a blob backend for a stream route, a media signing key for a
+ * playback route, a readable fs-source root, a supported speech provider with its credential,
+ * servable frontend mounts, and the deployment tenant a cron or manual trigger fires under). The
+ * deploy path makes the same checks again, with the same refusals, on what this returns.
+ */
+async function preflightDeclaredSpec(
+  db: Db,
+  config: ServerConfig,
+  specPath: string,
+  opts: { moduleImporter?: ModuleImporter; agentBackendsFactory?: AgentBackendsFactory },
+): Promise<PreflightedSpec> {
+  const specSource = readFileSync(specPath, 'utf8');
+  const parsedSpec = validateDeclaredSpec(specSource, specPath);
+  const merged = await mergeExtensions(
+    parsedSpec,
+    specSource,
+    config.escapeHatchRoot as string,
+    specPath,
+    opts.moduleImporter,
+  );
+  const spec = merged.spec;
+  streamBlobFactory(spec, config, merged.packBlobFactory, specPath);
+  fsSourceFactoryFor(config);
+  mediaTokenServiceFor(spec, config, specPath);
+  buildSttCapability(config);
+  buildTtsCapability(config);
+  assertFrontendMountsServable(spec, specPath);
+  // A cron or manual trigger needs the durable worker, which the deploy wires only with agent
+  // backends; without them the deploy refuses for that reason first, as it always has.
+  const fireable = fireableTriggers(spec.triggers);
+  if (
+    fireable.length > 0 &&
+    spec.deployment?.durableWorker === true &&
+    opts.agentBackendsFactory !== undefined
+  ) {
+    await assertCronTenantBootable(db, requireCronTenant(fireable.length, config));
+  }
+  return { parsedSpec, merged };
 }
 
 /**
@@ -2674,6 +2884,11 @@ async function deployDeclaredSpec(
     fence: RuntimeFence;
     /** Runs each product migration as a `runtime.apply` operation, with its receipts. */
     deployApply?: DeployApply;
+    /**
+     * What `preflightDeclaredSpec` already resolved before the boot changed anything: the parsed
+     * document and its merged extensions. Absent, this deployer resolves them itself.
+     */
+    preflight?: PreflightedSpec;
     agentBackendsFactory?: AgentBackendsFactory;
     registerProductTables?: ProductTableRegistrar;
     /**
@@ -2726,7 +2941,7 @@ async function deployDeclaredSpec(
   // needs (deploy() re-parses internally for its own VALIDATE step — a !ok there aborts the deploy).
   // assembleServer already ran the same check before it migrated anything; it is repeated here so
   // this deployer never depends on its caller for it.
-  const parsedSpec = validateDeclaredSpec(specSource, specPath);
+  const parsedSpec = opts.preflight?.parsedSpec ?? validateDeclaredSpec(specSource, specPath);
 
   // ── Resolve + merge the referenced extension PACKS, fail-closed ─────────────
   // For each `extensions[]` ref, loadExtensions resolves the pack's defineExtension manifest
@@ -2744,7 +2959,8 @@ async function deployDeclaredSpec(
     specSource: effectiveSpecSource,
     extensionImporter,
     packBlobFactory,
-  } = await mergeExtensions(parsedSpec, specSource, escapeHatchRoot, specPath, opts.moduleImporter);
+  } = opts.preflight?.merged ??
+  (await mergeExtensions(parsedSpec, specSource, escapeHatchRoot, specPath, opts.moduleImporter));
 
   const specStores = [...effectiveSpec.stores];
   const productTables = buildProductTables(specStores);
@@ -2865,29 +3081,9 @@ async function deployDeclaredSpec(
   // Asked through the SHARED predicate (boot-env-demands.ts), on the POST-MERGE `effectiveSpec` — so
   // the read-only report asks the identical question of the base document, and says in its own output
   // that a pack could still supply a blob backend it cannot see.
-  const hasStreamRoute = declaresStreamRoute(effectiveSpec.api);
-  let blobFactory: BlobStoreFactory | undefined;
-  if (hasStreamRoute) {
-    // A PACK may PROVIDE its own blob backend (an ExtensionCapabilities.blobFactory — e.g.
-    // an S3 backend). When a pack provided one, prefer it (the pack owns the bytes); else the default
-    // fs backend over RAYSPEC_BLOB_ROOT. A stream route with NEITHER is fail-closed (nowhere to put
-    // bytes). The pack-provided factory is still tenant-bound BY CONSTRUCTION (the BlobStore contract).
-    if (packBlobFactory) {
-      blobFactory = packBlobFactory;
-    } else if (config.blobRoot) {
-      blobFactory = makeFsBlobStoreFactory(config.blobRoot);
-    } else {
-      throw new BootConfigError(
-        `Boot aborted — the deployed spec at ${specPath} declares a 'stream' route but no blob backend ` +
-          'is configured (RAYSPEC_BLOB_ROOT is unset and no extension provided one). A stream ' +
-          'route moves binary bytes through the tenant-bound BlobStore; set RAYSPEC_BLOB_ROOT to a ' +
-          'writable directory (the fs blob backend writes one subdir per tenant under it), or load a ' +
-          'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',
-      );
-    }
-    // Object writes stop once the process has drained under a source fence; reads never do.
-    blobFactory = fence.blobFactory(blobFactory);
-  }
+  let blobFactory = streamBlobFactory(effectiveSpec, config, packBlobFactory, specPath);
+  // Object writes stop once the process has drained under a source fence; reads never do.
+  if (blobFactory !== undefined) blobFactory = fence.blobFactory(blobFactory);
 
   // ── The READ-ONLY FS-SOURCE backend build ──────────────────────────────────
   // The READ-ONLY, path-jailed `FsSource` (`init.fsSource`) reads deployment-static assets under
@@ -2898,19 +3094,7 @@ async function deployDeclaredSpec(
   // refusal is re-raised HERE in the house form: it names the VARIABLE the operator has to fix, and a
   // BootConfigError is one of the classes the entrypoint prints message-only (serve.ts). Injected into
   // the engine in buildApp (below), like blobFactory.
-  let fsSourceFactory: FsSourceFactory | undefined;
-  if (config.fsSourceRoot) {
-    try {
-      fsSourceFactory = makeFsSourceFactory(config.fsSourceRoot);
-    } catch (err) {
-      if (!(err instanceof FsSourceConfigError)) throw err;
-      throw new BootConfigError(
-        `Boot aborted — RAYSPEC_FS_SOURCE_ROOT='${config.fsSourceRoot}' does not exist or is not a ` +
-          'directory. It is the READ-ONLY source root `init.fsSource` reads under; point it at an ' +
-          'existing directory on the box (nothing here creates it). Fail-closed.',
-      );
-    }
-  }
+  const fsSourceFactory = fsSourceFactoryFor(config);
 
   // ── The MEDIA-TOKEN service (playback's 2nd auth path) deploy guard + build ──
   // A `kind:'stream', mode:'playback'` route is authenticated by a signed `?token=` media-JWT (HS256,
@@ -2919,29 +3103,7 @@ async function deployDeclaredSpec(
   // playback route without a verifier would be unauthenticated. The service ALSO powers the
   // `init.mintPlayToken` capability a mint `{handler}` route receives. Built once (LOCAL/self-host,
   // pre-hardening); injected into the engine in buildApp. A spec with no playback route needs none.
-  const hasPlaybackRoute = declaresPlaybackRoute(effectiveSpec.api);
-  let mediaTokenService: ReturnType<typeof createMediaTokenService> | undefined;
-  if (hasPlaybackRoute) {
-    if (!config.mediaSigningKey) {
-      throw new BootConfigError(
-        `Boot aborted — the deployed spec at ${specPath} declares a stream PLAYBACK route but no media ` +
-          'signing key is configured (RAYSPEC_MEDIA_SIGNING_KEY is unset). A playback route is ' +
-          'authenticated by a signed ?token= media-JWT (HS256, a DISTINCT key from the RS256 API chain ' +
-          '— a leaked media URL must not grant API access). Set RAYSPEC_MEDIA_SIGNING_KEY to a ' +
-          'high-entropy secret of at least 32 bytes. Fail-closed (a playback route requires the media ' +
-          'verifier).',
-      );
-    }
-    // createMediaTokenService fail-closes on a too-short secret; wrap that as a BootConfigError so the
-    // abort is uniform + actionable at the entrypoint.
-    try {
-      mediaTokenService = createMediaTokenService(config.mediaSigningKey);
-    } catch (err) {
-      throw new BootConfigError(
-        `Boot aborted — RAYSPEC_MEDIA_SIGNING_KEY is invalid: ${(err as Error).message}`,
-      );
-    }
-  }
+  const mediaTokenService = mediaTokenServiceFor(effectiveSpec, config, specPath);
 
   // ── The SPEECH-TO-TEXT capability build (`init.stt`) ───────────────────────
   // A route/tool handler transcribes audio bytes through the provider the deployment selected with
@@ -3005,25 +3167,7 @@ async function deployDeclaredSpec(
   // entrypoints branch it to `assembleStaticServer`, which carries no such gate and still reports an
   // unservable mount through `/health` alone. Mirrors the stream/playback guards above; the actual
   // mounting runs in assembleServer AFTER deployDeclaredSpec returns.
-  const frontendSpecDir = dirname(specPath);
-  for (const mount of effectiveSpec.frontend ?? []) {
-    const unservable = mountUnservableReason(mount, frontendSpecDir);
-    if (unservable === undefined) continue;
-    const resolvedDir = resolve(frontendSpecDir, mount.dir);
-    if (unservable === 'dir') {
-      throw new BootConfigError(
-        `Boot aborted — the deployed spec at ${specPath} declares a frontend at route '${mount.route}' ` +
-          `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) is missing or unreadable. ` +
-          'Point frontend.dir at a readable directory of built assets. Fail-closed.',
-      );
-    }
-    throw new BootConfigError(
-      `Boot aborted — the deployed spec at ${specPath} declares an spa frontend at route '${mount.route}' ` +
-        `but its static directory '${mount.dir}' (resolved to ${resolvedDir}) has no readable index.html. ` +
-        'An spa mount serves index.html for every unmatched deep link, so without it the mount cannot ' +
-        'answer one. Build the frontend into frontend.dir, or set spa: false. Fail-closed.',
-    );
-  }
+  assertFrontendMountsServable(effectiveSpec, specPath);
 
   // ── Wire the off-request DURABLE WORKER iff the spec declares deployment.durableWorker
   //    AND the deployment supplies agent backends (the platform ships none). The executor runs
@@ -3413,22 +3557,14 @@ async function deployDeclaredSpec(
       }
       // A cron/manual trigger fires under a KNOWN tenant (single-deployment LOCAL posture). Fail closed if
       // one is declared but no tenant was configured — firing under an unknown tenant is never silently OK.
-      if (!config.cronTenantId) {
-        throw new BootConfigError(
-          `Boot aborted — the spec declares ${fireable.length} cron/manual trigger(s) but ` +
-            'RAYSPEC_CRON_TENANT_ID is not set. A cron/manual trigger fires under a known deployment ' +
-            'tenant (single-deployment LOCAL posture; multi-tenant fan-out is reserved). Set ' +
-            'RAYSPEC_CRON_TENANT_ID to the org id the trigger should fire under. Fail-closed.',
-        );
-      }
       // Validate the tenant SHAPE at BOOT: `forTenant` throws the fail-closed "tenantId must be a UUID"
       // for a malformed id, which no amount of waiting could ever make valid.
-      await assertCronTenantBootable(db, config.cronTenantId);
+      await assertCronTenantBootable(db, requireCronTenant(fireable.length, config));
       // Whether that org EXISTS is a per-firing question, not a boot gate — it is normal for a cron
       // deployment to come up BEFORE its tenant org has been registered against it. Announce the state
       // once here so an operator watching the boot knows why nothing fires yet (and that it will, without
       // a restart); the scheduler then re-asks per firing through the SAME probe.
-      const cronTenantId = config.cronTenantId;
+      const cronTenantId = requireCronTenant(fireable.length, config);
       if (!(await tenantOrgExists(db, cronTenantId))) {
         bootWarn(cronTenantAbsentBootNotice(cronTenantId));
       }

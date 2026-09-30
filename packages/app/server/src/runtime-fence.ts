@@ -27,6 +27,12 @@
  * starts any producer, so a process that boots under a held fence starts in `draining`, with its
  * queues registered paused. When the fence is released every producer is resumed — the queues
  * dispatch again, the gates open — without restarting the process.
+ *
+ * A BOOTING PROCESS IS VISIBLE. `load()` writes this process's heartbeat BEFORE it reads the fence, and
+ * starts the poll there, so the heartbeat stays fresh for the whole boot. A quiesce that commits while
+ * a process is still booting therefore finds a live process that has not observed the new epoch, and
+ * waits for it (or times out) instead of reporting the source fenced while that process attaches its
+ * producers and launches its queues.
  */
 import { randomUUID } from 'node:crypto';
 import { ApiError } from '@rayspec/auth-core';
@@ -110,6 +116,8 @@ export class RuntimeFence {
   #lastHeartbeat: { at: number; body: string } | undefined;
   #failing = false;
   #stopped = false;
+  #watching = false;
+  #syncing: Promise<void> = Promise.resolve();
 
   constructor(options: RuntimeFenceOptions) {
     this.#db = options.db;
@@ -193,26 +201,36 @@ export class RuntimeFence {
   // ─── lifecycle ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Read the fence once, before any producer starts. Under a held fence the process starts in
-   * `draining`: producers attached afterwards are paused as they attach.
+   * Announce this process and read the fence once, before any producer starts. The heartbeat is
+   * written first — `open`, at epoch 0, which no held fence has — so a quiesce that commits from
+   * here on counts this process as live and not yet drained. Under a held fence the process starts
+   * in `draining`: producers attached afterwards are paused as they attach. The poll starts here
+   * too, so the heartbeat stays fresh and a fence taken during the boot is observed during it.
    */
   async load(): Promise<void> {
-    const observed = await this.#read();
-    if (observed.state === 'fenced') {
-      this.#epoch = observed.epoch;
-      this.#phase = 'draining';
-      this.#drain.abort();
-    } else {
-      this.#epoch = observed.epoch;
-    }
-  }
-
-  /** Start watching the fence and heartbeating. */
-  async start(): Promise<void> {
     await this.#db.$client.unsafe(
       "DELETE FROM runtime_control_processes WHERE seen_at < clock_timestamp() - interval '1 hour'",
     );
+    await this.#heartbeat(true);
+    const observed = await this.#read();
+    this.#epoch = observed.epoch;
+    if (observed.state === 'fenced') {
+      this.#phase = 'draining';
+      this.#drain.abort();
+    }
+    await this.#heartbeat(true);
+    this.#watch();
+  }
+
+  /** Watch the fence and heartbeat (a no-op for the poll when `load()` already started it). */
+  async start(): Promise<void> {
     await this.sync();
+    this.#watch();
+  }
+
+  #watch(): void {
+    if (this.#watching || this.#stopped) return;
+    this.#watching = true;
     this.#schedule();
   }
 
@@ -244,6 +262,13 @@ export class RuntimeFence {
    * caller that just changed the fence in this same process need not wait for the next poll.
    */
   async sync(): Promise<void> {
+    // One observation at a time: the poll and an explicit call never interleave their phase changes.
+    const next = this.#syncing.then(() => this.#syncOnce());
+    this.#syncing = next.catch(() => {});
+    return next;
+  }
+
+  async #syncOnce(): Promise<void> {
     let observed: ObservedFence;
     try {
       observed = await this.#read();
@@ -315,11 +340,12 @@ export class RuntimeFence {
     };
   }
 
-  async #heartbeat(): Promise<void> {
+  async #heartbeat(force = false): Promise<void> {
     const body = this.#heartbeatBody();
     const text = JSON.stringify(body);
     const now = Date.now();
     if (
+      !force &&
       this.#lastHeartbeat !== undefined &&
       this.#lastHeartbeat.body === text &&
       now - this.#lastHeartbeat.at < this.#heartbeatMs
