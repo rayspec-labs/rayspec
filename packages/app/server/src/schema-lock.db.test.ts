@@ -277,31 +277,24 @@ describe.skipIf(!baseUrl)('the shared schema lock', () => {
 
   it('a boot applies its product-store DDL under the lock, not only its platform chain', async () => {
     const url = await freshDb('product_ddl');
-    // The platform chain is already applied, so the boot's own chain step is a quick no-op.
+    // The platform chain is already applied, so the boot has no chain to run and takes no lock for
+    // it: the first thing it waits on is its product DDL.
     const setup = makeDb(url);
     await applyMigrations(setup);
     await setup.$client.end();
 
-    // Queue: the test holds the lock (first), the boot's chain step waits (second), a second test
-    // connection waits (third). Released in that order, the second test connection holds the lock
-    // when the boot reaches its product DDL — which must then wait as well.
-    const first = holdLock(url);
-    await first.acquired;
+    const held = holdLock(url);
+    await held.acquired;
     const config = await bootConfig(url, specPath);
     let settled = false;
     const booting = boot(config).finally(() => {
       settled = true;
     });
-    await until(async () => (await waiters(url)) === 1, "the boot's chain step to queue");
-    const second = holdLock(url);
-    await until(async () => (await waiters(url)) === 2, 'the second holder to queue');
-    await first.release();
-    await second.acquired;
     await until(async () => (await waiters(url)) === 1, "the boot's product DDL to queue");
     await sleep(300);
     expect(settled).toBe(false);
     expect(await scalar(url, "SELECT to_regclass('public.lock_notes')::text")).toBeNull();
-    await second.release();
+    await held.release();
     const server = await booting;
     expect(server.deployMode).toBe('materialized');
     expect(await scalar(url, "SELECT to_regclass('public.lock_notes')::text")).toBe('lock_notes');

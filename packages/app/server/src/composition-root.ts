@@ -136,6 +136,7 @@ import {
   PROVISION_BOOT_SECRETS,
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
+import { DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import {
   bindingsProbe,
@@ -2181,8 +2182,17 @@ export async function assembleServer(
     db,
     ...(opts.fencePollIntervalMs !== undefined ? { pollIntervalMs: opts.fencePollIntervalMs } : {}),
   });
+  // Every schema change this boot makes runs as a `runtime.apply` operation with its receipts, and an
+  // apply an earlier process left interrupted is reconciled first (deploy-apply.ts).
+  const deployApply = new DeployApply({
+    db,
+    migratePlatform: () => applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs }),
+    ...(config.specPath ? { specSource: readFileSync(config.specPath, 'utf8') } : {}),
+    lockTimeoutMs: config.schemaLockTimeoutMs,
+    warn: opts.bootWarn ?? consoleWarn,
+  });
   try {
-    await applyMigrations(db, { lockTimeoutMs: config.schemaLockTimeoutMs });
+    await deployApply.platformChain();
     await fence.load();
   } catch (err) {
     // A refused boot hands no pool back, so end it here rather than leave its connections open.
@@ -2292,6 +2302,7 @@ export async function assembleServer(
     //     the earlier family guard used to abort. The classic path (6b) is untouched.
     const deployed = await deployProductYamlSpec(db, config, baseDeps, {
       fence,
+      deployApply,
       registerProductTables: opts.registerProductTables,
       ...(opts.productDeterministicAgents
         ? { deterministicAgents: opts.productDeterministicAgents }
@@ -2329,6 +2340,7 @@ export async function assembleServer(
     //    → migrate → roll out → drift). Product-agnostic: the spec is the injected deployer artifact.
     const deployed = await deployDeclaredSpec(db, config, baseDeps, {
       fence,
+      deployApply,
       agentBackendsFactory: opts.agentBackendsFactory,
       registerProductTables: opts.registerProductTables,
       ...(opts.updateMigrations ? { updateMigrations: opts.updateMigrations } : {}),
@@ -2660,6 +2672,8 @@ async function deployDeclaredSpec(
   opts: {
     /** This process's source fence: every producer this deploy wires is attached to it. */
     fence: RuntimeFence;
+    /** Runs each product migration as a `runtime.apply` operation, with its receipts. */
+    deployApply?: DeployApply;
     agentBackendsFactory?: AgentBackendsFactory;
     registerProductTables?: ProductTableRegistrar;
     /**
@@ -3180,18 +3194,33 @@ async function deployDeclaredSpec(
   // [validate] / [unsupported_spec] / [lint/gate] before its migrate stage. The catch around the
   // deploy + the post-deploy gates reads it to tell an operator what a refusal left behind.
   const appliedMigrations: string[] = [];
+  // An apply refusal of a product migration (deploy-apply.ts), raised as itself, not as deploy()'s
+  // wrapper, so the entrypoints can exit with its class.
+  let applyRefusal: RuntimeApplyError | undefined;
   const target: DeployTarget = {
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
       // The generated product SQL carries drizzle statement-breakpoints; strip them and apply the
       // migration all-or-nothing in one transaction (the public schema is the live target here).
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
-      // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
-      // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
-      await db.$client.begin(async (tx) => {
-        await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
-        await tx.unsafe(ddl);
-      });
+      if (opts.deployApply !== undefined) {
+        // As an apply: under the operation lease, with receipts, the DDL and its finish receipt in
+        // one transaction under the shared schema lock (deploy-apply.ts). deploy() re-wraps whatever
+        // this throws; an apply refusal is kept so the catch below can raise it as itself.
+        try {
+          await opts.deployApply.productMigration(migration);
+        } catch (err) {
+          if (err instanceof RuntimeApplyError) applyRefusal = err;
+          throw err;
+        }
+      } else {
+        // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
+        // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
+        await db.$client.begin(async (tx) => {
+          await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
+          await tx.unsafe(ddl);
+        });
+      }
       // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.
       appliedMigrations.push(migration.name);
     },
@@ -3452,7 +3481,7 @@ async function deployDeclaredSpec(
     // Say what was committed, without re-wrapping (the message keeps its class and its prefix), and
     // without repeating the post-UPDATE drift gate, whose own text already states it.
     throw attachAppliedProductDdlNote(
-      e,
+      applyRefusal ?? e,
       appliedMigrations,
       specStores.map((s) => s.name),
     );

@@ -152,6 +152,7 @@ import {
   resolveLiveTenantOrgId,
   type ServerConfig,
 } from './composition-root.js';
+import { type DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
 import { gatedProducer, queueProducer, type RuntimeFence } from './runtime-fence.js';
@@ -204,6 +205,11 @@ export interface DeployProductYamlOpts {
    * backend this boot wires all stop under it. Omitted ⇒ nothing is fenced (a direct test caller).
    */
   fence?: RuntimeFence;
+  /**
+   * Runs each product migration as a `runtime.apply` operation, with its receipts. Omitted ⇒ the DDL
+   * runs directly under the shared schema lock (a direct test caller).
+   */
+  deployApply?: DeployApply;
   /** LOCAL table-registration stand-in: register the built product tables before deploy()'s identity-keyed verify. */
   registerProductTables?: (tables: ReadonlyMap<string, PgTable>) => void;
   /** Env source (default process.env) — injectable for tests. */
@@ -2895,16 +2901,31 @@ export async function deployProductYamlSpec(
   // [validate] / [unsupported_spec] / [lint/gate] before its migrate stage). Mirrors the classic
   // composition-root deployer.
   const appliedMigrations: string[] = [];
+  // An apply refusal of a product migration (deploy-apply.ts), raised as itself, not as deploy()'s
+  // wrapper, so the entrypoints can exit with its class.
+  let applyRefusal: RuntimeApplyError | undefined;
   const target: DeployTarget = {
     driftSchema: 'public',
     async applyMigration(migration: PlannedMigration): Promise<void> {
       const ddl = migration.sql.replace(/-->\s*statement-breakpoint/g, '');
-      // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
-      // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
-      await db.$client.begin(async (tx) => {
-        await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
-        await tx.unsafe(ddl);
-      });
+      if (opts.deployApply !== undefined) {
+        // As an apply: under the operation lease, with receipts, the DDL and its finish receipt in
+        // one transaction under the shared schema lock (deploy-apply.ts). deploy() re-wraps whatever
+        // this throws; an apply refusal is kept so the catch below can raise it as itself.
+        try {
+          await opts.deployApply.productMigration(migration);
+        } catch (err) {
+          if (err instanceof RuntimeApplyError) applyRefusal = err;
+          throw err;
+        }
+      } else {
+        // Under the SHARED SCHEMA LOCK, taken in the SAME transaction as the DDL: a concurrent boot's
+        // migration chain, a tenant ensure or another deploy waits, and the lock commits with the DDL.
+        await db.$client.begin(async (tx) => {
+          await lockSchemaInTransaction(tx, config.schemaLockTimeoutMs);
+          await tx.unsafe(ddl);
+        });
+      }
       // AFTER the transaction resolves: a migration that threw is rolled back and never recorded.
       appliedMigrations.push(migration.name);
     },
@@ -3008,7 +3029,7 @@ export async function deployProductYamlSpec(
     // whose own text already states it. The launch below is deliberately OUTSIDE: it is not a gate,
     // and it runs workflows, so the note's "nothing has served" reading would stop being true.
     throw attachAppliedProductDdlNote(
-      e,
+      applyRefusal ?? e,
       appliedMigrations,
       composedStores.map((s) => s.name),
     );

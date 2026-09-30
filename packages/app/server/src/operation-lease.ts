@@ -30,6 +30,7 @@
 import { randomBytes } from 'node:crypto';
 import {
   BINDING_REVISION_KEY_BYTES,
+  isIdempotencyKey,
   isSha256,
   isUuidV4,
   MAX_ACTOR_LENGTH,
@@ -123,10 +124,7 @@ function checkIdentity(identity: OperationIdentity): void {
     throw new RangeError(`actor must be 1 to ${MAX_ACTOR_LENGTH} characters`);
   }
   if (!isSha256(identity.inputsDigest)) throw new RangeError('inputsDigest must be a SHA-256');
-  if (
-    identity.idempotencyKey !== undefined &&
-    !/^[A-Za-z0-9_-]{16,128}$/.test(identity.idempotencyKey)
-  ) {
+  if (identity.idempotencyKey !== undefined && !isIdempotencyKey(identity.idempotencyKey)) {
     throw new RangeError('an idempotency key is 16 to 128 characters of [A-Za-z0-9_-]');
   }
 }
@@ -158,7 +156,8 @@ async function lockStateRow(tx: LeaseTx): Promise<StateLeaseRow | undefined> {
   return rows[0];
 }
 
-interface ReceiptInput {
+/** One receipt to append; the operation, actor and epoch come from the lease that writes it. */
+export interface ReceiptInput {
   event: ReceiptEvent;
   step?: string | null;
   digest?: string | null;
@@ -168,7 +167,9 @@ interface ReceiptInput {
 
 async function appendReceipt(
   tx: LeaseTx,
-  identity: OperationIdentity,
+  identity: Pick<OperationIdentity, 'operationId' | 'kind' | 'actor' | 'inputsDigest'> & {
+    idempotencyKey?: string;
+  },
   leaseEpoch: number,
   receipt: ReceiptInput,
 ): Promise<void> {
@@ -302,11 +303,19 @@ export class OperationLease {
    */
   async mutate<T>(
     write: (tx: LeaseTx) => Promise<T>,
-    opts: { bumpRevision?: boolean } = {},
+    opts: {
+      bumpRevision?: boolean;
+      /**
+       * Runs first in the same transaction, before the lease check locks the state row: a wait here
+       * (the shared schema lock) therefore never holds that row, which the lease renewal needs.
+       */
+      beforeGuard?: (tx: LeaseTx) => Promise<void>;
+    } = {},
   ): Promise<{ result: T; environmentRevision: number | null }> {
     let result: T | undefined;
     let environmentRevision: number | null = null;
     await this.#db.$client.begin(async (tx) => {
+      if (opts.beforeGuard !== undefined) await opts.beforeGuard(tx);
       await this.guard(tx);
       result = await write(tx);
       if (opts.bumpRevision === true) {
@@ -324,6 +333,40 @@ export class OperationLease {
   /** Append one receipt under the lease check. */
   async record(receipt: ReceiptInput): Promise<void> {
     await this.mutate((tx) => appendReceipt(tx, this.identity, this.epoch, receipt));
+  }
+
+  /**
+   * Append one receipt inside `tx`, a transaction `mutate` opened (so the lease check already ran in
+   * it): a step's finish receipt then commits together with the step's own effect, or not at all.
+   */
+  async recordIn(tx: LeaseTx, receipt: ReceiptInput): Promise<void> {
+    await appendReceipt(tx, this.identity, this.epoch, receipt);
+  }
+
+  /**
+   * Append a receipt to ANOTHER operation's record, under this lease: how the holder that reconciles
+   * an interrupted operation closes its steps. The receipt names this holder as the actor and carries
+   * this lease's epoch, so the record shows who settled it and when; it never carries an idempotency
+   * key.
+   */
+  async recordFor(
+    operation: { operationId: string; kind: string; inputsDigest: string },
+    receipt: Omit<ReceiptInput, 'event'> & { event: Exclude<ReceiptEvent, 'intent'> },
+  ): Promise<void> {
+    if (!isUuidV4(operation.operationId)) throw new RangeError('operationId must be a UUID v4');
+    await this.mutate((tx) =>
+      appendReceipt(
+        tx,
+        {
+          operationId: operation.operationId,
+          kind: operation.kind as ResultOperation,
+          actor: this.identity.actor,
+          inputsDigest: operation.inputsDigest,
+        },
+        this.epoch,
+        receipt,
+      ),
+    );
   }
 
   /**
@@ -357,14 +400,29 @@ export class OperationLease {
   /**
    * Record the outcome and release the lease, in one transaction. Only a holder that still holds the
    * lease can do this; a stale one gets `RAY_FENCE_MISMATCH`, and the receipts it left stay what
-   * they are for the next holder to reconcile.
+   * they are for the next holder to reconcile. With `bumpRevision` the same transaction increases the
+   * environment revision. Returns the environment revision the outcome records; `detail` may be
+   * built from it.
    */
-  async release(outcome: OperationOutcome, detail?: Record<string, unknown>): Promise<void> {
+  async release(
+    outcome: OperationOutcome,
+    detail?: Record<string, unknown> | ((environmentRevision: number) => Record<string, unknown>),
+    opts: { bumpRevision?: boolean } = {},
+  ): Promise<number> {
+    let revision = 0;
     await this.mutate(async (tx) => {
+      const rows = (await tx.unsafe(
+        opts.bumpRevision === true
+          ? `UPDATE runtime_control_state
+                SET environment_revision = environment_revision + 1, updated_at = now()
+              WHERE id = 1 RETURNING environment_revision`
+          : 'SELECT environment_revision FROM runtime_control_state WHERE id = 1',
+      )) as { environment_revision: string | number }[];
+      revision = Number(rows[0]?.environment_revision);
       await appendReceipt(tx, this.identity, this.epoch, {
         event: 'outcome',
         outcome,
-        detail: detail ?? null,
+        detail: typeof detail === 'function' ? detail(revision) : (detail ?? null),
       });
       await tx.unsafe(
         `UPDATE runtime_control_state
@@ -374,6 +432,7 @@ export class OperationLease {
       );
     });
     this.#released = true;
+    return revision;
   }
 }
 

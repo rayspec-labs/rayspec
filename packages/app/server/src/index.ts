@@ -36,6 +36,28 @@ export {
   observedAgentTracing,
   resolveAgentTracing,
 } from './agent-tracing.js';
+// Apply: a list of steps run under the operation lease with a receipt before and after each, after the
+// plan, revision, fence and idempotency checks, and after reconciling what an interrupted apply left
+// unsettled; a step whose outcome cannot be established blocks until an operator records it.
+export {
+  type ApplyCheckpoint,
+  type ApplyControl,
+  type ApplyOptions,
+  type ApplyPlanCheck,
+  type ApplyStep,
+  DEFAULT_APPLY_LEASE_TTL_MS,
+  hasUnsettledApplies,
+  MAX_STEP_NAME_LENGTH,
+  type ObservedOutcome,
+  type ReconciledOperation,
+  type ResolveStepRequest,
+  type ResolveStepResult,
+  reconcileUnsettled,
+  resolveInterruptedStep,
+  runApply,
+  type StateObservers,
+  type StepEffect,
+} from './apply-operation.js';
 export { bootBanner, bootBaseUrl, staticBootBanner } from './banner.js';
 // The port-collision boot refusal — shared by the `rayspec-serve` bin (serve.ts) and the `rayspec
 // deploy` CLI so a taken port refuses the boot in the same actionable one-line form on both, instead
@@ -114,6 +136,15 @@ export {
   type StaticServerConfig,
   validateInjectedSpec,
 } from './composition-root.js';
+// The legacy YAML deploy's schema changes, each run as an apply.
+export {
+  BOOT_ACTOR,
+  bootRefusalExitCode,
+  DeployApply,
+  type DeployApplyOptions,
+  LEGACY_DEPLOY_PLAN_FORMAT_VERSION,
+  RuntimeApplyError,
+} from './deploy-apply.js';
 // Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
 export {
   bindingsProbe,
@@ -142,6 +173,7 @@ export {
   type OperationOutcome,
   type OperationReceipt,
   type ReceiptEvent,
+  type ReceiptInput,
   readOperationReceipts,
   unfinishedSteps,
 } from './operation-lease.js';
@@ -190,6 +222,7 @@ export { loadLocalDotenvIfPresent } from './read-env.js';
 export {
   CAPABILITY_MODULES,
   createRuntimeControl,
+  type HostingReport,
   providedCapabilities,
   type RuntimeControlAdapter,
   type RuntimeControlOptions,
