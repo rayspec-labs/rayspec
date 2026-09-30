@@ -1127,17 +1127,17 @@ change is applied by the explicit `--apply-migration` flag below.
 
   What it deliberately does not do is in the verdict's `notChecked`, not left to
   inference. It opens **no socket, no database and no credential**, and it loads **no
-  extension pack** — running pack code is what would break that promise — so every
-  demand a pack changes is invisible here. It runs in **both** directions: a
-  pack-supplied blob backend *removes* the `RAYSPEC_BLOB_ROOT` demand, while a
-  pack-contributed `api` route *adds* the `RAYSPEC_BLOB_ROOT` demand (any
+  extension** — running extension code is what would break that promise — so every
+  demand an extension changes is invisible here. It runs in **both** directions: an
+  extension-supplied blob backend *removes* the `RAYSPEC_BLOB_ROOT` demand, while an
+  extension-contributed `api` route *adds* the `RAYSPEC_BLOB_ROOT` demand (any
   `kind: stream`) and the `RAYSPEC_MEDIA_SIGNING_KEY` demand (`mode: playback`), and a
-  pack-contributed agent *adds* its backend's credential demand. The boot guards ask
+  extension-contributed agent *adds* its backend's credential demand. The boot guards ask
   their questions of the **post-merge** document; this reads the base one — so a
-  document whose whole route surface arrives from a pack (the
+  document whose whole route surface arrives from an extension (the
   [`stream-backend` example](../examples/stream-backend/rayspec.yaml) is exactly that
   shape) reports the three unconditional secrets and nothing more. To keep that from
-  reading as a clean bill of health, the verdict **names the packs the document
+  reading as a clean bill of health, the verdict **names the extensions the document
   declares** — parsed off `extensions[]`, never loaded. A set `<VAR>_FILE` mount counts
   as set from the variable alone: the file is
   never opened, so a missing, unreadable or empty secret file still refuses the boot.
@@ -1203,7 +1203,7 @@ change is applied by the explicit `--apply-migration` flag below.
 - **Profiles — declaration vs. custom code.** `deploy` runs a **product-profile**
   document (like `examples/acme-notes/acme-notes.product.yaml`) directly — it is
   pure declaration with no custom code and no build step. A **backend-profile**
-  document may ship custom escape-hatch handler modules (and an extension pack is
+  document may ship custom escape-hatch handler modules (and an extension is
   authored the same way); the runtime loads them as **compiled JavaScript only** —
   it fail-closed-rejects a `.ts` module path at roll-out, deterministically (this
   does not rely on the Node version, even where Node transparently type-strips `.ts`):
@@ -1216,10 +1216,12 @@ change is applied by the explicit `--apply-migration` flag below.
   Compile such handlers to `.js` first and deploy the compiled artifact — the deploy
   runtime ships no turnkey `.ts` loader. The bundled examples ship a build step
   (`build.mjs`): `examples/acme-notes-backend` emits a deploy-ready `dist/rayspec.yaml`,
-  and `examples/stream-backend` compiles its extension pack. A **pack** additionally
+  and `examples/stream-backend` compiles its extension. An **extension** additionally
   resolves `@rayspec/platform` at load starting from its own compiled entry's location, so
-  ship the pack directory to the deploy target with its installed `node_modules` — that is
-  what pins the platform build it runs against. See
+  ship the extension directory to the deploy target with its installed `node_modules` —
+  that is what pins the platform build it runs against. An application bundle written by
+  [`pack`](#pack) is the exception: it leaves `@rayspec/*` out of the extension's files,
+  because the runtime that deploys the bundle provides them. See
   [spec-reference → `extensions`](./spec-reference.md#extensions) for the section grammar and
   [getting-started → the backend profile](./getting-started.md#the-backend-profile-direct-agent-boot)
   for the walkthrough.

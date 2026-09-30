@@ -378,7 +378,7 @@ power:
    declarative surface, a `handler` points a route, tool, or trigger at a named
    export in a TypeScript module. Handlers load from a path-jailed root and
    dispatch through the same chokepoints declarative actions use — so custom code
-   still can't escape tenancy or the trust boundary. Extension packs bundle
+   still can't escape tenancy or the trust boundary. Extensions bundle
    handlers, stores, and tooling as a versioned, exactly-pinned unit.
 3. **The core last.** Changing the platform itself is the last resort, reserved
    for genuinely new platform capabilities — not for product logic, which belongs

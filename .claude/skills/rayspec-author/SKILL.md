@@ -93,7 +93,7 @@ with a declarative approximation; recommend it as a future iteration or the prod
   **product profile** instead — `file_input` is unlocked there; and a **sync chat / conversational**
   product is authorable in the **product profile** via `conversation_input` [tool-less v1 — see the
   honest boundary below]; see the product-profile reference below.)
-- **`extensions[]`** (extension packs)
+- **`extensions[]`** (extensions)
 - **`{handler}` / `{route}` HTTP handlers** (`kind:'route'`/`'trigger'` handlers; a declared
   `{handler}` *route*) — a later iteration (NOT the update flow — see Phase 7 below)
 - **update-flow** — ✅ **NOW SUPPORTED by Phase 7 (the update flow, below):** re-deploy an

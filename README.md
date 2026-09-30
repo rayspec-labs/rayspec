@@ -206,7 +206,7 @@ including provisioning the first tenant and making an authenticated request.
 
 The quickstart above deploys a **product-profile** document — pure declaration, no
 build step. A **backend-profile** document that ships custom `.ts` escape-hatch
-handlers (or an extension pack authored in `.ts`) must be compiled to `.js` first:
+handlers (or an extension authored in `.ts`) must be compiled to `.js` first:
 the runtime loads compiled JavaScript only and fail-closed-rejects a `.ts` module
 deterministically. The bundled examples ship a `build.mjs` build step — see
 [getting-started → the backend profile](./docs/getting-started.md#the-backend-profile-direct-agent-boot).

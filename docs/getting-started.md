@@ -650,7 +650,7 @@ convenience — it provisions a throwaway dev database and drives the redeploy/u
 flow — **not** a requirement for running agents.)
 
 **Custom handlers ship compiled.** A backend-profile document may also point at
-custom escape-hatch handler modules (and an extension pack is authored the same
+custom escape-hatch handler modules (and an extension is authored the same
 way). The production runtime loads them as **compiled JavaScript only**: it
 fail-closed-rejects a TypeScript-source module path at roll-out, deterministically —
 this does **not** depend on the Node version (some Node versions transparently
@@ -664,7 +664,7 @@ JavaScript first and deploy the built module …
 
 The fix is a build step: transpile the handlers to `.js` and deploy the compiled
 output. (The product profile above carries no code, so it needs no build — this
-applies only to a backend profile with custom handlers, or an extension pack.) The
+applies only to a backend profile with custom handlers, or an extension.) The
 bundled examples ship one:
 
 ```bash
@@ -672,28 +672,28 @@ bundled examples ship one:
 node examples/acme-notes-backend/build.mjs
 $RAYSPEC deploy examples/acme-notes-backend/dist/rayspec.yaml
 
-# An extension pack authored in .ts: compile the pack, then deploy a spec that references it.
+# An extension authored in .ts: compile it, then deploy a spec that references it.
 node examples/stream-backend/build.mjs   # -> examples/stream-backend/packs/stream-pack/dist/
 ```
 
 Each `build.mjs` is a thin `tsc` wrapper (see the example's `tsconfig.build.json`).
 Adapt it for your own backend, or run any equivalent transpile — the runtime only
-requires that every handler/pack module resolves to compiled `.js`/`.mjs`. Use
+requires that every handler/extension module resolves to compiled `.js`/`.mjs`. Use
 [`rayspec gen-handler`](./cli-reference.md#gen-handler) to scaffold a handler —
 with [`--emit js`](./cli-reference.md#which-target-to-emit) it renders the handler
 as plain ESM JavaScript, deployable without a build step at all — and `doctor` to
 validate any spec before you deploy it.
 
-An **extension pack** needs one thing beyond the transpile. Its compiled entry keeps
+An **extension** needs one thing beyond the transpile. Its compiled entry keeps
 `import { defineExtension } from '@rayspec/platform'` as a runtime import, and the loader
 imports that entry by its own absolute path — so Node resolves the bare specifier from
-the **built pack file's own location** upward, reaching the pack's own `node_modules`
+the **built extension file's own location** upward, reaching the extension's own `node_modules`
 before any the deployment happens to carry above it. Inside this repo that `node_modules`
-is a pnpm workspace link; a pack shipped from its own repository instead depends on the
+is a pnpm workspace link; an extension shipped from its own repository instead depends on the
 **released** `@rayspec/platform` at the version the deployment runs, installs it, and
-ships the pack **directory** — compiled output **and** `node_modules` — to the deploy
+ships the extension **directory** — compiled output **and** `node_modules` — to the deploy
 target, so the pinned version is the one that binds. See
-[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-pack-from-its-own-repo),
+[`examples/stream-backend`](../examples/stream-backend/README.md#shipping-this-extension-from-its-own-repo),
 which ships a copy-ready manifest for that shape.
 
 For the security boundaries that apply before you expose any of this beyond a
