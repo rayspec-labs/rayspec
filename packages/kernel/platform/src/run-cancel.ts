@@ -423,6 +423,10 @@ export const RUN_CANCEL_LOCK_WAIT_MS = 2000;
  * rather than holding the caller. The run that IS that transaction passes `0` — it already holds the
  * lock, so it never waits.
  *
+ * `opts.message` replaces the recorded error text. The worker passes one when it ends a job whose
+ * requester is no longer authorized, so the run reads back why it never started rather than as a
+ * cancellation someone asked for.
+ *
  * WHY `error` AND NOT A FIFTH HEADER STATUS: the terminal header statuses are read off the neutral
  * `RunResult.status` options, which are exactly `completed` and `error`; a cancelled run produced no
  * answer, so `error` is what it is, and the neutral `errorClass` is what says WHY. Every consumer that
@@ -431,9 +435,10 @@ export const RUN_CANCEL_LOCK_WAIT_MS = 2000;
 export async function recordRunCancelled(
   tdb: TenantDb,
   runId: string,
-  opts?: { lockWaitMs?: number },
+  opts?: { lockWaitMs?: number; message?: string },
 ): Promise<RunCancellationOutcome> {
   const lockWaitMs = opts?.lockWaitMs ?? RUN_CANCEL_LOCK_WAIT_MS;
+  const message = opts?.message ?? runCancelledMessage(runId);
   try {
     return await tdb.transaction(
       async (tx) => {
@@ -493,7 +498,7 @@ export async function recordRunCancelled(
             inputHash: RUN_CANCELLED_STEP_KEY,
             // The `{ error, errorClass }` shape every failing step carries — it is what the run read
             // path derives the reported error and class from.
-            output: { error: runCancelledMessage(runId), errorClass: CANCELLED_CLASS },
+            output: { error: message, errorClass: CANCELLED_CLASS },
             status: 'error',
             errorClass: CANCELLED_CLASS,
             authMode: CANCELLED_AUTH_MODE,

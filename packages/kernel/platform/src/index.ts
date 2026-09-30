@@ -102,7 +102,9 @@ export type {
   DurableExecutor,
   DurableExecutorIdentity,
   DurableJobStatus,
+  DurableRunAuthorizer,
   EnqueueResult,
+  JobPrincipal,
   RunJob,
 } from './durable/types.js';
 export type {
@@ -148,6 +150,7 @@ export type { BufferedTenantEmit, TenantEventBus } from './handlers/index.js';
 export {
   assertCompiledJavaScriptModule,
   buildToolFactory,
+  CREDENTIAL_REQUEST_HEADERS,
   defaultImporter,
   getHandlerRuntime,
   HandlerLoadError,
@@ -167,6 +170,7 @@ export {
   setHandlerRuntime,
   type ToolFactory,
   typeStrippingImporter,
+  withoutCredentials,
 } from './handlers/index.js';
 export { rehydrateConversation } from './rehydrate.js';
 // Run cancellation: the persisted marker every dispatch consults before executing, the process-local

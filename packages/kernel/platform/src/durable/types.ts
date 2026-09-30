@@ -48,7 +48,31 @@ export interface RunJob {
    * durable recovery re-dispatch (the run-header completing-transition gate).
    */
   readonly persistTo?: string;
+  /**
+   * Who asked for the run, recorded by the server when it enqueued the job and re-checked by the
+   * worker before the run starts (`DurableRunAuthorizer`). A request surface sets the caller it
+   * authenticated; a trigger or schedule sets `system`. Never taken from a request body or from
+   * handler code. Absent on a job enqueued before jobs carried it.
+   */
+  readonly requestedBy?: JobPrincipal;
 }
+
+/**
+ * The identity a durable job runs on behalf of. Plain values only, so the job stays serializable: a
+ * member by user id, an API key by key id, or the platform itself.
+ */
+export type JobPrincipal =
+  | { readonly kind: 'user'; readonly userId: string }
+  | { readonly kind: 'apikey'; readonly apiKeyId: string }
+  | { readonly kind: 'system' };
+
+/**
+ * The check a worker runs when a job is about to execute: may `job.requestedBy` still run an agent in
+ * `job.tenantId`? `true` runs the job; `false` ends it before anything runs. A throw fails the job
+ * without running it. The composition root builds it from the membership and API-key stores, so a
+ * member removed, or a key revoked, after the enqueue does not have the run completed on their behalf.
+ */
+export type DurableRunAuthorizer = (job: RunJob) => Promise<boolean>;
 
 /**
  * The NEUTRAL job status — a small closed enum mapped FROM the engine's own status by the adapter

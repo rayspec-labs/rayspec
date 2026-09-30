@@ -18,6 +18,7 @@
  *                           route/trigger path).
  */
 export type { BufferedTenantEmit, TenantEventBus } from './event-bus.js';
+export { CREDENTIAL_REQUEST_HEADERS, withoutCredentials } from './handler-request.js';
 export {
   getHandlerRuntime,
   type HandlerRuntime,
