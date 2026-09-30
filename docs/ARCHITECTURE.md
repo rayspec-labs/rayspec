@@ -290,6 +290,25 @@ further hardening layer that it does **not** include.
   every tenant table's policy enabled and forced
   ([Database roles and row-level security](./database-isolation.md)). The runtime
   checks the posture at boot and reports it active only when every check passes.
+- **Authenticate, then authorize the operation and the resource** — a credential
+  only says who is calling. Every route then checks the permission for the action
+  (from the live membership row for every write, run start and administrative
+  action, never from the token's claim) and reaches only rows of the caller's own
+  organization, so another organization's id answers `404` like a missing one. A
+  durable agent run records the member or API key that asked for it and is checked
+  again when the worker starts it, so a member removed in the meantime has nothing
+  run on their behalf; a playback token stops working once its user is no longer a
+  member. Reads trust the token's role for the token's lifetime.
+- **Handlers get a sanitized principal and scoped facades** — the caller as plain
+  values, a store facade over its own organization's stores, and capabilities bound
+  to that organization; never a database handle or the migration connection. A
+  stream handler's request arrives without `authorization`, `proxy-authorization`,
+  `cookie` or a playback `?token=`; an error it throws answers a bare `500`.
+- **Single-tenant mode, opt-in** — `RAYSPEC_SINGLE_TENANT=true` holds the runtime to
+  one organization: a second is refused on every path and accounts join by invite.
+  With role separation and the managed hosting posture it makes up the hardened
+  posture ([Hosting in the hardened posture](./hardened-posture.md)), which the
+  runtime requires before it reports the managed posture as supported.
 - **No plaintext secrets** — signing keys, peppers, and provider credentials live
   in the environment or a secret manager, never in the database or in git. The
   server refuses to boot if a required secret is missing (fail-closed).
@@ -323,6 +342,13 @@ service additionally needs.
 Database row-level security, the second in-database enforcement of tenancy, is not
 part of that layer: it ships in the core, off until the operator turns on role
 separation, and a public multi-tenant service runs with it on.
+
+None of this is a sandbox for custom code. Handlers and extensions are imported into
+the runtime process and can reach what the process can — its environment, its files,
+the network, a database connection of their own. Path jails and scoped facades narrow
+what a handler is **handed**; they do not contain code that goes looking. Only a
+boundary outside the process (a dedicated VM or container, its own database, host
+egress rules) contains code that is not trusted.
 
 ### Restore and key rotation
 
@@ -543,3 +569,5 @@ across every product built on it.
 - **[Getting started](./getting-started.md)** — run the stack and make a request.
 - **[Runtime operations](./runtime-operations.md)** — apply, quiesce, resume and recovery from an
   interrupted operation, for operators.
+- **[Hosting in the hardened posture](./hardened-posture.md)** — role separation, single-tenant
+  mode and the managed posture together: turning it on, checking it, and what it does not cover.

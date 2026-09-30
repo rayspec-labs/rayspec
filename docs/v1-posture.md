@@ -20,6 +20,13 @@ run, every store write, and every view read executes under that single
 server-derived tenant id — there is no request-time tenant fan-out. Multi-tenant
 routing is a later, hardening-adjacent concern; it is not in v1.
 
+The product profile binds its one tenant at boot, but on its own it does not stop
+the auth surface from creating further organizations: registration is open and any
+signed-in user may create one. `RAYSPEC_SINGLE_TENANT=true` enforces the limit for the whole runtime: a second
+organization is refused on every path, open registration only creates the first,
+and after it accounts join by invite. It is off by default and required for the
+hardened hosting posture ([Hosting in the hardened posture](./hardened-posture.md)).
+
 ## Triggers are ingress events only — no cron, no outbound
 
 A v1 workflow is driven **only** by an inbound capability ingress event (an audio

@@ -427,8 +427,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaches nothing, that pooled connections carry no tenant into the next request under concurrency,
   and that the runtime role can neither run DDL, disable or drop a policy, truncate, nor change its
   own role attributes.
+- **Single-tenant mode, opt-in.** `RAYSPEC_SINGLE_TENANT=true` holds the runtime to one
+  organization. The org store refuses a second one under a transaction-scoped advisory lock, on
+  every path that creates one: `POST /v1/orgs`, `POST /v1/auth/register` with an `orgName`, the
+  operator bootstrap route, and `rayspec tenant ensure` (which reads the same variable, keeps
+  resolving the existing organization idempotently and reports `SINGLE_TENANT_LIMIT` for a second).
+  Open registration only creates that first organization; after it an account is made by redeeming
+  an invite. A refusal is a `403` with one fixed message; the registration check runs before an
+  account is created, so only the loser of two registrations racing for the first organization is
+  left with an account and no organization. A boot of a database that already holds more than one organization is refused. Any value other than
+  `true` or `false` refuses the boot. `BootedServer.singleTenant` reports it, and the
+  runtime-control adapter's `inspectHosting()` reports the tenant limit as
+  `applicationTenants: { singleTenantMode, maxApplicationTenants }`. Unset, nothing changes.
+- **A durable agent run is re-checked against its requester when it starts.** A run enqueued
+  through the API (`async: true`, or a handler's `init.enqueue`) records who asked for it —
+  `requestedBy` on the job: the member, the API key, or `system` for a trigger — taken from the
+  authenticated request, never from the body or handler code. The worker asks the new
+  `DurableRunAuthorizer` (`makeRunAuthorizer` in `@rayspec/api-auth`, wired by the server) before it
+  starts the run: a member no longer in the organization, or a key revoked, expired or without
+  `agent:run`, gets no run. The run is marked like a cancellation, so no recovery re-dispatch runs
+  it either, and it reads back as `status: 'error'`, `errorClass: 'cancelled'` with a message saying
+  it was not started; the backend is never called. `recordRunCancelled` takes the message to record.
+- **New guide:** [Hosting in the hardened posture](./docs/hardened-posture.md) — role separation,
+  single-tenant mode and the managed posture together; how to turn it on and check it; what every
+  surface authorizes; what handler code is given; and what it does not protect against (it is not a
+  sandbox for custom code).
 
 ### Changed
+
+- **Starting or cancelling an agent run rereads the membership.** `agent:run` is now a permission
+  checked against the live membership row, like `store:write` and the administrative actions, so a
+  member removed or demoted since their access token was minted can no longer start or cancel a run
+  on the token's claim. An API key is unaffected (the key itself is the live credential).
+- **The terminal `error` frame of a streamed run carries a fixed message per class.** A run that
+  throws while streaming (`Accept: text/event-stream`) ends with `{ message, errorClass }` as before,
+  but `message` is now a fixed text for the class (`The run failed.` for an unclassified failure),
+  not the thrown error's own text; the platform's timeout and cancellation texts are kept. The
+  detail is logged server-side. An agent definition that does not fit its backend answers `Agent
+  spec is invalid for its backend.` without the validator's detail, which is logged.
 
 - **Every statement of the tenant chokepoint runs under the tenant context.** A `TenantDb` built on
   the pool used to run each statement on its own, without the transaction-local `app.current_tenant`
@@ -565,6 +601,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A stream handler no longer receives the caller's credential.** The Web `Request` a `stream`
+  route handler is handed (`init.request`) no longer carries `authorization`, `proxy-authorization`
+  or `cookie`, and a playback handler's request URL and `params` no longer carry the `?token=` media
+  token. Every other header and the body arrive unchanged; the caller is `init.principal`. The
+  platform exports the view as `withoutCredentials` and the header list as
+  `CREDENTIAL_REQUEST_HEADERS`.
+- **A playback token stops working once its user is no longer a member.** The media-token check now
+  also rereads the token user's membership in the token's organization on every request, so a
+  member removed after the mint loses playback at once instead of at the token's expiry (up to 24
+  hours).
 - **With role separation, one tenant's row cannot reference another tenant's row.** A store foreign
   key onto a parent's `id` is checked by Postgres without regard to tenancy, so a create or update
   naming another tenant's parent id was accepted. Under role separation the same-tenant trigger
@@ -621,6 +667,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its databases, set the two URLs and restart; see
   [Database roles and row-level security](./docs/database-isolation.md). The quiesce barrier
   `database-write-role` needs the runtime-control adapter's connection to be the migration role's.
+- **Nothing about the hardened posture changes unless it is turned on.** Without
+  `RAYSPEC_SINGLE_TENANT` the number of organizations is not limited and registration stays open;
+  without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. Four checks apply to every
+  deployment from this release on, and each refuses only a principal that no longer has access or
+  removes something handler code should not use: `agent:run` rereads the membership; a queued agent
+  run is re-checked when it starts (a run enqueued before the upgrade carries no requester and runs
+  as before); a playback token needs a current member; and a stream handler no longer sees the
+  credential headers or the playback `?token=` — a handler that read the caller from them reads
+  `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
 - **`rayspec deploy` of a `.ray` file is a new path.** It used to read the file as YAML. Now a
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,

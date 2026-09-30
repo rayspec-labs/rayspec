@@ -91,6 +91,17 @@ passes. It protects against a statement that lost its tenant, not against code i
 the runtime process that sets another tenant deliberately — handlers still run in
 that process. See [Database roles and row-level security](./docs/database-isolation.md).
 
+### Single-tenant mode and the hardened posture (opt-in)
+
+`RAYSPEC_SINGLE_TENANT=true` holds the runtime to one organization: a second one is
+refused on every path and accounts join by invite. With role separation and
+`RAYSPEC_HOSTING_POSTURE=managed` it makes up the hardened posture. In every posture
+each route authorizes the operation and the resource after authenticating the caller,
+a queued agent run is re-checked against its requester when it starts, a stream
+handler never sees the caller's credential, and handler errors reach the client
+without their detail. It is not a sandbox: custom code runs in the runtime process.
+See [Hosting in the hardened posture](./docs/hardened-posture.md).
+
 ### The separate hardening layer (NOT in the core)
 
 Running RaySpec for **untrusted, multi-tenant, public-internet** traffic requires

@@ -34,6 +34,9 @@ environment is in [Runtime operations](./runtime-operations.md).
   row-level security; `DATABASE_URL` then names the runtime role. Set the roles up first with
   [Database roles and row-level security](./database-isolation.md). Without it, one role migrates
   and serves, as before.
+- **Optionally, single-tenant mode** (`RAYSPEC_SINGLE_TENANT=true`), which holds the runtime to
+  one organization; with role separation and `RAYSPEC_HOSTING_POSTURE=managed` it makes up the
+  [hardened posture](./hardened-posture.md).
 
 Everything the deploy reads comes from the **explicit process environment** and from the files
 you name on the command line. A `.env` file in the working directory is **not** read on this path,

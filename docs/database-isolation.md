@@ -121,8 +121,10 @@ When a check fails the server still starts and serves as before, prints one warn
 failure, and does not report the posture as active. An embedder reads the result as
 `BootedServer.databaseIsolation`; the runtime-control adapter reports it with
 `inspectDatabaseIsolation()` when it is given the runtime role's name (`runtimeRole`), and its
-`inspect()` reports the managed posture as supported only for a release with a capability receipt
-**and** an active posture.
+`inspect()` reports the managed posture as supported only for a release with a capability receipt,
+an active posture **and** single-tenant mode (`RAYSPEC_SINGLE_TENANT=true`). The whole hardened
+posture, and what it does not cover, is described in
+[Hosting in the hardened posture](./hardened-posture.md).
 
 ## The source fence
 
