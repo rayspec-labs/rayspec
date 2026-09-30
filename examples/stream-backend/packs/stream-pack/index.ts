@@ -1,5 +1,5 @@
 /**
- * The SYNTHETIC stream/blob EXTENSION PACK — the platform's own forcing-function for the
+ * The SYNTHETIC stream/blob EXTENSION — the platform's own forcing-function for the
  * `extensions[]` pack mechanism. It carries the ENTIRE stream surface (the blob-pointer store,
  * the ingest/playback/mint handlers, the stream + mint routes) as a `defineExtension` manifest, loaded
  * via `extensions: [{ id, module: ./packs/stream-pack, version }]` from this deployment's `rayspec.yaml`.

@@ -15,7 +15,7 @@
  *                                            boot will require, with their <VAR>_FILE equivalents and
  *                                            their set/unset state. Reads the document AND the
  *                                            environment; opens no socket, no database and no
- *                                            credential, and loads no extension pack. Emits a JSON
+ *                                            credential, and loads no extension. Emits a JSON
  *                                            verdict.
  *
  * WHAT deploy IS. It is `deployments/acme-notes/serve.mts` as a first-class operator command: it wraps

@@ -2284,8 +2284,9 @@ async function mergeExtensions(
   const reparsed = parseSpec(mergedSource);
   if (!reparsed.ok) {
     throw new BootConfigError(
-      `Boot aborted — the spec at ${specPath} merged with its extension packs is invalid (a pack ` +
-        'fragment collided with a deployment declaration, or a pack cross-reference is dangling):\n' +
+      `Boot aborted — the spec at ${specPath} merged with its extensions is invalid (an ` +
+        'extension fragment collided with a deployment declaration, or an extension cross-reference ' +
+        'is dangling):\n' +
         JSON.stringify(reparsed.errors, null, 2),
     );
   }
@@ -2564,7 +2565,7 @@ async function deployDeclaredSpec(
     } else {
       throw new BootConfigError(
         `Boot aborted — the deployed spec at ${specPath} declares a 'stream' route but no blob backend ` +
-          'is configured (RAYSPEC_BLOB_ROOT is unset and no extension pack provided one). A stream ' +
+          'is configured (RAYSPEC_BLOB_ROOT is unset and no extension provided one). A stream ' +
           'route moves binary bytes through the tenant-bound BlobStore; set RAYSPEC_BLOB_ROOT to a ' +
           'writable directory (the fs blob backend writes one subdir per tenant under it), or load a ' +
           'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',

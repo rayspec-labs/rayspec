@@ -193,7 +193,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The release script `release:pack` is now `release:tarballs`**, so that "pack" means only
   `rayspec pack`. It runs the same `node scripts/publish.mjs --pack`; the old name is gone, because
-  no workflow or document used it. The documentation calls extension packs **extensions**.
+  no workflow or document used it. The documentation calls extension packs **extensions**, and
+  so do the messages users see: `deploy --check-env` now says "no extension is loaded" and
+  "declares N extension(s)", the boot errors about merged extensions and a missing blob backend
+  say "extension", and the example specs and extension manifests describe themselves the same
+  way.
 - **An unexpected internal failure of the CLI exits 7**, not 2, so a script can tell a defect from
   a usage error. Every other exit code of the existing commands is unchanged.
 - **Each CLI command loads only its own modules.** The entry point now imports a command's module

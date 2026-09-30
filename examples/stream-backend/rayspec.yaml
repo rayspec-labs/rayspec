@@ -18,7 +18,7 @@ version: '1.0'
 
 metadata:
   name: stream-backend
-  description: A synthetic blob/stream backend — delivered as a defineExtension pack via extensions[].
+  description: A synthetic blob/stream backend — delivered as a defineExtension extension via extensions[].
 
 # --- extensions -------------------------------------------------------------------------------
 # The synthetic stream/blob PACK (the whole stream surface). `module` is the pack DIRECTORY, resolved

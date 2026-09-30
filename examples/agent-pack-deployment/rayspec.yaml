@@ -3,7 +3,7 @@
 #
 # This is a tiny, SYNTHETIC backend declared purely in the RaySpec format. It lives OUTSIDE packages/
 # (it is not a workspace package, never built/typechecked/tested by turbo). It is the platform's OWN
-# forcing-function for an extension pack contributing an `agents` fragment (not just stores/handlers/
+# forcing-function for an extension contributing an `agents` fragment (not just stores/handlers/
 # tooling/api) — NOT a real product pack (those ship as product code in their own repos).
 #
 # The whole product surface (a `notes` store + a `lookup_note` tool + its handler + a `note_summarizer`
@@ -19,7 +19,7 @@ version: '1.0'
 
 metadata:
   name: agent-pack-backend
-  description: A synthetic backend whose OOTB agent is contributed by a defineExtension pack.
+  description: A synthetic backend whose OOTB agent is contributed by a defineExtension extension.
 
 # --- extensions -------------------------------------------------------------------------------
 # The synthetic agent PACK (the whole product surface, incl. the agents fragment). `module` is the pack

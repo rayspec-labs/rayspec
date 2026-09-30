@@ -15,7 +15,7 @@ routes) lives in an **extension built with `defineExtension`** under [`packs/str
 extensions:
   - id: stream_pack
     module: ./packs/stream-pack   # a DIRECTORY (path-jailed at deploy; npm-module refs not exercised here)
-    version: 1.0.0                 # an EXACT pin — a SKEW with the pack manifest aborts the deploy
+    version: 1.0.0                 # an EXACT pin — a SKEW with the extension manifest aborts the deploy
 ```
 
 At boot, `@rayspec/platform`'s `loadExtensions` resolves the extension (directory-only **path-jailed**;

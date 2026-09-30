@@ -1,5 +1,5 @@
 /**
- * The SYNTHETIC `agents`-fragment EXTENSION PACK — the platform's own
+ * The SYNTHETIC `agents`-fragment EXTENSION — the platform's own
  * forcing-function for a pack contributing an OOTB `agents` fragment (not just stores/handlers/
  * tooling/api). It carries a self-contained, PRODUCT-AGNOSTIC structured-output agent: a `notes`
  * store, a `lookup_note` tool (+ its handler), and an agent that references that tool. Loaded via
