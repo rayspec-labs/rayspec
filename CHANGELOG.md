@@ -376,9 +376,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   root, a playback route without a valid media signing key, an unsupported STT or TTS provider or
   a missing credential for one, an unreadable `RAYSPEC_FS_SOURCE_ROOT`, a frontend mount with
   nothing to serve and a cron or manual trigger without `RAYSPEC_CRON_TENANT_ID` are refused before
-  the platform chain runs. A Product-YAML document's environment demands (its deployment tenant, a
-  blob root, a media signing key, a speech provider) still run after the platform chain and before
-  any product DDL.
+  the platform chain runs. For a Product-YAML document the same holds for its deployment tenant
+  (`RAYSPEC_PRODUCT_TENANT_ID` set, an org id, and naming a live org; on a database without the
+  platform tables no org exists yet, so that refusal comes first), a reviewed update delta and its
+  allowlist, a blob root, a media signing key, a readable `RAYSPEC_FS_SOURCE_ROOT`, the extraction
+  mode and the speech provider. What still runs after the platform chain, before any product DDL:
+  the live schema's drift check, and the sidecar configurations of live agents, the responder and
+  the normalizer.
+- **`GET /health` answers when the database hangs.** Its database round trip had no time bound, so
+  a database that stopped answering (rather than refusing connections) left the probe without an
+  answer. It is now bounded like the other readiness checks (2 s) and reports `db: unreachable`
+  with 503. The boot banner's route list is unchanged; it does not list `GET /livez`.
 - **Every schema change takes one lock.** The boot's platform migration chain took no lock, so a
   boot racing another boot or a `rayspec tenant ensure` against an empty database could die on a
   duplicate object. The chain, product-store DDL and `tenant ensure` now all take the one shared

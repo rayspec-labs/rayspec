@@ -373,8 +373,9 @@ ensure` — takes one shared transaction-scoped advisory lock, `pg_advisory_xact
 that changed nothing. The lock is released by commit, rollback or a lost connection, so a
 killed runner never blocks the next one.
 
-The boot runs in this order: validate the signing key and the spec, and for a backend spec the
-environment its merged extensions demand; reconcile any apply an earlier process left interrupted; apply the platform migration chain if the ledger is behind the
+The boot runs in this order: validate the signing key and the spec, and the environment the
+spec demands (for a backend spec, once its extensions are merged; for a Product-YAML document, its
+deployment tenant, blob root, media signing key, extraction mode and speech provider); reconcile any apply an earlier process left interrupted; apply the platform migration chain if the ledger is behind the
 runtime; read the source fence; assemble the application, whose deployer applies product-store
 DDL. Each schema change is a `runtime.apply` operation (below): it takes the operation lease
 first and the shared schema lock inside it, so a boot, an export's quiesce and an operator's
@@ -459,8 +460,11 @@ export refuses.
 
 Readiness (`GET /health`) covers the database, the platform schema (a database migrated by a newer
 runtime is refused at boot and reported not ready), the boot secrets mounted as files, the frontend
-mounts and the durable worker with its system database; liveness (`GET /livez`) only says the
-process answers. Neither names a host, a path or a secret. Under `RAYSPEC_HOSTING_POSTURE=managed`
+mounts and the durable worker with its system database, each bounded to 2 s, so a database that
+hangs is reported unreachable rather than leaving the probe without an answer; liveness
+(`GET /livez`) only says the process answers. Neither names a host, a path or a secret. The boot
+banner's route list is kept as it was, so a legacy deploy prints the same output; it does not list
+`/livez`. Under `RAYSPEC_HOSTING_POSTURE=managed`
 the public `/recovery-scope` probe is not registered, and cross-process run cancellation is on
 by default (`RAYSPEC_RUN_CANCEL_POLL_MS` 2000 unless set); `inspectHosting()` reports both.
 
