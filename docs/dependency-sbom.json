@@ -4,7 +4,7 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "55e15ab15abfeab2cde30f2fccb7f0cf95037a0e006f92c0167a2c5d54391edb",
+  "lockfile_sha256": "058a5946400c65793300c7a363c8b1a033af474bcc1ad556e3de13ad5be01b1d",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v24.21.0"
@@ -2441,7 +2441,7 @@
     },
     {
       "name": "brace-expansion",
-      "version": "5.0.9",
+      "version": "5.0.12",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -2851,7 +2851,7 @@
     },
     {
       "name": "fast-uri",
-      "version": "3.1.7",
+      "version": "3.1.8",
       "license": "BSD-3-Clause",
       "license_file_present": true,
       "installed": true
@@ -3107,7 +3107,7 @@
     },
     {
       "name": "ip-address",
-      "version": "10.5.1",
+      "version": "10.7.2",
       "license": "MIT",
       "license_file_present": true,
       "installed": true

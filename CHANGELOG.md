@@ -89,6 +89,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   versions, so the workspace tests what a consumer installs. An `npm audit` over the packed
   tarballs installed into an empty directory drops from 10 findings to 8, with no `hono` finding
   and none against the top-level `undici`.
+- **The workspace lockfile is clear of the advisories published against `brace-expansion`,
+  `fast-uri` and `ip-address`.** The root overrides move to `brace-expansion` `5.0.12`, `fast-uri`
+  `3.1.8` and `ip-address` `10.7.2`, the first versions outside every reported range, and the
+  dependency SBOM is regenerated. The three `brace-expansion` advisories also match the `5.0.6` copy
+  inside the Pi SDK's shrinkwrap, which no override reaches; the newest Pi SDK release checked,
+  `0.99.1`, pins `5.0.9`, which they cover as well. The consumer scan lists them next to the
+  entries below, with the same expiry.
 - **Still open for consumers: three advisories inside `@earendil-works/pi-coding-agent`.**
   `@rayspec/adapter-pi` depends on `@earendil-works/pi-coding-agent` `0.79.9`, which ships an
   `npm-shrinkwrap.json` pinning `undici` `8.5.0`, `brace-expansion` `5.0.6` and `protobufjs`
