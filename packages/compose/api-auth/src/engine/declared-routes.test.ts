@@ -881,8 +881,17 @@ describeDb('declared {handler} route — fail-closed at boot when handlers are n
     await expect(createHarnessBootOnly(handlerSpec)).rejects.toThrow(
       /references handler 'custom_route' but no loaded handler/,
     );
+    // The refused boot released what the harness had set up: in the runtime-role lane the schema's
+    // own role is dropped, so a refused boot leaves nothing behind in the cluster.
+    const [left] = (await h.db.$client.unsafe(
+      'SELECT count(*)::int AS n FROM pg_roles WHERE rolname = $1',
+      [`${BOOT_FAIL_SCHEMA}_runtime`],
+    )) as unknown as { n: number }[];
+    expect(left?.n).toBe(0);
   });
 });
+
+const BOOT_FAIL_SCHEMA = 'rayspec_test_handler_bootfail';
 
 /**
  * Boot-only harness probe: attempt to build the app for a spec WITHOUT loaded handlers, so the
@@ -899,7 +908,7 @@ async function createHarnessBootOnly(spec: RaySpec): Promise<void> {
   const hh = await createHarness({
     engineSpec: spec,
     agentRegistry,
-    schema: 'rayspec_test_handler_bootfail',
+    schema: BOOT_FAIL_SCHEMA,
   });
   await hh.close();
 }

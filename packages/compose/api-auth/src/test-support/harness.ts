@@ -593,7 +593,20 @@ export async function createHarness(
     ...(opts.maxJsonBodyBytes !== undefined ? { maxJsonBodyBytes: opts.maxJsonBodyBytes } : {}),
   };
 
-  const app = createAuthApp(deps);
+  // A spec the engine refuses throws here, at boot. The pools and the runtime role are released before
+  // the error travels on, so a suite that expects the refusal leaves no role behind in the cluster.
+  let app: ReturnType<typeof createAuthApp>;
+  try {
+    app = createAuthApp(deps);
+  } catch (error) {
+    unregisterTables?.();
+    if (runtimeRole !== undefined) {
+      await appDb.$client.end();
+      await runtimeRole.drop();
+    }
+    await db.$client.end();
+    throw error;
+  }
 
   // Product tables are TRUNCATEd on reset too (they are tenant-scoped data; a leak across tests would
   // corrupt the cross-tenant assertions). They cascade-depend on orgs, so order them BEFORE the core
