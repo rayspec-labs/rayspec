@@ -197,6 +197,92 @@ export function checkResumeRequest(request: unknown): BundleError[] {
   return [];
 }
 
+/** The form of an apply idempotency key: 16 to 128 characters of `[A-Za-z0-9_-]`. */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+
+/** Whether a value is an apply idempotency key. */
+export function isIdempotencyKey(value: unknown): value is string {
+  return typeof value === 'string' && IDEMPOTENCY_KEY_PATTERN.test(value);
+}
+
+/**
+ * Check the members every apply carries, whatever it deploys: the plan digest, the expected
+ * environment revision (a positive safe integer; revisions start at 1) and the idempotency key.
+ */
+export function checkApplyControl(request: unknown): BundleError[] {
+  const base = checkRequestBase(request);
+  if (base.length > 0) return base;
+  const r = request as Record<string, unknown>;
+  if (!isSha256(r.planDigest)) {
+    return [usage('planDigest must be a lowercase hex SHA-256', '/planDigest')];
+  }
+  const revision = r.expectedEnvironmentRevision;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1) {
+    return [
+      usage(
+        'expectedEnvironmentRevision must be a positive safe integer',
+        '/expectedEnvironmentRevision',
+      ),
+    ];
+  }
+  if (!isIdempotencyKey(r.idempotencyKey)) {
+    return [
+      usage('idempotencyKey must be 16 to 128 characters of [A-Za-z0-9_-]', '/idempotencyKey'),
+    ];
+  }
+  return [];
+}
+
+/**
+ * Check an apply request: the apply members, then the plan inputs prepare used (bundle digest and
+ * path, binding revisions, `preparedAt`) and the grant (`approvedBy` like an actor, `approvedAt` a
+ * whole-second UTC timestamp).
+ */
+export function checkApplyRequest(request: unknown): BundleError[] {
+  const control = checkApplyControl(request);
+  if (control.length > 0) return control;
+  const r = request as Record<string, unknown>;
+  if (!isSha256(r.bundleSha256)) {
+    return [usage('bundleSha256 must be a lowercase hex SHA-256', '/bundleSha256')];
+  }
+  if (
+    typeof r.bundlePath !== 'string' ||
+    !r.bundlePath.startsWith('/') ||
+    r.bundlePath.includes('\0')
+  ) {
+    return [usage('bundlePath must be an absolute path', '/bundlePath')];
+  }
+  const revisions = checkBindingRevisions(r.bindingRevision, '/bindingRevision');
+  if (revisions.length > 0) return revisions;
+  if (parseTimestamp(r.preparedAt) === null) {
+    return [usage('preparedAt must be a whole-second UTC timestamp ending in Z', '/preparedAt')];
+  }
+  const grant = r.grant;
+  if (!isRecord(grant) || Object.keys(grant).length !== 2) {
+    return [usage('grant must be {approvedBy, approvedAt}', '/grant')];
+  }
+  if (
+    typeof grant.approvedBy !== 'string' ||
+    grant.approvedBy.length === 0 ||
+    grant.approvedBy.length > MAX_ACTOR_LENGTH ||
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: the control range is what is refused
+    /[\u0000-\u001f\u007f]/.test(grant.approvedBy)
+  ) {
+    return [
+      usage(
+        `approvedBy must be 1 to ${MAX_ACTOR_LENGTH} characters without control characters`,
+        '/grant/approvedBy',
+      ),
+    ];
+  }
+  if (parseTimestamp(grant.approvedAt) === null) {
+    return [
+      usage('approvedAt must be a whole-second UTC timestamp ending in Z', '/grant/approvedAt'),
+    ];
+  }
+  return [];
+}
+
 // ─── timestamps ────────────────────────────────────────────────────────────────────────────────
 
 const TIMESTAMP =

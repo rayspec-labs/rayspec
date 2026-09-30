@@ -9,6 +9,8 @@ import { createHash, createHmac } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   bindingRevisionId,
+  checkApplyControl,
+  checkApplyRequest,
   checkPrepareRequest,
   checkQuiesceRequest,
   checkRequestBase,
@@ -185,6 +187,64 @@ describe('checkResumeRequest', () => {
     const errors = checkResumeRequest({ ...base, fenceEpoch });
     expect(errors).toHaveLength(1);
     expect(errors[0]).toMatchObject({ code: 'RAY_USAGE', path: '/fenceEpoch' });
+  });
+});
+
+describe('checkApplyRequest', () => {
+  const apply = {
+    ...base,
+    planDigest: A,
+    bundleSha256: B,
+    bundlePath: '/srv/staging/app.ray',
+    bindingRevision: [{ name: 'SUPPORT_EMAIL', revisionId: C }],
+    preparedAt: '2026-09-29T12:00:00Z',
+    expectedEnvironmentRevision: 3,
+    idempotencyKey: 'deploy-2026-09-29_0001',
+    grant: { approvedBy: 'owner@example.test', approvedAt: '2026-09-29T12:01:00Z' },
+  };
+
+  it('accepts a complete request, and the apply members alone', () => {
+    expect(checkApplyRequest(apply)).toEqual([]);
+    expect(
+      checkApplyControl({
+        ...base,
+        planDigest: A,
+        expectedEnvironmentRevision: 1,
+        idempotencyKey: 'k'.repeat(16),
+      }),
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['a plan digest that is not a SHA-256', { planDigest: 'A'.repeat(64) }, '/planDigest'],
+    ['revision 0', { expectedEnvironmentRevision: 0 }, '/expectedEnvironmentRevision'],
+    ['a fractional revision', { expectedEnvironmentRevision: 1.5 }, '/expectedEnvironmentRevision'],
+    ['a key of 15 characters', { idempotencyKey: 'k'.repeat(15) }, '/idempotencyKey'],
+    ['a key of 129 characters', { idempotencyKey: 'k'.repeat(129) }, '/idempotencyKey'],
+    ['a key with a dot', { idempotencyKey: 'deploy.2026-09-29' }, '/idempotencyKey'],
+    ['a relative bundle path', { bundlePath: 'app.ray' }, '/bundlePath'],
+    ['a sub-second preparedAt', { preparedAt: '2026-09-29T12:00:00.5Z' }, '/preparedAt'],
+    ['a grant with an extra member', { grant: { ...apply.grant, note: 'x' } }, '/grant'],
+    [
+      'an approver with a newline',
+      { grant: { approvedBy: 'a\nb', approvedAt: '2026-09-29T12:01:00Z' } },
+      '/grant/approvedBy',
+    ],
+    [
+      'an approval time without Z',
+      { grant: { approvedBy: 'owner', approvedAt: '2026-09-29T12:01:00' } },
+      '/grant/approvedAt',
+    ],
+  ])('refuses %s', (_label, change, path) => {
+    const errors = checkApplyRequest({ ...apply, ...change });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ code: 'RAY_USAGE', path });
+  });
+
+  it('checks the common members first', () => {
+    expect(checkApplyRequest({ ...apply, operationId: 'nope' })[0]).toMatchObject({
+      path: '/operationId',
+    });
   });
 });
 

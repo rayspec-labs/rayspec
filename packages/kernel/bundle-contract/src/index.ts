@@ -53,6 +53,8 @@ export {
 export {
   BINDING_REVISION_KEY_BYTES,
   bindingRevisionId,
+  checkApplyControl,
+  checkApplyRequest,
   checkBindingRevisions,
   checkPrepareRequest,
   checkQuiesceRequest,
@@ -62,6 +64,8 @@ export {
   digestOf,
   EMPTY_PRODUCT_SCHEMA_DIGEST,
   formatTimestamp,
+  IDEMPOTENCY_KEY_PATTERN,
+  isIdempotencyKey,
   isPlanExpired,
   isSha256,
   isUuidV4,
