@@ -62,7 +62,7 @@
  *
  * Every command module is imported on its own path only, so a command loads nothing another command
  * needs: `bundle inspect`/`verify` and `pack` in particular never load the server, the database
- * layer or a handler loader.
+ * layer or a handler loader (`pack --against` alone loads the product schema planner).
  */
 import { readFileSync, realpathSync } from 'node:fs';
 import { argv } from 'node:process';
@@ -199,8 +199,8 @@ const HELP_SECTIONS: readonly HelpSection[] = [
       {
         name: 'pack',
         block: `  rayspec pack --spec <path> --output <file.ray> [--id <application-id>] [--version <semver>]
-               [--runtime <exact-version>] [--include <path>]... [--source-maps] [--preview]
-               [--force] [--json]
+               [--runtime <exact-version>] [--include <path>]... [--against <old-spec>
+               [--allowlist <file.json>]] [--source-maps] [--preview] [--force] [--json]
                                 Write an application bundle from an application that is ALREADY
                                 BUILT: the spec, the compiled handler and extension modules and what
                                 they import, the built frontend, the third-party packages they need
@@ -212,6 +212,15 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 unless --runtime names another exact version. --include adds a file or
                                 directory relative to the spec; --source-maps carries source maps
                                 (*.map files, and scripts that inline theirs).
+                                --against <old-spec> carries the product delta from the stores of the
+                                spec the environment runs to this spec's, the product schema digests
+                                it migrates between (computed on a throwaway database on the server
+                                SHADOW_DATABASE_URL names, read from the environment, never a .env
+                                file) and, with --allowlist, the reviewed allowlist; a destructive
+                                delta the allowlist does not clear is refused. The target regenerates
+                                the delta from its own product migration ledger and refuses any
+                                difference. Review a destructive delta with \`rayspec plan <spec>
+                                --against <old-spec>\` first.
                                 --preview prints the inclusion list and writes nothing. The archive is
                                 written to a temporary file beside the output, read back, and moved
                                 into place; an existing output is refused unless --force. Writes ONE
@@ -635,8 +644,9 @@ async function runBundleVerb(rest: readonly string[], json: boolean): Promise<nu
 
 /**
  * `rayspec pack`. A new verb, so it writes one envelope on stdout whether or not `--json` was given,
- * and the operation id on stderr; without `--json` the inclusion summary follows it there. It reads
- * no environment, so the `.env` auto-load is skipped. SIGINT and SIGTERM are answered at pack's
+ * and the operation id on stderr; without `--json` the inclusion summary follows it there. The
+ * `.env` auto-load is skipped: the one value pack reads, `SHADOW_DATABASE_URL` for `--against`,
+ * comes from the process environment. SIGINT and SIGTERM are answered at pack's
  * next safe point, where it removes what it wrote and reports `RAY_INTERRUPTED`.
  */
 async function runPackVerb(rest: readonly string[], json: boolean): Promise<number> {

@@ -586,8 +586,8 @@ maybeDescribe('refusals reach the envelope with their code and exit class', () =
       [['--spec', spec, '--runtime', 'latest'], '--runtime must be an exact version'],
       [['--spec', spec, '--include', ''], '--include needs a path'],
       [['--spec', spec, '--build'], 'Build the application yourself first'],
-      [['--spec', spec, '--against', spec], 'rayspec plan <spec> --against'],
-      [['--spec', spec, '--allowlist', spec], '--against and --allowlist are not available'],
+      [['--spec', spec, '--allowlist', spec], '--allowlist requires --against'],
+      [['--spec', spec, '--against', ''], '--against needs the path of the previous spec'],
     ] as const) {
       const r = refusedPack([...args], 2, 'RAY_USAGE');
       expect(r.envelope.errors[0].message).toContain(fragment);
@@ -757,12 +757,13 @@ maybeDescribe('refusals reach the envelope with their code and exit class', () =
 });
 
 maybeDescribe('help', () => {
-  it('pack --help prints its block and leaves out the flags that are refused', () => {
+  it('pack --help prints its block and leaves out the flag that is refused', () => {
     const r = runProbed(register, work, ['pack', '--help'], { cwd: work });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('rayspec pack --spec <path> --output <file.ray>');
     expect(r.stdout).not.toContain('--build');
-    expect(r.stdout).not.toContain('--against');
+    expect(r.stdout).toContain('[--against <old-spec>');
+    expect(r.stdout).toContain('[--allowlist <file.json>]');
   });
 });
 
