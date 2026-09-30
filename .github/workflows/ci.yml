@@ -467,6 +467,15 @@ jobs:
           RAYSPEC_TEST_DATABASE_ISOLATION: roles
         run: pnpm exec turbo run test --filter='@rayspec/api-auth'
 
+      # The platform suites that support the same switch — the store facade and run cancellation —
+      # run over a runtime role of their own too (see test-support/test-db.ts `makeTestAppDb`).
+      - name: Test (platform store facade and run cancellation as the runtime role)
+        env:
+          RAYSPEC_TEST_DATABASE_ISOLATION: roles
+        run: >-
+          pnpm --filter='@rayspec/platform' exec vitest run
+          src/handlers/store-facade.db.test.ts src/run-cancel.db.test.ts
+
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   # LANE 3 — live providers (OPT-IN, non-blocking). Runs ONLY on a manual workflow_dispatch, so it
   # is never a required PR check and can never block a merge when live creds are absent. It calls

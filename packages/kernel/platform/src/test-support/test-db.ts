@@ -12,7 +12,12 @@
 import { forTenant } from '@rayspec/db';
 // Raw-handle factory lives on the test/bootstrap subpath, NOT the main surface, so request
 // code cannot import it. This is test-support, so reaching for it here is legitimate.
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import {
+  assertConnectedAsRuntimeRole,
+  isolateTestSchema,
+  makeDbWithSchema,
+  testDatabaseIsolation,
+} from '@rayspec/db/testing';
 
 export { forTenant };
 
@@ -29,6 +34,29 @@ export function testDatabaseUrl(): string {
 
 export function makeTestDb() {
   return makeDbWithSchema(testDatabaseUrl(), TEST_SCHEMA);
+}
+
+/**
+ * The handle run-core code under test runs over. Normally `admin` itself. With
+ * RAYSPEC_TEST_DATABASE_ISOLATION=roles, a runtime role of its own (no superuser, no BYPASSRLS, owner
+ * of nothing) with every tenant table of the test schema under the enabled, forced tenant policy;
+ * `admin` stays the handle a suite seeds and inspects through. Call after `resetRunSchema`.
+ */
+export async function makeTestAppDb(admin: ReturnType<typeof makeTestDb>): Promise<{
+  appDb: ReturnType<typeof makeTestDb>;
+  close(): Promise<void>;
+}> {
+  if (!testDatabaseIsolation()) return { appDb: admin, close: async () => {} };
+  const role = await isolateTestSchema(admin.$client, testDatabaseUrl(), TEST_SCHEMA);
+  const appDb = makeDbWithSchema(role.url, TEST_SCHEMA);
+  await assertConnectedAsRuntimeRole(appDb.$client, role.role);
+  return {
+    appDb,
+    async close() {
+      await appDb.$client.end();
+      await role.drop();
+    },
+  };
 }
 
 /**

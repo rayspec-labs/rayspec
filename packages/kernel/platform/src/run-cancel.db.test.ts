@@ -29,6 +29,7 @@ import { insertEnqueuedRunHeader } from './run-header.js';
 import { isRunTainted } from './run-taint.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -37,6 +38,9 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle the code under test runs over: `db`, or the runtime role's in the isolated lane.
+let appDb = db;
+let closeAppDb = async (): Promise<void> => {};
 
 const spec: AgentSpec = {
   name: 'extract',
@@ -159,6 +163,7 @@ const open: { finish(): void }[] = [];
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 
 beforeEach(async () => {
@@ -174,6 +179,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
@@ -181,7 +187,7 @@ describe('cancelling a run in flight', () => {
   it('SYNC invocation shape (no transaction): a cancelled run rejects with RunCancelledError', async () => {
     const backend = new SilentBackend();
     open.push(backend);
-    const running = runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'cancel-sync' });
+    const running = runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'cancel-sync' });
     // The run is registered while it executes, so it can be named and ended by id.
     await waitFor(() => backend.entered === 1);
     expect(signalRunCancelled('cancel-sync')).toBe(true);
@@ -193,10 +199,10 @@ describe('cancelling a run in flight', () => {
   it('DURABLE invocation shape (inside the run transaction, with a taintDb): the same cancellation applies', async () => {
     const backend = new SilentBackend();
     open.push(backend);
-    const running = forTenant(db, TENANT_A).transaction((txTdb) =>
+    const running = forTenant(appDb, TENANT_A).transaction((txTdb) =>
       runAgent(txTdb, backend, spec, {
         runId: 'cancel-durable',
-        taintDb: forTenant(db, TENANT_A),
+        taintDb: forTenant(appDb, TENANT_A),
       }),
     );
     await waitFor(() => backend.entered === 1);
@@ -208,7 +214,7 @@ describe('cancelling a run in flight', () => {
     const backend = new SilentBackend();
     open.push(backend);
     const controller = new AbortController();
-    const running = runAgent(forTenant(db, TENANT_A), backend, spec, {
+    const running = runAgent(forTenant(appDb, TENANT_A), backend, spec, {
       runId: 'cancel-opt-signal',
       signal: controller.signal,
     });
@@ -224,7 +230,7 @@ describe('cancelling a run in flight', () => {
     const controller = new AbortController();
     controller.abort();
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, {
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
         runId: 'cancel-pre-aborted',
         signal: controller.signal,
       }),
@@ -235,7 +241,9 @@ describe('cancelling a run in flight', () => {
   it('names the run and says what was cancelled — and does NOT claim to have stopped the model call', async () => {
     const backend = new SilentBackend();
     open.push(backend);
-    const running = runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'cancel-message' });
+    const running = runAgent(forTenant(appDb, TENANT_A), backend, spec, {
+      runId: 'cancel-message',
+    });
     await waitFor(() => backend.entered === 1);
     signalRunCancelled('cancel-message');
     const err = await running.catch((e: unknown) => e);
@@ -247,7 +255,7 @@ describe('cancelling a run in flight', () => {
   it('the seams of a CANCELLED run are inert: no event, no journal write, no rehydrate, no tool fire', async () => {
     const backend = new SilentBackend();
     open.push(backend);
-    const running = runAgent(forTenant(db, TENANT_A), backend, spec, {
+    const running = runAgent(forTenant(appDb, TENANT_A), backend, spec, {
       runId: 'cancel-seams',
       tools: [nonIdempotentTool()],
     });
@@ -284,13 +292,15 @@ describe('cancelling a run in flight', () => {
     // The handler did NOT run — a cancelled run never fires a fresh side effect.
     expect(sideEffectFires).toBe(0);
     expect(await countJournalSteps('cancel-seams')).toBe(0);
-    expect(await isRunTainted(forTenant(db, TENANT_A), 'cancel-seams')).toBe(false);
+    expect(await isRunTainted(forTenant(appDb, TENANT_A), 'cancel-seams')).toBe(false);
   });
 
   it('the refusal a cancelled run’s seam gives NAMES the cancellation, not the wall-clock bound', async () => {
     const backend = new SilentBackend();
     open.push(backend);
-    const running = runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'cancel-refusal' });
+    const running = runAgent(forTenant(appDb, TENANT_A), backend, spec, {
+      runId: 'cancel-refusal',
+    });
     await waitFor(() => backend.entered === 1);
     signalRunCancelled('cancel-refusal');
     await expect(running).rejects.toBeInstanceOf(RunCancelledError);
@@ -300,7 +310,7 @@ describe('cancelling a run in flight', () => {
   });
 
   it('a run that has ENDED is no longer cancellable by id (the registration is released)', async () => {
-    const result = await runAgent(forTenant(db, TENANT_A), new SlowBackend(10), spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), new SlowBackend(10), spec, {
       runId: 'cancel-after-end',
     });
     expect(result.status).toBe('completed');
@@ -310,16 +320,16 @@ describe('cancelling a run in flight', () => {
 
 describe('the persisted cancellation record', () => {
   it('marks, reads back, and is tenant-scoped (a foreign tenant reads no marker)', async () => {
-    await markRunCancelled(forTenant(db, TENANT_A), 'marker-run');
-    expect(await isRunCancelled(forTenant(db, TENANT_A), 'marker-run')).toBe(true);
-    expect(await isRunCancelled(forTenant(db, TENANT_B), 'marker-run')).toBe(false);
+    await markRunCancelled(forTenant(appDb, TENANT_A), 'marker-run');
+    expect(await isRunCancelled(forTenant(appDb, TENANT_A), 'marker-run')).toBe(true);
+    expect(await isRunCancelled(forTenant(appDb, TENANT_B), 'marker-run')).toBe(false);
     // Idempotent: a repeated mark is a no-op, never a unique-violation.
-    await markRunCancelled(forTenant(db, TENANT_A), 'marker-run');
-    expect(await isRunCancelled(forTenant(db, TENANT_A), 'marker-run')).toBe(true);
+    await markRunCancelled(forTenant(appDb, TENANT_A), 'marker-run');
+    expect(await isRunCancelled(forTenant(appDb, TENANT_A), 'marker-run')).toBe(true);
   });
 
   it('journals the terminal outcome of a not-yet-started run: header `error`, step class `cancelled`', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     await insertEnqueuedRunHeader(tdb, {
       runId: 'record-enqueued',
       backend: 'openai',
@@ -338,11 +348,11 @@ describe('the persisted cancellation record', () => {
   });
 
   it('leaves a run that ALREADY finished exactly as it was (a finished run keeps its outcome)', async () => {
-    const result = await runAgent(forTenant(db, TENANT_A), new SlowBackend(5), spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), new SlowBackend(5), spec, {
       runId: 'record-finished',
     });
     expect(result.status).toBe('completed');
-    const outcome = await recordRunCancelled(forTenant(db, TENANT_A), 'record-finished');
+    const outcome = await recordRunCancelled(forTenant(appDb, TENANT_A), 'record-finished');
     expect(outcome.cancelled).toBe(false);
     expect(await runHeaderStatus('record-finished')).toBe('completed');
     // And it wrote NOTHING: a run that produced its own outcome must not gain a contradictory
@@ -368,9 +378,9 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
     runId: string,
     backend: SilentBackend,
   ): Promise<RunResult | unknown> {
-    return forTenant(db, TENANT_A)
+    return forTenant(appDb, TENANT_A)
       .transaction((txTdb) =>
-        runAgent(txTdb, backend, spec, { runId, taintDb: forTenant(db, TENANT_A) }),
+        runAgent(txTdb, backend, spec, { runId, taintDb: forTenant(appDb, TENANT_A) }),
       )
       .catch((err: unknown) => err);
   }
@@ -380,7 +390,7 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
     open.push(backend);
     const runId = 'cancel-held-durable';
     // The enqueue-time header the run surface commits before the worker picks the job up.
-    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+    await insertEnqueuedRunHeader(forTenant(appDb, TENANT_A), {
       runId,
       backend: 'openai',
       agentName: spec.name,
@@ -395,7 +405,7 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
     // (measured: 2038ms, `cancelled:false`) instead of a few milliseconds. In a deployment that is worse
     // than slow: the wait is the run's whole remaining life, and by the time the signal is finally sent
     // the run has ended and released its registration — nothing is freed at all.
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const startedAt = Date.now();
     await markRunCancelled(tdb, runId);
     expect(signalRunCancelled(runId)).toBe(true);
@@ -415,7 +425,7 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
     const backend = new SilentBackend();
     open.push(backend);
     const runId = 'cancel-unreachable-durable';
-    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+    await insertEnqueuedRunHeader(forTenant(appDb, TENANT_A), {
       runId,
       backend: 'openai',
       agentName: spec.name,
@@ -427,7 +437,9 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
     // A run executing in ANOTHER process: the marker and the engine reach it, the in-process signal
     // cannot. The header row stays held for the whole run, so the completing transition gives up on it.
     const startedAt = Date.now();
-    const outcome = await recordRunCancelled(forTenant(db, TENANT_A), runId, { lockWaitMs: 200 });
+    const outcome = await recordRunCancelled(forTenant(appDb, TENANT_A), runId, {
+      lockWaitMs: 200,
+    });
     expect(Date.now() - startedAt).toBeLessThan(2000);
     // It reports what it actually did — NOT a cancellation it never made …
     expect(outcome).toEqual({ cancelled: false, status: 'enqueued' });
@@ -444,7 +456,7 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
     const backend = new SilentBackend();
     open.push(backend);
     const runId = 'cancel-not-overwritten';
-    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+    await insertEnqueuedRunHeader(forTenant(appDb, TENANT_A), {
       runId,
       backend: 'openai',
       agentName: spec.name,
@@ -455,7 +467,7 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
 
     // Cancelled while executing, with no signal delivered (another worker process): the marker is the
     // record, and the header row is the run's own until it ends.
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     await markRunCancelled(tdb, runId);
     expect(await recordRunCancelled(tdb, runId, { lockWaitMs: 200 })).toEqual({
       cancelled: false,
@@ -480,13 +492,13 @@ describe('cancelling a run that is EXECUTING inside its own transaction', () => 
 describe('UNSET — no cancellation anywhere', () => {
   it('a run nobody cancels completes exactly as before, with an un-aborted signal', async () => {
     const backend = new SlowBackend(120);
-    const result = await runAgent(forTenant(db, TENANT_A), backend, spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {
       runId: 'cancel-unset',
     });
     expect(result.status).toBe('completed');
     expect(backend.sawAborted).toBe(false);
     expect(await runHeaderStatus('cancel-unset')).toBe('completed');
-    expect(await isRunCancelled(forTenant(db, TENANT_A), 'cancel-unset')).toBe(false);
+    expect(await isRunCancelled(forTenant(appDb, TENANT_A), 'cancel-unset')).toBe(false);
   });
 
   it('cancelling an id NOTHING is running under changes nothing and reports it did nothing', () => {
