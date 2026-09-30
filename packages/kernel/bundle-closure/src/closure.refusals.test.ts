@@ -15,6 +15,8 @@ import {
   handlerSpec,
   link,
   machOAddon,
+  PG_DUMP_CANARY,
+  PG_DUMP_OUTPUT,
   packageFiles,
   privateKeyHeader,
   RUNTIME,
@@ -403,6 +405,58 @@ describe('secrets', () => {
       code: 'RAY_CLOSURE_INVALID',
       reason: 'source-map-not-opted-in',
     });
+  });
+
+  it('leaves database dumps in a walked directory out, by name and by their first bytes', async () => {
+    const root = temporaryDirectory();
+    writeTree(root, {
+      'rayspec.yaml': backendSpec('frontend:\n  - { route: /, dir: web }\n'),
+      'web/dist/index.html': '<p>hi</p>',
+      'web/dist/backup.sql': PG_DUMP_OUTPUT,
+      'web/dist/schema.SQL': 'CREATE TABLE t (id int);\n',
+      'web/dist/export.txt': PG_DUMP_OUTPUT,
+      'web/dist/mysql-export': '-- MySQL dump 10.13  Distrib 8.4.3, for Linux (x86_64)\n',
+      'web/dist/archive.bin': Buffer.concat([Buffer.from('PGDMP'), Buffer.alloc(16)]),
+      'web/dist/app.data': Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(16)]),
+      'web/dist/notes.txt': 'the pg_dump manual says: -- PostgreSQL database dump\n',
+    });
+    const closure = await accepted(root);
+    expect(paths(closure).filter((p) => p.startsWith('payload/web/'))).toEqual([
+      'payload/web/dist/index.html',
+      'payload/web/dist/notes.txt',
+    ]);
+    expect(closure.excluded).toEqual([
+      { source: 'web/dist/app.data', reason: 'a database dump' },
+      { source: 'web/dist/archive.bin', reason: 'a database dump' },
+      { source: 'web/dist/backup.sql', reason: 'a database dump' },
+      { source: 'web/dist/export.txt', reason: 'a database dump' },
+      { source: 'web/dist/mysql-export', reason: 'a database dump' },
+      { source: 'web/dist/schema.SQL', reason: 'a database dump' },
+    ]);
+    expect(JSON.stringify(closure)).not.toContain(PG_DUMP_CANARY);
+  });
+
+  it('refuses a database dump named explicitly, whatever its name, and carries a named SQL file', async () => {
+    const root = handlerApp('export const handle = 1;\n', {
+      'db/backup.sql': PG_DUMP_OUTPUT,
+      'db/seed.txt': PG_DUMP_OUTPUT,
+      'db/schema.sql': 'CREATE TABLE t (id int);\n',
+    });
+    for (const include of ['db/backup.sql', 'db/seed.txt']) {
+      const errors = await refused(root, { include: [include] });
+      expect(errors).toEqual([
+        expect.objectContaining({
+          code: 'RAY_CLOSURE_INVALID',
+          reason: 'excluded-file',
+          path: include,
+        }),
+      ]);
+      expect(errors[0]!.message).toContain('is a database dump');
+      expect(JSON.stringify(errors)).not.toContain(PG_DUMP_CANARY);
+    }
+    expect(paths(await accepted(root, { include: ['db/schema.sql'] }))).toContain(
+      'payload/db/schema.sql',
+    );
   });
 
   it('refuses an explicitly included file of an excluded class', async () => {

@@ -102,6 +102,65 @@ export function privateKeyHeader(): string {
 }
 
 /**
+ * The output of pg_dump 16 in its default plain-text format for a one-table database, as the tool
+ * wrote it. The row is the canary `canary-dump@example.test`.
+ */
+export const PG_DUMP_OUTPUT = [
+  '--',
+  '-- PostgreSQL database dump',
+  '--',
+  '',
+  '\\restrict XMTvFKAMa3nUQjyhEotS5SA396Fhwpuxg3IHAvDAaN589ZX7tvajLt81gq6yvxY',
+  '',
+  '-- Dumped from database version 16.14 (Debian 16.14-1.pgdg13+1)',
+  '-- Dumped by pg_dump version 16.14 (Debian 16.14-1.pgdg13+1)',
+  '',
+  'SET statement_timeout = 0;',
+  'SET lock_timeout = 0;',
+  'SET idle_in_transaction_session_timeout = 0;',
+  "SET client_encoding = 'UTF8';",
+  'SET standard_conforming_strings = on;',
+  "SELECT pg_catalog.set_config('search_path', '', false);",
+  'SET check_function_bodies = false;',
+  'SET xmloption = content;',
+  'SET client_min_messages = warning;',
+  'SET row_security = off;',
+  '',
+  "SET default_tablespace = '';",
+  '',
+  'SET default_table_access_method = heap;',
+  '',
+  '--',
+  '-- Name: users; Type: TABLE; Schema: public; Owner: -',
+  '--',
+  '',
+  'CREATE TABLE public.users (',
+  '    email text',
+  ');',
+  '',
+  '',
+  '--',
+  '-- Data for Name: users; Type: TABLE DATA; Schema: public; Owner: -',
+  '--',
+  '',
+  'COPY public.users (email) FROM stdin;',
+  'canary-dump@example.test',
+  '\\.',
+  '',
+  '',
+  '--',
+  '-- PostgreSQL database dump complete',
+  '--',
+  '',
+  '\\unrestrict XMTvFKAMa3nUQjyhEotS5SA396Fhwpuxg3IHAvDAaN589ZX7tvajLt81gq6yvxY',
+  '',
+  '',
+].join('\n');
+
+/** The row `PG_DUMP_OUTPUT` carries, which must never reach a bundle. */
+export const PG_DUMP_CANARY = 'canary-dump@example.test';
+
+/**
  * The first bytes of a compiled addon: an ELF shared object with the given machine and OS ABI
  * (x64 and System V by default), followed by a registration symbol.
  */

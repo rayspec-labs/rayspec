@@ -61,9 +61,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script or style sheet with an inline source map unless source maps are asked for, and an
   explicitly named file of an excluded class. Walked directories leave out version-control
   metadata, caches, logs, environment files (`.env`, `.env.*`, `*.env`, `.envrc`), credentials
-  (`.aws/`, `.ssh/`, `credentials`, key files and others), database dumps, local `node_modules`
-  and, unless asked for, source maps, matching names in any letter case, and list each with its
-  reason. Inside a vendored package only environment and credential files by name are left out,
+  (`.aws/`, `.ssh/`, `credentials`, key files and others), database dumps (by name, `*.sql`
+  included, and by the first bytes pg_dump, pg_dumpall, mysqldump and mariadb-dump write or a
+  pg_dump archive or SQLite database starts with), local `node_modules` and, unless asked for,
+  source maps, matching names in any letter case, and list each with its reason. A file that starts
+  like a database dump is refused when it is named explicitly. Inside a vendored package only environment and credential files by name are left out,
   so a certificate bundle or data file it reads at run time goes in. Every file then goes through the
   bundle's secret rules, and a hit is `RAY_SECRET_DETECTED` naming the path only. The identity
   comes from `--id`/`--version` or the spec's metadata and never from the name or the runtime; the

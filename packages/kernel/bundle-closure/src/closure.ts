@@ -47,6 +47,7 @@ import {
   excludedFile,
   excludedPackageDirectory,
   excludedPackageFile,
+  excludedWalkedFile,
   LOCKFILE_NAMES,
   MAX_PAYLOAD_PATH_LENGTH,
   NATIVE_LOADERS,
@@ -1147,7 +1148,7 @@ class Resolver {
   }
 
   private keepFile(path: string, name: string): boolean {
-    const exclusion = excludedFile(name, this.sourceMaps);
+    const exclusion = excludedWalkedFile(name, this.sourceMaps);
     if (exclusion === undefined) return true;
     this.excluded.push({ source: this.tree.relativePath(path), reason: exclusion });
     return false;
@@ -1179,7 +1180,8 @@ class Resolver {
 
   /**
    * Add a file of the application. A file named explicitly (by the spec, an import or `--include`)
-   * that belongs to an excluded class is refused, never dropped. A file with a second name on disk
+   * that belongs to an excluded class is refused, never dropped; a file that starts like a database
+   * dump is left out of a walked directory and refused when named. A file with a second name on disk
    * (a hard link) is refused, since that name may lie outside the root, and so is a script or style
    * sheet that inlines its source map, unless source maps are asked for.
    */
@@ -1204,6 +1206,18 @@ class Resolver {
     const payload = this.payloadPath(path);
     if (this.files.has(payload)) return;
     const digest = await this.tree.digestFile(path);
+    if (digest.databaseDump) {
+      if (explicit) {
+        refuse(
+          'RAY_CLOSURE_INVALID',
+          `'${rel}' is a database dump and never enters a bundle; remove it from the spec or ` +
+            'the include list',
+          { reason: 'excluded-file', path: rel },
+        );
+      }
+      this.excluded.push({ source: rel, reason: 'a database dump' });
+      return;
+    }
     if (digest.links > 1) {
       refuse(
         'RAY_CLOSURE_INVALID',

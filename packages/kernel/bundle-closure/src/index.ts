@@ -41,6 +41,8 @@ export {
   excludedFile,
   excludedPackageDirectory,
   excludedPackageFile,
+  excludedWalkedFile,
+  isDatabaseDump,
 } from './rules.js';
 export { noticesText, packageUrl, sbomBytes, type VendoredPackage } from './sbom.js';
 export {

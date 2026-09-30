@@ -132,10 +132,17 @@ bundle.
   `.env.*`, `*.env`, `.envrc`), credentials (`id_rsa` and its kin, `.aws/`,
   `.ssh/` and other credential directories, `credentials`, `.pgpass`, `.netrc`,
   `.npmrc`, service-account and `client_secret` JSON files, `*.pem`, `*.key`,
-  `*.p8`, keystores), database dumps (`*.dump`, `*.sqlite`, `*.db`, `*.bak` and
-  others), local `node_modules` directories, operating-system files and, without
-  `--source-maps`, source maps. Names match in any letter case. The summary
-  lists each with its reason.
+  `*.p8`, keystores), database dumps (`*.sql`, `*.dump`, `*.sqlite`, `*.db`,
+  `*.bak` and others), local `node_modules` directories, operating-system files
+  and, without `--source-maps`, source maps. Names match in any letter case. The
+  summary lists each with its reason. A SQL file your application needs, such as
+  a migration it reads, goes in when you name it with `--include`.
+- **A database dump, whatever its name.** A file whose first bytes are those of
+  a dump (the banner pg_dump, pg_dumpall, mysqldump or mariadb-dump write at
+  the top of plain-text output, or the start of a pg_dump archive or an SQLite
+  database) is left out of a walked directory, and refused with
+  `excluded-file` when the spec or `--include` names it. Move the dump out of
+  the application directory.
 - Inside a vendored package, pack leaves out only environment and credential
   files by their exact name (`.env`, `.envrc`, `id_rsa`, `.npmrc` and the like),
   version-control and credential directories and, without `--source-maps`,

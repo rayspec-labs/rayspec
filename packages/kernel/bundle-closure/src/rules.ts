@@ -7,7 +7,11 @@
  * walks only the directories the spec names or `--include` adds, and inside them it leaves out
  * version-control metadata, caches, logs, environment files, credentials, database dumps, local
  * dependency directories and, unless asked for, source maps, matching names in any letter case. A
- * file of those classes that is named explicitly is refused rather than dropped. Inside a vendored
+ * file of those classes that is named explicitly is refused rather than dropped. A walked directory
+ * also leaves out `*.sql` files, since a plain-text dump carries that name; a SQL file the spec or
+ * `--include` names goes in. A file whose first bytes are those of a database dump (pg_dump,
+ * pg_dumpall, mysqldump or MariaDB output, a pg_dump archive or an SQLite database) is a dump
+ * whatever its name: left out of a walked directory, refused when named. Inside a vendored
  * package only environment and credential files by name, version control and, unless asked for,
  * source maps are left out, since the package may read any other file at run time.
  */
@@ -162,6 +166,42 @@ export function excludedFile(name: string, sourceMaps: boolean): ExclusionClass 
     if (lower.endsWith(suffix)) return suffixClass;
   }
   return undefined;
+}
+
+/**
+ * The class of a file left out of a directory the resolver walks: every class of `excludedFile`, and
+ * `*.sql` files, which a plain-text database dump is named. A SQL file named explicitly is not
+ * excluded by its name, so a migration the spec or `--include` names still goes in.
+ */
+export function excludedWalkedFile(name: string, sourceMaps: boolean): ExclusionClass | undefined {
+  const exclusion = excludedFile(name, sourceMaps);
+  if (exclusion !== undefined) return exclusion;
+  return name.toLowerCase().endsWith('.sql') ? 'a database dump' : undefined;
+}
+
+/** How many leading bytes of a file `isDatabaseDump` reads. */
+export const DATABASE_DUMP_HEADER_BYTES = 4096;
+
+/** The comment line a plain-text dump tool writes near the top of its output. */
+const DUMP_BANNER = /^-- (?:PostgreSQL database (?:cluster )?dump|MySQL dump |MariaDB dump )/m;
+
+const BINARY_DUMP_MAGIC: readonly Buffer[] = [
+  Buffer.from('PGDMP', 'latin1'),
+  Buffer.from('SQLite format 3\0', 'latin1'),
+];
+
+/**
+ * Whether the first bytes of a file are those of a database dump: the banner pg_dump, pg_dumpall,
+ * mysqldump or mariadb-dump write in plain-text output, or the magic of a pg_dump archive or an
+ * SQLite database. Only the first `DATABASE_DUMP_HEADER_BYTES` are looked at.
+ */
+export function isDatabaseDump(head: Uint8Array): boolean {
+  const bytes = Buffer.from(head.buffer, head.byteOffset, head.byteLength).subarray(
+    0,
+    DATABASE_DUMP_HEADER_BYTES,
+  );
+  if (BINARY_DUMP_MAGIC.some((magic) => bytes.subarray(0, magic.length).equals(magic))) return true;
+  return DUMP_BANNER.test(bytes.toString('latin1'));
 }
 
 /**

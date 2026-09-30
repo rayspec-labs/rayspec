@@ -98,12 +98,15 @@ The resolver walks only the directories the spec names or `include` adds, and th
 version-control metadata (`.git`, `.hg`, `.svn`), caches, `logs/` and `*.log`, environment files
 (`.env`, `.env.*`, `*.env`, `.envrc`), credentials (`id_rsa` and its kin, credential directories
 such as `.aws/` and `.ssh/`, `credentials`, `.pgpass`, `.netrc`, `.npmrc`, service-account and
-`client_secret` JSON files, `*.pem`, `*.key`, `*.p8`, keystores), database dumps (`*.dump`,
-`*.sqlite`, `*.db`, `*.bak` and others), local `node_modules` directories, operating-system
+`client_secret` JSON files, `*.pem`, `*.key`, `*.p8`, keystores), database dumps (`*.sql`,
+`*.dump`, `*.sqlite`, `*.db`, `*.bak` and others), local `node_modules` directories, operating-system
 metadata and, unless `sourceMaps` is set, source maps. Names match in any letter case. Each is
 listed in `excluded` with its reason. A file of those classes named explicitly (by the spec, an
 import or `include`) is refused instead: `excluded-file`, or `source-map-not-opted-in` for a
-source map. A script or style sheet of the application that inlines its source map as a `data:`
+source map. A `*.sql` file is the exception: named explicitly, it goes in. A file whose first bytes
+are those of a database dump (the banner pg_dump, pg_dumpall, mysqldump or mariadb-dump write in
+plain-text output, or the magic of a pg_dump archive or an SQLite database) is a dump whatever its
+name: left out of a walked directory and refused with `excluded-file` when named. A script or style sheet of the application that inlines its source map as a `data:`
 URL is refused with `source-map-not-opted-in` unless `sourceMaps` is set.
 
 Inside a vendored package only environment and credential files by their exact name,

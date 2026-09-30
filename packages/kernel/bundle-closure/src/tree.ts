@@ -12,8 +12,8 @@
  * lie outside the root; the digest reports the link count so the resolver can refuse it.
  *
  * Files are opened without following links and read in chunks; each read computes the size, the
- * SHA-256, the private-key scan of the bundle's secret rules and the native-binary header check in
- * one pass.
+ * SHA-256, the private-key scan of the bundle's secret rules, the native-binary header check and the
+ * database-dump header check in one pass.
  */
 import { createHash } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
@@ -22,6 +22,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { PrivateKeyScanner } from '@rayspec/bundle';
 import { NATIVE_HEADER_BYTES, nativeBinaryPlatform } from './native.js';
 import { refuse } from './refusal.js';
+import { DATABASE_DUMP_HEADER_BYTES, isDatabaseDump } from './rules.js';
 
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 const CHUNK_BYTES = 1024 * 1024;
@@ -33,6 +34,8 @@ export interface FileDigest {
   privateKey: boolean;
   /** The platform when the file starts like a native binary (ELF, Mach-O or PE). */
   nativePlatform: string | undefined;
+  /** Whether the file starts like a database dump (`isDatabaseDump`). */
+  databaseDump: boolean;
   /** How many names the file has on disk; more than one is a hard link. */
   links: number;
 }
@@ -46,6 +49,7 @@ export function digestBytes(bytes: Uint8Array): FileDigest {
     sha256: createHash('sha256').update(bytes).digest('hex'),
     privateKey: scanner.found,
     nativePlatform: nativeBinaryPlatform(bytes.subarray(0, NATIVE_HEADER_BYTES)),
+    databaseDump: isDatabaseDump(bytes.subarray(0, DATABASE_DUMP_HEADER_BYTES)),
     links: 1,
   };
 }
@@ -211,12 +215,15 @@ export class ApplicationTree {
       const buffer = Buffer.alloc(CHUNK_BYTES);
       let size = 0;
       let nativePlatform: string | undefined;
+      let databaseDump = false;
       for (;;) {
         const { bytesRead } = await handle.read(buffer, 0, CHUNK_BYTES, size);
         if (bytesRead === 0) break;
         const chunk = buffer.subarray(0, bytesRead);
-        if (size === 0)
+        if (size === 0) {
           nativePlatform = nativeBinaryPlatform(chunk.subarray(0, NATIVE_HEADER_BYTES));
+          databaseDump = isDatabaseDump(chunk.subarray(0, DATABASE_DUMP_HEADER_BYTES));
+        }
         hash.update(chunk);
         scanner.update(chunk);
         size += bytesRead;
@@ -226,6 +233,7 @@ export class ApplicationTree {
         sha256: hash.digest('hex'),
         privateKey: scanner.found,
         nativePlatform,
+        databaseDump,
         links: stats.nlink,
       };
     } finally {
