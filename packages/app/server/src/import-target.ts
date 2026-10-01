@@ -22,9 +22,14 @@
  *
  * THE RESTORE (`restoreImport`), under the shared schema advisory lock held on the application
  * database for its whole course:
+ *  0. the runtime role is kept from writing anything the restore creates: the migration role's
+ *     default privileges that would grant it writes are withheld in both databases (recorded first,
+ *     so a discard can give them back), and the catalogs are read as the baseline;
  *  1. each dump, workflow system database first, with `pg_restore` in one transaction, restoring only
  *     the entries the allowlist approved (`dump-policy.ts`), with no owner, privilege, comment or
- *     tablespace from the dump; the bytes streamed must hash to the inventory's digest;
+ *     tablespace from the dump; the bytes streamed must hash to the inventory's digest; then the
+ *     database must hold exactly what the plan creates (`import-catalog.ts`) and the runtime role
+ *     no write privilege on any of it;
  *  2. the one organization: a dump that restores another number of organizations is refused
  *     (`RAY_MULTI_TENANT_UNSUPPORTED`) and the restore is discarded at once;
  *  3. the objects: each stored blob file written unchanged under `<blob root>/<tenant>/<key>`
@@ -38,16 +43,20 @@
  *     index's size, header and both digests;
  *  6. the identity policy (`import-identity.ts`): each account's carried identity recorded in the
  *     target's security audit, and who signs in again, who needs owner recovery and who has no way
- *     in reported;
- *  7. the runtime-control state of the target: its own deployment id and a fence taken at once, with
- *     the runtime role's writes revoked, so no runtime serves the target until the cutover releases
- *     the fence.
+ *     in reported; then the row counts and both catalogs are checked once more;
+ *  7. the runtime-control state of the target: its own deployment id, and its fence, held by the
+ *     import (`import` in the barrier record), with the writes the runtime role is owed recorded for
+ *     the cutover to grant — it never held them; then the default privileges are given back, and the
+ *     catalogs, read a last time, are what the cutover compares the target with.
+ * The runtime role can connect and read throughout, and write nothing the restore creates until the
+ * cutover releases the fence.
  * A failure from step 1 on leaves the target marked failed (the caller's receipts and `import.json`)
  * for an explicit discard; only the multi-tenant refusal discards by itself, as the contract asks.
  *
  * THE DISCARD (`discardImportTarget`) drops every object the migration role owns in both target
  * databases (schemas, tables, sequences, functions, types, extensions) and empties the blob root,
- * then checks the target is empty again. It touches nothing it does not own.
+ * gives back the default privileges the failed import withheld, then checks the target is empty
+ * again. It touches nothing it does not own.
  */
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -72,7 +81,14 @@ import {
   verifyTenantIsolation,
 } from '@rayspec/db';
 import { BlobInventoryError, listFsBlobs } from '@rayspec/platform';
-import { quiesceOperation } from './fence-operations.js';
+import { type ImportHold, quiesceOperation, readBarrierRecord } from './fence-operations.js';
+import {
+  type CatalogExpectation,
+  type CatalogState,
+  catalogDifference,
+  catalogDigest,
+  readCatalog,
+} from './import-catalog.js';
 import { applyIdentityPolicy, type IdentityReport } from './import-identity.js';
 import { ensureRuntimeControlState } from './operation-lease.js';
 import { PgDumpError, type PgDumpTool, pgToolMajor, resolvePgTool } from './pg-dump.js';
@@ -82,7 +98,13 @@ import { readProductTables, readSchemaHead } from './schema-head.js';
 import { SchemaLockTimeoutError, withSchemaLock } from './schema-lock.js';
 import type { ImportDump, OpenedMigration } from './snapshot-import.js';
 import { queryOf, readUserTables } from './snapshot-source.js';
-import { openControlDatabase } from './write-barrier.js';
+import {
+  BARRIER_EXEMPT_TABLE,
+  openControlDatabase,
+  type RecordedGrant,
+  WRITE_PRIVILEGES,
+  type WritePrivilege,
+} from './write-barrier.js';
 
 /** Where and as whom an import restores. */
 export interface ImportTargetConfig {
@@ -376,6 +398,8 @@ export interface RestoredImport {
   /** The target's fence, taken by the import: the cutover releases it. */
   targetFenceEpoch: number;
   targetEnvironmentRevision: number;
+  /** SHA-256 of what both catalogs held when the import ended; the cutover compares it. */
+  catalogSha256: string;
   credentialReset: {
     sessions: 'reset';
     apiKeys: 'reset';
@@ -405,6 +429,11 @@ export interface RestoreImportOptions {
   workDir: string;
   /** Called when verification starts. */
   onVerifying?: () => Promise<void>;
+  /**
+   * Called with the default write privileges the import is about to withhold, before it does: the
+   * caller records them, so a discard gives them back even after the import was killed.
+   */
+  onWithheld?: (withheld: WithheldDefaultWrite[]) => Promise<void>;
   /** Stops at the next safe point; a running `pg_restore` is ended and rolls back. */
   signal?: AbortSignal;
   lockTimeoutMs?: number;
@@ -577,36 +606,227 @@ async function verifyObjects(root: string, index: ObjectIndex): Promise<void> {
   }
 }
 
+// ─── the runtime role's writes ──────────────────────────────────────────────────────────────────
+
 /**
- * Tables of the connected database the runtime role cannot use as a runtime needs to: read every
- * table and the schema it is in, and write every table but the migration ledgers — in the
- * application database those of schema `public`, in the workflow system database all of them. The
- * database roles setup grants exactly this through the migration role's default privileges.
+ * A default privilege of the migration role that grants the runtime role writes on the tables it
+ * creates, everywhere (`schema` null) or in one schema. An import withholds these while it restores,
+ * so the runtime role never holds a write on what the restore creates before the cutover.
  */
-async function tablesWithoutRuntimeGrants(
+export interface WithheldDefaultWrite {
+  database: 'application' | 'workflow-system';
+  schema: string | null;
+  privileges: WritePrivilege[];
+}
+
+function isWritePrivilege(value: unknown): value is WritePrivilege {
+  return typeof value === 'string' && (WRITE_PRIVILEGES as readonly string[]).includes(value);
+}
+
+/** Parse withheld default writes read back from an import record; anything malformed is dropped. */
+export function readWithheldDefaultWrites(value: unknown): WithheldDefaultWrite[] {
+  if (!Array.isArray(value)) return [];
+  const out: WithheldDefaultWrite[] = [];
+  for (const entry of value) {
+    const e = (typeof entry === 'object' && entry !== null ? entry : {}) as Record<string, unknown>;
+    if (
+      (e.database !== 'application' && e.database !== 'workflow-system') ||
+      (e.schema !== null && typeof e.schema !== 'string') ||
+      !Array.isArray(e.privileges)
+    ) {
+      continue;
+    }
+    out.push({
+      database: e.database,
+      schema: e.schema as string | null,
+      privileges: e.privileges.filter(isWritePrivilege),
+    });
+  }
+  return out;
+}
+
+/** The migration role's default write privileges for the runtime role in the connected database. */
+async function readDefaultWrites(
   db: Db,
   runtimeRole: string,
-  database: 'application' | 'workflow-system',
-): Promise<number> {
+  database: WithheldDefaultWrite['database'],
+): Promise<WithheldDefaultWrite[]> {
+  const rows = (await db.$client.unsafe(
+    `SELECT n.nspname::text AS schema,
+            array_agg(DISTINCT a.privilege_type ORDER BY a.privilege_type) AS privileges
+       FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+       CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+      WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        AND d.defaclobjtype = 'r'
+        AND a.grantee = (SELECT oid FROM pg_roles WHERE rolname = $1)
+        AND a.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
+      GROUP BY n.nspname ORDER BY n.nspname NULLS FIRST`,
+    [runtimeRole],
+  )) as unknown as { schema: string | null; privileges: unknown[] }[];
+  return rows.map((r) => ({
+    database,
+    schema: r.schema,
+    privileges: r.privileges.filter(isWritePrivilege),
+  }));
+}
+
+/** Grant or revoke default write privileges of the migration role for the runtime role. */
+async function alterDefaultWrites(
+  db: Db,
+  runtimeRole: string,
+  entries: readonly WithheldDefaultWrite[],
+  verb: 'GRANT' | 'REVOKE',
+): Promise<void> {
+  const direction = verb === 'GRANT' ? 'TO' : 'FROM';
+  await db.$client.begin(async (tx) => {
+    for (const e of entries) {
+      const privileges = e.privileges.filter(isWritePrivilege);
+      if (privileges.length === 0) continue;
+      // A schema a discard dropped has no default privileges left to give back.
+      const [stmt] = (await tx.unsafe(
+        `SELECT CASE
+                  WHEN $2::text IS NULL
+                    THEN format('ALTER DEFAULT PRIVILEGES FOR ROLE %I ${verb} %s ON TABLES ${direction} %I',
+                                current_user, $1::text, $3::text)
+                  WHEN to_regnamespace(quote_ident($2::text)) IS NULL THEN NULL
+                  ELSE format('ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I ${verb} %s ON TABLES ${direction} %I',
+                              current_user, $2::text, $1::text, $3::text)
+                END AS stmt`,
+        [privileges.join(', '), e.schema, runtimeRole],
+      )) as unknown as { stmt: string | null }[];
+      if (stmt?.stmt) await tx.unsafe(stmt.stmt);
+    }
+  });
+}
+
+/**
+ * Whether a default privilege of the migration role still grants a write on its new tables to the
+ * runtime role, a role it is a member of, or PUBLIC.
+ */
+async function defaultWritesRemain(db: Db, runtimeRole: string): Promise<boolean> {
   const [row] = (await db.$client.unsafe(
-    `SELECT count(*)::int AS n
+    `SELECT count(*)::int AS n FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+      WHERE d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+        AND d.defaclobjtype = 'r'
+        AND a.privilege_type IN ('INSERT', 'UPDATE', 'DELETE', 'TRUNCATE')
+        AND (a.grantee = 0 OR pg_has_role($1, a.grantee, 'MEMBER'))`,
+    [runtimeRole],
+  )) as unknown as { n: number }[];
+  return (row?.n ?? 0) > 0;
+}
+
+/** How many tables of the connected database the runtime role, or a role it is a member of, can write. */
+async function tablesRuntimeCanWrite(db: Db, runtimeRole: string): Promise<number> {
+  const [row] = (await db.$client.unsafe(
+    `SELECT count(DISTINCT c.oid)::int AS n
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       CROSS JOIN pg_roles m
+      WHERE c.relkind IN ('r', 'p')
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
+        AND pg_has_role($1, m.oid, 'MEMBER')
+        AND (has_table_privilege(m.oid, c.oid, 'INSERT') OR has_table_privilege(m.oid, c.oid, 'UPDATE')
+             OR has_table_privilege(m.oid, c.oid, 'DELETE')
+             OR has_table_privilege(m.oid, c.oid, 'TRUNCATE'))`,
+    [runtimeRole],
+  )) as unknown as { n: number }[];
+  return row?.n ?? 0;
+}
+
+/**
+ * The writes the runtime role is owed on the restored tables of the connected database: what the
+ * withheld default privileges would have granted, except on the migration ledgers. `missing` counts
+ * the tables a runtime cannot use as it needs to: read every table and the schema it is in, and
+ * write every table but the migration ledgers — in the application database those of schema
+ * `public`, in the workflow system database all of them.
+ */
+async function owedWrites(
+  db: Db,
+  runtimeRole: string,
+  database: WithheldDefaultWrite['database'],
+  withheld: readonly WithheldDefaultWrite[],
+): Promise<{ grants: RecordedGrant[]; missing: number }> {
+  const tables = (await db.$client.unsafe(
+    `SELECT n.nspname::text AS schema, c.relname::text AS table,
+            has_schema_privilege($1, n.oid, 'USAGE') AND has_table_privilege($1, c.oid, 'SELECT') AS reads
        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE c.relkind IN ('r', 'p')
         AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
-        AND NOT (has_schema_privilege($1, n.oid, 'USAGE') AND has_table_privilege($1, c.oid, 'SELECT')
-                 AND (CASE WHEN $2 = 'application'
-                                AND (n.nspname <> 'public' OR c.relname = ANY($3::text[]))
-                           THEN true
-                           ELSE has_table_privilege($1, c.oid, 'INSERT')
-                                AND has_table_privilege($1, c.oid, 'UPDATE')
-                                AND has_table_privilege($1, c.oid, 'DELETE') END))`,
-    [
-      runtimeRole,
-      database,
-      MIGRATION_ONLY_TABLES.filter((t) => t.schema === 'public').map((t) => t.table),
-    ],
-  )) as unknown as { n: number }[];
-  return row?.n ?? 0;
+      ORDER BY 1, 2`,
+    [runtimeRole],
+  )) as unknown as { schema: string; table: string; reads: boolean }[];
+  const ledgers = new Set(MIGRATION_ONLY_TABLES.map((t) => `${t.schema}.${t.table}`));
+  const grants: RecordedGrant[] = [];
+  let missing = 0;
+  for (const t of tables) {
+    const ledger = database === 'application' && ledgers.has(`${t.schema}.${t.table}`);
+    const privileges = WRITE_PRIVILEGES.filter((p) =>
+      withheld.some(
+        (w) =>
+          w.database === database &&
+          (w.schema === null || w.schema === t.schema) &&
+          w.privileges.includes(p),
+      ),
+    );
+    const needsWrites = !ledger && (database === 'workflow-system' || t.schema === 'public');
+    const writes = (['INSERT', 'UPDATE', 'DELETE'] as const).every((p) => privileges.includes(p));
+    if (t.reads !== true || (needsWrites && !writes)) missing += 1;
+    if (!ledger && privileges.length > 0) {
+      grants.push({ schema: t.schema, table: t.table, privileges: [...privileges] });
+    }
+  }
+  return { grants, missing };
+}
+
+/** The tables of one database and their rows, against the snapshot's counts. */
+async function verifyTableCounts(
+  db: Db,
+  database: 'application' | 'workflow-system',
+  expected: Snapshot['tableCounts'],
+  added: ReadonlyMap<string, number> = new Map(),
+): Promise<void> {
+  const counted = expected.filter((t) => t.database === database);
+  const live = await readUserTables(queryOf(db));
+  const key = (t: { schema: string; table: string }) => `${t.schema}.${t.table}`;
+  if (live.length !== counted.length || live.some((t) => !counted.some((e) => key(e) === key(t)))) {
+    throw verificationFailed(`the ${database} database holds other tables than the snapshot`);
+  }
+  for (const t of counted) {
+    // The runtime-control tables are the target's own from the restore on; the allowlist let no row
+    // of the source's into them.
+    if (database === 'application' && RUNTIME_CONTROL_TABLE_NAMES.has(t.table)) continue;
+    const [row] = (await db.$client.unsafe(
+      `SELECT count(*)::text AS n FROM "${t.schema.replaceAll('"', '""')}"."${t.table.replaceAll('"', '""')}"`,
+    )) as unknown as { n: string }[];
+    const rows = t.rows + (added.get(key(t)) ?? 0);
+    if (Number(row?.n) !== rows) {
+      throw verificationFailed(
+        `${t.schema}.${t.table} of the ${database} database holds ${row?.n} rows, not the ${rows} ` +
+          'the snapshot and the import account for',
+      );
+    }
+  }
+}
+
+/** Refuse a database whose catalog is not what it must hold. */
+async function checkCatalog(
+  db: Db,
+  runtimeRole: string,
+  database: 'application' | 'workflow-system',
+  expected: CatalogExpectation,
+): Promise<CatalogState> {
+  const state = await readCatalog(db, runtimeRole);
+  const difference = catalogDifference(state, expected);
+  if (difference !== null) {
+    throw new RestoreRefusal(
+      bundleError(
+        'RAY_POLICY_DENIED',
+        `the restored ${database} database holds what its restore plan does not create: ` +
+          `${difference}. The target is marked failed and the source stays authoritative`,
+        { reason: 'privileged-statement' },
+      ),
+    );
+  }
+  return state;
 }
 
 /**
@@ -615,14 +835,77 @@ async function tablesWithoutRuntimeGrants(
  */
 export async function restoreImport(options: RestoreImportOptions): Promise<RestoreImportResult> {
   const { opened, config, facts, control } = options;
+  const runtimeRole = config.runtimeRole;
   let changed = false;
   let sys: Db | null = null;
+  let withheld: WithheldDefaultWrite[] | null = null;
   const archive = await open(opened.archivePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const databases = (): [WithheldDefaultWrite['database'], Db][] => [
+    ['application', control],
+    ...(sys === null ? [] : [['workflow-system', sys] as [WithheldDefaultWrite['database'], Db]]),
+  ];
   try {
+    sys =
+      facts.workflowSystemDatabase === 'present'
+        ? makeDb(config.migrationWorkflowSystemDatabaseUrl, 1, {
+            applicationName: 'rayspec-import',
+          })
+        : null;
     const restored = await withSchemaLock(
       control,
       async () => {
-        // 1. The dumps.
+        // 0. The runtime role writes nothing the restore creates: the default privileges that would
+        // grant it writes are recorded, then withheld; the catalogs as they are then are the baseline.
+        const found: WithheldDefaultWrite[] = [];
+        const baseline = new Map<string, CatalogState>();
+        for (const [database, db] of databases()) {
+          found.push(...(await readDefaultWrites(db, runtimeRole, database)));
+          baseline.set(database, await readCatalog(db, runtimeRole));
+        }
+        await options.onWithheld?.(found);
+        withheld = found;
+        for (const [database, db] of databases()) {
+          await alterDefaultWrites(
+            db,
+            runtimeRole,
+            found.filter((w) => w.database === database),
+            'REVOKE',
+          );
+          if (await defaultWritesRemain(db, runtimeRole)) {
+            throw new RestoreRefusal(
+              bundleError(
+                'RAY_POLICY_DENIED',
+                `the default privileges of the ${database} database grant the runtime role writes ` +
+                  'through PUBLIC or another role, so the target could not be kept unwritable while ' +
+                  'it is restored; prepare the target with the database roles setup alone',
+                { reason: 'posture-refused' },
+              ),
+            );
+          }
+        }
+        const restoring = new Map<string, CatalogState>();
+        for (const [database, db] of databases()) {
+          restoring.set(database, await readCatalog(db, runtimeRole));
+        }
+        const expectation = (
+          database: WithheldDefaultWrite['database'],
+          during: boolean,
+          extraTriggers = 0,
+        ): CatalogExpectation => {
+          const plan = options.dumps.find((d) => d.database === database)?.plan;
+          const settled = (during ? restoring : baseline).get(database)!;
+          return {
+            extensions: plan?.extensions ?? [],
+            schemas: plan?.schemas ?? [],
+            functions: plan?.functions ?? [],
+            triggers: (plan?.triggers ?? 0) + extraTriggers,
+            defaultPrivileges: settled.defaultPrivileges,
+            roleSettings: settled.roleSettings,
+          };
+        };
+
+        // 1. The dumps; after each, the database holds exactly what its plan creates, and nothing
+        // the runtime role can write.
         let foreignKeys = 0;
         for (const dump of options.dumps) {
           checkpoint(options.signal);
@@ -644,6 +927,19 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
             throw verificationFailed('a dump changed while it was restored', 'entry-sha256');
           }
           foreignKeys += dump.plan.foreignKeys;
+          const db = dump.database === 'application' ? control : sys;
+          if (db === null) throw new Error('the workflow system database is not open');
+          await checkCatalog(db, runtimeRole, dump.database, expectation(dump.database, true));
+          if ((await tablesRuntimeCanWrite(db, runtimeRole)) > 0) {
+            throw new RestoreRefusal(
+              bundleError(
+                'RAY_POLICY_DENIED',
+                `the runtime role can write restored tables of the ${dump.database} database before ` +
+                  'the cutover; prepare the target with the database roles setup alone',
+                { reason: 'posture-refused' },
+              ),
+            );
+          }
           if (dump.database === 'application') {
             // The target's own runtime-control state, at once: its deployment id is how a discard
             // knows the database is the one this import changed.
@@ -697,10 +993,12 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         await options.onVerifying?.();
 
         // 4. The runtime role's posture.
+        let referenceTriggers = 0;
         await control.$client.begin(async (tx) => {
-          await applyTenantIsolation(tx, { runtimeRole: config.runtimeRole });
+          const applied = await applyTenantIsolation(tx, { runtimeRole });
+          referenceTriggers = applied.referenceTriggersCreated.length;
         });
-        const posture = await verifyTenantIsolation(control.$client, { role: config.runtimeRole });
+        const posture = await verifyTenantIsolation(control.$client, { role: runtimeRole });
         if (!posture.active) {
           throw new RestoreRefusal(
             bundleError(
@@ -714,20 +1012,10 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         }
 
         // 5. The verification.
-        sys =
-          opened.snapshot.workflowSystemDatabase === 'included'
-            ? makeDb(config.migrationWorkflowSystemDatabaseUrl, 1, {
-                applicationName: 'rayspec-import',
-              })
-            : null;
-        for (const [database, db] of [
-          ['application', control],
-          ['workflow-system', sys],
-        ] as const) {
-          if (
-            db !== null &&
-            (await tablesWithoutRuntimeGrants(db, config.runtimeRole, database)) > 0
-          ) {
+        const owed = new Map<string, RecordedGrant[]>();
+        for (const [database, db] of databases()) {
+          const writes = await owedWrites(db, runtimeRole, database, found);
+          if (writes.missing > 0) {
             throw new RestoreRefusal(
               bundleError(
                 'RAY_POLICY_DENIED',
@@ -738,37 +1026,10 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
               ),
             );
           }
+          owed.set(database, writes.grants);
         }
-        for (const [database, db] of [
-          ['application', control],
-          ['workflow-system', sys],
-        ] as const) {
-          if (db === null) continue;
-          const expected = opened.snapshot.tableCounts.filter((t) => t.database === database);
-          const live = await readUserTables(queryOf(db));
-          const key = (t: { schema: string; table: string }) => `${t.schema}.${t.table}`;
-          if (
-            live.length !== expected.length ||
-            live.some((t) => !expected.some((e) => key(e) === key(t)))
-          ) {
-            throw verificationFailed(
-              `the ${database} database holds other tables than the snapshot`,
-            );
-          }
-          for (const t of expected) {
-            // The runtime-control tables are the target's own from the restore on; the allowlist
-            // let no row of the source's into them.
-            if (database === 'application' && RUNTIME_CONTROL_TABLE_NAMES.has(t.table)) continue;
-            const [row] = (await db.$client.unsafe(
-              `SELECT count(*)::text AS n FROM "${t.schema}"."${t.table}"`,
-            )) as unknown as { n: string }[];
-            if (Number(row?.n) !== t.rows) {
-              throw verificationFailed(
-                `${t.schema}.${t.table} of the ${database} database holds ${row?.n} rows, not the ` +
-                  `${t.rows} the snapshot counts`,
-              );
-            }
-          }
+        for (const [database, db] of databases()) {
+          await verifyTableCounts(db, database, opened.snapshot.tableCounts);
           const [fk] = (await db.$client.unsafe(
             `SELECT count(*)::int AS n, count(*) FILTER (WHERE NOT c.convalidated)::int AS invalid
                FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
@@ -833,12 +1094,31 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
           migrationBundleSha256: options.migrationBundleSha256,
         });
 
-        return { tenantId, foreignKeys, identity };
+        // The import's own writes ran the dump's triggers: the rows and the catalogs once more.
+        for (const [database, db] of databases()) {
+          await verifyTableCounts(
+            db,
+            database,
+            opened.snapshot.tableCounts,
+            database === 'application'
+              ? new Map([['public.auth_audit', identity.users.length]])
+              : new Map(),
+          );
+          await checkCatalog(
+            db,
+            runtimeRole,
+            database,
+            expectation(database, true, database === 'application' ? referenceTriggers : 0),
+          );
+        }
+
+        return { tenantId, foreignKeys, identity, owed, referenceTriggers, expectation };
       },
       { timeoutMs: options.lockTimeoutMs },
     );
 
-    // The fence: no runtime serves the target until the cutover releases it.
+    // 7. The fence: no runtime serves the target until the cutover releases it. The runtime role
+    // never held the writes it is owed; the fence records them for the cutover to grant.
     const fenced = await fenceTarget(
       options,
       `import ${options.operationId}: not live until the cutover`,
@@ -855,6 +1135,58 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
           ),
         ],
       };
+    }
+    await holdForCutover(options, fenced, restored.owed);
+    await alterDefaultWrites(
+      control,
+      runtimeRole,
+      (withheld as WithheldDefaultWrite[] | null)?.filter((w) => w.database === 'application') ??
+        [],
+      'GRANT',
+    );
+    if (sys !== null) {
+      await alterDefaultWrites(
+        sys,
+        runtimeRole,
+        (withheld as WithheldDefaultWrite[] | null)?.filter(
+          (w) => w.database === 'workflow-system',
+        ) ?? [],
+        'GRANT',
+      );
+    }
+    withheld = null;
+    const finalStates: CatalogState[] = [];
+    for (const [database, db] of databases()) {
+      finalStates.push(
+        await checkCatalog(
+          db,
+          runtimeRole,
+          database,
+          restored.expectation(
+            database,
+            false,
+            database === 'application' ? restored.referenceTriggers : 0,
+          ),
+        ),
+      );
+    }
+    const catalogSha256 = catalogDigest(finalStates);
+    const recorded = await control.$client.begin((tx) =>
+      writeImportHold(tx, (record) => {
+        const hold = readBarrierRecord(record)?.import;
+        if (hold?.operationId !== options.operationId || hold.state !== 'ready-for-cutover') {
+          return null;
+        }
+        return { ...record, import: { ...hold, catalogSha256 } satisfies ImportHold };
+      }),
+    );
+    if (!recorded) {
+      throw new RestoreRefusal(
+        bundleError(
+          'RAY_RECONCILIATION_REQUIRED',
+          "the target's fence changed while the import held it; the target is marked failed",
+        ),
+      );
     }
     const [revision] = (await control.$client.unsafe(
       'SELECT environment_revision::int AS revision FROM runtime_control_state WHERE id = 1',
@@ -873,6 +1205,7 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         foreignKeys: restored.foreignKeys,
         targetFenceEpoch: fenced,
         targetEnvironmentRevision: revision?.revision ?? 0,
+        catalogSha256,
         credentialReset: {
           sessions: 'reset',
           apiKeys: 'reset',
@@ -889,9 +1222,24 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
     // no runtime serves it before it is discarded.
     const discarded = err instanceof RestoreRefusal && err.discarded;
     if (changed && !discarded) {
-      await fenceTarget(options, `import ${options.operationId} failed: discard this target`).catch(
-        () => null,
-      );
+      const epoch = await fenceTarget(
+        options,
+        `import ${options.operationId} failed: discard this target`,
+      ).catch(() => null);
+      if (epoch !== null) await markImportFailed(control, options.operationId).catch(() => {});
+    }
+    // The default privileges go back whether or not the target changed; a discard gives them back
+    // too, from the import record, should this fail.
+    const giveBack = withheld as WithheldDefaultWrite[] | null;
+    if (giveBack !== null) {
+      for (const [database, db] of databases()) {
+        await alterDefaultWrites(
+          db,
+          runtimeRole,
+          giveBack.filter((w) => w.database === database),
+          'GRANT',
+        ).catch(() => {});
+      }
     }
     if (err instanceof RestoreRefusal) {
       return { ok: false, errors: [err.error], targetChanged: err.discarded ? false : changed };
@@ -987,6 +1335,89 @@ async function fenceTarget(options: RestoreImportOptions, reason: string): Promi
   }
 }
 
+/** Write an import's hold into the fence's barrier record, in `tx`; false when the fence is not held. */
+async function writeImportHold(
+  tx: { unsafe(query: string, parameters?: unknown[]): PromiseLike<unknown> },
+  change: (record: Record<string, unknown>) => Record<string, unknown> | null,
+): Promise<boolean> {
+  const [row] = (await tx.unsafe(
+    'SELECT fence_state, fence_barriers FROM runtime_control_state WHERE id = 1 FOR UPDATE',
+  )) as { fence_state: string; fence_barriers: unknown }[];
+  if (row?.fence_state !== 'fenced' || typeof row.fence_barriers !== 'object') return false;
+  const next = change({ ...(row.fence_barriers as Record<string, unknown>) });
+  if (next === null) return false;
+  await tx.unsafe(
+    'UPDATE runtime_control_state SET fence_barriers = $1::text::jsonb, updated_at = now() WHERE id = 1',
+    [JSON.stringify(next)],
+  );
+  return true;
+}
+
+/**
+ * The fence an import took at `epoch` becomes the import's hold: the writes the runtime role is owed
+ * are recorded for the cutover to grant (the heartbeat table, which a fence leaves writable, is
+ * granted at once), and only the cutover may release it.
+ */
+async function holdForCutover(
+  options: RestoreImportOptions,
+  epoch: number,
+  owed: ReadonlyMap<string, RecordedGrant[]>,
+): Promise<void> {
+  const { control, config } = options;
+  const exempt = (g: RecordedGrant) => `${g.schema}.${g.table}` === BARRIER_EXEMPT_TABLE;
+  const application = owed.get('application') ?? [];
+  const held = await control.$client.begin(async (tx) => {
+    const [row] = (await tx.unsafe(
+      'SELECT fence_epoch::int AS epoch FROM runtime_control_state WHERE id = 1 FOR UPDATE',
+    )) as unknown as { epoch: number }[];
+    if (row?.epoch !== epoch) return false;
+    for (const g of application.filter(exempt)) {
+      const [stmt] = (await tx.unsafe(
+        "SELECT format('GRANT %s ON TABLE %I.%I TO %I', $1::text, $2::text, $3::text, $4::text) AS stmt",
+        [g.privileges.join(', '), g.schema, g.table, config.runtimeRole],
+      )) as unknown as { stmt: string }[];
+      if (stmt !== undefined) await tx.unsafe(stmt.stmt);
+    }
+    return writeImportHold(tx, (record) => {
+      const barriers = readBarrierRecord(record);
+      if (barriers?.database.state !== 'held' || barriers.database.role !== config.runtimeRole) {
+        return null;
+      }
+      const hold: ImportHold = { operationId: options.operationId, state: 'ready-for-cutover' };
+      return {
+        ...record,
+        database: {
+          ...barriers.database,
+          grants: [...(barriers.database.grants ?? []), ...application.filter((g) => !exempt(g))],
+          workflowSystemGrants: [
+            ...(barriers.database.workflowSystemGrants ?? []),
+            ...(owed.get('workflow-system') ?? []),
+          ],
+        },
+        import: hold,
+      };
+    });
+  });
+  if (!held) {
+    throw new RestoreRefusal(
+      bundleError(
+        'RAY_RECONCILIATION_REQUIRED',
+        "the target's fence changed while the import held it; the target is marked failed",
+      ),
+    );
+  }
+}
+
+/** Mark the import's hold on its target's fence as failed: the fence is then never resumed. */
+export async function markImportFailed(control: Db, operationId: string): Promise<void> {
+  await control.$client.begin(async (tx) => {
+    await writeImportHold(tx, (record) => ({
+      ...record,
+      import: { operationId, state: 'failed' } satisfies ImportHold,
+    }));
+  });
+}
+
 // ─── the discard ───────────────────────────────────────────────────────────────────────────────
 
 /** Drop every object the connected role owns in the connected database; returns how many. */
@@ -1055,13 +1486,14 @@ async function discardDatabases(control: Db, workflowSystemUrl: string): Promise
 
 /**
  * Discard what an import restored into a target: every object the migration role owns in both
- * databases, and everything in the blob root (the root itself stays). Then the target must be empty
- * again (`RAY_TARGET_NOT_EMPTY` otherwise: something the migration role does not own is in it).
+ * databases, and everything in the blob root (the root itself stays); and give back the default
+ * write privileges the import withheld. Then the target must be empty again (`RAY_TARGET_NOT_EMPTY`
+ * otherwise: something the migration role does not own is in it).
  */
 export async function discardImportTarget(
   control: Db,
   config: ImportTargetConfig,
-  failed: { deploymentId: string },
+  failed: { deploymentId: string; withheldDefaultWrites?: readonly WithheldDefaultWrite[] },
 ): Promise<{ ok: true } | { ok: false; errors: BundleError[] }> {
   // Only the database this import changed: it records the import's deployment id, or it holds no
   // relation at all (the restore failed before the application database).
@@ -1105,6 +1537,28 @@ export async function discardImportTarget(
   try {
     await withSchemaLock(control, async () => {
       await discardDatabases(control, config.migrationWorkflowSystemDatabaseUrl);
+      const withheld = failed.withheldDefaultWrites ?? [];
+      await alterDefaultWrites(
+        control,
+        config.runtimeRole,
+        withheld.filter((w) => w.database === 'application'),
+        'GRANT',
+      );
+      const sysWithheld = withheld.filter((w) => w.database === 'workflow-system');
+      const [present] = (await control.$client.unsafe(
+        'SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1) AS present',
+        [databaseNameOf(config.migrationWorkflowSystemDatabaseUrl)],
+      )) as unknown as { present: boolean }[];
+      if (sysWithheld.length > 0 && present?.present === true) {
+        const sys = makeDb(config.migrationWorkflowSystemDatabaseUrl, 1, {
+          applicationName: 'rayspec-import',
+        });
+        try {
+          await alterDefaultWrites(sys, config.runtimeRole, sysWithheld, 'GRANT');
+        } finally {
+          await sys.$client.end().catch(() => {});
+        }
+      }
     });
     if (config.blobRoot !== null && (await blobRootState(config.blobRoot)) === 'not-empty') {
       for (const entry of await readdir(config.blobRoot)) {

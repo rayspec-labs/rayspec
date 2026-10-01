@@ -272,6 +272,23 @@ export {
   schemaProbe,
 } from './health.js';
 export {
+  type CatalogExpectation,
+  type CatalogState,
+  catalogDifference,
+  catalogDigest,
+  readCatalog,
+} from './import-catalog.js';
+export {
+  CUTOVER_TOKEN_LIFETIME_MS,
+  type CutoverDatabases,
+  type CutoverImport,
+  type CutoverResult,
+  type CutoverToken,
+  consumeCutoverToken,
+  issueCutoverToken,
+  renewCutoverToken,
+} from './import-cutover.js';
+export {
   applyIdentityPolicy,
   BOOT_SECRET_FILES,
   type BootSecretName,
@@ -282,8 +299,6 @@ export {
   mintBootSecrets,
 } from './import-identity.js';
 export {
-  CUTOVER_TOKEN_LIFETIME_MS,
-  type CutoverToken,
   closeInterruptedImport,
   discardInstruction,
   IMPORT_ACTOR,
@@ -303,10 +318,13 @@ export {
   type ImportTargetInspection,
   type ImportVerification,
   inspectImportTarget,
+  markImportFailed,
   type RestoredImport,
   type RestoreImportOptions,
   type RestoreImportResult,
+  readWithheldDefaultWrites,
   restoreImport,
+  type WithheldDefaultWrite,
 } from './import-target.js';
 export {
   type MigrationBundleInput,

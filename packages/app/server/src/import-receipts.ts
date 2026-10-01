@@ -2,7 +2,11 @@
  * THE RECEIPTS OF AN IMPORT — every transition of the migration state machine an import goes
  * through on the target, recorded where the operator and the target environment read it back:
  *
- *   IMPORTING → VERIFYING → READY_FOR_CUTOVER, and BLOCKED from either of the first two.
+ *   IMPORTING → VERIFYING → READY_FOR_CUTOVER → CUTOVER → COMPLETE, and BLOCKED from either of the
+ *   first two.
+ *
+ * READY_FOR_CUTOVER is recorded again when the cutover token is renewed; CUTOVER when a cutover
+ * consumed the token, COMPLETE when it released the target's fence (`import-cutover.ts`).
  *
  * Each transition carries the operation id, the actor, the source's fence epoch (the one the
  * snapshot was taken under) and the target's, the time, the digests known by then and the recovery
@@ -29,10 +33,18 @@ import {
 } from '@rayspec/bundle-contract';
 import type { Db } from '@rayspec/db';
 import type { StateDirectory } from './deployment-state.js';
+import type { CutoverToken } from './import-cutover.js';
+import type { WithheldDefaultWrite } from './import-target.js';
 import { appendOperationReceipt } from './operation-lease.js';
 
 /** The states of the migration state machine an import moves through. */
-export type ImportState = 'IMPORTING' | 'VERIFYING' | 'READY_FOR_CUTOVER' | 'BLOCKED';
+export type ImportState =
+  | 'IMPORTING'
+  | 'VERIFYING'
+  | 'READY_FOR_CUTOVER'
+  | 'CUTOVER'
+  | 'COMPLETE'
+  | 'BLOCKED';
 
 /** The actor an import records: the CLI on the operator's host. Never a credential. */
 export const IMPORT_ACTOR = 'rayspec-import';
@@ -59,22 +71,6 @@ export interface ImportTransition {
   interrupted?: true;
   closedBy?: string;
 }
-
-/** What binds the cutover: the migration, the target and both fences. */
-export interface CutoverToken {
-  cutoverTokenFormatVersion: 1;
-  migrationBundleSha256: string;
-  applicationDigest: string;
-  targetDeploymentId: string;
-  sourceFenceEpoch: number;
-  targetFenceEpoch: number;
-  targetEnvironmentRevision: number;
-  issuedAt: string;
-  expiresAt: string;
-}
-
-/** The cutover token's lifetime. */
-export const CUTOVER_TOKEN_LIFETIME_MS = 15 * 60 * 1000;
 
 /** Counts and facts of a finished import; no table, store or record is named. */
 export interface ImportSummary {
@@ -111,9 +107,10 @@ export interface ImportReceipt {
   deploymentId: string | null;
   /** SHA-256 of the canonical request (bundle digest, target), never the request itself. */
   inputsDigest: string;
-  outcome: 'ready-for-cutover' | 'blocked' | null;
+  outcome: 'ready-for-cutover' | 'complete' | 'blocked' | null;
   transitions: ImportTransition[];
   summary: ImportSummary | null;
+  /** What the cutover token binds, and the token's SHA-256; never the token. */
   cutover: { token: CutoverToken; tokenSha256: string } | null;
 }
 
@@ -124,8 +121,13 @@ export interface ImportRecord {
   deploymentId: string;
   migrationBundleSha256: string;
   sourceFenceEpoch: number;
-  state: 'IMPORTING' | 'READY_FOR_CUTOVER' | 'BLOCKED';
+  state: 'IMPORTING' | 'READY_FOR_CUTOVER' | 'CUTOVER' | 'COMPLETE' | 'BLOCKED';
   updatedAt: string;
+  /**
+   * The default write privileges the import withheld from the runtime role while it restored; a
+   * discard gives them back.
+   */
+  withheldDefaultWrites?: WithheldDefaultWrite[];
 }
 
 /** The local receipt's name for an import's operation id. */
@@ -187,9 +189,31 @@ export class ImportReceiptLog {
     this.#receipt.deploymentId = deploymentId;
   }
 
-  /** From now on every transition is also recorded in the target's receipts, earlier ones first. */
-  async attach(db: Db): Promise<void> {
+  /**
+   * Continue the local receipt of an import (its cutover, or a renewed cutover token); null when the
+   * state directory holds none for it.
+   */
+  static async reopen(
+    stateDir: StateDirectory,
+    operationId: string,
+  ): Promise<ImportReceiptLog | null> {
+    let found: unknown;
+    try {
+      found = await stateDir.readReceipt(importReceiptName(operationId));
+    } catch {
+      return null;
+    }
+    if (!isImportReceipt(found)) return null;
+    return new ImportReceiptLog(stateDir, found);
+  }
+
+  /**
+   * From now on every transition is also recorded in the target's receipts; the earlier ones first,
+   * unless they are there already (`replay: false`, for a reopened receipt).
+   */
+  async attach(db: Db, options: { replay?: boolean } = {}): Promise<void> {
     this.#db = db;
+    if (options.replay === false) return;
     for (const t of this.#receipt.transitions) await this.#record(t);
   }
 
@@ -222,6 +246,7 @@ export class ImportReceiptLog {
     };
     this.#receipt.transitions.push(t);
     if (state === 'READY_FOR_CUTOVER') this.#receipt.outcome = 'ready-for-cutover';
+    if (state === 'COMPLETE') this.#receipt.outcome = 'complete';
     if (state === 'BLOCKED') this.#receipt.outcome = 'blocked';
     await this.#write();
     if (this.#db !== null) await this.#record(t);
@@ -232,11 +257,10 @@ export class ImportReceiptLog {
     await this.#write();
   }
 
-  async cutover(token: CutoverToken): Promise<string> {
-    const tokenSha256 = digestOf(token);
+  /** Record what a cutover token binds and its SHA-256 (never the token). */
+  async cutover(token: CutoverToken, tokenSha256: string): Promise<void> {
     this.#receipt.cutover = { token, tokenSha256 };
     await this.#write();
-    return tokenSha256;
   }
 
   async #write(): Promise<void> {
@@ -259,7 +283,8 @@ async function appendImportTransition(
   receipt: Pick<ImportReceipt, 'operationId' | 'actor' | 'inputsDigest' | 'cutover'>,
   t: ImportTransition,
 ): Promise<void> {
-  const terminal = t.state === 'READY_FOR_CUTOVER' || t.state === 'BLOCKED';
+  const terminal =
+    t.state === 'READY_FOR_CUTOVER' || t.state === 'COMPLETE' || t.state === 'BLOCKED';
   await appendOperationReceipt(
     db,
     {
@@ -275,7 +300,7 @@ async function appendImportTransition(
         t.state === 'READY_FOR_CUTOVER' && receipt.cutover !== null
           ? receipt.cutover.tokenSha256
           : (t.digests.migrationBundleSha256 ?? null),
-      ...(terminal ? { outcome: t.state === 'READY_FOR_CUTOVER' ? 'succeeded' : 'failed' } : {}),
+      ...(terminal ? { outcome: t.state === 'BLOCKED' ? 'failed' : 'succeeded' } : {}),
       detail: {
         ...t,
         ...(t.state === 'READY_FOR_CUTOVER' && receipt.cutover !== null
