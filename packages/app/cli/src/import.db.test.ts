@@ -21,12 +21,23 @@
  *     it and closes the killed run's receipt; `--discard-failed` empties it.
  *  9. SIGINT during the restore ends `pg_restore` (exit 6); the target is discarded the same way.
  * 10. The full round trip: every row of both databases and every file equals the source's —
- *     non-ASCII text, NULLs, JSON, a foreign key, two users with their password hashes — the
- *     credential tables are empty, every transition is in the receipts, the target is fenced with its
+ *     non-ASCII text, NULLs, JSON, a foreign key, three users with their password hashes (one owner
+ *     holds none: their only credential was an API key) — the credential tables are empty, each
+ *     account's carried identity is in the target's security audit, stderr says who signs in again
+ *     and which owner needs owner recovery, the target's own boot secrets are in a new private
+ *     directory and in no output, every transition is in the receipts, the target is fenced with its
  *     runtime role unable to write, and the source is untouched.
- * 11. The cutover: `rayspec resume` releases the target's fence, the application deployed there with
- *     new boot secrets serves the imported rows, a member signs in with the password they had, and a
- *     token the source issued is refused.
+ * 11. The cutover: owner recovery is refused while the target is fenced; `rayspec resume` releases
+ *     the fence; the application deployed there with the secrets the import minted serves the
+ *     imported rows; a member signs in with the password they had; the source's access token,
+ *     refresh session, API key and invite are all refused; the key-only owner gets a recovery token
+ *     printed once, redeems it once (a second redemption fails), signs in with the new password and
+ *     reissues an API key that works; the token is stored only as its HMAC and in no audit row or
+ *     receipt.
+ * 12. The other mode: a backup of the source (both databases whole, credentials included) restored
+ *     and served under new secrets refuses every copied credential while the password signs in;
+ *     served under the source's own secrets it keeps the access token, the refresh session, the API
+ *     key and the invite.
  *
  * `pg_dump`/`pg_restore`: the host's when their major is the server's, else the pinned image through
  * docker. Skips without DATABASE_URL; a REQUIRED run (CI, RAYSPEC_REQUIRE_DB_TESTS) fails instead,
@@ -37,6 +48,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
+  cpSync,
   existsSync,
   fstatSync,
   mkdirSync,
@@ -59,7 +71,7 @@ import type { RuntimeRoleLane } from '@rayspec/db/testing';
 import { listFsBlobs } from '@rayspec/platform';
 import type { DumpTocEntry } from '@rayspec/server';
 import { generateX25519Identity } from 'age-encryption';
-import { exportPKCS8, generateKeyPair } from 'jose';
+import { decodeJwt, exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -89,7 +101,7 @@ import {
   TICK,
   withDbName,
 } from './test-support/migration-source.js';
-import { holdingPgRestore } from './test-support/pg-tools.js';
+import { holdingPgRestore, runPgTool } from './test-support/pg-tools.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -100,12 +112,14 @@ if (dbRequired && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARMS = 11;
+const ARMS = 12;
 
 const SOURCE_DB = `rayspec_import_src_${process.pid}`;
 const TARGET_DB = `rayspec_import_tgt_${process.pid}`;
 const TARGET_SYS = `${TARGET_DB}_dbos_sys`;
 const TWO_ORGS_DB = `${SOURCE_DB}_two_orgs`;
+const PAIRED_DB = `rayspec_import_pair_${process.pid}`;
+const PAIRED_SYS = `${PAIRED_DB}_dbos_sys`;
 const valid = schemaValidator('resultEnvelope');
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -205,15 +219,27 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     return run;
   }
 
-  const importArgs = (bundle: string, extra: string[] = []) => [
-    'import',
-    bundle,
-    '--target',
-    stateDir,
-    '--identity-file',
-    identityFile,
-    ...extra,
-  ];
+  /** Each import gets a new directory for the target's boot secrets; a dry run gets none. */
+  let secretsDirs = 0;
+  let lastSecretsOut = '';
+  const importArgs = (bundle: string, extra: string[] = []) => {
+    let secretsOut: string[] = [];
+    if (!extra.includes('--dry-run')) {
+      secretsDirs += 1;
+      lastSecretsOut = join(workDir, `secrets-${secretsDirs}`);
+      secretsOut = ['--secrets-out', lastSecretsOut];
+    }
+    return [
+      'import',
+      bundle,
+      '--target',
+      stateDir,
+      ...secretsOut,
+      '--identity-file',
+      identityFile,
+      ...extra,
+    ];
+  };
 
   /** Everything in a database an import could have left: relations, functions, schemas, extensions. */
   async function contents(db: string): Promise<number> {
@@ -301,7 +327,7 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     if (!baseUrl) return;
     await source?.dispose().catch(() => {});
     await asAdmin(adminUrl, 'postgres', async (sql) => {
-      for (const name of [TARGET_DB, TARGET_SYS, TWO_ORGS_DB]) {
+      for (const name of [TARGET_DB, TARGET_SYS, TWO_ORGS_DB, PAIRED_DB, PAIRED_SYS]) {
         await sql.unsafe(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
       }
     }).catch(() => {});
@@ -738,11 +764,13 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
   }, 600_000);
 
   let imported: CliRun;
+  let importedSecrets = '';
 
   it('imports the bundle: every row and file equals the source, credentials are reset, the target is fenced and the source untouched', async () => {
     const sourceFence = await fenceOf(source.db);
     const sourceBlobs = (await listFsBlobs(source.blobRoot, { phase: 'quiesced' })).objects;
     imported = await cli(importArgs(source.bundle, ['--bindings-file', bindingsFile]));
+    importedSecrets = lastSecretsOut;
     const run = imported;
     expect(run.code, run.stderr).toBe(0);
     const data = run.envelope.data as ParsedJson;
@@ -789,6 +817,12 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
         expect(t.rows, `${t.schema}.${t.table}`).toBe(0);
         continue;
       }
+      // The security audit left the source; the target's starts with the identity the import
+      // carried, one row per account, written after the counts were verified (below).
+      if (t.database === 'application' && t.table === 'auth_audit') {
+        expect(t.rows).toBe(0);
+        continue;
+      }
       expect(restored.length, `${t.database} ${t.schema}.${t.table}`).toBe(t.rows);
       if (t.database === 'application' && excludedTables.has(`${t.schema}.${t.table}`)) {
         expect(restored, `${t.schema}.${t.table}`).toEqual([]);
@@ -808,7 +842,7 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     const users = await asAdmin(adminUrl, TARGET_DB, (sql) =>
       sql.unsafe('SELECT email, password_hash FROM users ORDER BY email'),
     );
-    expect(users).toHaveLength(2);
+    expect(users).toHaveLength(3);
     expect(users).toEqual(
       await asAdmin(adminUrl, source.db, (sql) =>
         sql.unsafe('SELECT email, password_hash FROM users ORDER BY email'),
@@ -819,12 +853,72 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       'api_keys',
       'invites',
       'oidc_models',
-      'auth_audit',
+      'owner_recovery_tokens',
       'idempotency_keys',
     ]) {
       expect(await rowsOf(TARGET_DB, 'public', table), table).toEqual([]);
     }
-    expect((await rowsOf(source.db, 'public', 'sessions')).length).toBeGreaterThan(0);
+    for (const table of ['sessions', 'api_keys', 'invites']) {
+      expect((await rowsOf(source.db, 'public', table)).length, table).toBeGreaterThan(0);
+    }
+
+    // The identity policy: each account's carried identity is on the target's security record, and
+    // stderr says who signs in again and which owner needs owner recovery.
+    const audited = (await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe(
+        `SELECT u.email, a.actor_org_id::text AS org, a.meta FROM auth_audit a
+           JOIN users u ON u.id = a.actor_user_id WHERE a.event = 'identity_imported' ORDER BY u.email`,
+      ),
+    )) as unknown as { email: string; org: string; meta: Record<string, string> }[];
+    expect(await rowsOf(TARGET_DB, 'public', 'auth_audit')).toHaveLength(3);
+    expect(audited.map((a) => a.email)).toEqual(users.map((u) => u.email));
+    for (const a of audited) {
+      expect(a.org).toBe(SOURCE_TENANT);
+      expect(a.meta).toMatchObject({
+        operationId: run.envelope.operationId,
+        migrationBundleSha256: source.exported.sha256,
+        userId: 'preserved',
+        passwordHash: a.email === source.keyholder.email ? 'absent' : 'preserved',
+        sessions: 'reset',
+        apiKeys: 'reset',
+        invites: 'reset',
+      });
+    }
+    const signIn = run.stderr.split('\n').find((l) => l.startsWith('sign in again')) ?? '';
+    expect(signIn).toContain('(2)');
+    for (const m of source.members) expect(signIn).toContain(m.email);
+    const recovery = run.stderr.split('\n').find((l) => l.startsWith('owner recovery')) ?? '';
+    expect(recovery).toContain(`${source.keyholder.email} (owner)`);
+    expect(recovery).toContain('rayspec tenant recover-owner');
+    expect(run.stderr).toContain('every key of the source is reissued');
+
+    // The target's own boot secrets: a new private directory, three private files, never printed.
+    const secretsDir = lastSecretsOut;
+    const dirFd = openSync(secretsDir, 'r');
+    try {
+      expect(fstatSync(dirFd).mode & 0o777).toBe(0o700);
+    } finally {
+      closeSync(dirFd);
+    }
+    expect(readdirSync(secretsDir).sort()).toEqual(
+      ['api-key-pepper', 'jwt-signing-key.pem', 'media-signing-key'].sort(),
+    );
+    for (const name of readdirSync(secretsDir)) {
+      const fd = openSync(join(secretsDir, name), 'r');
+      let value: string;
+      try {
+        expect(fstatSync(fd).mode & 0o777, name).toBe(0o600);
+        value = readFileSync(fd, 'utf8');
+      } finally {
+        closeSync(fd);
+      }
+      expect(value.length).toBeGreaterThan(40);
+      expect(`${run.stdout}${run.stderr}`.includes(value.trim()), name).toBe(false);
+      expect(value).not.toContain(source.bootSecrets.apiKeyPepper);
+    }
+    expect(run.stderr).toContain(
+      `RAYSPEC_API_KEY_PEPPER_FILE=${join(secretsDir, 'api-key-pepper')}`,
+    );
 
     // Every file, byte for byte.
     const restoredBlobs = (await listFsBlobs(blobRoot, { phase: 'quiesced' })).objects;
@@ -874,6 +968,10 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       actor: 'rayspec-import',
       deploymentId,
       outcome: 'ready-for-cutover',
+      summary: {
+        bootSecrets: 'reissued',
+        identity: { signInAgain: 2, ownerRecovery: 1, noCredential: 0 },
+      },
     });
     expect((receipt.transitions as ParsedJson[]).map((t) => t.state)).toEqual([
       'IMPORTING',
@@ -886,7 +984,14 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       sourceFenceEpoch: source.exported.fenceEpoch,
       targetFenceEpoch: 1,
     });
-    for (const s of [...secrets(), stateDir, NON_ASCII, 'import_notes']) {
+    for (const s of [
+      ...secrets(),
+      stateDir,
+      NON_ASCII,
+      'import_notes',
+      source.keyholder.email,
+      lastSecretsOut,
+    ]) {
       expect(receiptText.includes(s), s.slice(0, 12)).toBe(false);
     }
     const rows = await asAdmin(adminUrl, TARGET_DB, (sql) =>
@@ -922,8 +1027,29 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     armsRan += 1;
   }, 600_000);
 
-  it('the cutover: resume releases the target, the application serves the imported rows, passwords sign in, source tokens do not', async () => {
+  /** `rayspec tenant recover-owner` against the target: its own JSON object, not an envelope. */
+  async function recoverOwner(email: string, env: NodeJS.ProcessEnv) {
+    const run = await start(['tenant', 'recover-owner', '--email', email], env).done;
+    expect(run.leaked, 'a secret reached the output').toBe(0);
+    return { ...run, result: run.envelope as ParsedJson };
+  }
+
+  it('the cutover: the new boot secrets serve the imported rows; passwords sign in; every copied session, refresh token, API key and invite fails; owner recovery works once', async () => {
     const deploymentId = imported.envelope.data.deploymentId as string;
+    const recoveryEnv = {
+      ...targetEnv(),
+      RAYSPEC_API_KEY_PEPPER_FILE: join(importedSecrets, 'api-key-pepper'),
+    };
+    // Before the cutover the target is fenced, so no recovery token is written into it.
+    const early = await recoverOwner(source.keyholder.email, recoveryEnv);
+    expect(early.code).toBe(1);
+    expect(early.result).toMatchObject({
+      ok: false,
+      errors: [{ code: 'ENVIRONMENT_FENCED' }],
+    });
+    expect(early.result).not.toHaveProperty('recoveryToken');
+    expect(await rowsOf(TARGET_DB, 'public', 'owner_recovery_tokens')).toEqual([]);
+
     const resumed = await cli([
       'resume',
       '--deployment',
@@ -936,89 +1062,53 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     expect(resumed.code, resumed.stderr).toBe(0);
     expect(resumed.envelope.data).toMatchObject({ released: true });
 
-    const { privateKey } = await generateKeyPair('RS256', {
-      extractable: true,
-      modulusLength: 2048,
-    });
+    // The application, deployed with the secrets the import minted, read through their _FILE mounts.
     const port = await freePort();
     const deployEnv = {
       ...targetEnv(),
       SHADOW_DATABASE_URL: process.env.SHADOW_DATABASE_URL ?? adminUrl,
-      RAYSPEC_JWT_SIGNING_KEY: await exportPKCS8(privateKey),
-      RAYSPEC_API_KEY_PEPPER: ['target', 'pepper', randomUUID()].join('-'),
+      RAYSPEC_JWT_SIGNING_KEY_FILE: join(importedSecrets, 'jwt-signing-key.pem'),
+      RAYSPEC_API_KEY_PEPPER_FILE: join(importedSecrets, 'api-key-pepper'),
       RAYSPEC_CRON_TENANT_ID: SOURCE_TENANT,
     };
-    const dry = spawnSync(
-      process.execPath,
-      [
-        CLI_DIST,
-        'deploy',
-        source.appBundle,
-        '--dry-run',
-        '--bindings-file',
-        bindingsFile,
-        '--state-dir',
-        stateDir,
-      ],
-      { cwd: workDir, env: deployEnv, encoding: 'utf8', timeout: 180_000 },
-    );
-    expect(dry.status, dry.stderr).toBe(0);
-    const plan = JSON.parse(dry.stdout) as ParsedJson;
-    expect(plan.data.plan.schemaImpact.from).toEqual(parts.snapshot.schemaHead);
-    const served = spawn(
-      process.execPath,
-      [
-        CLI_DIST,
-        'deploy',
-        source.appBundle,
-        '--plan-digest',
-        plan.data.planDigest,
-        '--port',
-        String(port),
-        '--bindings-file',
-        bindingsFile,
-        '--state-dir',
-        stateDir,
-      ],
-      {
-        cwd: workDir,
-        env: { ...deployEnv, ALLOWED_ORIGINS: '' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-    children.push(served);
-    let out = '';
-    served.stdout?.on('data', (d) => {
-      out += String(d);
-    });
-    served.stderr?.on('data', (d) => {
-      out += String(d);
-    });
-    const deadline = Date.now() + 150_000;
-    for (;;) {
-      if (served.exitCode !== null) throw new Error(`deploy exited\n${out}`);
-      try {
-        if ((await fetch(`http://127.0.0.1:${port}/livez`)).status === 200) break;
-      } catch {
-        // not listening yet
-      }
-      if (Date.now() > deadline) throw new Error(`deploy did not serve\n${out}`);
-      await pause(250);
-    }
+    const served = await serve(deployEnv, stateDir, port);
     try {
       const base = `http://127.0.0.1:${port}`;
-      // A token the source issued is signed with the source's key: refused.
+      const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+        fetch(`${base}${path}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...headers },
+          body: JSON.stringify(body),
+        });
+      // Every credential the source's secrets keyed fails: its access token, its refresh session,
+      // its API key and its pending invite.
+      const sourceToken = await source.freshSourceToken();
+      expect((decodeJwt(sourceToken).exp ?? 0) * 1000).toBeGreaterThan(Date.now() + 60_000);
       const old = await fetch(`${base}/notes`, {
-        headers: { authorization: `Bearer ${source.sourceToken}` },
+        headers: { authorization: `Bearer ${sourceToken}` },
       });
       expect(old.status).toBe(401);
+      const refreshed = await fetch(`${base}/v1/auth/refresh`, {
+        method: 'POST',
+        headers: {
+          cookie: `__Host-rayspec_refresh=${source.issued.refreshSecret}`,
+          'sec-fetch-site': 'same-origin',
+        },
+      });
+      expect(refreshed.status).toBe(401);
+      const keyed = await fetch(`${base}/v1/orgs/${SOURCE_TENANT}/api-keys`, {
+        headers: { authorization: `Bearer ${source.issued.apiKey}` },
+      });
+      expect(keyed.status).toBe(401);
+      const invited = await post('/v1/invites/accept', {
+        token: source.issued.inviteToken,
+        password: 'an-invitee-long-password',
+      });
+      expect(invited.status).toBe(400);
+
       // A member signs in with the password they had at the source.
       const owner = source.members[0]!;
-      const login = await fetch(`${base}/v1/auth/login`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email: owner.email, password: owner.password }),
-      });
+      const login = await post('/v1/auth/login', { email: owner.email, password: owner.password });
       expect(login.status).toBe(200);
       let token = ((await login.json()) as { accessToken: string }).accessToken;
       const switched = await fetch(`${base}/v1/orgs/${SOURCE_TENANT}/switch`, {
@@ -1040,10 +1130,307 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       });
       expect(posted.status).toBe(201);
       expect((await fenceOf(source.db))?.state).toBe('fenced');
+
+      // The owner whose only credential was the API key: nothing to sign in with, until the
+      // operator issues a recovery token, which works once.
+      const recoveryPassword = ['recovered', 'owner', randomUUID().slice(0, 8)].join('-');
+      expect(
+        (
+          await post('/v1/auth/login', {
+            email: source.keyholder.email,
+            password: recoveryPassword,
+          })
+        ).status,
+      ).toBe(401);
+      const issued = await recoverOwner(source.keyholder.email, recoveryEnv);
+      expect(issued.code, issued.stderr).toBe(0);
+      const recoveryToken = issued.result.recoveryToken as string;
+      expect(recoveryToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(issued.result).toMatchObject({
+        ok: true,
+        orgId: SOURCE_TENANT,
+        redeemPath: '/v1/auth/owner-recovery',
+      });
+      // Printed once: in the one JSON object on stdout, nowhere else.
+      expect(issued.stdout.split(recoveryToken)).toHaveLength(2);
+      expect(issued.stderr).not.toContain(recoveryToken);
+
+      const redeemed = await post('/v1/auth/owner-recovery', {
+        token: recoveryToken,
+        password: recoveryPassword,
+      });
+      expect(redeemed.status).toBe(200);
+      const recovered = (await redeemed.json()) as { accessToken: string; role: string };
+      expect(recovered.role).toBe('owner');
+      const again = await post('/v1/auth/owner-recovery', {
+        token: recoveryToken,
+        password: `${recoveryPassword}-again`,
+      });
+      expect(again.status).toBe(400);
+      expect(
+        (
+          await post('/v1/auth/login', {
+            email: source.keyholder.email,
+            password: recoveryPassword,
+          })
+        ).status,
+      ).toBe(200);
+      // The recovered owner reissues an API key, which works on the target.
+      const reissued = await fetch(`${base}/v1/orgs/${SOURCE_TENANT}/api-keys`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${recovered.accessToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ scopes: ['apikey:read'] }),
+      });
+      expect(reissued.status).toBe(201);
+      const newKey = ((await reissued.json()) as { plaintext: string }).plaintext;
+      expect(
+        (
+          await fetch(`${base}/v1/orgs/${SOURCE_TENANT}/api-keys`, {
+            headers: { authorization: `Bearer ${newKey}` },
+          })
+        ).status,
+      ).toBe(200);
+
+      // The token is stored as its HMAC only, and audited without it.
+      const stored = await rowsOf(TARGET_DB, 'public', 'owner_recovery_tokens');
+      expect(stored).toHaveLength(1);
+      expect(stored[0]).not.toContain(recoveryToken);
+      const events = (await asAdmin(adminUrl, TARGET_DB, (sql) =>
+        sql.unsafe(
+          `SELECT event, meta::text AS meta FROM auth_audit
+            WHERE event IN ('owner_recovery_issued', 'owner_recovery_redeemed') ORDER BY created_at`,
+        ),
+      )) as unknown as { event: string; meta: string }[];
+      expect(events.map((e) => e.event)).toEqual([
+        'owner_recovery_issued',
+        'owner_recovery_redeemed',
+      ]);
+      expect(events.some((e) => e.meta.includes(recoveryToken))).toBe(false);
+      for (const f of readdirSync(join(stateDir, 'receipts'))) {
+        expect(readFileSync(join(stateDir, 'receipts', f), 'utf8')).not.toContain(recoveryToken);
+      }
     } finally {
       served.kill('SIGTERM');
       await new Promise((r) => served.on('exit', r));
     }
     armsRan += 1;
   }, 600_000);
+
+  it('a backup restore paired with the source secrets keeps its sessions, refresh tokens, API keys and invites; new secrets break them and passwords survive', async () => {
+    // The operator's own backup of the source, both databases whole, credentials included, restored
+    // on the same server and prepared like any database the roles serve.
+    for (const [from, to] of [
+      [source.db, PAIRED_DB],
+      [source.sysDb, PAIRED_SYS],
+    ] as const) {
+      const u = new URL(withDbName(adminUrl, from));
+      const dump = spawnSync(source.pgDump, ['--format=custom'], {
+        env: {
+          PATH: process.env.PATH ?? '',
+          HOME: process.env.HOME ?? '',
+          PGHOST: u.hostname,
+          PGPORT: u.port || '5432',
+          PGUSER: decodeURIComponent(u.username),
+          PGPASSWORD: decodeURIComponent(u.password),
+          PGDATABASE: from,
+        },
+        maxBuffer: 1024 * 1024 * 1024,
+        timeout: 300_000,
+      });
+      expect(dump.status, String(dump.stderr)).toBe(0);
+      await asAdmin(adminUrl, 'postgres', async (sql) => {
+        await sql.unsafe(`DROP DATABASE IF EXISTS "${to}" WITH (FORCE)`);
+        await sql.unsafe(`CREATE DATABASE "${to}"`);
+      });
+      const restored = await runPgTool(
+        source.pgRestore,
+        withDbName(adminUrl, to),
+        ['--exit-on-error', '--single-transaction', '--dbname', to],
+        dump.stdout,
+      );
+      expect(restored.code, restored.stderr).toBe(0);
+      const roles = from === source.db ? source.roles.app : source.roles.sys;
+      const role = (url: string) => decodeURIComponent(new URL(url).username);
+      await asAdmin(adminUrl, to, async (sql) => {
+        await sql.unsafe(`REVOKE CREATE, TEMPORARY ON DATABASE "${to}" FROM PUBLIC`);
+        await sql.unsafe(
+          `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE "${to}" TO "${role(roles.migration)}"`,
+        );
+        await sql.unsafe(
+          `GRANT CONNECT ON DATABASE "${to}" TO "${role(roles.runtime)}", "${role(roles.snapshot)}"`,
+        );
+      });
+    }
+    // The backup carries the credentials: the rows are there.
+    for (const table of ['sessions', 'api_keys', 'invites']) {
+      expect((await rowsOf(PAIRED_DB, 'public', table)).length, table).toBeGreaterThan(0);
+    }
+    const pairedDir = join(workDir, 'paired');
+    mkdirSync(pairedDir, { mode: 0o700 });
+    const pairedState = join(pairedDir, 'state');
+    cpSync(source.stateDir, pairedState, { recursive: true });
+    // A copy takes the default modes; the state directory is private, as on the host it came from.
+    expect(spawnSync('chmod', ['-R', 'go-rwx', pairedState]).status).toBe(0);
+    const pairedBlobs = join(pairedDir, 'blobs');
+    cpSync(source.blobRoot, pairedBlobs, { recursive: true });
+    const pairedEnv = (secrets: { jwtSigningKey: string; apiKeyPepper: string }) => ({
+      PATH: process.env.PATH ?? '',
+      HOME: process.env.HOME ?? '',
+      DATABASE_URL: withDbName(source.roles.app.runtime, PAIRED_DB),
+      RAYSPEC_MIGRATION_DATABASE_URL: withDbName(source.roles.app.migration, PAIRED_DB),
+      DBOS_SYSTEM_DATABASE_URL: withDbName(source.roles.sys.runtime, PAIRED_SYS),
+      SHADOW_DATABASE_URL: process.env.SHADOW_DATABASE_URL ?? adminUrl,
+      RAYSPEC_BLOB_ROOT: pairedBlobs,
+      RAYSPEC_CRON_TENANT_ID: SOURCE_TENANT,
+      RAYSPEC_JWT_SIGNING_KEY: secrets.jwtSigningKey,
+      RAYSPEC_API_KEY_PEPPER: secrets.apiKeyPepper,
+    });
+    // The backup was taken while the export held the source's fence; release it on the copy.
+    const resumed = await cli(
+      [
+        'resume',
+        '--deployment',
+        source.deploymentId,
+        '--fence-epoch',
+        String(source.exported.fenceEpoch),
+        '--state-dir',
+        pairedState,
+      ],
+      pairedEnv(source.bootSecrets),
+    );
+    expect(resumed.code, resumed.stderr).toBe(0);
+
+    const probe = async (secrets: { jwtSigningKey: string; apiKeyPepper: string }) => {
+      const port = await freePort();
+      const served = await serve(pairedEnv(secrets), pairedState, port);
+      try {
+        const base = `http://127.0.0.1:${port}`;
+        const status = async (path: string, init: RequestInit) =>
+          (await fetch(`${base}${path}`, init)).status;
+        const sourceToken = await source.freshSourceToken();
+        expect((decodeJwt(sourceToken).exp ?? 0) * 1000).toBeGreaterThan(Date.now() + 60_000);
+        return {
+          accessToken: await status('/notes', {
+            headers: { authorization: `Bearer ${sourceToken}` },
+          }),
+          refresh: await status('/v1/auth/refresh', {
+            method: 'POST',
+            headers: {
+              cookie: `__Host-rayspec_refresh=${source.issued.refreshSecret}`,
+              'sec-fetch-site': 'same-origin',
+            },
+          }),
+          apiKey: await status(`/v1/orgs/${SOURCE_TENANT}/api-keys`, {
+            headers: { authorization: `Bearer ${source.issued.apiKey}` },
+          }),
+          invite: await status('/v1/invites/accept', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              token: source.issued.inviteToken,
+              password: 'an-invitee-long-password',
+            }),
+          }),
+          password: await status('/v1/auth/login', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              email: source.members[1]!.email,
+              password: source.members[1]!.password,
+            }),
+          }),
+        };
+      } finally {
+        served.kill('SIGTERM');
+        await new Promise((r) => served.on('exit', r));
+      }
+    };
+
+    // Under new secrets — what a portability import always does — every row is there and every
+    // credential keyed by the old secrets is refused; the password is not keyed by them.
+    const { privateKey } = await generateKeyPair('RS256', {
+      extractable: true,
+      modulusLength: 2048,
+    });
+    const fresh = {
+      jwtSigningKey: await exportPKCS8(privateKey),
+      apiKeyPepper: ['fresh', 'pepper', randomUUID()].join('-'),
+    };
+    expect(await probe(fresh)).toEqual({
+      accessToken: 401,
+      refresh: 401,
+      apiKey: 401,
+      invite: 400,
+      password: 200,
+    });
+    // Under the source's own secrets, the backup keeps every credential.
+    expect(await probe(source.bootSecrets)).toEqual({
+      accessToken: 200,
+      refresh: 200,
+      apiKey: 200,
+      invite: 201,
+      password: 200,
+    });
+    armsRan += 1;
+  }, 900_000);
+
+  /** Deploy the source's application with `env` on `stateDir` and wait until it serves on `port`. */
+  async function serve(env: NodeJS.ProcessEnv, dir: string, port: number): Promise<ChildProcess> {
+    const dry = spawnSync(
+      process.execPath,
+      [
+        CLI_DIST,
+        'deploy',
+        source.appBundle,
+        '--dry-run',
+        '--bindings-file',
+        bindingsFile,
+        '--state-dir',
+        dir,
+      ],
+      { cwd: workDir, env, encoding: 'utf8', timeout: 180_000 },
+    );
+    expect(dry.status, dry.stderr).toBe(0);
+    const plan = JSON.parse(dry.stdout) as ParsedJson;
+    expect(plan.data.plan.schemaImpact.from).toEqual(parts.snapshot.schemaHead);
+    const served = spawn(
+      process.execPath,
+      [
+        CLI_DIST,
+        'deploy',
+        source.appBundle,
+        '--plan-digest',
+        plan.data.planDigest,
+        '--port',
+        String(port),
+        '--bindings-file',
+        bindingsFile,
+        '--state-dir',
+        dir,
+      ],
+      { cwd: workDir, env: { ...env, ALLOWED_ORIGINS: '' }, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    children.push(served);
+    let out = '';
+    served.stdout?.on('data', (d) => {
+      out += String(d);
+    });
+    served.stderr?.on('data', (d) => {
+      out += String(d);
+    });
+    const deadline = Date.now() + 150_000;
+    for (;;) {
+      if (served.exitCode !== null) throw new Error(`deploy exited\n${out}`);
+      try {
+        if ((await fetch(`http://127.0.0.1:${port}/livez`)).status === 200) return served;
+      } catch {
+        // not listening yet
+      }
+      if (Date.now() > deadline) throw new Error(`deploy did not serve\n${out}`);
+      await pause(250);
+    }
+  }
 });

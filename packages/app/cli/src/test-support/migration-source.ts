@@ -3,7 +3,9 @@
  * packed with `rayspec pack`, deployed with the real CLI (`rayspec deploy <file.ray>`) under role
  * separation on databases of its own, with a durable worker, a cron trigger and an fs blob root;
  * seeded through its HTTP API with two users, rows that hold non-ASCII text, NULLs and a foreign key,
- * and files; then exported with `rayspec export` to an age X25519 recipient.
+ * and files; given the credentials its secrets key — a refresh session, an API key, a pending
+ * invite — and a second owner whose only credential is an API key (no password, as an account that
+ * only ever used a key has); then exported with `rayspec export` to an age X25519 recipient.
  *
  * The suites that use it compare the import against `expected()`, which reads the source as the
  * superuser after the export, while the source is fenced and cannot change.
@@ -15,7 +17,14 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createRuntimeRoleLane, type RuntimeRoleLane } from '@rayspec/db/testing';
 import { generateX25519Identity, identityToRecipient } from 'age-encryption';
-import { exportPKCS8, generateKeyPair } from 'jose';
+import {
+  decodeJwt,
+  decodeProtectedHeader,
+  exportPKCS8,
+  generateKeyPair,
+  importPKCS8,
+  SignJWT,
+} from 'jose';
 import postgres from 'postgres';
 import {
   backendSpec,
@@ -151,6 +160,25 @@ export interface MigrationSource {
   members: { email: string; password: string }[];
   /** An access token the source issued to the owner, signed with the source's key. */
   sourceToken: string;
+  /**
+   * The same access token signed again with the source's key, valid from now: the claims and the
+   * key id the source wrote, with a fresh issue time and expiry. An access token lives minutes, so a
+   * check of what a target does with a source token uses this, not the one that may have expired.
+   */
+  freshSourceToken(): Promise<string>;
+  /** The credentials the source's secrets key, as the source issued them. */
+  issued: {
+    /** The owner's refresh secret (the `__Host-rayspec_refresh` cookie). */
+    refreshSecret: string;
+    /** An API key of the key-only owner. */
+    apiKey: string;
+    /** A pending invite the owner issued. */
+    inviteToken: string;
+  };
+  /** The owner whose only credential is an API key: no password. */
+  keyholder: { email: string };
+  /** The source's boot secrets, as a backup paired with them would keep them. */
+  bootSecrets: { jwtSigningKey: string; apiKeyPepper: string };
   /** Every password of the source's roles, which no output may carry. */
   secrets: string[];
   /** Stop the served source and drop its databases and roles. */
@@ -192,6 +220,7 @@ export async function buildMigrationSource(
     });
     const pem = await exportPKCS8(privateKey);
     const key = ['inert', 'import', randomUUID()].join('-');
+    const pepper = ['source', 'pepper', randomUUID()].join('-');
     const deployDir = temporaryDirectory('import-source-');
     const blobRoot = join(deployDir, 'blobs');
     mkdirSync(blobRoot);
@@ -228,7 +257,7 @@ export async function buildMigrationSource(
       DBOS_SYSTEM_DATABASE_URL: roles.sys.runtime,
       SHADOW_DATABASE_URL: process.env.SHADOW_DATABASE_URL ?? adminUrl,
       RAYSPEC_JWT_SIGNING_KEY: pem,
-      RAYSPEC_API_KEY_PEPPER: ['source', 'pepper', randomUUID()].join('-'),
+      RAYSPEC_API_KEY_PEPPER: pepper,
       RAYSPEC_BLOB_ROOT: blobRoot,
       RAYSPEC_CRON_TENANT_ID: SOURCE_TENANT,
     };
@@ -317,6 +346,70 @@ export async function buildMigrationSource(
     const switched = await http(`/v1/orgs/${SOURCE_TENANT}/switch`, { method: 'POST' });
     if (switched.status !== 200) throw new Error(`switch ${switched.status}`);
     token = ((await switched.json()) as { accessToken: string }).accessToken;
+
+    // The credentials the source's secrets key: the owner's refresh session and a pending invite.
+    const login = await http(
+      '/v1/auth/login',
+      json({ email: members[0]!.email, password: members[0]!.password }),
+    );
+    if (login.status !== 200) throw new Error(`login ${login.status}`);
+    const refreshSecret = login.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('__Host-rayspec_refresh='))
+      ?.slice('__Host-rayspec_refresh='.length)
+      .split(';')[0];
+    if (refreshSecret === undefined) throw new Error('no refresh cookie');
+    const invite = await http(
+      `/v1/orgs/${SOURCE_TENANT}/invites`,
+      json({ email: `late-${randomUUID()}@example.test`, role: 'member' }),
+    );
+    if (invite.status !== 201) throw new Error(`invite ${invite.status}`);
+    const inviteToken = ((await invite.json()) as { inviteToken: string }).inviteToken;
+    // A second owner who signs in once, mints an API key and from then on holds only that key.
+    const keyholder = { email: `keyholder-${randomUUID()}@example.test` };
+    const keyholderPassword = ['keyholder', 'long', 'password', randomUUID().slice(0, 8)].join('-');
+    const keyReg = await fetch(
+      `http://127.0.0.1:${port}/v1/auth/register`,
+      json({ email: keyholder.email, password: keyholderPassword }),
+    );
+    if (keyReg.status !== 201) throw new Error(`register ${keyReg.status}`);
+    await asAdmin(adminUrl, db, async (sql) => {
+      await sql.unsafe(
+        `INSERT INTO memberships (org_id, user_id, role, status)
+         SELECT $1, id, 'owner', 'active' FROM users WHERE email = $2`,
+        [SOURCE_TENANT, keyholder.email],
+      );
+    });
+    const keyLogin = await fetch(
+      `http://127.0.0.1:${port}/v1/auth/login`,
+      json({ email: keyholder.email, password: keyholderPassword }),
+    );
+    const keyBearer = ((await keyLogin.json()) as { accessToken: string }).accessToken;
+    const keySwitch = await fetch(`http://127.0.0.1:${port}/v1/orgs/${SOURCE_TENANT}/switch`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${keyBearer}` },
+    });
+    const keyToken = ((await keySwitch.json()) as { accessToken: string }).accessToken;
+    const minted = await fetch(`http://127.0.0.1:${port}/v1/orgs/${SOURCE_TENANT}/api-keys`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${keyToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ scopes: ['apikey:read'] }),
+    });
+    if (minted.status !== 201) throw new Error(`api key ${minted.status} ${await minted.text()}`);
+    const apiKey = ((await minted.json()) as { plaintext: string }).plaintext;
+    await asAdmin(adminUrl, db, (sql) =>
+      sql.unsafe('UPDATE users SET password_hash = NULL WHERE email = $1', [keyholder.email]),
+    );
+    // Preconditions: the key works at the source, the key-only owner has no password left.
+    const keyCheck = await fetch(`http://127.0.0.1:${port}/v1/orgs/${SOURCE_TENANT}/api-keys`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+    if (keyCheck.status !== 200) throw new Error(`api key at the source ${keyCheck.status}`);
+    const noPassword = await fetch(
+      `http://127.0.0.1:${port}/v1/auth/login`,
+      json({ email: keyholder.email, password: keyholderPassword }),
+    );
+    if (noPassword.status !== 401) throw new Error(`key-only owner login ${noPassword.status}`);
 
     // Rows: a project, notes that reference it, NULLs, non-ASCII text and JSON.
     const project = await http('/projects', json({ name: NON_ASCII, archived: null }));
@@ -431,7 +524,28 @@ export async function buildMigrationSource(
       bindings,
       members,
       sourceToken: token,
-      secrets: [...secrets, ...members.map((m) => m.password)],
+      freshSourceToken: async () => {
+        const claims = decodeJwt(token);
+        const header = decodeProtectedHeader(token);
+        const ttl = (claims.exp ?? 0) - (claims.iat ?? 0);
+        return new SignJWT({ ...claims })
+          .setProtectedHeader({ ...header, alg: 'RS256' })
+          .setIssuedAt()
+          .setExpirationTime(`${ttl}s`)
+          .sign(await importPKCS8(pem, 'RS256'));
+      },
+      issued: { refreshSecret, apiKey, inviteToken },
+      keyholder,
+      bootSecrets: { jwtSigningKey: pem, apiKeyPepper: pepper },
+      secrets: [
+        ...secrets,
+        ...members.map((m) => m.password),
+        keyholderPassword,
+        refreshSecret,
+        apiKey,
+        inviteToken,
+        pepper,
+      ],
       dispose,
     };
   } catch (err) {
