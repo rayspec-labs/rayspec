@@ -12,6 +12,9 @@
  *
  *  - extensions, schemas besides `public` and functions (by schema and name, extension members
  *    aside): exactly the plan's;
+ *  - each function's language, security mode, stored settings and body: exactly what the dump's
+ *    entry defines, so a function redefined under its own name (made SECURITY DEFINER, given
+ *    another body) is seen;
  *  - triggers: the plan's, plus the ones the import adds itself;
  *  - views, materialized views, foreign tables, composite, enum, domain and range types, table rules,
  *    operators, collations, conversions, text search configurations and dictionaries, publications,
@@ -23,12 +26,15 @@
  */
 import { createHash } from 'node:crypto';
 import type { Db } from '@rayspec/db';
+import type { FunctionDefinition } from './dump-policy.js';
 
 /** What the catalog holds, in a form two reads can be compared by. */
 export interface CatalogState {
   extensions: string[];
   schemas: string[];
   functions: string[];
+  /** Each function's definition (`describeFunction`), extension members aside. */
+  functionDefinitions: string[];
   triggers: number;
   /** Objects no import restores: their kind and how many. */
   foreign: Record<string, number>;
@@ -44,8 +50,8 @@ export interface CatalogState {
 export interface CatalogExpectation {
   extensions: readonly string[];
   schemas: readonly string[];
-  /** `schema.name(arguments)` or `schema.name`. */
-  functions: readonly string[];
+  /** The functions the restore creates. */
+  functions: readonly FunctionDefinition[];
   triggers: number;
   defaultPrivileges: string;
   roleSettings: string;
@@ -78,6 +84,17 @@ export async function readCatalog(db: Db, runtimeRole: string): Promise<CatalogS
        (SELECT coalesce(array_agg(n.nspname || '.' || p.proname ORDER BY n.nspname, p.proname), '{}')
           FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
          WHERE ${USER_SCHEMA('n')} AND NOT ${EXTENSION_MEMBER('pg_proc', 'p.oid')}) AS functions,
+       (SELECT coalesce(json_agg(json_build_object(
+                 'name', n.nspname || '.' || p.proname,
+                 'language', l.lanname,
+                 'securityDefiner', p.prosecdef,
+                 'config', coalesce(p.proconfig, '{}'),
+                 'bodySha256', encode(sha256(convert_to(p.prosrc, 'UTF8')), 'hex'))
+                 ORDER BY n.nspname, p.proname, p.oid), '[]')
+          FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+          JOIN pg_language l ON l.oid = p.prolang
+         WHERE ${USER_SCHEMA('n')} AND NOT ${EXTENSION_MEMBER('pg_proc', 'p.oid')})
+         AS function_definitions,
        (SELECT count(*)::int FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
           JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE NOT t.tgisinternal AND ${USER_SCHEMA('n')}) AS triggers,
@@ -129,6 +146,18 @@ export async function readCatalog(db: Db, runtimeRole: string): Promise<CatalogS
     extensions: list(r.extensions),
     schemas: list(r.schemas),
     functions: list(r.functions),
+    functionDefinitions: sorted(
+      (Array.isArray(r.function_definitions) ? r.function_definitions : []).map(
+        (f: Record<string, unknown>) =>
+          describeFunction({
+            name: String(f.name),
+            language: String(f.language),
+            securityDefiner: f.securityDefiner === true,
+            config: list(f.config).map(storedSetting),
+            bodySha256: String(f.bodySha256),
+          }),
+      ),
+    ),
     triggers: Number(r.triggers),
     foreign: {
       'views, foreign tables or composite types': Number(r.views),
@@ -146,6 +175,55 @@ export async function readCatalog(db: Db, runtimeRole: string): Promise<CatalogS
     defaultPrivileges: String(r.default_privileges ?? ''),
     roleSettings: String(r.role_settings ?? ''),
   };
+}
+
+/**
+ * A stored setting (`proconfig`, `name=value`) in the form the restore plan records: a list value
+ * (`pg_catalog, "my schema"`, each element quoted as an identifier where it needs it) as the JSON
+ * array of its elements.
+ */
+export function storedSetting(setting: string): string {
+  const eq = setting.indexOf('=');
+  if (eq === -1) return setting;
+  const value = setting.slice(eq + 1);
+  const elements: string[] = [];
+  let i = 0;
+  for (;;) {
+    while (value[i] === ' ') i++;
+    let element = '';
+    if (value[i] === '"') {
+      i++;
+      for (; i < value.length; i++) {
+        if (value[i] === '"') {
+          if (value[i + 1] !== '"') break;
+          i++;
+        }
+        element += value[i];
+      }
+      if (i >= value.length) return setting;
+      i++;
+    } else {
+      while (i < value.length && value[i] !== ',') element += value[i++];
+      element = element.trimEnd();
+    }
+    elements.push(element);
+    while (value[i] === ' ') i++;
+    if (i >= value.length) break;
+    if (value[i] !== ',') return setting;
+    i++;
+  }
+  return `${setting.slice(0, eq)}=${JSON.stringify(elements)}`;
+}
+
+/** One line per function that two reads, or a read and a plan, compare equal when it is the same. */
+export function describeFunction(f: FunctionDefinition): string {
+  return JSON.stringify([
+    f.name,
+    f.language,
+    f.securityDefiner ? 'definer' : 'invoker',
+    [...f.config].sort(),
+    f.bodySha256,
+  ]);
 }
 
 function sorted(values: readonly string[]): string[] {
@@ -168,8 +246,17 @@ export function catalogDifference(
 ): string | null {
   if (!same(state.extensions, expected.extensions)) return 'it holds other extensions';
   if (!same(state.schemas, expected.schemas)) return 'it holds other schemas';
-  const names = expected.functions.map((f) => f.replace(/\(.*$/s, ''));
-  if (!same(state.functions, names)) return 'it holds other functions';
+  if (
+    !same(
+      state.functions,
+      expected.functions.map((f) => f.name),
+    )
+  ) {
+    return 'it holds other functions';
+  }
+  if (!same(state.functionDefinitions, expected.functions.map(describeFunction))) {
+    return 'a function is not defined as its dump entry defines it';
+  }
   if (state.triggers !== expected.triggers) return 'it holds other triggers';
   for (const [kind, count] of Object.entries(state.foreign)) {
     if (count !== 0) return `it holds ${kind}`;
@@ -186,5 +273,13 @@ export function catalogDifference(
 
 /** SHA-256 of a catalog state, which the cutover compares with the one the import ended with. */
 export function catalogDigest(states: readonly CatalogState[]): string {
-  return createHash('sha256').update(JSON.stringify(states), 'utf8').digest('hex');
+  // Lists in one order, so two reads of the same catalog digest equally however they came back.
+  const canonical = states.map((s) => ({
+    ...s,
+    extensions: sorted(s.extensions),
+    schemas: sorted(s.schemas),
+    functions: sorted(s.functions),
+    functionDefinitions: sorted(s.functionDefinitions),
+  }));
+  return createHash('sha256').update(JSON.stringify(canonical), 'utf8').digest('hex');
 }

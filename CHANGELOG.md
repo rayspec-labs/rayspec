@@ -675,12 +675,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   language, a `SECURITY DEFINER` function beyond the platform's two, `COPY … PROGRAM`, a call into
   the dump or a server function (SQL from text, files, large objects, advisory locks, notifications)
   from an expression the restore evaluates, an entry outside the section `pg_dump` puts its kind in,
-  or any statement beside the ones an entry may hold (`privileged-statement`). The restore runs
-  pre-data, data and post-data in that order whatever the archive's order, so no trigger of the dump
-  exists while rows are copied in; after each restore, after the import's own writes and before the
+  a Unicode-escape name or string (`U&"…"`, `UESCAPE`), or any statement beside the ones an entry
+  may hold (`privileged-statement`). The restore runs pre-data, data and post-data in that order
+  whatever the archive's order, so no trigger of the dump exists while rows are copied in; after each restore, after the import's own writes and before the
   cutover, both catalogs must hold exactly what the restore plan creates (no extra extension,
   schema, function, view, type, rule, publication, large object, foreign grant, or changed default
-  privileges or role settings). A dump that restores a second organization is refused and its
+  privileges or role settings; every function with the language, security mode, search path and
+  body its dump entry gives it). A dump that restores a second organization is refused and its
   restore discarded (`RAY_MULTI_TENANT_UNSUPPORTED`). Every transition (`IMPORTING`, `VERIFYING`,
   `READY_FOR_CUTOVER`, `CUTOVER`, `COMPLETE`, `BLOCKED`) is recorded in a shareable local receipt
   and the target's receipts. The import prints a cutover token once: it binds the migration bundle,
@@ -696,10 +697,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`@rayspec/server` exports the import's building blocks**: `openMigrationBundle`, `planDumps`,
   `inspectImportTarget`, `restoreImport`, `discardImportTarget`, `markImportFailed`,
   `ImportReceiptLog`, the cutover (`issueCutoverToken`, `renewCutoverToken`, `consumeCutoverToken`),
-  the catalog check (`readCatalog`, `catalogDifference`, `catalogDigest`), the custom-format
-  table-of-contents reader `readDumpToc`, the restore allowlist `planDumpRestore`, `decryptFile` and
-  `parseAgeX25519Identity`, and `listDump`/`restoreDump` for `pg_restore`. The inner snapshot reader
-  of `@rayspec/bundle` reports where each payload entry lies in the archive
+  the catalog check (`readCatalog`, `catalogDifference`, `catalogDigest`, `describeFunction`), the
+  custom-format table-of-contents reader `readDumpToc`, the restore allowlist `planDumpRestore`,
+  `decryptFile` and `parseAgeX25519Identity`, and `listDump`/`restoreDump` for `pg_restore`. The
+  inner snapshot reader of `@rayspec/bundle` reports where each payload entry lies in the archive
   (`SnapshotInspection.entries`), and `@rayspec/db` exports the platform's definer-function
   allowlist (`ISOLATION_DEFINER_FUNCTIONS`, `normalizeFunctionBody`).
 - **The identity of an imported target.** `rayspec import` now requires `--secrets-out <new-dir>`

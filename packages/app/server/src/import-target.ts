@@ -897,7 +897,7 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
           return {
             extensions: plan?.extensions ?? [],
             schemas: plan?.schemas ?? [],
-            functions: plan?.functions ?? [],
+            functions: plan?.functionDefinitions ?? [],
             triggers: (plan?.triggers ?? 0) + extraTriggers,
             defaultPrivileges: settled.defaultPrivileges,
             roleSettings: settled.roleSettings,

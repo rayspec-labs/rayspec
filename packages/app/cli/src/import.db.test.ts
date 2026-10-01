@@ -121,7 +121,7 @@ if (dbRequired && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARMS = 13;
+const ARMS = 14;
 
 const SOURCE_DB = `rayspec_import_src_${process.pid}`;
 const TARGET_DB = `rayspec_import_tgt_${process.pid}`;
@@ -131,6 +131,35 @@ const PAIRED_DB = `rayspec_import_pair_${process.pid}`;
 const PAIRED_SYS = `${PAIRED_DB}_dbos_sys`;
 const valid = schemaValidator('resultEnvelope');
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** A dump entry for a trigger function of the dump that runs `sql` each time it fires. */
+function functionEntry(base: DumpTocEntry, tag: string, sql: string, dumpId: number): DumpTocEntry {
+  return {
+    ...base,
+    dumpId,
+    oid: String(dumpId),
+    tag: `${tag}()`,
+    namespace: 'public',
+    defn:
+      `CREATE FUNCTION public.${tag}() RETURNS trigger\n    LANGUAGE plpgsql\n` +
+      `    AS $$\nBEGIN\n\tEXECUTE '${sql}';\n\tRETURN NEW;\nEND;\n$$;\n`,
+  };
+}
+
+/** A dump entry for a trigger that runs a function of the dump before each insert into `table`. */
+function triggerEntry(base: DumpTocEntry, table: string, fn: string, dumpId: number): DumpTocEntry {
+  return {
+    ...base,
+    dumpId,
+    oid: String(dumpId),
+    tag: `${table} ${fn}`,
+    namespace: 'public',
+    section: 4,
+    defn:
+      `CREATE TRIGGER ${fn} BEFORE INSERT ON public.${table} FOR EACH ROW EXECUTE FUNCTION ` +
+      `public.${fn}();\n`,
+  };
+}
 
 interface CliRun {
   code: number | null;
@@ -500,37 +529,6 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
 
   it('restores every row before a trigger of the dump exists, and finds what a trigger function created during the import', async () => {
     const dump = parts.files.get(SNAPSHOT_PATHS.database)!;
-    const functionEntry = (
-      base: DumpTocEntry,
-      tag: string,
-      sql: string,
-      dumpId: number,
-    ): DumpTocEntry => ({
-      ...base,
-      dumpId,
-      oid: String(dumpId),
-      tag: `${tag}()`,
-      namespace: 'public',
-      defn:
-        `CREATE FUNCTION public.${tag}() RETURNS trigger\n    LANGUAGE plpgsql\n` +
-        `    AS $$\nBEGIN\n\tEXECUTE '${sql}';\n\tRETURN NEW;\nEND;\n$$;\n`,
-    });
-    const triggerEntry = (
-      base: DumpTocEntry,
-      table: string,
-      fn: string,
-      dumpId: number,
-    ): DumpTocEntry => ({
-      ...base,
-      dumpId,
-      oid: String(dumpId),
-      tag: `${table} ${fn}`,
-      namespace: 'public',
-      section: 4,
-      defn:
-        `CREATE TRIGGER ${fn} BEFORE INSERT ON public.${table} FOR EACH ROW EXECUTE FUNCTION ` +
-        `public.${fn}();\n`,
-    });
     const forged = await forgeDump(dump, (entries) => {
       const firstData = entries.findIndex((e) => e.desc === 'TABLE DATA');
       expect(firstData).toBeGreaterThan(0);
@@ -582,6 +580,63 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       view: true,
       notes: parts.snapshot.tableCounts.find((t) => t.table === 'import_notes')!.rows,
     });
+    expect(JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8'))).toMatchObject({
+      state: 'BLOCKED',
+    });
+    expect(await fenceOf(TARGET_DB)).toMatchObject({ state: 'fenced' });
+    const discarded = await cli(['import', '--target', stateDir, '--discard-failed']);
+    expect(discarded.code, discarded.stderr).toBe(0);
+    await expectTargetUntouched();
+    armsRan += 1;
+  }, 600_000);
+
+  it('finds a function a trigger of the dump redefined under its own name during the import', async () => {
+    const dump = parts.files.get(SNAPSHOT_PATHS.database)!;
+    // The platform's append-only guard runs with the rights of whoever writes the ledger; made
+    // SECURITY DEFINER, it would run with the migration role's.
+    const redefined = 'public.product_migration_ledger_append_only()';
+    const forged = await forgeDump(dump, (entries) => {
+      const fn = entries.find((e) => e.desc === 'FUNCTION')!;
+      const trigger = entries.find((e) => e.desc === 'TRIGGER')!;
+      expect(
+        entries.some(
+          (e) => e.desc === 'FUNCTION' && e.tag === 'product_migration_ledger_append_only()',
+        ),
+      ).toBe(true);
+      const firstData = entries.findIndex((e) => e.desc === 'TABLE DATA');
+      return [
+        ...entries.slice(0, firstData),
+        functionEntry(
+          fn,
+          'redefines_a_function',
+          `ALTER FUNCTION ${redefined} SECURITY DEFINER`,
+          900_201,
+        ),
+        ...entries.slice(firstData),
+        triggerEntry(trigger, 'auth_audit', 'redefines_a_function', 900_202),
+      ];
+    });
+    const bundle = await rebuildMigrationBundle(parts, {
+      recipient: source.recipient,
+      target: appTarget,
+      files: { [SNAPSHOT_PATHS.database]: forged },
+    });
+    const dry = await cli(importArgs(bundle, ['--dry-run']));
+    expect(dry.code, dry.stderr).toBe(0);
+    const run = await cli(importArgs(bundle, ['--bindings-file', bindingsFile]));
+    expect(run.code, run.stderr).toBe(4);
+    expect(run.envelope.errors[0]).toMatchObject({
+      code: 'RAY_POLICY_DENIED',
+      reason: 'privileged-statement',
+    });
+    expect(run.envelope.errors[0].message).toContain(
+      'a function is not defined as its dump entry defines it',
+    );
+    // The trigger fired and changed the function in place: same name, same count.
+    const [found] = (await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe(`SELECT prosecdef FROM pg_proc WHERE oid = '${redefined}'::regprocedure`),
+    )) as unknown as [{ prosecdef: boolean }];
+    expect(found.prosecdef).toBe(true);
     expect(JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8'))).toMatchObject({
       state: 'BLOCKED',
     });

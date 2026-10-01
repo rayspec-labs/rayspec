@@ -8,6 +8,7 @@
  * reason, and so is a dump that disagrees with the tables `snapshot.json` counts. (Real dumps of a
  * deployed application and its workflow engine are judged in the import suite of `@rayspec/cli`.)
  */
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { DumpToc, DumpTocEntry } from './dump-archive.js';
 import { type CountedTable, lexSql, planDumpRestore, splitStatements } from './dump-policy.js';
@@ -347,6 +348,21 @@ describe('the lexer', () => {
       expect(() => lexSql(sql), sql).toThrow();
     }
   });
+
+  it('refuses a Unicode-escape name or string and a UESCAPE clause', () => {
+    for (const sql of [
+      'SELECT U&"pg\\005fsleep"(1)',
+      'SELECT u&"lo\\005fcreat"(-1)',
+      'SELECT public.U&"chk"(body)',
+      'SELECT U&"pg!005fnotify" UESCAPE \'!\'(name, name)',
+      "SELECT U&'d\\0061t\\+000061'",
+    ]) {
+      expect(() => lexSql(sql), sql).toThrow(/Unicode-escape|UESCAPE/);
+    }
+    expect(() => lexSql("SELECT x UESCAPE '!'")).toThrow(/UESCAPE/);
+    // An operator `&` after a name `u` is not an escape: a space separates them.
+    expect(lexSql('SELECT u & "x"').map((t) => t.value)).toEqual(['select', 'u', '&', 'x']);
+  });
 });
 
 describe('a dump of the platform', () => {
@@ -375,6 +391,67 @@ describe('a dump of the platform', () => {
       'public.receipts_append_only()',
     ]);
     expect(result.value.extensions).toEqual([]);
+  });
+
+  it('records what each restored function is: language, security mode, search path and body digest', () => {
+    const result = judge(applicationDump());
+    expect(outcome(result)).toBe('ok');
+    if (!result.ok) return;
+    const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+    expect(result.value.functionDefinitions).toEqual([
+      {
+        name: 'public.rayspec_invite_tenant',
+        language: 'sql',
+        securityDefiner: true,
+        config: ['search_path=["pg_catalog","pg_temp"]'],
+        bodySha256: sha256(
+          '\n\tSELECT tenant_id FROM public.invites WHERE token_hash = p_token_hash\n',
+        ),
+      },
+      {
+        name: 'public.receipts_append_only',
+        language: 'plpgsql',
+        securityDefiner: false,
+        config: [],
+        bodySha256: sha256(
+          "\nBEGIN\n\tRAISE EXCEPTION 'append-only: % is refused', TG_OP;\nEND;\n",
+        ),
+      },
+    ]);
+  });
+
+  it('refuses a function whose search path is not one list of quoted names', () => {
+    for (const set of [
+      'SET search_path FROM CURRENT',
+      'SET search_path TO pg_catalog, pg_temp',
+      "SET search_path TO 'pg_catalog', pg_temp",
+      "SET search_path TO 'pg_catalog'\n    SET search_path TO 'public'",
+    ]) {
+      expect(
+        outcome(
+          judge(
+            withEntry({ desc: 'FUNCTION', tag: 'receipts_append_only()' }, (e) => ({
+              ...e,
+              defn: APPEND_ONLY.replace('LANGUAGE plpgsql\n', `LANGUAGE plpgsql\n    ${set}\n`),
+            })),
+          ),
+        ),
+        set,
+      ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    }
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'FUNCTION', tag: 'receipts_append_only()' }, (e) => ({
+            ...e,
+            defn: APPEND_ONLY.replace(
+              'LANGUAGE plpgsql\n',
+              "LANGUAGE plpgsql\n    SET search_path TO 'pg_catalog', 'pg_temp'\n",
+            ),
+          })),
+        ),
+      ),
+    ).toBe('ok');
   });
 
   it('restores every row before a trigger of the dump exists, whatever order the archive puts them in', () => {
@@ -828,6 +905,46 @@ describe('no dump code at restore time', () => {
         match.desc,
       ).toBe('RAY_POLICY_DENIED/privileged-statement');
     }
+  });
+
+  it('refuses a call spelled with a Unicode escape, in an expression the restore evaluates and in a body', () => {
+    // Postgres resolves each of these to the denied function or the dump's own function; the plain
+    // spelling is refused, so the escaped one must be too.
+    for (const [plain, escaped] of [
+      ['pg_sleep(1)', 'U&"pg\\005fsleep"(1)'],
+      ["set_config('role', 'x', false)", "U&\"set\\005fconfig\"('role', 'x', false)"],
+      ['lo_creat(-1)', 'U&"lo\\005fcreat"(-1)'],
+      ['pg_notify(name, name)', 'U&"pg!005fnotify" UESCAPE \'!\'(name, name)'],
+      ['pg_advisory_unlock_all()', 'U&"pg\\005fadvisory\\005funlock\\005fall"()'],
+      ['public.receipts_append_only()', 'public.U&"receipts\\005fappend\\005fonly"()'],
+    ] as const) {
+      for (const call of [plain, escaped]) {
+        expect(
+          outcome(
+            judge(
+              withEntry({ desc: 'TABLE', tag: 'orgs' }, (e) => ({
+                ...e,
+                defn: (e.defn ?? '').replace('length(name) > 0', `${call} IS NOT NULL`),
+              })),
+            ),
+          ),
+          call,
+        ).toBe('RAY_POLICY_DENIED/privileged-statement');
+      }
+    }
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'FUNCTION', tag: 'receipts_append_only()' }, (e) => ({
+            ...e,
+            defn: APPEND_ONLY.replace(
+              'RAISE EXCEPTION',
+              'PERFORM U&"lo\\005fcreat"(-1);\n\tRAISE EXCEPTION',
+            ),
+          })),
+        ),
+      ),
+    ).toBe('RAY_POLICY_DENIED/privileged-statement');
   });
 
   it('refuses a server function in any expression, qualified or not', () => {

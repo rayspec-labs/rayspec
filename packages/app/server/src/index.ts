@@ -233,6 +233,7 @@ export {
   type DumpPolicyInput,
   type DumpPolicyResult,
   type DumpRestorePlan,
+  type FunctionDefinition,
   lexSql,
   planDumpRestore,
   type SqlToken,
@@ -276,6 +277,7 @@ export {
   type CatalogState,
   catalogDifference,
   catalogDigest,
+  describeFunction,
   readCatalog,
 } from './import-catalog.js';
 export {

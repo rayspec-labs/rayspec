@@ -51,6 +51,8 @@
  * checked again after the restore (`import-target.ts`): the catalog must hold what the plan restores
  * and nothing else.
  */
+
+import { createHash } from 'node:crypto';
 import { type BundleError, bundleError, type ErrorReason } from '@rayspec/bundle-contract';
 import { ISOLATION_DEFINER_FUNCTIONS, normalizeFunctionBody } from '@rayspec/db';
 import type { DumpToc, DumpTocEntry } from './dump-archive.js';
@@ -75,7 +77,8 @@ const WORD_PART = /[A-Za-z0-9_$\u0080-\uffff]/;
 
 /**
  * Split SQL into tokens, skipping whitespace and comments. Knows standard strings (`''` doubled),
- * escape strings (`E'…'`), quoted identifiers, dollar quoting and nested block comments.
+ * escape strings (`E'…'`), quoted identifiers, dollar quoting and nested block comments. Refuses
+ * Unicode escapes (`U&"…"`, `U&'…'`, `UESCAPE`), which would hide a name from every check.
  */
 export function lexSql(sql: string): SqlToken[] {
   const tokens: SqlToken[] = [];
@@ -106,6 +109,15 @@ export function lexSql(sql: string): SqlToken[] {
         } else i++;
       }
       continue;
+    }
+    // A Unicode-escape name or string (`U&"…"`, `U&'…'`) spells its characters as code points, so
+    // a name checked as written would not be the name Postgres resolves. pg_dump never writes one.
+    if (
+      (ch === 'U' || ch === 'u') &&
+      sql[i + 1] === '&' &&
+      (sql[i + 2] === '"' || sql[i + 2] === "'")
+    ) {
+      throw new SqlLexError('a Unicode-escape name or string');
     }
     if (
       ch === "'" ||
@@ -177,6 +189,7 @@ export function lexSql(sql: string): SqlToken[] {
       const start = i;
       while (i < n && WORD_PART.test(sql[i]!)) i++;
       const text = sql.slice(start, i);
+      if (text.toLowerCase() === 'uescape') throw new SqlLexError('a UESCAPE clause');
       tokens.push({ kind: 'word', text, value: text.toLowerCase() });
       continue;
     }
@@ -448,6 +461,18 @@ export interface DumpPolicyInput {
   rowsExcluded: ReadonlySet<string>;
 }
 
+/** What a restored function is: what decides whose rights it runs with and what it does. */
+export interface FunctionDefinition {
+  /** `schema.name`. */
+  name: string;
+  language: string;
+  securityDefiner: boolean;
+  /** Its stored settings, `name=value` with a list value's elements unquoted and JSON-encoded. */
+  config: string[];
+  /** SHA-256 of its body (`prosrc`) as UTF-8, hex. */
+  bodySha256: string;
+}
+
 export interface DumpRestorePlan {
   /** The role that owns every object of the dump. */
   owner: string;
@@ -459,6 +484,8 @@ export interface DumpRestorePlan {
   foreignKeys: number;
   /** The functions the restore creates, `schema.name(arguments)`. */
   functions: string[];
+  /** What each function the restore creates is, for the catalog check to compare against. */
+  functionDefinitions: FunctionDefinition[];
   /** The extensions the restore creates. */
   extensions: string[];
   /** The schemas besides `public` the restore creates. */
@@ -529,6 +556,8 @@ interface Context {
   input: DumpPolicyInput;
   /** Functions the dump defines, by `schema.name`, with whether each returns `trigger`. */
   functions: Map<string, { trigger: boolean }>;
+  /** What each function entry defines, by its dump id. */
+  definitions: Map<number, FunctionDefinition>;
 }
 
 /**
@@ -972,6 +1001,10 @@ function checkFunction(ctx: Context, entry: DumpTocEntry, s: readonly SqlToken[]
   if (settings.some((setting) => setting !== 'search_path')) {
     throw refuse('is a function that changes a setting other than the search path');
   }
+  const searchPath = searchPathValues(header);
+  if (settings.length > 1 || (settings.length === 1 && searchPath === null)) {
+    throw refuse('is a function whose search path is not one list of quoted names');
+  }
 
   const args = s.slice(argsStart, argsEnd + 1);
   checkCalls(ctx, entry, args.slice(1, -1));
@@ -981,12 +1014,11 @@ function checkFunction(ctx: Context, entry: DumpTocEntry, s: readonly SqlToken[]
     const expected = ISOLATION_DEFINER_FUNCTIONS.find(
       (d) => d.name === signature && d.arguments === argText,
     );
-    const searchPath = settingValues(header);
     if (
       input.database !== 'application' ||
       name.parts[0] !== 'public' ||
       expected === undefined ||
-      searchPath !== "'pg_catalog', 'pg_temp'" ||
+      searchPath?.join(',') !== 'pg_catalog,pg_temp' ||
       normalizeFunctionBody(body[0]!.value) !== normalizeFunctionBody(expected.body)
     ) {
       throw refuse(
@@ -1018,6 +1050,13 @@ function checkFunction(ctx: Context, entry: DumpTocEntry, s: readonly SqlToken[]
     }
   }
   ctx.functions.set(name.parts.join('.'), { trigger: returnsTrigger });
+  ctx.definitions.set(entry.dumpId, {
+    name: name.parts.join('.'),
+    language,
+    securityDefiner: definer,
+    config: searchPath === null ? [] : [`search_path=${JSON.stringify(searchPath)}`],
+    bodySha256: createHash('sha256').update(body[0]!.value, 'utf8').digest('hex'),
+  });
 }
 
 /** Tokens rendered back as `pg_dump` prints an argument list: words joined by single spaces. */
@@ -1031,18 +1070,24 @@ function rendered(tokens: readonly SqlToken[]): string {
   return out;
 }
 
-/** The values of a function's `SET search_path TO …`, as written. */
-function settingValues(header: readonly SqlToken[]): string | null {
+/**
+ * The names of a function's `SET search_path TO '…', '…'`, unquoted, as pg_dump writes them; null
+ * without one, or when it is written another way (`FROM CURRENT`, unquoted names).
+ */
+function searchPathValues(header: readonly SqlToken[]): string[] | null {
   const at = header.findIndex((_t, i) => keywords(header, i, 'set', 'search_path'));
   if (at === -1 || !keywords(header, at + 2, 'to')) return null;
   const values: string[] = [];
-  for (let i = at + 3; i < header.length; i++) {
-    const t = header[i]!;
-    if (t.kind === 'string') values.push(`'${t.value}'`);
-    else if (t.kind === 'op' && t.value === ',') continue;
-    else break;
+  let i = at + 3;
+  for (;;) {
+    const t = header[i];
+    if (t?.kind !== 'string') return null;
+    values.push(t.value);
+    if (header[i + 1]?.kind !== 'op' || header[i + 1]!.value !== ',') break;
+    i += 2;
   }
-  return values.join(', ');
+  const next = header[i + 1];
+  return next === undefined || next.kind === 'word' ? values : null;
 }
 
 // ─── privileges ────────────────────────────────────────────────────────────────────────────────
@@ -1157,7 +1202,7 @@ function inSectionOrder(entries: readonly DumpTocEntry[]): DumpTocEntry[] {
 }
 
 function plan(input: DumpPolicyInput): DumpRestorePlan {
-  const ctx: Context = { input, functions: new Map() };
+  const ctx: Context = { input, functions: new Map(), definitions: new Map() };
   const { entries } = input.toc;
 
   // The session the restore runs in.
@@ -1303,9 +1348,9 @@ function plan(input: DumpPolicyInput): DumpRestorePlan {
       throw mismatch(input.database, 'holds no data for a counted table with rows');
   }
 
-  const functions = restore
-    .filter((e) => e.desc === 'FUNCTION')
-    .map((e) => `${e.namespace}.${e.tag}`);
+  const restoredFunctions = restore.filter((e) => e.desc === 'FUNCTION');
+  const functions = restoredFunctions.map((e) => `${e.namespace}.${e.tag}`);
+  const functionDefinitions = restoredFunctions.map((e) => ctx.definitions.get(e.dumpId)!);
   const ordered = inSectionOrder(restore);
   return {
     owner,
@@ -1313,6 +1358,7 @@ function plan(input: DumpPolicyInput): DumpRestorePlan {
     useList: ordered.map((e) => `${e.dumpId}; ${e.tableoid} ${e.oid} ${e.desc}\n`).join(''),
     foreignKeys: restore.filter((e) => e.desc === 'FK CONSTRAINT').length,
     functions,
+    functionDefinitions,
     extensions: restore.filter((e) => e.desc === 'EXTENSION').map((e) => e.tag),
     schemas: restore.filter((e) => e.desc === 'SCHEMA').map((e) => e.tag),
     triggers: restore.filter((e) => e.desc === 'TRIGGER').length,

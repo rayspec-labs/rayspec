@@ -1564,7 +1564,9 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
   the platform's two lookups, unchanged), `LEAKPROOF`, a setting other than the search path, data
   loaded by anything but `COPY … FROM stdin`, a call into the dump or a server function (SQL from
   text, files, large objects, advisory locks, notifications) from an expression the restore
-  evaluates, an entry outside the section `pg_dump` puts its kind in (`privileged-statement`). The
+  evaluates, an entry outside the section `pg_dump` puts its kind in, a Unicode-escape name or
+  string (`U&"…"`, `U&'…'`, `UESCAPE`), a function search path not written as quoted names
+  (`privileged-statement`). The
   restore list runs pre-data, data and post-data in that order whatever the archive's order, so no
   trigger of the dump exists while rows are copied in. Privileges, comments and the dump's owner are
   not restored: every object belongs to the target's migration role, and the target's runtime and
@@ -1572,7 +1574,8 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
   the cutover.
 - **The catalogs.** After each restore, after the import's own writes and before the cutover, both
   databases must hold exactly what the restore plan creates: the plan's extensions, schemas,
-  functions and triggers (plus the ones the import adds), no view, type, rule, operator, text search
+  functions and triggers (plus the ones the import adds), each function with the language, security
+  mode, search path and body its dump entry gives it, no view, type, rule, operator, text search
   object, publication or large object, no privilege for a role the target does not grant to, and
   default privileges and role settings unchanged (`RAY_POLICY_DENIED` `privileged-statement`).
 - **The target** must be empty — no table, sequence, function, type, schema besides `public`,

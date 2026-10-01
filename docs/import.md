@@ -104,15 +104,19 @@ Refused, before anything reaches the target (`RAY_POLICY_DENIED`):
   data loaded by anything but `COPY … FROM stdin` (no `PROGRAM`), an expression the restore would
   evaluate that calls a function of the dump or a server function (one that runs SQL from text,
   reads files, touches large objects, takes advisory locks or sends notifications), an entry in
-  another section than the one `pg_dump` puts its kind in, or any statement beside the ones an entry
-  may hold: `privileged-statement`.
+  another section than the one `pg_dump` puts its kind in, a name or string written with a Unicode
+  escape (`U&"…"`, `U&'…'`, `UESCAPE`, which `pg_dump` never writes and which would spell a refused
+  name another way), a function search path written other than as a list of quoted names, or any
+  statement beside the ones an entry may hold: `privileged-statement`.
 
 The restore runs the sections in `pg_dump`'s order whatever order the archive lists them in: every
 row is copied in before any trigger, index, constraint or policy of the dump exists. A function of the
 dump still runs whenever something calls it — a trigger on a table the import writes itself, for one —
 so after each restore, after the import's own writes and once more before the cutover, the import
 reads both catalogs and refuses a target that holds anything its restore plan does not create: an
-extension, schema or function beyond the plan, a view, type, rule, operator or text search object, a
+extension, schema or function beyond the plan, a function of the plan redefined under its own name
+(another language, security mode, search path or body than its dump entry gives it — made
+`SECURITY DEFINER`, for one), a view, type, rule, operator or text search object, a
 publication, a large object, a privilege for a role the target does not grant to, or changed default
 privileges or role settings (`RAY_POLICY_DENIED` `privileged-statement`; the target is marked failed).
 
