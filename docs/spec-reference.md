@@ -155,10 +155,10 @@ stores:
   reserved names are:
 
   `api_keys`, `auth_audit`, `conversation_items`, `idempotency_keys`, `invites`,
-  `journal_steps`, `memberships`, `oidc_models`, `orgs`, `product_migration_ledger`,
-  `run_events`, `runs`, `runtime_control_processes`, `runtime_control_receipts`,
-  `runtime_control_state`, `sessions`, `tenant_event_streams`, `tenant_events`,
-  `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
+  `journal_steps`, `memberships`, `oidc_models`, `orgs`, `owner_recovery_tokens`,
+  `product_migration_ledger`, `run_events`, `runs`, `runtime_control_processes`,
+  `runtime_control_receipts`, `runtime_control_state`, `sessions`, `tenant_event_streams`,
+  `tenant_events`, `users`, `workflow_artifacts`, `workflow_node_states`, `workflow_runs`.
 
   Several are names a product would plausibly reach for on its own — `sessions`
   for a chat application, `invites`, `runs`. The match is exact, so a
@@ -612,7 +612,7 @@ under key pressure. The half of that worth stating plainly is which windows are
 eligible for eviction: there is **one** limiter in the product and therefore one
 bounded store, and it holds every counter in the system — not only declared-route
 budgets but the authentication throttles too (`login`, `register`, `refresh`,
-`oauth-token`, `invite-accept`). Eviction is by insertion age across the whole
+`oauth-token`, `invite-accept`, `owner-recovery`). Eviction is by insertion age across the whole
 store, so under per-route key pressure the window that gets dropped may be an
 authentication counter rather than a route budget, which would hand a
 credential-stuffing run a fresh `login` allowance.

@@ -143,6 +143,9 @@ export const DEFAULT_POLICIES: Record<string, RateLimitPolicy> = {
   // account, so throttle it per source IP to bound token-probing / account-creation abuse. The token
   // is 256-bit (brute-force is infeasible regardless), but a per-source cap is cheap defense-in-depth.
   'invite-accept': { max: 10, windowMs: 60_000 },
+  // Owner recovery is UNAUTHENTICATED too (the token bearer redeems) and SETS a password, so it gets
+  // the same per-source cap as an invite accept.
+  'owner-recovery': { max: 10, windowMs: 60_000 },
   // The two declared-route tiers. The tier is chosen AFTER the credential is validated, so a caller
   // whose credential is absent or does not validate lands in the STRICT bucket keyed on the anti-spoof
   // client source, and only a VALIDATED principal reaches the generous one (keyed by tenant+principal).

@@ -96,6 +96,9 @@ const UNSCOPED_WHITELIST = new Set([
   // tenant is known — a hash-equality lookup on the unique token_hash index via the raw handle,
   // structurally identical to the api-key/session bearer-resolution above. Whitelisted for that read.
   'packages/compose/api-auth/src/stores/invite-store.ts',
+  // The owner-recovery store: owner_recovery_tokens is a global table (no tenant_id), resolved by
+  // the presented token's HMAC before any tenant is known, like the api-key/session resolution.
+  'packages/compose/api-auth/src/stores/owner-recovery-store.ts',
 ]);
 
 // The named, per-file allowlist for the `Db`-typed-parameter query form

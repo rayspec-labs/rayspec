@@ -7,6 +7,7 @@ export * from './dto.js';
 export * from './email.js';
 export * from './errors.js';
 export * from './invite.js';
+export * from './owner-recovery.js';
 export * from './password.js';
 export * from './rate-limit.js';
 export * from './session.js';

@@ -242,6 +242,29 @@ export const AcceptInviteResponse = z.object({
 });
 export type AcceptInviteResponse = z.infer<typeof AcceptInviteResponse>;
 
+/**
+ * Redeem an owner-recovery token the operator issued: the token, the owner's new password, and the
+ * opt-in body delivery of the refresh secret for a non-browser client.
+ */
+export const OwnerRecoveryRequest = z.object({
+  token: z.string().min(1).max(256),
+  password: passwordField,
+  deliverRefreshTokenInBody,
+});
+export type OwnerRecoveryRequest = z.infer<typeof OwnerRecoveryRequest>;
+
+/** The recovered owner, signed in: a token envelope scoped to their organization. */
+export const OwnerRecoveryResponse = z.object({
+  accessToken: z.string(),
+  tokenType: z.literal('Bearer'),
+  expiresIn: z.number().int().positive(),
+  activeOrgId: z.string().uuid(),
+  userId: z.string().uuid(),
+  role: z.literal('owner'),
+  refreshToken: z.string().optional(),
+});
+export type OwnerRecoveryResponse = z.infer<typeof OwnerRecoveryResponse>;
+
 // ---- api keys ------------------------------------------------------------------------------
 
 /**
