@@ -191,6 +191,12 @@ export interface ApplyBundleOptions {
   /** Crash tests only: see `ApplyOptions.onCheckpoint`. */
   onCheckpoint?: (point: ApplyCheckpoint, step?: string) => Promise<void>;
   now?: () => Date;
+  /**
+   * With role separation (`db` is then the migration role's connection): the runtime role. The
+   * bundled product delta brings the tables it creates under row-level isolation in its own
+   * transaction.
+   */
+  tenantIsolation?: { runtimeRole: string };
 }
 
 export interface AppliedBundle {
@@ -365,6 +371,7 @@ export async function applyBundle(options: ApplyBundleOptions): Promise<AppliedB
         sql: product.delta,
         declared: product.declared,
         expectedAfter: plan.plan.schemaImpact.to.product,
+        ...(options.tenantIsolation !== undefined ? { isolateFor: options.tenantIsolation } : {}),
       }),
     );
   }

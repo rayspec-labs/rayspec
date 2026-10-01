@@ -21,6 +21,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { type RuntimeRoleEnv, runtimeRoleEnv } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -71,6 +72,7 @@ describe.skipIf(!baseUrl)(
   () => {
     let child: ChildProcess | undefined;
     let childErr = '';
+    let roles: RuntimeRoleEnv | undefined;
 
     beforeAll(async () => {
       if (!baseUrl) return;
@@ -85,6 +87,8 @@ describe.skipIf(!baseUrl)(
 
       const { privateKey } = await generateKeyPair('RS256', { extractable: true });
       const pem = await exportPKCS8(privateKey);
+      // The child's connections: the superuser's, or in the runtime-role lane role separation.
+      roles = await runtimeRoleEnv(appDbUrl, withDbName(baseUrl, `${SUITE_DB}_dbos_sys`));
 
       // Boot the BACKEND-profile spec via the REAL CLI subprocess. The declared `openai` agent's adapter
       // is built from an INERT key (boot makes no provider call). RAYSPEC_SKIP_DOTENV=1 so no stray
@@ -95,7 +99,7 @@ describe.skipIf(!baseUrl)(
         env: {
           ...process.env,
           RAYSPEC_SKIP_DOTENV: '1',
-          DATABASE_URL: appDbUrl,
+          ...roles.env,
           RAYSPEC_JWT_SIGNING_KEY: pem,
           RAYSPEC_API_KEY_PEPPER: 'cli-agent-mount-pepper-only',
           OPENAI_API_KEY: 'sk-inert-boot-only-never-called',
@@ -130,6 +134,7 @@ describe.skipIf(!baseUrl)(
           await admin.end();
         }
       }
+      await roles?.drop();
     }, 60_000);
 
     const maybe = baseUrl ? it : it.skip;

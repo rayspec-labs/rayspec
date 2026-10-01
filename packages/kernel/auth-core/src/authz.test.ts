@@ -72,11 +72,23 @@ describe('isSensitive', () => {
     expect(isSensitive('org:switch')).toBe(true);
   });
   it('marks read-mostly ops NOT sensitive (claim role acceptable)', () => {
-    expect(isSensitive('agent:run')).toBe(false);
     expect(isSensitive('agent:read')).toBe(false);
     expect(isSensitive('org:read')).toBe(false);
     expect(isSensitive('apikey:read')).toBe(false);
     expect(isSensitive('store:read')).toBe(false);
+  });
+  it('marks agent:run SENSITIVE in the hardened posture only — starting or cancelling a run there re-checks live membership', () => {
+    expect(isSensitive('agent:run', { hardened: true })).toBe(true);
+    expect(isSensitive('agent:run')).toBe(false);
+    expect(isSensitive('agent:run', { hardened: false })).toBe(false);
+  });
+  it('the hardened posture widens the set and never narrows it', () => {
+    for (const p of ['apikey:mint', 'org:switch', 'store:write'] as const) {
+      expect(isSensitive(p, { hardened: true })).toBe(true);
+    }
+    for (const p of ['agent:read', 'store:read', 'org:read'] as const) {
+      expect(isSensitive(p, { hardened: true })).toBe(false);
+    }
   });
   it('marks store:write SENSITIVE — a product-data mutation re-checks live membership', () => {
     expect(isSensitive('store:write')).toBe(true);

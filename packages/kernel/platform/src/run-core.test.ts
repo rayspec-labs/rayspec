@@ -14,6 +14,7 @@ import { makeJournalSink, runAgent } from './run-core.js';
 import { getRunObservability } from './run-observability.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -21,6 +22,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 /**
  * A fake backend that journals exactly one `llm` step on a live run and, on replay,
@@ -128,6 +133,7 @@ const specWithOutput: AgentSpec = {
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 
 beforeEach(async () => {
@@ -138,13 +144,14 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('run-core live run', () => {
   it('journals a step under the correct tenant_id and persists a run header + conversation', async () => {
     const backend = new FakeBackend();
-    const res = await runAgent(forTenant(db, TENANT_A), backend, spec, {});
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {});
 
     expect(res.status).toBe('completed');
     expect(backend.liveCalls).toBe(1);
@@ -211,7 +218,7 @@ describe('run-core capability gate (fail-closed)', () => {
   it('rejects an outputSchema spec on pi when requireNativeStructuredOutput=true BEFORE backend.run', async () => {
     const backend = new FakePiBackend();
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, specWithOutput, {
+      runAgent(forTenant(appDb, TENANT_A), backend, specWithOutput, {
         requireNativeStructuredOutput: true,
       }),
     ).rejects.toThrow(/fail-closed/);
@@ -226,7 +233,7 @@ describe('run-core capability gate (fail-closed)', () => {
 
   it('ACCEPTS the same outputSchema spec on openai (native structured output)', async () => {
     const backend = new FakeBackend();
-    const res = await runAgent(forTenant(db, TENANT_A), backend, specWithOutput, {
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, specWithOutput, {
       requireNativeStructuredOutput: true,
     });
     expect(res.status).toBe('completed');
@@ -235,7 +242,7 @@ describe('run-core capability gate (fail-closed)', () => {
 
   it('ACCEPTS an outputSchema spec on pi when native is NOT demanded (pi emulates)', async () => {
     const backend = new FakePiBackend();
-    const res = await runAgent(forTenant(db, TENANT_A), backend, specWithOutput, {});
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, specWithOutput, {});
     expect(res.status).toBe('completed');
     expect(backend.runCalls).toBe(1);
   });
@@ -311,7 +318,7 @@ class EmittingBackend implements Backend {
 describe('run-core run_events persistence', () => {
   it('persists EVERY emitted NeutralEvent to run_events in seq order under the right tenant', async () => {
     const backend = new EmittingBackend();
-    const res = await runAgent(forTenant(db, TENANT_A), backend, spec, {});
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {});
     expect(res.status).toBe('completed');
 
     const events = await db
@@ -344,7 +351,7 @@ describe('run-core run_events persistence', () => {
   it('persists run_events even with NO live sink (a real durable read path for GET /runs/{id}/events)', async () => {
     const backend = new EmittingBackend();
     // No onEvent supplied — the pipeline still persists every frame durably.
-    const res = await runAgent(forTenant(db, TENANT_A), backend, spec, {});
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {});
     const events = await db
       .select()
       .from(schema.runEvents)
@@ -415,7 +422,7 @@ describe('run-core effective-spec tool wiring (fail-the-fix)', () => {
     };
 
     const backend = new SpecToolsRecordingBackend();
-    const res = await runAgent(forTenant(db, TENANT_A), backend, declaredAgentSpec, {
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, declaredAgentSpec, {
       tools: [lookupTool],
     });
 
@@ -429,7 +436,7 @@ describe('run-core effective-spec tool wiring (fail-the-fix)', () => {
 describe('run-core replay', () => {
   it('returns the cached step WITHOUT re-calling the model', async () => {
     const backend = new FakeBackend();
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const live = await runAgent(tdb, backend, spec, {});
     expect(backend.liveCalls).toBe(1);
 
@@ -443,7 +450,7 @@ describe('run-core replay', () => {
 
   it('replay header upsert is idempotent — no duplicate run rows or conversation rows', async () => {
     const backend = new FakeBackend();
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const live = await runAgent(tdb, backend, spec, {});
 
     await runAgent(tdb, backend, spec, { replayRunId: live.runId });
@@ -557,7 +564,7 @@ describe('run-core error-step healing on re-run', () => {
   const KEY = 'llm:heal';
 
   it('heals a failed step end-to-end: a re-run of a step that errored persists the success with NO conflict', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new TransientThenHealBackend();
 
     // First live run: the step fails transiently → one error row in the journal.
@@ -588,7 +595,7 @@ describe('run-core error-step healing on re-run', () => {
   });
 
   it('heals a failed step at the sink: re-recording an error step under the same key REPLACES it', async () => {
-    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN, 'openai', false, cost);
+    const sink = makeJournalSink(forTenant(appDb, TENANT_A), RUN, 'openai', false, cost);
     // First attempt fails transiently → an error row occupies the (tenant,run,key) unique slot.
     await sink.record({
       type: 'llm',
@@ -625,7 +632,7 @@ describe('run-core error-step healing on re-run', () => {
   });
 
   it('never overwrites an ok row: a later same-key record leaves the completed output authoritative', async () => {
-    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN, 'openai', false, cost);
+    const sink = makeJournalSink(forTenant(appDb, TENANT_A), RUN, 'openai', false, cost);
     await sink.record({
       type: 'llm',
       idempotencyKey: KEY,
@@ -663,7 +670,7 @@ describe('run-core error-step healing on re-run', () => {
   });
 
   it('double error under the same key: the later attempt wins cleanly, no conflict', async () => {
-    const sink = makeJournalSink(forTenant(db, TENANT_A), RUN, 'openai', false, cost);
+    const sink = makeJournalSink(forTenant(appDb, TENANT_A), RUN, 'openai', false, cost);
     await sink.record({
       type: 'llm',
       idempotencyKey: KEY,
@@ -697,7 +704,7 @@ describe('run-core error-step healing on re-run', () => {
   });
 
   it('an ok step is left untouched by a re-run: the same row (stepId + output) survives replay', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new FakeBackend();
     const live = await runAgent(tdb, backend, spec, {});
     expect(backend.liveCalls).toBe(1);
@@ -881,7 +888,7 @@ class CompleteThenSpuriousErrorBackend implements Backend {
 
 describe('run-core run-header reconcile on heal', () => {
   it('reconciles the run header error→completed when a re-dispatch heals the run', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new RedispatchHealBackend();
     const runId = 'heal-header-run';
 
@@ -906,7 +913,7 @@ describe('run-core run-header reconcile on heal', () => {
   });
 
   it('a healed run reads as completed via observability and satisfies the double-bill short-circuit', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new RedispatchHealBackend();
     const runId = 'heal-observe-run';
 
@@ -932,7 +939,7 @@ describe('run-core run-header reconcile on heal', () => {
   });
 
   it('never downgrades an already-completed header: a spurious error re-run leaves it completed', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new CompleteThenSpuriousErrorBackend();
     const runId = 'no-downgrade-run';
 
@@ -1062,7 +1069,7 @@ describe('run-core sequentialTools (per-run FIFO width-1 queue in front of dispa
     const backend = new BatchToolBackend();
     const seqSpec: AgentSpec = { ...spec, sequentialTools: true };
 
-    const res = await runAgent(forTenant(db, TENANT_A), backend, seqSpec, { tools });
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, seqSpec, { tools });
 
     expect(res.status).toBe('completed');
     expect(backend.results).toEqual(['tool_data', 'tool_data']);
@@ -1078,7 +1085,7 @@ describe('run-core sequentialTools (per-run FIFO width-1 queue in front of dispa
     const { trace, tools } = orderedWritePair(2000);
     const backend = new BatchToolBackend();
 
-    const res = await runAgent(forTenant(db, TENANT_A), backend, spec, { tools });
+    const res = await runAgent(forTenant(appDb, TENANT_A), backend, spec, { tools });
 
     expect(res.status).toBe('completed');
     expect(backend.results).toEqual(['tool_data', 'tool_data']);

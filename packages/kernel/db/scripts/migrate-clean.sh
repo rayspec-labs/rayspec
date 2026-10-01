@@ -128,9 +128,19 @@ if [[ "$PUSH_EXIT" -ne 0 ]] || ! grep -qF 'Pulling schema from database' <<<"$PU
 fi
 # Pending DDL lines push printed under the "about to execute" banner. Case-INSENSITIVE: drizzle also
 # emits lowercase data-loss preamble (e.g. `truncate table ... cascade;` / `delete from ...`).
+# The second subtraction: the row-level tenant policies (drizzle/0015_tenant_row_security.sql) are
+# deliberately NOT declared in schema.ts — declaring one makes drizzle-kit enable row security with
+# it, and the chain must leave it off for a single-role deployment — so push lists each as a policy
+# to drop, and, because its introspection takes a table that carries a policy for one with row
+# security enabled, a `DISABLE ROW LEVEL SECURITY` for the same table (a no-op: the chain enables it
+# nowhere). Exactly those two statement shapes are subtracted; Step 3 asserts positively that every
+# tenant table carries the canonical policy and that NO table has row security enabled, so a
+# migration that really enabled it would still fail this gate.
 DRIFT_STMTS="$(grep -iE '^[[:space:]]*(ALTER|CREATE|DROP|ADD|RENAME|TRUNCATE|DELETE|INSERT|UPDATE)[[:space:]]' <<<"$PUSH_CLEAN" \
   | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
   | grep -vxF $'ALTER TABLE "api_keys" ALTER COLUMN "scopes" SET DEFAULT \'{}\';' \
+  | grep -vxE '^DROP POLICY "tenant_isolation" ON "[a-z_]+" CASCADE;$' \
+  | grep -vxE '^ALTER TABLE "[a-z_]+" DISABLE ROW LEVEL SECURITY;$' \
   || true)"
 if [[ -n "$DRIFT_STMTS" ]]; then
   echo "MIGRATE-CLEAN: FAIL — the migrated DB DRIFTS from schema.ts. push would still run:" >&2
@@ -141,7 +151,7 @@ fi
 if grep -qF 'No changes detected' <<<"$PUSH_CLEAN"; then
   echo "  ok: push reports 'No changes detected' (zero drift)."
 else
-  echo "  ok: push reports ZERO real drift (only the one documented exact benign scopes line)."
+  echo "  ok: push reports ZERO real drift (only the documented benign lines: the scopes default and the tenant policies Step 3 asserts)."
 fi
 
 # --- Step 3: COMPLETE STRUCTURAL CROSS-CHECK (the DETERMINISTIC primary oracle, push-quirk-free) ---

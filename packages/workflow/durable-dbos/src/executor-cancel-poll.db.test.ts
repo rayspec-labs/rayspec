@@ -38,6 +38,7 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -68,6 +69,7 @@ const baseSpec: AgentSpec = {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let engine: EngineDatabases | undefined;
 /** A SECOND, independent pool over the same schema — the cancelling side, as another process is. */
 let markerDb: DbHandle;
 let executor: DbosDurableExecutor;
@@ -162,8 +164,15 @@ beforeAll(async () => {
   await db.$client.unsafe(buildSpineSchemaSql(APP_SCHEMA));
   await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'cp', 'cp')`, [TENANT]);
 
+  // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+  engine = await engineDatabases({
+    admin: db,
+    adminUrl: url,
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: dbosSystemUrl,
+  });
   const deps: DbosExecutorDeps = {
-    db,
+    db: engine.appDb,
     resolveRun: (job: RunJob): ResolvedRun => {
       if (job.agentId === 'echo-agent') return { backend, spec: baseSpec };
       throw new Error(`unknown agent '${job.agentId}'`);
@@ -171,7 +180,7 @@ beforeAll(async () => {
   };
   executor = new DbosDurableExecutor(deps, {
     name: `rayspec-cancel-poll-${PID}`,
-    systemDatabaseUrl: dbosSystemUrl,
+    systemDatabaseUrl: engine.systemDatabaseUrl,
   });
   await executor.start();
 }, 60_000);
@@ -193,6 +202,7 @@ afterAll(async () => {
   try {
     await executor.shutdown();
   } finally {
+    await engine?.close();
     backend.releaseGate();
     await markerDb.$client.end();
     await db.$client.end();

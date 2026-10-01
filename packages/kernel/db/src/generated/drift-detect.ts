@@ -140,16 +140,26 @@ export async function detectDrift(
   }
 
   // --- foreign keys -------------------------------------------------------------------------
+  // Read from `pg_constraint`, not `information_schema`: the information schema lists a constraint's
+  // referenced columns (`constraint_column_usage`) only for tables the CURRENT role owns, so a role
+  // that owns nothing — the runtime role under role separation — would see no foreign key at all and
+  // report every one as missing. The catalog shows them to any role. Same rows as before: one per
+  // referencing column, the referenced table in the same schema, the ON DELETE rule spelled as the
+  // information schema spells it.
   const fkRows = (await query(
-    `SELECT tc.table_name, kcu.column_name, ccu.table_name AS foreign_table_name, rc.delete_rule
-       FROM information_schema.table_constraints tc
-       JOIN information_schema.key_column_usage kcu
-         ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-       JOIN information_schema.constraint_column_usage ccu
-         ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-       JOIN information_schema.referential_constraints rc
-         ON tc.constraint_name = rc.constraint_name AND tc.table_schema = rc.constraint_schema
-      WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = ANY($2)`,
+    `SELECT t.relname::text AS table_name, a.attname::text AS column_name,
+            ft.relname::text AS foreign_table_name,
+            CASE con.confdeltype
+              WHEN 'c' THEN 'CASCADE' WHEN 'r' THEN 'RESTRICT' WHEN 'n' THEN 'SET NULL'
+              WHEN 'd' THEN 'SET DEFAULT' ELSE 'NO ACTION' END AS delete_rule
+       FROM pg_constraint con
+       JOIN pg_class t ON t.oid = con.conrelid
+       JOIN pg_namespace ns ON ns.oid = t.relnamespace
+       JOIN pg_class ft ON ft.oid = con.confrelid
+       JOIN pg_namespace fns ON fns.oid = ft.relnamespace
+       CROSS JOIN LATERAL unnest(con.conkey) AS k(attnum)
+       JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+      WHERE con.contype = 'f' AND ns.nspname = $1 AND fns.nspname = $1 AND t.relname = ANY($2)`,
     [schemaName, tableNames],
   )) as unknown as FkRow[];
 

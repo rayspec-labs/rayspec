@@ -62,6 +62,7 @@ import {
   insertEnqueuedRunHeader,
   isRunTainted,
   isTerminalRunStatus,
+  type JobPrincipal,
   markRunCancelled,
   RunBoundTimeoutError,
   RunCancelledError,
@@ -75,7 +76,7 @@ import { and, asc, eq, gt } from 'drizzle-orm';
 import type { Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import type { AgentRegistryEntry, AppDeps, AppEnv } from '../app-context.js';
+import type { AgentRegistryEntry, AppDeps, AppEnv, AuthContext } from '../app-context.js';
 import { readBoundedJson } from '../http/bounded-body.js';
 import { requireAuth, requirePermission, resolveTenant } from '../http/middleware.js';
 
@@ -213,7 +214,14 @@ export async function executeAgentRun(
   try {
     assertSpecValid(spec, entry.backend.id);
   } catch (e) {
-    throw new ApiError('VALIDATION_ERROR', `Agent spec is invalid for its backend: ${String(e)}`);
+    // The deployment's agent definition does not fit its backend — a configuration fault, not the
+    // caller's. In the hardened posture the reason, which names the deployed spec's internals, is
+    // logged, not returned; outside it the response carries it, as before.
+    if (deps.hardenedPosture !== true) {
+      throw new ApiError('VALIDATION_ERROR', `Agent spec is invalid for its backend: ${String(e)}`);
+    }
+    console.error(`[api-auth] agent '${agentId}' is invalid for its backend`, e);
+    throw new ApiError('VALIDATION_ERROR', 'Agent spec is invalid for its backend.');
   }
 
   // ---- RUN-LEVEL IDEMPOTENCY — RESERVE-BEFORE-EXECUTE (B1) ----------------------------------
@@ -261,6 +269,7 @@ export async function executeAgentRun(
       instructions: body.instructions,
       maxTurns: body.maxTurns,
       persistTo,
+      requestedBy: jobPrincipalOf(c.get('principal')),
     });
   }
 
@@ -401,12 +410,34 @@ export async function executeAgentRun(
         // A held-request timeout is the neutral `timeout` class; a cancellation is the platform-side
         // `cancelled` class (never routed through the upstream classifier — nothing upstream failed);
         // any other throw → classify it.
-        const { errorClass, message } =
-          err instanceof RunTimeoutError
-            ? { errorClass: 'timeout' as ErrorClass, message: err.message }
-            : err instanceof RunCancelledError
-              ? { errorClass: 'cancelled' as ErrorClass, message: err.message }
-              : classifyUpstreamError(err);
+        //
+        // In the hardened posture the frame carries the class and a FIXED message per class, never the
+        // thrown error's own text: an unclassified throw is whatever failed inside the run (a
+        // database error, a tool's exception) and a provider's error text can name the deployment's
+        // own account, and neither belongs on the wire. The detail goes to the server log, the same
+        // place a thrown error on the JSON path goes. The platform's own timeout and cancellation
+        // texts are kept (they are written by this codebase and say what the caller needs). Outside
+        // the posture the frame carries the classifier's message, as before.
+        let errorClass: ErrorClass;
+        let message: string;
+        if (err instanceof RunTimeoutError) {
+          errorClass = 'timeout';
+          message = err.message;
+        } else if (err instanceof RunCancelledError) {
+          errorClass = 'cancelled';
+          message = err.message;
+        } else {
+          const classified = classifyUpstreamError(err);
+          errorClass = classified.errorClass;
+          message = classified.message;
+          if (deps.hardenedPosture === true) {
+            message = streamErrorMessage(errorClass);
+            console.error(
+              `[api-auth] run stream failed requestId=${c.get('requestId') ?? 'unknown'} class=${errorClass}`,
+              err,
+            );
+          }
+        }
         await stream
           .writeSSE({ event: 'error', data: JSON.stringify({ message, errorClass }) })
           .catch(() => {});
@@ -495,6 +526,8 @@ interface AsyncEnqueueInput {
   maxTurns?: number;
   /** The agent action's optional output-persist store (threaded onto the durable job). */
   persistTo?: string;
+  /** The authenticated caller the job runs on behalf of (see `jobPrincipalOf`). */
+  requestedBy?: JobPrincipal;
 }
 
 /**
@@ -525,6 +558,11 @@ interface EnqueueAgentRunInput {
    * off-request run writes its validated output into the declared store. Undefined ⇒ no output persist.
    */
   persistTo?: string;
+  /**
+   * The identity the job runs on behalf of, derived from the request's authenticated principal —
+   * never from the body or from handler code. The worker re-checks it when the job executes.
+   */
+  requestedBy?: JobPrincipal;
 }
 
 /** The neutral outcome of `enqueueAgentRun` — the effective runId + whether it was a same-key dedupe. */
@@ -656,6 +694,7 @@ async function enqueueAgentRun(
       ...(inp.instructions !== undefined ? { instructions: inp.instructions } : {}),
       ...(inp.maxTurns !== undefined ? { maxTurns: inp.maxTurns } : {}),
       ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
+      ...(inp.requestedBy !== undefined ? { requestedBy: inp.requestedBy } : {}),
     });
   } catch (err) {
     // The enqueue THREW — but the throw does NOT prove the job did not start. The
@@ -712,6 +751,7 @@ async function enqueueAsyncRun(
     bodyHash: inp.bodyHash,
     reservedRunId: inp.reservedRunId,
     ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
+    ...(inp.requestedBy !== undefined ? { requestedBy: inp.requestedBy } : {}),
   });
   // A same-key dedupe → the loser body (omits `status`: the prior run may already be COMPLETED/FAILED,
   // so echoing 'enqueued' would be a lie — the caller reads the real state from GET /v1/runs/{id}). A
@@ -947,6 +987,7 @@ export function malformedCapabilityCall(
 export function makeEnqueueAgentRunCapability(
   deps: AppDeps,
   tenantId: string,
+  requestedBy?: JobPrincipal,
 ): EnqueueAgentRunCapability | undefined {
   // No durable worker ⇒ omit the capability (a handler that needs it fail-closes on undefined). The
   // core ALSO 501s on a missing executor, but omitting the slot is the cleaner contract (the handler
@@ -1004,9 +1045,24 @@ export function makeEnqueueAgentRunCapability(
       idemKey: req.idempotencyKey,
       bodyHash,
       reservedRunId,
+      // The request's caller, closed over like the tenant: a handler cannot name another.
+      ...(requestedBy !== undefined ? { requestedBy } : {}),
     });
     return { runId };
   };
+}
+
+/**
+ * The identity a durable job records for the request that enqueued it: the member for a user
+ * principal, the key for an API-key or machine principal. Undefined when the request carried neither
+ * (the job then runs without an execution-time re-check, like a job enqueued before jobs carried one).
+ */
+export function jobPrincipalOf(principal: AuthContext | undefined): JobPrincipal | undefined {
+  if (principal?.kind === 'user' && principal.userId) {
+    return { kind: 'user', userId: principal.userId };
+  }
+  if (principal?.apiKeyId) return { kind: 'apikey', apiKeyId: principal.apiKeyId };
+  return undefined;
 }
 
 /** Register the run-READ routes (GET run + GET events) on the shared middleware chain. */
@@ -1139,6 +1195,29 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * The message a streamed run's terminal `error` frame carries for a thrown failure — fixed per class,
+ * so nothing from inside the run or from the provider's error text reaches the client.
+ */
+export function streamErrorMessage(errorClass: ErrorClass): string {
+  switch (errorClass) {
+    case 'rate_limited':
+      return 'The model provider rate-limited the run.';
+    case 'upstream_5xx':
+      return 'The model provider failed to answer.';
+    case 'upstream_4xx':
+      return 'The model provider rejected the request.';
+    case 'timeout':
+      return 'The run timed out.';
+    case 'model_refusal':
+      return 'The model declined to answer.';
+    case 'cancelled':
+      return 'The run was cancelled.';
+    default:
+      return 'The run failed.';
+  }
+}
 
 /** True if the client requested an SSE stream (Accept: text/event-stream). */
 function acceptsEventStream(c: Context): boolean {

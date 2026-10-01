@@ -36,6 +36,7 @@ import { runAgent } from './run-core.js';
 import { insertEnqueuedRunHeader, RUN_STATUS_ENQUEUED, RUN_STATUS_RUNNING } from './run-header.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -43,6 +44,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 /** The mode the pre-identity `resolveAuth()` can honestly report: nothing is bound yet. */
 const PRE_IDENTITY_MODE: AuthMode = 'unauthenticated';
@@ -213,6 +218,7 @@ async function readEvents(runId: string) {
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 beforeEach(async () => {
   await db.$client.unsafe(
@@ -221,12 +227,13 @@ beforeEach(async () => {
   await seedOrgs(db, TENANT_A);
 });
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('a preflight-bound mode is the run’s authoritative pre-run mode', () => {
   it('every journaled llm AND tool step carries the BOUND mode, and the ledger bills it as one', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = openRemote();
     const runId = 'preflight-bound-run';
 
@@ -261,7 +268,7 @@ describe('a preflight-bound mode is the run’s authoritative pre-run mode', () 
   });
 
   it('the in-flight `running` header already carries the bound mode, before the run finishes', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = new RemoteBackend();
     const runId = 'preflight-inflight-run';
 
@@ -281,7 +288,7 @@ describe('a preflight-bound mode is the run’s authoritative pre-run mode', () 
 
 describe('the credential-binding reference is opaque: forwarded verbatim, stored nowhere', () => {
   it('reaches the backend byte-for-byte and appears in no persisted row', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = openRemote();
     const runId = 'preflight-binding-ref-run';
     const credentialBindingRef = 'lease/2026-08-02/9f3c-OPAQUE-HANDLE';
@@ -299,7 +306,7 @@ describe('the credential-binding reference is opaque: forwarded verbatim, stored
   });
 
   it('omits the key entirely when the deployment supplied no reference', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = openRemote();
     const runId = 'preflight-no-binding-ref-run';
 
@@ -313,7 +320,7 @@ describe('the credential-binding reference is opaque: forwarded verbatim, stored
 
 describe('a backend that implements only resolveAuth() is unchanged', () => {
   it('is asked once, and its answer attributes the header and BOTH journaled steps', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = makeLegacyBackend('api-key');
     const runId = 'legacy-omitted-run';
 
@@ -328,7 +335,7 @@ describe('a backend that implements only resolveAuth() is unchanged', () => {
   });
 
   it('an EXPLICIT `preflightAuth: undefined` still takes the legacy path', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const legacy = makeLegacyBackend('api-key');
     // A presence test written as `'preflightAuth' in backend` would take the preflight arm here and
     // die on `backend.preflightAuth is not a function`.
@@ -343,7 +350,7 @@ describe('a backend that implements only resolveAuth() is unchanged', () => {
   });
 
   it('an honest `unauthenticated` from resolveAuth() still COMPLETES — the new refusal is not on this path', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = makeLegacyBackend('unauthenticated');
     const runId = 'legacy-unauthenticated-run';
 
@@ -355,7 +362,7 @@ describe('a backend that implements only resolveAuth() is unchanged', () => {
   });
 
   it('an OFF-VOCABULARY answer from resolveAuth() still completes and is still recorded as given', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     // `resolveAuth()` is declared to return an `AuthMode`, but types are erased: a third-party backend
     // can return anything at runtime, and today such a run completes and records what it reported.
     // This arm is what the asymmetry buys — applying the preflight's fail-closed guard one call too
@@ -379,7 +386,7 @@ describe('a refused preflight ends the run before it writes anything of its own'
   // for the wrong reason, and the arm would pass even if the preflight ran after the header
   // transition. Outside a transaction, an absent row means the write never happened.
   it('SYNC: a THROW propagates verbatim and leaves no run, no journal step and no event', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = openRemote();
     backend.preflightError = new Error('cloud: no binding for tenant');
     const runId = 'preflight-throw-run';
@@ -400,7 +407,7 @@ describe('a refused preflight ends the run before it writes anything of its own'
     // path writes an `enqueued` header BEFORE handing the job over, outside the transaction the
     // durable worker wraps the run in, so a refusal cannot roll it back. What the refusal must not do
     // is ADVANCE it — no `running` transition, no terminal write — or add a journal row or an event.
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = openRemote();
     backend.preflightError = new Error('cloud: no binding for tenant');
     const runId = 'preflight-throw-enqueued-run';
@@ -425,7 +432,7 @@ describe('a refused preflight ends the run before it writes anything of its own'
   });
 
   it('a fabricated mode can never reach runs.auth_mode or journal_steps.auth_mode', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     const backend = openRemote();
     // Both columns are plain `text NOT NULL` with no CHECK constraint, so the fail-closed guard is
     // the only thing standing between a fabricated mode and the audit record.

@@ -24,7 +24,17 @@ import type { AppEnv } from '../app-context.js';
 import type { MediaTokenService } from './media-token.js';
 
 /** The query-param name carrying the media token (`?token=...`). */
-const MEDIA_TOKEN_PARAM = 'token';
+export const MEDIA_TOKEN_PARAM = 'token';
+
+/** What `mediaAuth` checks beyond the token itself. */
+export interface MediaAuthOptions {
+  /**
+   * Whether `userId` is an active member of `tenantId` right now. When supplied (the declared-route
+   * interpreter supplies the membership store's live lookup), a verified token whose user is no
+   * longer a member is refused like an invalid one.
+   */
+  readonly isLiveMember?: (userId: string, tenantId: string) => Promise<boolean>;
+}
 
 /**
  * The media-JWT verifier middleware. Reads `?token=`, verifies it (alg-pinned HS256, signature, exp,
@@ -34,7 +44,10 @@ const MEDIA_TOKEN_PARAM = 'token';
  * (no enumeration: forged, expired, wrong-alg, and absent all return the same generic failure). The
  * verified `resource` + `sub` are stashed for the handler/semaphore via context vars.
  */
-export function mediaAuth(service: MediaTokenService): MiddlewareHandler<AppEnv> {
+export function mediaAuth(
+  service: MediaTokenService,
+  opts: MediaAuthOptions = {},
+): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const token = c.req.query(MEDIA_TOKEN_PARAM);
     if (!token) throw unauthenticated();
@@ -45,6 +58,12 @@ export function mediaAuth(service: MediaTokenService): MiddlewareHandler<AppEnv>
       throw unauthenticated();
     }
     const { tenantId, resource, sub } = result.claims;
+    // A token outlives nothing it was minted for: the user it names must STILL be an active member of
+    // the tenant it names, read live on every request. A member removed after the mint loses playback
+    // at once instead of at the token's expiry (up to the platform ceiling). Same uniform 401.
+    if (opts.isLiveMember !== undefined && !(await opts.isLiveMember(sub, tenantId))) {
+      throw unauthenticated();
+    }
     // The media principal: a synthetic, API-powerless principal. It carries NO scopes + the apikey kind
     // (so the normal authz path, were it ever reached, would deny every API permission — the media key
     // is for THIS route only). `userId` = the token's sub (the per-user semaphore keys off it).

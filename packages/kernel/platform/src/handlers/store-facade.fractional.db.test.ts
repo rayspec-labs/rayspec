@@ -26,6 +26,7 @@ import {
 import type { StoreSpec } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { makeSchemaAppDb } from '../test-support/test-db.js';
 import { makeHandlerDb, StoreInputError } from './store-facade.js';
 
 const SCHEMA = 'rayspec_test_handlerdb_fractional';
@@ -78,6 +79,9 @@ function buildSchemaSql(): string {
 
 describe.skipIf(!hasDb)('makeHandlerDb — double/numeric envelopes over the real chokepoint', () => {
   let db: ReturnType<typeof makeDbWithSchema>;
+  // The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+  let appDb: ReturnType<typeof makeDbWithSchema>;
+  let closeAppDb: () => Promise<void> = async () => {};
   let productTables: Map<string, PgTable>;
   let unregister: () => void;
 
@@ -86,17 +90,19 @@ describe.skipIf(!hasDb)('makeHandlerDb — double/numeric envelopes over the rea
     await db.$client.unsafe(buildSchemaSql());
     productTables = buildProductTables([measurementsStore]);
     unregister = registerScopedTables([...productTables.values()]);
+    ({ appDb, close: closeAppDb } = await makeSchemaAppDb(db, SCHEMA));
   });
   beforeEach(async () => {
     await db.$client.unsafe(`TRUNCATE ${SCHEMA}.measurements`);
   });
   afterAll(async () => {
+    await closeAppDb();
     unregister();
     await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
     await db.$client.end();
   });
 
-  const handlerDb = () => makeHandlerDb(forTenant(db, TENANT_A), productTables);
+  const handlerDb = () => makeHandlerDb(forTenant(appDb, TENANT_A), productTables);
 
   it('round-trips a finite double and an exact numeric string (byte-equal past float64)', async () => {
     testsRan += 1;

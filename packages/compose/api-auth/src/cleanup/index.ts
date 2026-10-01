@@ -63,7 +63,7 @@
  * iterates orgs for per-org retention via its join.
  */
 
-import { type Db, eventRetentionCutoff, sweepTenantEvents } from '@rayspec/db';
+import { type Db, eventRetentionCutoff, forTenant } from '@rayspec/db';
 import { IdentityStore } from '../stores/identity-store.js';
 import { DrizzleOidcAdapter } from '../stores/oidc-store.js';
 import { OrgStore } from '../stores/org-store.js';
@@ -191,12 +191,13 @@ export async function runScheduledCleanup(deps: CleanupDeps): Promise<CleanupRes
   // gets told "ok" and handed a hole). The cutoff derives from the SAME `now` the rest of the pass
   // uses. No gate: an event past its declared window is not PII the operator must sign off on, it is
   // the stream doing what the deployment declared — the operator control is the window itself.
+  // The sweep runs once per tenant, under that tenant's context (`TenantDb.sweepEvents`), so it also
+  // reaches every stream where row-level security hides the other tenants' rows. Each tenant's delete
+  // and floor still commit in one statement.
   const eventBus =
     config.eventBusRetentionHours === undefined
       ? undefined
-      : await sweepTenantEvents(db, {
-          cutoff: eventRetentionCutoff(now, config.eventBusRetentionHours),
-        });
+      : await sweepEveryTenant(db, eventRetentionCutoff(now, config.eventBusRetentionHours));
 
   return {
     oidcPruned,
@@ -209,6 +210,21 @@ export async function runScheduledCleanup(deps: CleanupDeps): Promise<CleanupRes
     // Spread so the field is ABSENT (not a fabricated zero) on a deployment with no event bus.
     ...(eventBus ? { eventBus } : {}),
   };
+}
+
+/**
+ * The event-bus retention sweep over every tenant: the org ids come from the global `orgs` table (a
+ * tombstoned org's stream is swept too), and each tenant's stream is swept under its own context.
+ */
+async function sweepEveryTenant(db: Db, cutoff: Date): Promise<EventBusCleanupResult> {
+  let deleted = 0;
+  let tenants = 0;
+  for (const orgId of await new OrgStore(db).allOrgIds()) {
+    const swept = await forTenant(db, orgId).sweepEvents(cutoff);
+    deleted += swept.deleted;
+    tenants += swept.tenants;
+  }
+  return { deleted, tenants };
 }
 
 /**

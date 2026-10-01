@@ -292,17 +292,20 @@ export async function readTenantEventPage(
  * cursor truncated whose next row happens to survive, and it can never declare a cursor fine whose
  * rows are gone. Over-signalling is recoverable; under-signalling is the silent hole.
  *
- * CROSS-TENANT BY DESIGN (like the OIDC prune and the GDPR purge it runs beside): this is platform
- * housekeeping over every tenant's stream, driven by the scheduled cleanup arm, never by a product
- * request. Nothing here is gated on a per-request tenant, and no product request can trigger it.
+ * `tenantId` limits the sweep to one tenant's stream, which is how the scheduled cleanup runs it: once
+ * per tenant, through `TenantDb.sweepEvents`, under that tenant's context, so it also works where
+ * row-level security hides every other tenant's rows. Without `tenantId` it sweeps every stream the
+ * connection can see in one statement.
  */
 export async function sweepTenantEvents(
   db: Db,
-  opts: { readonly cutoff: Date },
+  opts: { readonly cutoff: Date; readonly tenantId?: string },
 ): Promise<TenantEventSweepResult> {
+  const onlyTenant =
+    opts.tenantId === undefined ? sql`` : sql` and tenant_id = ${opts.tenantId}::uuid`;
   const rows = (await db.execute(sql`
     with doomed as (
-      delete from tenant_events where at < ${opts.cutoff.toISOString()}::timestamptz
+      delete from tenant_events where at < ${opts.cutoff.toISOString()}::timestamptz${onlyTenant}
       returning tenant_id, seq
     ), per_tenant as (
       select tenant_id, max(seq) as floor, count(*)::bigint as removed

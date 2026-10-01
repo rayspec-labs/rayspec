@@ -21,7 +21,7 @@
  */
 import type { AgentSpec, Backend, NeutralTool, RunContext, RunResult } from '@rayspec/core';
 import { forTenant } from '@rayspec/db';
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import { makeDbWithSchema, type TestAppDb, testAppDb } from '@rayspec/db/testing';
 import {
   CapabilityRegistry,
   type WorkflowInputEvent,
@@ -42,6 +42,8 @@ const TENANT = '00000000-0000-0000-0000-0000000000e5';
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+// The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+let app: TestAppDb<DbHandle>;
 let testsRan = 0;
 
 /** The ground-truth side-effect counter the non-idempotent tool bumps on every REAL fire. */
@@ -151,7 +153,7 @@ function orderEvent(): WorkflowInputEvent {
 }
 
 function buildEngine(backend: FakeChargeBackend): DurableWorkflowEngine {
-  const tdb = forTenant(db, TENANT);
+  const tdb = forTenant(app.appDb, TENANT);
   const registry = new CapabilityRegistry();
   const resolve = (agentId: string): ResolvedAgentNode | undefined =>
     agentId === 'charge_agent' ? { backend, spec: CHARGE_SPEC, tools: [chargeTool] } : undefined;
@@ -170,6 +172,7 @@ describe.skipIf(!hasDb)('workflow-durable — agent node crash-resume never re-f
     db = makeDbWithSchema(url, APP_SCHEMA);
     await db.$client.unsafe(buildWorkflowDurableSchemaSql(APP_SCHEMA));
     await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1,'e','e')`, [TENANT]);
+    app = await testAppDb(db, url, APP_SCHEMA);
   }, 60_000);
 
   beforeEach(async () => {
@@ -180,6 +183,7 @@ describe.skipIf(!hasDb)('workflow-durable — agent node crash-resume never re-f
   });
 
   afterAll(async () => {
+    await app?.close();
     await db.$client.end();
   });
 
@@ -203,7 +207,7 @@ describe.skipIf(!hasDb)('workflow-durable — agent node crash-resume never re-f
     const workflowRunId = (
       await db.$client.unsafe('SELECT workflow_run_id FROM workflow_runs LIMIT 1')
     )[0] as { workflow_run_id: string };
-    const store = new TenantDbWorkflowJournalStore(forTenant(db, TENANT));
+    const store = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT));
     await store.finalizeRun(workflowRunId.workflow_run_id, {
       status: 'running',
       resumable: false,
@@ -237,7 +241,7 @@ describe.skipIf(!hasDb)('workflow-durable — agent node crash-resume never re-f
     await db.$client.unsafe(
       `UPDATE workflow_node_states SET status = 'running' WHERE node_id = 'charge'`,
     );
-    const store = new TenantDbWorkflowJournalStore(forTenant(db, TENANT));
+    const store = new TenantDbWorkflowJournalStore(forTenant(app.appDb, TENANT));
     await store.finalizeRun(done.run.workflowRunId, {
       status: 'running',
       resumable: false,

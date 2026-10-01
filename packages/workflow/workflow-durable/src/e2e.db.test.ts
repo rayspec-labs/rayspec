@@ -10,7 +10,7 @@
  */
 import type { AgentSpec } from '@rayspec/core';
 import { forTenant, schema } from '@rayspec/db';
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import { makeDbWithSchema, type TestAppDb, testAppDb } from '@rayspec/db/testing';
 import {
   CapabilityRegistry,
   type WorkflowInputEvent,
@@ -39,6 +39,8 @@ const OTHER_TENANT = '00000000-0000-0000-0000-0000000000d4';
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+// The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+let app: TestAppDb<DbHandle>;
 let testsRan = 0;
 
 const CLASSIFIER_SPEC: AgentSpec = {
@@ -108,7 +110,7 @@ function ticketEvent(): WorkflowInputEvent {
 }
 
 function buildEngine(tenantId: string, backend: FakeClassifierBackend): DurableWorkflowEngine {
-  const tdb = forTenant(db, tenantId);
+  const tdb = forTenant(app.appDb, tenantId);
   const registry = new CapabilityRegistry();
   // CAPABILITY node — a Tier B capability the deployment composes (here: parse an intake ticket).
   registry.register('intake.parse_ticket', ({ input, step }) => ({
@@ -154,6 +156,7 @@ describe.skipIf(!hasDb)(
         `INSERT INTO orgs (id, name, slug) VALUES ($1,'c','c'),($2,'d','d')`,
         [TENANT, OTHER_TENANT],
       );
+      app = await testAppDb(db, url, APP_SCHEMA);
     }, 60_000);
 
     beforeEach(async () => {
@@ -163,6 +166,7 @@ describe.skipIf(!hasDb)(
     });
 
     afterAll(async () => {
+      await app?.close();
       await db.$client.end();
     });
 
@@ -185,7 +189,7 @@ describe.skipIf(!hasDb)(
 
       // The AGENT node ran through the REAL runAgent path exactly once — a `runs` header persisted.
       expect(backend.liveRuns).toBe(1);
-      const tdb = forTenant(db, TENANT);
+      const tdb = forTenant(app.appDb, TENANT);
       const runs = (await tdb.select(schema.runs).all()) as Array<{
         agentName: string;
         status: string;
@@ -216,14 +220,17 @@ describe.skipIf(!hasDb)(
         event: ticketEvent(),
       });
 
-      const obs = await getWorkflowRunObservability(forTenant(db, TENANT), view.run.workflowRunId);
+      const obs = await getWorkflowRunObservability(
+        forTenant(app.appDb, TENANT),
+        view.run.workflowRunId,
+      );
       expect(obs?.run.status).toBe('completed');
       expect(obs?.nodeStatusCounts.completed).toBe(4);
       expect(obs?.nodes).toHaveLength(4);
 
       // A DIFFERENT tenant cannot read this run (tenant-scoped observability).
       const foreign = await getWorkflowRunObservability(
-        forTenant(db, OTHER_TENANT),
+        forTenant(app.appDb, OTHER_TENANT),
         view.run.workflowRunId,
       );
       expect(foreign).toBeUndefined();
@@ -245,7 +252,7 @@ describe.skipIf(!hasDb)(
       expect(second.run.status).toBe('completed');
       // The agent (and every node) ran EXACTLY once across both executes (dedup on the run id).
       expect(backend.liveRuns).toBe(1);
-      const artifacts = await forTenant(db, TENANT).select(schema.workflowArtifacts).all();
+      const artifacts = await forTenant(app.appDb, TENANT).select(schema.workflowArtifacts).all();
       expect(artifacts).toHaveLength(1);
     });
 
@@ -253,7 +260,7 @@ describe.skipIf(!hasDb)(
       testsRan += 1;
       const backend = new FakeClassifierBackend();
       const wf = triageWorkflow();
-      const tdb = forTenant(db, TENANT);
+      const tdb = forTenant(app.appDb, TENANT);
       const store = new TenantDbWorkflowJournalStore(tdb);
       const engine = buildEngine(TENANT, backend);
 

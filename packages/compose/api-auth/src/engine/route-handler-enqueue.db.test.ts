@@ -287,6 +287,13 @@ describe.skipIf(!hasDb)('route-handler init.enqueue durable seam', () => {
     expect(job.runId).toBe(body.runId); // the runId the handler received == the enqueued job's runId
     expect(job.agentId).toBe('transcribe-agent');
     expect(job.input).toBe('transcribe this recording');
+    // The job records the REQUEST's caller (server-derived), which the worker re-checks at execution.
+    const me = (await (
+      await jsonRequest(h.app, 'GET', '/v1/auth/me', {
+        headers: { authorization: `Bearer ${token}` },
+      })
+    ).json()) as { userId: string };
+    expect(job.requestedBy).toEqual({ kind: 'user', userId: me.userId });
     // The run did NOT execute in-request (off-request: no synchronous backend run).
     expect(backend.liveRuns).toBe(0);
   });

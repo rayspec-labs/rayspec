@@ -181,6 +181,16 @@ storage), and each exemption is explicit and reviewed. The practical consequence
 there is no ergonomic path to a cross-tenant read, because the unscoped handle is
 not the one application code is given.
 
+Every tenant table carries a row-level policy that compares `tenant_id` with the
+transaction-local `app.current_tenant`, which a chokepoint transaction sets to the
+server-derived tenant first. With **role separation** turned on
+(`RAYSPEC_MIGRATION_DATABASE_URL`, opt-in) every statement the chokepoint issues
+runs in such a transaction and the database enforces that policy on its own: the server serves as a runtime role that
+owns nothing and cannot bypass row security, the migration role owns the schema,
+and a statement that lost or never had its tenant reaches no tenant row. Without it
+the policies exist but are not enabled, and one role migrates and serves as before.
+See [Database roles and row-level security](./database-isolation.md).
+
 ### 3. The tool-dispatch trust boundary
 
 Agent tool calls run through one dispatch boundary, and everything that crosses it
@@ -273,7 +283,34 @@ further hardening layer that it does **not** include.
 
 - **Tenant isolation by construction** — the fail-closed chokepoint above, with a
   continuous-integration test that fails the build if any tenant-owned table can
-  be read without the predicate.
+  be read without the predicate, and a build gate that fails when a migration adds
+  a tenant table without its row-level policy.
+- **Database roles and row-level security, opt-in** — a migration role, a runtime
+  role without `BYPASSRLS` that owns nothing, and a read-only snapshot role, with
+  every tenant table's policy enabled and forced
+  ([Database roles and row-level security](./database-isolation.md)). The runtime
+  checks the posture at boot and reports it active only when every check passes.
+- **Authenticate, then authorize the operation and the resource** — a credential
+  only says who is calling. Every route then checks the permission for the action
+  (from the live membership row for every write and administrative action, never
+  from the token's claim) and reaches only rows of the caller's own organization, so
+  another organization's id answers `404` like a missing one. In the hardened
+  posture a run start or cancel rereads the membership too; a durable agent run
+  records the member or API key that asked for it and is checked again when the
+  worker starts it, so a member removed in the meantime has nothing run on their
+  behalf; and a playback token stops working once its user is no longer a member.
+  Reads trust the token's role for the token's lifetime.
+- **Handlers get a sanitized principal and scoped facades** — the caller as plain
+  values, a store facade over its own organization's stores, and capabilities bound
+  to that organization; never a database handle or the migration connection. In
+  the hardened posture a stream handler's request arrives without `authorization`,
+  `proxy-authorization`, `cookie` or a playback `?token=`; an error a handler throws
+  answers a bare `500`.
+- **Single-tenant mode, opt-in** — `RAYSPEC_SINGLE_TENANT=true` holds the runtime to
+  one organization: a second is refused on every path and accounts join by invite.
+  With role separation and the managed hosting posture it makes up the hardened
+  posture ([Hosting in the hardened posture](./hardened-posture.md)), which the
+  runtime requires before it reports the managed posture as supported.
 - **No plaintext secrets** — signing keys, peppers, and provider credentials live
   in the environment or a secret manager, never in the database or in git. The
   server refuses to boot if a required secret is missing (fail-closed).
@@ -295,7 +332,6 @@ protections that are deliberately out of scope for the core and belong to a
 distinct hardening layer:
 
 - per-tenant data encryption with wrapped data-encryption keys,
-- database row-level security as a second, in-database enforcement of tenancy,
 - per-tenant execution sandboxing, and
 - cryptographic binding of tokens to their client.
 
@@ -304,6 +340,17 @@ deployment on a public address** for untrusted traffic without that layer. The
 distinction is intentional: the core gives a self-hoster a correct, tenant-isolated
 backend for trusted use, and the hardening layer is what a public multi-tenant
 service additionally needs.
+
+Database row-level security, the second in-database enforcement of tenancy, is not
+part of that layer: it ships in the core, off until the operator turns on role
+separation, and a public multi-tenant service runs with it on.
+
+None of this is a sandbox for custom code. Handlers and extensions are imported into
+the runtime process and can reach what the process can — its environment, its files,
+the network, a database connection of their own. Path jails and scoped facades narrow
+what a handler is **handed**; they do not contain code that goes looking. Only a
+boundary outside the process (a dedicated VM or container, its own database, host
+egress rules) contains code that is not trusted.
 
 ### Restore and key rotation
 
@@ -472,7 +519,8 @@ the fence is in the database, a process that boots under it starts fenced (its q
 paused), and a `resume()` from another process reaches a running server within one poll.
 
 The database write barrier the export relies on is taken only after a full drain and is never
-assumed. With role separation (the runtime connects as a role that owns no table) `quiesce()`
+assumed. With role separation (the runtime connects as a role that owns no table — see
+[Database roles and row-level security](./database-isolation.md)) `quiesce()`
 revokes that role's INSERT, UPDATE, DELETE and TRUNCATE on every table of both databases, checks
 with `has_table_privilege` that nothing survived for the role or any role it can switch to with
 `SET ROLE`, refuses a role that can switch to a table owner, a superuser, a role that bypasses row
@@ -523,3 +571,5 @@ across every product built on it.
 - **[Getting started](./getting-started.md)** — run the stack and make a request.
 - **[Runtime operations](./runtime-operations.md)** — apply, quiesce, resume and recovery from an
   interrupted operation, for operators.
+- **[Hosting in the hardened posture](./hardened-posture.md)** — role separation, single-tenant
+  mode and the managed posture together: turning it on, checking it, and what it does not cover.

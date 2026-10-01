@@ -371,7 +371,8 @@ export async function invokeStreamRouteHandler(
       // handler moves bytes; the deploy fail-closes if no backend is wired, so this is never absent).
       blob: blobFactory(txTdb.tenantId),
       params,
-      // The RAW Web Request — the binary body is UNTRUSTED DATA the handler treats as bytes.
+      // The Web Request the caller built (in the hardened posture already without its credentials,
+      // see handler-request.ts) — the body is UNTRUSTED DATA the handler treats as bytes.
       request,
       // Spread so the field is ABSENT (not `undefined`) on the ingest path, keeping the init shape exact.
       ...(mediaResource !== undefined ? { mediaResource } : {}),

@@ -31,6 +31,7 @@ import type { StoreSpec } from '@rayspec/spec';
 import { sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { makeSchemaAppDb } from '../test-support/test-db.js';
 import { makeHandlerDb, StoreInputError } from './store-facade.js';
 
 const SCHEMA = 'rayspec_test_handlerdb_cmp';
@@ -84,6 +85,9 @@ function buildSchemaSql(): string {
 
 describe.skipIf(!hasDb)('makeHandlerDb — comparison-operator read filters', () => {
   let db: ReturnType<typeof makeDbWithSchema>;
+  // The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+  let appDb: ReturnType<typeof makeDbWithSchema>;
+  let closeAppDb: () => Promise<void> = async () => {};
   let productTables: Map<string, PgTable>;
   let unregister: () => void;
 
@@ -92,17 +96,19 @@ describe.skipIf(!hasDb)('makeHandlerDb — comparison-operator read filters', ()
     await db.$client.unsafe(buildSchemaSql());
     productTables = buildProductTables([eventsStore]);
     unregister = registerScopedTables([...productTables.values()]);
+    ({ appDb, close: closeAppDb } = await makeSchemaAppDb(db, SCHEMA));
   });
   beforeEach(async () => {
     await db.$client.unsafe(`TRUNCATE ${SCHEMA}.events`);
   });
   afterAll(async () => {
+    await closeAppDb();
     unregister();
     await db.$client.unsafe(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`);
     await db.$client.end();
   });
 
-  const handlerDb = () => makeHandlerDb(forTenant(db, TENANT_A), productTables);
+  const handlerDb = () => makeHandlerDb(forTenant(appDb, TENANT_A), productTables);
 
   /** Seed rows seq 1..n (score = seq + 0.5, amount = seq exact-decimal cents). */
   async function seed(n: number): Promise<void> {

@@ -215,7 +215,7 @@ export function requirePermission(deps: AppDeps, permission: Permission): Middle
     };
 
     let effectiveRole = principal.role;
-    if (isSensitive(permission)) {
+    if (isSensitive(permission, { hardened: deps.hardenedPosture === true })) {
       // LIVE membership lookup — the JWT/session claim is NOT trusted for sensitive/mutating ops.
       if (principal.kind === 'user' && principal.userId) {
         const live = await deps.identityStore.liveMembership(principal.userId, tenantId);

@@ -55,6 +55,7 @@ import {
   type ResolvedRun,
   RUN_STARTED_SCOPE,
 } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -82,6 +83,7 @@ const baseSpec: AgentSpec = {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let engine: EngineDatabases | undefined;
 let executor: DbosDurableExecutor;
 let dbosSystemUrl: string;
 let appBaseUrl: string;
@@ -194,8 +196,15 @@ beforeAll(async () => {
   await db.$client.unsafe(buildSpineSchemaSql(APP_SCHEMA));
   await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'sc', 'sc')`, [TENANT]);
 
+  // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+  engine = await engineDatabases({
+    admin: db,
+    adminUrl: url,
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: dbosSystemUrl,
+  });
   const deps: DbosExecutorDeps = {
-    db,
+    db: engine.appDb,
     resolveRun: (job: RunJob): ResolvedRun => {
       if (job.agentId === 'echo-agent') {
         return { backend, spec: baseSpec };
@@ -205,7 +214,7 @@ beforeAll(async () => {
   };
   executor = new DbosDurableExecutor(deps, {
     name: `rayspec-shortcircuit-${PID}`,
-    systemDatabaseUrl: dbosSystemUrl,
+    systemDatabaseUrl: engine.systemDatabaseUrl,
   });
   await executor.start();
 }, 60_000);
@@ -223,6 +232,7 @@ afterAll(async () => {
   try {
     await executor.shutdown();
   } finally {
+    await engine?.close();
     await db.$client.end();
     await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
   }

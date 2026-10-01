@@ -23,6 +23,10 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type SystemCleanupOutcome, SystemCleanupScheduler } from './index.js';
+import {
+  type WorkflowSystemDatabase,
+  workflowSystemDatabase,
+} from './test-support/engine-databases.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const envPath = join(here, '..', '..', '..', '..', '.env');
@@ -83,6 +87,8 @@ async function dropSysDbSafely(baseUrl: string, sysDb: string): Promise<void> {
   }
 }
 
+let system: WorkflowSystemDatabase | undefined;
+
 describe.skipIf(!hasDb)('SystemCleanupScheduler — registers + runs the injected cleanup', () => {
   beforeAll(async () => {
     const url = process.env.DATABASE_URL as string;
@@ -93,6 +99,8 @@ describe.skipIf(!hasDb)('SystemCleanupScheduler — registers + runs the injecte
     // enqueues a run). Point it at the app DB; we never touch app tables in this suite.
     const { makeDb } = await import('@rayspec/db');
     const appDb = makeDb(url, 2);
+    // The engine's system database: the superuser's, or in the runtime-role lane the runtime role's.
+    system = await workflowSystemDatabase(withDbName(url, DBOS_SYS_DB));
 
     executor = new DbosDurableExecutor(
       {
@@ -101,7 +109,7 @@ describe.skipIf(!hasDb)('SystemCleanupScheduler — registers + runs the injecte
           throw new Error('resolveRun not used in the cleanup scheduler test');
         },
       },
-      { name: `rayspec-cleanup-${PID}`, systemDatabaseUrl: withDbName(url, DBOS_SYS_DB) },
+      { name: `rayspec-cleanup-${PID}`, systemDatabaseUrl: system.url },
     );
 
     scheduler = new SystemCleanupScheduler({
@@ -129,6 +137,7 @@ describe.skipIf(!hasDb)('SystemCleanupScheduler — registers + runs the injecte
         ._appDb;
       if (appDb) await appDb.$client.end();
       await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
+      await system?.close();
     }
   }, 30_000);
 

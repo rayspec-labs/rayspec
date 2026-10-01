@@ -8,7 +8,7 @@
  * Skips without DATABASE_URL; the un-skippable ran-guard (bottom) fails a DB-required run that lost it.
  */
 import { forTenant } from '@rayspec/db';
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import { makeDbWithSchema, type TestAppDb, testAppDb } from '@rayspec/db/testing';
 import { contentHash, InMemoryArtifactStore } from '@rayspec/grounding-runtime';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { buildWorkflowDurableSchemaSql } from '../test-support/schema-ddl.js';
@@ -23,6 +23,8 @@ const TENANT = '00000000-0000-0000-0000-0000000000f6';
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+// The handle code under test runs over: `db`, or in the runtime-role lane the runtime role's.
+let app: TestAppDb<DbHandle>;
 let testsRan = 0;
 
 // An idempotency_key DELIBERATELY distinct from the content hash — the exact drift trigger (the DB store
@@ -41,6 +43,7 @@ describe.skipIf(!hasDb)('workflow-durable — artifact store handle-id parity', 
     db = makeDbWithSchema(url, APP_SCHEMA);
     await db.$client.unsafe(buildWorkflowDurableSchemaSql(APP_SCHEMA));
     await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1,'f','f')`, [TENANT]);
+    app = await testAppDb(db, url, APP_SCHEMA);
   }, 60_000);
 
   beforeEach(async () => {
@@ -48,13 +51,14 @@ describe.skipIf(!hasDb)('workflow-durable — artifact store handle-id parity', 
   });
 
   afterAll(async () => {
+    await app?.close();
     await db.$client.end();
   });
 
   it('the DB store mints the SAME content-addressed handle id as the in-memory store', async () => {
     testsRan += 1;
     const inMemory = new InMemoryArtifactStore().persist(persistInput);
-    const dbStore = new TenantDbArtifactStore(forTenant(db, TENANT));
+    const dbStore = new TenantDbArtifactStore(forTenant(app.appDb, TENANT));
     const durable = await dbStore.persist(persistInput);
 
     // Both handles are seeded from the CONTENT hash — NOT the idempotency_key.
@@ -69,7 +73,7 @@ describe.skipIf(!hasDb)('workflow-durable — artifact store handle-id parity', 
     testsRan += 1;
     const inMemStore = new InMemoryArtifactStore();
     const inMemory = inMemStore.persist(persistInput);
-    const dbStore = new TenantDbArtifactStore(forTenant(db, TENANT));
+    const dbStore = new TenantDbArtifactStore(forTenant(app.appDb, TENANT));
     await dbStore.persist(persistInput);
 
     // The DB store resolves the in-memory-minted handle id (same content-addressed id).

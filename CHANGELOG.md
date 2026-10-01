@@ -385,9 +385,120 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reports the hosting posture and whether cross-process run cancellation is on, with its interval
   and whether the variable or the posture set it. The contract's inspect result has no member for
   it, so it is not part of `inspect()`.
+- **Database roles and row-level security, opt-in.** Setting `RAYSPEC_MIGRATION_DATABASE_URL` (or
+  `RAYSPEC_MIGRATION_DATABASE_URL_FILE`) turns on role separation: the platform migrations, product
+  DDL, the migration ledgers and a new step that enables row-level security run as a migration role
+  over that connection, whose pool the boot closes once its schema work is done, and the server
+  serves as the runtime role in `DATABASE_URL`. The step enables and forces the `tenant_isolation`
+  policy on every tenant table (every table with a `tenant_id` column, product stores included; a
+  product migration does it in the transaction that creates its tables), guards each foreign key
+  between tenant tables with a trigger that refuses a reference to another tenant's row (reported
+  like a missing parent), and leaves the runtime role read-only on the two migration ledgers. The
+  new platform migration `0015_tenant_row_security` creates the core policies and three narrow
+  functions (the invite and run-ownership lookups that must find a row before a tenant is known,
+  and the reference trigger); it enables nothing, so a deployment that sets nothing keeps one role
+  and behaves as before. The boot then checks, from the catalog, that the runtime role is no
+  superuser, bypasses no row security, may create no role, database, schema, table or temporary
+  table, owns nothing, holds no `TRUNCATE` on a tenant table and starts with no preset tenant, and
+  that every tenant table carries exactly the tenant policy and no other permissive policy; it also
+  names every view or materialized view the runtime role can read that reads a tenant table with
+  its owner's rights, and every `SECURITY DEFINER` function owned by a bypassing role that the
+  runtime role can call other than the two lookups, unchanged. It reports the result as `BootedServer.databaseIsolation`
+  and prints one warning line naming each failed check, while still serving. The durable worker's
+  own tables are migrated as the migration role before the engine starts as the runtime role, and
+  `rayspec tenant ensure` provisions over the migration role when the variable is set. The boot's
+  product-schema drift check reads foreign keys from `pg_constraint` instead of the information
+  schema, which shows a constraint's referenced table only to the table's owner, so a restart of a
+  role-separated deployment mounts its product stores instead of refusing them as drifted. The three
+  roles and their grants come from `sql/database-roles.sql` in `@rayspec/db`
+  (`packages/kernel/db/sql/database-roles.sql`), which the dev container (`pnpm db:up`, on a new
+  volume) and CI run too; it is idempotent and hands the objects of an existing single-role database
+  over to the migration role without touching a row. New guide:
+  [Database roles and row-level security](./docs/database-isolation.md).
+- **The runtime-control adapter reports the database isolation posture.**
+  `inspectDatabaseIsolation()` runs the same catalog check for the adapter's `runtimeRole`, and
+  `inspect()` reports `managedPosture.supported` only when the release carries a capability receipt,
+  that posture is active **and** single-tenant mode (`RAYSPEC_SINGLE_TENANT=true`) is on; without
+  `runtimeRole` it is never supported.
+- **The tenant chokepoint gate fails a migration that adds a tenant table without its row-level
+  policy.** `scripts/check-tenant-chokepoint.mjs` reads the committed platform chain and names every
+  table with a `tenant_id` column (created quoted or not, or given the column by adding or renaming
+  one) that no migration gives the canonical `tenant_isolation` policy. It also fails a migration
+  that creates any other policy, changes a policy, creates a view without `security_invoker` or a
+  materialized view, creates a `SECURITY DEFINER` function other than the two lookups, or switches
+  a table's row security off. `gate:migrate-clean` asserts the policies on every tenant table and row security enabled on none
+  after the chain.
+- **A test lane served as the runtime role.** With `RAYSPEC_TEST_DATABASE_ISOLATION=roles` the
+  database-backed suites of api-auth, platform, workflow-durable, durable-dbos, server and cli run
+  the code under test as a runtime role with every tenant table's policy enabled and forced: a
+  hand-built test schema is served as a role of its own (`testAppDb` in `@rayspec/db/testing`),
+  every server boot is handed role separation (the server's `vitest.setup.ts` wraps
+  `assembleServer` and `provisionTenant`), a workflow engine launches as the runtime role, and a
+  spawned CLI or server gets both connections (`runtimeRoleEnv`). Each lane checks from inside a
+  session that it is connected as the runtime role; any other value of the variable fails the run.
+  CI runs all six packages that way as well. `GLOBAL_TABLES` in `@rayspec/db` lists the tables without a tenant column, and the
+  database-backed suite holds it equal to the catalog. The new
+  row-level isolation suites of `@rayspec/db` and `@rayspec/server` create throwaway roles through
+  the setup SQL and prove, as the runtime role, that one tenant cannot read, update, delete,
+  insert or reference another's rows or receive its events, that no, forged or stale tenant context
+  reaches nothing, that pooled connections carry no tenant into the next request under concurrency,
+  and that the runtime role can neither run DDL, disable or drop a policy, truncate, nor change its
+  own role attributes.
+- **Single-tenant mode, opt-in.** `RAYSPEC_SINGLE_TENANT=true` holds the runtime to one
+  organization. The org store refuses a second one under a transaction-scoped advisory lock, on
+  every path that creates one: `POST /v1/orgs`, `POST /v1/auth/register` with an `orgName`, the
+  operator bootstrap route, and `rayspec tenant ensure` (which reads the same variable, keeps
+  resolving the existing organization idempotently and reports `SINGLE_TENANT_LIMIT` for a second).
+  Open registration only creates that first organization; after it an account is made by redeeming
+  an invite. A refusal is a `403` with one fixed message; the registration and bootstrap checks run
+  before an account is created, so only the loser of two registrations racing for the first
+  organization is left with an account and no organization. A boot of a database that already holds more than one organization is refused. Any value other than
+  `true` or `false` refuses the boot. `BootedServer.singleTenant` reports it, and the
+  runtime-control adapter's `inspectHosting()` reports the tenant limit as
+  `applicationTenants: { singleTenantMode, maxApplicationTenants }`. Unset, nothing changes.
+- **In the hardened posture a durable agent run is re-checked against its requester when it
+  starts.** A run enqueued
+  through the API (`async: true`, or a handler's `init.enqueue`) records who asked for it —
+  `requestedBy` on the job: the member, the API key, or `system` for a trigger — taken from the
+  authenticated request, never from the body or handler code. With role separation or single-tenant
+  mode on, the worker asks the new `DurableRunAuthorizer` (`makeRunAuthorizer` in
+  `@rayspec/api-auth`, wired by the server only then) before it starts the run: a member no longer in the organization, or a key revoked, expired or without
+  `agent:run`, gets no run. The run is marked like a cancellation, so no recovery re-dispatch runs
+  it either, and it reads back as `status: 'error'`, `errorClass: 'cancelled'` with a message saying
+  it was not started; the backend is never called. `recordRunCancelled` takes the message to record.
+- **New guide:** [Hosting in the hardened posture](./docs/hardened-posture.md) — role separation,
+  single-tenant mode and the managed posture together; how to turn it on and check it; what every
+  surface authorizes; what handler code is given; and what it does not protect against (it is not a
+  sandbox for custom code).
 
 ### Changed
 
+- **In the hardened posture, starting or cancelling an agent run rereads the membership.** With
+  role separation or single-tenant mode on, `agent:run` is checked against the live membership row,
+  like `store:write` and the administrative actions, so a member removed or demoted since their
+  access token was minted can no longer start or cancel a run on the token's claim. An API key is
+  unaffected (the key itself is the live credential). Outside the posture the claim is trusted, as
+  before. `isSensitive` in `@rayspec/auth-core` takes the posture as an optional second argument.
+- **In the hardened posture the terminal `error` frame of a streamed run carries a fixed message
+  per class.** A run that throws while streaming (`Accept: text/event-stream`) ends with
+  `{ message, errorClass }` as before, but with role separation or single-tenant mode on `message`
+  is a fixed text for the class (`The run failed.` for an unclassified failure), not the thrown
+  error's own text; the platform's timeout and cancellation texts are kept, and the detail is logged
+  server-side. There, an agent definition that does not fit its backend answers `Agent spec is
+  invalid for its backend.` without the validator's detail, which is logged. Outside the posture
+  both carry the detail, as before.
+
+- **With role separation every statement of the tenant chokepoint runs under the tenant context.**
+  A `TenantDb` built on a pool marked with the new `requireTenantContext` (the server marks the
+  runtime role's pools when `RAYSPEC_MIGRATION_DATABASE_URL` is set) runs each standalone statement
+  in a short transaction that sets the transaction-local `app.current_tenant` first; a statement on
+  a transaction the chokepoint did not open sets it before it runs. Results are the same; such a
+  statement costs a `BEGIN`, a `set_config` and a `COMMIT` more (measured locally at about 1.35 ms
+  instead of 0.59 ms for a small read). On an unmarked pool a standalone statement still runs on its
+  own, as before. The invite redemption resolves the invite's tenant from its token hash first and
+  reads the invite through the chokepoint, and the event-bus retention sweep runs once per
+  organization under that tenant's context (`TenantDb.sweepEvents`); both return what they returned
+  before.
 - **The legacy YAML deploy changes the schema through apply.** Every schema change a boot makes
   (`rayspec deploy <spec.yaml>` and `rayspec-serve`) — the platform migration chain when the
   ledger is behind the runtime, and each product-store migration — runs as a `runtime.apply`
@@ -515,6 +626,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **In the hardened posture a stream handler no longer receives the caller's credential.** With
+  role separation or single-tenant mode turned on, the Web `Request` a `stream` route handler is
+  handed (`init.request`) no longer carries `authorization`, `proxy-authorization` or `cookie`, and
+  a playback handler's request URL and `params` no longer carry the `?token=` media token. Every
+  other header and the body arrive unchanged; the caller is `init.principal`. Without either
+  setting the handler sees the request as before. The platform exports the view as
+  `withoutCredentials` and the header list as `CREDENTIAL_REQUEST_HEADERS`; `createAuthApp` takes
+  `hardenedPosture`, which turns on every check of the posture listed here.
+- **In the hardened posture a playback token stops working once its user is no longer a member.**
+  With role separation or single-tenant mode on, the media-token check also rereads the token
+  user's membership in the token's organization on every request, so a member removed after the
+  mint loses playback at once instead of at the token's expiry (up to 24 hours). Outside the
+  posture the token alone decides, as before.
+- **With role separation, one tenant's row cannot reference another tenant's row.** A store foreign
+  key onto a parent's `id` is checked by Postgres without regard to tenancy, so a create or update
+  naming another tenant's parent id was accepted. Under role separation the same-tenant trigger
+  refuses it as a validation error, exactly like a parent that does not exist. A single-role
+  deployment is unchanged.
 - **An install of the published packages no longer resolves the vulnerable `hono` and top-level
   `undici`.** The root `pnpm.overrides` moved both inside this repository, but a consumer's `npm
   install` never sees those overrides: it installs the exact versions `@rayspec/server` and
@@ -560,6 +689,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **The platform chain gains `0015_tenant_row_security`.** It only creates policies and functions
+  and enables nothing, so a deployment that does not set `RAYSPEC_MIGRATION_DATABASE_URL` runs
+  exactly as before. To turn role separation on for an existing deployment, run the setup SQL on
+  its databases, set the two URLs and restart; see
+  [Database roles and row-level security](./docs/database-isolation.md). The quiesce barrier
+  `database-write-role` needs the runtime-control adapter's connection to be the migration role's.
+- **Nothing about the hardened posture changes unless it is turned on.** Without
+  `RAYSPEC_SINGLE_TENANT` the number of organizations is not limited and registration stays open;
+  without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. With neither set, every
+  authorization check and error message behaves as before. With either setting on: `agent:run`
+  rereads the membership; a queued agent run is re-checked when it starts (a run enqueued before the
+  upgrade carries no requester and runs as before); a playback token needs a current member;
+  streamed error frames and the invalid agent-spec answer carry fixed messages; and a stream handler
+  no longer sees the credential headers or the playback `?token=` — a handler that read the caller
+  from them reads `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
 - **`rayspec deploy` of a `.ray` file is a new path.** It used to read the file as YAML. Now a
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,

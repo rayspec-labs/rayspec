@@ -56,6 +56,7 @@ import {
   type ResolvedRun,
   RUN_STARTED_SCOPE,
 } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -99,6 +100,7 @@ const persistFactsStore: StoreSpec = {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let engine: EngineDatabases;
 let executor: DbosDurableExecutor;
 let dbosSystemUrl: string;
 let appBaseUrl: string;
@@ -235,10 +237,17 @@ beforeAll(async () => {
     TENANT,
   ]);
 
+  // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+  engine = await engineDatabases({
+    admin: db,
+    adminUrl: url,
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: dbosSystemUrl,
+  });
   const deps: DbosExecutorDeps = {
     // The executor runs on the WRAPPED db so the run's tdb.transaction() GUC is observed (deliverable
     // 2). The DDL above ran on the UNWRAPPED handle; only the run path sees the proxy.
-    db: wrapDb(db),
+    db: engine.serving(wrapDb(engine.appDb)),
     resolveRun: (job: RunJob): ResolvedRun => {
       if (job.agentId !== 'echo-agent') {
         throw new Error(`unknown agent '${job.agentId}'`);
@@ -249,7 +258,7 @@ beforeAll(async () => {
   };
   executor = new DbosDurableExecutor(deps, {
     name: `rayspec-spine-${PID}`,
-    systemDatabaseUrl: dbosSystemUrl,
+    systemDatabaseUrl: engine.systemDatabaseUrl,
   });
   await executor.start();
 }, 60_000);
@@ -271,6 +280,7 @@ afterAll(async () => {
     await executor.shutdown();
   } finally {
     unregisterTables?.();
+    await engine?.close();
     await db.$client.end();
     await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
   }

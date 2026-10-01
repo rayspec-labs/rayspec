@@ -97,9 +97,26 @@ const SENSITIVE = new Set<Permission>([
   'store:write',
 ]);
 
+/**
+ * Permissions that are SENSITIVE only in the hardened posture. Starting (or cancelling) an agent run
+ * spends model calls and enqueues work that runs later on the caller's behalf, so there a member
+ * removed or demoted since their token was minted must not do it on the stale claim (the worker
+ * re-checks the same thing when a queued run executes). Outside it the claim is trusted, as before.
+ */
+const SENSITIVE_WHEN_HARDENED = new Set<Permission>(['agent:run']);
+
+/** Which posture a permission check runs in. */
+export interface SensitivityPosture {
+  /** The hardened hosting posture is on. Default: off. */
+  readonly hardened?: boolean;
+}
+
 /** True if `permission` requires a live membership check (never trust the JWT claim). */
-export function isSensitive(permission: Permission): boolean {
-  return SENSITIVE.has(permission);
+export function isSensitive(permission: Permission, posture: SensitivityPosture = {}): boolean {
+  return (
+    SENSITIVE.has(permission) ||
+    (posture.hardened === true && SENSITIVE_WHEN_HARDENED.has(permission))
+  );
 }
 
 /**

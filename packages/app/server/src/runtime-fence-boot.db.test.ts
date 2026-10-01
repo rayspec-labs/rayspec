@@ -40,6 +40,11 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { formatTimestamp } from '@rayspec/bundle-contract';
 import { type Db, makeDb } from '@rayspec/db';
+import {
+  type RuntimeRoleEnv,
+  runtimeRoleEnv,
+  tablesWithoutForcedRowSecurity,
+} from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -143,6 +148,8 @@ async function serverFetch(
 
 describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
   let dbUrl = '';
+  // The servers' connections: the superuser's, or in the runtime-role lane role separation.
+  let roles: RuntimeRoleEnv | undefined;
   let dir = '';
   let keyFile = '';
   let pepperFile = '';
@@ -185,7 +192,7 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
       env: {
         PATH: process.env.PATH ?? '',
         HOME: process.env.HOME ?? '',
-        DATABASE_URL: dbUrl,
+        ...(roles?.env ?? { DATABASE_URL: dbUrl }),
         RAYSPEC_JWT_SIGNING_KEY_FILE: keyFile,
         RAYSPEC_API_KEY_PEPPER_FILE: pepperFile,
         PORT: String(port),
@@ -304,6 +311,7 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SYS_DB}" WITH (FORCE)`);
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
     await admin.unsafe(`CREATE DATABASE "${SUITE_DB}"`);
+    roles = await runtimeRoleEnv(dbUrl, withDbName(baseUrl, SYS_DB));
 
     dir = mkdtempSync(join(tmpdir(), 'rayspec-fence-boot-'));
     keyFile = join(dir, 'jwt.pem');
@@ -318,6 +326,8 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     server = await boot();
     sql = postgres(dbUrl, { max: 2 });
     control = openControlDatabase(dbUrl);
+    // In the runtime-role lane the server serves as the runtime role with every tenant table forced.
+    if (roles?.runtimeRole) expect(await tablesWithoutForcedRowSecurity(dbUrl)).toEqual([]);
 
     // A user who is owner of the cron tenant's org, and a token scoped to it.
     await sql`INSERT INTO orgs (id, name, slug) VALUES (${TENANT}, 'Fence Co', 'fence-co')`;
@@ -344,6 +354,7 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SYS_DB}" WITH (FORCE)`);
     await admin.unsafe(`DROP DATABASE IF EXISTS "${SUITE_DB}" WITH (FORCE)`);
     await admin.end();
+    await roles?.drop();
     if (dbRequired && armsRan === 0) throw new Error('no fence boot arm ran');
   }, 60_000);
 
@@ -839,7 +850,7 @@ describe.skipIf(!baseUrl)('the source fence on a really booted server', () => {
         env: {
           PATH: process.env.PATH ?? '',
           HOME: process.env.HOME ?? '',
-          DATABASE_URL: dbUrl,
+          ...(roles?.env ?? { DATABASE_URL: dbUrl }),
           RAYSPEC_JWT_SIGNING_KEY_FILE: keyFile,
           RAYSPEC_API_KEY_PEPPER_FILE: pepperFile,
           PORT: String(port),

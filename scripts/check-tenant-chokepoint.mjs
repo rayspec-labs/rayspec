@@ -552,7 +552,314 @@ function selfTest() {
   }
 }
 
+// ── every tenant table the platform chain creates carries the row-level tenant policy ─────────────
+// The database enforces tenant isolation beneath the chokepoint with one policy per tenant table
+// (`tenant_isolation`, packages/kernel/db/src/tenant-isolation.ts), created by the platform chain and
+// enabled by the migration role when the runtime connects as its own role. A migration that adds a
+// table with a `tenant_id` column must add that policy too, or the new table would be the one tenant
+// table row security does not cover: this check reads the committed chain and fails the build on
+// such a table, and on any statement that opens a way around the policy (see isolationSideDoors).
+// (Product stores get theirs from `applyTenantIsolation` in the transaction that
+// creates them; the database-backed test enumerates the live catalog for those.)
+const MIGRATIONS_DIR = 'packages/kernel/db/drizzle';
+const POLICY_PREDICATE = `"tenant_id" = NULLIF(current_setting('app.current_tenant', true), '')::uuid`;
+
+/** Strip `--` line comments so commented-out DDL never counts. */
+function stripSqlComments(sqlText) {
+  return sqlText
+    .split('\n')
+    .map((line) => {
+      const at = line.indexOf('--');
+      return at === -1 ? line : line.slice(0, at);
+    })
+    .join('\n');
+}
+
+// A table name as a migration writes it: quoted or not, with or without the `public.` schema.
+const TABLE_NAME = String.raw`(?:"?public"?\.)?"?([A-Za-z0-9_]+)"?`;
+const TENANT_COLUMN_NAME = `"?tenant_id"?`;
+
+/** The two SECURITY DEFINER lookups the platform chain creates (`ISOLATION_DEFINER_FUNCTIONS`). */
+const ALLOWED_DEFINER_FUNCTIONS = new Set(['rayspec_run_owned_elsewhere', 'rayspec_invite_tenant']);
+
+/**
+ * The tenant tables the migrations create (or give a `tenant_id` column, by adding or renaming one)
+ * that no migration gives the canonical tenant policy. Pure, so the self-test exercises it.
+ * `migrations` is `[{ name, sql }]` in chain order.
+ */
+function tenantTablesWithoutPolicy(migrations) {
+  const tenantTables = new Set();
+  const policed = new Set();
+  for (const { sql: raw } of migrations) {
+    const sqlText = stripSqlComments(raw);
+    for (const statement of sqlText.split(';')) {
+      const create = new RegExp(
+        String.raw`CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${TABLE_NAME}\s*\(`,
+        'i',
+      ).exec(statement);
+      if (create && new RegExp(String.raw`[\s(,]${TENANT_COLUMN_NAME}\s`, 'i').test(statement)) {
+        tenantTables.add(create[1]);
+      }
+      const alter = new RegExp(
+        String.raw`ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?${TABLE_NAME}\s`,
+        'i',
+      ).exec(statement);
+      if (alter) {
+        const table = alter[1];
+        const addsColumn = new RegExp(
+          String.raw`ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?${TENANT_COLUMN_NAME}\s`,
+          'i',
+        ).test(statement);
+        const renamesColumn = new RegExp(
+          String.raw`RENAME\s+(?:COLUMN\s+)?"?[A-Za-z0-9_]+"?\s+TO\s+${TENANT_COLUMN_NAME}(?:\s|$)`,
+          'i',
+        ).test(statement);
+        if (addsColumn || renamesColumn) tenantTables.add(table);
+        // A renamed table keeps its policy under its new name.
+        const renamed = /RENAME\s+TO\s+"?([A-Za-z0-9_]+)"?/i.exec(statement);
+        if (renamed) {
+          if (tenantTables.delete(table)) tenantTables.add(renamed[1]);
+          if (policed.delete(table)) policed.add(renamed[1]);
+        }
+      }
+      const policy = new RegExp(
+        String.raw`CREATE\s+POLICY\s+"?tenant_isolation"?\s+ON\s+${TABLE_NAME}`,
+        'i',
+      ).exec(statement);
+      if (policy && isCanonicalPolicy(statement)) policed.add(policy[1]);
+      const dropped = new RegExp(
+        String.raw`DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?"?tenant_isolation"?\s+ON\s+${TABLE_NAME}`,
+        'i',
+      ).exec(statement);
+      if (dropped) policed.delete(dropped[1]);
+    }
+  }
+  return [...tenantTables].filter((t) => !policed.has(t)).sort();
+}
+
+/** Whether a `CREATE POLICY` statement is the canonical tenant policy, word for word. */
+function isCanonicalPolicy(statement) {
+  return (
+    /CREATE\s+POLICY\s+"tenant_isolation"\s+ON\s+/i.test(statement) &&
+    /\sAS\s+PERMISSIVE\s+FOR\s+ALL\s+TO\s+PUBLIC\s/i.test(statement) &&
+    statement.includes(`USING (${POLICY_PREDICATE})`) &&
+    statement.includes(`WITH CHECK (${POLICY_PREDICATE})`) &&
+    statement.trim().endsWith(`WITH CHECK (${POLICY_PREDICATE})`)
+  );
+}
+
+/**
+ * The statements of the chain that would open a way around the tenant policy for the runtime role:
+ * a policy other than the canonical tenant policy (permissive policies are ORed, so one more widens
+ * it), a changed policy, a view that reads as its owner (the owner bypasses row security) or a
+ * materialized view (it holds its owner's read), a SECURITY DEFINER function other than the two
+ * lookups, and a table whose row security is switched off. Pure, so the self-test exercises it.
+ */
+function isolationSideDoors(migrations) {
+  const found = [];
+  for (const { name, sql: raw } of migrations) {
+    for (const chunk of stripSqlComments(raw).split(';')) {
+      const statement = chunk.trim();
+      if (statement === '') continue;
+      const head = statement.replace(/\s+/g, ' ').slice(0, 120);
+      if (/^CREATE\s+POLICY\s/i.test(statement) && !isCanonicalPolicy(statement)) {
+        found.push(`${name}: a policy other than the canonical tenant policy (${head})`);
+      }
+      if (/^ALTER\s+POLICY\s/i.test(statement)) {
+        found.push(`${name}: a changed policy (${head})`);
+      }
+      if (/^CREATE\s+(?:OR\s+REPLACE\s+)?MATERIALIZED\s+VIEW\s/i.test(statement)) {
+        found.push(`${name}: a materialized view, which holds its owner's read (${head})`);
+      } else if (
+        /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:RECURSIVE\s+)?VIEW\s/i.test(
+          statement,
+        ) &&
+        !/security_invoker\s*(?:=\s*(?:true|on|yes|1)\s*)?[,)]/i.test(statement)
+      ) {
+        found.push(`${name}: a view without security_invoker, which reads as its owner (${head})`);
+      }
+      const fn =
+        /^(?:CREATE\s+(?:OR\s+REPLACE\s+)?|ALTER\s+)FUNCTION\s+(?:"?[A-Za-z0-9_]+"?\.)?"?([A-Za-z0-9_]+)"?/i.exec(
+          statement,
+        );
+      const definerAt = statement.search(/\bSECURITY\s+DEFINER\b/i);
+      const bodyAt = statement.search(/\sAS\s+\$/i);
+      if (
+        fn &&
+        definerAt !== -1 &&
+        (bodyAt === -1 || definerAt < bodyAt) &&
+        !(/^CREATE/i.test(statement) && ALLOWED_DEFINER_FUNCTIONS.has(fn[1]))
+      ) {
+        found.push(`${name}: a SECURITY DEFINER function other than the two lookups (${head})`);
+      }
+      if (
+        /^ALTER\s+TABLE\s[\s\S]*\b(?:DISABLE|NO\s+FORCE)\s+ROW\s+LEVEL\s+SECURITY\b/i.test(
+          statement,
+        )
+      ) {
+        found.push(`${name}: row security switched off (${head})`);
+      }
+    }
+  }
+  return found;
+}
+
+function policySelfTest() {
+  const policy = (t) =>
+    `CREATE POLICY "tenant_isolation" ON "public"."${t}" AS PERMISSIVE FOR ALL TO PUBLIC ` +
+    `USING (${POLICY_PREDICATE}) WITH CHECK (${POLICY_PREDICATE});`;
+  const cases = [
+    {
+      label: 'a tenant table with no policy',
+      migrations: [
+        { name: 'a', sql: 'CREATE TABLE "x" (\n\t"id" uuid,\n\t"tenant_id" uuid NOT NULL\n);' },
+      ],
+      expect: ['x'],
+    },
+    {
+      label: 'a tenant table written without quotes',
+      migrations: [{ name: 'a', sql: 'CREATE TABLE u ( id uuid, tenant_id uuid NOT NULL );' }],
+      expect: ['u'],
+    },
+    {
+      label: 'a schema-qualified tenant table without quotes',
+      migrations: [
+        { name: 'a', sql: 'CREATE TABLE IF NOT EXISTS public.q (\n  tenant_id uuid NOT NULL\n);' },
+      ],
+      expect: ['q'],
+    },
+    {
+      label: 'a tenant table whose policy comes in a later migration',
+      migrations: [
+        { name: 'a', sql: 'CREATE TABLE "x" (\n\t"tenant_id" uuid NOT NULL\n);' },
+        { name: 'b', sql: policy('x') },
+      ],
+      expect: [],
+    },
+    {
+      label: 'a policy that does not read the tenant setting',
+      migrations: [
+        { name: 'a', sql: 'CREATE TABLE "x" (\n\t"tenant_id" uuid NOT NULL\n);' },
+        {
+          name: 'b',
+          sql: 'CREATE POLICY "tenant_isolation" ON "x" USING (true) WITH CHECK (true);',
+        },
+      ],
+      expect: ['x'],
+    },
+    {
+      label: 'a tenant_id column added to an existing table',
+      migrations: [
+        { name: 'a', sql: 'CREATE TABLE "g" (\n\t"id" uuid\n);' },
+        { name: 'b', sql: 'ALTER TABLE "g" ADD COLUMN "tenant_id" uuid NOT NULL;' },
+      ],
+      expect: ['g'],
+    },
+    {
+      label: 'a column renamed to tenant_id',
+      migrations: [
+        { name: 'a', sql: 'CREATE TABLE "r" (\n\t"org" uuid\n);' },
+        { name: 'b', sql: 'ALTER TABLE "r" RENAME COLUMN "org" TO "tenant_id";' },
+      ],
+      expect: ['r'],
+    },
+    {
+      label: 'a tenant table renamed after its policy',
+      migrations: [
+        { name: 'a', sql: `CREATE TABLE "x" (\n\t"tenant_id" uuid NOT NULL\n);\n${policy('x')}` },
+        { name: 'b', sql: 'ALTER TABLE "x" RENAME TO "y";' },
+      ],
+      expect: [],
+    },
+    {
+      label: 'a dropped policy',
+      migrations: [
+        { name: 'a', sql: `CREATE TABLE "x" (\n\t"tenant_id" uuid NOT NULL\n);\n${policy('x')}` },
+        { name: 'b', sql: 'DROP POLICY "tenant_isolation" ON "public"."x";' },
+      ],
+      expect: ['x'],
+    },
+    {
+      label: 'a commented-out table and a global table',
+      migrations: [
+        {
+          name: 'a',
+          sql: '-- CREATE TABLE "c" ("tenant_id" uuid);\nCREATE TABLE "orgs" (\n\t"id" uuid\n);',
+        },
+      ],
+      expect: [],
+    },
+  ];
+  for (const { label, migrations, expect } of cases) {
+    const got = tenantTablesWithoutPolicy(migrations);
+    if (JSON.stringify(got) !== JSON.stringify(expect)) {
+      console.error(
+        `tenant-chokepoint gate SELF-TEST FAILED (tenant policy, ${label}): got ` +
+          `${JSON.stringify(got)}, expected ${JSON.stringify(expect)}`,
+      );
+      process.exit(2);
+    }
+  }
+
+  const sideDoorCases = [
+    { label: 'the canonical policy', sql: policy('x'), expect: 0 },
+    {
+      label: 'a second permissive policy',
+      sql: 'CREATE POLICY "allow_all" ON "public"."runs" AS PERMISSIVE FOR ALL TO PUBLIC USING (true) WITH CHECK (true);',
+      expect: 1,
+    },
+    {
+      label: 'a tenant policy with a widened expression',
+      sql: policy('x').replace(';', ' OR true;'),
+      expect: 1,
+    },
+    {
+      label: 'a changed policy',
+      sql: 'ALTER POLICY "tenant_isolation" ON "x" USING (true);',
+      expect: 1,
+    },
+    { label: 'an owner-rights view', sql: 'CREATE VIEW v AS SELECT * FROM runs;', expect: 1 },
+    {
+      label: 'a security_invoker view',
+      sql: 'CREATE VIEW "v" WITH (security_invoker = true) AS SELECT * FROM runs;',
+      expect: 0,
+    },
+    { label: 'a materialized view', sql: 'CREATE MATERIALIZED VIEW m AS SELECT 1;', expect: 1 },
+    {
+      label: 'a SECURITY DEFINER function',
+      sql: 'CREATE FUNCTION "public"."leak"() RETURNS int LANGUAGE sql SECURITY DEFINER AS $$ SELECT 1 $$;',
+      expect: 1,
+    },
+    {
+      label: 'an allowed lookup',
+      sql: 'CREATE FUNCTION "public"."rayspec_invite_tenant"(p text) RETURNS uuid LANGUAGE sql STABLE SECURITY DEFINER AS $$ SELECT NULL::uuid $$;',
+      expect: 0,
+    },
+    {
+      label: 'a function made SECURITY DEFINER afterwards',
+      sql: 'ALTER FUNCTION public.rayspec_same_tenant_reference() SECURITY DEFINER;',
+      expect: 1,
+    },
+    {
+      label: 'row security switched off',
+      sql: 'ALTER TABLE "runs" NO FORCE ROW LEVEL SECURITY;',
+      expect: 1,
+    },
+  ];
+  for (const { label, sql, expect } of sideDoorCases) {
+    const got = isolationSideDoors([{ name: 'a', sql }]).length;
+    if (got !== expect) {
+      console.error(
+        `tenant-chokepoint gate SELF-TEST FAILED (isolation side door, ${label}): got ${got} ` +
+          `finding(s), expected ${expect}`,
+      );
+      process.exit(2);
+    }
+  }
+}
+
 selfTest();
+policySelfTest();
 
 const violations = [];
 const scannedPerRoot = new Map();
@@ -580,6 +887,33 @@ for (const file of walk(join(repoRoot, DB_SCOPED_TABLES_ROOT))) {
 }
 scannedPerRoot.set(DB_SCOPED_TABLES_ROOT, dbScanned);
 
+// The committed platform chain, in its file order (the numeric prefix is the chain order).
+// A missing directory reads as no migration at all, which the unscanned-root guard below refuses.
+let migrationFiles = [];
+try {
+  migrationFiles = readdirSync(join(repoRoot, MIGRATIONS_DIR))
+    .filter((name) => name.endsWith('.sql'))
+    .sort();
+} catch {
+  migrationFiles = [];
+}
+const committedChain = migrationFiles.map((name) => ({
+  name,
+  sql: readFileSync(join(repoRoot, MIGRATIONS_DIR, name), 'utf8'),
+}));
+const unpoliced = tenantTablesWithoutPolicy(committedChain);
+for (const sideDoor of isolationSideDoors(committedChain)) {
+  violations.push(`${MIGRATIONS_DIR}/${sideDoor}`);
+}
+for (const table of unpoliced) {
+  violations.push(
+    `${MIGRATIONS_DIR}: the tenant table "${table}" has no row-level tenant policy — add ` +
+      `CREATE POLICY "tenant_isolation" ON "public"."${table}" with the canonical predicate ` +
+      '(`tenantPolicySql` in packages/kernel/db/src/tenant-isolation.ts) in a migration',
+  );
+}
+scannedPerRoot.set(MIGRATIONS_DIR, migrationFiles.length);
+
 // ── fail-closed: a root that read NOTHING certifies nothing ───────────────────────────────────────
 // walk() returns silently on a directory that does not exist, so before this guard a rename or a move
 // of any root above retired the gate WITHOUT a signal: zero files scanned, zero violations found,
@@ -604,7 +938,8 @@ if (violations.length > 0) {
   for (const v of violations) console.error(`  - ${v}`);
   console.error(
     '\nRequest-path + run-core code must hold only a TenantDb. Use forTenant(db, tenantId);' +
-      ' reach global/auth tables via db.unscoped() ONLY in a whitelisted module.',
+      ' reach global/auth tables via db.unscoped() ONLY in a whitelisted module. Every tenant' +
+      ' table the platform chain creates carries the row-level tenant policy.',
   );
   process.exit(1);
 }
@@ -612,5 +947,6 @@ if (violations.length > 0) {
 const totalScanned = [...scannedPerRoot.values()].reduce((sum, count) => sum + count, 0);
 console.log(
   `tenant-chokepoint gate PASSED: ${totalScanned} source file(s) across ${scannedPerRoot.size} ` +
-    'root(s) — no raw-db imports or unscoped() calls in scoped roots.',
+    'root(s) — no raw-db imports or unscoped() calls in scoped roots, and every tenant table of ' +
+    'the platform chain carries the row-level tenant policy.',
 );

@@ -52,6 +52,25 @@ import { DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { readOperationReceipts } from './operation-lease.js';
 import { readProductSchemaDigest, runtimePlatformHead } from './schema-head.js';
 
+/**
+ * Undo the newest platform migration (the row-level tenant policies and the isolation functions), so
+ * the database is one migration behind this runtime, as a database left by the previous release is.
+ */
+const UNDO_NEWEST_MIGRATION = `
+DROP FUNCTION rayspec_same_tenant_reference();
+DROP FUNCTION rayspec_invite_tenant(text);
+DROP FUNCTION rayspec_run_owned_elsewhere(text);
+DO $undo$
+DECLARE t text;
+BEGIN
+  FOR t IN SELECT c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
+            WHERE p.polname = 'tenant_isolation' LOOP
+    EXECUTE format('DROP POLICY tenant_isolation ON %I', t);
+  END LOOP;
+END
+$undo$;
+`;
+
 const here = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_DIR = resolve(here, '..');
 const CHILD = join(here, '__fixtures__', 'apply-crash', 'child.mts');
@@ -335,15 +354,14 @@ describe.skipIf(!baseUrl)('apply after a crash', () => {
 
   it('killed after the platform chain committed and before its receipt: a boot reconciles it as applied', async () => {
     // One migration behind this runtime, as a database left by the previous release is.
-    await sql`DROP TABLE product_migration_ledger`;
-    await sql`DROP FUNCTION product_migration_ledger_append_only()`;
+    await sql.unsafe(UNDO_NEWEST_MIGRATION);
     await sql`DELETE FROM drizzle.__drizzle_migrations
                WHERE created_at = (SELECT max(created_at) FROM drizzle.__drizzle_migrations)`;
     await runAndKill('legacy-platform', 'after-step-effect');
     const killed = { operationId: await startedBy('platform-migrations') };
-    const [ledger] = await sql<{ present: boolean }[]>`
-      SELECT to_regclass('public.product_migration_ledger') IS NOT NULL AS present`;
-    expect(ledger?.present).toBe(true);
+    const [newest] = await sql<{ present: boolean }[]>`
+      SELECT to_regprocedure('public.rayspec_invite_tenant(text)') IS NOT NULL AS present`;
+    expect(newest?.present).toBe(true);
 
     const db = processDb();
     const warnings: string[] = [];

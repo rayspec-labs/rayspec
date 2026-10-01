@@ -266,10 +266,14 @@ The security policy and contributing guide are published with this release.
 
 RaySpec's core is built for **trusted, self-hosted, single-node** deployment. It
 enforces day-one safety — tenant isolation, no plaintext secrets, an untrusted-content
-boundary, and an audit trail — out of the box. Hardening for **untrusted,
-multi-tenant, public-internet hosting** (per-tenant data encryption, database
-row-level security, per-tenant sandboxing, and token binding) is a separate layer
-and is **not** part of the core. Do not put a core deployment on a public address
+boundary, and an audit trail — out of the box. Database roles and row-level security
+ship opt-in ([Database roles and row-level security](./docs/database-isolation.md)),
+and so does single-tenant mode; together with the managed posture they make up the
+hardened posture ([Hosting in the hardened posture](./docs/hardened-posture.md)),
+which is not a sandbox for custom code.
+Hardening for **untrusted, multi-tenant, public-internet hosting** (per-tenant data
+encryption, per-tenant sandboxing, and token binding) is a separate layer and is
+**not** part of the core. Do not put a core deployment on a public address
 without that layer. The boot process says so loudly, and so does
 [ARCHITECTURE](./docs/ARCHITECTURE.md).
 

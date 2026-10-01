@@ -36,10 +36,12 @@ import {
   invokeStreamRouteHandler,
   type ResolvedHandler,
   type StreamRouteHandler,
+  withoutCredentials,
 } from '@rayspec/platform';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { Context } from 'hono';
 import type { AppDeps, AppEnv } from '../app-context.js';
+import { MEDIA_TOKEN_PARAM } from '../media/playback-middleware.js';
 import { handlerPrincipal, principalActor } from './principal-actor.js';
 
 /**
@@ -95,8 +97,9 @@ export function makeStreamIngestHandler(args: {
     // into the handler's store facade so the pointer-row insert records who created it (un-spoofable: the
     // handler could not supply created_by — the facade rejects that server-controlled column).
     const createdByActor = principalActor(c.get('principal'));
-    // The RAW Web Request — the binary body reaches the handler UNPARSED (the body is UNTRUSTED
-    // DATA the handler treats as bytes; we never call c.req.json()). invokeStreamRouteHandler opens the
+    // The Web Request — the binary body reaches the handler UNPARSED (the body is UNTRUSTED DATA the
+    // handler treats as bytes; we never call c.req.json()); in the hardened posture a copy without the
+    // credential headers (withoutCredentials). invokeStreamRouteHandler opens the
     // TenantDb.transaction (GUC), builds the StreamRouteHandlerInit (db + tenant-bound blob + params +
     // request), invokes the handler, and returns its raw Response.
     return invokeStreamRouteHandler(
@@ -104,7 +107,7 @@ export function makeStreamIngestHandler(args: {
       tdb,
       productTables,
       params,
-      c.req.raw,
+      deps.hardenedPosture === true ? withoutCredentials(c.req.raw) : c.req.raw,
       blobFactory,
       // no media resource on the ingest path (playback-only); the actor follows as the next arg.
       undefined,
@@ -156,12 +159,17 @@ export function makeStreamPlaybackHandler(args: {
     // The OPAQUE resource the verified media token authorized (the verifier stashed it). The handler
     // binds it to the route resource + re-validates ownership in the DB; never trusted alone.
     const mediaResource = c.get('mediaResource');
+    // The media token authenticated this request and has done its job: in the hardened posture the
+    // handler receives the request without it and without the credential headers. `params` is built
+    // from the same URL, so the token reaches the handler through neither.
+    const strip = deps.hardenedPosture === true;
+    if (strip) delete params[MEDIA_TOKEN_PARAM];
     return invokeStreamRouteHandler(
       fn,
       tdb,
       productTables,
       params,
-      c.req.raw,
+      strip ? withoutCredentials(c.req.raw, { dropQueryParams: [MEDIA_TOKEN_PARAM] }) : c.req.raw,
       blobFactory,
       mediaResource,
     );

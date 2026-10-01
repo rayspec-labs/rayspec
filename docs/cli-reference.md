@@ -738,6 +738,10 @@ attempt got through.
   The pepper must be the **same value the target deployment runs with**, because
   it is what the invite token is hashed under. `RAYSPEC_JWT_SIGNING_KEY` is
   deliberately not read — the command mints no JWT.
+- **Single-tenant mode:** with `RAYSPEC_SINGLE_TENANT=true` (the setting the
+  server reads) the command still resolves the one organization idempotently, but
+  refuses to create a second one with `SINGLE_TENANT_LIMIT` and writes nothing.
+  See [Hosting in the hardened posture](./hardened-posture.md).
 - **Flags:**
   - `--org-id <uuid>` — **required**. The organization id to create or resolve.
     A malformed uuid is a usage error, refused before the database is opened.
@@ -801,7 +805,8 @@ attempt got through.
   nothing and can simply be run again; on an environment quiesced by the
   runtime's source fence it reports `ENVIRONMENT_FENCED` and creates, resolves
   and migrates nothing until the fence is released; a migration chain the
-  runtime refused for another reason reports `MIGRATION_REFUSED`); `2` on a
+  runtime refused for another reason reports `MIGRATION_REFUSED`; a second
+  organization under single-tenant mode reports `SINGLE_TENANT_LIMIT`); `2` on a
   usage error.
 
 ### The owner handoff, and why it creates no user

@@ -61,6 +61,7 @@ import {
 } from './test-support/cross-process-run.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -68,6 +69,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** The child fixture, run as a real process. TypeScript source on purpose: never the built dist. */
@@ -275,6 +280,7 @@ beforeAll(async () => {
     throw new Error(`cross-process run fixture is missing at ${CHILD_PATH}`);
   }
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 
 beforeEach(async () => {
@@ -297,6 +303,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
@@ -304,10 +311,10 @@ describe('ACCEPTANCE 2 — single-process behaviour is unchanged when nothing is
   it('an unconfigured run never touches the autonomous handle, and completes with an un-aborted signal', async () => {
     testsRan += 1;
     const uses: string[] = [];
-    const taintDb = watchTenantDb(forTenant(db, TENANT_A), (m) => uses.push(m));
+    const taintDb = watchTenantDb(forTenant(appDb, TENANT_A), (m) => uses.push(m));
     const cfg = config('poll-unset', { gateMs: 20 });
     const backend = new GatedRunBackend(cfg);
-    const outcome = await runDurableShapeCancellable(db, cfg, backend, taintDb);
+    const outcome = await runDurableShapeCancellable(appDb, cfg, backend, taintDb);
 
     // The whole cost of the feature when it is off: NOTHING. Not one statement on the autonomous
     // handle, because the poll was never armed.
@@ -324,17 +331,17 @@ describe('ACCEPTANCE 2 — single-process behaviour is unchanged when nothing is
     // wrapper, same shape — one variable set.
     process.env[POLL_ENV] = '25';
     const uses: string[] = [];
-    const taintDb = watchTenantDb(forTenant(db, TENANT_A), (m) => uses.push(m));
+    const taintDb = watchTenantDb(forTenant(appDb, TENANT_A), (m) => uses.push(m));
     const cfg = config('poll-set-nonvacuity');
     const backend = new GatedRunBackend(cfg);
     let inGate = false;
     backend.onGate = () => {
       inGate = true;
     };
-    const running = runDurableShapeCancellable(db, cfg, backend, taintDb);
+    const running = runDurableShapeCancellable(appDb, cfg, backend, taintDb);
     await waitFor(() => inGate);
     // ONLY the marker — no signal of any kind, even though this run is in this very process.
-    await markRunCancelled(forTenant(db, TENANT_A), cfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), cfg.runId);
 
     expect(await running).toEqual({ outcome: 'cancelled', errorName: 'RunCancelledError' });
     expect(uses.length).toBeGreaterThan(0);
@@ -355,18 +362,18 @@ describe('ACCEPTANCE 1 — the process boundary is real', () => {
     localBackend.onGate = () => {
       localInGate = true;
     };
-    const localRunning = runDurableShapeCancellable(db, localCfg, localBackend);
+    const localRunning = runDurableShapeCancellable(appDb, localCfg, localBackend);
     await waitFor(() => localInGate);
 
     // The pair is the proof: a FALSE on its own could be a broken call. The TRUE beside it, in the
     // same process at the same instant, says the call works and the child is simply out of reach.
     expect(signalRunCancelled(childCfg.runId)).toBe(false);
-    await markRunCancelled(forTenant(db, TENANT_A), localCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), localCfg.runId);
     expect(signalRunCancelled(localCfg.runId)).toBe(true);
     expect(await localRunning).toEqual({ outcome: 'cancelled', errorName: 'RunCancelledError' });
 
     // And the child, which nothing in this process can signal, is ended by the marker alone.
-    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), childCfg.runId);
     expect(await child.done).toMatchObject({ outcome: 'cancelled' });
   });
 });
@@ -382,7 +389,7 @@ describe('ACCEPTANCE 1 — a run in a second process observes the cancellation a
     // cannot, and this asserts that rather than trusting it.
     expect(signalRunCancelled(childCfg.runId)).toBe(false);
     const markedAt = Date.now();
-    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), childCfg.runId);
     const childOutcome = await child.done;
     const observedMs = Date.now() - markedAt;
 
@@ -401,9 +408,9 @@ describe('ACCEPTANCE 1 — a run in a second process observes the cancellation a
     localBackend.onGate = () => {
       localInGate = true;
     };
-    const localRunning = runDurableShapeCancellable(db, localCfg, localBackend);
+    const localRunning = runDurableShapeCancellable(appDb, localCfg, localBackend);
     await waitFor(() => localInGate);
-    await markRunCancelled(forTenant(db, TENANT_A), localCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), localCfg.runId);
     expect(signalRunCancelled(localCfg.runId)).toBe(true);
     expect(await localRunning).toEqual({ outcome: 'cancelled', errorName: 'RunCancelledError' });
     const controlShape = await terminalShape(localCfg.runId);
@@ -425,7 +432,7 @@ describe('the managed hosting posture turns the cross-process poll on by default
     await child.inGate;
     expect(signalRunCancelled(childCfg.runId)).toBe(false);
     const markedAt = Date.now();
-    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), childCfg.runId);
     expect(await child.done).toMatchObject({
       outcome: 'cancelled',
       errorName: 'RunCancelledError',
@@ -441,7 +448,7 @@ describe('the managed hosting posture turns the cross-process poll on by default
     const childCfg = config('local-posture', { gateMs: 2500 });
     const child = spawnCrossProcessRun(childCfg, { env: {} });
     await child.inGate;
-    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), childCfg.runId);
     // Nothing re-reads the marker, so the run burns its gate and completes.
     expect(await child.done).toMatchObject({ outcome: 'completed' });
   });
@@ -453,10 +460,10 @@ describe('ACCEPTANCE 3 — a cancelled run that fired a non-idempotent tool stay
     const childCfg = config('cross-tainted', { fireNonIdempotentTool: true });
     const child = spawnCrossProcessRun(childCfg, 100);
     await child.inGate;
-    await markRunCancelled(forTenant(db, TENANT_A), childCfg.runId);
+    await markRunCancelled(forTenant(appDb, TENANT_A), childCfg.runId);
     expect(await child.done).toMatchObject({ outcome: 'cancelled' });
 
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     // The taint was committed on the AUTONOMOUS handle before the side effect, so the run's rollback
     // could not take it — the evidence that a non-idempotent tool already fired is still there.
     expect(await isRunTainted(tdb, childCfg.runId)).toBe(true);
@@ -476,11 +483,11 @@ describe('a poll read that FAILS can neither end a run nor fail one', () => {
     // marker would destroy work that is happening.
     process.env[POLL_ENV] = '10';
     const uses: string[] = [];
-    const taintDb = watchTenantDb(forTenant(db, TENANT_A), (m) => uses.push(m), true);
+    const taintDb = watchTenantDb(forTenant(appDb, TENANT_A), (m) => uses.push(m), true);
     const cfg = config('poll-read-fails', { gateMs: 300 });
     const backend = new GatedRunBackend(cfg);
 
-    const outcome = await runDurableShapeCancellable(db, cfg, backend, taintDb);
+    const outcome = await runDurableShapeCancellable(appDb, cfg, backend, taintDb);
 
     expect(uses.filter((m) => m === 'select').length).toBeGreaterThan(0);
     expect(outcome).toEqual({ outcome: 'completed', errorName: null });
@@ -517,7 +524,7 @@ describe('what a cancelled run leaves in its journal follows the INVOCATION SHAP
     backend.onGate = () => {
       inGate = true;
     };
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
 
     const ended = runAgent(tdb, backend, CROSS_PROCESS_SPEC, { runId: cfg.runId }).then(
       () => 'resolved',
@@ -526,7 +533,7 @@ describe('what a cancelled run leaves in its journal follows the INVOCATION SHAP
     await waitFor(() => inGate);
     // The cancellation as the OTHER process issues it: the marker, then the cancel surface's record.
     // Nothing in this process signals the run — the poll is what has to reach it.
-    const cancelDb = forTenant(db, TENANT_A);
+    const cancelDb = forTenant(appDb, TENANT_A);
     await markRunCancelled(cancelDb, cfg.runId);
 
     expect(await ended).toBe('RunCancelledError');

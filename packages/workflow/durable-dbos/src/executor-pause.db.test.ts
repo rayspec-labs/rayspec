@@ -23,6 +23,7 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type ResolvedRun } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -55,6 +56,7 @@ const spec: AgentSpec = {
 };
 
 let db: ReturnType<typeof makeDbWithSchema>;
+let engine: EngineDatabases | undefined;
 let executor: DbosDurableExecutor;
 
 function withDbName(url: string, name: string): string {
@@ -105,15 +107,22 @@ maybe('agent-run dispatch pauses and resumes without shutting the engine down', 
     db = makeDbWithSchema(url, APP_SCHEMA);
     await db.$client.unsafe(buildSpineSchemaSql(APP_SCHEMA));
     await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'pa', 'pa')`, [TENANT]);
+    // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+    engine = await engineDatabases({
+      admin: db,
+      adminUrl: url,
+      schema: APP_SCHEMA,
+      systemDatabaseUrl: withDbName(url, DBOS_SYS_DB),
+    });
     executor = new DbosDurableExecutor(
       {
-        db,
+        db: engine.appDb,
         resolveRun: (j: RunJob): ResolvedRun => {
           if (j.agentId === 'echo-agent') return { backend, spec };
           throw new Error(`unknown agent '${j.agentId}'`);
         },
       },
-      { name: `rayspec-pause-${PID}`, systemDatabaseUrl: withDbName(url, DBOS_SYS_DB) },
+      { name: `rayspec-pause-${PID}`, systemDatabaseUrl: engine.systemDatabaseUrl },
     );
     // Paused before the engine launches: the queue must come up paused.
     await executor.pauseDispatch();
@@ -125,6 +134,7 @@ maybe('agent-run dispatch pauses and resumes without shutting the engine down', 
     try {
       await executor?.shutdown();
     } finally {
+      await engine?.close();
       await db?.$client.end();
       if (baseUrl) await dropSysDb(baseUrl);
     }

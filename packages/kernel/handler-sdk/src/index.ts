@@ -830,7 +830,13 @@ export interface StreamRouteHandlerInit extends HandlerInit {
   readonly blob: BlobStore;
   /** Path/query params bound by the route (e.g. `{upload_id}` → `params.upload_id`). All DATA. */
   readonly params: Readonly<Record<string, string>>;
-  /** The raw Web-standard request (binary body / Range headers) — the body is UNTRUSTED DATA. */
+  /**
+   * The Web-standard request (binary body / Range headers) — the body is UNTRUSTED DATA. In the
+   * hardened posture (role separation or single-tenant mode turned on) it carries no credential:
+   * `authorization`, `proxy-authorization` and `cookie` are removed before the handler runs, and so
+   * is the playback route's `?token=` (the caller was authenticated before the handler runs;
+   * `principal` says who it is). Every other header is kept. Otherwise it is the request as sent.
+   */
   readonly request: Request;
   /**
    * Playback ONLY: the OPAQUE resource reference the verified media token authorized this

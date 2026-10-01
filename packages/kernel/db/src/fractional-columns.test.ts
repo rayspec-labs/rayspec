@@ -167,7 +167,7 @@ describe('DRIFT — wrong live numeric parameters are drift, not a pass', () => 
           inject('idempotency_key', 'text', 'YES'),
         ];
       }
-      if (sql.includes("constraint_type = 'FOREIGN KEY'")) {
+      if (sql.includes("con.contype = 'f'")) {
         return [
           {
             table_name: 'ledger_lines',

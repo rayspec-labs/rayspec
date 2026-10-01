@@ -3,6 +3,11 @@
 #   - rayspec      : the main DB (run journal, conversation store, db-spike entities)
 #   - rayspec_shadow: a SEPARATE throwaway DB Atlas uses for migration dry-runs.
 # Shadow DB must be empty/disposable — Atlas drops & recreates its contents on every diff.
+# On a new volume the init scripts also create the three database roles of the isolated posture
+# (rayspec_migrator, rayspec_runtime, rayspec_snapshot) in `rayspec`, from the SAME setup SQL an
+# operator runs (packages/kernel/db/sql/database-roles.sql), with dev-only passwords. The default
+# `rayspec` superuser is unchanged, so a one-role local boot works exactly as before; see
+# docs/database-isolation.md for booting with role separation.
 services:
   postgres:
     # Pinned by digest: the same multi-platform index CI's service containers use (linux/amd64 and
@@ -24,6 +29,8 @@ services:
     volumes:
       - rayspec-pgdata:/var/lib/postgresql/data
       - ./scripts/init-shadow-db.sql:/docker-entrypoint-initdb.d/10-init-shadow-db.sql:ro
+      - ./packages/kernel/db/sql/database-roles.sql:/docker-entrypoint-initdb.d/20-database-roles.sql:ro
+      - ./scripts/init-dev-role-passwords.sql:/docker-entrypoint-initdb.d/30-dev-role-passwords.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rayspec -d rayspec"]
       interval: 2s

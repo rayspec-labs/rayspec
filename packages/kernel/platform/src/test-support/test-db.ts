@@ -12,7 +12,7 @@
 import { forTenant } from '@rayspec/db';
 // Raw-handle factory lives on the test/bootstrap subpath, NOT the main surface, so request
 // code cannot import it. This is test-support, so reaching for it here is legitimate.
-import { makeDbWithSchema } from '@rayspec/db/testing';
+import { makeDbWithSchema, testAppDb } from '@rayspec/db/testing';
 
 export { forTenant };
 
@@ -29,6 +29,28 @@ export function testDatabaseUrl(): string {
 
 export function makeTestDb() {
   return makeDbWithSchema(testDatabaseUrl(), TEST_SCHEMA);
+}
+
+/**
+ * The handle code under test runs over, for a suite's own `schema` (built by `admin`, a superuser
+ * handle). Normally `admin` itself. With RAYSPEC_TEST_DATABASE_ISOLATION=roles, a runtime role of its
+ * own (no superuser, no BYPASSRLS, owner of nothing) with every tenant table of the schema under the
+ * enabled, forced tenant policy; `admin` stays the handle a suite seeds and inspects through. Call it
+ * after the schema's DDL.
+ */
+export async function makeSchemaAppDb<D extends ReturnType<typeof makeDbWithSchema>>(
+  admin: D,
+  schema: string,
+): Promise<{ appDb: D; close(): Promise<void> }> {
+  return testAppDb(admin, testDatabaseUrl(), schema);
+}
+
+/** {@link makeSchemaAppDb} for the run-core suites' shared schema. Call after `resetRunSchema`. */
+export async function makeTestAppDb(admin: ReturnType<typeof makeTestDb>): Promise<{
+  appDb: ReturnType<typeof makeTestDb>;
+  close(): Promise<void>;
+}> {
+  return makeSchemaAppDb(admin, TEST_SCHEMA);
 }
 
 /**

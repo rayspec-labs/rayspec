@@ -190,6 +190,26 @@ structural gate. It needs:
   both) and generates only what is missing.
 - **`ffmpeg` on the `PATH`** for the media suites. Without it they skip; set
   `RAYSPEC_REQUIRE_MEDIA_TESTS=true` to turn that skip into a failure.
+- **The runtime-role lane.** CI runs the database-backed suites of `@rayspec/api-auth`,
+  `@rayspec/platform`, `@rayspec/workflow-durable`, `@rayspec/durable-dbos`,
+  `@rayspec/server` and `@rayspec/cli` a second time with
+  `RAYSPEC_TEST_DATABASE_ISOLATION=roles`. The code under test then runs as a runtime
+  role (no superuser, no `BYPASSRLS`, owner of nothing) with every tenant table's
+  row-level policy enabled and forced: a hand-built test schema is served as a role of
+  its own (`testAppDb` in `@rayspec/db/testing`); every server boot is handed role
+  separation, migrating as a migration role and serving as a runtime role that the
+  shipped setup SQL prepared (`packages/app/server/vitest.setup.ts`); a workflow engine
+  launches as the runtime role on a system database the migration role migrated; a CLI
+  or server a suite spawns gets both connections (`runtimeRoleEnv`). The suite itself
+  keeps its superuser connection for seeding and inspecting. Run one package locally
+  with, for example, `RAYSPEC_TEST_DATABASE_ISOLATION=roles pnpm --filter @rayspec/server test`.
+  A few suites stay on the superuser in both lanes, each for a stated reason: the
+  migration and apply tooling (`plan`, `shadow-apply` and the `.env` loader that feeds
+  it, `pack --against`, the apply crash suite), which is the migration role's work, not
+  the runtime's; `dev db`, which creates databases, and the example dev-boot shutdown,
+  which checks signal handling; and the `@rayspec/db` suites of the chokepoint itself,
+  beside which the row-level isolation suite creates its own roles and runs as the
+  runtime role in either lane.
 - **Time.** The test task runs one package at a time and takes a little over ten
   minutes on a current laptop. `pnpm test` keeps going after a package fails, so the
   summary at the end lists every failed package, and the command still exits

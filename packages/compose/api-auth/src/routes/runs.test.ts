@@ -10,9 +10,10 @@
  *  - cross-tenant: B reading A's runId → 404 (incl. /events), no leak.
  */
 
-import { computeCost, type NeutralTool } from '@rayspec/core';
+import { CAPABILITIES, computeCost, type NeutralTool } from '@rayspec/core';
 import { isTerminalRunStatus } from '@rayspec/platform';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { createAuthApp } from '../app.js';
 import type { AgentRegistry, AgentRegistryEntry } from '../app-context.js';
 import { FakeRunBackend } from '../test-support/fake-backend.js';
 import { createHarness, type Harness, jsonRequest } from '../test-support/harness.js';
@@ -946,12 +947,18 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
     expect(after).toEqual(cleanSeqs);
   });
 
-  it('a backend that THROWS mid-run ends the SSE with an event:error frame; run_events keeps what was persisted', async () => {
-    const { token } = await principal('sse-err@example.com', 'SseErrOrg');
+  it.each([
+    { posture: 'hardened', hardened: true },
+    { posture: 'default', hardened: false },
+  ])('a backend that THROWS mid-run ends the SSE with an event:error frame; run_events keeps what was persisted ($posture posture)', async ({
+    hardened,
+  }) => {
+    const app = hardened ? createAuthApp({ ...h.deps, hardenedPosture: true }) : h.app;
+    const { token } = await principal(`sse-err-${String(hardened)}@example.com`, 'SseErrOrg');
     // Make the SHARED backend throw mid-run via its gate (after run_started has emitted + persisted).
     backend.gate = () => Promise.reject(new Error('mid-run-explosion'));
     try {
-      const res = await h.app.request('/v1/agents/echo-agent/runs', {
+      const res = await app.request('/v1/agents/echo-agent/runs', {
         method: 'POST',
         headers: {
           authorization: `Bearer ${token}`,
@@ -963,6 +970,19 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
       const frames = await parseSse(res);
       // The stream ends with a terminal event:error frame (the run failed mid-stream).
       expect(frames.at(-1)?.event).toBe('error');
+      const frame = JSON.parse(frames.at(-1)?.data ?? '{}') as {
+        message: string;
+        errorClass: string;
+      };
+      expect(frame.errorClass).toBe('internal');
+      if (hardened) {
+        // The frame names the class with a fixed message; the thrown error's own text stays server-side.
+        expect(frame.message).toBe('The run failed.');
+        expect(frames.map((f) => f.data).join('\n')).not.toContain('mid-run-explosion');
+      } else {
+        // Outside the posture the frame carries the classifier's message, as before.
+        expect(frame.message).toContain('mid-run-explosion');
+      }
       // run_events still holds whatever was persisted BEFORE the throw (persist-before-flush durability
       // on the LIVE path) — at least run_started (seq 0), asserted at the route layer via a SELECT.
       const runStartedRows = await h.db.$client.unsafe(
@@ -973,6 +993,59 @@ describe('POST /v1/agents/:id/runs (SSE)', () => {
     } finally {
       backend.gate = undefined;
     }
+  });
+
+  it.each([
+    { posture: 'hardened', hardened: true },
+    { posture: 'default', hardened: false },
+  ])('an agent spec its backend cannot run answers 400 before any model call ($posture posture)', async ({
+    hardened,
+  }) => {
+    const app = hardened ? createAuthApp({ ...h.deps, hardenedPosture: true }) : h.app;
+    const { token } = await principal(`bad-spec-${String(hardened)}@example.com`, 'BadSpecOrg');
+    // A synthetic descriptor (restored below): the registered agent declares a tool its backend
+    // could no longer execute — the deployment's configuration fault, not the caller's.
+    const original = CAPABILITIES.openai;
+    CAPABILITIES.openai = { ...original, tools: false };
+    try {
+      const res = await jsonRequest(app, 'POST', '/v1/agents/echo-agent/runs', {
+        body: { input: 'x' },
+        headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe('VALIDATION_ERROR');
+      if (hardened) {
+        expect(body.error.message).toBe('Agent spec is invalid for its backend.');
+      } else {
+        expect(body.error.message).toContain('Agent spec is invalid for its backend: ');
+        expect(body.error.message).toContain('cannot execute tools');
+      }
+      expect(backend.liveRuns).toBe(0);
+    } finally {
+      CAPABILITIES.openai = original;
+    }
+  });
+});
+
+describe('agent:run and the live membership', () => {
+  it.each([
+    { posture: 'hardened', hardened: true, expected: 403 },
+    { posture: 'default', hardened: false, expected: 200 },
+  ])('a member removed after their token was minted starting a run ($posture posture → $expected)', async ({
+    hardened,
+    expected,
+  }) => {
+    const app = hardened ? createAuthApp({ ...h.deps, hardenedPosture: true }) : h.app;
+    const { orgId, token } = await principal(`removed-${String(hardened)}@example.com`, 'GoneOrg');
+    // The membership row goes; the token still carries the owner claim until it expires.
+    await h.db.$client.unsafe('DELETE FROM memberships WHERE org_id = $1', [orgId]);
+    const res = await jsonRequest(app, 'POST', '/v1/agents/echo-agent/runs', {
+      body: { input: 'after-removal' },
+      headers: { authorization: `Bearer ${token}`, accept: 'application/json' },
+    });
+    // Hardened: rereads the membership like every other write. Default: trusts the claim, as before.
+    expect(res.status).toBe(expected);
   });
 });
 

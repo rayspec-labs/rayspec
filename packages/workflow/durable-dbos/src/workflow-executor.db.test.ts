@@ -38,6 +38,7 @@ import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DbosDurableExecutor, type DbosExecutorDeps, type ResolvedRun } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 import {
   DbosWorkflowExecutor,
@@ -67,6 +68,7 @@ const workerWarnings: string[] = [];
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let engine: EngineDatabases | undefined;
 let executor: DbosDurableExecutor;
 let wfExecutor: DbosWorkflowExecutor;
 let appBaseUrl: string;
@@ -198,8 +200,15 @@ beforeAll(async () => {
   await db.$client.unsafe(buildWorkflowTablesSql(APP_SCHEMA));
   await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'wf', 'wf')`, [TENANT]);
 
+  // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+  engine = await engineDatabases({
+    admin: db as unknown as Db,
+    adminUrl: url,
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: withDbName(url, DBOS_SYS_DB),
+  });
   const deps: DbosExecutorDeps = {
-    db: db as unknown as Db,
+    db: engine.appDb,
     // No agent runs in this test — a fail-closed resolver documents that.
     resolveRun: (job: RunJob): ResolvedRun => {
       throw new Error(`no agent runs in the workflow spine test (got '${job.agentId}')`);
@@ -207,11 +216,11 @@ beforeAll(async () => {
   };
   executor = new DbosDurableExecutor(deps, {
     name: `rayspec-wf-spine-${PID}`,
-    systemDatabaseUrl: withDbName(url, DBOS_SYS_DB),
+    systemDatabaseUrl: engine.systemDatabaseUrl,
     applicationVersion: DOC_APP_VERSION,
   });
   wfExecutor = new DbosWorkflowExecutor({
-    db: db as unknown as Db,
+    db: engine.appDb,
     resolveWorkflowRun,
     logger: { warn: (m) => workerWarnings.push(m) },
   });
@@ -232,6 +241,7 @@ afterAll(async () => {
   try {
     await executor.shutdown();
   } finally {
+    await engine?.close();
     await db.$client.end();
     await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
   }

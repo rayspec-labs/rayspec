@@ -584,7 +584,17 @@ export function registerDeclaredRoutes(
         app,
         route.method,
         honoPath,
-        mediaAuth(mediaTokenService),
+        mediaAuth(mediaTokenService, {
+          // In the hardened posture, re-checked on every playback request: a token minted for a
+          // member who has since been removed stops working at once (no `identityStore` only in
+          // partial-deps unit suites). Outside it the token alone decides, as before.
+          ...(deps.hardenedPosture === true && deps.identityStore
+            ? {
+                isLiveMember: async (userId: string, tenantId: string) =>
+                  (await deps.identityStore.liveMembership(userId, tenantId)) !== undefined,
+              }
+            : {}),
+        }),
         perUserStreamSemaphore(
           config.playbackMaxStreamsPerUser !== undefined
             ? { maxPerUser: config.playbackMaxStreamsPerUser }

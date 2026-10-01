@@ -38,6 +38,7 @@ import { insertEnqueuedRunHeader } from './run-header.js';
 import { isRunTainted } from './run-taint.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -45,6 +46,10 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 const spec: AgentSpec = {
   name: 'extract',
@@ -209,6 +214,7 @@ const open: { finish(): void }[] = [];
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 
 beforeEach(async () => {
@@ -226,6 +232,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
@@ -236,7 +243,7 @@ describe('per-run wall-clock bound', () => {
     open.push(backend);
     const started = Date.now();
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'bound-sync' }),
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'bound-sync' }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     expect(backend.entered).toBe(1);
     // It rejected because the bound expired, not because the backend answered: the backend is still
@@ -251,10 +258,10 @@ describe('per-run wall-clock bound', () => {
     // Mirror the durable executor: runAgent runs INSIDE forTenant(db,tenant).transaction() and gets a
     // SEPARATE autonomous-commit TenantDb for the taint marker.
     await expect(
-      forTenant(db, TENANT_A).transaction((txTdb) =>
+      forTenant(appDb, TENANT_A).transaction((txTdb) =>
         runAgent(txTdb, backend, spec, {
           runId: 'bound-durable',
-          taintDb: forTenant(db, TENANT_A),
+          taintDb: forTenant(appDb, TENANT_A),
         }),
       ),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
@@ -265,7 +272,7 @@ describe('per-run wall-clock bound', () => {
     setBound('80');
     const backend = new SilentBackend();
     open.push(backend);
-    const err = await runAgent(forTenant(db, TENANT_A), backend, spec, {
+    const err = await runAgent(forTenant(appDb, TENANT_A), backend, spec, {
       runId: 'bound-message',
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RunBoundTimeoutError);
@@ -284,7 +291,7 @@ describe('per-run wall-clock bound', () => {
     const backend = new SilentBackend();
     open.push(backend);
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'bound-abandoned' }),
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'bound-abandoned' }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     const before = await countRunEvents('bound-abandoned');
     // The abandoned SDK call keeps going and emits through the run's sink. It must neither throw
@@ -300,7 +307,7 @@ describe('per-run wall-clock bound', () => {
     const backend = new SilentBackend();
     open.push(backend);
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, { runId: 'bound-journal' }),
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'bound-journal' }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     // The abandoned SDK call settles LATER and journals its step then — that is the normal shape of
     // an adapter's error/success branch. The journal is bound to the run's tdb (on the durable path a
@@ -334,7 +341,7 @@ describe('per-run wall-clock bound', () => {
     const backend = new SilentBackend();
     open.push(backend);
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, {
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
         runId: 'bound-tool',
         tools: [nonIdempotentTool()],
       }),
@@ -349,7 +356,7 @@ describe('per-run wall-clock bound', () => {
     // The handler did NOT run: no side effect for a run that was already given up on.
     expect(sideEffectFires).toBe(0);
     expect(await countJournalSteps('bound-tool')).toBe(0);
-    expect(await isRunTainted(forTenant(db, TENANT_A), 'bound-tool')).toBe(false);
+    expect(await isRunTainted(forTenant(appDb, TENANT_A), 'bound-tool')).toBe(false);
   });
 
   it('a dispatch ALREADY IN FLIGHT when the bound fires is NOT stopped: the handler runs, its journal step is refused', async () => {
@@ -359,7 +366,7 @@ describe('per-run wall-clock bound', () => {
     // The handler is held for 600ms — five times the bound — so the dispatch is provably still inside
     // the dispatcher when the bound fires.
     await expect(
-      runAgent(forTenant(db, TENANT_A), backend, spec, {
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
         runId: 'bound-in-flight',
         tools: [nonIdempotentTool(600)],
       }),
@@ -377,7 +384,7 @@ describe('per-run wall-clock bound', () => {
     // The taint marker was committed BEFORE the handler (the dispatcher's fail-closed ordering), so it
     // is on record even though the run had been given up on. The step is not: the journal refused it,
     // so an effect that really happened is unjournaled.
-    expect(await isRunTainted(forTenant(db, TENANT_A), 'bound-in-flight')).toBe(true);
+    expect(await isRunTainted(forTenant(appDb, TENANT_A), 'bound-in-flight')).toBe(true);
     expect(await countJournalSteps('bound-in-flight')).toBe(0);
   });
 
@@ -386,17 +393,17 @@ describe('per-run wall-clock bound', () => {
     const backend = new SilentBackend();
     open.push(backend);
     // The API enqueue path writes the `enqueued` header BEFORE the job is handed to the worker (#164).
-    await insertEnqueuedRunHeader(forTenant(db, TENANT_A), {
+    await insertEnqueuedRunHeader(forTenant(appDb, TENANT_A), {
       runId: 'bound-durable-header',
       backend: 'openai',
       agentName: spec.name,
       model: spec.model,
     });
     await expect(
-      forTenant(db, TENANT_A).transaction((txTdb) =>
+      forTenant(appDb, TENANT_A).transaction((txTdb) =>
         runAgent(txTdb, backend, spec, {
           runId: 'bound-durable-header',
-          taintDb: forTenant(db, TENANT_A),
+          taintDb: forTenant(appDb, TENANT_A),
         }),
       ),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
@@ -417,10 +424,10 @@ describe('per-run wall-clock bound', () => {
     // run-core's own header write is inside the run transaction, so the rejection rolls it back and
     // nothing about this run is left in `runs` — there is no header to test for terminality.
     await expect(
-      forTenant(db, TENANT_A).transaction((txTdb) =>
+      forTenant(appDb, TENANT_A).transaction((txTdb) =>
         runAgent(txTdb, backend, spec, {
           runId: 'bound-durable-no-header',
-          taintDb: forTenant(db, TENANT_A),
+          taintDb: forTenant(appDb, TENANT_A),
         }),
       ),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
@@ -429,7 +436,7 @@ describe('per-run wall-clock bound', () => {
 
   it('UNSET: a run slower than any bound still completes (today’s unbounded behaviour)', async () => {
     setBound(undefined);
-    const result = await runAgent(forTenant(db, TENANT_A), new SlowBackend(300), spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), new SlowBackend(300), spec, {
       runId: 'bound-unset',
     });
     expect(result.status).toBe('completed');
@@ -437,7 +444,7 @@ describe('per-run wall-clock bound', () => {
 
   it('MALFORMED: an unparsable value leaves the run unbounded', async () => {
     setBound('later');
-    const result = await runAgent(forTenant(db, TENANT_A), new SlowBackend(300), spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), new SlowBackend(300), spec, {
       runId: 'bound-malformed',
     });
     expect(result.status).toBe('completed');
@@ -445,7 +452,7 @@ describe('per-run wall-clock bound', () => {
 
   it('a run that finishes INSIDE the bound is unaffected', async () => {
     setBound('5000');
-    const result = await runAgent(forTenant(db, TENANT_A), new SlowBackend(20), spec, {
+    const result = await runAgent(forTenant(appDb, TENANT_A), new SlowBackend(20), spec, {
       runId: 'bound-inside',
     });
     expect(result.status).toBe('completed');

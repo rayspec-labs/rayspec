@@ -76,6 +76,7 @@ import {
   RUN_STARTED_SCOPE,
   TRIGGER_FIRE_SCOPE,
 } from './index.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildCronProductSchemaSql, buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -124,6 +125,7 @@ const cronMarksStore: StoreSpec = {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let engine: EngineDatabases;
 let executor: DbosDurableExecutor;
 let scheduler: DbosCronScheduler;
 let productTables: Map<string, PgTable>;
@@ -132,6 +134,8 @@ let appBaseUrl: string;
 
 /** Captures the GUC read INSIDE the handler's own tdb.transaction() (the GUC read-back). */
 const capturedGuc: { value: string | null } = { value: null };
+/** How many times the trigger handler body ran; the GUC is read back only in a transaction that ran it. */
+let handlerInvocations = 0;
 
 /**
  * A trigger HANDLER (the `nightly-digest` shape): write a `cron_marks` row via the facade (proving it
@@ -142,6 +146,7 @@ const capturedGuc: { value: string | null } = { value: null };
 const cronHandlerFn: ResolvedHandler & { kind: 'trigger' } = {
   kind: 'trigger',
   fn: async (init) => {
+    handlerInvocations += 1;
     await init.db.insert('cron_marks', { note: `fired:${init.triggerName}` });
   },
 };
@@ -219,6 +224,8 @@ function handlerCatchUpDescriptor(name: string): TriggerDescriptor {
  * Wrap the raw Db so the GUC inside the handler's own tdb.transaction() is OBSERVED — invokeTriggerHandler
  * opens forTenant(db,tenantId).transaction(), and this proxy reads current_setting on that same tx handle
  * AFTER the handler body runs (the GUC read-back pattern). Proves the handler ran in the GUC-populated tx.
+ * Only a transaction in which the handler body ran is read back: every other chokepoint statement (the
+ * firing reserve among them) runs in a short context transaction of its own.
  */
 function wrapDb(raw: Db): Db {
   const realTransaction = raw.transaction.bind(raw);
@@ -228,7 +235,9 @@ function wrapDb(raw: Db): Db {
         return (inner: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
           realTransaction(
             async (tx: unknown) => {
+              const ranBefore = handlerInvocations;
               const r = await inner(tx);
+              if (handlerInvocations === ranBefore) return r;
               const rows = (await (tx as Db).execute(
                 sql`select current_setting(${TENANT_GUC}, true) as tenant`,
               )) as unknown as Array<{ tenant: string | null }>;
@@ -355,8 +364,15 @@ describe.skipIf(!hasDb)(
       productTables = buildProductTables([cronMarksStore]);
       unregister = registerScopedTables([...productTables.values()]);
 
+      // The engine's databases: the suite's own, or in the runtime-role lane the runtime role's.
+      engine = await engineDatabases({
+        admin: db,
+        adminUrl: url,
+        schema: APP_SCHEMA,
+        systemDatabaseUrl: withDbName(url, DBOS_SYS_DB),
+      });
       const deps: DbosExecutorDeps = {
-        db: wrapDb(db),
+        db: engine.serving(wrapDb(engine.appDb)),
         resolveRun: (job: RunJob): ResolvedRun => {
           if (job.agentId !== 'echo-agent') throw new Error(`unknown agent '${job.agentId}'`);
           return { backend, spec: baseSpec };
@@ -364,7 +380,7 @@ describe.skipIf(!hasDb)(
       };
       executor = new DbosDurableExecutor(deps, {
         name: `rayspec-cron-${PID}`,
-        systemDatabaseUrl: withDbName(url, DBOS_SYS_DB),
+        systemDatabaseUrl: engine.systemDatabaseUrl,
       });
 
       // The scheduler over the SAME tenant (single-deployment LOCAL posture). It dispatches off the
@@ -381,7 +397,7 @@ describe.skipIf(!hasDb)(
           eventDescriptor('on-thing'),
         ],
         {
-          db: wrapDb(db),
+          db: engine.serving(wrapDb(engine.appDb)),
           tenantId: TENANT,
           executor,
           productTables,
@@ -409,6 +425,7 @@ describe.skipIf(!hasDb)(
       try {
         await executor.shutdown();
       } finally {
+        await engine?.close();
         await db.$client.end();
         await dropSysDbSafely(appBaseUrl, DBOS_SYS_DB);
       }
@@ -662,7 +679,14 @@ describe.skipIf(!hasDb)(
     it('CATCH-UP: a make-up replay of a DOWNTIME-missed interval fires once; a re-replay reuses the reserve → no-op (at-least-once + at-most-once)', async () => {
       const catchUpScheduler = new DbosCronScheduler(
         [handlerCatchUpDescriptor('nightly-digest-catchup')],
-        { db, tenantId: TENANT, executor, productTables, invokeTriggerHandler, tenantExists },
+        {
+          db: engine.appDb,
+          tenantId: TENANT,
+          executor,
+          productTables,
+          invokeTriggerHandler,
+          tenantExists,
+        },
       );
       // An interval that SHOULD have fired 30 min ago but did not (the app was down) — no reserve exists.
       const missed = new Date(Date.now() - 30 * 60_000);
@@ -685,7 +709,7 @@ describe.skipIf(!hasDb)(
       const catchUpScheduler = new DbosCronScheduler(
         [handlerCatchUpDescriptor('nightly-digest-catchup')],
         {
-          db,
+          db: engine.appDb,
           tenantId: TENANT,
           executor,
           productTables,
@@ -722,7 +746,7 @@ describe.skipIf(!hasDb)(
       const catchUpScheduler = new DbosCronScheduler(
         [handlerCatchUpDescriptor('nightly-digest-catchup')],
         {
-          db,
+          db: engine.appDb,
           tenantId: TENANT,
           executor,
           productTables,

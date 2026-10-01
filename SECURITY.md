@@ -78,6 +78,33 @@ this split is essential to deploying it safely. This section mirrors
   signal to the owner; only the invitee resolves that, at redeem. Tokens are stored
   hashed, are single-use, and expire.
 
+### Database roles and row-level security (opt-in)
+
+Database row-level security, a second in-database enforcement of tenancy beneath the
+chokepoint, ships in the core and is **off until the operator turns on role
+separation** (`RAYSPEC_MIGRATION_DATABASE_URL`). With it the server serves as a
+runtime role that is no superuser, cannot bypass row security and owns nothing; the
+migration role owns the schema; and every tenant table's policy is enabled and
+forced, so a statement without the server-derived tenant reaches no tenant row. The
+runtime checks this posture at boot and reports it active only when every check
+passes. It protects against a statement that lost its tenant, not against code in
+the runtime process that sets another tenant deliberately — handlers still run in
+that process. See [Database roles and row-level security](./docs/database-isolation.md).
+
+### Single-tenant mode and the hardened posture (opt-in)
+
+`RAYSPEC_SINGLE_TENANT=true` holds the runtime to one organization: a second one is
+refused on every path and accounts join by invite. With role separation and
+`RAYSPEC_HOSTING_POSTURE=managed` it makes up the hardened posture. In every posture
+each route authorizes the operation and the resource after authenticating the caller,
+and a thrown handler error reaches the client without its detail. With role separation
+or single-tenant mode on, the runtime also rereads the membership to start or cancel
+an agent run, re-checks a queued agent run against its requester when it starts,
+refuses a playback token whose user is no longer a member, hands a stream handler its
+request without the caller's credential, and keeps error detail out of streamed run
+frames. It is not a sandbox: custom code runs in the runtime process.
+See [Hosting in the hardened posture](./docs/hardened-posture.md).
+
 ### The separate hardening layer (NOT in the core)
 
 Running RaySpec for **untrusted, multi-tenant, public-internet** traffic requires
@@ -85,7 +112,6 @@ protections that are deliberately out of scope for the core and belong to a
 distinct hardening layer:
 
 - per-tenant data encryption with wrapped data-encryption keys,
-- database row-level security as a second, in-database enforcement of tenancy,
 - cross-node federation and data-residency enforcement — the data model carries the
   federation- and residency-ready columns from day one, but enforcing them belongs
   to this layer,

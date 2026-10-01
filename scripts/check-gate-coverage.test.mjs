@@ -67,6 +67,8 @@ const CHOKEPOINT_ROOTS = [
   'packages/compose/api-auth/src',
   'packages/workflow/durable-dbos/src',
   'packages/kernel/db/src',
+  // The platform migration chain the tenant-policy check reads (`.sql` files, not sources).
+  'packages/kernel/db/drizzle',
 ];
 const ADAPTER_ROOTS = [
   'packages/adapters/openai/src',
@@ -75,9 +77,16 @@ const ADAPTER_ROOTS = [
   'packages/adapters/codex/src',
 ];
 
-/** A populated tree: one benign source file under every declared root. */
+/** A benign migration: a global table, which needs no tenant policy. */
+const BENIGN_MIGRATION = 'CREATE TABLE "things" (\n\t"id" uuid PRIMARY KEY\n);\n';
+
+/** A populated tree: one benign source file (a benign migration in a migrations root) per root. */
 function populated(roots) {
-  return Object.fromEntries(roots.map((r) => [`${r}/ok.ts`, BENIGN]));
+  return Object.fromEntries(
+    roots.map((r) =>
+      r.endsWith('/drizzle') ? [`${r}/0000_ok.sql`, BENIGN_MIGRATION] : [`${r}/ok.ts`, BENIGN],
+    ),
+  );
 }
 
 const created = [];
@@ -155,6 +164,43 @@ try {
       );
       console.log(`ok (G/${gate}) — an unscanned root fails closed (exit ${r.code})`);
     }
+  }
+
+  // ── the tenant-policy check: a tenant table the chain adds without its policy FAILS, naming it,
+  // and a missing migrations directory fails closed like any other unscanned root ────────────────
+  {
+    const files = populated(CHOKEPOINT_ROOTS);
+    files['packages/kernel/db/drizzle/0001_notes.sql'] =
+      'CREATE TABLE "notes" (\n\t"id" uuid PRIMARY KEY,\n\t"tenant_id" uuid NOT NULL\n);\n';
+    const { ws, script: s } = throwawayRepo('check-tenant-chokepoint.mjs', files);
+    created.push(ws);
+    const r = runGate(s);
+    assert.notEqual(r.code, 0, '(P/tenant-chokepoint) a tenant table without a policy must FAIL');
+    assert.match(r.err, /"notes" has no row-level tenant policy/, '(P) the table must be named');
+    console.log(
+      `ok (P/tenant-chokepoint) — a tenant table without its policy fails (exit ${r.code})`,
+    );
+  }
+  {
+    const files = populated(CHOKEPOINT_ROOTS);
+    files['packages/kernel/db/drizzle/0001_open.sql'] =
+      'CREATE POLICY "allow_all" ON "public"."runs" AS PERMISSIVE FOR ALL TO PUBLIC ' +
+      'USING (true) WITH CHECK (true);\n';
+    const { ws, script: s } = throwawayRepo('check-tenant-chokepoint.mjs', files);
+    created.push(ws);
+    const r = runGate(s);
+    assert.notEqual(r.code, 0, '(P/side-door) a second permissive policy must FAIL');
+    assert.match(r.err, /0001_open\.sql: a policy other than the canonical tenant policy/);
+    console.log(`ok (P/side-door) — a policy beside the tenant policy fails (exit ${r.code})`);
+  }
+  {
+    const files = populated(CHOKEPOINT_ROOTS.filter((r) => !r.endsWith('/drizzle')));
+    const { ws, script: s } = throwawayRepo('check-tenant-chokepoint.mjs', files);
+    created.push(ws);
+    const r = runGate(s);
+    assert.notEqual(r.code, 0, '(G/migrations) a missing migrations directory must fail CLOSED');
+    assert.ok(r.err.includes('packages/kernel/db/drizzle'), '(G/migrations) it must be named');
+    console.log(`ok (G/migrations) — a missing migrations directory fails closed (exit ${r.code})`);
   }
 
   console.log('\ngate-coverage regression: ALL CASES PASSED');

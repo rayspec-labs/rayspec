@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { rehydrateConversation } from './rehydrate.js';
 import {
   forTenant,
+  makeTestAppDb,
   makeTestDb,
   resetRunSchema,
   seedOrgs,
@@ -18,9 +19,14 @@ import {
 } from './test-support/test-db.js';
 
 const db = makeTestDb();
+// The handle code under test runs over: `db` itself, or in the runtime-role lane the runtime role's
+// (see `makeTestAppDb`); `db` stays the one the suite seeds and inspects through.
+let appDb: ReturnType<typeof makeTestDb> = db;
+let closeAppDb: () => Promise<void> = async () => {};
 
 beforeAll(async () => {
   await resetRunSchema(db);
+  ({ appDb, close: closeAppDb } = await makeTestAppDb(db));
 });
 beforeEach(async () => {
   await db.$client.unsafe(
@@ -29,12 +35,13 @@ beforeEach(async () => {
   await seedOrgs(db, TENANT_A);
 });
 afterAll(async () => {
+  await closeAppDb();
   await db.$client.end();
 });
 
 describe('rehydrateConversation round-trip', () => {
   it('reassembles ConvTurn[] from persisted part rows (grouped by turn, ordered by seq)', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     // Two turns: a user text turn, then an assistant turn with a tool_call + tool_result pair.
     await tdb.insert(schema.conversationItems, [
       {
@@ -83,7 +90,7 @@ describe('rehydrateConversation round-trip', () => {
   });
 
   it('DROPS a malformed stored payload on read — never trusts attacker jsonb', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     await tdb.insert(schema.conversationItems, [
       // valid part -> kept
       {
@@ -125,7 +132,7 @@ describe('rehydrateConversation round-trip', () => {
   });
 
   it('coerces a stored system role to a user data turn (no prompt-injection as system)', async () => {
-    const tdb = forTenant(db, TENANT_A);
+    const tdb = forTenant(appDb, TENANT_A);
     await tdb.insert(schema.conversationItems, {
       runId: 'r3',
       seq: '0',

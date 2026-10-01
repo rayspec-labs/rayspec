@@ -65,6 +65,7 @@ import {
   OrgIdInUseError,
   OrgStore,
   OrgTombstonedError,
+  SingleTenantLimitError,
 } from '@rayspec/api-auth';
 import { mintInviteToken, normalizeEmail } from '@rayspec/auth-core';
 import { isUniqueViolation, makeDb } from '@rayspec/db';
@@ -85,6 +86,17 @@ const FENCED_MESSAGE =
 export interface TenantProvisionSecrets {
   readonly databaseUrl: string;
   readonly apiKeyPepper: string;
+  /**
+   * The migration role's connection (RAYSPEC_MIGRATION_DATABASE_URL), when the deployment separates
+   * its database roles. The migration chain, the row-level isolation step and the provisioning writes
+   * then run over it; `databaseUrl` is only asked which role the runtime serves with.
+   */
+  readonly migrationDatabaseUrl?: string;
+  /**
+   * Single-tenant mode (RAYSPEC_SINGLE_TENANT=true): resolving the one organization stays idempotent,
+   * creating a second is refused with `SINGLE_TENANT_LIMIT`.
+   */
+  readonly singleTenant?: boolean;
 }
 
 export interface TenantProvisionInput {
@@ -229,7 +241,9 @@ export async function provisionTenant(
     );
   }
 
-  const db = makeDb(secrets.databaseUrl);
+  // With role separation everything here runs as the migration role: it migrates, and it writes the
+  // org and its invite before any runtime serves them.
+  const db = makeDb(secrets.migrationDatabaseUrl ?? secrets.databaseUrl);
   // Tracked outside the transaction so a failure AFTER the token file exists — including at commit —
   // can remove it. A stray file holding a credential for a reservation that rolled back is exactly
   // the residue this whole path exists to avoid.
@@ -243,13 +257,20 @@ export async function provisionTenant(
     try {
       const lockOptions =
         opts.schemaLockTimeoutMs === undefined ? {} : { lockTimeoutMs: opts.schemaLockTimeoutMs };
-      await new DeployApply({
+      const tenantIsolation =
+        secrets.migrationDatabaseUrl === undefined
+          ? undefined
+          : { runtimeRole: await runtimeRoleOf(secrets.databaseUrl) };
+      const apply = new DeployApply({
         db,
         migratePlatform: () => applyMigrations(db, lockOptions),
         ...lockOptions,
         actor: TENANT_ENSURE_ACTOR,
         warn: () => {},
-      }).platformChain();
+        ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
+      });
+      await apply.platformChain();
+      await apply.tenantIsolation();
     } catch (err) {
       if (err instanceof RuntimeApplyError) {
         if (err.errors[0]?.reason === 'fenced') {
@@ -279,8 +300,12 @@ export async function provisionTenant(
       );
     }
 
-    // The posture is hardcoded, not read from the environment — see the module docblock.
-    const orgStore = new OrgStore(db, { tenantBootstrapEnabled: true });
+    // The bootstrap posture is hardcoded, not read from the environment — see the module docblock.
+    // The single-tenant limit is the deployment's own switch, resolved with the secrets.
+    const orgStore = new OrgStore(db, {
+      tenantBootstrapEnabled: true,
+      singleTenant: secrets.singleTenant === true,
+    });
     const inviteStore = new InviteStore(db);
     const auditStore = new AuditStore(db);
 
@@ -446,6 +471,19 @@ export async function provisionTenant(
   }
 }
 
+/** The role `databaseUrl` connects as: the runtime role the isolation step revokes ledger writes from. */
+async function runtimeRoleOf(databaseUrl: string): Promise<string> {
+  const runtime = makeDb(databaseUrl, 1);
+  try {
+    const rows = (await runtime.$client.unsafe('SELECT current_user::text AS role')) as unknown as {
+      role: string;
+    }[];
+    return rows[0]?.role ?? '';
+  } finally {
+    await runtime.$client.end();
+  }
+}
+
 /**
  * A driver rejection as ONE bounded line. The migrator's own message quotes the entire failing
  * statement — a whole migration file, comments included — so the database's actual complaint is
@@ -466,6 +504,13 @@ function oneLine(err: unknown): string {
  */
 function translateReserveError(err: unknown, input: TenantProvisionInput): unknown {
   if (err instanceof TenantProvisionError) return err;
+  if (err instanceof SingleTenantLimitError) {
+    return new TenantProvisionError(
+      'SINGLE_TENANT_LIMIT',
+      `The deployment runs in single-tenant mode (RAYSPEC_SINGLE_TENANT=true) and already holds ` +
+        `another organization, so ${input.orgId} was not created. Nothing was written.`,
+    );
+  }
   if (err instanceof OrgTombstonedError) {
     return new TenantProvisionError(
       'ORG_TOMBSTONED',

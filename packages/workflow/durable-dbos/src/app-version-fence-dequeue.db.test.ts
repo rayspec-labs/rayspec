@@ -66,6 +66,7 @@ import {
   type ResolvedRun,
   RUN_STARTED_SCOPE,
 } from './executor.js';
+import { type EngineDatabases, engineDatabases } from './test-support/engine-databases.js';
 import { FakeSpineBackend } from './test-support/fake-backend.js';
 import { buildSpineSchemaSql } from './test-support/schema-ddl.js';
 
@@ -101,6 +102,7 @@ const baseSpec: AgentSpec = {
 
 type DbHandle = ReturnType<typeof makeDbWithSchema>;
 let db: DbHandle;
+let engine: EngineDatabases | undefined;
 /** Deployment B, kept on the module so `afterAll` can tear it down if a test aborts mid-way. */
 let deploymentB: DbosDurableExecutor | undefined;
 
@@ -153,7 +155,7 @@ async function bootDeployment(
   applicationVersion: string,
 ): Promise<DbosDurableExecutor> {
   const deps: DbosExecutorDeps = {
-    db,
+    db: (engine as EngineDatabases).appDb,
     resolveRun: (job: RunJob): ResolvedRun => {
       if (job.agentId !== 'echo-agent') throw new Error(`unknown agent '${job.agentId}'`);
       return { backend, spec: baseSpec };
@@ -161,7 +163,7 @@ async function bootDeployment(
   };
   const exec = new DbosDurableExecutor(deps, {
     name: documentName,
-    systemDatabaseUrl: withDbName(appBaseUrl(), DBOS_SYS_DB),
+    systemDatabaseUrl: (engine as EngineDatabases).systemDatabaseUrl,
     applicationVersion,
     workerConcurrency: 1,
     deregisterOnShutdown: true,
@@ -242,6 +244,13 @@ beforeAll(async () => {
   await db.$client.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'fence', 'fence')`, [
     TENANT,
   ]);
+  // Both deployments' databases: the suite's own, or in the runtime-role lane the runtime role's.
+  engine = await engineDatabases({
+    admin: db,
+    adminUrl: appBaseUrl(),
+    schema: APP_SCHEMA,
+    systemDatabaseUrl: withDbName(appBaseUrl(), DBOS_SYS_DB),
+  });
 }, 60_000);
 
 afterAll(async () => {
@@ -249,6 +258,7 @@ afterAll(async () => {
   try {
     if (deploymentB) await deploymentB.shutdown();
   } finally {
+    await engine?.close();
     try {
       const admin = postgres(appBaseUrl(), { max: 1 });
       try {
