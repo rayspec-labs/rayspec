@@ -27,7 +27,12 @@
  *  8. An export killed during the capture, then `resume` instead of another export: resume removes
  *     the plaintext the killed export left in the scratch directory, closes its receipt with the
  *     fence it left, and releases that fence.
- *  9. Without role separation, on a stopped source attested with `--source-stopped`, the export
+ *  9. An upload in flight during the precheck (its temporary file in the blob root) does not refuse
+ *     the export: the precheck reports it as in flight, the upload finishes in the drain, and the
+ *     snapshot carries the object it became.
+ * 10. A temporary upload file that is still there after the drain is an upload that never
+ *     finished: the capture refuses (`unreconciled-effects`) and the source stays fenced.
+ * 11. Without role separation, on a stopped source attested with `--source-stopped`, the export
  *     succeeds and says which barrier held (`database-stopped-source`) and which did not apply.
  *
  * `pg_dump` and `pg_restore`: the host's when their major is the server's, else the pinned postgres
@@ -47,6 +52,7 @@ import {
   openSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -60,7 +66,7 @@ import {
   schemaValidator,
 } from '@rayspec/bundle-contract';
 import { createRuntimeRoleLane, type RuntimeRoleLane } from '@rayspec/db/testing';
-import { listFsBlobs } from '@rayspec/platform';
+import { listFsBlobs, makeFsBlobStoreFactory } from '@rayspec/platform';
 import { Decrypter, generateX25519Identity, identityToRecipient } from 'age-encryption';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
@@ -73,7 +79,12 @@ import {
 } from '../../../kernel/bundle-closure/src/test-support/app.js';
 import { runPack } from './pack.js';
 import { CLI_DIST, type ParsedJson } from './test-support/bundles.js';
-import { holdingPgDump, pgToolPath, runPgTool } from './test-support/pg-tools.js';
+import {
+  finishingUploadPgDump,
+  holdingPgDump,
+  pgToolPath,
+  runPgTool,
+} from './test-support/pg-tools.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -84,7 +95,7 @@ if (dbRequired && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARMS = 9;
+const ARMS = 11;
 
 const SUITE_DB = `rayspec_export_cli_${process.pid}`;
 const SYS_DB = `${SUITE_DB}_dbos_sys`;
@@ -786,7 +797,7 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     const index = JSON.parse(entries.get(SNAPSHOT_PATHS.objectIndex)!.toString('utf8')) as {
       objects: { tenantId: string; key: string; sha256: string }[];
     };
-    const live = await listFsBlobs(blobRoot);
+    const live = (await listFsBlobs(blobRoot, { phase: 'quiesced' })).objects;
     expect(index.objects.map((o) => [o.tenantId, o.key, o.sha256])).toEqual(
       live.map((o) => [o.tenantId, o.key, o.sha256]),
     );
@@ -1092,6 +1103,101 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     expect(rows.every((r) => /^[a-f0-9]{64}$/.test(r.digest ?? ''))).toBe(true);
     expect(await fence()).toEqual({ state: 'open', epoch });
     expect(await noteUntilAccepted('after the killed export was resumed')).toBe(201);
+    armsRan += 1;
+  }, 300_000);
+
+  /** The name the fs blob store gives the temporary file of a write of `file`. */
+  const temporaryFile = (file: string) =>
+    `${file}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`;
+
+  async function resumeAt(epoch: number): Promise<void> {
+    const resumed = await cli(
+      ['resume', '--deployment', deploymentId(), '--fence-epoch', String(epoch)],
+      cliEnv(roleEnv()),
+    );
+    expect(resumed.code, resumed.stderr).toBe(0);
+    expect(resumed.envelope.data).toMatchObject({ fenceEpoch: epoch, released: true });
+  }
+
+  it('an upload in flight during the precheck that finishes in the drain does not refuse the export', async () => {
+    const before = await fence();
+    expect(before.state).toBe('open');
+    // The upload's stored file as the store writes it, under its temporary name in the blob root.
+    const staging = temporaryDirectory('export-upload-');
+    await makeFsBlobStoreFactory(staging)(TENANT).put(
+      'uploads/in-flight',
+      Buffer.from('bytes of in-flight'),
+    );
+    const finished = join(blobRoot, TENANT, 'uploads', 'in-flight');
+    const temporary = temporaryFile(finished);
+    copyFileSync(join(staging, TENANT, 'uploads', 'in-flight'), temporary);
+    const log = join(toolsDir, 'in-flight.versions');
+    const finishing = finishingUploadPgDump(pgDump, toolsDir, log, temporary, finished);
+    const output = join(deployDir, 'in-flight.ray');
+    const run = await cli(exportArgs(output), cliEnv(roleEnv(), { RAYSPEC_PG_DUMP: finishing }));
+    expect(run.code, run.stderr).toBe(0);
+    // The precheck saw the temporary file and went on; the capture's preflight, under the fence,
+    // found the upload finished.
+    expect(run.stderr).toContain('precheck: 1 upload in flight in the blob root');
+    expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(['in-flight', 'finished']);
+    const epoch = before.epoch + 1;
+    expect(await fence()).toEqual({ state: 'fenced', epoch });
+    expect(run.envelope.data.fenceEpoch).toBe(epoch);
+    // The snapshot carries the object the upload became.
+    const entries = zipEntries(await decrypt(output, identity));
+    const index = JSON.parse(entries.get(SNAPSHOT_PATHS.objectIndex)!.toString('utf8')) as {
+      objects: { tenantId: string; key: string; sha256: string }[];
+    };
+    expect(index.objects).toContainEqual(
+      expect.objectContaining({
+        tenantId: TENANT,
+        key: 'uploads/in-flight',
+        sha256: sha(Buffer.from('bytes of in-flight')),
+      }),
+    );
+    expect(readdirSync(join(state(), 'scratch'))).toEqual([]);
+    await resumeAt(epoch);
+    armsRan += 1;
+  }, 300_000);
+
+  it('a temporary upload file still there after the drain refuses the capture and keeps the fence', async () => {
+    const before = await fence();
+    expect(before.state).toBe('open');
+    const temporary = temporaryFile(join(blobRoot, TENANT, 'uploads', 'never-finished'));
+    writeFileSync(temporary, 'half an upload');
+    const output = join(deployDir, 'never-finished.ray');
+    const epoch = before.epoch + 1;
+    try {
+      const run = await cli(exportArgs(output), cliEnv(roleEnv()));
+      expect(run.code, run.stderr).toBe(3);
+      expect(run.stderr).toContain('precheck: 1 upload in flight in the blob root');
+      expect(run.envelope.errors[0]).toMatchObject({
+        code: 'RAY_EXTERNAL_STATE_UNSUPPORTED',
+        reason: 'unreconciled-effects',
+      });
+      expect(run.envelope.errors[0].message).toContain(
+        `rayspec resume --deployment ${deploymentId()} --fence-epoch ${epoch}`,
+      );
+      // The fence this export took stays held, and nothing was written.
+      expect(await fence()).toEqual({ state: 'fenced', epoch });
+      expect((await postNote('while an upload never finished')).status).toBe(503);
+      expect(existsSync(output)).toBe(false);
+      expect(readdirSync(join(state(), 'scratch'))).toEqual([]);
+      const receipt = JSON.parse(
+        readFileSync(join(state(), 'receipts', `export-${run.envelope.operationId}.json`), 'utf8'),
+      ) as ParsedJson;
+      expect(receipt.outcome).toBe('blocked');
+      expect((receipt.transitions as ParsedJson[]).at(-1)).toMatchObject({
+        state: 'BLOCKED',
+        fenceEpoch: epoch,
+        fenceState: 'fenced',
+        error: { code: 'RAY_EXTERNAL_STATE_UNSUPPORTED', reason: 'unreconciled-effects' },
+      });
+    } finally {
+      rmSync(temporary, { force: true });
+    }
+    await resumeAt(epoch);
+    expect(await noteUntilAccepted('after the unfinished upload was removed')).toBe(201);
     armsRan += 1;
   }, 300_000);
 

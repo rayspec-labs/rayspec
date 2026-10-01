@@ -436,6 +436,7 @@ export {
   excludedDataCategories,
   identityPolicy,
   openWorkflowSystemDatabase,
+  type PreflightPhase,
   preflightSnapshot,
   type RunHistoryPolicy,
   type SnapshotBlobSource,

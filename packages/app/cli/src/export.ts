@@ -13,7 +13,9 @@
  *   PRECHECK   arguments, the state directory, the configuration, the blob source (an application
  *              that loads an extension is refused), the scratch lock, then the read-only preflight
  *              of the source (`preflightSnapshot`), recorded with the application digest it
- *              established. A refusal here changes nothing at the source.
+ *              established. A refusal here changes nothing at the source. An upload still being
+ *              written is normal before the fence: it is reported as in flight and left to the
+ *              drain; the capture refuses one whose temporary file outlives the drain.
  *              Then the operator confirms the downtime: `--confirm-quiesce`, or an answer at the
  *              terminal to the plan printed on stderr.
  *   QUIESCING  `quiesce()` takes the source fence (or finds the one an earlier export took, at its
@@ -647,8 +649,14 @@ export async function runExport(
       runHistoryPolicy: p.runHistoryPolicy,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
     };
-    const preflight = await server.preflightSnapshot(source);
+    const preflight = await server.preflightSnapshot(source, { phase: 'live' });
     warnings = [...preflight.warnings];
+    if (preflight.uploadsInFlight > 0) {
+      progress(
+        `precheck: ${preflight.uploadsInFlight} upload${preflight.uploadsInFlight === 1 ? '' : 's'} ` +
+          'in flight in the blob root; the fence drains them before the capture',
+      );
+    }
     // The precheck's transition is recorded once it has finished, with the application digest it
     // established.
     if (preflight.facts !== null) known = { applicationDigest: preflight.facts.applicationDigest };

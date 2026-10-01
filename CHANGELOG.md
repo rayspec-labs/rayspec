@@ -642,6 +642,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the plaintext a killed one left in the scratch directory and closes its receipt. An application
   that loads any extension is refused before the fence (`unsupported-blob-adapter`), even with
   `RAYSPEC_BLOB_ROOT` set, since an extension's blob backend would be used in place of the fs store.
+  An upload being written during the precheck is normal operation: it is reported as in flight and
+  left to the fence's drain; only a temporary upload file still there after the drain refuses, in the
+  capture (`unreconciled-effects`), with the source fenced. `listFsBlobs` takes the phase (`live` or
+  `quiesced`) that decides which of the two a temporary file is.
   Every transition (`PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED`, `BLOCKED`) is recorded
   with its operation id, actor, fence epoch, time, digests and recovery action in a shareable local
   receipt (`<state-dir>/receipts/`, no secret, record or table name) and in the environment's

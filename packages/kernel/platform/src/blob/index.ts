@@ -8,6 +8,10 @@
 export {
   BlobInventoryError,
   type BlobInventoryErrorKind,
+  type FsBlobInventory,
+  type FsBlobWalkOptions,
+  type FsBlobWalkPhase,
+  type FsInFlightWrite,
   type FsStoredBlob,
   listFsBlobs,
   MAX_SNAPSHOT_KEY_LENGTH,

@@ -118,8 +118,14 @@ which wins over the plain variable.
 | `RAYSPEC_BLOB_ROOT` | the fs blob root |
 | `RAYSPEC_PG_DUMP` | an absolute path to `pg_dump`; default the first on `PATH` |
 
-Before it changes anything, the export prints the downtime plan on the terminal and asks you to type
-`yes`. In a script, or with `--json`, pass `--confirm-quiesce` instead.
+Before it changes anything, the export runs a read-only precheck of the source (the checks are
+listed in [Runtime operations](./runtime-operations.md#snapshots-of-a-fenced-source)); a refusal there
+changes nothing. The precheck runs while the deployment is still open, so an upload being written at
+that moment is normal: its temporary file in the blob root is counted (and its bytes count toward the
+size and disk budgets), reported on stderr as `precheck: N upload(s) in flight in the blob root`, and
+left to the fence, which drains every upload before the capture. Then the export prints the downtime
+plan on the terminal and asks you to type `yes`. In a script, or with `--json`, pass
+`--confirm-quiesce` instead.
 
 `--run-history` has no default. `included` carries runs, run events, agent journals, conversation
 items and workflow runs; `excluded` keeps their rows at the source (their tables arrive empty). The
@@ -214,6 +220,7 @@ is fenced and nothing is released.
 | The drain did not finish before `--quiesce-deadline` (`RAY_SOURCE_NOT_QUIESCENT`) | fenced | wait for the runs to end and run the export again, or `rayspec resume` |
 | No database write barrier (`database-barrier-unavailable`) | fenced | enable role separation, or stop every runtime process and run it again with `--source-stopped`; or `rayspec resume` |
 | A session that could write is connected (`uncontrolled-writer`), or a run is still marked running (`unreconciled-effects`) | fenced | disconnect it or reconcile the run, then run the export again |
+| The blob root still holds the temporary file of an upload after the drain (`unreconciled-effects`): an upload that never finished, such as one whose process was killed | fenced | with the source fenced no upload is running, so delete the leftover `<key>.tmp-<pid>-<ms>-<uuid>` file under the blob root (`find "$RAYSPEC_BLOB_ROOT" -name '*.tmp-*'`), then run the export again |
 | Ctrl-C / SIGTERM (`RAY_INTERRUPTED`, exit 6) | fenced | the export stopped at a safe point, ended `pg_dump` and removed its scratch data; run it again, or `rayspec resume` |
 | The process was killed outright | fenced, unless it was killed before quiesce took the fence | run the export again, or `rayspec resume`: either one first removes what the killed run left in `<state-dir>/scratch/` and records the killed run as interrupted |
 | The database or the disk failed during the capture (`RAY_INFRA_UNAVAILABLE`) | fenced | fix it and run the export again, or `rayspec resume` |

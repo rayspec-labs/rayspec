@@ -107,6 +107,46 @@ export function holdingPgDump(
 }
 
 /**
+ * A `pg_dump` wrapper that finishes an upload in flight between an export's precheck and its
+ * capture. An export runs `pg_dump --version` once in each: the precheck's preflight, before the
+ * fence, and the capture's, under the fence after the drain. Each `--version` call appends to `log`
+ * whether the upload's temporary file `from` is still there (`in-flight`); the second one renames it
+ * to `to`, as a finishing upload does, and logs `finished`. Everything else runs the real tool.
+ */
+export function finishingUploadPgDump(
+  realPgDump: string,
+  dir: string,
+  log: string,
+  from: string,
+  to: string,
+): string {
+  const wrapper = join(dir, 'pg_dump-finishing-upload');
+  writeFileSync(
+    wrapper,
+    [
+      `#!${process.execPath}`,
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      'const args = process.argv.slice(2);',
+      "if (args.includes('--version')) {",
+      `  const log = ${JSON.stringify(log)};`,
+      "  const calls = fs.existsSync(log) ? fs.readFileSync(log, 'utf8').split('\\n').filter(Boolean).length : 0;",
+      `  if (calls === 1 && fs.existsSync(${JSON.stringify(from)})) {`,
+      `    fs.renameSync(${JSON.stringify(from)}, ${JSON.stringify(to)});`,
+      "    fs.appendFileSync(log, 'finished\\n');",
+      `  } else fs.appendFileSync(log, fs.existsSync(${JSON.stringify(from)}) ? 'in-flight\\n' : 'absent\\n');`,
+      '}',
+      `const child = spawn(${JSON.stringify(realPgDump)}, args, { stdio: 'inherit' });`,
+      "process.on('SIGTERM', () => child.kill('SIGTERM'));",
+      "child.on('exit', (code) => process.exit(code ?? 1));",
+      '',
+    ].join('\n'),
+  );
+  chmodSync(wrapper, 0o755);
+  return wrapper;
+}
+
+/**
  * Run a client tool with the libpq environment of `url`, `input` on stdin.
  *
  * A tool may finish without reading all of its input: `pg_restore` reading a custom-format archive

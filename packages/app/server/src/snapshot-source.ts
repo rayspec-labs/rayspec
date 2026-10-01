@@ -3,7 +3,8 @@
  * application, the schema head, the blob root, the disk and size budgets, the database extensions,
  * the tenants and their way back in, and every table and piece of state the snapshot could not
  * carry. `preflightSnapshot` runs it all read-only, before any fence is taken, and reports each
- * finding as a blocker; `captureSnapshot` (snapshot-capture.ts) runs it again under the fence.
+ * finding as a blocker; `captureSnapshot` (snapshot-capture.ts) runs it again under the fence, in
+ * the `quiesced` phase.
  *
  * THE CHECKS, in the order the contract's export sequence names them:
  *   1. the source: the state directory's active bundle, rebuilt byte for byte with the one bundle
@@ -15,9 +16,13 @@
  *      `pg_dump` found has the same major; the role the dumps read as (the snapshot role, or the
  *      single role) can read every table of both databases past row-level security;
  *   2. the blob adapter: the fs blob root, walked completely (`unsupported-blob-adapter` for any
- *      other adapter, `unreconciled-effects` for an upload that never finished);
+ *      other adapter). The phase decides what the temporary file of an upload means: before the
+ *      fence (`live`, the default) it is an upload in flight, counted in `uploadsInFlight` and left
+ *      to the fence's drain; under the fence (`quiesced`) it is an upload that never finished
+ *      (`unreconciled-effects`);
  *   3. the budgets: objects and their bytes against the migration limits (`RAY_LIMIT_EXCEEDED`
- *      `migration-size`, `object-index-size`), and free space for the scratch copy;
+ *      `migration-size`, `object-index-size`), and free space for the scratch copy. An upload in
+ *      flight counts as the object it is about to become;
  *   4. extensions: the platform chain creates none, so any extension but the built-in `plpgsql` in
  *      the application database is refused (`RAY_POLICY_DENIED` `unsupported-extension`); in the
  *      workflow system database, so is any but the one the durable engine's own migrations create
@@ -61,7 +66,13 @@ import {
 } from '@rayspec/bundle-contract';
 import { redactText } from '@rayspec/core';
 import { type Db, makeDb } from '@rayspec/db';
-import { BlobInventoryError, type FsStoredBlob, listFsBlobs } from '@rayspec/platform';
+import {
+  BlobInventoryError,
+  type FsBlobWalkPhase,
+  type FsInFlightWrite,
+  type FsStoredBlob,
+  listFsBlobs,
+} from '@rayspec/platform';
 import type { StateDirectory } from './deployment-state.js';
 import { type PgDumpTool, pgDumpMajor, resolvePgDump } from './pg-dump.js';
 import { ledgerDrift, readProductLedger } from './product-ledger.js';
@@ -147,6 +158,11 @@ export interface SnapshotPreflight {
   /** Every finding that stops an export, first one first. Empty when the source can be exported. */
   blockers: BundleError[];
   warnings: BundleWarning[];
+  /**
+   * Uploads the `live` walk found still being written: normal before the fence, which drains them.
+   * Always 0 in the `quiesced` phase, where such a file is a blocker.
+   */
+  uploadsInFlight: number;
   /** Present when there is no blocker. */
   facts: SnapshotSourceFacts | null;
 }
@@ -368,11 +384,16 @@ export class SourceRefusal extends Error {
   }
 }
 
-/** The blob listing of the source, or the refusal the walk ends with. */
+/**
+ * The blob listing of the source, or the refusal the walk ends with. `phase` is `live` before the
+ * fence (an upload in flight is listed, not refused) and `quiesced` under it, after the drain (an
+ * upload's temporary file is an upload that never finished: `unreconciled-effects`).
+ */
 export async function listSourceBlobs(
   blob: SnapshotBlobSource,
-): Promise<{ objects: FsStoredBlob[] } | { refusal: BundleError }> {
-  if (blob.kind === 'none') return { objects: [] };
+  phase: FsBlobWalkPhase,
+): Promise<{ objects: FsStoredBlob[]; inFlight: FsInFlightWrite[] } | { refusal: BundleError }> {
+  if (blob.kind === 'none') return { objects: [], inFlight: [] };
   if (blob.kind === 'unsupported') {
     return {
       refusal: bundleError(
@@ -383,7 +404,7 @@ export async function listSourceBlobs(
     };
   }
   try {
-    return { objects: await listFsBlobs(blob.root) };
+    return await listFsBlobs(blob.root, { phase });
   } catch (err) {
     if (!(err instanceof BlobInventoryError)) throw err;
     if (err.kind === 'root-missing') {
@@ -417,14 +438,24 @@ function names(list: readonly string[]): string {
   return list.length > 10 ? `${shown} and ${list.length - 10} more` : shown;
 }
 
+export interface PreflightPhase {
+  /**
+   * `live` (the default): before the fence, while uploads may still run; an upload in flight is
+   * counted, not refused. `quiesced`: under the fence, after the drain; it is refused.
+   */
+  phase?: FsBlobWalkPhase;
+}
+
 /**
- * Check the source of an export, read-only, before any fence is taken. Every finding is a blocker in
- * `blockers`; a database or blob root that cannot be reached is `RAY_INFRA_UNAVAILABLE`.
+ * Check the source of an export, read-only. Every finding is a blocker in `blockers`; a database or
+ * blob root that cannot be reached is `RAY_INFRA_UNAVAILABLE`. Before any fence is taken it runs in
+ * the `live` phase; the capture runs it again under the fence in the `quiesced` phase.
  */
 export async function preflightSnapshot(
   options: SnapshotSourceOptions,
+  { phase = 'live' }: PreflightPhase = {},
 ): Promise<SnapshotPreflight> {
-  const result = await preflightUnredacted(options);
+  const result = await preflightUnredacted(options, phase);
   return {
     ...result,
     blockers: result.blockers.map(redactedError),
@@ -437,9 +468,13 @@ export function redactedError(error: BundleError): BundleError {
   return { ...error, message: redactText(error.message) };
 }
 
-async function preflightUnredacted(options: SnapshotSourceOptions): Promise<SnapshotPreflight> {
+async function preflightUnredacted(
+  options: SnapshotSourceOptions,
+  phase: FsBlobWalkPhase,
+): Promise<SnapshotPreflight> {
   const blockers: BundleError[] = [];
   const warnings: BundleWarning[] = [];
+  const blobs = { inFlight: 0 };
   let limits: ReaderLimits;
   try {
     limits = resolveReaderLimits(options.limits);
@@ -447,14 +482,20 @@ async function preflightUnredacted(options: SnapshotSourceOptions): Promise<Snap
     return {
       blockers: [bundleError('RAY_USAGE', 'a reader limit is outside 0 to its default')],
       warnings,
+      uploadsInFlight: 0,
       facts: null,
     };
   }
   try {
-    return await preflight(options, limits, blockers, warnings);
+    return await preflight(options, phase, limits, blockers, warnings, blobs);
   } catch (err) {
     if (err instanceof SourceRefusal)
-      return { blockers: [...blockers, err.error], warnings, facts: null };
+      return {
+        blockers: [...blockers, err.error],
+        warnings,
+        uploadsInFlight: blobs.inFlight,
+        facts: null,
+      };
     return {
       blockers: [
         ...blockers,
@@ -465,6 +506,7 @@ async function preflightUnredacted(options: SnapshotSourceOptions): Promise<Snap
         ),
       ],
       warnings,
+      uploadsInFlight: blobs.inFlight,
       facts: null,
     };
   }
@@ -472,9 +514,11 @@ async function preflightUnredacted(options: SnapshotSourceOptions): Promise<Snap
 
 async function preflight(
   options: SnapshotSourceOptions,
+  phase: FsBlobWalkPhase,
   limits: ReaderLimits,
   blockers: BundleError[],
   warnings: BundleWarning[],
+  blobs: { inFlight: number },
 ): Promise<SnapshotPreflight> {
   const query = queryOf(options.db);
   const scratch = await mkdtemp(join(options.scratchParent, 'rayspec-preflight-'));
@@ -620,26 +664,31 @@ async function preflight(
       }
     }
 
-    // 2. The blob adapter.
-    const listed = await listSourceBlobs(options.blob);
+    // 2. The blob adapter. Before the fence an upload in flight is normal operation: it is counted
+    // and left to the fence's drain. Under the fence it is an upload that never finished.
+    const listed = await listSourceBlobs(options.blob, phase);
     const objects = 'objects' in listed ? listed.objects : [];
+    const inFlight = 'inFlight' in listed ? listed.inFlight : [];
     if ('refusal' in listed) blockers.push(listed.refusal);
+    blobs.inFlight = inFlight.length;
 
-    // 3. The budgets.
+    // 3. The budgets. An upload in flight counts as the object it is about to become.
     const objectBytes = objects.reduce((sum, o) => sum + o.storedSize, 0);
-    if (objects.length > MAX_SNAPSHOT_OBJECTS) {
+    const budgetObjects = objects.length + inFlight.length;
+    const budgetBytes = objectBytes + inFlight.reduce((sum, w) => sum + w.size, 0);
+    if (budgetObjects > MAX_SNAPSHOT_OBJECTS) {
       blockers.push(
         bundleError(
           'RAY_LIMIT_EXCEEDED',
-          `the blob root holds ${objects.length} objects; a snapshot indexes at most ${MAX_SNAPSHOT_OBJECTS}`,
+          `the blob root holds ${budgetObjects} objects; a snapshot indexes at most ${MAX_SNAPSHOT_OBJECTS}`,
           { reason: 'object-index-size' },
         ),
       );
     }
     const applicationBytes = application === null ? 0 : ((await statSize(application.path)) ?? 0);
     if (
-      objectBytes > MAX_SNAPSHOT_ENTRY_BYTES ||
-      objectBytes + applicationBytes > limits.migrationExtractedBytes
+      budgetBytes > MAX_SNAPSHOT_ENTRY_BYTES ||
+      budgetBytes + applicationBytes > limits.migrationExtractedBytes
     ) {
       blockers.push(
         bundleError(
@@ -651,7 +700,7 @@ async function preflight(
       );
     }
     const [appSize] = await query('SELECT pg_database_size(current_database())::text AS bytes');
-    let estimate = Number(appSize?.bytes ?? 0) + objectBytes + applicationBytes;
+    let estimate = Number(appSize?.bytes ?? 0) + budgetBytes + applicationBytes;
     if (workflowDb !== null) {
       const [sysSize] = await queryOf(workflowDb)(
         'SELECT pg_database_size(current_database())::text AS bytes',
@@ -767,11 +816,12 @@ async function preflight(
       tenantId === null ||
       pgDump === null
     ) {
-      return { blockers, warnings, facts: null };
+      return { blockers, warnings, uploadsInFlight: inFlight.length, facts: null };
     }
     return {
       blockers,
       warnings,
+      uploadsInFlight: inFlight.length,
       facts: {
         deploymentId: options.deploymentId,
         applicationId: application.manifest.application.id,

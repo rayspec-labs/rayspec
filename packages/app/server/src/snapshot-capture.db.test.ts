@@ -505,6 +505,7 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
   it('preflight finds nothing to block on a clean single-tenant source', async () => {
     const r = await preflightSnapshot(source());
     expect(r.blockers).toEqual([]);
+    expect(r.uploadsInFlight).toBe(0);
     expect(r.facts).toMatchObject({
       deploymentId: DEPLOYMENT,
       applicationId: 'field-notes',
@@ -584,7 +585,7 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
 
       // The objects: exactly the blob root, and each stored file unchanged.
       const entries = zipEntries(readFileSync(v.archivePath));
-      const listed = await listFsBlobs(blobRoot);
+      const listed = (await listFsBlobs(blobRoot, { phase: 'quiesced' })).objects;
       const index = read.value.objectIndex.objects;
       expect(index.map((o) => [o.tenantId, o.key, o.size, o.sha256, o.contentType])).toEqual(
         listed.map((o) => [o.tenantId, o.key, o.size, o.sha256, o.contentType]),
@@ -797,7 +798,7 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
     }
   }, 120_000);
 
-  it('refuses a foreign session, a run still running, and a blob written during the capture', async () => {
+  it('refuses a foreign session, a run still running, an upload that never finished, and a blob written during the capture', async () => {
     const scratchBefore = readdirSync(scratchParent);
     const epoch = await quiesce(true);
     try {
@@ -821,6 +822,24 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
         reason: 'unreconciled-effects',
       });
       await control.$client.unsafe("DELETE FROM runs WHERE run_id = 'run-open'");
+
+      // Under the fence the uploads have drained: a temporary upload file still in the blob root is
+      // an upload that never finished. The capture refuses and the fence stays.
+      const unfinished = join(blobRoot, orgId, `empty.tmp-1-1700000000000-${randomUUID()}`);
+      writeFileSync(unfinished, 'half');
+      try {
+        const partial = await capture(epoch, 'included');
+        expect(!partial.ok && partial.errors[0]).toMatchObject({
+          code: 'RAY_EXTERNAL_STATE_UNSUPPORTED',
+          reason: 'unreconciled-effects',
+        });
+        const [held] = await control.$client.unsafe(
+          'SELECT fence_state, fence_epoch::int AS e FROM runtime_control_state WHERE id = 1',
+        );
+        expect(held).toMatchObject({ fence_state: 'fenced', e: epoch });
+      } finally {
+        rmSync(unfinished);
+      }
 
       // A pg_dump wrapper that writes a blob before it dumps: the source moved under the capture.
       const wrapper = join(dir, 'pg-dump-writes-a-blob.mjs');
@@ -931,10 +950,20 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
     expect(await blockers({ blob: { kind: 'unsupported', name: 's3' } })).toEqual([
       'RAY_EXTERNAL_STATE_UNSUPPORTED/unsupported-blob-adapter',
     ]);
+    // Before the fence an upload in flight is normal operation: preflight counts it and goes on;
+    // under the fence (the quiesced phase the capture runs it in) it is an upload that never finished.
     const partial = join(blobRoot, orgId, `empty.tmp-1-1700000000000-${randomUUID()}`);
     writeFileSync(partial, 'half');
     try {
-      expect(await blockers()).toEqual(['RAY_EXTERNAL_STATE_UNSUPPORTED/unreconciled-effects']);
+      const live = await preflightSnapshot(source());
+      expect(live.blockers).toEqual([]);
+      expect(live.uploadsInFlight).toBe(1);
+      expect(live.facts).not.toBeNull();
+      const quiesced = await preflightSnapshot(source(), { phase: 'quiesced' });
+      expect(quiesced.blockers.map((b) => `${b.code}/${b.reason ?? ''}`)).toEqual([
+        'RAY_EXTERNAL_STATE_UNSUPPORTED/unreconciled-effects',
+      ]);
+      expect(quiesced.uploadsInFlight).toBe(0);
     } finally {
       rmSync(partial);
     }

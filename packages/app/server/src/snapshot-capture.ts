@@ -11,7 +11,9 @@
  *    Otherwise the capture refuses with `RAY_EXTERNAL_STATE_UNSUPPORTED`
  *    `database-barrier-unavailable` and the fence stays as it is;
  *  - object writes are fenced (every runtime process drained), else `RAY_SOURCE_NOT_QUIESCENT`;
- *  - every preflight check passes again, now under the fence;
+ *  - every preflight check passes again, now under the fence and in the `quiesced` phase: the drain
+ *    has ended every upload, so the temporary file of one still in the blob root is an upload that
+ *    never finished (`RAY_EXTERNAL_STATE_UNSUPPORTED` `unreconciled-effects`), and the fence stays;
  *  - no session other than the caller's own can write: with the role barrier, only sessions of the
  *    fenced runtime role may be connected; with the stopped source, none at all
  *    (`uncontrolled-writer`);
@@ -433,8 +435,9 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     if (!report.objectsHeld)
       refuse(notQuiescent('object writes are not fenced: a process has not drained'));
 
-    // Every preflight check, now under the fence.
-    const checked = await preflightSnapshot(options);
+    // Every preflight check, now under the fence: uploads have drained, so a temporary upload file
+    // left in the blob root is one that never finished, and refuses.
+    const checked = await preflightSnapshot(options, { phase: 'quiesced' });
     if (checked.blockers.length > 0 || checked.facts === null) {
       return {
         ok: false,
@@ -502,7 +505,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
 
     // 2. The objects.
     checkpoint(options.signal);
-    const before = await listSourceBlobs(options.blob);
+    const before = await listSourceBlobs(options.blob, 'quiesced');
     if ('refusal' in before) refuse(before.refusal);
     const objectIndex = await captureObjects(before.objects, files.objects, options.signal);
     const indexBytes = Buffer.from(canonicalJsonFile(objectIndex), 'utf8');
@@ -578,7 +581,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
 
     // 4. Still the same source?
     checkpoint(options.signal);
-    const after = await listSourceBlobs(options.blob);
+    const after = await listSourceBlobs(options.blob, 'quiesced');
     if ('refusal' in after || listingDigest(after.objects) !== listingDigest(before.objects)) {
       refuse(notQuiescent('the blob root changed while the snapshot was taken'));
     }

@@ -6,6 +6,10 @@
  * than skip, everything the store would not have written: a missing root, a stray top-level entry, a
  * link, a special file, the temporary file of an unfinished write, a malformed header and a key no
  * snapshot can carry.
+ *
+ * The two phases: `live` (before an export's fence) lists the temporary file of an upload as an
+ * upload in flight and goes on; `quiesced` (under the fence, after the drain) refuses it. Every other
+ * refusal holds in both.
  */
 import { createHash } from 'node:crypto';
 import {
@@ -20,7 +24,12 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { BlobInventoryError, listFsBlobs, MAX_SNAPSHOT_KEY_LENGTH } from './fs-blob-inventory.js';
+import {
+  BlobInventoryError,
+  type FsBlobWalkPhase,
+  listFsBlobs,
+  MAX_SNAPSHOT_KEY_LENGTH,
+} from './fs-blob-inventory.js';
 import { makeFsBlobStoreFactory } from './fs-blob-store.js';
 
 const TENANT_A = '0000000a-0000-4000-8000-000000000000';
@@ -50,9 +59,18 @@ async function seeded(): Promise<string> {
   return root;
 }
 
-async function refusal(root: string): Promise<BlobInventoryError> {
+const PHASES: readonly FsBlobWalkPhase[] = ['live', 'quiesced'];
+
+/** The temporary file name the store gives a write of `key` before renaming it into place. */
+const temporaryName = (key: string) =>
+  `${key}.tmp-123-1700000000000-${'0123abcd-0000-4000-8000-0000000000ef'}`;
+
+async function refusal(
+  root: string,
+  phase: FsBlobWalkPhase = 'quiesced',
+): Promise<BlobInventoryError> {
   try {
-    await listFsBlobs(root);
+    await listFsBlobs(root, { phase });
   } catch (err) {
     if (err instanceof BlobInventoryError) return err;
     throw err;
@@ -63,7 +81,9 @@ async function refusal(root: string): Promise<BlobInventoryError> {
 describe('listFsBlobs', () => {
   it('lists every stored object, sorted by tenant and then key by byte value', async () => {
     const root = await seeded();
-    const listed = await listFsBlobs(root);
+    const { objects: listed, inFlight } = await listFsBlobs(root, { phase: 'quiesced' });
+    expect(inFlight).toEqual([]);
+    expect(await listFsBlobs(root, { phase: 'live' })).toEqual({ objects: listed, inFlight: [] });
     expect(listed.map((o) => [o.tenantId, o.key])).toEqual([
       [TENANT_A, 'A/nested/deep.bin'],
       [TENANT_A, 'z.txt'],
@@ -85,11 +105,13 @@ describe('listFsBlobs', () => {
   });
 
   it('lists an empty root as no objects, and refuses a root that does not exist', async () => {
-    expect(await listFsBlobs(newRoot())).toEqual([]);
-    expect((await refusal(join(newRoot(), 'missing'))).kind).toBe('root-missing');
-    const file = join(newRoot(), 'file');
-    writeFileSync(file, 'x');
-    expect((await refusal(file)).kind).toBe('root-missing');
+    for (const phase of PHASES) {
+      expect(await listFsBlobs(newRoot(), { phase })).toEqual({ objects: [], inFlight: [] });
+      expect((await refusal(join(newRoot(), 'missing'), phase)).kind).toBe('root-missing');
+      const file = join(newRoot(), 'file');
+      writeFileSync(file, 'x');
+      expect((await refusal(file, phase)).kind).toBe('root-missing');
+    }
   });
 
   it('refuses a top-level entry that is not a lowercase tenant directory', async () => {
@@ -115,13 +137,62 @@ describe('listFsBlobs', () => {
     });
   });
 
-  it('refuses the temporary file of an unfinished write', async () => {
+  it('quiesced: refuses the temporary file of an upload that never finished', async () => {
     const root = await seeded();
-    writeFileSync(
-      join(root, TENANT_B, `empty.tmp-123-1700000000000-${'0123abcd-0000-4000-8000-0000000000ef'}`),
-      'partial',
-    );
-    expect((await refusal(root)).kind).toBe('partial-write');
+    writeFileSync(join(root, TENANT_B, temporaryName('empty')), 'partial');
+    expect(await refusal(root, 'quiesced')).toMatchObject({
+      kind: 'partial-write',
+      relativePath: `${TENANT_B}/${temporaryName('empty')}`,
+    });
+  });
+
+  it('live: lists the temporary file of an upload as in flight, with its size, and goes on', async () => {
+    const root = await seeded();
+    const quiet = (await listFsBlobs(root, { phase: 'quiesced' })).objects;
+    writeFileSync(join(root, TENANT_B, temporaryName('empty')), 'partial');
+    mkdirSync(join(root, TENANT_A, 'uploads'));
+    writeFileSync(join(root, TENANT_A, 'uploads', temporaryName('next')), 'twelve bytes');
+    const live = await listFsBlobs(root, { phase: 'live' });
+    // The stored objects are exactly those of the quiet root: a temporary file is never an object.
+    expect(live.objects).toEqual(quiet);
+    expect(live.inFlight).toEqual([
+      {
+        tenantId: TENANT_A,
+        relativePath: `${TENANT_A}/uploads/${temporaryName('next')}`,
+        size: 12,
+      },
+      { tenantId: TENANT_B, relativePath: `${TENANT_B}/${temporaryName('empty')}`, size: 7 },
+    ]);
+    // Once the upload is renamed into place, a quiesced walk lists it as an object.
+    rmSync(join(root, TENANT_B, temporaryName('empty')));
+    await makeFsBlobStoreFactory(root)(TENANT_A).put('uploads/next', new Uint8Array([1, 2]));
+    rmSync(join(root, TENANT_A, 'uploads', temporaryName('next')));
+    const after = await listFsBlobs(root, { phase: 'quiesced' });
+    expect(after.inFlight).toEqual([]);
+    expect(after.objects.map((o) => o.key)).toContain('uploads/next');
+  });
+
+  it('live: refuses everything else the store would not have written, as quiesced does', async () => {
+    const root = await seeded();
+    writeFileSync(join(root, TENANT_B, temporaryName('empty')), 'partial');
+    writeFileSync(join(root, TENANT_B, 'broken'), Buffer.from([0, 0]));
+    expect(await refusal(root, 'live')).toMatchObject({
+      kind: 'malformed',
+      relativePath: `${TENANT_B}/broken`,
+    });
+    const stray = await seeded();
+    writeFileSync(join(stray, 'notes.txt'), 'x');
+    expect((await refusal(stray, 'live')).kind).toBe('not-a-tenant');
+    const nested = await seeded();
+    symlinkSync(join(nested, TENANT_B, 'empty'), join(nested, TENANT_A, 'link'));
+    expect((await refusal(nested, 'live')).kind).toBe('link');
+  });
+
+  it('refuses a call that names no phase', async () => {
+    const root = await seeded();
+    await expect(
+      listFsBlobs(root, {} as unknown as { phase: FsBlobWalkPhase }),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 
   it('refuses a header that is truncated, unparseable or states another length', async () => {

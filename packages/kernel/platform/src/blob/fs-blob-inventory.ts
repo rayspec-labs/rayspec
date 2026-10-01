@@ -10,18 +10,28 @@
  * file's own size. Entries are sorted by tenant, then key, by byte value. The bytes themselves are
  * not read here: the caller that copies a file hashes it on the way and compares it with the header.
  *
+ * THE PHASE. The caller says which of two moments the walk runs in, and that decides what the
+ * temporary file of a write (`<key>.tmp-<pid>-<ms>-<uuid>`) means:
+ *   - `live`: the deployment may be accepting uploads (an export's preflight, before the fence).
+ *     A temporary file is an upload in flight, which is normal operation: it is listed under
+ *     `inFlight` with its size and the walk goes on. A file or directory that disappears during
+ *     the walk (an upload renamed into place, a blob deleted) is skipped, not refused.
+ *   - `quiesced`: the fence is held and every upload has drained (an export's capture). A temporary
+ *     file still present is an upload that never finished, and the walk refuses it
+ *     (`partial-write`); so does anything that disappears during the walk.
+ *
  * FAIL CLOSED. Anything the store would not have written is refused with a typed error rather than
  * skipped, because a snapshot that silently left a file out would not be complete:
  *   - the root is missing or not a directory (a mistyped root would otherwise look empty);
  *   - an entry at the top level that is not a directory named by a lowercase UUID;
  *   - a symbolic link or a special file anywhere (the walk never follows a link);
- *   - a temporary file of a write that never finished (`<key>.tmp-<pid>-<ms>-<uuid>`);
+ *   - in the `quiesced` phase, a temporary file of a write that never finished;
  *   - a file whose header is truncated, unparseable, or states a length other than the bytes behind
  *     it;
  *   - a key a snapshot cannot carry: longer than 1024 characters or not in Unicode NFC.
  * Errors carry the path relative to the root in `relativePath`, never in the message.
  */
-import { open, readdir } from 'node:fs/promises';
+import { lstat, open, readdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 
 /** One stored object of an fs blob root. */
@@ -39,6 +49,33 @@ export interface FsStoredBlob {
   storedSize: number;
   /** Where the logical bytes start in the stored file. */
   dataStart: number;
+}
+
+/** The temporary file of an upload that was still being written when a `live` walk saw it. */
+export interface FsInFlightWrite {
+  tenantId: string;
+  /** The temporary file's path relative to the root (`<tenantId>/<key>.tmp-…`). */
+  relativePath: string;
+  /** Its size when the walk saw it. */
+  size: number;
+}
+
+/**
+ * When the walk runs: `live` while uploads may still be running (before the fence), `quiesced` once
+ * the fence holds and uploads have drained (the capture).
+ */
+export type FsBlobWalkPhase = 'live' | 'quiesced';
+
+export interface FsBlobWalkOptions {
+  phase: FsBlobWalkPhase;
+}
+
+/** What a walk of an fs blob root found. */
+export interface FsBlobInventory {
+  /** Every stored object, sorted by tenant and then key. */
+  objects: FsStoredBlob[];
+  /** Uploads in flight, sorted by path; always empty in the `quiesced` phase, which refuses them. */
+  inFlight: FsInFlightWrite[];
 }
 
 export type BlobInventoryErrorKind =
@@ -82,8 +119,30 @@ function byCodePoint(a: string, b: string): number {
   return Buffer.compare(x, y);
 }
 
-/** Walk the blob root and list every stored object, sorted by tenant and then key. */
-export async function listFsBlobs(root: string): Promise<FsStoredBlob[]> {
+/** A filesystem error that says the entry is gone. */
+function vanished(err: unknown): boolean {
+  const code = (err as { code?: string } | null)?.code;
+  return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+interface Walk {
+  root: string;
+  phase: FsBlobWalkPhase;
+  objects: FsStoredBlob[];
+  inFlight: FsInFlightWrite[];
+}
+
+/**
+ * Walk the blob root and list every stored object, sorted by tenant and then key, and, in the `live`
+ * phase, every upload in flight. See the module comment for what each phase refuses.
+ */
+export async function listFsBlobs(
+  root: string,
+  options: FsBlobWalkOptions,
+): Promise<FsBlobInventory> {
+  if (options.phase !== 'live' && options.phase !== 'quiesced') {
+    throw new TypeError('listFsBlobs: the phase is live or quiesced');
+  }
   const absoluteRoot = resolve(root);
   let top: Awaited<ReturnType<typeof readdir>>;
   try {
@@ -94,7 +153,7 @@ export async function listFsBlobs(root: string): Promise<FsStoredBlob[]> {
       'the blob root does not exist or is not a readable directory',
     );
   }
-  const out: FsStoredBlob[] = [];
+  const walk: Walk = { root: absoluteRoot, phase: options.phase, objects: [], inFlight: [] };
   for (const entry of top) {
     if (entry.isSymbolicLink()) {
       throw new BlobInventoryError('link', 'the blob root holds a symbolic link', entry.name);
@@ -106,26 +165,34 @@ export async function listFsBlobs(root: string): Promise<FsStoredBlob[]> {
         entry.name,
       );
     }
-    await walkTenant(absoluteRoot, entry.name, '', out);
+    await walkTenant(walk, entry.name, '');
   }
-  return out.sort((a, b) => byCodePoint(a.tenantId, b.tenantId) || byCodePoint(a.key, b.key));
+  return {
+    objects: walk.objects.sort(
+      (a, b) => byCodePoint(a.tenantId, b.tenantId) || byCodePoint(a.key, b.key),
+    ),
+    inFlight: walk.inFlight.sort((a, b) => byCodePoint(a.relativePath, b.relativePath)),
+  };
 }
 
-async function walkTenant(
-  root: string,
-  tenantId: string,
-  prefix: string,
-  out: FsStoredBlob[],
-): Promise<void> {
-  const directory = join(root, tenantId, prefix);
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
+async function walkTenant(walk: Walk, tenantId: string, prefix: string): Promise<void> {
+  const directory = join(walk.root, tenantId, prefix);
+  let entries: Awaited<ReturnType<typeof readdir>>;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (err) {
+    // Before the fence a directory can go away under the walk (its last blob deleted).
+    if (walk.phase === 'live' && vanished(err)) return;
+    throw err;
+  }
+  for (const entry of entries) {
     const key = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
     const relativePath = `${tenantId}/${key}`;
     if (entry.isSymbolicLink()) {
       throw new BlobInventoryError('link', 'the blob root holds a symbolic link', relativePath);
     }
     if (entry.isDirectory()) {
-      await walkTenant(root, tenantId, key, out);
+      await walkTenant(walk, tenantId, key);
       continue;
     }
     if (!entry.isFile()) {
@@ -135,13 +202,23 @@ async function walkTenant(
         relativePath,
       );
     }
+    const file = join(directory, entry.name);
     if (PARTIAL_WRITE.test(entry.name)) {
-      throw new BlobInventoryError(
-        'partial-write',
-        'the blob root holds the temporary file of an upload that never finished; remove it once ' +
-          'no upload is running',
-        relativePath,
-      );
+      if (walk.phase === 'quiesced') {
+        throw new BlobInventoryError(
+          'partial-write',
+          'the blob root holds the temporary file of an upload that never finished; remove it once ' +
+            'no upload is running',
+          relativePath,
+        );
+      }
+      // An upload in flight: renamed into place or removed when it ends, drained by the fence.
+      try {
+        walk.inFlight.push({ tenantId, relativePath, size: (await lstat(file)).size });
+      } catch (err) {
+        if (!vanished(err)) throw err;
+      }
+      continue;
     }
     if (key.length > MAX_SNAPSHOT_KEY_LENGTH || key.normalize('NFC') !== key) {
       throw new BlobInventoryError(
@@ -150,7 +227,15 @@ async function walkTenant(
         relativePath,
       );
     }
-    out.push(await readStoredHeader(join(directory, entry.name), tenantId, key, relativePath));
+    let stored: FsStoredBlob;
+    try {
+      stored = await readStoredHeader(file, tenantId, key, relativePath);
+    } catch (err) {
+      // Before the fence a blob can be deleted between the listing and the read.
+      if (walk.phase === 'live' && vanished(err)) continue;
+      throw err;
+    }
+    walk.objects.push(stored);
   }
 }
 
