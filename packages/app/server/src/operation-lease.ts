@@ -212,6 +212,28 @@ async function appendReceipt(
 }
 
 /**
+ * Append one receipt for an operation that records its course without holding the lease — an export,
+ * whose fence is taken and released by the leased `quiesce` and `resume` it runs. The receipt carries
+ * the lease epoch the environment is at, and passes the same redaction path as every other receipt.
+ */
+export async function appendOperationReceipt(
+  db: Db,
+  identity: Pick<OperationIdentity, 'operationId' | 'kind' | 'actor' | 'inputsDigest'>,
+  receipt: ReceiptInput,
+): Promise<void> {
+  if (!isUuidV4(identity.operationId)) throw new RangeError('operationId must be a UUID v4');
+  if (receipt.event === 'intent' || receipt.event === 'lease-taken-over') {
+    throw new RangeError('an operation without the lease records steps and its outcome only');
+  }
+  await db.$client.begin(async (tx) => {
+    const [row] = (await tx.unsafe(
+      'SELECT lease_epoch::text AS lease_epoch FROM runtime_control_state WHERE id = 1',
+    )) as unknown as { lease_epoch: string }[];
+    await appendReceipt(tx, identity, Number(row?.lease_epoch ?? 0), receipt);
+  });
+}
+
+/**
  * Take the operation lease for `identity`, in one transaction with its intent receipt.
  *
  * Refused with `RAY_LOCK_TIMEOUT` (retryable) while ANY holder has a live lease, including an earlier

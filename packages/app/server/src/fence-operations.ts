@@ -86,6 +86,11 @@ export interface FenceOperationOptions {
   quiesceLeaseTtlMs?: number;
   /** The readiness probes the in-process server adds to `health()`. */
   readiness?: readonly ReadinessProbe[];
+  /**
+   * Ends a quiesce's wait for the drain early, as a passed deadline does: the result is `timed-out`
+   * and the fence stays held. A CLI aborts it on SIGINT or SIGTERM.
+   */
+  signal?: AbortSignal;
 }
 
 function envelope<T>(
@@ -233,6 +238,7 @@ async function waitForDrain(
   epoch: number,
   deadline: Date,
   pollMs: number,
+  signal: AbortSignal | undefined,
 ): Promise<DrainOutcome> {
   for (;;) {
     const live = (await db.$client.unsafe(
@@ -242,7 +248,9 @@ async function waitForDrain(
       [PROCESS_LIVE_WINDOW_MS],
     )) as unknown as ProcessRow[];
     const outcome = aggregate(live, epoch);
-    if (outcome.drained || Date.now() >= deadline.getTime()) return outcome;
+    if (outcome.drained || Date.now() >= deadline.getTime() || signal?.aborted === true) {
+      return outcome;
+    }
     await new Promise((r) => setTimeout(r, Math.min(pollMs, deadline.getTime() - Date.now())));
   }
 }
@@ -399,7 +407,13 @@ export async function quiesceOperation(
 
     // 2. The drain.
     const drain = await lease.step('drain', async () => ({
-      value: await waitForDrain(options.db, fence.epoch, deadline, options.quiescePollMs ?? 200),
+      value: await waitForDrain(
+        options.db,
+        fence.epoch,
+        deadline,
+        options.quiescePollMs ?? 200,
+        options.signal,
+      ),
     }));
 
     // 3. The barriers. A database barrier already held by an earlier quiesce of this fence is kept as

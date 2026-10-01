@@ -8,6 +8,10 @@
  *                            deployment serves, replaced atomically (temporary file, fsync, rename)
  *   versions/<bundleSha256>/ the extracted, immutable version directory of each staged bundle
  *   plans/<planDigest>.json  a plan record written by `rayspec deploy --dry-run`
+ *   receipts/<name>.json     the local operation receipt of an export, which names no secret, no
+ *                            record content and no store
+ *   scratch/                 the private scratch space of an export: its lock file and, while it
+ *                            runs, the directory its plaintext snapshot is captured into
  *
  * It never holds a secret value, a connection string or a key: the database and the blob root come
  * from the explicit process environment, and a plan record carries binding revision ids, never values.
@@ -45,6 +49,9 @@ export const DEPLOYMENT_FORMAT_VERSION = 1;
 
 /** A deployment id: 16 lowercase hex characters from a cryptographic random source. */
 const DEPLOYMENT_ID = /^[a-z0-9-]{1,64}$/;
+
+/** The name of a local operation receipt: the operation and its id. */
+const RECEIPT_NAME = /^[a-z]+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** The largest state file this module reads; every one it writes is far smaller. */
 const MAX_STATE_FILE_BYTES = 256 * 1024;
@@ -291,7 +298,7 @@ export class StateDirectory {
     return join(this.root, 'plans', `${planDigest}.json`);
   }
 
-  async #subdirectory(name: 'versions' | 'plans'): Promise<string> {
+  async #subdirectory(name: 'versions' | 'plans' | 'receipts' | 'scratch'): Promise<string> {
     const dir = join(this.root, name);
     try {
       await mkdir(dir, { mode: 0o700 });
@@ -300,6 +307,30 @@ export class StateDirectory {
     }
     await checkDirectory(dir, `the ${name} directory of the state directory`);
     return dir;
+  }
+
+  /** The scratch directory of an export (mode 0700, created when missing), checked like the root. */
+  async scratchDirectory(): Promise<string> {
+    return this.#subdirectory('scratch');
+  }
+
+  /** The directory of the local operation receipts (mode 0700, created when missing). */
+  async receiptsDirectory(): Promise<string> {
+    return this.#subdirectory('receipts');
+  }
+
+  /** Write a local operation receipt as `receipts/<name>.json`, replacing it atomically. */
+  async writeReceipt(name: string, receipt: unknown): Promise<string> {
+    if (!RECEIPT_NAME.test(name)) throw new RangeError('a receipt is named by its operation');
+    const dir = await this.receiptsDirectory();
+    await writeAtomically(dir, `${name}.json`, canonicalJsonFile(receipt));
+    return join(dir, `${name}.json`);
+  }
+
+  /** A local operation receipt, or null when there is none of that name. */
+  async readReceipt(name: string): Promise<unknown | null> {
+    if (!RECEIPT_NAME.test(name)) throw new RangeError('a receipt is named by its operation');
+    return readStateJson(join(this.root, 'receipts', `${name}.json`), 'the operation receipt');
   }
 
   /** `deployment.json`, or null before the first deploy. */

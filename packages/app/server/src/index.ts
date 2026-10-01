@@ -26,6 +26,16 @@ export type { DriftFinding } from '@rayspec/db';
 // The bindings a bundle deploy grants: the application's own to its handlers (`init.bindings`), the
 // provider credentials to the adapters that use them — neither through the process environment.
 export { type ApplicationBindingGrant, setApplicationBindings } from '@rayspec/platform';
+// age v1 encryption to one X25519 recipient (the age authors' implementation), and the migration
+// bundle that carries an encrypted inner snapshot archive.
+export {
+  AGE_X25519_ENCRYPTION,
+  type EncryptedFile,
+  EncryptionAborted,
+  type EncryptOptions,
+  encryptFile,
+  isAgeX25519Recipient,
+} from './age-encryption.js';
 // The agent trace-export posture (issue #287). Re-exported here for embedders, but the `rayspec deploy`
 // CLI imports the SAME symbols through the `@rayspec/server/agent-tracing` SUBPATH instead: that module
 // pulls in no adapter, so the deploy path can decide the posture — and write the SDK's switch — before
@@ -147,8 +157,10 @@ export {
   DEFAULT_SHUTDOWN_DRAIN_MS,
   databaseIsolationWarning,
   detectStaticProfile,
+  type ExportSourceConfig,
   type HostingPosture,
   isStaticProfile,
+  loadExportSourceConfig,
   loadServerConfig,
   loadStaticServerConfig,
   loadTenantProvisionSecrets,
@@ -165,6 +177,7 @@ export {
   SchemaNewerThanRuntimeError,
   type ServerConfig,
   SINGLE_ROLE_ISOLATION,
+  SNAPSHOT_DATABASE_URL_VAR,
   type StaticBootedServer,
   type StaticServerConfig,
   validateInjectedSpec,
@@ -197,6 +210,21 @@ export {
   StateDirectoryError,
   verifyVersion,
 } from './deployment-state.js';
+// The receipts of an export (the local, shareable one and the environment's) and its scratch space.
+export {
+  closeInterruptedExport,
+  EXPORT_ACTOR,
+  type ExportDigests,
+  type ExportInputs,
+  type ExportReceipt,
+  ExportReceiptLog,
+  type ExportState,
+  type ExportSummary,
+  type ExportTransition,
+  exportReceiptName,
+  resumeInstruction,
+} from './export-receipts.js';
+export { EXPORT_LOCK_NAME, type ExportScratch, takeExportScratch } from './export-scratch.js';
 // Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
 export {
   bindingsProbe,
@@ -210,11 +238,19 @@ export {
   type SecretFile,
   schemaProbe,
 } from './health.js';
+export {
+  type MigrationBundleInput,
+  MigrationWriteAborted,
+  type MigrationWriteOptions,
+  type WrittenMigrationBundle,
+  writeMigrationBundle,
+} from './migration-bundle.js';
 // The operation lease with its fencing epoch, and the append-only operation receipts: the frame a
 // mutating runtime-control operation runs in (one holder at a time, intent before effect, every write
 // checked against the epoch in its own transaction).
 export {
   acquireOperationLease,
+  appendOperationReceipt,
   findIntentByIdempotencyKey,
   type LeaseTakeover,
   type LeaseTx,
@@ -233,6 +269,7 @@ export {
 // snapshot must carry or cannot carry, and the capture of the plaintext inner snapshot archive under
 // the fence (the caller encrypts it). `pg_dump` is found and run by `pg-dump.ts`.
 export {
+  PgDumpAborted,
   PgDumpError,
   type PgDumpTool,
   pgDumpMajor,
@@ -382,10 +419,17 @@ export {
   type ExcludedTable,
 } from './snapshot-capture.js';
 export {
+  type ExportedSnapshot,
+  type ExportSnapshotOptions,
+  type ExportSnapshotResult,
+  exportSnapshot,
+} from './snapshot-export.js';
+export {
   type ClassifiedTable,
   classifyApplicationTables,
   excludedDataCategories,
   identityPolicy,
+  openWorkflowSystemDatabase,
   preflightSnapshot,
   type RunHistoryPolicy,
   type SnapshotBlobSource,

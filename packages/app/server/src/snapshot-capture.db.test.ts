@@ -904,6 +904,24 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
     } finally {
       await sql.unsafe('DROP EXTENSION citext');
     }
+    // The durable engine's own extension is carried in the workflow system database, where its
+    // migrations create it, and refused in the application database, where nothing does.
+    const sys = postgres(sysUrl, { max: 1, onnotice: () => {} });
+    try {
+      await sys.unsafe('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+      expect(await blockers()).toEqual([]);
+      await sys.unsafe('CREATE EXTENSION IF NOT EXISTS citext');
+      expect(await blockers()).toEqual(['RAY_POLICY_DENIED/unsupported-extension']);
+      await sys.unsafe('DROP EXTENSION citext');
+    } finally {
+      await sys.end();
+    }
+    await sql.unsafe('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
+    try {
+      expect(await blockers()).toEqual(['RAY_POLICY_DENIED/unsupported-extension']);
+    } finally {
+      await sql.unsafe('DROP EXTENSION "uuid-ossp"');
+    }
     await sql.unsafe('ALTER TABLE field_notes ADD COLUMN stray text');
     try {
       expect(await blockers()).toEqual(['RAY_SCHEMA_DRIFT/']);

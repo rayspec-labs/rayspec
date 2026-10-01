@@ -41,6 +41,14 @@ export class PgDumpError extends Error {
   }
 }
 
+/** The dump was stopped by the caller's signal; the child was ended and its output is incomplete. */
+export class PgDumpAborted extends Error {
+  constructor() {
+    super('pg_dump was stopped');
+    this.name = 'PgDumpAborted';
+  }
+}
+
 /** The largest amount of the child's error output kept for a message. */
 const MAX_STDERR_BYTES = 16 * 1024;
 
@@ -139,9 +147,13 @@ function run(
   tool: PgDumpTool,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-  options: { stdoutFd?: number; timeoutMs?: number } = {},
+  options: { stdoutFd?: number; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<ChildOutcome> {
   return new Promise((resolvePromise, reject) => {
+    if (options.signal?.aborted === true) {
+      reject(new PgDumpAborted());
+      return;
+    }
     const child = spawn(tool.command, [...(tool.args ?? []), ...args], {
       env,
       stdio: ['ignore', options.stdoutFd ?? 'pipe', 'pipe'],
@@ -163,14 +175,23 @@ function run(
       options.timeoutMs === undefined
         ? undefined
         : setTimeout(() => child.kill('SIGKILL'), options.timeoutMs);
+    // A stop request ends the child at once; the dump it was writing is incomplete.
+    const onAbort = () => child.kill('SIGTERM');
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     child.on('error', (e) => {
       if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
       reject(
         new PgDumpError(`pg_dump could not be started (${(e as NodeJS.ErrnoException).code})`),
       );
     });
     child.on('close', (code, signal) => {
       if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
+      if (options.signal?.aborted === true) {
+        reject(new PgDumpAborted());
+        return;
+      }
       resolvePromise({
         code,
         signal,
@@ -194,13 +215,15 @@ export async function pgDumpMajor(tool: PgDumpTool): Promise<number> {
 /**
  * Write a custom-format dump of the database `url` names to `outFile`, a new file created with mode
  * 0600. `args` are the dump's own arguments after `--format=custom`. Throws `PgDumpError` when the
- * dump fails; the message carries the redacted end of the tool's error output.
+ * dump fails; the message carries the redacted end of the tool's error output. When `signal` aborts,
+ * the child is ended and `PgDumpAborted` is thrown.
  */
 export async function runPgDump(
   tool: PgDumpTool,
   url: string,
   args: readonly string[],
   outFile: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const connection = connectionEnvironment(url, tool.rewriteHost);
   // The password joins the redaction registry, so no message or log line can carry it.
@@ -211,6 +234,7 @@ export async function runPgDump(
   try {
     outcome = await run(tool, ['--format=custom', '--no-password', ...args], env, {
       stdoutFd: handle.fd,
+      ...(signal === undefined ? {} : { signal }),
     });
     await handle.sync();
   } finally {

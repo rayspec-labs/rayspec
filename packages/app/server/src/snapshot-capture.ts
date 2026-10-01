@@ -33,7 +33,8 @@
  *  5. `snapshot.json` and the archive, written by the one snapshot writer and read back.
  * The reads use the read-only snapshot role when one is configured, else the single role; the result
  * says which, and which barriers held. On any refusal or failure the scratch directory is removed.
- * Every message passes the redaction path (`redactText`) before it is returned.
+ * Every message passes the redaction path (`redactText`) before it is returned. A caller's abort
+ * signal stops the capture at its next safe point with `RAY_INTERRUPTED`, ending a running `pg_dump`.
  */
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
@@ -53,12 +54,13 @@ import {
   SNAPSHOT_PATHS,
   type Snapshot,
   type TableCount,
+  type Target,
 } from '@rayspec/bundle-contract';
 import { redactText } from '@rayspec/core';
 import { type Db, makeDb } from '@rayspec/db';
 import type { FsStoredBlob } from '@rayspec/platform';
 import { readBarrierRecord } from './fence-operations.js';
-import { PgDumpError, type PgDumpTool, runPgDump } from './pg-dump.js';
+import { PgDumpAborted, PgDumpError, type PgDumpTool, runPgDump } from './pg-dump.js';
 import { runtimeVersion } from './runtime-control.js';
 import {
   classifyApplicationTables,
@@ -85,6 +87,12 @@ export interface CaptureSnapshotOptions extends SnapshotSourceOptions {
   /** Whether the target keeps password hashes (through the audited identity adapter). Default preserved. */
   passwordHashes?: 'preserved' | 'reset';
   now?: () => Date;
+  /**
+   * Stops the capture at its next safe point: between objects, between steps, and by ending a
+   * running `pg_dump`. The capture then reports `RAY_INTERRUPTED`, removes its scratch directory and
+   * leaves the fence as it is.
+   */
+  signal?: AbortSignal;
 }
 
 /** One barrier and what the capture found it to be. */
@@ -109,6 +117,8 @@ export interface CapturedSnapshot {
   archiveSha256: string;
   archiveSize: number;
   snapshot: Snapshot;
+  /** The target the deployed application was built for, as its manifest states it. */
+  applicationTarget: Target;
   /** Every application table whose rows stayed at the source, by category. */
   excludedTables: ExcludedTable[];
   barriers: CaptureBarrier[];
@@ -131,6 +141,13 @@ class CaptureRefusal extends Error {
 
 function refuse(error: BundleError): never {
   throw new CaptureRefusal(error);
+}
+
+/** The capture was stopped by the caller's signal at a safe point. */
+class CaptureInterrupted extends Error {}
+
+function checkpoint(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw new CaptureInterrupted();
 }
 
 function notQuiescent(message: string): BundleError {
@@ -211,12 +228,17 @@ async function unreconciledEffects(db: Db): Promise<number> {
 }
 
 /** Copy the stored blob files into `objects.bin`, hashing each, and build the object index. */
-async function captureObjects(objects: readonly FsStoredBlob[], out: string): Promise<ObjectIndex> {
+async function captureObjects(
+  objects: readonly FsStoredBlob[],
+  out: string,
+  signal: AbortSignal | undefined,
+): Promise<ObjectIndex> {
   const target = await open(out, 'wx', 0o600);
   const index: ObjectIndex = { objectIndexFormatVersion: 1, objects: [] };
   let offset = 0;
   try {
     for (const object of objects) {
+      checkpoint(signal);
       const source = await open(object.file, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
         () => null,
       );
@@ -295,6 +317,7 @@ async function dumpDatabase(
   tables: readonly { schema: string; table: string; rowsExported: boolean }[],
   outFile: string,
   database: TableCount['database'],
+  signal: AbortSignal | undefined,
 ): Promise<TableCount[]> {
   const reader = makeDb(url, 1, { applicationName: 'rayspec-snapshot-reader' });
   try {
@@ -327,7 +350,7 @@ async function dumpDatabase(
       const excluded = tables
         .filter((t) => !t.rowsExported)
         .map((t) => `--exclude-table-data=${t.schema}.${t.table}`);
-      await runPgDump(tool, url, [`--snapshot=${exported!.id}`, ...excluded], outFile);
+      await runPgDump(tool, url, [`--snapshot=${exported!.id}`, ...excluded], outFile, signal);
       return counts;
     });
   } finally {
@@ -458,6 +481,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     }
 
     // The scratch directory.
+    checkpoint(options.signal);
     scratch = await mkdtemp(join(options.scratchParent, 'rayspec-snapshot-'));
     await chmod(scratch, 0o700);
     const files = {
@@ -477,9 +501,10 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     files.application = application.path;
 
     // 2. The objects.
+    checkpoint(options.signal);
     const before = await listSourceBlobs(options.blob);
     if ('refusal' in before) refuse(before.refusal);
-    const objectIndex = await captureObjects(before.objects, files.objects);
+    const objectIndex = await captureObjects(before.objects, files.objects, options.signal);
     const indexBytes = Buffer.from(canonicalJsonFile(objectIndex), 'utf8');
     const indexFile = await open(files.objectIndex, 'wx', 0o600);
     try {
@@ -489,6 +514,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     }
 
     // 3. The databases.
+    checkpoint(options.signal);
     const policy = options.runHistoryPolicy;
     const capturedAt = formatTimestamp(now());
     const appTables = classifyApplicationTables(
@@ -513,6 +539,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
       appTables.tables,
       files.database,
       'application',
+      options.signal,
     );
     workflowDb = await openWorkflowSystemDatabase(options.db, workflowUrl);
     const workflowSystem: Snapshot['workflowSystemDatabase'] =
@@ -535,6 +562,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
           sysTables,
           files.workflowSystem,
           'workflow-system',
+          options.signal,
         )),
       );
     }
@@ -549,6 +577,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     }
 
     // 4. Still the same source?
+    checkpoint(options.signal);
     const after = await listSourceBlobs(options.blob);
     if ('refusal' in after || listingDigest(after.objects) !== listingDigest(before.objects)) {
       refuse(notQuiescent('the blob root changed while the snapshot was taken'));
@@ -559,6 +588,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     }
 
     // 5. The archive.
+    checkpoint(options.signal);
     tableCounts.sort(
       (a, b) =>
         compareCodePoints(a.database, b.database) ||
@@ -619,6 +649,7 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
         archiveSha256: written.value.archiveSha256,
         archiveSize: written.value.archiveSize,
         snapshot: written.value.snapshot,
+        applicationTarget: application.manifest.target,
         excludedTables: appTables.tables
           .filter((t) => !t.rowsExported)
           .map(({ schema, table, category }) => ({ schema, table, category })),
@@ -631,6 +662,19 @@ async function captureUnredacted(options: CaptureSnapshotOptions): Promise<Captu
     if (scratch !== undefined) await rm(scratch, { recursive: true, force: true }).catch(() => {});
     if (err instanceof CaptureRefusal || err instanceof SourceRefusal) {
       return { ok: false, errors: [err.error], barriers };
+    }
+    if (err instanceof CaptureInterrupted || err instanceof PgDumpAborted) {
+      return {
+        ok: false,
+        errors: [
+          bundleError(
+            'RAY_INTERRUPTED',
+            'the capture was stopped before it finished; nothing was kept, and the source stays ' +
+              'fenced: retry the export, or release the fence with resume',
+          ),
+        ],
+        barriers,
+      };
     }
     if (err instanceof PgDumpError) {
       return {

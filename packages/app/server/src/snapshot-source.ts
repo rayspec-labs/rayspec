@@ -18,8 +18,10 @@
  *      other adapter, `unreconciled-effects` for an upload that never finished);
  *   3. the budgets: objects and their bytes against the migration limits (`RAY_LIMIT_EXCEEDED`
  *      `migration-size`, `object-index-size`), and free space for the scratch copy;
- *   4. extensions: the snapshot format's extension allowlist is empty, so any extension but the built-in `plpgsql` in either
- *      database is refused (`RAY_POLICY_DENIED` `unsupported-extension`);
+ *   4. extensions: the platform chain creates none, so any extension but the built-in `plpgsql` in
+ *      the application database is refused (`RAY_POLICY_DENIED` `unsupported-extension`); in the
+ *      workflow system database, so is any but the one the durable engine's own migrations create
+ *      there (`uuid-ossp`, `WORKFLOW_ENGINE_EXTENSIONS`);
  *   5. tenants: exactly one organization, and no blob of another tenant
  *      (`RAY_MULTI_TENANT_UNSUPPORTED`);
  *   6. owner recovery: a member of the organization holds a password (`RAY_OWNER_RECOVERY_REQUIRED`);
@@ -232,6 +234,14 @@ export async function readUserTables(
   );
   return rows.map((r) => ({ schema: String(r.schema), table: String(r.table) }));
 }
+
+/**
+ * The extensions the durable workflow engine's own migrations create in the workflow system database
+ * (`create extension if not exists "uuid-ossp"` in the DBOS system database migrations). A workflow
+ * system database the engine has launched in always has them, so they are not refused there; in the
+ * application database they are.
+ */
+export const WORKFLOW_ENGINE_EXTENSIONS: readonly string[] = ['uuid-ossp'];
 
 /** The extensions of the connected database other than the built-in procedural language. */
 export async function readExtensions(query: CatalogQuery): Promise<string[]> {
@@ -664,7 +674,11 @@ async function preflight(
     // 4. Extensions.
     const extensions = [
       ...(await readExtensions(query)),
-      ...(workflowDb === null ? [] : await readExtensions(queryOf(workflowDb))),
+      ...(workflowDb === null
+        ? []
+        : (await readExtensions(queryOf(workflowDb))).filter(
+            (name) => !WORKFLOW_ENGINE_EXTENSIONS.includes(name),
+          )),
     ];
     if (extensions.length > 0) {
       blockers.push(
