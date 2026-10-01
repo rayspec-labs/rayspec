@@ -146,6 +146,44 @@ same matrix.
 | `openai` | text-to-speech | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a synthesis | none | a cancelled run does not stop a synthesis in flight | `packages/adapters/openai-tts/src/hanging-provider.test.ts` |
 | `fake` | text-to-speech | test-only | not applicable | not applicable | none | staging and conformance only | — |
 
+## Egress
+
+An application **declares** the hosts it calls: `deployment.egressHosts` in a backend spec,
+`deployment_overrides.egress_hosts` in a product spec ([Spec reference](./spec-reference.md#deployment)).
+`rayspec pack` carries the list into the bundle manifest (`permissions.egressHosts`),
+`rayspec bundle verify` refuses a manifest whose list differs from the spec's, and `prepare()`
+reports it as a permission change covered by the plan digest. `inspectHosting().egress` states who
+enforces it.
+
+**The runtime enforces none of it.** A call to an undeclared host is not blocked by RaySpec. Program
+the host's network policy from the declared list — an egress firewall, a security group, or an
+egress proxy that admits only those hosts — and deny everything else, including the database and
+control channels the application does not need. Handlers and extensions run in the runtime process
+and can open any connection the process can; only the host's policy contains them.
+
+**What the platform guards itself.** When the platform makes an outbound request on behalf of a spec
+or a request — to a URL it did not choose — it goes through one guard (`guardedFetch` in
+`@rayspec/platform`) that refuses:
+
+- a scheme other than `http:` or `https:`, and a URL carrying a user name or password;
+- a loopback, private (RFC 1918, unique-local IPv6, carrier-grade NAT), link-local, metadata
+  (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`), unspecified, multicast, broadcast, reserved,
+  documentation or benchmarking address, including an IPv4 address embedded in IPv6;
+- a host name that resolves to such an address: the check runs on the address the connection
+  actually uses, so a name that answers a public address once and a private one later (DNS
+  rebinding) is refused too;
+- a redirect to any of the above, each hop checked again; a redirect to another origin drops the
+  `authorization`, `cookie` and `proxy-authorization` headers.
+
+A guarded request connects directly, never through `HTTP_PROXY`/`HTTPS_PROXY`, because behind a proxy
+the guard would see the proxy's address instead of the destination's.
+
+This release has **no** such outbound path: no grammar field, node or request field makes the
+platform fetch a URL. The provider adapters call the endpoints the operator configures
+(`OPENAI_BASE_URL` and `DEEPGRAM_BASE_URL` are reserved operator settings a bundle cannot set). A test
+holds the list of every outbound call site in the shipped source, so a new one is either routed
+through the guard or reviewed.
+
 ## What handler code is given
 
 - the tenant id the server derived, and the caller as plain values (`kind`, `id`, `role`);
@@ -185,7 +223,7 @@ detail; the detail goes to the server log.
 - A durable run enqueued before this release carries no requester and is not re-checked.
 - Bearer credentials (access tokens, API keys, media tokens) are not bound to a client: whoever holds
   one can use it until it expires or is revoked.
-- Egress is not enforced by the runtime; the host's network policy does that.
+- Egress is not enforced by the runtime; the host's network policy does that ([Egress](#egress)).
 
 ## Upgrading
 

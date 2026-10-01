@@ -188,6 +188,20 @@ export {
   typeStrippingImporter,
   withoutCredentials,
 } from './handlers/index.js';
+// The run/job observability read-path (SAFE half): surfaces a run's status + taint /
+// quarantine state derived ENTIRELY from the already-persisted journal/run_events/markers (no new store).
+// The guard on an outbound request the platform makes to a URL it did not choose: refuses loopback,
+// private, link-local and metadata destinations, after DNS resolution and on every redirect.
+export {
+  type AddressClass,
+  classifyAddress,
+  type GuardedRequestInit,
+  guardedFetch,
+  type HostResolver,
+  type OutboundGuardOptions,
+  type OutboundRefusalReason,
+  OutboundRequestRefused,
+} from './outbound-guard.js';
 export { rehydrateConversation } from './rehydrate.js';
 export {
   InRequestRunGate,
@@ -254,8 +268,6 @@ export {
   type RunHeaderIdentity,
   type RunHeaderStatus,
 } from './run-header.js';
-// The run/job observability read-path (SAFE half): surfaces a run's status + taint /
-// quarantine state derived ENTIRELY from the already-persisted journal/run_events/markers (no new store).
 export { getRunObservability, type RunObservability } from './run-observability.js';
 // The non-idempotent-taint marker: the chokepoint writes a tenant-scoped
 // `idempotency_keys(scope='run_taint', key=runId)` marker BEFORE a non-idempotent tool fires; every

@@ -135,6 +135,12 @@ export interface HostingReport {
    * runs it and how its calls are bounded and stopped.
    */
   supportedBackends: readonly SupportedBackend[];
+  /**
+   * Who enforces the egress a bundle declares (`permissions.egressHosts`): the host network policy,
+   * never this runtime. The platform's own requests to a URL it did not choose go through
+   * `guardedFetch`, which refuses internal destinations; custom code is not bound by it.
+   */
+  egress: { enforcement: 'host-network-policy'; platformOutboundGuard: true };
 }
 
 /** The operations this adapter implements today, and the hosting report. */
@@ -403,6 +409,7 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         },
         executionPolicy: resolveExecutionPolicy(env),
         supportedBackends: SUPPORTED_BACKEND_MATRIX,
+        egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
       };
     },
 

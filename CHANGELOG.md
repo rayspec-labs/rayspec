@@ -516,6 +516,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforce: the runtime blocks no call to an undeclared host. `spec.schema.json`,
   `version-1.0.schema.json` and `product.schema.json` carry the new fields. A 1.8 parser refuses a
   spec that uses them.
+- **A guard for outbound requests to a URL the platform did not choose.** `guardedFetch` in
+  `@rayspec/platform` refuses a scheme other than `http:`/`https:`, a URL with credentials, and a
+  loopback, private, link-local, metadata, unspecified, multicast or reserved destination — judged
+  on the address the connection uses after DNS resolution, so a name that resolves to `127.0.0.1` or
+  rebinds is refused — and checks every redirect hop the same way. No outbound path of this release
+  takes a URL from a spec or a request; a test holds the list of every outbound call site in the
+  shipped source so that a new one goes through the guard or is reviewed. Handlers are not bound by
+  it: they run in-process, and the host network policy contains them. See
+  [Hosting in the hardened posture → Egress](./docs/hardened-posture.md#egress).
 
 ### Changed
 

@@ -103,6 +103,7 @@ describe('the hosting report beside inspect()', () => {
       applicationTenants: { singleTenantMode: false, maxApplicationTenants: null },
       executionPolicy: resolveExecutionPolicy({}),
       supportedBackends: SUPPORTED_BACKEND_MATRIX,
+      egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
     });
   });
 
@@ -117,6 +118,7 @@ describe('the hosting report beside inspect()', () => {
       applicationTenants: { singleTenantMode: false, maxApplicationTenants: null },
       executionPolicy: resolveExecutionPolicy({ RAYSPEC_HOSTING_POSTURE: 'managed' }),
       supportedBackends: SUPPORTED_BACKEND_MATRIX,
+      egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
     });
   });
 
