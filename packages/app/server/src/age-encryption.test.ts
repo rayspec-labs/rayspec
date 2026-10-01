@@ -473,8 +473,8 @@ describe('decryptFile', () => {
     const out = join(dir, 'out.zip');
     const over = await decryptFile(ciphertext, out, identity, { maxPlaintextBytes: budget });
     expect(code(over)).toBe('RAY_LIMIT_EXCEEDED/extracted-size');
-    expect(existsSync(out)).toBe(false);
-    writeFileSync(out, 'already here');
+    // Creating the destination exclusively proves the refused decryption left no file behind.
+    writeFileSync(out, 'already here', { flag: 'wx' });
     const exists = await decryptFile(ciphertext, out, identity, { maxPlaintextBytes: LIMIT });
     expect(code(exists)).toBe('RAY_USAGE/');
     expect(readFileSync(out, 'utf8')).toBe('already here');
