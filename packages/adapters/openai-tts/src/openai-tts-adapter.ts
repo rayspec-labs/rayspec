@@ -51,6 +51,11 @@ export interface OpenAiTtsAdapterOptions {
   env?: Record<string, string | undefined>;
   /** Injectable fetch for deterministic tests; defaults to the global `fetch`. */
   fetchImpl?: typeof fetch;
+  /**
+   * How long one synthesis request may take, body included, in milliseconds
+   * (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`). Absent ⇒ no bound beyond the transport's own.
+   */
+  timeoutMs?: number;
 }
 
 export class OpenAiTtsAdapter implements TtsAdapter {
@@ -61,6 +66,7 @@ export class OpenAiTtsAdapter implements TtsAdapter {
   private readonly baseUrlOption?: string;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number | undefined;
 
   constructor(options: OpenAiTtsAdapterOptions = {}) {
     const model = options.model?.trim() || DEFAULT_OPENAI_TTS_MODEL;
@@ -77,6 +83,7 @@ export class OpenAiTtsAdapter implements TtsAdapter {
     this.baseUrlOption = options.baseUrl;
     this.env = options.env ?? process.env;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs;
   }
 
   /**
@@ -97,10 +104,15 @@ export class OpenAiTtsAdapter implements TtsAdapter {
       throw new TtsAdapterError('provider_unavailable', 'OpenAI API key is not configured.');
     }
 
+    // The request timeout covers the whole exchange — the response AND the body read — because the
+    // same signal is handed to fetch, which aborts the body stream with it.
+    const timeout =
+      this.timeoutMs === undefined ? undefined : AbortSignal.timeout(this.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.resolveBaseUrl()}/v1/audio/speech`, {
         method: 'POST',
+        ...(timeout ? { signal: timeout } : {}),
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
@@ -114,6 +126,7 @@ export class OpenAiTtsAdapter implements TtsAdapter {
         }),
       });
     } catch (err) {
+      if (timeout?.aborted) throw timedOut(this.timeoutMs);
       // Transport failure — class name only, never a message that could echo the text or the key.
       throw new TtsAdapterError(
         'provider_unavailable',
@@ -147,6 +160,7 @@ export class OpenAiTtsAdapter implements TtsAdapter {
     try {
       bytes = new Uint8Array(await response.arrayBuffer());
     } catch (err) {
+      if (timeout?.aborted) throw timedOut(this.timeoutMs);
       throw new TtsAdapterError(
         'malformed_provider_output',
         `openai tts response could not be read: ${errorName(err)}`,
@@ -212,4 +226,13 @@ function startsWithJsonPunctuation(bytes: Uint8Array): boolean {
     return byte === 0x7b /* '{' */ || byte === 0x5b /* '[' */;
   }
   return false;
+}
+
+/** The refusal of a synthesis request that outlived its timeout (retryable: nothing was produced). */
+function timedOut(timeoutMs: number | undefined): TtsAdapterError {
+  return new TtsAdapterError(
+    'provider_unavailable',
+    `openai tts request timed out after ${timeoutMs}ms (RAYSPEC_AGENT_REQUEST_TIMEOUT_MS).`,
+    true,
+  );
 }

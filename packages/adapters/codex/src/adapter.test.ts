@@ -1049,9 +1049,15 @@ describe('Codex adapter: with no cancellation signal the run is exactly what it 
     await new CodexAdapter().run({ ...baseSpec }, ctx);
 
     const call = codexCalls[0];
-    // CodexOptions: a toolless run carries the curated env and NOTHING else — no `config` (there is no
-    // bridge to point codex at) and no `codexPathOverride`.
-    expect(Object.keys(call?.options ?? {}).sort()).toEqual(['env']);
+    // CodexOptions: a toolless run carries the curated env and the kill-ladder launcher, and NOTHING
+    // else — no `config` (there is no bridge to point codex at). The SDK starts the launcher; the
+    // launcher starts the bundled binary the SDK would have started, and escalates a SIGTERM it
+    // ignores to a SIGKILL after the default grace.
+    expect(Object.keys(call?.options ?? {}).sort()).toEqual(['codexPathOverride', 'env']);
+    expect(String(call?.options.codexPathOverride)).toMatch(/rayspec-codex-launcher-[^/]+\/codex$/);
+    const env = call?.options.env as Record<string, string>;
+    expect(env.RAYSPEC_CODEX_EXECUTABLE).toMatch(/codex(\.exe)?$/);
+    expect(env.RAYSPEC_CODEX_KILL_GRACE_MS).toBe('5000');
     // ThreadOptions: the sandbox confinement, unchanged, key set and values.
     expect(call?.threadOptions).toEqual({
       model: 'gpt-5.5',

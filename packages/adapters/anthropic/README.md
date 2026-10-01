@@ -61,6 +61,12 @@ surrounding platform, or of cancellation in general, rather than of this SDK.
   the run quarantined rather than silently re-runnable.
 - **Work the child already committed upstream is not undone.** Cancellation stops a
   process; it rolls nothing back.
+- **A silent child is ended by the provider-call timeout.** With
+  `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` set (or the managed posture's default), a run whose child
+  sends no message for that long is aborted through the same controller — so through the same
+  ladder above — and the run reports the neutral `timeout` class; a tool call the platform
+  dispatches does not count as silence. The ladder's rungs are the SDK's own and fixed (2 s, then
+  5 s): `RAYSPEC_AGENT_KILL_GRACE_MS` does not shorten them on this backend.
 
 ## Links
 

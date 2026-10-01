@@ -100,7 +100,14 @@ import type {
   ToolDispatchResult,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, hashJson, linkAbort } from '@rayspec/core';
+import {
+  type CallWatchdog,
+  classifyUpstreamError,
+  hashJson,
+  linkAbort,
+  ProviderCallTimeoutError,
+  startCallWatchdog,
+} from '@rayspec/core';
 import { z } from 'zod';
 
 /** The single in-proc MCP server name; tools are exposed to the model as `mcp__<NAME>__<tool>`. */
@@ -361,13 +368,26 @@ export class AnthropicAdapter implements Backend {
     // work the child already committed upstream is not undone, and a link cannot exist before the
     // controller does, so a run cancelled during setup is caught by the platform race, not here.
     const unlinkCancel = linkAbort(ctx.signal, abortController);
+    // PROVIDER-CALL TIMEOUT (`ctx.limits.providerCallTimeoutMs`): the child is one long call that
+    // streams a message per step, so the bound is on SILENCE — no message from the child within the
+    // window ends the run through the same controller, and so through the same termination ladder. A
+    // tool call the platform dispatches does not count as silence: the dispatcher bounds it itself.
+    // Absent ⇒ inert, as before.
+    const watchdog = startCallWatchdog(ctx.limits?.providerCallTimeoutMs, () =>
+      abortController.abort(),
+    );
 
     // ---- in-proc MCP tool bridge (BRIDGED, not fail-closed) -----------------------------------
     // Register the neutral tools as an IN-PROCESS MCP server whose handler runs in THIS Node
     // process and ONLY: marshal args -> ctx.dispatchTool(name, args, toolCallId) -> return the
     // opaque tool_data/tool_error into the MCP tool-RESULT channel. The adapter holds NO handler;
     // the gate (gate:adapter-handlers) verifies every tool path routes through dispatchTool.
-    const { mcpServers, allowedTools, toolEvents } = this.buildToolBridge(spec, ctx, emit);
+    const { mcpServers, allowedTools, toolEvents } = this.buildToolBridge(
+      spec,
+      ctx,
+      emit,
+      watchdog,
+    );
 
     // The SET of tool names that ARE sanctioned (the in-proc MCP tools, both the bare neutral
     // name e.g. `get_weather` and the model-facing `mcp__rayspec__get_weather`). Used by (a) the
@@ -455,6 +475,7 @@ export class AnthropicAdapter implements Backend {
       });
 
       for await (const msg of q) {
+        watchdog.touch();
         const m = msg as AnthropicMessage;
         if (m.type === 'system' && m.subtype === 'init') {
           // AUTH-MODE SELF-CHECK from the live init message — the definitive source (note:
@@ -538,8 +559,18 @@ export class AnthropicAdapter implements Backend {
       errorRetryAfter = classified.retryAfter;
     } finally {
       // OWN + ABORT the child no matter what — never leak the spawned `claude` process.
+      watchdog.dispose();
       unlinkCancel();
       abortController.abort();
+    }
+    if (watchdog.fired && ctx.limits?.providerCallTimeoutMs !== undefined) {
+      // The run ended because the child went silent: say so, with the neutral `timeout` class, rather
+      // than as whatever the aborted iterator happened to throw.
+      status = 'error';
+      errorMessage = new ProviderCallTimeoutError('anthropic', ctx.limits.providerCallTimeoutMs)
+        .message;
+      errorClass = 'timeout';
+      errorRetryAfter = undefined;
     }
 
     const latencyMs = Date.now() - startedAt;
@@ -660,6 +691,7 @@ export class AnthropicAdapter implements Backend {
     spec: AgentSpec,
     ctx: RunContext,
     emit: (e: NeutralEventInput) => unknown,
+    watchdog?: CallWatchdog,
   ): {
     mcpServers?: Record<string, ReturnType<typeof createSdkMcpServer>>;
     allowedTools: string[];
@@ -709,11 +741,14 @@ export class AnthropicAdapter implements Backend {
             return asMcp(mcpError(JSON.stringify({ kind: 'tool_error', name: t.name, message })));
           }
           toolEvents.count++;
-          const result: ToolDispatchResult = await ctx.dispatchTool(
-            t.name,
-            argsForDispatch,
-            toolCallId,
-          );
+          // The dispatcher bounds the tool call itself; its duration is not the provider's silence.
+          watchdog?.pause();
+          let result: ToolDispatchResult;
+          try {
+            result = await ctx.dispatchTool(t.name, argsForDispatch, toolCallId);
+          } finally {
+            watchdog?.resume();
+          }
           // Return the opaque dispatcher result into the MCP tool-RESULT channel (never raw output).
           return asMcp(
             result.kind === 'tool_error'

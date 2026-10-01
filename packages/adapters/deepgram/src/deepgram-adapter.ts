@@ -51,6 +51,11 @@ export interface DeepgramSttAdapterOptions {
   fetchImpl?: typeof fetch;
   /** Injectable clock (ISO string) for deterministic tests; defaults to the real clock. */
   now?: () => string;
+  /**
+   * How long one transcription request may take, body included, in milliseconds
+   * (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`). Absent ⇒ no bound beyond the transport's own.
+   */
+  timeoutMs?: number;
 }
 
 export class DeepgramSttAdapter implements SttAdapter {
@@ -64,6 +69,7 @@ export class DeepgramSttAdapter implements SttAdapter {
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => string;
+  private readonly timeoutMs: number | undefined;
 
   constructor(options: DeepgramSttAdapterOptions) {
     this.resolver = options.resolver;
@@ -73,6 +79,7 @@ export class DeepgramSttAdapter implements SttAdapter {
     this.env = options.env ?? process.env;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.timeoutMs = options.timeoutMs;
   }
 
   /**
@@ -133,10 +140,15 @@ export class DeepgramSttAdapter implements SttAdapter {
     }
 
     const url = this.buildListenUrl(request.model_policy, request.language_policy);
+    // The request timeout covers the whole exchange — the response AND the body read — because the
+    // same signal is handed to fetch, which aborts the body stream with it.
+    const timeout =
+      this.timeoutMs === undefined ? undefined : AbortSignal.timeout(this.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(url, {
         method: 'POST',
+        ...(timeout ? { signal: timeout } : {}),
         headers: {
           Authorization: `Token ${apiKey}`,
           'Content-Type': media.contentType ?? DEFAULT_CONTENT_TYPE,
@@ -144,6 +156,7 @@ export class DeepgramSttAdapter implements SttAdapter {
         body: media.bytes,
       });
     } catch (err) {
+      if (timeout?.aborted) return { status: 'failed', error: timedOut(this.timeoutMs) };
       // Transport failure — class name only, never a message that could echo audio content or the key.
       return {
         status: 'failed',
@@ -163,6 +176,7 @@ export class DeepgramSttAdapter implements SttAdapter {
     try {
       payload = await response.json();
     } catch {
+      if (timeout?.aborted) return { status: 'failed', error: timedOut(this.timeoutMs) };
       return {
         status: 'failed',
         error: {
@@ -302,4 +316,13 @@ function httpError(status: number): SttAdapterError {
 /** The error's class name only — never its message (which could echo request content or the key). */
 function errorName(err: unknown): string {
   return err instanceof Error && typeof err.name === 'string' ? err.name : 'Error';
+}
+
+/** The failure of a transcription request that outlived its timeout (retryable: nothing was produced). */
+function timedOut(timeoutMs: number | undefined): SttAdapterError {
+  return {
+    code: 'provider_unavailable',
+    message: `deepgram request timed out after ${timeoutMs}ms (RAYSPEC_AGENT_REQUEST_TIMEOUT_MS).`,
+    retryable: true,
+  };
 }
