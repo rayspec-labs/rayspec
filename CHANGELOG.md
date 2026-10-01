@@ -476,7 +476,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grace for a child process (`RAYSPEC_AGENT_KILL_GRACE_MS`, new), queue admission for `async` runs
   in total and per organization (`RAYSPEC_AGENT_QUEUE_MAX`, `RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT`,
   new), the durable worker's concurrency (`RAYSPEC_AGENT_WORKER_CONCURRENCY`, new, default 4) and
-  in-request runs per process (`RAYSPEC_AGENT_SYNC_RUNS_MAX`, new) are read in one place.
+  in-request runs per process (`RAYSPEC_AGENT_SYNC_RUNS_MAX`, new: synchronous agent runs,
+  conversation reply runs and record normalize runs together) are read in one place.
   Under `RAYSPEC_HOSTING_POSTURE=managed` every bound has a default (15 minutes per run, 2 minutes per
   provider call, 2 attempts, a queue of 1000 and 100 per organization, 32 in-request runs, the 2 s
   cancellation poll) and an unusable value of any of them refuses the boot; without the posture the
@@ -487,18 +488,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `error.details` `{ reason: "queue-full", scope, limit }`; nothing is recorded for the refused
   run, and an `Idempotency-Key` it carried is free again. Admission counts the durable engine's own
   queue under one database lock, so a burst is admitted exactly up to the bound.
-- **Every adapter bounds its provider call.** The openai backend keeps its per-request client
-  timeout; the anthropic, codex and pi backends end a call whose stream or child goes silent for the
+- **Every adapter bounds its provider call.** The openai backend's per-request timeout now covers
+  the response body too, so a provider that sends its headers and then stalls is ended; the anthropic, codex and pi backends end a call whose stream or child goes silent for the
   provider-call timeout, with the neutral `timeout` class; the Deepgram and OpenAI speech adapters
   bound each request, body included. The auth preflight of a remote backend is bounded by the same
   timeout. Each is proven against a local provider that never answers or a child that never speaks.
 - **A codex child that ignores `SIGTERM` is killed.** The adapter starts the binary through a small
-  launcher that forwards the `SIGTERM` and sends `SIGKILL` after the kill grace, so a cancelled or
-  timed-out codex run always settles.
+  launcher, in a process group of its own, that forwards the `SIGTERM` to the group and sends
+  `SIGKILL` after the kill grace, and never waits on the child's output beyond the grace, so a
+  cancelled or timed-out codex run always settles, even when a process the child started holds its
+  output open.
 - **A run's record says what happened to its provider call.** A run ended by a cancellation or by
   its wall-clock bound carries `before-call`, `call-aborted`, `after-call` or `outcome-unknown` in its
   terminal step, as observed by the process executing it; the cancel surface records
-  `outcome-unknown` for a run it finds executing until that process reports.
+  `outcome-unknown` for a run it finds executing until that process reports. A run cancelled while it
+  was being set up, before it could be signalled, reads its cancellation once before the provider
+  call and never makes it.
 - **The supported-backend matrix for the managed posture.** Under `RAYSPEC_HOSTING_POSTURE=managed`
   only the openai agent backend and the Deepgram and OpenAI speech providers run; a boot whose
   agents, product model calls or speech providers use anything else is refused before anything is
@@ -518,7 +523,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spec that uses them.
 - **A guard for outbound requests to a URL the platform did not choose.** `guardedFetch` in
   `@rayspec/platform` refuses a scheme other than `http:`/`https:`, a URL with credentials, and a
-  loopback, private, link-local, metadata, unspecified, multicast or reserved destination — judged
+  loopback, private, link-local, metadata, unspecified, multicast or reserved destination (an IPv4
+  address embedded in IPv6 judged by that address, any IPv6 address outside `2000::/3` refused) — judged
   on the address the connection uses after DNS resolution, so a name that resolves to `127.0.0.1` or
   rebinds is refused — and checks every redirect hop the same way. No outbound path of this release
   takes a URL from a spec or a request; a test holds the list of every outbound call site in the
@@ -564,8 +570,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [Spec reference → `init.bindings`](./docs/spec-reference.md#initbindings--application-bindings).
 - **One redaction path for logs, error envelopes, receipts and traces.** Every line a server boot or
   `rayspec deploy <file.ray>` writes to stdout and stderr, every HTTP error envelope, every
-  runtime-control result envelope, every receipt detail, every run's recorded error and every
-  exported agent trace passes `redactText`/`redactValue` (`@rayspec/core`): the boot secrets, the
+  runtime-control result envelope, every receipt detail, every run's recorded error, the error a
+  failed durable run leaves in the workflow engine's system database and every exported agent trace
+  passes `redactText`/`redactValue` (`@rayspec/core`): the boot secrets, the
   provider keys and the binding values the process resolved are removed wherever they occur, and so
   are bearer tokens, credential headers, URL passwords, PEM private keys, JSON web tokens, RaySpec
   API keys and `sk-…` provider keys. See
@@ -590,7 +597,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taken over stops its run), and a recovery re-run of an untainted run first removes what the
   interrupted attempt left. Consequences: an async run reads `running` while it executes rather than
   `enqueued`; a cancelled run keeps the journal steps it wrote before it was ended; a tool's writes
-  commit as they happen, as they always did in-request.
+  commit as they happen, as they always did in-request; and a recovery or second dispatch of a run
+  whose header is already terminal `error` leaves it as recorded instead of running it again (before,
+  only a `completed` header was left alone).
 - **The wall-clock bound ends the run instead of only abandoning it.** When
   `RAYSPEC_AGENT_RUN_MAX_MS` expires the run's signal is aborted, so a backend that honours it stops
   its provider call, and the run is recorded terminal `error` with the `timeout` class. A run that
@@ -824,10 +833,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A bundle deploy hands bindings over differently.** The bindings file may supply only names the
   bundle declares (plus the selected speech provider's key); any other name is refused with
-  `RAY_USAGE`. Its values are no longer written into the process environment: provider keys go to
-  their adapters, the application's own names to `init.bindings`. A handler of a bundle that read a
-  declared binding from `process.env` reads it from `init.bindings.get(name)` instead. A YAML deploy
-  is unchanged.
+  `RAY_USAGE`. A provider key it supplies is no longer written into the process environment: it goes
+  to its adapter alone. The application's own names are still written there, and are also available
+  to handlers as `init.bindings.get(name)`. A YAML deploy is unchanged.
 - **The anthropic backend's child process no longer inherits the whole server environment.** It is
   started without the other providers' keys, every `_FILE` variant, the database URLs (`DATABASE_URL`,
   `SHADOW_DATABASE_URL`, `DBOS_…`, `PG…`) and every `RAYSPEC_…` and `CLOUD_…` setting, in every

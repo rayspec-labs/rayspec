@@ -106,11 +106,14 @@ in every posture.
 | `RAYSPEC_AGENT_QUEUE_MAX` | queued and executing `async` runs, in total | 1000 | no bound |
 | `RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT` | queued and executing `async` runs, per organization | 100 | no bound |
 | `RAYSPEC_AGENT_WORKER_CONCURRENCY` | durable runs one worker process executes at once | 4 | 4 |
-| `RAYSPEC_AGENT_SYNC_RUNS_MAX` | in-request runs one process holds at once | 32 | no bound |
+| `RAYSPEC_AGENT_SYNC_RUNS_MAX` | in-request runs one process holds at once: synchronous `POST /v1/agents/{id}/runs`, conversation reply runs and record normalize runs together | 32 | no bound |
 | `RAYSPEC_RUN_CANCEL_POLL_MS` | how soon a cancellation reaches a run in another worker process | 2000 | off |
 
 A run past a queue or in-request bound is refused with `429 RATE_LIMITED`, a `Retry-After`, and
-`error.details` `{ reason: "queue-full", scope, limit }`, before anything is recorded for it. Under
+`error.details` `{ reason: "queue-full", scope, limit }`, before anything is recorded for it. A
+conversation reply or record normalize past the in-request bound runs nothing either; it answers
+with its capability's own failure (`502` `conversation_reply_failed` or `record_normalize_failed`)
+carrying the neutral `rate_limited` class, rather than with `429`. A retry with the same message or record converges as for any failed reply. Under
 the managed posture an unusable value of any of these variables refuses the boot; without it, the
 variables added with the policy refuse the boot and the older four treat an unusable value as unset.
 
@@ -126,7 +129,10 @@ fired a non-idempotent tool stays quarantined as before.
 the durable worker as on the in-request path, so a run waiting on a slow provider holds no
 database connection. One execution per run is kept by a lease on the run's started-once marker, which
 the executing worker renews: a second dispatch of the same run waits until the lease is given up or
-lapses, and an execution whose lease was taken over stops its own run.
+lapses, and an execution whose lease was taken over stops its own run. A dispatch that takes a run
+over re-runs it only when the run never reached an outcome (its header still `enqueued` or
+`running`) and fired no non-idempotent tool; a run whose header is terminal — `completed`, or `error`
+with its recorded end, whatever the phase — is left as it is, its record intact.
 
 ## Supported backends
 
@@ -138,9 +144,9 @@ same matrix.
 
 | Backend | Kind | Managed posture | Provider-call bound | Cancellation and the wall-clock bound | Child process | Not covered | Proven by |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `openai` | agent | allowed | every HTTP request: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`, at most `RAYSPEC_AGENT_MAX_ATTEMPTS` attempts | the run's signal aborts the HTTP request | none | a tool call already dispatched runs to its own tool timeout | `packages/adapters/openai/src/hanging-provider.test.ts` |
+| `openai` | agent | allowed | every HTTP request, response body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`, at most `RAYSPEC_AGENT_MAX_ATTEMPTS` attempts | the run's signal aborts the HTTP request | none | a tool call already dispatched runs to its own tool timeout | `packages/adapters/openai/src/hanging-provider.test.ts` |
 | `anthropic` | agent | self-host-only | silence of the child: no message for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | the SDK query ends; stdin closes at once, SIGTERM after 2 s, SIGKILL 5 s later | killed 7 s after the abort (fixed by the SDK) | the child's own children are not signalled; a host that exits inside the ladder can orphan a child that ignores SIGTERM | `packages/adapters/anthropic/src/cancellation.real-process.test.ts` |
-| `codex` | agent | self-host-only | silence of the turn: no event for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | the streamed turn ends; the launcher forwards SIGTERM to the child | killed `RAYSPEC_AGENT_KILL_GRACE_MS` after an ignored SIGTERM | the child's own children are not signalled; without the bundled binary the escalation is unavailable (logged) | `packages/adapters/codex/src/cancel.integration.test.ts` |
+| `codex` | agent | self-host-only | silence of the turn: no event for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | the streamed turn ends; the launcher forwards SIGTERM to the child's process group | the group is killed `RAYSPEC_AGENT_KILL_GRACE_MS` after an ignored SIGTERM, and run() settles even while a grandchild holds the output open | a process the child starts in a session of its own is not signalled; on Windows only the child is; without the bundled binary the escalation is unavailable (logged) | `packages/adapters/codex/src/cancel.integration.test.ts` |
 | `pi` | agent | self-host-only | silence of the session: no event for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | `session.abort()` aborts the HTTP request | none | compaction and branch-summary requests are not reached by the abort; a tool ignores its own abort signal | `packages/adapters/pi/src/hanging-provider.test.ts` |
 | `deepgram` | speech-to-text | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a transcription | none | a cancelled run does not stop a transcription in flight | `packages/adapters/deepgram/src/hanging-provider.test.ts` |
 | `fake` | speech-to-text | test-only | not applicable | not applicable | none | staging and conformance only | — |
@@ -162,8 +168,9 @@ The model and speech provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CLAU
    and nothing read from the file;
 3. the plain variable.
 
-A value from a file or a bindings file never enters the process environment. Each credential is
-handed only to the component that uses it, and each agent backend has exactly one source for it:
+A provider credential from a file or a bindings file never enters the process environment. Each
+credential is handed only to the component that uses it, and each agent backend has exactly one
+source for it:
 
 | Credential | Handed to |
 | --- | --- |
@@ -189,12 +196,14 @@ credential is tried in its place. The `anthropic` backend reports what its child
 supply only the names the bundle's manifest declares, plus the speech provider key the operator
 selected (`DEEPGRAM_API_KEY` under `STT_PROVIDER=deepgram`, `OPENAI_API_KEY` under
 `TTS_PROVIDER=openai`); any other name is refused with `RAY_USAGE`, a reserved one with
-`RAY_BINDING_RESERVED`. The application's own declared bindings reach its handlers as
-`init.bindings.get(name)`, never through the process environment; asking for a name the bundle does
-not declare, or for a provider credential, throws (`BindingNotGrantedError`). See
-[Spec reference → `init.bindings`](./spec-reference.md#initbindings--application-bindings). Handler code
-runs in the runtime process, so this keeps values out of the environment and away from child
-processes; it does not stop code that goes looking (see [What it does not protect
+`RAY_BINDING_RESERVED`. The application's own declared bindings go where the bindings contract puts
+application-defined names, the application process environment, and also reach its handlers as
+`init.bindings.get(name)`; asking `init.bindings` for a name the bundle does not declare, or for a
+provider credential, throws (`BindingNotGrantedError`). See
+[Spec reference → `init.bindings`](./spec-reference.md#initbindings--application-bindings). A
+provider credential supplied in the bindings file is handed to its adapter alone and is not written
+into the environment, so it does not reach a child process; the application's own values are, and
+do. Handler code runs in the runtime process either way (see [What it does not protect
 against](#what-it-does-not-protect-against)).
 
 ### The JWT signing key
@@ -260,6 +269,7 @@ Everything the runtime writes passes one redaction path (`redactText` and `redac
 | Runtime-control envelopes | the error and warning messages of `inspect`, `prepare`, `quiesce`, `resume` and `health` |
 | Receipts | the `detail` of every apply and fence receipt, before it is written |
 | Traces | the error a failed run records in its journal step and on the run, and every agent trace the SDK exports |
+| Workflow engine | the error a failed durable run throws (message, stack and fields), before the engine stores it in its system database |
 
 It removes two kinds of thing:
 
@@ -316,7 +326,10 @@ or a request — to a URL it did not choose — it goes through one guard (`guar
 - a scheme other than `http:` or `https:`, and a URL carrying a user name or password;
 - a loopback, private (RFC 1918, unique-local IPv6, carrier-grade NAT), link-local, metadata
   (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`), unspecified, multicast, broadcast, reserved,
-  documentation or benchmarking address, including an IPv4 address embedded in IPv6;
+  documentation or benchmarking address, including an IPv4 address embedded in IPv6 (mapped,
+  translated, NAT64 `64:ff9b::/96`, 6to4), which is judged by the IPv4 address it carries, and any
+  IPv6 address outside global unicast (`2000::/3`), the local-use NAT64 prefix `64:ff9b:1::/48`
+  among them;
 - a host name that resolves to such an address: the check runs on the address the connection
   actually uses, so a name that answers a public address once and a private one later (DNS
   rebinding) is refused too;

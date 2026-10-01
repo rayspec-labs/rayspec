@@ -1155,7 +1155,7 @@ How well the work itself stops depends on the backend:
 | ----------- | --------------------------------------------------------------------------- |
 | `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
 | `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down, but not instantly — the SDK closes its input at once, then escalates over roughly two to seven seconds. The adapter's README lists what that window costs. |
-| `codex`     | The signal aborts the streamed turn; the adapter starts the binary through a launcher that forwards the `SIGTERM` and sends `SIGKILL` after `RAYSPEC_AGENT_KILL_GRACE_MS`, so a child that ignores `SIGTERM` is still ended and the run settles. Processes the child spawned itself are not signalled. See the adapter's README. |
+| `codex`     | The signal aborts the streamed turn; the adapter starts the binary through a launcher that forwards the `SIGTERM` and sends `SIGKILL` after `RAYSPEC_AGENT_KILL_GRACE_MS`, so a child that ignores `SIGTERM` is still ended and the run settles. The signals go to the child's process group, so processes it spawned end with it (one that starts a session of its own does not). See the adapter's README. |
 | `pi`        | The prompt call takes no signal, so the session's `abort()` is brought forward; it aborts the agent run's controller, which is the signal the model request carries, so the token stream stops at the transport. A cancel that arrives before the adapter issues the prompt call skips the request; a narrow window between that check and the agent registering its run remains, and the adapter's README records it. |
 
 In every case the platform stops waiting immediately, and records what happened to the
@@ -1550,8 +1550,9 @@ Two boundaries the table implies are worth spelling out.
 #### `init.bindings` — application bindings
 
 On a bundle deployment, the values of the bindings the bundle's manifest declares — the
-application's own names, not the provider keys — reach handlers here and nowhere else: they are
-not put into the process environment.
+application's own names, not the provider keys — reach handlers here, and also the application
+process environment, where code that reads `process.env` finds them as it always did. The provider
+keys never reach either.
 
 ```ts
 const secret = init.bindings?.get('WEBHOOK_SIGNING_SECRET'); // a declared name: its value
