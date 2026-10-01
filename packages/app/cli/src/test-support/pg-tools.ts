@@ -106,7 +106,16 @@ export function holdingPgDump(
   return wrapper;
 }
 
-/** Run a client tool with the libpq environment of `url`, `input` on stdin. */
+/**
+ * Run a client tool with the libpq environment of `url`, `input` on stdin.
+ *
+ * A tool may finish without reading all of its input: `pg_restore` reading a custom-format archive
+ * from a pipe stops after the last data block it needs, and an archive can carry bytes after it (the
+ * one `pg_dump` 16.15 writes on Linux repeats its table of contents after the data). When what is
+ * left exceeds the pipe's buffer, the pending write fails with EPIPE once the tool exits. That is the
+ * tool's choice, judged by its exit code; any other stdin error, or an EPIPE from a tool that failed,
+ * is reported.
+ */
 export function runPgTool(
   tool: string,
   url: string,
@@ -133,8 +142,18 @@ export function runPgTool(
     child.stderr.on('data', (c: Buffer) => {
       stderr += c.toString('utf8');
     });
+    let stdinError: NodeJS.ErrnoException | undefined;
+    child.stdin.on('error', (e: NodeJS.ErrnoException) => {
+      stdinError = e;
+    });
     child.on('error', reject);
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.on('close', (code) => {
+      if (stdinError !== undefined && (stdinError.code !== 'EPIPE' || code !== 0)) {
+        reject(new Error(`${tool} stdin: ${stdinError.message} (exit ${code})\n${stderr}`));
+        return;
+      }
+      resolve({ code, stdout, stderr });
+    });
     child.stdin.end(input ?? Buffer.alloc(0));
   });
 }

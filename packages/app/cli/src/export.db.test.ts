@@ -231,7 +231,12 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     child: ChildProcess;
     done: Promise<CliRun>;
   } {
-    const child = spawn(process.execPath, [CLI_DIST, ...args], { cwd: deployDir, env });
+    // Nothing is written to a child's stdin, so it gets none: no pipe is left open without a reader.
+    const child = spawn(process.execPath, [CLI_DIST, ...args], {
+      cwd: deployDir,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     children.push(child);
     let stdout = '';
     let stderr = '';
@@ -474,7 +479,11 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
         '--bindings-file',
         bindings,
       ],
-      { cwd: deployDir, env: { ...deployEnv, ALLOWED_ORIGINS: '' } },
+      {
+        cwd: deployDir,
+        env: { ...deployEnv, ALLOWED_ORIGINS: '' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
     );
     let out = '';
     applied.stdout?.on('data', (d) => {
