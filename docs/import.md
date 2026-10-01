@@ -127,6 +127,11 @@ The import mints the target's own deployment id, then:
 - **READY_FOR_CUTOVER** — the target is fenced with its runtime role's writes revoked, so nothing can
   serve or change it until you release it.
 
+Before it reports success the import also checks that the runtime role holds its grants on every
+restored table (reads everywhere, writes in schema `public` but the migration ledgers, writes on the
+whole workflow system database) and the isolated posture; a target whose roles were not prepared
+with the database roles setup is refused there (`RAY_POLICY_DENIED` `posture-refused`).
+
 A dump that restores more than one organization is refused (`RAY_MULTI_TENANT_UNSUPPORTED`) and its
 restore removed at once.
 
@@ -199,7 +204,7 @@ fence with `rayspec resume` at the epoch the export reported.
 | What happened | The target | What to do |
 | --- | --- | --- |
 | A refusal before the restore (the bundle, the identity, a dump, the target, the runtime) | unchanged | fix the cause and run it again |
-| A failure or refusal after the restore began (`RAY_RECONCILIATION_REQUIRED`, a verification) | marked failed: `import.json` says `BLOCKED` | `rayspec import --target <dir> --discard-failed`, then import again |
+| A failure or refusal after the restore began (`RAY_RECONCILIATION_REQUIRED`, a verification) | marked failed: `import.json` says `BLOCKED`, and the target is fenced with its runtime role's writes revoked once its application database was restored | `rayspec import --target <dir> --discard-failed`, then import again |
 | Ctrl-C / SIGTERM (`RAY_INTERRUPTED`, exit 6) | `pg_restore` ended and rolled back; marked failed if anything was restored | as above |
 | The process was killed outright | possibly half restored; `import.json` says `IMPORTING`, the plaintext is in `<target>/scratch/` | run the import again: it removes the plaintext, closes the killed run's receipt and marks the target failed; then `--discard-failed` |
 

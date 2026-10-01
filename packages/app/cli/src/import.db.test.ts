@@ -14,14 +14,17 @@
  *  4. A dump that restores two organizations is refused and its restore discarded.
  *  5. A non-empty target (a table, a blob) is refused, in the dry run and the import.
  *  6. A snapshot of another runtime is refused.
- *  7. An import killed during the restore leaves the target marked failed: the next import refuses
+ *  7. A target whose roles do not give the runtime role its writes on the restored workflow system
+ *     database is refused after the restore: marked failed, fenced, and emptied by
+ *     `--discard-failed`.
+ *  8. An import killed during the restore leaves the target marked failed: the next import refuses
  *     it and closes the killed run's receipt; `--discard-failed` empties it.
- *  8. SIGINT during the restore ends `pg_restore` (exit 6); the target is discarded the same way.
- *  9. The full round trip: every row of both databases and every file equals the source's —
+ *  9. SIGINT during the restore ends `pg_restore` (exit 6); the target is discarded the same way.
+ * 10. The full round trip: every row of both databases and every file equals the source's —
  *     non-ASCII text, NULLs, JSON, a foreign key, two users with their password hashes — the
  *     credential tables are empty, every transition is in the receipts, the target is fenced with its
  *     runtime role unable to write, and the source is untouched.
- * 10. The cutover: `rayspec resume` releases the target's fence, the application deployed there with
+ * 11. The cutover: `rayspec resume` releases the target's fence, the application deployed there with
  *     new boot secrets serves the imported rows, a member signs in with the password they had, and a
  *     token the source issued is refused.
  *
@@ -97,7 +100,7 @@ if (dbRequired && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARMS = 10;
+const ARMS = 11;
 
 const SOURCE_DB = `rayspec_import_src_${process.pid}`;
 const TARGET_DB = `rayspec_import_tgt_${process.pid}`;
@@ -579,6 +582,42 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     await expectTargetUntouched();
     armsRan += 1;
   }, 180_000);
+
+  it('refuses a target whose roles do not grant the runtime role its writes, after the restore: marked failed, fenced, discarded', async () => {
+    const roles = target.lane.roles;
+    const alter = (verb: 'REVOKE' | 'GRANT') =>
+      asAdmin(adminUrl, TARGET_SYS, (sql) =>
+        sql.unsafe(
+          `ALTER DEFAULT PRIVILEGES FOR ROLE "${roles.migration}" ${verb} INSERT, UPDATE, DELETE ON TABLES ` +
+            `${verb === 'REVOKE' ? 'FROM' : 'TO'} "${roles.runtime}"`,
+        ),
+      );
+    await alter('REVOKE');
+    try {
+      const run = await cli(importArgs(source.bundle, ['--bindings-file', bindingsFile]));
+      expect(run.code, run.stderr).toBe(4);
+      expect(run.envelope.errors[0]).toMatchObject({
+        code: 'RAY_POLICY_DENIED',
+        reason: 'posture-refused',
+      });
+      expect(run.envelope.errors[0].message).toContain('--discard-failed');
+      // Marked failed in the state directory, and fenced in the database.
+      expect(JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8'))).toMatchObject({
+        operationId: run.envelope.operationId,
+        state: 'BLOCKED',
+      });
+      expect(await fenceOf(TARGET_DB)).toMatchObject({ state: 'fenced' });
+      const again = await cli(importArgs(source.bundle, ['--dry-run']));
+      expect(again.code).toBe(4);
+      expect(again.envelope.errors[0]).toMatchObject({ code: 'RAY_TARGET_NOT_EMPTY' });
+      const discarded = await cli(['import', '--target', stateDir, '--discard-failed']);
+      expect(discarded.code, discarded.stderr).toBe(0);
+      await expectTargetUntouched();
+    } finally {
+      await alter('GRANT');
+    }
+    armsRan += 1;
+  }, 600_000);
 
   /** Start an import whose restore of the application database holds until it is stopped. */
   async function importHeldInRestore(name: string) {

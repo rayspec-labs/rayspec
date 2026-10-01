@@ -1568,7 +1568,8 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
 - **Interruption and failure.** SIGINT or SIGTERM stops the import at its next safe point and ends a
   running `pg_restore`, whose transaction rolls back (`RAY_INTERRUPTED`, exit 6). A failure after the
   target changed is `RAY_RECONCILIATION_REQUIRED` (exit 6) or the refusal that found it; the target is
-  marked failed (`import.json` `BLOCKED`) until `--discard-failed`. A process killed outright leaves
+  marked failed (`import.json` `BLOCKED`, and fenced with its runtime role's writes revoked once its
+  application database was restored) until `--discard-failed`. A process killed outright leaves
   its scratch data and `import.json` at `IMPORTING`; the next `import` of the target removes the
   scratch data (so does `resume`), closes the killed run's receipt and marks the target failed.
 - **Codes.** The contract's lists for the two forms — `RAY_USAGE`, `RAY_INVALID_ARCHIVE`,

@@ -63,6 +63,7 @@ import {
   applyTenantIsolation,
   type Db,
   listTenantTables,
+  MIGRATION_ONLY_TABLES,
   makeDb,
   verifyTenantIsolation,
 } from '@rayspec/db';
@@ -563,6 +564,38 @@ async function verifyObjects(root: string, index: ObjectIndex): Promise<void> {
 }
 
 /**
+ * Tables of the connected database the runtime role cannot use as a runtime needs to: read every
+ * table and the schema it is in, and write every table but the migration ledgers — in the
+ * application database those of schema `public`, in the workflow system database all of them. The
+ * database roles setup grants exactly this through the migration role's default privileges.
+ */
+async function tablesWithoutRuntimeGrants(
+  db: Db,
+  runtimeRole: string,
+  database: 'application' | 'workflow-system',
+): Promise<number> {
+  const [row] = (await db.$client.unsafe(
+    `SELECT count(*)::int AS n
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind IN ('r', 'p')
+        AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg\\_%'
+        AND NOT (has_schema_privilege($1, n.oid, 'USAGE') AND has_table_privilege($1, c.oid, 'SELECT')
+                 AND (CASE WHEN $2 = 'application'
+                                AND (n.nspname <> 'public' OR c.relname = ANY($3::text[]))
+                           THEN true
+                           ELSE has_table_privilege($1, c.oid, 'INSERT')
+                                AND has_table_privilege($1, c.oid, 'UPDATE')
+                                AND has_table_privilege($1, c.oid, 'DELETE') END))`,
+    [
+      runtimeRole,
+      database,
+      MIGRATION_ONLY_TABLES.filter((t) => t.schema === 'public').map((t) => t.table),
+    ],
+  )) as unknown as { n: number }[];
+  return row?.n ?? 0;
+}
+
+/**
  * Restore an opened snapshot into a checked target, verify it and fence it. Returns what was restored
  * or the refusal, saying whether the target changed (and so needs an explicit discard).
  */
@@ -666,6 +699,25 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
           ['application', control],
           ['workflow-system', sys],
         ] as const) {
+          if (
+            db !== null &&
+            (await tablesWithoutRuntimeGrants(db, config.runtimeRole, database)) > 0
+          ) {
+            throw new RestoreRefusal(
+              bundleError(
+                'RAY_POLICY_DENIED',
+                `the runtime role lacks its grants on restored tables of the ${database} database: ` +
+                  'prepare the target with the database roles setup (the workflow system database ' +
+                  'with database kind workflow-system)',
+                { reason: 'posture-refused' },
+              ),
+            );
+          }
+        }
+        for (const [database, db] of [
+          ['application', control],
+          ['workflow-system', sys],
+        ] as const) {
           if (db === null) continue;
           const expected = opened.snapshot.tableCounts.filter((t) => t.database === database);
           const live = await readUserTables(queryOf(db));
@@ -759,35 +811,11 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
     );
 
     // The fence: no runtime serves the target until the cutover releases it.
-    const workflowSystemDb =
-      facts.workflowSystemDatabase === 'present'
-        ? openControlDatabase(config.migrationWorkflowSystemDatabaseUrl, 1)
-        : null;
-    let fenced: Awaited<ReturnType<typeof quiesceOperation>>;
-    try {
-      fenced = await quiesceOperation(
-        {
-          contractVersion: CONTRACT_VERSION,
-          operationId: options.operationId,
-          actor: options.actor,
-          reason: `import ${options.operationId}: not live until the cutover`,
-          deadline: formatTimestamp(new Date(Date.now() + 60_000)),
-          sourceStopped: false,
-        },
-        options.operationId,
-        {
-          db: control,
-          runtimeRole: config.runtimeRole,
-          ...(workflowSystemDb !== null ? { workflowSystemDb } : {}),
-          workflowSystemDatabaseName: facts.workflowSystemDatabaseName,
-        },
-      );
-    } finally {
-      await workflowSystemDb?.$client.end().catch(() => {});
-    }
-    const held =
-      fenced.data?.barriers.find((b) => b.barrier === 'database-write-role')?.state === 'held';
-    if (!fenced.ok || fenced.data === null || !held) {
+    const fenced = await fenceTarget(
+      options,
+      `import ${options.operationId}: not live until the cutover`,
+    );
+    if (fenced === null) {
       return {
         ok: false,
         targetChanged: true,
@@ -815,7 +843,7 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         },
         tenantId: restored.tenantId,
         foreignKeys: restored.foreignKeys,
-        targetFenceEpoch: fenced.data.fenceEpoch,
+        targetFenceEpoch: fenced,
         targetEnvironmentRevision: revision?.revision ?? 0,
         credentialReset: {
           sessions: 'reset',
@@ -828,6 +856,14 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
       },
     };
   } catch (err) {
+    // A target the restore changed is fenced as failed when its control tables made it that far, so
+    // no runtime serves it before it is discarded.
+    const discarded = err instanceof RestoreRefusal && err.discarded;
+    if (changed && !discarded) {
+      await fenceTarget(options, `import ${options.operationId} failed: discard this target`).catch(
+        () => null,
+      );
+    }
     if (err instanceof RestoreRefusal) {
       return { ok: false, errors: [err.error], targetChanged: err.discarded ? false : changed };
     }
@@ -878,6 +914,47 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
   } finally {
     await archive.close().catch(() => {});
     await (sys as Db | null)?.$client.end().catch(() => {});
+  }
+}
+
+/**
+ * Take the target's fence with the runtime role's writes revoked in both databases, as `quiesce`
+ * does; returns its epoch, or null when the database barrier did not hold or the target has no
+ * control tables (a restore that failed before the application database).
+ */
+async function fenceTarget(options: RestoreImportOptions, reason: string): Promise<number | null> {
+  const { control, config, facts } = options;
+  const [present] = (await control.$client.unsafe(
+    "SELECT to_regclass('public.runtime_control_state') IS NOT NULL AS present",
+  )) as unknown as { present: boolean }[];
+  if (present?.present !== true) return null;
+  const workflowSystemDb =
+    facts.workflowSystemDatabase === 'present'
+      ? openControlDatabase(config.migrationWorkflowSystemDatabaseUrl, 1)
+      : null;
+  try {
+    const fenced = await quiesceOperation(
+      {
+        contractVersion: CONTRACT_VERSION,
+        operationId: options.operationId,
+        actor: options.actor,
+        reason,
+        deadline: formatTimestamp(new Date(Date.now() + 60_000)),
+        sourceStopped: false,
+      },
+      options.operationId,
+      {
+        db: control,
+        runtimeRole: config.runtimeRole,
+        ...(workflowSystemDb !== null ? { workflowSystemDb } : {}),
+        workflowSystemDatabaseName: facts.workflowSystemDatabaseName,
+      },
+    );
+    const held =
+      fenced.data?.barriers.find((b) => b.barrier === 'database-write-role')?.state === 'held';
+    return fenced.ok && fenced.data !== null && held ? fenced.data.fenceEpoch : null;
+  } finally {
+    await workflowSystemDb?.$client.end().catch(() => {});
   }
 }
 
