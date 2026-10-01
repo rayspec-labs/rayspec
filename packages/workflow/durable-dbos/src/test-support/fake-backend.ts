@@ -80,6 +80,11 @@ export class FakeSpineBackend implements Backend {
   structuredOutput?: Record<string, unknown>;
 
   onHoldingRunTx?: () => void;
+  /**
+   * Called when `run()` is entered and when it returns or throws, so a test can tell which database
+   * transactions were open across the whole backend call.
+   */
+  onRunBoundary?: (edge: 'enter' | 'exit') => void;
   #preToolWaiters: Array<() => void> = [];
   releasePreTool(): void {
     const waiters = this.#preToolWaiters;
@@ -105,6 +110,7 @@ export class FakeSpineBackend implements Backend {
   }
 
   async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    this.onRunBoundary?.('enter');
     this.liveRuns += 1;
     this.runInvocations.set(ctx.runId, (this.runInvocations.get(ctx.runId) ?? 0) + 1);
     this.liveConcurrency += 1;
@@ -113,6 +119,7 @@ export class FakeSpineBackend implements Backend {
       return await this.#runImpl(spec, ctx);
     } finally {
       this.liveConcurrency -= 1;
+      this.onRunBoundary?.('exit');
     }
   }
 

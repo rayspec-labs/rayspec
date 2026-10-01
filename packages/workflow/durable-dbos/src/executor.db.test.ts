@@ -7,10 +7,9 @@
  *  1. `enqueue` a RunJob → the `runAgentJob` workflow runs the EXISTING `runAgent` OFF-REQUEST (the
  *     enqueue returns immediately; the run completes asynchronously on the worker) → status maps
  *     enqueued → succeeded.
- *  2. The run executes inside `forTenant(db, tenantId).transaction()` — the `app.current_tenant` GUC
- *     is POPULATED during the run (asserted by a read-back from inside a journaled step's own tx is
- *     hard; instead we assert the durable EFFECT: the journal/run_events/run header all persist
- *     tenant-scoped under the run, which is what the GUC-wrapped tx commits).
+ *  2. No database transaction is held across the backend call: every transaction the run path opens
+ *     closes inside the call or before it, and the journal/run_events/run header all persist
+ *     tenant-scoped under the run.
  *  3. The run header + journal steps + run_events persist (the resumable read path is populated).
  *  4. The SAFETY GUARD: a workflow body whose `run_started` marker ALREADY exists (the
  *     recovery-of-an-already-started-run case) FAILS terminally and does NOT re-run `runAgent` (no
@@ -22,7 +21,7 @@
  *
  * HONEST SCOPE (behavior-verified vs doc-verified): these tests drive the REAL engine via
  * `enqueue` + an in-step throw — they BEHAVIORALLY verify the started-once guard, the marker-outside-
- * runAgent's-tx commit, the GUC-populated tx, and engine-level workflow-id idempotency. They do NOT
+ * runAgent's-tx commit, the absence of a transaction across the call, and engine-level workflow-id idempotency. They do NOT
  * kill and restart the host PROCESS, so DBOS's launch-time crash-RECOVERY re-dispatch (a process dies
  * mid-workflow, restarts, and DBOS re-invokes the incomplete workflow) is DOC-verified against the
  * installed 4.21.6 (`system_database.js` recovery + `maxRecoveryAttempts`), not exercised here. A real
@@ -36,7 +35,7 @@ import net from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentSpec } from '@rayspec/core';
-import { type Db, forTenant, schema, TENANT_GUC } from '@rayspec/db';
+import { type Db, forTenant, schema } from '@rayspec/db';
 import {
   buildProductTables,
   injectedColumnLinesSql,
@@ -46,7 +45,7 @@ import {
 import { RUN_TAINT_SCOPE, type RunJob } from '@rayspec/platform';
 import type { StoreSpec } from '@rayspec/spec';
 import { config as loadDotenv } from 'dotenv';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -108,18 +107,29 @@ let productTables: Map<string, PgTable>;
 let unregisterTables: (() => void) | undefined;
 
 /**
- * Captures the `app.current_tenant` GUC value read at the end of any `tdb.transaction()` body the run
- * path opens. The off-request run holds NO transaction across the model call, so a plain run opens
- * none and this stays null — the proof that the run does not pin a connection while it waits. Reset
- * per test; written by the wrapDb proxy below.
+ * Records every transaction the run path opens on the wrapped Db, as a pair of positions on one
+ * counter shared with the backend's call boundaries. A transaction that opened before the backend
+ * call was entered and closed after it returned was held across the model call. Short transactions
+ * that open and close between those points (TenantDb opens one per statement under row-level
+ * security) do not count. Reset per test; written by the wrapDb proxy and the backend hook below.
  */
-const capturedGuc: { value: string | null } = { value: null };
+const txTrace = {
+  tick: 0,
+  spans: [] as Array<{ open: number; close: number }>,
+  callEnter: -1,
+  callExit: -1,
+};
+
+/** The transactions that were open for the whole backend call. */
+function transactionsSpanningTheCall(): number {
+  return txTrace.spans.filter((s) => s.open < txTrace.callEnter && s.close > txTrace.callExit)
+    .length;
+}
 
 /**
- * Wrap the raw Db so the executor's `forTenant(db, tenantId).transaction(...)` body is OBSERVED:
- * after TenantDb's `set_config(app.current_tenant, …)` runs (inside the same tx) and the inner body
- * (runAgent) runs, read `current_setting` on the SAME tx handle (the GUC read-back pattern). Proves
- * the GUC is actually populated during the off-request run — not merely that we call `.transaction()`.
+ * Wrap the raw Db so every `transaction()` the run path opens on it (the executor's
+ * `forTenant(db, tenantId).transaction(...)`, and TenantDb's short per-statement transactions) is
+ * recorded with its open and close positions.
  */
 function wrapDb(raw: Db): Db {
   const realTransaction = raw.transaction.bind(raw);
@@ -129,12 +139,13 @@ function wrapDb(raw: Db): Db {
         return (inner: (tx: unknown) => Promise<unknown>, ...rest: unknown[]) =>
           realTransaction(
             async (tx: unknown) => {
-              const r = await inner(tx);
-              const rows = (await (tx as Db).execute(
-                sql`select current_setting(${TENANT_GUC}, true) as tenant`,
-              )) as unknown as Array<{ tenant: string | null }>;
-              capturedGuc.value = rows[0]?.tenant ?? null;
-              return r;
+              const span = { open: ++txTrace.tick, close: Number.POSITIVE_INFINITY };
+              txTrace.spans.push(span);
+              try {
+                return await inner(tx);
+              } finally {
+                span.close = ++txTrace.tick;
+              }
             },
             ...(rest as []),
           ) as unknown;
@@ -268,7 +279,14 @@ beforeEach(async () => {
   backend.liveRuns = 0;
   backend.throwMidRunTimes = 0;
   backend.structuredOutput = undefined;
-  capturedGuc.value = null;
+  txTrace.tick = 0;
+  txTrace.spans = [];
+  txTrace.callEnter = -1;
+  txTrace.callExit = -1;
+  backend.onRunBoundary = (edge) => {
+    if (edge === 'enter') txTrace.callEnter = ++txTrace.tick;
+    else txTrace.callExit = ++txTrace.tick;
+  };
   // Clean the app tables between tests (orgs cascade keeps the tenant row; clear the run data).
   await db.$client.unsafe(
     'TRUNCATE run_events, journal_steps, conversation_items, runs, idempotency_keys, persist_facts CASCADE',
@@ -314,9 +332,13 @@ describe('DBOS durable spine — runAgent off-request', () => {
     expect(backend.liveRuns).toBe(1);
 
     // The off-request run holds NO transaction across the model call: its statements commit as they
-    // are made, so the wrapDb proxy never saw a transaction body. Not blind: wrapping runAgent in
-    // tdb.transaction() again would set this to the tenant.
-    expect(capturedGuc.value).toBeNull();
+    // are made, so no transaction the run path opened was open from before the backend call to after
+    // it. Holds in both isolation lanes (under row-level security each statement runs in its own short
+    // transaction, which closes inside the call). Not blind: wrapping runAgent in tdb.transaction()
+    // again makes that transaction span the call.
+    expect(txTrace.callEnter).toBeGreaterThan(0);
+    expect(txTrace.callExit).toBeGreaterThan(txTrace.callEnter);
+    expect(transactionsSpanningTheCall()).toBe(0);
 
     // The run HEADER persisted (tenant-scoped), status completed, the final text from the fake run.
     const tdb = forTenant(db, TENANT);
