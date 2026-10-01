@@ -371,7 +371,11 @@ Apply these **autonomous defaults** (and record them for the Phase-4 review):
 Phase 2.5 codegen:**
 
 For each detected tool, add:
-- a **`handlers[]`** entry — `{ id, module: handlers/<name>.gen.ts, export: <camelCaseExport>, kind: tool }`.
+- a **`handlers[]`** entry — `{ id, module: handlers/<name>.gen.ts, export: <camelCaseExport>, kind: tool, uses: [] }`.
+  (`uses` lists the rights the handler asks for; a generated lookup/persist handler reaches the DB only
+  through `init.db`, which is not a right, so it declares `uses: []`. Under
+  `RAYSPEC_HOSTING_POSTURE=managed` a handler that omits `uses` is refused at boot — see the
+  `handlers[]` grammar reference below.)
   (A generated `.ts` module path raises a non-fatal `doctor` advisory — see the `handlers[]` grammar
   reference below for what it says and the two ways out, which you must take **before the Phase-5
   boot**, not just before a deploy: both boot paths refuse an un-built `.ts` module.)
@@ -1130,7 +1134,20 @@ Notes that matter:
   module: <path>            # REQUIRED — path RELATIVE to the spec dir, e.g. handlers/code-claim.gen.ts.
   export: <symbol>          # REQUIRED — the named export the renderer emitted (e.g. codeClaim).
   kind: tool                # It.2: ALWAYS 'tool'. (route/trigger are later iterations; rejected by the wrapper.)
+  uses: []                  # optional in the grammar; WRITE it. The rights this handler asks for, each listed
+                            #   once, from a CLOSED vocabulary: blob | fsSource | stt | tts | emit | enqueue |
+                            #   mintPlayToken | bindings. A generated tool handler needs none (`init.db` is not a
+                            #   right) — so `uses: []`.
 ```
+
+> **`uses` — the handler's declared rights.** A name outside the vocabulary is refused when the spec is
+> parsed. A right the handler's kind never receives is a `capability_violation` from `doctor`: a `tool`
+> may ask for `blob`, `fsSource`, `stt`, `tts`, `emit`, `bindings` (never `enqueue` or `mintPlayToken`).
+> When `uses` is declared, the handler's init carries exactly those capabilities (reaching for another
+> one throws), and a boot whose deployment does not grant a declared right is refused before anything
+> runs. When it is ABSENT the handler receives every capability the deployment configured — except
+> under **`RAYSPEC_HOSTING_POSTURE=managed`**, where a handler without `uses` is refused at boot. So
+> always write it; `uses: []` is the correct value for every handler this skill generates.
 
 > The `.gen.ts` files are produced by `rayspec gen-handler` from the derived holes (Phase 2.5) — you
 > NEVER hand-author them. They import `@rayspec/handler-sdk` TYPE-ONLY, take ZERO npm deps, and reach
