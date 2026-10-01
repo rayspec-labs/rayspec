@@ -104,6 +104,7 @@ describe('the hosting report beside inspect()', () => {
       executionPolicy: resolveExecutionPolicy({}),
       supportedBackends: SUPPORTED_BACKEND_MATRIX,
       egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
+      agentTraceExport: 'openai',
     });
   });
 
@@ -119,7 +120,27 @@ describe('the hosting report beside inspect()', () => {
       executionPolicy: resolveExecutionPolicy({ RAYSPEC_HOSTING_POSTURE: 'managed' }),
       supportedBackends: SUPPORTED_BACKEND_MATRIX,
       egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
+      agentTraceExport: 'off',
     });
+  });
+
+  it('reports the agent trace export the boot applies', () => {
+    const exported = (env: NodeJS.ProcessEnv) => report(env).agentTraceExport;
+    // The agent SDK's own default, which exports, unless something turns it off.
+    expect(exported({})).toBe('openai');
+    // The managed posture turns it off unless the operator states otherwise.
+    expect(exported({ RAYSPEC_HOSTING_POSTURE: 'managed' })).toBe('off');
+    expect(exported({ RAYSPEC_HOSTING_POSTURE: 'managed', RAYSPEC_AGENT_TRACING: 'openai' })).toBe(
+      'openai',
+    );
+    // An explicit value, and the SDK switch the deploy path writes.
+    expect(exported({ RAYSPEC_AGENT_TRACING: 'off' })).toBe('off');
+    expect(exported({ RAYSPEC_AGENT_TRACING: 'openai' })).toBe('openai');
+    expect(exported({ OPENAI_AGENTS_DISABLE_TRACING: '1' })).toBe('off');
+    // A value the boot refuses cannot be attested as off.
+    expect(
+      exported({ RAYSPEC_AGENT_TRACING: 'nonsense', RAYSPEC_HOSTING_POSTURE: 'managed' }),
+    ).toBe('openai');
   });
 
   it('reports the execution policy the managed posture applies, with where each bound came from', () => {

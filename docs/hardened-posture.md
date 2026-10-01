@@ -16,7 +16,7 @@ hosting posture as supported only when all of it is on.
 | --- | --- | --- |
 | `RAYSPEC_MIGRATION_DATABASE_URL` (or `_FILE`), with the roles from `database-roles.sql` | Role separation and row-level security: the migration role changes the schema, the server serves as a runtime role that cannot bypass the tenant policies. See [Database roles and row-level security](./database-isolation.md). | one role migrates and serves |
 | `RAYSPEC_SINGLE_TENANT=true` | Single-tenant mode: the runtime holds one organization. Creating a second one is refused on every path (the HTTP routes, the operator bootstrap, `rayspec tenant ensure`); open registration only creates that first one, and after it an account is made by redeeming an invite. | any number of organizations; open registration |
-| `RAYSPEC_HOSTING_POSTURE=managed` | The public `/recovery-scope` probe is not registered, cross-process run cancellation is on by default, every execution bound has a default ([Bounded execution](#bounded-execution)), and a boot that would use a backend outside the [supported-backend matrix](#supported-backends) is refused. | `local` |
+| `RAYSPEC_HOSTING_POSTURE=managed` | The public `/recovery-scope` probe is not registered, cross-process run cancellation is on by default, every execution bound has a default ([Bounded execution](#bounded-execution)), a boot that would use a backend outside the [supported-backend matrix](#supported-backends) is refused, and agent traces are not exported unless `RAYSPEC_AGENT_TRACING=openai` ([Telemetry](#telemetry)). | `local` |
 | `RAYSPEC_TRUSTED_PROXIES` | Behind a reverse proxy, the proxy addresses whose forwarding headers are believed; nothing else can set the client address. | the socket peer is the client |
 
 `RAYSPEC_SINGLE_TENANT` accepts exactly `true` or `false`; any other value refuses the boot, so a
@@ -52,8 +52,9 @@ typo never leaves the limit off by accident.
   `applicationTenants: { singleTenantMode: true, maxApplicationTenants: 1 }`, read from the same
   setting the boot reads.
 - `inspect()` reports `managedPosture.supported: true` only when the release carries a capability
-  receipt, the database isolation posture is active (`runtimeRole` given to the adapter), **and**
-  single-tenant mode is on ([Runtime operations](./runtime-operations.md)).
+  receipt, the database isolation posture is active (`runtimeRole` given to the adapter),
+  single-tenant mode is on, **and** no agent trace is exported (`inspectHosting().agentTraceExport`
+  is `off`) ([Runtime operations](./runtime-operations.md)).
 - From outside: a second `POST /v1/auth/register` answers `403`, and `POST /v1/orgs` answers `403`.
 
 ## What the runtime checks on every request and job
@@ -145,6 +146,23 @@ same matrix.
 | `fake` | speech-to-text | test-only | not applicable | not applicable | none | staging and conformance only | — |
 | `openai` | text-to-speech | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a synthesis | none | a cancelled run does not stop a synthesis in flight | `packages/adapters/openai-tts/src/hanging-provider.test.ts` |
 | `fake` | text-to-speech | test-only | not applicable | not applicable | none | staging and conformance only | — |
+
+## Telemetry
+
+The agent SDK of the `openai` backend exports agent traces to OpenAI by default: run metadata and,
+once an agent calls tools, the tool arguments and outputs. Whether this process exports them is
+`inspectHosting().agentTraceExport` (`off` or `openai`), and the boot banner's `Trace export:` line
+states what the SDK will actually do.
+
+| Entrypoint | `RAYSPEC_AGENT_TRACING` unset | To change it |
+| --- | --- | --- |
+| `rayspec deploy <spec.yaml>` and `rayspec deploy <file.ray>` | off | `RAYSPEC_AGENT_TRACING=openai` |
+| any entrypoint under `RAYSPEC_HOSTING_POSTURE=managed` | off | `RAYSPEC_AGENT_TRACING=openai` |
+| `rayspec-serve` (and the boot wrappers that print the banner), without the managed posture | **exported** (the SDK's default) | **`RAYSPEC_AGENT_TRACING=off`** |
+
+`rayspec-serve` keeps the SDK's default in this release so that a deployment that relies on it does
+not lose its traces on upgrade. If the code it serves is not yours, set `RAYSPEC_AGENT_TRACING=off`.
+`inspect()` does not report the managed posture as supported while traces are exported.
 
 ## Egress
 

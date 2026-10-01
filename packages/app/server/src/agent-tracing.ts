@@ -126,7 +126,9 @@ export async function applyDeployAgentTracing(
  * here would turn the export off on an entrypoint whose default has always been the SDK's, and that is
  * a product decision, not a defect fix. So unset and blank fall through untouched, and the resolver
  * decides only once a value is actually stated — which also means an unsupported value refuses in the
- * same message, from the same line, on both entrypoints rather than in a second wording.
+ * same message, from the same line, on both entrypoints rather than in a second wording. The one
+ * exception is the managed posture (`RAYSPEC_HOSTING_POSTURE=managed`), which is opt-in and defaults
+ * the export off the way the deploy path does.
  *
  * Turning the export off is the same pair `applyDeployAgentTracing` takes, and here the SECOND half is
  * the one doing the work: `serve.ts` imports the composition root — and through it `@openai/agents` —
@@ -139,10 +141,40 @@ export async function applyServeAgentTracing(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<AgentTracingPosture | undefined> {
   const raw = env.RAYSPEC_AGENT_TRACING?.trim();
-  if (raw === undefined || raw === '') return undefined;
+  if (raw === undefined || raw === '') {
+    // Under the managed posture the export is off unless the operator states otherwise: there the
+    // code that runs belongs to a customer, which is the deploy path's reason, not a developer's own.
+    if (!managedPosture(env)) return undefined;
+    await disableSdkTracing(env);
+    return 'off';
+  }
   const selected = resolveAgentTracing(env);
   if (selected === 'off') await disableSdkTracing(env);
   return selected;
+}
+
+/**
+ * `RAYSPEC_HOSTING_POSTURE=managed`, read raw: this leaf module runs before the boot validates the
+ * posture (which refuses any other value than `local` or `managed`), and must not import it.
+ */
+function managedPosture(env: NodeJS.ProcessEnv): boolean {
+  return env.RAYSPEC_HOSTING_POSTURE?.trim() === 'managed';
+}
+
+/**
+ * The trace-export posture a process with this environment is under, as the hosting report states it,
+ * without asking the SDK (the report reads no module the boot has not loaded). It follows the
+ * entrypoints above: an explicit `RAYSPEC_AGENT_TRACING` wins; else the SDK's own kill-switch, which
+ * the deploy path writes; else `off` under the managed posture; else the SDK's default, which exports.
+ * A value the boot would refuse cannot be attested as off, so it reports `openai`.
+ */
+export function configuredAgentTraceExport(env: NodeJS.ProcessEnv): AgentTracingPosture {
+  const raw = env.RAYSPEC_AGENT_TRACING?.trim();
+  if (raw === 'off') return 'off';
+  if (raw !== undefined && raw !== '') return 'openai';
+  const sdkSwitch = env[SDK_DISABLE_TRACING_ENV]?.trim();
+  if (sdkSwitch === '1' || sdkSwitch === 'true') return 'off';
+  return managedPosture(env) ? 'off' : 'openai';
 }
 
 /**

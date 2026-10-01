@@ -77,6 +77,7 @@ import {
   resolveExecutionPolicy,
   resolveRunCancelPoll,
 } from '@rayspec/platform';
+import { type AgentTracingPosture, configuredAgentTraceExport } from './agent-tracing.js';
 import {
   type DatabaseIsolationStatus,
   type HostingPosture,
@@ -141,6 +142,12 @@ export interface HostingReport {
    * `guardedFetch`, which refuses internal destinations; custom code is not bound by it.
    */
   egress: { enforcement: 'host-network-policy'; platformOutboundGuard: true };
+  /**
+   * Whether agent traces leave this process (`openai`) or not (`off`), as the boot applies it: an
+   * explicit `RAYSPEC_AGENT_TRACING`, the deploy path's default, `off` under the managed posture, else
+   * the agent SDK's default, which exports (agent-tracing.ts `configuredAgentTraceExport`).
+   */
+  agentTraceExport: AgentTracingPosture;
 }
 
 /** The operations this adapter implements today, and the hosting report. */
@@ -410,6 +417,7 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         executionPolicy: resolveExecutionPolicy(env),
         supportedBackends: SUPPORTED_BACKEND_MATRIX,
         egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
+        agentTraceExport: configuredAgentTraceExport(env),
       };
     },
 
@@ -467,10 +475,15 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         applicationDigest: state.applicationDigest,
         releaseManifestSha256: options.releaseManifestSha256 ?? null,
         // The managed posture is supported only by a release that ships its capability receipt, on an
-        // environment whose database isolation (role separation and row-level security) is active
-        // and whose runtime runs in single-tenant mode.
+        // environment whose database isolation (role separation and row-level security) is active,
+        // whose runtime runs in single-tenant mode, and which exports no agent trace (the receipt
+        // attests `agentTraceExport: "off"`).
         managedPosture: {
-          supported: receipt !== null && isolation.active && singleTenantMode,
+          supported:
+            receipt !== null &&
+            isolation.active &&
+            singleTenantMode &&
+            configuredAgentTraceExport(options.env ?? process.env) === 'off',
           receiptSha256: receipt,
         },
         fence: state.fence,

@@ -525,6 +525,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped source so that a new one goes through the guard or is reviewed. Handlers are not bound by
   it: they run in-process, and the host network policy contains them. See
   [Hosting in the hardened posture → Egress](./docs/hardened-posture.md#egress).
+- **The managed posture exports no agent trace by default, and the hosting report says whether one
+  is exported.** Under `RAYSPEC_HOSTING_POSTURE=managed` an unset `RAYSPEC_AGENT_TRACING` means `off`
+  on `rayspec-serve` and the boot wrappers too, as it already did on `rayspec deploy` (both the YAML
+  and the `.ray` path); `RAYSPEC_AGENT_TRACING=openai` turns the export back on.
+  `inspectHosting()` reports `agentTraceExport` (`off` or `openai`) and `egress` (enforced by the
+  host network policy), and `inspect()` no longer reports the managed posture as supported while
+  traces are exported. Without the managed posture `rayspec-serve` keeps exporting by default, as
+  before; set `RAYSPEC_AGENT_TRACING=off` to stop it. See
+  [Hosting in the hardened posture → Telemetry](./docs/hardened-posture.md#telemetry).
 
 ### Changed
 

@@ -504,7 +504,7 @@ describe.skipIf(!baseUrl)(
         const receipt = 'a'.repeat(64);
         const inspect = (
           runtimeRole?: string,
-          env: NodeJS.ProcessEnv = { RAYSPEC_SINGLE_TENANT: 'true' },
+          env: NodeJS.ProcessEnv = { RAYSPEC_SINGLE_TENANT: 'true', RAYSPEC_AGENT_TRACING: 'off' },
         ) =>
           createRuntimeControl({
             db: control,
@@ -517,10 +517,33 @@ describe.skipIf(!baseUrl)(
           receiptSha256: receipt,
         });
         // Without single-tenant mode (unset, or a value the boot would refuse): not supported.
-        expect((await inspect(iso.roles.runtime, {})).data?.managedPosture.supported).toBe(false);
         expect(
-          (await inspect(iso.roles.runtime, { RAYSPEC_SINGLE_TENANT: 'yes' })).data?.managedPosture
+          (await inspect(iso.roles.runtime, { RAYSPEC_AGENT_TRACING: 'off' })).data?.managedPosture
             .supported,
+        ).toBe(false);
+        // While agent traces are exported (stated, or the agent SDK's default outside the managed
+        // posture): not supported. The managed posture alone turns the export off.
+        for (const tracing of [{ RAYSPEC_AGENT_TRACING: 'openai' }, {}]) {
+          expect(
+            (await inspect(iso.roles.runtime, { RAYSPEC_SINGLE_TENANT: 'true', ...tracing })).data
+              ?.managedPosture.supported,
+          ).toBe(false);
+        }
+        expect(
+          (
+            await inspect(iso.roles.runtime, {
+              RAYSPEC_SINGLE_TENANT: 'true',
+              RAYSPEC_HOSTING_POSTURE: 'managed',
+            })
+          ).data?.managedPosture.supported,
+        ).toBe(true);
+        expect(
+          (
+            await inspect(iso.roles.runtime, {
+              RAYSPEC_SINGLE_TENANT: 'yes',
+              RAYSPEC_AGENT_TRACING: 'off',
+            })
+          ).data?.managedPosture.supported,
         ).toBe(false);
         // The snapshot role bypasses row security: as a runtime role it would not hold the posture.
         expect((await inspect(iso.roles.snapshot)).data?.managedPosture.supported).toBe(false);
