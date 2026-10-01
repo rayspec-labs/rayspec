@@ -809,6 +809,14 @@ export async function runAgent(
   // whether the call settled after it was told to stop is what the run's record states.
   let runCall: Promise<RunResult> | undefined;
   try {
+    // A cancellation that landed while this run was being set up — after the worker's own check of
+    // the marker, before the run was armed above (resolving it, reserving its lease, the auth
+    // preflight) — reached only the persisted marker: nothing was registered for the cancel surface to
+    // signal, and a watch's first read comes an interval later. Read the marker once now, so such a
+    // run never calls the backend. A failed read is no answer, as it is for the watch.
+    if (!cancellation.signal.aborted && (await isRunCancelled(tdb, runId).catch(() => false))) {
+      cancellation.abort();
+    }
     // A run whose signal has ALREADY aborted (a caller that passed a spent signal, or a cancellation
     // that landed while this run was being set up) never calls the backend at all.
     if (cancellation.signal.aborted) throw new RunCancelledError(runId);

@@ -21,6 +21,7 @@ import {
   markRunCancelled,
   RUN_CANCEL_LOCK_WAIT_MS,
   RunCancelledError,
+  readRunCancellationPhase,
   recordRunCancelled,
   signalRunCancelled,
 } from './run-cancel.js';
@@ -237,6 +238,26 @@ describe('cancelling a run in flight', () => {
       }),
     ).rejects.toBeInstanceOf(RunCancelledError);
     expect(backend.entered).toBe(0);
+  });
+
+  it('a cancellation that lands while the run is set up (during its auth preflight) stops it before the backend is called', async () => {
+    // The window between the worker's own check of the marker and the run being armed: nothing is
+    // registered yet, so the cancel surface can only write the marker. The run must read it.
+    const tdb = forTenant(appDb, TENANT_A);
+    const runId = 'cancel-during-setup';
+    const backend = new SilentBackend();
+    open.push(backend);
+    backend.resolveAuth = async () => {
+      await markRunCancelled(tdb, runId);
+      expect(signalRunCancelled(runId)).toBe(false); // not armed yet: nothing to signal
+      return 'api-key' as const;
+    };
+    await expect(runAgent(tdb, backend, spec, { runId, taintDb: tdb })).rejects.toBeInstanceOf(
+      RunCancelledError,
+    );
+    expect(backend.entered).toBe(0);
+    expect(await runHeaderStatus(runId)).toBe('error');
+    expect(await readRunCancellationPhase(tdb, runId)).toBe('before-call');
   });
 
   it('names the run and says what was cancelled — and does NOT claim to have stopped the model call', async () => {
