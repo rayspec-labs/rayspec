@@ -102,6 +102,8 @@ import {
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
 import {
+  applicationBindingsGranted,
+  assertHandlerRights,
   type BlobStoreFactory,
   type DurableExecutor,
   type DurableExecutorIdentity,
@@ -112,6 +114,8 @@ import {
   executionPolicyProblems,
   FsSourceConfigError,
   type FsSourceFactory,
+  type GrantedRights,
+  HandlerRightsError,
   InRequestRunGate,
   invokeTriggerHandler,
   type LoadedExtensions,
@@ -3220,6 +3224,62 @@ function fsSourceFactoryFor(config: ServerConfig): FsSourceFactory | undefined {
  * HS256, a DISTINCT key from the RS256 API chain), or undefined when no playback route is declared.
  * A playback route without a valid media signing key is refused: it would be unauthenticated.
  */
+/**
+ * The rights this deployment grants a handler (`handlers[].uses`): for each, `null` when the
+ * capability is built for this boot, else what is missing. Built from the same values the engine is
+ * wired with, so a right is granted exactly when its capability reaches the init.
+ */
+/** Refuse a boot whose handlers ask for rights this deployment does not grant (handler-rights.ts). */
+function assertBootHandlerRights(
+  spec: RaySpec,
+  config: ServerConfig,
+  capabilities: Parameters<typeof grantedHandlerRights>[0],
+): void {
+  try {
+    assertHandlerRights(spec.handlers, grantedHandlerRights(capabilities), {
+      managedPosture: config.hostingPosture === 'managed',
+    });
+  } catch (err) {
+    if (err instanceof HandlerRightsError) throw new BootConfigError(err.message);
+    throw err;
+  }
+}
+
+function grantedHandlerRights(capabilities: {
+  blobFactory?: unknown;
+  fsSourceFactory?: unknown;
+  sttCapability?: unknown;
+  ttsCapability?: unknown;
+  eventBus?: unknown;
+  durableWorker: boolean;
+  mediaTokenService?: unknown;
+}): GrantedRights {
+  return {
+    blob:
+      capabilities.blobFactory !== undefined
+        ? null
+        : 'no blob backend is built: one is built for a spec that declares a stream route, over ' +
+          'RAYSPEC_BLOB_ROOT or one an extension provides',
+    fsSource:
+      capabilities.fsSourceFactory !== undefined ? null : 'RAYSPEC_FS_SOURCE_ROOT is not set',
+    stt: capabilities.sttCapability !== undefined ? null : 'STT_PROVIDER is not set',
+    tts: capabilities.ttsCapability !== undefined ? null : 'TTS_PROVIDER is not set',
+    emit:
+      capabilities.eventBus !== undefined ? null : 'the spec does not enable deployment.eventBus',
+    enqueue: capabilities.durableWorker
+      ? null
+      : 'no durable worker runs (deployment.durableWorker with agent backends)',
+    mintPlayToken:
+      capabilities.mediaTokenService !== undefined
+        ? null
+        : 'no media signing service is built: one is built for a spec that declares a playback ' +
+          'route, with RAYSPEC_MEDIA_SIGNING_KEY',
+    bindings: applicationBindingsGranted()
+      ? null
+      : 'application bindings are granted only on a bundle deployment (rayspec deploy <file.ray>)',
+  };
+}
+
 function mediaTokenServiceFor(
   effectiveSpec: RaySpec,
   config: ServerConfig,
@@ -3520,6 +3580,17 @@ async function preflightDeclaredSpec(
   opts.registerProductTables?.(productTables);
 
   const eventBus = spec.deployment?.eventBus?.enabled === true ? makeTenantEventBus({}) : undefined;
+  // Every handler's declared rights must be granted before anything is built on them; under the
+  // managed posture every handler must declare them.
+  assertBootHandlerRights(spec, config, {
+    blobFactory,
+    fsSourceFactory,
+    sttCapability,
+    ttsCapability,
+    eventBus,
+    durableWorker: spec.deployment?.durableWorker === true && agentBackends !== undefined,
+    mediaTokenService,
+  });
   await deploy<ReturnType<typeof createAuthApp>>({
     specSource: merged.specSource,
     migrations: [],
@@ -3861,6 +3932,20 @@ async function deployDeclaredSpec(
     eventBusDecl?.enabled === true
       ? (eventBusDecl.retentionHours ?? DEFAULT_EVENT_BUS_RETENTION_HOURS)
       : undefined;
+
+  // ── Handler rights (`handlers[].uses`) ─────────────────────────────────────
+  // A declared right this deployment does not grant refuses the boot, naming the handler and what is
+  // missing; under the managed posture a handler that declares nothing does too. Checked against the
+  // capabilities built just above — the ones the engine is wired with.
+  assertBootHandlerRights(effectiveSpec, config, {
+    blobFactory,
+    fsSourceFactory,
+    sttCapability,
+    ttsCapability,
+    eventBus,
+    durableWorker: effectiveSpec.deployment?.durableWorker === true && agentBackends !== undefined,
+    mediaTokenService,
+  });
 
   // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL

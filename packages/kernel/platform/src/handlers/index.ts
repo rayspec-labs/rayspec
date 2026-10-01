@@ -20,12 +20,21 @@
  */
 export {
   type ApplicationBindingGrant,
+  applicationBindingsGranted,
   applicationBindingsReader,
   BindingNotGrantedError,
   setApplicationBindings,
 } from './application-bindings.js';
 export type { BufferedTenantEmit, TenantEventBus } from './event-bus.js';
 export { CREDENTIAL_REQUEST_HEADERS, withoutCredentials } from './handler-request.js';
+export {
+  assertHandlerRights,
+  type GrantedRights,
+  HandlerRightsError,
+  scopeInit,
+  scopeResolvedHandler,
+  ToolRightNotGrantedError,
+} from './handler-rights.js';
 export {
   getHandlerRuntime,
   type HandlerRuntime,

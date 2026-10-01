@@ -1439,6 +1439,31 @@ handlers:
   product stores, so its route is gated on `store:read` instead of the default
   `store:write` (see the authorization consequence below). Absent or `false` leaves
   the default gate unchanged.
+- `uses` — optional list of the **rights** the handler asks for: the
+  [optional capabilities](#optional-handler-capabilities) its init may carry —
+  `blob`, `fsSource`, `stt`, `tts`, `emit`, `enqueue`, `mintPlayToken`, `bindings`.
+  With it, the handler is **scoped**: its init carries exactly those capabilities,
+  and reaching for any other configured one throws an error named
+  `ToolRightNotGrantedError` where it asks (`init.emit` on a handler that did not
+  declare `emit`), instead of handing it over. Each right is refused before anything
+  runs when it cannot be honoured: a name outside the list is refused when the
+  document is parsed; a right the handler's kind never receives (a trigger asking
+  for `stt`, a tool asking for `enqueue`, a `{handler}` route asking for `blob`) is
+  refused by the lint (`capability_violation`), and a stream route handler must
+  declare `blob`; a right the deployment does not grant (`stt` without
+  `STT_PROVIDER`, `emit` without `deployment.eventBus`) refuses the boot, naming
+  the handler, the right and what is missing. An empty list declares that the
+  handler uses none. Absent, the handler receives every capability the deployment
+  configured, as before — except under `RAYSPEC_HOSTING_POSTURE=managed`, which
+  refuses a boot whose handler declares no `uses`. A 1.8 parser refuses a spec that
+  uses the key.
+
+  ```yaml
+  handlers:
+    - { id: transcribe, module: handlers/transcribe.mjs, export: run, kind: route, uses: [stt, emit] }
+    - { id: nightly, module: handlers/nightly.mjs, export: run, kind: trigger, uses: [] }
+  ```
+
 - `lintSuppress` — optional list of acknowledged advisories scoped to **this
   handler**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
   `code` naming an advisory (never an error) and a **required, non-empty**

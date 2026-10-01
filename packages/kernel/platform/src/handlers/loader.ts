@@ -40,6 +40,7 @@ import { realpathSync } from 'node:fs';
 import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { type HandlerKind, type HandlerSpec, typeScriptSourceExtensionOf } from '@rayspec/spec';
+import { scopeResolvedHandler } from './handler-rights.js';
 import type { ResolvedHandler } from './handler-runtime.js';
 
 /** A fail-closed loader error — every message names the offending handler id + module for the deploy log. */
@@ -280,7 +281,8 @@ async function resolveOne(
   // calls it through the HandlerRuntime with the matching init shape, and a mismatched author
   // signature is a trusted-author bug (TS-checked at the author's edge, not enforceable across the
   // dynamic-import boundary).
-  return makeResolved(handler.kind, exported as never);
+  // A handler that declares `uses` is invoked with an init scoped to those rights (handler-rights.ts).
+  return scopeResolvedHandler(makeResolved(handler.kind, exported as never), handler);
 }
 
 /** Build the typed ResolvedHandler union member for a kind (one place the kind→type map lives). */

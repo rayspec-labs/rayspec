@@ -570,6 +570,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are bearer tokens, credential headers, URL passwords, PEM private keys, JSON web tokens, RaySpec
   API keys and `sk-…` provider keys. See
   [Hosting in the hardened posture → Redaction](./docs/hardened-posture.md#redaction).
+- **Scoped handler rights: `handlers[].uses`.** A handler may list the capabilities it uses
+  (`blob`, `fsSource`, `stt`, `tts`, `emit`, `enqueue`, `mintPlayToken`, `bindings`); its init then
+  carries exactly those, and reaching for another one throws `ToolRightNotGrantedError` instead of
+  arriving. A right outside the list is refused when the document is parsed, one the handler's kind
+  never receives by the lint (`capability_violation`), and one the deployment does not grant by the
+  boot before anything is written, naming the handler and the missing setting. Under
+  `RAYSPEC_HOSTING_POSTURE=managed` a handler without `uses` refuses the boot. Without the key a
+  handler receives what the deployment configured, as before. `spec.schema.json` and
+  `version-1.0.schema.json` carry it; a 1.8 parser refuses a spec that uses it. See
+  [Hosting in the hardened posture → Tool rights](./docs/hardened-posture.md#tool-rights).
 
 ### Changed
 
@@ -802,6 +812,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take it as a peer).
 
 ### Upgrade notes
+
+- **Under `RAYSPEC_HOSTING_POSTURE=managed`, every handler declares `uses`.** A spec whose handlers
+  do not refuses the boot under the managed posture; add `uses` (an empty list for a handler that
+  uses no optional capability). Without the managed posture nothing changes.
 
 - **Log lines and error messages are redacted.** A line or message that carried a credential shape
   (a bearer token, a credential header, a URL password, a key) or a value the process holds as a

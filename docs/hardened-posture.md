@@ -16,7 +16,7 @@ hosting posture as supported only when all of it is on.
 | --- | --- | --- |
 | `RAYSPEC_MIGRATION_DATABASE_URL` (or `_FILE`), with the roles from `database-roles.sql` | Role separation and row-level security: the migration role changes the schema, the server serves as a runtime role that cannot bypass the tenant policies. See [Database roles and row-level security](./database-isolation.md). | one role migrates and serves |
 | `RAYSPEC_SINGLE_TENANT=true` | Single-tenant mode: the runtime holds one organization. Creating a second one is refused on every path (the HTTP routes, the operator bootstrap, `rayspec tenant ensure`); open registration only creates that first one, and after it an account is made by redeeming an invite. | any number of organizations; open registration |
-| `RAYSPEC_HOSTING_POSTURE=managed` | The public `/recovery-scope` probe is not registered, cross-process run cancellation is on by default, every execution bound has a default ([Bounded execution](#bounded-execution)), a boot that would use a backend outside the [supported-backend matrix](#supported-backends) is refused, and agent traces are not exported unless `RAYSPEC_AGENT_TRACING=openai` ([Telemetry](#telemetry)). | `local` |
+| `RAYSPEC_HOSTING_POSTURE=managed` | The public `/recovery-scope` probe is not registered, cross-process run cancellation is on by default, every execution bound has a default ([Bounded execution](#bounded-execution)), a boot that would use a backend outside the [supported-backend matrix](#supported-backends) is refused, agent traces are not exported unless `RAYSPEC_AGENT_TRACING=openai` ([Telemetry](#telemetry)), and every handler must declare its rights ([Tool rights](#tool-rights)). | `local` |
 | `RAYSPEC_TRUSTED_PROXIES` | Behind a reverse proxy, the proxy addresses whose forwarding headers are believed; nothing else can set the client address. | the socket peer is the client |
 
 `RAYSPEC_SINGLE_TENANT` accepts exactly `true` or `false`; any other value refuses the boot, so a
@@ -331,6 +331,29 @@ platform fetch a URL. The provider adapters call the endpoints the operator conf
 (`OPENAI_BASE_URL` and `DEEPGRAM_BASE_URL` are reserved operator settings a bundle cannot set). A test
 holds the list of every outbound call site in the shipped source, so a new one is either routed
 through the guard or reviewed.
+
+## Tool rights
+
+A handler states the capabilities it uses in `handlers[].uses`
+([Spec reference](./spec-reference.md#handlers)): `blob`, `fsSource`, `stt`, `tts`, `emit`,
+`enqueue`, `mintPlayToken`, `bindings`. A declaring handler gets exactly those; one it did not
+declare throws `ToolRightNotGrantedError` when the handler reaches for it, rather than arriving or
+silently missing. Every refusal comes before the handler runs:
+
+| Asked for | Refused |
+| --- | --- |
+| a right outside the vocabulary | when the document is parsed (`schema_violation`) |
+| a right the handler's kind never receives | by the lint (`capability_violation`) |
+| a right this deployment does not grant | by the boot, before anything is written, naming the handler, the right and the missing setting |
+| nothing, under `RAYSPEC_HOSTING_POSTURE=managed` | by the boot: every handler lists its rights (an empty list when it uses none) |
+
+An agent's tools are the declared `tooling[]` entries it references: a reference to a tool that is
+not declared is refused when the document is parsed, and a tool call the model makes to a name the
+agent does not have is answered with a `tool_error` and never runs. The `anthropic` and `pi`
+backends offer the model none of their own built-in tools; the `codex` backend keeps its own tools
+inside a read-only sandbox with no network (one reason it is self-host-only). Every tool of the
+spec is dispatched through the platform. This scopes what the platform hands a handler; it is not a sandbox
+(see [What it does not protect against](#what-it-does-not-protect-against)).
 
 ## What handler code is given
 

@@ -478,6 +478,29 @@ export type StoreSpec = z.infer<typeof StoreSpec>;
 export const HandlerKind = z.enum(['tool', 'route', 'trigger']);
 export type HandlerKind = z.infer<typeof HandlerKind>;
 
+/**
+ * A right a handler may ask for: one of the optional capabilities its init can carry. The vocabulary
+ * is CLOSED: a name outside it is refused when the document is parsed, before anything runs.
+ *  - `blob` — `init.blob`, tenant-bound binary storage (stream routes and tools);
+ *  - `fsSource` — `init.fsSource`, the read-only local file source (`{handler}` routes and tools);
+ *  - `stt`, `tts` — `init.stt` / `init.tts`, speech (`{handler}` routes and tools);
+ *  - `emit` — `init.emit`, the tenant event bus (`{handler}` routes and tools);
+ *  - `enqueue` — `init.enqueue`, a durable agent run (`{handler}` routes);
+ *  - `mintPlayToken` — `init.mintPlayToken`, a playback token (`{handler}` routes);
+ *  - `bindings` — `init.bindings`, the application's own bindings (every handler).
+ */
+export const HandlerRight = z.enum([
+  'blob',
+  'fsSource',
+  'stt',
+  'tts',
+  'emit',
+  'enqueue',
+  'mintPlayToken',
+  'bindings',
+]);
+export type HandlerRight = z.infer<typeof HandlerRight>;
+
 export const HandlerSpec = z
   .object({
     /** Logical id referenced by tooling/api/triggers. */
@@ -492,6 +515,20 @@ export const HandlerSpec = z
      * `store:read` instead of the default `store:write`, so a read-scoped credential can reach it.
      */
     readonly: z.boolean().optional(),
+    /**
+     * Opt-in: the rights this handler asks for (see `HandlerRight`). When declared, the handler's init
+     * carries exactly these capabilities — reaching for any other one throws — and a boot whose
+     * deployment does not grant one of them is refused before anything runs. Absent ⇒ the handler
+     * receives every capability the deployment configured, as before (refused under the managed
+     * hosting posture, which requires the declaration).
+     */
+    uses: z
+      .array(HandlerRight)
+      .refine((rights) => new Set(rights).size === rights.length, {
+        message: 'each right may be listed once',
+      })
+      .meta({ uniqueItems: true })
+      .optional(),
     /** Optional advisory acknowledgements scoped to THIS handler (see `LintSuppression`) — the node
      *  `typescript_handler_module` fires on. This schema doubles as the extension-pack handler
      *  fragment schema (`loadExtensions`, packages/kernel/platform), so a pack fragment may carry the

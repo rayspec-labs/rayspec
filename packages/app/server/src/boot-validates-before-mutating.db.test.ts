@@ -500,6 +500,31 @@ handlers:
         message: /route POST \/v1\/first-notes is under a RESERVED platform prefix/,
       },
       {
+        // A handler asking for a right this deployment does not grant: no STT_PROVIDER.
+        name: 'right-not-granted.yaml',
+        spec: `${VALID_SPEC}  - method: GET
+    path: /transcribe
+    action: { kind: handler, handler: speech_handler }
+handlers:
+  - { id: speech_handler, module: handlers/tick.mjs, export: tick, kind: route, uses: [stt, emit] }
+`,
+        message:
+          /handler 'speech_handler' asks for the right 'stt', which this deployment does not grant: STT_PROVIDER is not set; handler 'speech_handler' asks for the right 'emit', which this deployment does not grant: the spec does not enable deployment\.eventBus/,
+      },
+      {
+        // Under the managed posture every handler states its rights.
+        name: 'managed-undeclared-rights.yaml',
+        spec: `${VALID_SPEC}  - method: GET
+    path: /tick
+    action: { kind: handler, handler: tick_handler }
+handlers:
+  - { id: tick_handler, module: handlers/tick.mjs, export: tick, kind: route }
+`,
+        env: { RAYSPEC_HOSTING_POSTURE: 'managed' },
+        message:
+          /handler 'tick_handler' declares no rights; under RAYSPEC_HOSTING_POSTURE=managed every handler lists the capabilities it uses/,
+      },
+      {
         // No registrar: the product table never reaches the chokepoint.
         name: 'no-registrar.yaml',
         spec: VALID_SPEC,

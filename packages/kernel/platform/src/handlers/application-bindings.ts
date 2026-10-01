@@ -85,3 +85,8 @@ export function setApplicationBindings(grant: ApplicationBindingGrant | undefine
 export function applicationBindingsInit(): { bindings?: ApplicationBindings } {
   return reader === undefined ? {} : { bindings: reader };
 }
+
+/** Whether this process's deployment granted application bindings (a bundle deployment). */
+export function applicationBindingsGranted(): boolean {
+  return reader !== undefined;
+}
