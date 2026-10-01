@@ -34,6 +34,7 @@ import {
   type TtsCapability,
 } from '@rayspec/handler-sdk';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { applicationBindingsInit } from './application-bindings.js';
 import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime } from './handler-runtime.js';
 import { makeHandlerDb } from './store-facade.js';
@@ -223,6 +224,8 @@ function buildRouteHandlerInit(
     // an invocation context with no authenticated principal; never fabricated). DATA — never a
     // tenant signal (the tenant stays server-derived).
     ...(principal ? { principal } : {}),
+    // The application's own bindings, on a bundle deployment (absent otherwise).
+    ...applicationBindingsInit(),
     params,
   };
 }
@@ -379,6 +382,8 @@ export async function invokeStreamRouteHandler(
       // The authenticated caller (spread so ABSENT when no principal was resolved — the playback
       // posture; never fabricated). DATA — never a tenant signal (the tenant stays server-derived).
       ...(principal ? { principal } : {}),
+      // The application's own bindings, on a bundle deployment (absent otherwise).
+      ...applicationBindingsInit(),
     };
     return fn(init);
   });
@@ -399,6 +404,8 @@ export async function invokeTriggerHandler(
       tenantId: txTdb.tenantId,
       db: makeHandlerDb(txTdb, productTables),
       triggerName,
+      // The application's own bindings, on a bundle deployment (absent otherwise).
+      ...applicationBindingsInit(),
     };
     await getHandlerRuntime().invokeTrigger(fn, init);
   });

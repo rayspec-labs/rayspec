@@ -306,6 +306,16 @@ export class DeepgramSttAdapter implements SttAdapter {
 /** Map a non-2xx status to a neutral adapter error — status + provider name ONLY (never the body). */
 function httpError(status: number): SttAdapterError {
   const retryable = status === 429 || status >= 500;
+  if (status === 401 || status === 403) {
+    // A refused credential fails closed and says which one: never retried, never swapped for another.
+    return {
+      code: 'provider_unavailable',
+      message:
+        `deepgram refused the credential DEEPGRAM_API_KEY (HTTP ${status}): it is invalid, ` +
+        'expired, revoked or not permitted. Supply a valid key.',
+      retryable: false,
+    };
+  }
   return {
     code: 'provider_unavailable',
     message: `deepgram transcription failed: HTTP ${status}`,

@@ -167,6 +167,7 @@ import {
   prepareProductYamlSpec,
   validateProductYamlSpec,
 } from './product-boot.js';
+import { providerCredential } from './provider-credentials.js';
 import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
 import { gatedProducer, queueProducer, RuntimeFence } from './runtime-fence.js';
 import { type CatalogQuery, readPlatformHead, runtimePlatformHead } from './schema-head.js';
@@ -1497,10 +1498,12 @@ export function loadServerConfig(
   // VALUE is validated where the capability is built: loadServerConfig just resolves them;
   // deployDeclaredSpec fail-closes on an unsupported provider or a missing credential. An UNSET
   // provider is not an error at any point (the capability is simply absent, like an unset fs-source
-  // root). The key is trimmed + only carried through when non-blank (a blank key is no key).
+  // root). The key is trimmed + only carried through when non-blank (a blank key is no key); it is read
+  // through the one provider-credential reader, so DEEPGRAM_API_KEY_FILE and a bundle's bindings file
+  // supply it too (provider-credentials.ts).
   const sttProvider = env.STT_PROVIDER?.trim();
   if (sttProvider) config.sttProvider = sttProvider;
-  const deepgramApiKey = env.DEEPGRAM_API_KEY?.trim();
+  const deepgramApiKey = providerCredential(env, 'DEEPGRAM_API_KEY');
   if (deepgramApiKey) config.deepgramApiKey = deepgramApiKey;
 
   // The TTS provider selection (the `init.tts` capability) + its credential. Resolved RAW here on the
@@ -1508,7 +1511,7 @@ export function loadServerConfig(
   // provider is never an error, and the key is trimmed + only carried through when non-blank.
   const ttsProvider = env.TTS_PROVIDER?.trim();
   if (ttsProvider) config.ttsProvider = ttsProvider;
-  const openaiApiKey = env.OPENAI_API_KEY?.trim();
+  const openaiApiKey = providerCredential(env, 'OPENAI_API_KEY');
   if (openaiApiKey) config.openaiApiKey = openaiApiKey;
 
   return config;

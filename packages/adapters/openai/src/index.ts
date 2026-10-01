@@ -45,7 +45,9 @@
  *         (tool.d.ts:571) — the RETURN VALUE becomes the tool RESULT fed back to the model.
  *       details: ToolCallDetails { toolCall?: FunctionCallItem; signal?: AbortSignal }  (tool.d.ts:28)
  *         — `details.toolCall.callId` is the SDK's REAL tool-call id (the correlation id).
- *   - `setDefaultOpenAIKey(key)` from @openai/agents-openai (re-exported by @openai/agents).
+ *   - `new OpenAIProvider({ openAIClient })` from @openai/agents-openai (re-exported by
+ *     @openai/agents): a provider bound to ONE client, whose `getModel(name)` gives the model the agent
+ *     runs on. The adapter never registers a process-global key or client.
  *   - outputType accepts a JsonSchemaDefinition: { type:'json_schema', name, strict, schema }.
  *   - RunState serialization: result.state.toString() / RunState.fromString; CURRENT_SCHEMA_VERSION
  *     = "1.13" (runState.d.ts:45); fromString THROWS on a $schemaVersion mismatch. We do NOT use
@@ -86,15 +88,14 @@ import type {
   ToolSpec,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, costUsd, hashJson } from '@rayspec/core';
 import {
-  Agent,
-  getDefaultModelSettings,
-  run,
-  setDefaultOpenAIClient,
-  setDefaultOpenAIKey,
-  tool,
-} from '@openai/agents';
+  classifyUpstreamError,
+  costUsd,
+  credentialRefusedMessage,
+  hashJson,
+  isCredentialRefusal,
+} from '@rayspec/core';
+import { Agent, getDefaultModelSettings, type Model, OpenAIProvider, run, tool } from '@openai/agents';
 import OpenAI from 'openai';
 
 /**
@@ -185,6 +186,8 @@ export class OpenAIAdapter implements Backend {
   private readonly apiKey: string;
   private readonly timeoutMs: number | undefined;
   private readonly maxAttempts: number | undefined;
+  private client: OpenAI | undefined;
+  private provider: OpenAIProvider | undefined;
 
   constructor(opts: OpenAIAdapterOptions) {
     this.apiKey = opts.apiKey;
@@ -195,36 +198,54 @@ export class OpenAIAdapter implements Backend {
   // The OpenAI Agents SDK has no subscription/OAuth path — API key is the only mode.
   async resolveAuth(): Promise<AuthMode> {
     if (!this.apiKey) throw new Error('OpenAIAdapter: missing OPENAI_API_KEY');
-    // The run() call takes neither a timeout nor an attempt count (SharedRunOptions,
-    // @openai/agents-core/dist/run.d.ts) — both live on the underlying openai HTTP client, which the
-    // SDK's provider builds as `getDefaultOpenAIClient() ?? new OpenAI({...})`. So a configured bound
-    // is applied by registering that client here. `maxRetries` counts RETRIES, one fewer than the
-    // attempts the option names. With neither bound configured we register the key exactly as before.
-    if (this.timeoutMs !== undefined || this.maxAttempts !== undefined) {
-      const client = new OpenAI({
+    return 'api-key';
+  }
+
+  /**
+   * The openai HTTP client THIS adapter's runs use: its own key, and the configured bounds. It is never
+   * registered as the SDK's process-global default — a default is last-writer-wins, so two adapters
+   * with different keys in one process (two agents, or two tenants behind a factory) would send each
+   * other's key. The run() call takes neither a timeout nor an attempt count (SharedRunOptions,
+   * @openai/agents-core/dist/run.d.ts); both live on this client. `maxRetries` counts RETRIES, one
+   * fewer than the attempts the option names; an unset bound keeps the client's own default.
+   */
+  openAIClient(): OpenAI {
+    if (this.client === undefined) {
+      this.client = new OpenAI({
         apiKey: this.apiKey,
-        timeout: this.timeoutMs,
+        ...(this.timeoutMs !== undefined ? { timeout: this.timeoutMs } : {}),
         // Clamped at 0 so the retry count can never go NEGATIVE. `openai@6.44.0` decides whether to
         // retry with a truthiness test on the remaining count (`if (retriesRemaining)`,
         // openai/client.mjs:372 and :422) and decrements it per attempt (:563), so a negative count
         // never reaches 0 and the client retries without end — the opposite of the bound this option
         // names. `OpenAIAdapterOptions` is exported, so a caller can pass 0 directly even though the
         // environment resolver never yields it.
-        maxRetries: this.maxAttempts === undefined ? undefined : Math.max(0, this.maxAttempts - 1),
+        ...(this.maxAttempts !== undefined
+          ? { maxRetries: Math.max(0, this.maxAttempts - 1) }
+          : {}),
       });
+    }
+    return this.client;
+  }
+
+  /** The model `spec.model` names, bound to this adapter's own client. */
+  private async modelFor(name: string): Promise<Model> {
+    if (this.provider === undefined) {
       // `openai` ships a dual build with one CommonJS-mode .d.ts, so the class this ESM module
       // constructs and the class the CJS-typed SDK declares are nominally distinct to TypeScript
       // (the class carries a private field) though they are the same installed version — and the
       // SDK's own ESM entry imports the same ESM build this does. Hence the assertion.
-      setDefaultOpenAIClient(client as unknown as Parameters<typeof setDefaultOpenAIClient>[0]);
-    } else {
-      setDefaultOpenAIKey(this.apiKey);
+      this.provider = new OpenAIProvider({
+        openAIClient: this.openAIClient() as unknown as NonNullable<
+          ConstructorParameters<typeof OpenAIProvider>[0]
+        >['openAIClient'],
+      });
     }
-    return 'api-key';
+    return this.provider.getModel(name);
   }
 
   async run(spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
-    // resolveAuth() is idempotent (applies setDefaultOpenAIKey); the run's authMode is the one
+    // resolveAuth() is idempotent (it checks the key); the run's authMode is the one
     // run-core resolved ONCE and threaded on ctx — every journaled step attributes
     // to it. Fall back to this.resolveAuth() if run-core did not thread it.
     const resolved = await this.resolveAuth();
@@ -262,7 +283,9 @@ export class OpenAIAdapter implements Backend {
     const agent = new Agent({
       name: spec.name,
       instructions: spec.instructions,
-      model: spec.model,
+      // The model instance bound to THIS adapter's client and key, not a name the SDK would resolve
+      // through its process-global default provider.
+      model: await this.modelFor(spec.model),
       tools,
       ...(outputType ? { outputType } : {}),
       ...(sequentialTools
@@ -302,7 +325,12 @@ export class OpenAIAdapter implements Backend {
       // is written into the failing journal step's output jsonb AND onto the RunResult; a captured
       // Retry-After (seconds) is recorded in the step output too so the sync endpoint can surface the
       // header (RunResult shape stays exactly errorClass-additive, so parity is unaffected).
-      const { errorClass, message: errorMessage, retryAfter } = classifyUpstreamError(err);
+      const classified = classifyUpstreamError(err);
+      const { errorClass, retryAfter } = classified;
+      // A refused credential is named, never quoted: the provider's text can carry part of the key.
+      const errorMessage = isCredentialRefusal(err)
+        ? credentialRefusedMessage('OPENAI_API_KEY', err)
+        : classified.message;
       const latencyMs = Date.now() - startedAt;
       await ctx.journal.record({
         type: 'llm',

@@ -104,6 +104,38 @@ function extractStatus(err: unknown, depth = 0): number | undefined {
   return candidates[0];
 }
 
+/** The HTTP status an upstream error carries, as the classifier reads it; `undefined` when none. */
+export function upstreamHttpStatus(err: unknown): number | undefined {
+  try {
+    return extractStatus(err);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether an upstream error is the provider refusing the credential: HTTP 401 (unknown, expired or
+ * revoked) or 403 (not permitted).
+ */
+export function isCredentialRefusal(err: unknown): boolean {
+  const status = upstreamHttpStatus(err);
+  return status === 401 || status === 403;
+}
+
+/**
+ * The message a run records when the provider refused its credential. It names the credential, never
+ * its value, and replaces the provider's own text, which can quote part of the key. The run fails and
+ * is not retried, and no other credential is tried in its place.
+ */
+export function credentialRefusedMessage(credential: string, err: unknown): string {
+  const status = upstreamHttpStatus(err);
+  return (
+    `the model provider refused the credential ${credential} (HTTP ${status ?? 'error'}): it is ` +
+    'invalid, expired, revoked or not permitted for this request. Supply a valid value; the run ' +
+    'is not retried with another credential.'
+  );
+}
+
 /** Collect every finite HTTP status (100–599) in the shallow `cause`/`error` walk, in walk order. */
 function collectStatuses(err: unknown, depth: number, out: number[]): void {
   if (err === null || typeof err !== 'object' || depth > 3) return;

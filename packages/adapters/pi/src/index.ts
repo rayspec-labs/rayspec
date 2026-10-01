@@ -76,8 +76,10 @@ import type {
 import {
   type CallWatchdog,
   classifyUpstreamError,
+  credentialRefusedMessage,
   costUsd,
   hashJson,
+  isCredentialRefusal,
   onAbortSignal,
   ProviderCallTimeoutError,
   startCallWatchdog,
@@ -580,7 +582,10 @@ export class PiAdapter implements Backend {
       } catch (err) {
         status = 'error';
         const classified = classifyUpstreamError(err);
-        errorMessage = classified.message;
+        // A refused credential is named, never quoted: the provider's text can carry part of the key.
+        errorMessage = isCredentialRefusal(err)
+          ? credentialRefusedMessage('OPENAI_API_KEY', err)
+          : classified.message;
         errorClass = classified.errorClass;
         errorRetryAfter = classified.retryAfter;
       }

@@ -16,7 +16,14 @@
  *  - resolve-tools.ts   (2) declared `tooling[]` → `NeutralTool[]` factory (per-run, tenant-bound).
  *  - route-init.ts          builders for the route/trigger `HandlerInit` (the transaction-wrapped
  *                           route/trigger path).
+ *  - application-bindings.ts the `init.bindings` reader a bundle deployment grants its handlers.
  */
+export {
+  type ApplicationBindingGrant,
+  applicationBindingsReader,
+  BindingNotGrantedError,
+  setApplicationBindings,
+} from './application-bindings.js';
 export type { BufferedTenantEmit, TenantEventBus } from './event-bus.js';
 export { CREDENTIAL_REQUEST_HEADERS, withoutCredentials } from './handler-request.js';
 export {

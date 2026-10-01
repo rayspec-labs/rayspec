@@ -548,6 +548,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for a pepper that leaked: every such credential is refused at once, and passwords are unaffected.
   The operator procedure for both is in
   [Hosting in the hardened posture → Credentials and rotation](./docs/hardened-posture.md#the-api-key-pepper).
+- **Provider keys from a file, and each to the component that uses it.** `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY` and `DEEPGRAM_API_KEY` each accept
+  a `<NAME>_FILE` variant — a regular file of the server user, mode 600, never a link — which wins
+  over the plain variable and never falls back to it; a value read from a file stays out of the
+  process environment. A refused key (`401`/`403`) fails the run, transcription or synthesis with a
+  message naming the credential instead of the provider's text, without a retry and without another
+  credential in its place. See
+  [Hosting in the hardened posture → Provider credentials](./docs/hardened-posture.md#provider-credentials).
+- **`init.bindings`: a bundle's own bindings, for its handlers.** On `rayspec deploy <file.ray>` the
+  values of the application names the manifest declares reach every handler kind as
+  `init.bindings.get(name)` (and `names`); a name the bundle does not declare, or a provider
+  credential, throws `BindingNotGrantedError` instead of answering `undefined`. The type ships in
+  `@rayspec/handler-sdk`. See
+  [Spec reference → `init.bindings`](./docs/spec-reference.md#initbindings--application-bindings).
 
 ### Changed
 
@@ -780,6 +794,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take it as a peer).
 
 ### Upgrade notes
+
+- **A bundle deploy hands bindings over differently.** The bindings file may supply only names the
+  bundle declares (plus the selected speech provider's key); any other name is refused with
+  `RAY_USAGE`. Its values are no longer written into the process environment: provider keys go to
+  their adapters, the application's own names to `init.bindings`. A handler of a bundle that read a
+  declared binding from `process.env` reads it from `init.bindings.get(name)` instead. A YAML deploy
+  is unchanged.
+- **The anthropic backend's child process no longer inherits the whole server environment.** It is
+  started without the other providers' keys, every `_FILE` variant, the database URLs (`DATABASE_URL`,
+  `SHADOW_DATABASE_URL`, `DBOS_…`, `PG…`) and every `RAYSPEC_…` and `CLOUD_…` setting, in every
+  posture: handing a model client the database credentials was unsafe for every deployment. Its own
+  two credentials, proxy settings and everything else are passed as before.
+- **The openai backend no longer registers its key or client as the agent SDK's process-wide
+  default.** Each backend instance uses its own client, so two backends with different keys cannot
+  send each other's. Code outside RaySpec that relied on the default being set by RaySpec must set
+  it itself.
 
 - **Changing the API-key pepper also invalidates refresh sessions and invites,** as it always did;
   the architecture guide said only API keys were affected, and now says all three. Use

@@ -5,10 +5,11 @@
  * prompt AND the DECLARED extraction_constraints are BOTH composed into the instructions.
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { OpenAIAdapter } from '@rayspec/adapter-openai';
 import type { PlannedMigration } from '@rayspec/api-auth';
 import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -59,16 +60,6 @@ vi.mock('@openai/agents', async (importOriginal) => {
       openaiRegistration.setDefaultOpenAIClient(...args),
   };
 });
-
-/** The client handed to setDefaultOpenAIClient by the single registration a case performed. */
-function registeredClient(): { timeout: number; maxRetries: number; apiKey: string | null } {
-  expect(openaiRegistration.setDefaultOpenAIClient).toHaveBeenCalledTimes(1);
-  return openaiRegistration.setDefaultOpenAIClient.mock.calls[0]?.[0] as {
-    timeout: number;
-    maxRetries: number;
-    apiKey: string | null;
-  };
-}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ACME_YAML = resolve(here, '../../../../examples/acme-notes/acme-notes.product.yaml');
@@ -305,24 +296,57 @@ describe('makeExtractionBackend — the boot-side backend factory (fail-closed p
       },
       'openai',
     );
-    // Registration happens in resolveAuth() — the one pre-run auth call — not in the constructor.
     expect(await backend.resolveAuth()).toBe('api-key');
-    const client = registeredClient();
+    // The adapter's own client, which its model is bound to; nothing is registered process wide.
+    const client = (backend as OpenAIAdapter).openAIClient() as unknown as {
+      timeout: number;
+      maxRetries: number;
+      apiKey: string | null;
+    };
     expect(client.timeout).toBe(45_000); // RAYSPEC_AGENT_REQUEST_TIMEOUT_MS, verbatim
     expect(client.maxRetries).toBe(1); // RAYSPEC_AGENT_MAX_ATTEMPTS=2 ⇒ the first try plus one retry
     expect(client.apiKey).toBe('sk-bounded');
     expect(openaiRegistration.setDefaultOpenAIKey).not.toHaveBeenCalled();
+    expect(openaiRegistration.setDefaultOpenAIClient).not.toHaveBeenCalled();
   });
-  it('registers the API KEY and NO client when neither agent request bound is set', async () => {
-    // The other half of the promise: with both variables unset the boot registers auth exactly as it
-    // did before they existed — the key alone, no client and so no bound of any kind.
+  it('builds the client with the key alone when neither agent request bound is set', async () => {
+    // The other half of the promise: with both variables unset the client carries the key and the
+    // openai client's own defaults, no bound of RaySpec's.
     openaiRegistration.setDefaultOpenAIKey.mockClear();
     openaiRegistration.setDefaultOpenAIClient.mockClear();
     const backend = makeExtractionBackend({ OPENAI_API_KEY: 'sk-unbounded' }, 'openai');
     expect(await backend.resolveAuth()).toBe('api-key');
-    expect(openaiRegistration.setDefaultOpenAIKey).toHaveBeenCalledTimes(1);
-    expect(openaiRegistration.setDefaultOpenAIKey).toHaveBeenCalledWith('sk-unbounded');
+    const client = (backend as OpenAIAdapter).openAIClient() as unknown as {
+      timeout: number;
+      maxRetries: number;
+      apiKey: string | null;
+    };
+    expect(client.apiKey).toBe('sk-unbounded');
+    expect(client.timeout).toBe(600_000);
+    expect(client.maxRetries).toBe(2);
+    expect(openaiRegistration.setDefaultOpenAIKey).not.toHaveBeenCalled();
     expect(openaiRegistration.setDefaultOpenAIClient).not.toHaveBeenCalled();
+  });
+  it("reads OPENAI_API_KEY_FILE for 'openai', which wins over the plain variable", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rayspec-openai-key-'));
+    try {
+      const keyFile = join(dir, 'openai-key');
+      writeFileSync(keyFile, 'sk-from-the-file\n');
+      chmodSync(keyFile, 0o600);
+      const backend = makeExtractionBackend(
+        { OPENAI_API_KEY_FILE: keyFile, OPENAI_API_KEY: 'sk-plain' },
+        'openai',
+      ) as OpenAIAdapter;
+      expect((backend.openAIClient() as unknown as { apiKey: string }).apiKey).toBe(
+        'sk-from-the-file',
+      );
+      chmodSync(keyFile, 0o644);
+      expect(() => makeExtractionBackend({ OPENAI_API_KEY_FILE: keyFile }, 'openai')).toThrow(
+        /OPENAI_API_KEY_FILE .* readable or writable by group or others/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
   it("constructs the AnthropicAdapter for 'anthropic' (subscription token + config root)", () => {
     const ok = { CLAUDE_CODE_OAUTH_TOKEN: 'tok', RAYSPEC_ANTHROPIC_CONFIG_ROOT: '/tmp/anthro' };

@@ -164,7 +164,10 @@ export {
 // transaction-wrapped invocation. Composed by the api-auth declarative engine.
 export type { BufferedTenantEmit, TenantEventBus } from './handlers/index.js';
 export {
+  type ApplicationBindingGrant,
+  applicationBindingsReader,
   assertCompiledJavaScriptModule,
+  BindingNotGrantedError,
   buildToolFactory,
   CREDENTIAL_REQUEST_HEADERS,
   defaultImporter,
@@ -183,6 +186,7 @@ export {
   makeHandlerDb,
   type ResolvedHandler,
   StoreInputError,
+  setApplicationBindings,
   setHandlerRuntime,
   type ToolFactory,
   typeStrippingImporter,

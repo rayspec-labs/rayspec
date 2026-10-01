@@ -149,6 +149,54 @@ same matrix.
 
 ## Credentials and rotation
 
+### Provider credentials
+
+The model and speech provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+`CODEX_API_KEY`, `DEEPGRAM_API_KEY`) are read in one place, in this order:
+
+1. a value a bundle deploy took from its bindings file;
+2. `<NAME>_FILE`, a file the operator names: a regular file (not a link), owned by the user the
+   runtime runs as, closed to group and others. A set `_FILE` never falls back to the plain
+   variable; a file that is missing, insecure, larger than 64 KiB or empty refuses the boot (or the
+   bundle deploy, as `RAY_BINDINGS_FILE_INSECURE` or `RAY_USAGE`), naming the variable and the path
+   and nothing read from the file;
+3. the plain variable.
+
+A value from a file or a bindings file never enters the process environment. Each credential is
+handed only to the component that uses it, and each agent backend has exactly one source for it:
+
+| Credential | Handed to |
+| --- | --- |
+| `OPENAI_API_KEY` | the `openai` and `pi` agent backends, and the OpenAI speech adapter (`TTS_PROVIDER=openai`) |
+| `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` | the `anthropic` backend's `claude` child process |
+| `DEEPGRAM_API_KEY` | the Deepgram speech adapter (`STT_PROVIDER=deepgram`) |
+| `CODEX_API_KEY` | nothing: the `codex` backend runs on the login in `CODEX_HOME` and strips the key from its child |
+
+The `claude` child is started with this process's environment **minus** the other providers' keys,
+every `_FILE` variant, the database URLs (`DATABASE_URL`, `SHADOW_DATABASE_URL`, `DBOS_…`, `PG…`) and
+every `RAYSPEC_…` and `CLOUD_…` setting; it gets its own credential and its per-tenant config
+directory. Each `openai` backend holds its own HTTP client with its own key; none registers a
+process-wide default that another backend could pick up, so two agents (or two tenants behind a
+backend factory) configured with different keys never send each other's.
+
+**A refused key fails closed.** When the provider answers `401` or `403`, the run (or the
+transcription, or the synthesis) fails with a message that names the credential — "refused the
+credential `OPENAI_API_KEY` (HTTP 401): it is invalid, expired, revoked or not permitted" — and
+not the provider's own text, which can quote part of the key. It is not retried, and no other
+credential is tried in its place. The `anthropic` backend reports what its child reports.
+
+**Application bindings.** On a bundle deploy (`rayspec deploy <file.ray>`) the bindings file may
+supply only the names the bundle's manifest declares, plus the speech provider key the operator
+selected (`DEEPGRAM_API_KEY` under `STT_PROVIDER=deepgram`, `OPENAI_API_KEY` under
+`TTS_PROVIDER=openai`); any other name is refused with `RAY_USAGE`, a reserved one with
+`RAY_BINDING_RESERVED`. The application's own declared bindings reach its handlers as
+`init.bindings.get(name)`, never through the process environment; asking for a name the bundle does
+not declare, or for a provider credential, throws (`BindingNotGrantedError`). See
+[Spec reference → `init.bindings`](./spec-reference.md#initbindings--application-bindings). Handler code
+runs in the runtime process, so this keeps values out of the environment and away from child
+processes; it does not stop code that goes looking (see [What it does not protect
+against](#what-it-does-not-protect-against)).
+
 ### The JWT signing key
 
 `RAYSPEC_JWT_SIGNING_KEY` signs every access token and the OIDC provider's tokens. To rotate it

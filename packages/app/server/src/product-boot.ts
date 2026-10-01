@@ -156,6 +156,12 @@ import {
 import { type DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
+import {
+  isProviderCredentialName,
+  type ProviderCredentialName,
+  providerCredential,
+  providerCredentialSupplied,
+} from './provider-credentials.js';
 import { gatedProducer, queueProducer, type RuntimeFence } from './runtime-fence.js';
 import { lockSchemaInTransaction } from './schema-lock.js';
 import { assertManagedPostureBackends, managedBackendRefusal } from './supported-backends.js';
@@ -267,7 +273,11 @@ export interface DeployProductYamlOpts {
  * required" wording the CLI matches on to append its searched-`.env`-paths diagnostic.
  */
 function requireEnv(env: NodeJS.ProcessEnv, demand: BootEnvVar): string {
-  const v = env[demand.name]?.trim();
+  // A provider credential is read through the one credential reader (its `_FILE`, a value a bundle
+  // deploy granted, or the plain variable); every other demand is the plain variable.
+  const v = isProviderCredentialName(demand.name)
+    ? providerCredential(env, demand.name as ProviderCredentialName)
+    : env[demand.name]?.trim();
   if (!v) throw new ProductBootError(`${demand.name} is required (${demand.what}). Fail-closed.`);
   return v;
 }
@@ -843,7 +853,12 @@ export const WIRED_EXTRACTION_BACKENDS = ['openai', 'anthropic', 'pi', 'codex'] 
  * a deployer may legitimately want the API-key path.
  */
 export function anthropicApiKeyOverrideWarning(env: NodeJS.ProcessEnv): string | null {
-  if (!env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || !env.ANTHROPIC_API_KEY?.trim()) return null;
+  if (
+    !providerCredentialSupplied(env, 'CLAUDE_CODE_OAUTH_TOKEN') ||
+    !providerCredentialSupplied(env, 'ANTHROPIC_API_KEY')
+  ) {
+    return null;
+  }
   return (
     '\n⚠️  RAYSPEC PRODUCT BOOT — ANTHROPIC SUBSCRIPTION INTENT WILL BE OVERRIDDEN & BILLED ⚠️\n' +
     '    BOTH CLAUDE_CODE_OAUTH_TOKEN (the $0 subscription harness) AND ANTHROPIC_API_KEY are set.\n' +
@@ -887,8 +902,8 @@ export function anthropicReuseLoginEnabled(env: NodeJS.ProcessEnv): boolean {
  */
 export function anthropicReuseLoginShadowWarning(env: NodeJS.ProcessEnv): string | null {
   if (!anthropicReuseLoginEnabled(env)) return null;
-  const hasApiKey = Boolean(env.ANTHROPIC_API_KEY?.trim());
-  const hasOauth = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
+  const hasApiKey = providerCredentialSupplied(env, 'ANTHROPIC_API_KEY');
+  const hasOauth = providerCredentialSupplied(env, 'CLAUDE_CODE_OAUTH_TOKEN');
   if (!hasApiKey && !hasOauth) return null;
   const present = [
     hasApiKey ? 'ANTHROPIC_API_KEY' : null,
@@ -948,7 +963,13 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       // unchanged; it passes that dir to the child, which reuses the seeded login. Absent the flag the
       // throw below is byte-identical (fail-closed).
       const reuseLogin = anthropicReuseLoginEnabled(env);
-      if (!reuseLogin && !env.CLAUDE_CODE_OAUTH_TOKEN?.trim() && !env.ANTHROPIC_API_KEY?.trim()) {
+      const apiKey = providerCredential(env, 'ANTHROPIC_API_KEY');
+      const oauthToken = providerCredential(env, 'CLAUDE_CODE_OAUTH_TOKEN');
+      const credentials = {
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(oauthToken !== undefined ? { oauthToken } : {}),
+      };
+      if (!reuseLogin && credentials.apiKey === undefined && credentials.oauthToken === undefined) {
         throw new ProductBootError(
           "extraction backend 'anthropic' needs a CLAUDE_CODE_OAUTH_TOKEN (the sanctioned $0 " +
             'subscription official-harness) or an ANTHROPIC_API_KEY (bills the API) — neither is set. ' +
@@ -964,7 +985,8 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       const shadowWarning = anthropicReuseLoginShadowWarning(env);
       if (shadowWarning) console.warn(shadowWarning);
       const configRoot = requireEnv(env, ANTHROPIC_CONFIG_ROOT);
-      return new AnthropicAdapter({ configRoot });
+      // Its own two credentials, handed over explicitly: the child sees these and no other provider's.
+      return new AnthropicAdapter({ configRoot, credentials });
     }
     case 'pi': {
       const apiKey = requireEnv(env, OPENAI_API_KEY_FOR_PI);

@@ -135,6 +135,15 @@ export class OpenAiTtsAdapter implements TtsAdapter {
       );
     }
 
+    if (response.status === 401 || response.status === 403) {
+      // A refused credential fails closed and says which one: never retried, never swapped.
+      throw new TtsAdapterError(
+        'provider_unavailable',
+        `openai tts refused the credential OPENAI_API_KEY (HTTP ${response.status}): it is ` +
+          'invalid, expired, revoked or not permitted. Supply a valid key.',
+        false,
+      );
+    }
     if (!(response.status >= 200 && response.status < 300)) {
       // Status + provider name ONLY — never the response body (it can quote the submitted text).
       const retryable = response.status === 429 || response.status >= 500;

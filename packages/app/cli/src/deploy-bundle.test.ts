@@ -304,6 +304,86 @@ maybeDescribe('rayspec deploy <file.ray> — refused before any database', () =>
     }
   });
 
+  it('refuses a name the bundle does not declare, and a provider key it does not use', () => {
+    // The bundle declares OPENAI_API_KEY (its agent runs on openai) and nothing else.
+    for (const name of ['STRIPE_SECRET_KEY', 'DEEPGRAM_API_KEY', 'ANTHROPIC_API_KEY']) {
+      const run = deploy([
+        bundle,
+        '--dry-run',
+        '--bindings-file',
+        bindingsFile({
+          bindingsFormatVersion: 1,
+          bindings: [
+            { name: 'OPENAI_API_KEY', value: CANARY },
+            { name, value: CANARY },
+          ],
+        }),
+      ]);
+      expectRefusal(run, 'RAY_USAGE', 2);
+      expect(run.envelope.errors[0].path).toBe('/bindings/1/name');
+      expect(run.envelope.errors[0].message).toContain(
+        `${name}, which the bundle does not declare`,
+      );
+    }
+  });
+
+  it('refuses a provider key in the bindings file that the environment also names a file for', () => {
+    const run = deploy(
+      [
+        bundle,
+        '--dry-run',
+        '--bindings-file',
+        bindingsFile({
+          bindingsFormatVersion: 1,
+          bindings: [{ name: 'OPENAI_API_KEY', value: CANARY }],
+        }),
+      ],
+      { OPENAI_API_KEY_FILE: join(work, 'no-such-key') },
+    );
+    expectRefusal(run, 'RAY_USAGE', 2);
+    expect(run.envelope.errors[0].message).toContain('OPENAI_API_KEY_FILE');
+  });
+
+  it('refuses a provider key file that others can read, and one that is a link', () => {
+    const dir = temporaryDirectory('deploy-key-file-');
+    const open = join(dir, 'open-key');
+    writeFileSync(open, CANARY);
+    chmodSync(open, 0o644);
+    const insecure = deploy([bundle, '--dry-run'], { OPENAI_API_KEY_FILE: open });
+    expectRefusal(insecure, 'RAY_BINDINGS_FILE_INSECURE', 4);
+    expect(insecure.envelope.errors[0].message).toContain('OPENAI_API_KEY_FILE');
+    const target = join(dir, 'key');
+    writeFileSync(target, CANARY);
+    chmodSync(target, 0o600);
+    const link = join(dir, 'linked-key');
+    symlinkSync(target, link);
+    expectRefusal(
+      deploy([bundle, '--dry-run'], { OPENAI_API_KEY_FILE: link }),
+      'RAY_BINDINGS_FILE_INSECURE',
+      4,
+    );
+  });
+
+  it('accepts the speech provider key the operator selected, though no bundle declares it', () => {
+    const run = deploy(
+      [
+        bundle,
+        '--dry-run',
+        '--bindings-file',
+        bindingsFile({
+          bindingsFormatVersion: 1,
+          bindings: [
+            { name: 'OPENAI_API_KEY', value: CANARY },
+            { name: 'DEEPGRAM_API_KEY', value: CANARY },
+          ],
+        }),
+      ],
+      { STT_PROVIDER: 'deepgram' },
+    );
+    // Past the bindings: the dry-run reaches the database, which does not exist.
+    expectRefusal(run, 'RAY_INFRA_UNAVAILABLE', 5);
+  });
+
   it('reads no .env file: a DATABASE_URL there is not used', () => {
     const cwd = temporaryDirectory('deploy-dotenv-');
     writeFileSync(

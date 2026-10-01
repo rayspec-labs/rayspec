@@ -1508,6 +1508,7 @@ everywhere:
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
 | `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
 | `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and the tools of an **in-request** agent run (never those of an enqueued one — see below) | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
+| `init.bindings` | Read the application's own declared bindings (`get(name)`, `names`). | every handler: routes of both kinds, tools and triggers | a bundle deploy (`rayspec deploy <file.ray>`); absent on a YAML deploy |
 
 Two boundaries the table implies are worth spelling out.
 
@@ -1520,6 +1521,26 @@ Two boundaries the table implies are worth spelling out.
   through a `stream` route or a tool, and pass the handler a key, not a handle.
 - A **trigger** handler receives only `{ tenantId, db, triggerName }`, so work that
   needs any capability here belongs in a route or a tool the trigger drives.
+
+#### `init.bindings` — application bindings
+
+On a bundle deployment, the values of the bindings the bundle's manifest declares — the
+application's own names, not the provider keys — reach handlers here and nowhere else: they are
+not put into the process environment.
+
+```ts
+const secret = init.bindings?.get('WEBHOOK_SIGNING_SECRET'); // a declared name: its value
+init.bindings?.names;                                        // every declared application name
+init.bindings?.get('OPENAI_API_KEY');                        // throws: a provider credential
+init.bindings?.get('SOMETHING_ELSE');                        // throws: not declared
+```
+
+`get` answers a declared name with its value, or `undefined` for an optional binding nobody
+supplied. Any other name throws an error named `BindingNotGrantedError` (its `binding` property names
+what was asked for), so a handler never mistakes "not granted" for "not set": a name the bundle does
+not declare, and a provider credential even when the bundle declares it — those are read by the
+platform for the adapter that uses them. On a YAML deployment the field is absent and handlers read
+the environment the operator set, as before.
 
 #### `init.stt` — transcription
 

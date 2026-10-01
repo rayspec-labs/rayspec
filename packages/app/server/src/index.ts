@@ -21,6 +21,9 @@ export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
 // `BootedServer.drift`. It originates in @rayspec/db (drift-detect.ts); the server already depends on
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.
 export type { DriftFinding } from '@rayspec/db';
+// The bindings a bundle deploy grants: the application's own to its handlers (`init.bindings`), the
+// provider credentials to the adapters that use them — neither through the process environment.
+export { type ApplicationBindingGrant, setApplicationBindings } from '@rayspec/platform';
 // The agent trace-export posture (issue #287). Re-exported here for embedders, but the `rayspec deploy`
 // CLI imports the SAME symbols through the `@rayspec/server/agent-tracing` SUBPATH instead: that module
 // pulls in no adapter, so the deploy path can decide the posture — and write the SDK's switch — before
@@ -276,6 +279,17 @@ export {
   shadowProductDigests,
   uncoveredDestructiveMessage,
 } from './product-schema-plan.js';
+export {
+  CredentialFileError,
+  type CredentialSource,
+  grantProviderCredentials,
+  isProviderCredentialName,
+  PROVIDER_CREDENTIAL_NAMES,
+  type ProviderCredentialName,
+  providerCredential,
+  providerCredentialSources,
+  providerCredentialSupplied,
+} from './provider-credentials.js';
 // The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicates
 // and the installer are exported so the gate can be asserted directly (a runtime that implements
 // NODE_USE_ENV_PROXY + the opt-in + a named proxy ⇒ installed; anything else ⇒ the two
