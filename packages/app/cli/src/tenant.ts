@@ -15,16 +15,22 @@
  *                                                    handoff invite. Speaks to DATABASE_URL directly;
  *                                                    needs no running server and no HTTP route.
  *
- * Every command here returns a JSON summary that contains NO secret material; a usage/argument problem
- * is a `TenantCliError` (mapped to exit 2 by `index.ts`).
+ *   rayspec tenant recover-owner --email <address> [--org-id <uuid>] [--ttl-seconds <n>]
+ *                                                    Issue a one-time owner-recovery token for an
+ *                                                    owner who holds no password. The token is the
+ *                                                    one secret any command here prints, once.
+ *
+ * Every other command here returns a JSON summary that contains NO secret material; a usage/argument
+ * problem is a `TenantCliError` (mapped to exit 2 by `index.ts`).
  */
 import { runTenantEnsure, type TenantEnsureResult } from './tenant/ensure.js';
 import { TenantCliError } from './tenant/errors.js';
+import { runTenantRecoverOwner, type TenantRecoverOwnerResult } from './tenant/recover-owner.js';
 
 export { TenantCliError } from './tenant/errors.js';
 
-/** The result of any `tenant` command — a union today of one member, shaped like `DevResult`. */
-export type TenantResult = TenantEnsureResult;
+/** The result of any `tenant` command, shaped like `DevResult`. */
+export type TenantResult = TenantEnsureResult | TenantRecoverOwnerResult;
 
 /**
  * Dispatch a `tenant` sub-subcommand. `args` is the slice AFTER `tenant` (its first token is the
@@ -35,14 +41,16 @@ export async function runTenant(args: readonly string[]): Promise<TenantResult> 
   const sub = args[0];
   const rest = args.slice(1);
   if (sub === undefined) {
-    throw new TenantCliError('missing tenant subcommand (expected `ensure`)');
+    throw new TenantCliError('missing tenant subcommand (expected `ensure` or `recover-owner`)');
   }
   switch (sub) {
     case 'ensure':
       return runTenantEnsure(rest);
+    case 'recover-owner':
+      return runTenantRecoverOwner(rest);
     default:
       throw new TenantCliError(
-        `unknown tenant subcommand ${JSON.stringify(sub)} (expected \`ensure\`)`,
+        `unknown tenant subcommand ${JSON.stringify(sub)} (expected \`ensure\` or \`recover-owner\`)`,
       );
   }
 }

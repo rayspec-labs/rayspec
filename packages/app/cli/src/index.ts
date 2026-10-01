@@ -32,12 +32,16 @@
  *                                                        blobs, encrypt with age, write a migration
  *                                                        .ray. The source stays fenced (see export.ts).
  *   rayspec resume --deployment <id> --fence-epoch <n>   Release that fence, at its epoch only.
- *   rayspec import <migration.ray> --target <state-dir> --identity-file <file> [--dry-run]
+ *   rayspec import <migration.ray> --target <state-dir> --identity-file <file>
+ *                  (--dry-run | --secrets-out <new-dir>)
  *                                                        Decrypt and check a migration bundle, then
  *                                                        restore it into a new, empty target as its
- *                                                        migration role, verify it and leave it fenced
- *                                                        until the cutover (see import.ts);
+ *                                                        migration role, verify it, mint the target's
+ *                                                        own boot secrets and leave it fenced until
+ *                                                        the cutover (see import.ts);
  *                                                        `--discard-failed` removes a failed import.
+ *   rayspec tenant recover-owner --email <address>       Issue a one-time owner-recovery token for an
+ *                                                        owner who holds no password; printed once.
  *   Each writes ONE result envelope to stdout, like the bundle commands.
  *
  * PRODUCTION-MUTATING (`tenant` group — writes to the database DATABASE_URL names):
@@ -374,7 +378,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
         name: 'import',
         block: `  rayspec import <migration.ray> --target <state-dir> --identity-file <file> --dry-run [--json]
   rayspec import <migration.ray> --target <state-dir> --identity-file <file>
-                 [--bindings-file <file>] [--json]
+                 --secrets-out <new-dir> [--bindings-file <file>] [--json]
   rayspec import --target <state-dir> --discard-failed [--json]
                                 Restore a migration bundle into a NEW, EMPTY target and leave it
                                 fenced until the cutover; the source stays authoritative. In order:
@@ -396,9 +400,13 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 the shared schema lock, the objects written unchanged, and everything
                                 verified (row counts, foreign keys, schema head, one organization,
                                 empty credential tables, object digests, the runtime role's posture);
-                                the target is then fenced with the runtime role's writes revoked, and
-                                the result gives the cutover instruction and token (on stderr and in
-                                the receipt). A failure leaves a changed target marked failed;
+                                each account's carried identity is recorded in the target's security
+                                audit; the target is then fenced with the runtime role's writes
+                                revoked, its own signing key, API-key pepper and media key are minted
+                                into the new directory --secrets-out names (mode 0700, files 0600,
+                                never printed), and the result gives the cutover instruction and token
+                                (on stderr and in the receipt), and on stderr who signs in again,
+                                which owner needs owner recovery and that every API key is reissued. A failure leaves a changed target marked failed;
                                 --discard-failed removes what it restored. Reads DATABASE_URL (the
                                 runtime role), RAYSPEC_MIGRATION_DATABASE_URL (required),
                                 DBOS_SYSTEM_DATABASE_URL, RAYSPEC_BLOB_ROOT and RAYSPEC_PG_RESTORE
@@ -449,6 +457,24 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 mints a replacement (for a lost token). With RAYSPEC_SINGLE_TENANT=true
                                 it resolves the one organization and refuses to create a second
                                 (SINGLE_TENANT_LIMIT). Emits ONE JSON object.`,
+      },
+      {
+        name: 'tenant recover-owner',
+        block: `  rayspec tenant recover-owner --email <address> [--org-id <uuid>] [--ttl-seconds <n>]
+                                Issue a one-time owner-recovery token for an active OWNER who holds no
+                                password (whose only credential was an API key, which a new API-key
+                                pepper breaks — after an import, for example). The owner redeems it
+                                once at POST /v1/auth/owner-recovery with a new password and is signed
+                                in. The token is printed ONCE, in the JSON object on stdout, and is in
+                                no log, audit row or receipt; only its HMAC under the pepper is stored.
+                                Issuing again replaces a token still outstanding for that owner. It
+                                refuses an owner who holds a password, an account that is not an
+                                active owner, and a fenced environment (an exported source, or an
+                                import target before its cutover). Valid 30 minutes by default
+                                (--ttl-seconds, clamped to 5min-24h). Reads DATABASE_URL (or
+                                RAYSPEC_MIGRATION_DATABASE_URL) and RAYSPEC_API_KEY_PEPPER — the pepper
+                                the deployment runs with — each honouring its <VAR>_FILE variant. Runs
+                                no migration. Emits ONE JSON object; --json is not available for it.`,
       },
     ],
   },
@@ -707,6 +733,15 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   if (vector[0] === 'deploy' && !vector.slice(1).some((token) => isHelpFlag(token))) {
     const { isBundleDeploy } = await import('./deploy-bundle.js');
     if (await isBundleDeploy(vector.slice(1))) return runDeployBundleVerb(vector.slice(1), json);
+  }
+  // The one command whose answer carries a secret, printed once in its own JSON object; the result
+  // envelope has no operation for it, so it is not wrapped.
+  if (json && vector[0] === 'tenant' && vector[1] === 'recover-owner') {
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: '--json is not available for tenant recover-owner: it writes its own JSON object, once' })}\n`,
+    );
+    return 2;
   }
   if (!json) return printAnswer(await answer(vector, { json: false }));
 

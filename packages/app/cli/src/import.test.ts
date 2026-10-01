@@ -1,7 +1,7 @@
 /**
  * `rayspec import` before it reaches a database: the command line, the configuration it requires
- * (the target's migration role), the protected identity file, and `--discard-failed` on a state
- * directory that holds no failed import. Every answer is one valid result envelope; nothing here
+ * (the target's migration role), the protected identity file, the directory the target's new boot
+ * secrets go into, and `--discard-failed` on a state directory that holds no failed import. Every answer is one valid result envelope; nothing here
  * opens a connection (the database URLs name a port nothing listens on).
  */
 import { randomUUID } from 'node:crypto';
@@ -73,6 +73,18 @@ describe('parseImportArgs', () => {
     expect(usage(['m.ray', '--target', 't', '--identity-file', 'k', '--unknown'])).toBe(
       'RAY_USAGE',
     );
+    // An import mints the target's boot secrets into --secrets-out; a dry run and a discard do not.
+    expect(usage(['m.ray', '--target', 't', '--identity-file', 'k'])).toBe('RAY_USAGE');
+    expect(usage(['m.ray', '--target', 't', '--identity-file', 'k', '--secrets-out', ''])).toBe(
+      'RAY_USAGE',
+    );
+    expect(
+      usage(['m.ray', '--target', 't', '--identity-file', 'k', '--dry-run', '--secrets-out', 's']),
+    ).toBe('RAY_USAGE');
+    expect(usage(['--target', 't', '--discard-failed', '--secrets-out', 's'])).toBe('RAY_USAGE');
+    expect(
+      parseImportArgs(['m.ray', '--target', 't', '--identity-file', 'k', '--secrets-out', 's']),
+    ).toMatchObject({ dryRun: false, secretsOut: 's' });
     expect(
       parseImportArgs(['m.ray', '--target', 't', '--identity-file', 'k', '--dry-run']),
     ).toMatchObject({
@@ -135,6 +147,25 @@ describe('runImport before a database', () => {
       code: 'RAY_BINDINGS_FILE_INSECURE',
       exit: 4,
     });
+  });
+
+  it('refuses a --secrets-out that exists or has no parent, before anything is decrypted', async () => {
+    const identity = await identityFile(0o600);
+    const importArgs = (secretsOut: string) => [
+      ...args(identity).filter((a) => a !== '--dry-run'),
+      '--secrets-out',
+      secretsOut,
+    ];
+    const existing = temporaryDirectory('import-secrets-');
+    const taken = await run(importArgs(existing));
+    expect(taken).toMatchObject({ code: 'RAY_USAGE', exit: 2 });
+    expect(taken.message).toContain('--secrets-out');
+    const orphan = await run(importArgs(join(existing, 'missing', 'secrets')));
+    expect(orphan).toMatchObject({ code: 'RAY_USAGE' });
+    expect(orphan.message).toContain('parent directory of --secrets-out');
+    // A free path passes that check and reaches the bundle, which is missing here.
+    const free = await run(importArgs(join(existing, 'secrets')));
+    expect(free.message).not.toContain('--secrets-out');
   });
 
   it('discards nothing where no import failed, and never a deployment', async () => {

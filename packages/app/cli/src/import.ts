@@ -4,7 +4,7 @@
  *
  *   rayspec import <migration.ray> --target <state-dir> --identity-file <file> --dry-run [--json]
  *   rayspec import <migration.ray> --target <state-dir> --identity-file <file>
- *                  [--bindings-file <file>] [--json]
+ *                  --secrets-out <new-dir> [--bindings-file <file>] [--json]
  *   rayspec import --target <state-dir> --discard-failed [--json]
  *
  * THE DRY RUN is the passive eligibility plan: the outer bundle through the one reader, its
@@ -25,9 +25,14 @@
  *   VERIFYING          row counts, foreign keys, the schema head, one organization owning every row
  *                      and object, empty credential tables, the runtime role's posture, every object's
  *                      digests read back;
- *   READY_FOR_CUTOVER  the target is fenced with the runtime role's writes revoked; the result and the
- *                      receipt give the cutover instruction and the cutover token, which binds the
- *                      migration bundle, the target and both fence epochs;
+ *                      then the identity policy: each account's carried identity recorded in the
+ *                      target's security audit, the credentials reset;
+ *   READY_FOR_CUTOVER  the target is fenced with the runtime role's writes revoked, and its own boot
+ *                      secrets (signing key, API-key pepper, media key) are minted into the new
+ *                      directory `--secrets-out` names; the result and the receipt give the cutover
+ *                      instruction and the cutover token, which binds the migration bundle, the
+ *                      target and both fence epochs; stderr lists who signs in again, which owner
+ *                      needs owner recovery and who has no way in;
  *   BLOCKED            any refusal or failure: the source stays authoritative; a target the import
  *                      changed is marked failed (`import.json`, the receipts) and is removed only by
  *                      `--discard-failed`.
@@ -69,6 +74,7 @@ export const IMPORT_ARG_OPTIONS = {
   target: { type: 'string' },
   'identity-file': { type: 'string' },
   'bindings-file': { type: 'string' },
+  'secrets-out': { type: 'string' },
   'dry-run': { type: 'boolean' },
   'discard-failed': { type: 'boolean' },
 } as const satisfies NonNullable<ParseArgsConfig['options']>;
@@ -133,6 +139,7 @@ interface Parsed {
   target: string;
   identityFile: string | null;
   bindingsFile: string | null;
+  secretsOut: string | null;
   dryRun: boolean;
   discardFailed: boolean;
 }
@@ -175,6 +182,7 @@ export function parseImportArgs(args: readonly string[]): Parsed {
       positionals.length > 0 ||
       values['identity-file'] !== undefined ||
       values['bindings-file'] !== undefined ||
+      values['secrets-out'] !== undefined ||
       values['dry-run'] === true
     ) {
       refuse(
@@ -187,6 +195,7 @@ export function parseImportArgs(args: readonly string[]): Parsed {
       target,
       identityFile: null,
       bindingsFile: null,
+      secretsOut: null,
       dryRun: false,
       discardFailed,
     };
@@ -207,11 +216,25 @@ export function parseImportArgs(args: readonly string[]): Parsed {
   if (dryRun && bindingsFile !== null) {
     refuse('RAY_USAGE', '--bindings-file is read by an import, not by its dry run');
   }
+  const secretsOut = (values['secrets-out'] as string | undefined) ?? null;
+  if (dryRun && secretsOut !== null) {
+    refuse('RAY_USAGE', '--secrets-out is written by an import, not by its dry run');
+  }
+  if (!dryRun && (secretsOut === null || secretsOut === '')) {
+    refuse(
+      'RAY_USAGE',
+      "--secrets-out <new-dir> is required: the import mints the target's own signing key, API-key " +
+        "pepper and media key into that new directory (mode 0700); the source's secrets are never " +
+        'carried',
+      { path: '/secrets-out' },
+    );
+  }
   return {
     bundle: positionals[0] as string,
     target,
     identityFile,
     bindingsFile,
+    secretsOut,
     dryRun,
     discardFailed,
   };
@@ -406,6 +429,13 @@ export async function runImport(
       );
     }
 
+    // The directory the target's new boot secrets go into: new, under an existing parent.
+    const secretsOut = p.secretsOut === null ? null : resolve(p.secretsOut);
+    if (secretsOut !== null) {
+      const refusal = await server.bootSecretsDirectoryRefusal(secretsOut);
+      if (refusal !== null) throw new Refused([refusal]);
+    }
+
     // The identity file and the bindings file: protected files, their content never printed.
     let identity: string;
     try {
@@ -570,6 +600,7 @@ export async function runImport(
       deploymentId,
       operationId: options.operationId,
       actor: server.IMPORT_ACTOR,
+      migrationBundleSha256: o.bundleSha256,
       workDir: o.scratchDir,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
       onVerifying: async () => {
@@ -619,6 +650,30 @@ export async function runImport(
     }
     const value = restored.value;
 
+    // The target's own boot secrets. A directory that appeared since the check is refused like a
+    // failed restore: the target is restored and verified, but not ready without its secrets.
+    let secretFiles: Record<string, string>;
+    try {
+      secretFiles = await server.mintBootSecrets(secretsOut as string);
+    } catch {
+      await receipts
+        .transition('BLOCKED', {
+          sourceFenceEpoch: snapshot.fenceEpoch,
+          targetFenceEpoch: value.targetFenceEpoch,
+          digests,
+          recovery: blockedRecovery,
+        })
+        .catch(() => {});
+      await mark('BLOCKED');
+      return answer(null, [
+        bundleError(
+          'RAY_RECONCILIATION_REQUIRED',
+          'the target was restored and verified, but its new boot secrets could not be written to --secrets-out; the target is marked failed — discard it with ' +
+            `\`${server.discardInstruction(p.target)}\``,
+        ),
+      ]);
+    }
+
     // READY_FOR_CUTOVER: the cutover token binds the migration, the target and both fences.
     const app = tableTotals('application');
     const sys = tableTotals('workflow-system');
@@ -632,6 +687,12 @@ export async function runImport(
       objectCount: snapshot.objectCount,
       foreignKeys: value.foreignKeys,
       credentialReset: value.credentialReset,
+      bootSecrets: 'reissued',
+      identity: {
+        signInAgain: value.identity.counts['sign-in-again'],
+        ownerRecovery: value.identity.counts['owner-recovery'],
+        noCredential: value.identity.counts['no-credential'],
+      },
     });
     const issuedAt = new Date();
     const token = {
@@ -650,7 +711,11 @@ export async function runImport(
       `cutover: keep the source fenced at epoch ${snapshot.fenceEpoch}; release the target's fence ` +
       `with \`rayspec resume --deployment ${deploymentId} --fence-epoch ${value.targetFenceEpoch} ` +
       `--state-dir ${p.target}\` (the target's environment), then deploy the application the source ` +
-      `ran (sha256 ${snapshot.applicationDigest}) there with new boot secrets`;
+      `ran (sha256 ${snapshot.applicationDigest}) there with the new boot secrets: ` +
+      `RAYSPEC_JWT_SIGNING_KEY_FILE=${secretFiles.RAYSPEC_JWT_SIGNING_KEY} ` +
+      `RAYSPEC_API_KEY_PEPPER_FILE=${secretFiles.RAYSPEC_API_KEY_PEPPER}, and ` +
+      `RAYSPEC_MEDIA_SIGNING_KEY from ${secretFiles.RAYSPEC_MEDIA_SIGNING_KEY} when the application ` +
+      'has a playback route';
     await receipts.transition('READY_FOR_CUTOVER', {
       sourceFenceEpoch: snapshot.fenceEpoch,
       targetFenceEpoch: value.targetFenceEpoch,
@@ -680,6 +745,7 @@ export async function runImport(
           `${value.foreignKeys} foreign keys; every check matched`,
         'every user signs in again; API keys and invites are issued again (sessions, keys, invites and ' +
           'OIDC artifacts were not carried)',
+        ...identityLines(value.identity),
         `the target is fenced at epoch ${value.targetFenceEpoch} and accepts no traffic until the cutover`,
         cutover,
         `cutover token ${tokenSha256}, valid until ${token.expiresAt}: binds the migration bundle, the ` +
@@ -696,6 +762,39 @@ export async function runImport(
     await control?.$client.end().catch(() => {});
     await scratch?.release().catch(() => {});
   }
+}
+
+/**
+ * What the operator tells each account before the cutover: who signs in again with their password,
+ * which owner needs owner recovery, which account has no way in; and that every API key is reissued.
+ */
+function identityLines(report: import('@rayspec/server').IdentityReport): string[] {
+  const named = (action: string) =>
+    report.users
+      .filter((u) => u.action === action)
+      .map((u) => `${u.email} (${u.role ?? 'no membership'})`);
+  const lines = [
+    `sign in again with their password (${report.counts['sign-in-again']}): ` +
+      (named('sign-in-again').join(', ') || 'none'),
+  ];
+  if (report.counts['owner-recovery'] > 0) {
+    lines.push(
+      `owner recovery needed, no password (${report.counts['owner-recovery']}): ` +
+        `${named('owner-recovery').join(', ')} — once the target serves, issue each a one-time token ` +
+        'with `rayspec tenant recover-owner --email <address>`',
+    );
+  }
+  if (report.counts['no-credential'] > 0) {
+    lines.push(
+      `no way in, no password and not an owner (${report.counts['no-credential']}): ` +
+        `${named('no-credential').join(', ')} — an owner removes and re-invites them under a new address`,
+    );
+  }
+  lines.push(
+    'API keys: none was carried, so every key of the source is reissued by an owner after the ' +
+      'cutover; pending invites are issued again',
+  );
+  return lines;
 }
 
 /** Every binding the application declares, against the bindings file and the environment. */

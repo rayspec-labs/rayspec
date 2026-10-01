@@ -8,8 +8,9 @@ one `.ray` application bundle, running none of it), the passive `rayspec bundle 
 and `rayspec bundle verify`, the production-mutating `rayspec deploy` (a spec, or a `.ray`
 bundle planned with `--dry-run` and deployed by its reviewed plan digest), `rayspec export`
 (fence a self-hosted deployment and write its complete snapshot as one age-encrypted migration
-bundle) with `rayspec import` (restore such a bundle into a new, empty target, verify it and keep
-it fenced until the cutover) and `rayspec resume` (release a fence), and a clearly
+bundle) with `rayspec import` (restore such a bundle into a new, empty target, verify it, mint its
+own boot secrets and keep it fenced until the cutover), `rayspec tenant recover-owner` (a one-time
+owner-recovery token for an owner who holds no password) and `rayspec resume` (release a fence), and a clearly
 separated, local-dev `dev` command group
 (scaffolding, secret minting). Every subcommand emits
 machine-parseable JSON to stdout — `--help` is the one exception and prints plain
