@@ -55,7 +55,11 @@ export function pgToolPath(
       "if (env.PGHOST === 'localhost' || env.PGHOST === '127.0.0.1') env.PGHOST = 'host.docker.internal';",
       "const names = ['PGHOST', 'PGPORT', 'PGUSER', 'PGPASSWORD', 'PGDATABASE', 'PGCONNECT_TIMEOUT', 'PGAPPNAME', 'PGSSLMODE'];",
       "const pass = names.flatMap((v) => (env[v] === undefined ? [] : ['-e', v]));",
-      `const args = ['run', '--rm', '-i', '--add-host=host.docker.internal:host-gateway', ...pass, ${JSON.stringify(POSTGRES_IMAGE)}, ${JSON.stringify(name)}, ...process.argv.slice(2)];`,
+      // A list file pg_restore is given (`--use-list=<path>`) is mounted at the same path, read-only.
+      "const { dirname } = require('node:path');",
+      "const lists = process.argv.slice(2).filter((a) => a.startsWith('--use-list=/')).map((a) => dirname(a.slice(11)));",
+      "const mounts = lists.flatMap((d) => ['-v', d + ':' + d + ':ro']);",
+      `const args = ['run', '--rm', '-i', '--add-host=host.docker.internal:host-gateway', ...pass, ...mounts, ${JSON.stringify(POSTGRES_IMAGE)}, ${JSON.stringify(name)}, ...process.argv.slice(2)];`,
       "const child = spawn('docker', args, { env, stdio: 'inherit' });",
       "for (const s of ['SIGTERM', 'SIGINT']) process.on(s, () => child.kill(s));",
       "child.on('exit', (code) => process.exit(code ?? 1));",
@@ -94,6 +98,49 @@ export function holdingPgDump(
       'else {',
       '  const parent = process.ppid;',
       `  fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));`,
+      '  const timer = setInterval(() => {',
+      '    if (process.ppid !== parent) process.exit(3);',
+      `    if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(timer); run(); }`,
+      '  }, 50);',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(wrapper, 0o755);
+  return wrapper;
+}
+
+/**
+ * A `pg_restore` that waits, before a restore whose arguments include `match` (not for `--version` or
+ * `--list`), until the file `release` exists: it writes its process id to `marker` first, so a suite
+ * knows that restore is about to run. It exits on its own once the process that started it is gone,
+ * so a killed import leaves no restore behind.
+ */
+export function holdingPgRestore(
+  realPgRestore: string,
+  dir: string,
+  marker: string,
+  release: string,
+  match: string,
+): string {
+  const wrapper = join(dir, `pg_restore-holding-${Date.now()}`);
+  writeFileSync(
+    wrapper,
+    [
+      `#!${process.execPath}`,
+      "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
+      'const args = process.argv.slice(2);',
+      'const run = () => {',
+      `  const child = spawn(${JSON.stringify(realPgRestore)}, args, { stdio: 'inherit' });`,
+      "  for (const s of ['SIGTERM', 'SIGINT']) process.on(s, () => child.kill(s));",
+      "  child.on('exit', (code) => process.exit(code ?? 1));",
+      '};',
+      `if (!args.includes(${JSON.stringify(match)})) run();`,
+      'else {',
+      '  const parent = process.ppid;',
+      `  fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));`,
+      "  process.on('SIGTERM', () => process.exit(143));",
       '  const timer = setInterval(() => {',
       '    if (process.ppid !== parent) process.exit(3);',
       `    if (fs.existsSync(${JSON.stringify(release)})) { clearInterval(timer); run(); }`,
