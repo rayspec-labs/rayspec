@@ -150,10 +150,13 @@ export {
 export {
   applyTenantIsolation,
   CURRENT_TENANT_EXPRESSION,
+  ISOLATION_DEFINER_FUNCTIONS,
+  ISOLATION_DEFINER_SEARCH_PATH,
   type IsolationFinding,
   type IsolationSql,
   listTenantTables,
   MIGRATION_ONLY_TABLES,
+  normalizeFunctionBody,
   TENANT_POLICY_NAME,
   type TenantIsolationChanges,
   type TenantIsolationReport,
