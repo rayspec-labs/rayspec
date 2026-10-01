@@ -25,6 +25,15 @@
  *                                                    that is already built. One result envelope on
  *                                                    stdout, like the bundle commands (see pack.ts).
  *
+ * MIGRATION (fences a self-hosted deployment and writes its encrypted snapshot; releases the fence):
+ *   rayspec export --deployment <id> --recipient <age1…> --output <migration.ray>
+ *                  --run-history <included|excluded>     Preflight, fence under the operator's
+ *                                                        confirmation, capture both databases and the
+ *                                                        blobs, encrypt with age, write a migration
+ *                                                        .ray. The source stays fenced (see export.ts).
+ *   rayspec resume --deployment <id> --fence-epoch <n>   Release that fence, at its epoch only.
+ *   Both write ONE result envelope to stdout, like the bundle commands.
+ *
  * PRODUCTION-MUTATING (`tenant` group — writes to the database DATABASE_URL names):
  *   rayspec tenant ensure …      Idempotently create OR resolve one organization under a chosen id,
  *                                 speaking to the database directly (no running server, no HTTP
@@ -318,6 +327,58 @@ const HELP_SECTIONS: readonly HelpSection[] = [
   },
   {
     heading:
+      'MIGRATION (fences a self-hosted deployment, writes its encrypted snapshot, releases the fence):',
+    commands: [
+      {
+        name: 'export',
+        block: `  rayspec export --deployment <id> --recipient <age1...> --output <migration.ray>
+                 --run-history <included|excluded> [--confirm-quiesce] [--source-stopped]
+                 [--quiesce-deadline <seconds>] [--state-dir <dir>] [--json]
+                                Write the deployment's complete snapshot as a migration bundle,
+                                encrypted with age to the X25519 recipient (only the holder of the
+                                matching identity can read it; there is no passphrase mode). In order:
+                                a read-only precheck of the source (application, schema head, blob
+                                root, budgets, extensions, one organization, a password-holding
+                                member, unknown tables); the operator's confirmation of the downtime
+                                (--confirm-quiesce, required with --json or without a terminal;
+                                otherwise asked on the terminal); the source fence — writes, uploads,
+                                triggers and the run queue stopped, runs drained until
+                                --quiesce-deadline (default 300) — with a database write barrier: the
+                                runtime role's writes revoked (role separation,
+                                RAYSPEC_MIGRATION_DATABASE_URL), or every runtime process stopped and
+                                attested with --source-stopped, else refused; then both databases and
+                                the blobs captured under that fence epoch, verified, encrypted in a
+                                private scratch directory under the state directory, and the bundle
+                                written to --output (refused if it exists). Plaintext is never written
+                                anywhere else. --run-history has no default: excluded keeps runs, run
+                                events, journals and workflow runs at the source. The source STAYS
+                                FENCED afterwards; release it with \`rayspec resume\`. Reads DATABASE_URL,
+                                RAYSPEC_MIGRATION_DATABASE_URL, RAYSPEC_SNAPSHOT_DATABASE_URL (the
+                                read-only snapshot role), DBOS_SYSTEM_DATABASE_URL, RAYSPEC_BLOB_ROOT and
+                                RAYSPEC_PG_DUMP (absolute path; default pg_dump on PATH, of the server's
+                                major) from the process environment only, never a .env file. Writes ONE
+                                result envelope to stdout and a local receipt to
+                                <state-dir>/receipts/. Exit 0 exported / 2 usage, an existing output or
+                                a size limit / 3 tenants, external state, no database barrier /
+                                4 owner recovery, policy / 5 lock, database or quiesce deadline,
+                                retryable / 6 schema drift or interrupted (the fence stays) /
+                                7 internal error.`,
+      },
+      {
+        name: 'resume',
+        block: `  rayspec resume --deployment <id> --fence-epoch <n> [--state-dir <dir>] [--json]
+                                Release the source fence an export took, only at the epoch it
+                                reported, and give the runtime role back the writes the barrier
+                                revoked; runtime processes restart their producers within a second.
+                                A fence already open at that epoch is left alone (released: false).
+                                Same configuration as export. Writes ONE result envelope. Exit 0 /
+                                2 usage / 4 another epoch (RAY_FENCE_MISMATCH) / 5 database
+                                unavailable / 7 internal error.`,
+      },
+    ],
+  },
+  {
+    heading:
       'PRODUCTION-MUTATING (the `tenant` group — writes to the database DATABASE_URL names):',
     commands: [
       {
@@ -589,6 +650,9 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   if (vector[0] === 'pack' && !isHelpFlag(vector[1])) {
     return runPackVerb(vector.slice(1), json);
   }
+  if ((vector[0] === 'export' || vector[0] === 'resume') && !isHelpFlag(vector[1])) {
+    return runMigrationVerb(vector[0], vector.slice(1), json);
+  }
   // `deploy <file.ray>`: a file that starts with a ZIP signature or is named `.ray` takes the bundle
   // path, decided on at most four bytes and before any configuration or `.env` file is read.
   if (vector[0] === 'deploy' && !vector.slice(1).some((token) => isHelpFlag(token))) {
@@ -723,6 +787,59 @@ async function runPackVerb(rest: readonly string[], json: boolean): Promise<numb
 }
 
 /**
+ * `rayspec export` and `rayspec resume`. New verbs: one envelope on stdout with or without `--json`,
+ * the operation id on stderr and, without `--json`, a short description of the result there. No
+ * `.env` file is loaded: the configuration comes from the process environment. SIGINT and SIGTERM
+ * stop an export at its next safe point; any fence it took stays, and the envelope says how to
+ * release it.
+ */
+async function runMigrationVerb(
+  verb: 'export' | 'resume',
+  rest: readonly string[],
+  json: boolean,
+): Promise<number> {
+  const operationId = newOperationId();
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  // Library output while the verb runs goes to stderr; stdout carries the one envelope.
+  const stdout = reserveStdout();
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    const outcome =
+      verb === 'export'
+        ? await (await import('./export.js')).runExport(rest, {
+            operationId,
+            json,
+            signal: controller.signal,
+            terminal:
+              process.stdin.isTTY === true && process.stderr.isTTY === true
+                ? { input: process.stdin, output: process.stderr }
+                : null,
+          })
+        : await (await import('./resume.js')).runResume(rest, { operationId, json });
+    if (!json && outcome.summary.length > 0) {
+      await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    await writeEnvelope(stdout.sink, outcome.envelope);
+    return envelopeExitCode(outcome.envelope);
+  } catch (err) {
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    const failed = internalEnvelope(verb, operationId);
+    await writeEnvelope(stdout.sink, failed);
+    return envelopeExitCode(failed);
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    stdout.release();
+  }
+}
+
+/**
  * `rayspec deploy <file.ray>`. A new verb: one `deploy` or `deploy.dry-run` envelope on stdout,
  * with or without `--json`, and the operation id on stderr; without `--json` a short description of
  * the plan or the refusal follows it there. A deploy that serves writes its envelope when it stops.
@@ -775,7 +892,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `pack`, `deploy`, `tenant`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `pack`, `deploy`, `export`, `resume`, `tenant`, or `dev`)',
     );
   }
   // `--version`/`-v` is the one TOP-LEVEL flag, answered BEFORE the leading-dash check below —
@@ -801,7 +918,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
   if (help !== undefined) return { kind: 'text', text: help };
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`tenant\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`export\`, \`resume\`, \`tenant\`, or \`dev\`), got ${command}`,
     );
   }
 
@@ -902,7 +1019,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`tenant\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`export\`, \`resume\`, \`tenant\`, or \`dev\`)`,
       );
   }
 }
