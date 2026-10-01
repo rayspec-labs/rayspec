@@ -69,6 +69,8 @@ export interface WriteOptions {
   signingKey?: KeyObject;
   /** Reader limits, lowered from the defaults, that the archive must stay within. */
   limits?: Partial<ReaderLimits>;
+  /** The mode the archive file is created with. Default 0644. */
+  fileMode?: number;
 }
 
 export interface WrittenBundle {
@@ -161,7 +163,7 @@ export async function writeBundle(
 
     const archiveTemp = temporaryPath(path);
     temporary.push(archiveTemp);
-    await writeArchive(archiveTemp, entries);
+    await writeArchive(archiveTemp, entries, options?.fileMode ?? 0o644);
 
     const readBack = await inspectBundle(archiveTemp, { limits });
     if (!readBack.ok) {

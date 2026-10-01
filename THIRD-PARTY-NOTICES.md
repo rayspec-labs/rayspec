@@ -12,7 +12,7 @@ lockfile with an exact pinned version and is installed by the end user directly
 from the public npm registry. Under that install-from-registry model, each
 package's own license and copyright travel inside `node_modules` after
 `pnpm install` — **for the packages whose publishers ship a license file**. Many
-do not: **31** of the installed packages ship no in-tarball `LICENSE` at all
+do not: **32** of the installed packages ship no in-tarball `LICENSE` at all
 (including all four Pi packages, and the Codex CLI launcher together with its
 prebuilt binary). For those, this file and the SBOM are the attribution, and they
 are doing real compliance work rather than decoration. The SBOM lists them by
@@ -33,7 +33,7 @@ platform constraints.
   package whose `os`/`cpu`/`libc` constraints exclude that machine is not
   installed there, so its license cannot be read from disk: such a row is
   recorded with `installed: false`, `license: null` and an explicit
-  `absent_reason` — **never dropped**. Today that is 111 of 485 rows, and all of
+  `absent_reason` — **never dropped**. Today that is 111 of 494 rows, and all of
   them are per-platform native binary variants of packages already in the table
   (or the five wasm-runtime packages reachable only through one). A deployer who
   regenerates the SBOM on their own platform reads the licenses for the variants
@@ -52,7 +52,7 @@ fails when a dependency has moved without the inventory following it.
 
 ### Copyleft
 
-Of the **374** packages whose license was read from an installed manifest, **none
+Of the **383** packages whose license was read from an installed manifest, **none
 carries a strong-copyleft (GPL/AGPL/LGPL) license**. Two carry the file-scoped
 weak-copyleft MPL-2.0 (see below). The remaining 111 rows are the platform-gated
 variants described above; their licenses were not read on the generating host and
@@ -286,6 +286,33 @@ spec-driven boot factory, and removes the `workspace:*` entries that declare it
 spec grammar are all untouched by that edit — which is the property the neutral
 interface exists to guarantee.
 
+## Encryption of migration bundles
+
+### age-encryption — BSD-3-Clause
+
+- `age-encryption` 0.3.1 (the typage project, the age authors' JavaScript
+  implementation of the age v1 file format)
+- its dependencies `@noble/ciphers`, `@noble/curves`, `@noble/hashes`,
+  `@noble/post-quantum` and `@scure/base` — MIT, Copyright (c) 2022 Paul Miller
+
+`age-encryption` is licensed under the BSD 3-Clause License. **Copyright 2023
+The age Authors.** The license text and disclaimer travel in the package's own
+`LICENSE` file in `node_modules`, and so do the MIT notices of the `@noble` and
+`@scure` packages. `@rayspec/server` uses it to encrypt the payload of a
+migration bundle (`rayspec export`) to one X25519 recipient; RaySpec implements
+no cryptographic primitive of its own.
+
+### cctv-age — 0BSD OR CC0-1.0 OR Unlicense (test only)
+
+- `cctv-age` 0.2.0
+
+The official test vectors of the age format (C2SP CCTV), published by Filippo
+Valsorda. A development dependency of `@rayspec/server`, used only by its test
+suite; it is not part of the deployed runtime. Its published tarball ships **no**
+license file; its manifest offers 0BSD, CC0-1.0 or the Unlicense, and RaySpec
+uses it under the 0BSD terms, which require no attribution. It is named here so
+the inventory is complete.
+
 ## Weak-copyleft build-time dependency
 
 ### lightningcss — MPL-2.0
@@ -302,36 +329,37 @@ RaySpec does not make.
 
 ## Summary of the dependency license inventory
 
-`pnpm-lock.yaml` resolves **485** distinct third-party packages. The counts below
-are the **374** whose license was read verbatim from an installed manifest on the
+`pnpm-lock.yaml` resolves **494** distinct third-party packages. The counts below
+are the **383** whose license was read verbatim from an installed manifest on the
 machine that generated `docs/dependency-sbom.json`; the remaining **111** are the
 platform-gated variants described at the top of this file and are recorded there
 individually with `license: null`.
 
-| License                       | Distinct packages |
-| ----------------------------- | ----------------- |
-| MIT                           | 267               |
-| Apache-2.0                    | 57                |
-| BSD-3-Clause                  | 17                |
-| ISC                           | 16                |
-| BlueOak-1.0.0                 | 5                 |
-| BSD-2-Clause                  | 2                 |
-| MIT OR Apache-2.0             | 2                 |
-| MPL-2.0                       | 2                 |
-| Unlicense                     | 2                 |
-| (MIT OR CC0-1.0)              | 1                 |
-| 0BSD                          | 1                 |
-| SEE LICENSE IN LICENSE.md     | 1                 |
-| SEE LICENSE IN README.md      | 1                 |
-| **Licenses read from disk**   | **374**           |
-| Platform-gated, not installed | 111               |
-| **Total distinct packages**   | **485**           |
+| License                        | Distinct packages |
+| ------------------------------ | ----------------- |
+| MIT                            | 274               |
+| Apache-2.0                     | 57                |
+| BSD-3-Clause                   | 18                |
+| ISC                            | 16                |
+| BlueOak-1.0.0                  | 5                 |
+| BSD-2-Clause                   | 2                 |
+| MIT OR Apache-2.0              | 2                 |
+| MPL-2.0                        | 2                 |
+| Unlicense                      | 2                 |
+| (0BSD OR CC0-1.0 OR Unlicense) | 1                 |
+| (MIT OR CC0-1.0)               | 1                 |
+| 0BSD                           | 1                 |
+| SEE LICENSE IN LICENSE.md      | 1                 |
+| SEE LICENSE IN README.md       | 1                 |
+| **Licenses read from disk**    | **383**           |
+| Platform-gated, not installed  | 111               |
+| **Total distinct packages**    | **494**           |
 
 The two `SEE LICENSE IN ...` rows are the proprietary Anthropic Claude Agent SDK
 and its platform sidecar, described above. The permissive bulk (MIT / Apache-2.0 /
 BSD / ISC / BlueOak / 0BSD / Unlicense / CC0) imposes attribution-and-notice
 obligations, satisfied by each package shipping its own license inside
-`node_modules` — except for the 31 packages that ship none, whose attributions
+`node_modules` — except for the 32 packages that ship none, whose attributions
 this file carries. No package whose license was read carries a strong-copyleft
 (GPL/AGPL/LGPL) obligation.
 

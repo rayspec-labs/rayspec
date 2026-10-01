@@ -86,7 +86,8 @@ and then moved into place: linked, which fails if the destination exists, or ren
 `overwrite: true`. A bundle over the kind's archive limit is refused before anything is written
 (`archive-size`, or `migration-size` for a migration bundle), and so are payload files that add up
 to more than the kind's extracted byte limit (`extracted-size`). A limit the read-back reaches is
-reported as that limit; any other refusal of the read-back is `RAY_INTERNAL`.
+reported as that limit; any other refusal of the read-back is `RAY_INTERNAL`. `fileMode` sets the
+mode the archive is created with (default 0644); a migration bundle is written with 0600.
 
 ## The inner snapshot archive
 

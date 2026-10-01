@@ -4,15 +4,15 @@
   "reproduce": "pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs",
   "scope_note": "The package SET is derived from pnpm-lock.yaml (host-independent). Each licence is read verbatim from the installed package.json after a --frozen-lockfile install. Rows with installed:false are optional, platform-gated packages this host does not install; their licence was not read from disk and is recorded as null with an absent_reason, never dropped. 'provenance' below records WHERE the licences were read — it does not describe the scope of this inventory.",
   "lockfile": "pnpm-lock.yaml",
-  "lockfile_sha256": "648c6d650d802b483122faf4f17b475881bc3e805e3348803289229bae91c3e4",
+  "lockfile_sha256": "a73d306df3405b80ec8bd8b793caea7f92552d2acf41bab91c029c6f582d15fd",
   "provenance": {
     "host": "darwin-arm64",
     "node": "v24.21.0"
   },
   "counts": {
-    "lockfile_distinct": 485,
-    "installed_here": 374,
-    "license_read_from_manifest": 374,
+    "lockfile_distinct": 494,
+    "installed_here": 383,
+    "license_read_from_manifest": 383,
     "license_not_read": 111
   },
   "classification": {
@@ -21,15 +21,16 @@
     "custom_or_proprietary": "^\\s*(?:SEE LICENSE IN|UNLICENSED)"
   },
   "license_groups": {
-    "MIT": 267,
+    "MIT": 274,
     "Apache-2.0": 57,
-    "BSD-3-Clause": 17,
+    "BSD-3-Clause": 18,
     "ISC": 16,
     "BlueOak-1.0.0": 5,
     "BSD-2-Clause": 2,
     "MIT OR Apache-2.0": 2,
     "MPL-2.0": 2,
     "Unlicense": 2,
+    "(0BSD OR CC0-1.0 OR Unlicense)": 1,
     "(MIT OR CC0-1.0)": 1,
     "0BSD": 1,
     "SEE LICENSE IN LICENSE.md": 1,
@@ -67,6 +68,7 @@
       "@openai/codex@0.142.2 [Apache-2.0]",
       "@openai/codex@0.142.2-darwin-arm64 [Apache-2.0]",
       "@rolldown/binding-darwin-arm64@1.0.3 [MIT]",
+      "cctv-age@0.2.0 [(0BSD OR CC0-1.0 OR Unlicense)]",
       "data-uri-to-buffer@4.0.1 [MIT]",
       "drizzle-kit@0.31.10 [MIT]",
       "drizzle-orm@0.45.2 [Apache-2.0]",
@@ -1534,6 +1536,48 @@
       "absent_reason": "not installed: reachable only through an optional, platform-gated package this host skips, so its licence was NOT read from disk"
     },
     {
+      "name": "@noble/ciphers",
+      "version": "2.4.0",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@noble/curves",
+      "version": "2.0.1",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@noble/curves",
+      "version": "2.4.0",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@noble/hashes",
+      "version": "2.0.1",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@noble/hashes",
+      "version": "2.4.0",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@noble/post-quantum",
+      "version": "0.5.4",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
       "name": "@nodable/entities",
       "version": "2.2.0",
       "license": "MIT",
@@ -1931,6 +1975,13 @@
     {
       "name": "@rolldown/pluginutils",
       "version": "1.0.1",
+      "license": "MIT",
+      "license_file_present": true,
+      "installed": true
+    },
+    {
+      "name": "@scure/base",
+      "version": "2.4.0",
       "license": "MIT",
       "license_file_present": true,
       "installed": true
@@ -2359,6 +2410,14 @@
       "installed": true
     },
     {
+      "name": "age-encryption",
+      "version": "0.3.1",
+      "license": "BSD-3-Clause",
+      "license_file_present": true,
+      "installed": true,
+      "direct_dependents": ["packages/app/cli", "packages/app/server"]
+    },
+    {
       "name": "agent-base",
       "version": "7.1.4",
       "license": "MIT",
@@ -2482,6 +2541,14 @@
       "license": "MIT",
       "license_file_present": true,
       "installed": true
+    },
+    {
+      "name": "cctv-age",
+      "version": "0.2.0",
+      "license": "(0BSD OR CC0-1.0 OR Unlicense)",
+      "license_file_present": false,
+      "installed": true,
+      "direct_dependents": ["packages/app/server"]
     },
     {
       "name": "chai",
