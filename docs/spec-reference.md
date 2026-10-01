@@ -1870,7 +1870,7 @@ the bundle provides them, and refuses the bundle when the range the extension's
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no
-durable worker and no event bus.
+durable worker, no event bus and no declared egress.
 
 ```yaml
 deployment:
@@ -1927,6 +1927,29 @@ deployment:
   commit inside the transaction the engine opens around the handler, together
   with the writes the handler made in it, so a reader never sees an event
   announcing a change it cannot yet read.
+- `egressHosts` — optional list of the outbound hosts the application calls: a
+  model provider, a webhook receiver, an API a handler talks to.
+
+  ```yaml
+  deployment:
+    egressHosts: [api.openai.com, hooks.example.com]
+  ```
+
+  Each entry is a lowercase DNS hostname of at least two labels; each label is 1
+  to 63 characters of `a-z`, `0-9` and `-`, neither starting nor ending with `-`,
+  and the last label is 2 to 63 letters or an IDNA A-label (`xn--…`). No
+  wildcard, trailing dot, IP address, port or URL; at most 253 characters per
+  host, at most 256 hosts, each once. A document that breaks any of these is
+  refused at the entry's path.
+
+  The declaration is **declarative only**. `rayspec pack` carries it into the
+  bundle manifest as `permissions.egressHosts`, `rayspec bundle verify` refuses a
+  manifest whose hosts differ from the spec's, and every plan reports it
+  (`permissionChanges.egressAdded` and `egressRemoved`). The runtime does **not**
+  block a call to a host that is not listed: the host's network policy (an
+  egress firewall or proxy) enforces it. A spec that uses an agent backend but
+  declares no host is packed with the warning `RAY_W_EGRESS_UNDECLARED`. A 1.8
+  parser refuses a spec that uses the key.
 
 ## `frontend`
 
@@ -2622,6 +2645,16 @@ deployment_overrides:
   `default_model` and `default_provider`. Credentials are **not** named here — a
   deployment supplies them purely through the environment (e.g. `OPENAI_API_KEY`),
   never through the document.
+- `egress_hosts` — optional list of the outbound hosts the product calls, on
+  exactly the terms of the backend profile's
+  [`deployment.egressHosts`](#deployment): lowercase DNS hostnames, declarative
+  only, carried into the bundle manifest and reported in every plan, enforced by
+  the host's network policy and never by the runtime.
+
+  ```yaml
+  deployment_overrides:
+    egress_hosts: [api.openai.com, api.deepgram.com]
+  ```
 
 ---
 

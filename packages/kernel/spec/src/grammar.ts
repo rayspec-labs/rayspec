@@ -143,6 +143,47 @@ export type EventBusSpec = z.infer<typeof EventBusSpec>;
 export const DEFAULT_EVENT_BUS_RETENTION_HOURS = 24;
 
 /**
+ * An outbound host the application intends to call: a lowercase DNS hostname of at least two labels,
+ * each label 1 to 63 characters of `a-z 0-9 -` that neither starts nor ends with `-`, and a last label
+ * of 2 to 63 letters or an IDNA A-label (`xn--…`). No wildcard, trailing dot, IP literal, port or URL.
+ * The same pattern as `permissions.egressHosts` in the bundle manifest schema, so a host the grammar
+ * accepts is one `rayspec pack` can write.
+ */
+export const EGRESS_HOST_PATTERN =
+  /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$/;
+
+/** The longest egress host the bundle manifest accepts. */
+export const EGRESS_HOST_MAX_LENGTH = 253;
+
+/** The most egress hosts one document may declare. */
+export const EGRESS_HOSTS_MAX = 256;
+
+/** One egress host (see `EGRESS_HOST_PATTERN`). */
+export const EgressHost = z
+  .string()
+  .max(EGRESS_HOST_MAX_LENGTH)
+  .regex(
+    EGRESS_HOST_PATTERN,
+    'an egress host is a lowercase DNS hostname with at least two labels and an alphabetic or ' +
+      'xn-- last label: no wildcard, trailing dot, IP address, port or URL',
+  );
+
+/**
+ * The hosts an application declares it calls. DECLARATIVE: the declaration is carried into the bundle
+ * manifest (`permissions.egressHosts`) and reported in every plan, and the host network policy
+ * enforces it. The runtime does not block a call to an undeclared host.
+ */
+export const EgressHosts = z
+  .array(EgressHost)
+  .max(EGRESS_HOSTS_MAX)
+  .refine((hosts) => new Set(hosts).size === hosts.length, {
+    message: 'each egress host may be declared once',
+  })
+  // The refinement is invisible to the JSON Schema export; this states it there, as the manifest
+  // schema does.
+  .meta({ uniqueItems: true });
+
+/**
  * Deployment-level properties of a backend. These describe HOW the
  * deployment runs, NOT what any SDK can do — so `async`/off-request execution belongs HERE, on the
  * spec, gated by "is a durable worker configured?", and is INVISIBLE to the neutral `Backend`
@@ -159,11 +200,13 @@ export const DEFAULT_EVENT_BUS_RETENTION_HOURS = 24;
  *    DEPLOYMENT property, not a capability: it says the deployment keeps a durable per-tenant event
  *    stream, and the runtime gate stays the injected capability (an init carries `emit` only when the
  *    composition root wired the bus).
+ *  - `egressHosts` — the outbound hosts the application calls (see `EgressHosts`). Declarative only.
  */
 export const DeploymentSpec = z
   .object({
     durableWorker: z.boolean().optional(),
     eventBus: EventBusSpec.optional(),
+    egressHosts: EgressHosts.optional(),
   })
   .strict();
 export type DeploymentSpec = z.infer<typeof DeploymentSpec>;

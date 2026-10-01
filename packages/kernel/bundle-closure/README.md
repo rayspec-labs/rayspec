@@ -135,8 +135,9 @@ Every file, the generated ones included, then goes through the bundle's secret r
 - **`requires`, `permissions.execution`, `permissions.egressHosts`**: `deriveManifestFields`,
   following each capability's `derivedFrom` rule. `bundle verify` runs the same function on the
   spec inside the archive and `checkDerivedFields` refuses a manifest that differs. Egress hosts
-  derive as an empty list until the grammar can declare them, and a spec using an agent backend
-  gets the `RAY_W_EGRESS_UNDECLARED` warning.
+  are the ones the spec declares (backend `deployment.egressHosts`, product
+  `deployment_overrides.egress_hosts`) in code-point order, compared as a set; a spec using an
+  agent backend that declares none gets the `RAY_W_EGRESS_UNDECLARED` warning.
 - **`bindings`**: `deriveBindings`, the platform-grantable credentials of the agent backends the
   spec uses (`OPENAI_API_KEY` for `openai` and `pi`, `ANTHROPIC_API_KEY` or
   `CLAUDE_CODE_OAUTH_TOKEN` for `anthropic`, `CODEX_API_KEY` for `codex`). A product spec's

@@ -11,9 +11,9 @@
  *
  * The derivation follows the `derivedFrom` rule of each id in the capability vocabulary. Two ids are
  * never derived from a document today: the runtime-provided ids a bundle cannot require, and
- * `extraction-deterministic`, which no grammar field selects yet. Egress hosts come from a spec
- * field the grammar does not have yet, so every current spec derives an empty list, and a manifest
- * that lists a host is refused until the grammar can declare it.
+ * `extraction-deterministic`, which no grammar field selects yet. Egress hosts are the ones the spec
+ * declares: backend `deployment.egressHosts`, product `deployment_overrides.egress_hosts`, in
+ * code-point order; a spec that declares none derives an empty list.
  */
 import {
   type BindingDeclaration,
@@ -120,7 +120,11 @@ export function deriveManifestFields(parsed: BundleSpec): DerivedFields {
     for (const id of PRODUCT_CAPABILITY_IDS) {
       if (spec.requires.capabilities.includes(id)) ids.add(id);
     }
-    return { requires: sorted(ids), execution: 'none', egressHosts: [] };
+    return {
+      requires: sorted(ids),
+      execution: 'none',
+      egressHosts: sorted(new Set(spec.deployment_overrides?.egress_hosts ?? [])),
+    };
   }
   const spec = parsed.spec;
   if ((spec.frontend ?? []).length > 0) ids.add('static-frontend');
@@ -134,7 +138,11 @@ export function deriveManifestFields(parsed: BundleSpec): DerivedFields {
   for (const trigger of spec.triggers) ids.add(`trigger-${trigger.kind}`);
   for (const agent of spec.agents) ids.add(`agent-backend-${agent.backend}`);
   const execution = spec.handlers.length > 0 || spec.extensions.length > 0 ? 'in-process' : 'none';
-  return { requires: sorted(ids), execution, egressHosts: [] };
+  return {
+    requires: sorted(ids),
+    execution,
+    egressHosts: sorted(new Set(spec.deployment?.egressHosts ?? [])),
+  };
 }
 
 /**

@@ -3,7 +3,7 @@
  * each application needs at run time and nothing else, the derived fields are the spec's, and a
  * closure writes a bundle that the reader accepts and whose spec re-derives the same fields.
  */
-import { copyFileSync, cpSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { inspectBundle, writeBundle } from '@rayspec/bundle';
 import { NOTICES_PATH, SBOM_PATH } from '@rayspec/bundle-contract';
@@ -132,6 +132,22 @@ describe('acme-notes-backend: compiled handlers, stores, an agent and a cron tri
     ]);
     expect(closure.warnings.map((w) => w.code)).toEqual(['RAY_W_EGRESS_UNDECLARED']);
     await roundTrip(closure);
+  });
+
+  it('carries the egress hosts the spec declares, which the reader re-derives, and drops the warning', async () => {
+    const declared = join(built, 'rayspec.egress.yaml');
+    writeFileSync(
+      declared,
+      readFileSync(join(built, 'rayspec.yaml'), 'utf8').replace(
+        'deployment:\n  durableWorker: true\n',
+        'deployment:\n  durableWorker: true\n  egressHosts: [api.openai.com]\n',
+      ),
+    );
+    const closure = await resolved(declared, { id: 'acme-notes', version: '0.3.0' });
+    expect(closure.permissions.egressHosts).toEqual(['api.openai.com']);
+    expect(closure.warnings).toEqual([]);
+    const archive = await roundTrip(closure);
+    expect(archive).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('refuses the authored spec, whose handlers are TypeScript source', async () => {

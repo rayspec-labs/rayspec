@@ -163,7 +163,12 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     name: string,
     bindings: BindingDeclaration[] = [],
     signingKey?: ReturnType<typeof generateKeyPairSync>['privateKey'],
+    egressHosts: string[] = [],
   ): Promise<{ path: string; sha: string }> {
+    const spec =
+      egressHosts.length === 0
+        ? SPEC
+        : `${SPEC}deployment:\n  egressHosts: [${egressHosts.join(', ')}]\n`;
     const path = join(dir, name);
     const written = await writeBundle(
       path,
@@ -177,10 +182,10 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
           spec: 'payload/rayspec.yaml',
           requires: ['declarative-api', 'declarative-stores'],
           bindings,
-          permissions: { egressHosts: [], execution: 'none' },
+          permissions: { egressHosts, execution: 'none' },
         },
         files: [
-          { path: 'payload/rayspec.yaml', bytes: Buffer.from(SPEC) },
+          { path: 'payload/rayspec.yaml', bytes: Buffer.from(spec) },
           {
             path: 'payload/sbom.cdx.json',
             bytes: Buffer.from(
@@ -587,6 +592,25 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     armsRan += 1;
   }, 60_000);
 
+  it('prepare reports the egress hosts the spec declares as granted, in the plan and its digest', async () => {
+    const hosts = ['hooks.example.com', 'api.example.com'];
+    const { path, sha } = await writeAppBundle('notes-egress.ray', [], undefined, hosts);
+    const head = await liveHead();
+    const result = await adapter().prepare(
+      prepareRequest({ bundlePath: path, bundleSha256: sha, expectedSchemaHead: head }),
+    );
+    expectValidEnvelope(result);
+    expect(result.ok).toBe(true);
+    const { plan } = result.data!;
+    expect(plan.permissionChanges.egressAdded).toEqual(['api.example.com', 'hooks.example.com']);
+    expect(plan.permissionChanges.egressRemoved).toEqual([]);
+    // The same bundle without the declaration plans to a different digest: the grant is covered.
+    const plain = await adapter().prepare(prepareRequest({ expectedSchemaHead: head }));
+    expect(plain.data!.plan.permissionChanges.egressAdded).toEqual([]);
+    expect(plain.data!.planDigest).not.toBe(result.data!.planDigest);
+    armsRan += 1;
+  }, 60_000);
+
   it('a ledger newer than this runtime is drift for inspect and a blocker for prepare', async () => {
     await sql(
       "INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ('from-a-newer-runtime', 9999999999999)",
@@ -604,6 +628,6 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(12);
+  if (dbRequired) expect(armsRan).toBe(13);
   else expect(true).toBe(true);
 });

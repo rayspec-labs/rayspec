@@ -230,9 +230,13 @@ message names the file and the fix.
 | `RAY_INTERRUPTED` | 6 | SIGINT or SIGTERM arrived; nothing was written. | Run pack again. |
 | `RAY_INTERNAL` | 7 | A defect in pack. | Report it with the operation id. |
 
-A spec that uses an agent backend but declares no egress hosts is packed with
-the warning `RAY_W_EGRESS_UNDECLARED`: a host network policy that enforces the
-declared hosts would deny its calls.
+The manifest's `permissions.egressHosts` are the hosts the spec declares in
+`deployment.egressHosts` (backend profile) or `deployment_overrides.egress_hosts`
+(product profile), in code-point order. The declaration is what a host network
+policy is programmed from; the runtime itself blocks nothing. A spec that uses
+an agent backend but declares no egress hosts is packed with the warning
+`RAY_W_EGRESS_UNDECLARED`: a host network policy that enforces the declared
+hosts would deny its calls.
 
 ## Not available yet
 

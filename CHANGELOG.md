@@ -506,6 +506,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancellation semantics, gaps and the tests that prove them, is in
   [Hosting in the hardened posture → Supported backends](./docs/hardened-posture.md#supported-backends)
   and in `inspectHosting().supportedBackends`.
+- **The egress declaration.** A backend spec may list the outbound hosts its application calls in
+  `deployment.egressHosts`, a product spec in `deployment_overrides.egress_hosts`: lowercase DNS
+  hostnames of at least two labels, no wildcard, trailing dot, IP address, port or URL, each once, at
+  most 256. `rayspec pack` carries them into the manifest's `permissions.egressHosts`, which was
+  always empty before; `rayspec bundle verify` re-derives them from the spec and refuses a manifest
+  that lists one more or one fewer (`permissions-mismatch`); `prepare()` reports them as permission
+  changes and covers them by the plan digest. The declaration is for the host network policy to
+  enforce: the runtime blocks no call to an undeclared host. `spec.schema.json`,
+  `version-1.0.schema.json` and `product.schema.json` carry the new fields. A 1.8 parser refuses a
+  spec that uses them.
 
 ### Changed
 

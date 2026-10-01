@@ -640,8 +640,9 @@ bundle, in this order, stopping at the first failure:
 6. **Derived fields.** `requires`, the execution level and the egress hosts
    must be exactly what the spec derives: the capability ids its sections use,
    in code-point order; `in-process` when it declares handlers or extensions,
-   else `none`; and the egress hosts it declares (the grammar declares none yet,
-   so a manifest that lists one is refused). `RAY_MANIFEST_INVALID` with reason
+   else `none`; and the egress hosts it declares (backend `deployment.egressHosts`,
+   product `deployment_overrides.egress_hosts`), compared as a set, so a manifest
+   that lists one more or one fewer is refused. `RAY_MANIFEST_INVALID` with reason
    `requires-mismatch`, `execution-mismatch` or `permissions-mismatch`.
 7. **Secret scan.** A payload file named `.env`, `.env.*`, `id_rsa`,
    `id_ecdsa`, `id_ed25519` or `.pgpass`, or one that contains a PEM private-key

@@ -12,7 +12,13 @@ import {
   PLATFORM_GRANTABLE_BINDINGS,
   type RayManifest,
 } from '@rayspec/bundle-contract';
-import { APPLICATION_ID_PATTERN, APPLICATION_VERSION_PATTERN } from '@rayspec/spec';
+import {
+  APPLICATION_ID_PATTERN,
+  APPLICATION_VERSION_PATTERN,
+  EGRESS_HOST_MAX_LENGTH,
+  EGRESS_HOST_PATTERN,
+  EGRESS_HOSTS_MAX,
+} from '@rayspec/spec';
 import { describe, expect, it } from 'vitest';
 import {
   type BundleSpec,
@@ -147,6 +153,34 @@ deployment:
     });
   });
 
+  it('derives the egress hosts a backend spec declares, in code-point order', () => {
+    const spec = `version: '1.0'
+metadata:
+  name: calls-out
+deployment:
+  egressHosts: [api.openai.com, api.deepgram.com, xn--bcher-kva.example]
+`;
+    expect(deriveManifestFields(parsed(spec)).egressHosts).toEqual([
+      'api.deepgram.com',
+      'api.openai.com',
+      'xn--bcher-kva.example',
+    ]);
+  });
+
+  it('derives the egress hosts a product spec declares in deployment_overrides', () => {
+    const spec = `version: '1.0'
+product:
+  id: intake
+  name: Intake
+deployment_overrides:
+  egress_hosts: [hooks.example.com, api.openai.com]
+`;
+    expect(deriveManifestFields(parsed(spec)).egressHosts).toEqual([
+      'api.openai.com',
+      'hooks.example.com',
+    ]);
+  });
+
   it('derives only ids the vocabulary knows and a bundle may require', () => {
     const requirable = new Set(CAPABILITIES.filter((c) => c.requirableByBundle).map((c) => c.id));
     for (const id of deriveManifestFields(parsed(EVERY_BACKEND_FEATURE)).requires) {
@@ -188,6 +222,21 @@ describe('checkDerivedFields', () => {
       'RAY_MANIFEST_INVALID/execution-mismatch',
     ]);
     expect(check({ requires, egress: ['api.example.com'] })).toEqual([
+      'RAY_MANIFEST_INVALID/permissions-mismatch',
+    ]);
+  });
+
+  it('accepts the declared egress hosts in any order, and refuses one missing or one more', () => {
+    const declared = (egress: string[]) =>
+      checkDerivedFields(manifest({ requires: [], egress }), {
+        requires: [],
+        execution: 'none',
+        egressHosts: ['api.example.com', 'hooks.example.com'],
+      }).map((e) => `${e.code}/${e.reason}`);
+    expect(declared(['api.example.com', 'hooks.example.com'])).toEqual([]);
+    expect(declared(['hooks.example.com', 'api.example.com'])).toEqual([]);
+    expect(declared(['api.example.com'])).toEqual(['RAY_MANIFEST_INVALID/permissions-mismatch']);
+    expect(declared(['api.example.com', 'hooks.example.com', 'x.example.com'])).toEqual([
       'RAY_MANIFEST_INVALID/permissions-mismatch',
     ]);
   });
@@ -258,6 +307,16 @@ describe('the application identity', () => {
       .$defs;
     expect(APPLICATION_ID_PATTERN.source).toBe(defs.applicationId!.pattern);
     expect(APPLICATION_VERSION_PATTERN.source).toBe(defs.exactVersion!.pattern);
+  });
+
+  it('uses the egress host pattern and bounds the manifest schema uses', () => {
+    const schema = CONTRACT_SCHEMAS.manifest as {
+      $defs: Record<string, { pattern: string; maxLength: number }>;
+      properties: { permissions: { properties: { egressHosts: { maxItems: number } } } };
+    };
+    expect(EGRESS_HOST_PATTERN.source).toBe(schema.$defs.egressHost!.pattern);
+    expect(EGRESS_HOST_MAX_LENGTH).toBe(schema.$defs.egressHost!.maxLength);
+    expect(EGRESS_HOSTS_MAX).toBe(schema.properties.permissions.properties.egressHosts.maxItems);
   });
 
   it('takes the backend metadata, and the product metadata map', () => {

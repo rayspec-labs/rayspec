@@ -38,7 +38,7 @@ import { z } from 'zod';
 // kind / declared store column is rejected the same way backend store/column names are — and so a derived
 // product store is a standard `StoreSpec` the whole backend store machinery (generateProductSql /
 // diffProductStores / drift / classify / the update seam) consumes UNCHANGED.
-import { SafeIdentifier, SPEC_VERSION, StoreColumn } from './grammar.js';
+import { EgressHosts, SafeIdentifier, SPEC_VERSION, StoreColumn } from './grammar.js';
 // The view read+projection vocabulary — a SEPARATE module so this file's diff
 // stays minimal. See product-views.ts for the design laws.
 import { ViewConditionalRead, ViewParamSpec, ViewRead } from './product-views.js';
@@ -696,9 +696,15 @@ export const ProviderOverride = z
   .strict();
 export type ProviderOverride = z.infer<typeof ProviderOverride>;
 
+/**
+ * `egress_hosts` — the outbound hosts the product calls, on the same terms as the backend profile's
+ * `deployment.egressHosts` (see `EgressHosts`): declarative, carried into the bundle manifest and
+ * reported in every plan, enforced by the host network policy, never by the runtime.
+ */
 export const DeploymentOverrides = z
   .object({
     providers: z.record(z.string(), ProviderOverride).optional(),
+    egress_hosts: EgressHosts.optional(),
   })
   .strict();
 export type DeploymentOverrides = z.infer<typeof DeploymentOverrides>;
