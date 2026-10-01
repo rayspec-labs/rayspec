@@ -17,11 +17,12 @@
  *   - what IS proven is the adapter's own contract: the run's signal reaches a real spawned process,
  *     that process ends, and `adapter.run()` settles instead of hanging.
  *
- * The second test pins the OTHER side of that contract — the residual limit the README states. The
- * SDK signals with a plain SIGTERM and never escalates, so a child that ignores it survives; and
- * because the SDK drives the turn with a readline loop over that child's stdout, run() then does not
- * settle at all and its teardown (the tool bridge included) never runs. That is measured here rather
- * than assumed, so the README cannot quietly drift into claiming more than the adapter delivers.
+ * The second test is the kill ladder: the SDK signals with a plain SIGTERM and never escalates, so a
+ * child that ignores it would survive and — because the SDK drives the turn with a readline loop over
+ * that child's stdout — keep run() open for good. The adapter starts the binary through a launcher
+ * that forwards the SIGTERM and sends SIGKILL after the run's kill grace, so the child is gone and
+ * run() settles within the grace. The third test is the provider-call timeout: a child that never says
+ * anything is ended by the silence window alone, with nothing cancelling the run.
  */
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -57,12 +58,8 @@ const baseSpec = {
 
 /** How long a bounded wait is given before the test calls the thing it waited for stuck. */
 const BUDGET_MS = 10_000;
-/**
- * How long the LIMIT test waits before calling run() unsettled. It is a lower bound, not a proof of
- * "never": what makes it "never" is the mechanism (the SDK's readline loop over a stdout that stays
- * open), and the contrast is that the working path above settles in milliseconds once the child dies.
- */
-const UNSETTLED_BUDGET_MS = 2_000;
+/** The kill grace the ladder tests run with: SIGKILL follows an ignored SIGTERM after this long. */
+const KILL_GRACE_MS = 300;
 const POLL_MS = 25;
 
 /**
@@ -76,15 +73,28 @@ const POLL_MS = 25;
 function writeFakeCodexBinary(
   dir: string,
   pidFile: string,
-  opts: { ignoresSigterm?: boolean } = {},
+  opts: { ignoresSigterm?: boolean; grandchildPidFile?: string } = {},
 ): string {
   const bin = join(dir, 'codex');
   const pid = JSON.stringify(pidFile);
+  // A grandchild that inherits the binary's stdout, ignores SIGTERM and lives 20 s: it holds the pipe
+  // the launcher relays open after the binary itself is gone.
+  const grandchild =
+    opts.grandchildPidFile === undefined
+      ? []
+      : [
+          "const { spawn } = require('node:child_process');",
+          `const gc = spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(
+            "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 20000); setInterval(() => {}, 1000);",
+          )}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
+          `writeFileSync(${JSON.stringify(opts.grandchildPidFile)}, String(gc.pid));`,
+        ];
   writeFileSync(
     bin,
     [
       `#!${process.execPath}`,
       "const { writeFileSync, renameSync } = require('node:fs');",
+      ...grandchild,
       `writeFileSync(${pid} + '.tmp', String(process.pid));`,
       `renameSync(${pid} + '.tmp', ${pid});`,
       ...(opts.ignoresSigterm ? ["process.on('SIGTERM', () => {});"] : []),
@@ -200,37 +210,26 @@ describe('Codex adapter: cancelling a run ends the REAL spawned child and run() 
     expect(journal.records[0]?.status).toBe('error');
   });
 
-  it('LIMIT: a child that IGNORES SIGTERM survives, and run() then does NOT settle', async () => {
-    // The residual limit, measured rather than asserted. `@openai/codex-sdk` spawns with
-    // `spawn(this.executablePath, commandArgs, { env, signal: args.signal })` — no `killSignal`, no
-    // escalation — so aborting the signal sends one SIGTERM. It then drives the turn with
-    // `for await (const line of rl)` over the child's stdout and only afterwards awaits the exit. A
-    // child that ignores SIGTERM keeps that stdout open, so the loop never ends, run() never returns,
-    // and its `finally` — `unlinkCancel()`, `abort.abort()` and the MCP bridge teardown — never runs
-    // at all. Cancellation therefore bounds the bridge teardown only once the turn ends; it cannot
-    // rescue a run whose child refuses to die. This test exists so that limit stays stated honestly
-    // in the README and in `docs/spec-reference.md`.
-    //
-    // What this test does NOT distinguish, said plainly: 'still pending' + a live child is also what
-    // a completely broken cancellation produces, so those two assertions alone do not show the signal
-    // reached the child. The test above is what shows that (roll `linkAbort` back and it reddens
-    // while this one stays green); the SIGKILL at the end is what shows the hang was the child's
-    // survival rather than anything else in the adapter. If this test ever fails because run() DID
-    // settle, the limit was fixed — say so in the README and in the per-backend table, and do not
-    // relax the budget to make it pass again.
+  it('a child that IGNORES SIGTERM is killed after the kill grace, and run() settles', async () => {
+    // The SDK spawns with `spawn(path, args, { env, signal })` — no `killSignal`, no escalation — so
+    // aborting sends one SIGTERM, and a child that ignores it would keep the SDK's stdout loop (and
+    // run()) open for good. The kill ladder forwards that SIGTERM and follows it with a SIGKILL after
+    // the run's kill grace. If this test ever fails because the child survived, the ladder is broken:
+    // do not relax the budget to make it pass.
     expect(process.env.CODEX_HOME).toBeUndefined();
     codexPathOverride = writeFakeCodexBinary(dir, pidFile, { ignoresSigterm: true });
 
     const journal = new FakeJournal();
     const controller = new AbortController();
     const ctx: RunContext = {
-      runId: 'run-codex-cancel-limit',
+      runId: 'run-codex-cancel-ladder',
       tenantId: 'tenant-test',
       journal,
       replay: false,
       authMode: 'codex-subscription-oauth',
       tools: [],
       signal: controller.signal,
+      limits: { killGraceMs: KILL_GRACE_MS },
     };
     const adapter = new CodexAdapter({ codexPathOverride, codexHome: dir });
 
@@ -239,23 +238,100 @@ describe('Codex adapter: cancelling a run ends the REAL spawned child and run() 
     expect(await waitFor(() => existsSync(pidFile))).toBe(true);
     const pid = Number(readFileSync(pidFile, 'utf8'));
     leakedPid = pid;
-
-    controller.abort();
-
-    const outcome = await Promise.race([
-      run.then(() => 'settled' as const),
-      delay(UNSETTLED_BUDGET_MS, 'still pending' as const),
-    ]);
-    // The test above settles in milliseconds once its child dies; this one is still pending, and the
-    // child is still there. Both halves are the limit.
-    expect(outcome).toBe('still pending');
     expect(isAlive(pid)).toBe(true);
 
-    // SIGKILL cannot be ignored: the stdout closes, the turn ends, and run() settles the ordinary
-    // way — which also proves the hang was the child's survival and nothing else in the adapter.
-    process.kill(pid, 'SIGKILL');
+    const abortedAt = Date.now();
+    controller.abort();
+
+    // The child ignored the SIGTERM, so for the grace it is still there…
+    await delay(KILL_GRACE_MS / 3);
+    expect(isAlive(pid)).toBe(true);
+    // …and then the SIGKILL ends it, and run() settles.
+    expect(await waitFor(() => !isAlive(pid))).toBe(true);
+    const goneAfterMs = Date.now() - abortedAt;
+    expect(goneAfterMs).toBeGreaterThanOrEqual(KILL_GRACE_MS - 50);
+    const outcome = await Promise.race([
+      run.then(() => 'settled' as const),
+      delay(BUDGET_MS, 'still pending' as const),
+    ]);
+    expect(outcome).toBe('settled');
     const res = await run;
     expect(res.status).toBe('error');
     expect(res.backend).toBe('codex');
+  });
+
+  it('a child whose own child holds its stdout: the whole group is killed and run() settles', async () => {
+    // The binary ignores SIGTERM and has started a process that inherited its stdout. Killing the
+    // binary alone would leave that process holding the pipe the launcher relays, and run() open
+    // until it exits by itself (20 s here). The launcher signals the binary's whole process group and
+    // never waits on the relayed pipe beyond the grace.
+    expect(process.env.CODEX_HOME).toBeUndefined();
+    const grandchildPidFile = join(dir, 'grandchild.pid');
+    codexPathOverride = writeFakeCodexBinary(dir, pidFile, {
+      ignoresSigterm: true,
+      grandchildPidFile,
+    });
+    const controller = new AbortController();
+    const ctx: RunContext = {
+      runId: 'run-codex-cancel-group',
+      tenantId: 'tenant-test',
+      journal: new FakeJournal(),
+      replay: false,
+      authMode: 'codex-subscription-oauth',
+      tools: [],
+      signal: controller.signal,
+      limits: { killGraceMs: KILL_GRACE_MS },
+    };
+    const adapter = new CodexAdapter({ codexPathOverride, codexHome: dir });
+    const run = adapter.run({ ...baseSpec }, ctx);
+
+    expect(await waitFor(() => existsSync(pidFile) && existsSync(grandchildPidFile))).toBe(true);
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    const grandchild = Number(readFileSync(grandchildPidFile, 'utf8'));
+    leakedPid = pid;
+    try {
+      expect(isAlive(grandchild)).toBe(true);
+      const abortedAt = Date.now();
+      controller.abort();
+      const outcome = await Promise.race([
+        run.then(() => 'settled' as const),
+        delay(5_000, 'still pending' as const),
+      ]);
+      expect(outcome).toBe('settled');
+      expect(Date.now() - abortedAt).toBeLessThan(KILL_GRACE_MS + 3_000);
+      expect(await waitFor(() => !isAlive(pid) && !isAlive(grandchild))).toBe(true);
+    } finally {
+      if (isAlive(grandchild)) process.kill(grandchild, 'SIGKILL');
+    }
+  });
+
+  it('a child that says NOTHING is ended by the provider-call timeout, with no cancellation', async () => {
+    expect(process.env.CODEX_HOME).toBeUndefined();
+    codexPathOverride = writeFakeCodexBinary(dir, pidFile, { ignoresSigterm: true });
+    const journal = new FakeJournal();
+    const ctx: RunContext = {
+      runId: 'run-codex-timeout',
+      tenantId: 'tenant-test',
+      journal,
+      replay: false,
+      authMode: 'codex-subscription-oauth',
+      tools: [],
+      limits: { providerCallTimeoutMs: 300, killGraceMs: KILL_GRACE_MS },
+    };
+    const adapter = new CodexAdapter({ codexPathOverride, codexHome: dir });
+    const startedAt = Date.now();
+    const run = adapter.run({ ...baseSpec }, ctx);
+    expect(await waitFor(() => existsSync(pidFile))).toBe(true);
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    leakedPid = pid;
+
+    const res = await Promise.race([run, delay(BUDGET_MS, undefined)]);
+    expect(res).toBeDefined();
+    expect(res?.status).toBe('error');
+    expect(res?.errorClass).toBe('timeout');
+    expect(res?.error).toContain('RAYSPEC_AGENT_REQUEST_TIMEOUT_MS');
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(300);
+    // The child ignored the SIGTERM the timeout led to; the ladder killed it.
+    expect(isAlive(pid)).toBe(false);
   });
 });

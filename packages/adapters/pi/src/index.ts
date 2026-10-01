@@ -73,7 +73,17 @@ import type {
   ToolSpec,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, costUsd, hashJson, onAbortSignal } from '@rayspec/core';
+import {
+  type CallWatchdog,
+  classifyUpstreamError,
+  credentialRefusedMessage,
+  costUsd,
+  hashJson,
+  isCredentialRefusal,
+  onAbortSignal,
+  ProviderCallTimeoutError,
+  startCallWatchdog,
+} from '@rayspec/core';
 import type { TSchema } from 'typebox';
 import { Type } from 'typebox';
 
@@ -289,6 +299,11 @@ export function piToolParameters(toolSpec: ToolSpec): TSchema {
 
 export interface PiAdapterOptions {
   apiKey: string;
+  /**
+   * An OpenAI-compatible endpoint the model calls go to instead of the model's own (for example a
+   * proxy the host's network policy allows). Absent ⇒ the model's own endpoint.
+   */
+  baseUrl?: string;
 }
 
 /**
@@ -308,9 +323,11 @@ function swallow(step: () => void): void {
 export class PiAdapter implements Backend {
   readonly id = 'pi' as const;
   private readonly apiKey: string;
+  private readonly baseUrl: string | undefined;
 
   constructor(opts: PiAdapterOptions) {
     this.apiKey = opts.apiKey;
+    this.baseUrl = opts.baseUrl;
   }
 
   // Pi runs on the OpenAI API key here. Guard: this adapter must NEVER be pointed at an Anthropic
@@ -353,6 +370,7 @@ export class PiAdapter implements Backend {
     let model: ReturnType<typeof getModel> | null = null;
     try {
       model = getModel('openai', spec.model as never);
+      if (model && this.baseUrl !== undefined) model = { ...model, baseUrl: this.baseUrl };
     } catch {
       model = null;
     }
@@ -387,6 +405,9 @@ export class PiAdapter implements Backend {
 
     // ---- host-tool bridge: route Pi's tool execution to ctx.dispatchTool (NO handlers) ---------
     const toolEvents = { count: 0 };
+    // The provider-call watchdog (armed once the session exists, below). A tool call the platform
+    // dispatches does not count as the provider's silence: the dispatcher bounds it itself.
+    let watchdog: CallWatchdog | undefined;
     const customTools = spec.tools.map((t) =>
       // defineTool() parameters use TypeBox (docs/sdk.md). We pass the FAITHFUL neutral JSON-Schema
       // (via the exported piToolParameters single-source builder) so pi-agent-core's
@@ -426,7 +447,13 @@ export class PiAdapter implements Backend {
             };
           }
           toolEvents.count++;
-          const result: ToolDispatchResult = await ctx.dispatchTool(t.name, params, toolCallId);
+          watchdog?.pause();
+          let result: ToolDispatchResult;
+          try {
+            result = await ctx.dispatchTool(t.name, params, toolCallId);
+          } finally {
+            watchdog?.resume();
+          }
           return {
             content: [{ type: 'text' as const, text: JSON.stringify(result) }],
             details: {},
@@ -480,7 +507,22 @@ export class PiAdapter implements Backend {
       }
     };
     let forwardTail: Promise<void> = Promise.resolve();
+    // PROVIDER-CALL TIMEOUT (`ctx.limits.providerCallTimeoutMs`): the session reports every step of
+    // the model call as an event, so the bound is on SILENCE — no event within the window aborts the
+    // session, the same stop a cancellation uses, which ends the in-flight request at the transport.
+    // Absent ⇒ inert.
+    const callWatchdog = startCallWatchdog(ctx.limits?.providerCallTimeoutMs, () => {
+      try {
+        void session.abort().catch(() => {
+          /* best effort — a stop must not surface a new failure */
+        });
+      } catch {
+        /* best effort */
+      }
+    });
+    watchdog = callWatchdog;
     const unsubscribe = session.subscribe((event: unknown) => {
+      callWatchdog.touch();
       captureRetryFailure(event);
       forwardTail = forwardTail.then(() => this.forwardEvent(event, ctx, emit));
     });
@@ -540,7 +582,10 @@ export class PiAdapter implements Backend {
       } catch (err) {
         status = 'error';
         const classified = classifyUpstreamError(err);
-        errorMessage = classified.message;
+        // A refused credential is named, never quoted: the provider's text can carry part of the key.
+        errorMessage = isCredentialRefusal(err)
+          ? credentialRefusedMessage('OPENAI_API_KEY', err)
+          : classified.message;
         errorClass = classified.errorClass;
         errorRetryAfter = classified.retryAfter;
       }
@@ -577,6 +622,7 @@ export class PiAdapter implements Backend {
       // — and abandoned the steps behind it, which are the ones that actually release the SDK's
       // resources. Tearing down is not an outcome; it must not be able to produce one, and it must not
       // be able to stop itself half-way.
+      swallow(() => callWatchdog.dispose());
       swallow(() => unlinkCancel());
       swallow(() => unsubscribe());
       try {
@@ -585,6 +631,15 @@ export class PiAdapter implements Backend {
         /* best effort */
       }
       swallow(() => session.dispose());
+    }
+
+    if (callWatchdog.fired && ctx.limits?.providerCallTimeoutMs !== undefined) {
+      // The run ended because the provider went silent: say so, with the neutral `timeout` class,
+      // whatever the aborted session reported.
+      status = 'error';
+      errorMessage = new ProviderCallTimeoutError('pi', ctx.limits.providerCallTimeoutMs).message;
+      errorClass = 'timeout';
+      errorRetryAfter = undefined;
     }
 
     if (status === 'error') {

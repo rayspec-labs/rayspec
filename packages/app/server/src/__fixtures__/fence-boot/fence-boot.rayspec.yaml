@@ -58,16 +58,20 @@ handlers:
     module: handlers/tick.mjs
     export: tick
     kind: trigger
+    uses: []
   - id: emit_handler
     module: handlers/emit.mjs
     export: emitOnRead
     kind: route
     readonly: true
+    uses: [emit]
   - id: write_handler
     module: handlers/write.mjs
     export: writeOnRead
     kind: route
+    uses: []
   - id: ingest_handler
     module: handlers/ingest.mjs
     export: ingest
     kind: route
+    uses: [blob]

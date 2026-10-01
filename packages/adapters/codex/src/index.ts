@@ -99,7 +99,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import type {
   AgentSpec,
   AuthMode,
@@ -115,11 +115,78 @@ import type {
   ToolDispatchResult,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, costUsd, hashJson, linkAbort } from '@rayspec/core';
+import {
+  type CallWatchdog,
+  classifyUpstreamError,
+  costUsd,
+  hashJson,
+  linkAbort,
+  ProviderCallTimeoutError,
+  startCallWatchdog,
+} from '@rayspec/core';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { Codex } from '@openai/codex-sdk';
 import { z } from 'zod';
+import {
+  killLadderLauncher,
+  LAUNCHER_GRACE_ENV,
+  LAUNCHER_TARGET_ENV,
+  resolveBundledCodex,
+} from './kill-ladder.js';
+
+/** The grace a codex child gets between SIGTERM and SIGKILL when the run carries none. */
+export const DEFAULT_CODEX_KILL_GRACE_MS = 5_000;
+
+/**
+ * How the codex binary is started for one run: through the kill-ladder launcher (kill-ladder.ts) when
+ * the binary can be found and the launcher written, else directly by the SDK — the case in which a
+ * child that ignores SIGTERM is not escalated, which is logged once per process.
+ */
+export interface CodexLaunchPlan {
+  /** What the SDK starts (`codexPathOverride`); undefined ⇒ the SDK's own lookup. */
+  readonly executable?: string;
+  /** Variables added to the curated child env (the launcher's target and grace, PATH). */
+  readonly env: Record<string, string>;
+  /** Whether a SIGTERM the child ignores is followed by a SIGKILL. */
+  readonly escalates: boolean;
+}
+
+/** Whether the unavailable-ladder warning was already logged in this process. */
+let warnedNoEscalation = false;
+
+/**
+ * Plan how the binary is started: the explicit `codexPathOverride` or the bundled binary as the
+ * launcher's target, with the grace `killGraceMs`, and the bundled binary's own PATH entries (the SDK
+ * adds those itself only when it does the lookup).
+ */
+export function codexLaunchPlan(
+  override: string | undefined,
+  killGraceMs: number,
+  curatedPath: string | undefined,
+): CodexLaunchPlan {
+  const bundled = override === undefined ? resolveBundledCodex() : undefined;
+  const target = override ?? bundled?.executablePath;
+  const launcher = target === undefined ? undefined : killLadderLauncher();
+  if (target === undefined || launcher === undefined) {
+    if (!warnedNoEscalation) {
+      warnedNoEscalation = true;
+      console.warn(
+        '[adapter-codex] the codex kill ladder is unavailable (the bundled binary was not found or ' +
+          'the launcher could not be written): a codex child that ignores SIGTERM is not killed.',
+      );
+    }
+    return { ...(override === undefined ? {} : { executable: override }), env: {}, escalates: false };
+  }
+  const env: Record<string, string> = {
+    [LAUNCHER_TARGET_ENV]: target,
+    [LAUNCHER_GRACE_ENV]: String(killGraceMs),
+  };
+  if (bundled !== undefined && bundled.pathDirs.length > 0) {
+    env.PATH = [...bundled.pathDirs, ...(curatedPath ? [curatedPath] : [])].join(delimiter);
+  }
+  return { executable: launcher, env, escalates: true };
+}
 
 /** The single in-proc MCP server name; tools are dispatched by codex as server='rayspec'. */
 const MCP_SERVER_NAME = 'rayspec';
@@ -327,14 +394,27 @@ export class CodexAdapter implements Backend {
     // child only (SIGTERM): nothing escalates to a forced kill and processes that child spawned
     // itself are not terminated. A child that ignores SIGTERM keeps its stdout open, the SDK's
     // readline loop over that stdout never ends, and run() therefore never settles at all — measured
-    // in cancel.integration.test.ts and stated as a limit in this package's README.
+    // in cancel.integration.test.ts and stated as a limit in this package's README. The kill ladder
+    // (kill-ladder.ts) closes that gap: the SDK starts a launcher, which forwards the SIGTERM to the
+    // binary and sends SIGKILL `ctx.limits.killGraceMs` later if the binary is still there.
     const unlinkCancel = linkAbort(ctx.signal, abort);
+    // PROVIDER-CALL TIMEOUT (`ctx.limits.providerCallTimeoutMs`): the turn is one long call that
+    // streams an event per step, so the bound is on SILENCE — no event within the window ends the
+    // turn through the same controller, and so through the same ladder. A tool call the platform
+    // dispatches does not count as silence. Absent ⇒ inert.
+    const watchdog = startCallWatchdog(ctx.limits?.providerCallTimeoutMs, () => abort.abort());
+    const curatedEnv = this.buildCuratedEnv(mcpToken);
+    const launch = codexLaunchPlan(
+      this.codexPathOverride,
+      ctx.limits?.killGraceMs ?? DEFAULT_CODEX_KILL_GRACE_MS,
+      curatedEnv.PATH,
+    );
     try {
       // The sandbox confinement + tool bridge are allocated HERE (inside try) so a setup throw yields a
       // neutral error RunResult and the finally tears everything down.
       bridge =
         spec.tools.length > 0
-          ? await this.startMcpBridge(spec, ctx, emit, mcpToken, toolEvents)
+          ? await this.startMcpBridge(spec, ctx, emit, mcpToken, toolEvents, watchdog)
           : null;
       // The SINGLE fixed empty read-only scratch dir, reused across runs. A fixed path bounds codex's
       // `~/.codex/config.toml` `[projects]` registration to AT MOST ONE entry for it (never one-per-run)
@@ -348,10 +428,11 @@ export class CodexAdapter implements Backend {
       mkdirSync(CODEX_SCRATCH_CWD, { recursive: true });
       cwd = CODEX_SCRATCH_CWD;
       const codex = new Codex({
-        ...(this.codexPathOverride ? { codexPathOverride: this.codexPathOverride } : {}),
-        // The CURATED env — NO api key, NO base url, plus the per-run MCP bearer token. This is the
-        // structural mis-billing guard (the subprocess inherits ONLY these vars).
-        env: this.buildCuratedEnv(mcpToken),
+        ...(launch.executable ? { codexPathOverride: launch.executable } : {}),
+        // The CURATED env — NO api key, NO base url, plus the per-run MCP bearer token (and the
+        // launcher's target and grace). This is the structural mis-billing guard (the subprocess
+        // inherits ONLY these vars).
+        env: { ...curatedEnv, ...launch.env },
         // The in-proc MCP server (only when the run has tools) + the auto-approve key so a non-
         // interactive exec does not cancel the tool call.
         ...(bridge
@@ -385,6 +466,7 @@ export class CodexAdapter implements Backend {
       });
 
       for await (const rawEvent of events) {
+        watchdog.touch();
         const ev = rawEvent as CodexThreadEvent;
         if (ev.type === 'item.completed' || ev.type === 'item.updated') {
           const item = ev.item;
@@ -439,9 +521,17 @@ export class CodexAdapter implements Backend {
       // STILL be cleaned (no leak) if partially allocated. The scratch cwd is NOT torn down: it is the
       // SINGLE fixed dir shared across (concurrent) runs and read-only-confined (codex cannot write
       // into it — it stays empty + no state accumulates), so removing it would break concurrent runs.
+      watchdog.dispose();
       unlinkCancel();
       abort.abort();
       if (bridge) await bridge.close();
+    }
+    if (watchdog.fired && ctx.limits?.providerCallTimeoutMs !== undefined) {
+      // The turn ended because codex went silent: say so, with the neutral `timeout` class.
+      status = 'error';
+      errorMessage = new ProviderCallTimeoutError('codex', ctx.limits.providerCallTimeoutMs).message;
+      errorClass = 'timeout';
+      errorRetryAfter = undefined;
     }
 
     // The dispatched tool_call/tool_result parts the bridge collected (correlated by the real callId in
@@ -530,6 +620,7 @@ export class CodexAdapter implements Backend {
     emit: (e: NeutralEventInput) => unknown,
     mcpToken: string,
     toolEvents: { count: number },
+    watchdog?: CallWatchdog,
   ): Promise<{
     url: string;
     close: () => Promise<void>;
@@ -564,11 +655,14 @@ export class CodexAdapter implements Backend {
             return mcpResult(JSON.stringify({ kind: 'tool_error', name: t.name, message }), true);
           }
           toolEvents.count++;
-          const result: ToolDispatchResult = await ctx.dispatchTool(
-            t.name,
-            argsForDispatch,
-            toolCallId,
-          );
+          // The dispatcher bounds the tool call itself; its duration is not the provider's silence.
+          watchdog?.pause();
+          let result: ToolDispatchResult;
+          try {
+            result = await ctx.dispatchTool(t.name, argsForDispatch, toolCallId);
+          } finally {
+            watchdog?.resume();
+          }
           // Record the neutral tool_call/tool_result parts for the transcript re-derivation, joined by
           // the SAME callId the journal step + the emitted events carry (untrusted-content boundary: a tool result is DATA).
           // The stored `result` is the FULL opaque dispatch wrapper (tool_data/tool_error) — matches

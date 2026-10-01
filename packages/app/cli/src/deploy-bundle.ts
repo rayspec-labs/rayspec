@@ -401,6 +401,22 @@ class Interrupted extends Error {}
  * Run `rayspec deploy <file.ray> ...`. Returns the envelope to write, or `served` once the
  * deployment serves.
  */
+/**
+ * Write the application-defined bindings a bindings file supplied into the application process
+ * environment: the platform never reads them, and the application finds them there. A provider
+ * credential is skipped — it is granted to its adapter alone and never enters the environment, so a
+ * child process does not inherit it. A binding the explicit environment supplied is there already.
+ */
+export function exportApplicationBindings(
+  env: NodeJS.ProcessEnv,
+  fileValues: ReadonlyMap<string, string>,
+  isProviderCredentialName: (name: string) => boolean,
+): void {
+  for (const [name, value] of fileValues) {
+    if (!isProviderCredentialName(name)) env[name] = value;
+  }
+}
+
 export async function runDeployBundle(
   args: readonly string[],
   options: BundleDeployOptions,
@@ -513,6 +529,9 @@ async function deploy(
   }
 
   const server = await import('@rayspec/server');
+  // Everything this process writes from here on — the envelope, the boot's lines, a handler's — passes
+  // the one redaction path, and every binding value below is registered with it as it is read.
+  server.installOutputRedaction();
 
   // Protected files: the bindings file, the trusted keys, the state directory.
   let fileValues = new Map<string, string>();
@@ -529,6 +548,7 @@ async function deploy(
       throw err;
     }
     fileValues = parseBindingsFile(bytes);
+    server.registerSecretValues(fileValues.values());
   }
   const trustedKeys: KeyObject[] = [];
   for (const path of parsed.trustedKeys) trustedKeys.push(await readTrustedKey(path));
@@ -563,6 +583,30 @@ async function deploy(
       );
     }
   }
+  // Every other name in it must be one the bundle declares, or the provider credential of the speech
+  // provider the operator selected (which a bundle cannot declare for itself): a value reaches the
+  // application only for a name it asked for. A provider credential the operator also supplies as a
+  // file would leave two values for one name.
+  const declared = new Set(bundle.manifest.bindings.map((b) => b.name));
+  const speech = speechProviderCredentials(env);
+  for (const [i, name] of [...fileValues.keys()].entries()) {
+    if (!declared.has(name) && !speech.has(name)) {
+      refuse(
+        'RAY_USAGE',
+        `the bindings file supplies ${name}, which the bundle does not declare; a value reaches the ` +
+          'application only for a name its manifest declares in bindings',
+        { path: `/bindings/${i}/name` },
+      );
+    }
+    if (server.isProviderCredentialName(name) && env[`${name}_FILE`]?.trim()) {
+      refuse(
+        'RAY_USAGE',
+        `the bindings file supplies ${name} and the environment sets ${name}_FILE; supply it in one ` +
+          'place',
+        { path: `/bindings/${i}/name` },
+      );
+    }
+  }
   hooks.safePoint();
 
   // The configuration, from the explicit environment only. A deploy validates the whole boot
@@ -590,14 +634,32 @@ async function deploy(
   }
 
   // The binding values the plan covers: every entry of the bindings file, and each binding the
-  // bundle declares that the explicit environment supplies.
+  // bundle declares that the explicit environment supplies — a provider credential through its
+  // `_FILE` too, read with the checks the bindings file passes.
   const values = new Map(fileValues);
   for (const b of bundle.manifest.bindings) {
-    const value = env[b.name];
-    if (!values.has(b.name) && value !== undefined && value !== '') values.set(b.name, value);
+    if (values.has(b.name)) continue;
+    let value: string | undefined;
+    try {
+      value = server.isProviderCredentialName(b.name)
+        ? server.providerCredential(env, b.name as Parameters<typeof server.providerCredential>[1])
+        : env[b.name];
+    } catch (err) {
+      if (err instanceof server.CredentialFileError) {
+        refuse(
+          err.insecure ? 'RAY_BINDINGS_FILE_INSECURE' : 'RAY_USAGE',
+          err.message.replace(/^Boot aborted — /, ''),
+        );
+      }
+      throw err;
+    }
+    if (value !== undefined && value !== '') values.set(b.name, value);
   }
-  for (const [name, value] of fileValues) env[name] = value;
-  // The served application reads the declared bindings from the process environment.
+  server.registerSecretValues(values.values());
+  // Where each kind of value goes, once the deploy is past its dry-run: a provider credential only to
+  // the adapter that uses it, never into the process environment; an application-defined binding into
+  // the application process environment, as the bindings contract says, and to its handlers as
+  // `init.bindings`.
   const shadowDatabaseUrl = env.SHADOW_DATABASE_URL?.trim() || undefined;
   const runtime = {
     trustedKeys,
@@ -712,6 +774,16 @@ async function deploy(
     return dryRun(options, stateRoot, bundlePath, bundle, revisions, data, warnings);
   }
 
+  server.grantProviderCredentials(
+    new Map([...fileValues].filter(([name]) => server.isProviderCredentialName(name))),
+  );
+  exportApplicationBindings(env, fileValues, server.isProviderCredentialName);
+  server.setApplicationBindings({
+    declared: bundle.manifest.bindings.map((b) => b.name),
+    providerCredentials: server.PROVIDER_CREDENTIAL_NAMES,
+    values,
+  });
+
   // Plan acceptance: a plan that changes the schema or the grants must be the reviewed one.
   if (parsed.planDigest === undefined && server.planNeedsReview(data)) {
     refuse(
@@ -817,6 +889,19 @@ async function deploy(
     },
   );
   return { kind: 'served' };
+}
+
+/**
+ * The provider credentials the runtime itself reads for the speech providers the operator selected:
+ * `DEEPGRAM_API_KEY` under `STT_PROVIDER=deepgram`, `OPENAI_API_KEY` under `TTS_PROVIDER=openai`. A
+ * bundle does not declare these (the provider is the operator's choice), so the bindings file may
+ * supply them without a declaration.
+ */
+function speechProviderCredentials(env: NodeJS.ProcessEnv): Set<string> {
+  const names = new Set<string>();
+  if (env.STT_PROVIDER?.trim() === 'deepgram') names.add('DEEPGRAM_API_KEY');
+  if (env.TTS_PROVIDER?.trim() === 'openai') names.add('OPENAI_API_KEY');
+  return names;
 }
 
 /** Why a dry-run needs each variable it reads from the environment. */

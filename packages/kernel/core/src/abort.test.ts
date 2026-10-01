@@ -11,8 +11,9 @@
  * resource down, so it has to be safe to call after the source already fired and safe to call twice.
  */
 
-import { describe, expect, it } from 'vitest';
-import { linkAbort, onAbortSignal } from './abort.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { linkAbort, onAbortSignal, ProviderCallTimeoutError, startCallWatchdog } from './abort.js';
+import { classifyUpstreamError } from './error-class.js';
 
 describe('linkAbort — for a resource whose stop is a controller', () => {
   it('aborts the target when the source aborts', () => {
@@ -104,5 +105,79 @@ describe('onAbortSignal — for a resource whose stop is a CALL', () => {
     unlink();
     source.abort();
     expect(calls).toBe(0);
+  });
+});
+
+describe('startCallWatchdog — a provider call that goes silent', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fires once when the window passes with no output', () => {
+    vi.useFakeTimers();
+    let fired = 0;
+    const dog = startCallWatchdog(100, () => {
+      fired += 1;
+    });
+    vi.advanceTimersByTime(99);
+    expect(fired).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(fired).toBe(1);
+    expect(dog.fired).toBe(true);
+    vi.advanceTimersByTime(1_000);
+    expect(fired).toBe(1);
+  });
+
+  it('every touch starts the window again, so a call that keeps answering is never cut off', () => {
+    vi.useFakeTimers();
+    let fired = 0;
+    const dog = startCallWatchdog(100, () => {
+      fired += 1;
+    });
+    for (let i = 0; i < 10; i += 1) {
+      vi.advanceTimersByTime(90);
+      dog.touch();
+    }
+    expect(fired).toBe(0);
+    vi.advanceTimersByTime(100);
+    expect(fired).toBe(1);
+  });
+
+  it('does not count while paused (a tool call the platform bounds itself), and counts afresh after', () => {
+    vi.useFakeTimers();
+    let fired = 0;
+    const dog = startCallWatchdog(100, () => {
+      fired += 1;
+    });
+    dog.pause();
+    vi.advanceTimersByTime(1_000);
+    expect(fired).toBe(0);
+    dog.resume();
+    vi.advanceTimersByTime(99);
+    expect(fired).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(fired).toBe(1);
+  });
+
+  it('is inert without a timeout, and silent once disposed', () => {
+    vi.useFakeTimers();
+    let fired = 0;
+    const inert = startCallWatchdog(undefined, () => {
+      fired += 1;
+    });
+    vi.advanceTimersByTime(10_000);
+    expect(inert.fired).toBe(false);
+    const dog = startCallWatchdog(100, () => {
+      fired += 1;
+    });
+    dog.dispose();
+    vi.advanceTimersByTime(1_000);
+    expect(fired).toBe(0);
+  });
+
+  it('its error classifies as the neutral `timeout`', () => {
+    expect(classifyUpstreamError(new ProviderCallTimeoutError('codex', 100)).errorClass).toBe(
+      'timeout',
+    );
   });
 });

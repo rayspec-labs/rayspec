@@ -37,6 +37,7 @@ import {
   MAX_ACTOR_LENGTH,
   type ResultOperation,
 } from '@rayspec/bundle-contract';
+import { redactValue } from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 
 /** A postgres.js transaction handle, as far as this module uses it. */
@@ -201,9 +202,11 @@ async function appendReceipt(
       receipt.digest ?? null,
       receipt.outcome ?? null,
       receipt.event === 'intent' ? (identity.idempotencyKey ?? null) : null,
+      // A receipt passes the one redaction path: its detail can carry a message an apply step
+      // produced, and a receipt outlives the process that wrote it.
       receipt.detail === undefined || receipt.detail === null
         ? null
-        : JSON.stringify(receipt.detail),
+        : JSON.stringify(redactValue(receipt.detail)),
     ],
   );
 }

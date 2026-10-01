@@ -14,6 +14,7 @@
  * Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run that did not run.
  */
 import { randomUUID } from 'node:crypto';
+import { registerSecretValues } from '@rayspec/core';
 import { type Db, makeDb } from '@rayspec/db';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -341,6 +342,30 @@ describe.skipIf(!baseUrl)('the operation lease', () => {
     armsRan += 1;
   }, 60_000);
 
+  it('a receipt detail passes the one redaction path: a registered value and a credential shape', async () => {
+    const canary = `receipt-canary-${randomUUID()}`;
+    registerSecretValues([canary]);
+    const lease = await acquireOperationLease(processDb(), identity(), { ttlMs: 60_000 });
+    await lease.record({
+      event: 'step-started',
+      step: 'product-delta',
+      detail: { observer: `saw ${canary}`, before: { authorization: 'Bearer abc' } },
+    });
+    await lease.release('succeeded');
+    const stored = await rows<{ detail: unknown }>(
+      'SELECT detail FROM runtime_control_receipts WHERE operation_id = $1 AND step = $2',
+      [lease.identity.operationId, 'product-delta'],
+    );
+    const text = JSON.stringify(stored);
+    expect(text).not.toContain(canary);
+    expect(text).not.toContain('Bearer abc');
+    expect(stored[0]?.detail).toEqual({
+      observer: 'saw [redacted]',
+      before: { authorization: '[redacted]' },
+    });
+    armsRan += 1;
+  }, 60_000);
+
   it('refuses malformed identities and lifetimes before touching the database', async () => {
     const db = processDb();
     await expect(
@@ -359,6 +384,6 @@ describe.skipIf(!baseUrl)('the operation lease', () => {
 
 // The un-skippable ran-guard: a REQUIRED DB run that silently skipped is a false green.
 it('DB-backed arms actually ran when the environment requires them', () => {
-  if (dbRequired) expect(armsRan).toBe(8);
+  if (dbRequired) expect(armsRan).toBe(9);
   else expect(true).toBe(true);
 });

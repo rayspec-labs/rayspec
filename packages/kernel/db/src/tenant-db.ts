@@ -393,6 +393,23 @@ export class TenantDb {
   }
 
   /**
+   * Run `fn` inside a transaction of this tenant that first takes the transaction-scoped advisory lock
+   * `(namespace, slot)`, so every caller that takes the same key — in any process — runs `fn` one at a
+   * time. The key is the caller's and need not be tenant-specific: a bound that spans tenants (a global
+   * queue) serializes on one key for all of them. The lock is released when the transaction ends.
+   */
+  async withAdvisoryLock<R>(
+    namespace: number,
+    slot: number,
+    fn: (tx: TenantDb) => Promise<R>,
+  ): Promise<R> {
+    return this.transaction(async (tx) => {
+      await tx.raw.execute(sql`select pg_advisory_xact_lock(${namespace}::int4, ${slot}::int4)`);
+      return fn(tx);
+    });
+  }
+
+  /**
    * Cross-tenant run-header ownership probe (encapsulated).
    *
    * Returns the OWNERSHIP verdict for a runId against THIS tenant. This is intentionally a

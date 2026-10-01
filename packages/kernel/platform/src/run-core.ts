@@ -33,8 +33,10 @@ import type {
 import {
   assertRunResultKeyPresence,
   assertSpecValid,
+  classifyUpstreamError,
   computeCost,
   isErrorClass,
+  ProviderCallTimeoutError,
   reconcileCost,
 } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
@@ -44,12 +46,11 @@ import {
   RunAbandonedError,
   type RunAbandonReason,
   RunBoundTimeoutError,
-  resolveRunCancelPollMs,
-  resolveRunMaxMs,
   withRunBound,
 } from './agent-bounds.js';
 import { makeDispatchTool } from './dispatch.js';
 import { EventPipeline } from './event-pipeline.js';
+import { type ExecutionPolicy, resolveExecutionPolicy, runLimitsOf } from './execution-policy.js';
 import { makeHandlerDb } from './handlers/store-facade.js';
 import { rehydrateConversation } from './rehydrate.js';
 import { resolvePreRunAuthMode } from './run-auth-preflight.js';
@@ -57,7 +58,11 @@ import {
   armRunCancellation,
   isRunCancelled,
   RunCancelledError,
+  type RunEndPhase,
+  recordRunCancellationPhase,
   recordRunCancelled,
+  recordRunFailed,
+  recordRunTimedOut,
   withRunCancel,
 } from './run-cancel.js';
 import { markRunHeaderRunning } from './run-header.js';
@@ -145,6 +150,64 @@ export interface RunOptions {
    * `preflightAuth()` never sees it at all.
    */
   credentialBindingRef?: string;
+  /**
+   * The execution policy this run is bounded by (wall time, provider-call timeout, kill grace,
+   * cancellation poll). Absent ⇒ resolved from `process.env` when the run starts, which is what every
+   * production caller does; a test passes one to pin the bounds without touching the environment.
+   */
+  policy?: ExecutionPolicy;
+}
+
+/**
+ * How long run-core waits, after it told a backend to stop, for the backend's call to settle before it
+ * records the call's outcome as unknown: the kill grace a child process gets, plus this margin for the
+ * teardown that follows the kill.
+ */
+export const CALL_SETTLE_MARGIN_MS = 1_000;
+
+/**
+ * What had happened to a provider call that run-core gave up on, observed rather than assumed: no call
+ * was made; it settled with a failure (it was stopped) or with a completed result (it had finished)
+ * within the window; or it did not settle at all within the window (unknown).
+ */
+async function observeAbandonedCall(
+  call: Promise<RunResult> | undefined,
+  windowMs: number,
+): Promise<RunEndPhase> {
+  if (call === undefined) return 'before-call';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const unknown = new Promise<RunEndPhase>((resolve) => {
+    timer = setTimeout(() => resolve('outcome-unknown'), windowMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([
+      call.then(
+        (r): RunEndPhase => (r.status === 'completed' ? 'after-call' : 'call-aborted'),
+        (): RunEndPhase => 'call-aborted',
+      ),
+      unknown,
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Settle with `work`, or reject with `onTimeout()` once `ms` pass first. The timer is unref'd and
+ * cleared when the race settles; a late rejection of `work` is already handled by the race.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
@@ -454,6 +517,9 @@ export async function runAgent(
     requireNativeStructuredOutput: opts.requireNativeStructuredOutput,
   });
 
+  // The execution policy this run is bounded by, read once per run.
+  const policy = opts.policy ?? resolveExecutionPolicy();
+
   // The run's effective instant — every journaled step is priced as-of THIS timestamp from
   // the effective-dated registry, so all steps in a run cost consistently. Runs are
   // priced as-of EXECUTION TIME (now) — `runAt` is the wall clock at this live run. There is NO
@@ -552,7 +618,11 @@ export async function runAgent(
   // context-aware preflight is asked THERE instead — it receives the server-derived run identity and
   // returns a mode it has actually BOUND; the answer is validated against the neutral vocabulary and a
   // refusal ends the run before this line's consumers exist.
-  const authMode = await resolvePreRunAuthMode(backend, {
+  //
+  // The resolution is a provider call too — a remote preflight can hang — so it is bounded by the
+  // policy's provider-call timeout when one applies: past it the run is refused with the neutral
+  // `timeout` class before anything is written, as any other preflight refusal is.
+  const preflight = resolvePreRunAuthMode(backend, {
     runId,
     tenantId: tdb.tenantId,
     agentName: spec.name,
@@ -561,6 +631,13 @@ export async function runAgent(
       ? {}
       : { credentialBindingRef: opts.credentialBindingRef }),
   });
+  const preflightTimeoutMs = policy.requestTimeoutMs.value;
+  const authMode =
+    preflightTimeoutMs === undefined
+      ? await preflight
+      : await withDeadline(preflight, preflightTimeoutMs, () => {
+          return new ProviderCallTimeoutError(`${backend.id} auth preflight`, preflightTimeoutMs);
+        });
 
   // Publish the run header NOW that the run is starting, so the run-read routes resolve this runId
   // while the run is in flight instead of only once it finishes. Additive: this INSERTS a missing
@@ -676,7 +753,7 @@ export async function runAgent(
   // `opts.taintDb ?? tdb` — the AUTONOMOUS-COMMIT contract stated on that option — because a read that
   // failed inside the run's own transaction would abort it server-side and take the run down with it,
   // and because a timer is the one seam that can fire with no call chain to consult `abandoned`.
-  const cancelPollMs = resolveRunCancelPollMs();
+  const cancelPollMs = policy.cancelPollMs.value;
   const cancellation = armRunCancellation(
     runId,
     opts.signal,
@@ -708,11 +785,15 @@ export async function runAgent(
     // only the caller waiting on it. run-core races the same signal below, so a backend that cannot
     // honour it still stops holding this call.
     signal: cancellation.signal,
+    // The policy's limits on this run's provider calls: the per-call timeout and the kill grace.
+    limits: runLimitsOf(policy),
   };
-  // The run's wall-clock bound, read once per run. Undefined (the default, and what an unset or
-  // unusable RAYSPEC_AGENT_RUN_MAX_MS yields) means run-core waits for the backend as long as it
-  // takes — the behaviour before this variable existed.
-  const runMaxMs = resolveRunMaxMs();
+  // The run's wall-clock bound, read once per run. Undefined (a local posture without
+  // RAYSPEC_AGENT_RUN_MAX_MS) means run-core waits for the backend as long as it takes.
+  const runMaxMs = policy.runMaxMs.value;
+  // The handle a run's terminal outcome is recorded through when run-core gives up on it: the
+  // autonomous-commit handle when the caller supplied one.
+  const endDb = opts.taintDb ?? tdb;
 
   // The pipeline worker persists run_events ASYNCHRONOUSLY. If
   // backend.run THROWS, we must STILL await the pipeline so no run_events INSERT is left in flight on
@@ -724,45 +805,88 @@ export async function runAgent(
   // log is incomplete → propagate); on the THROW path the original backend error takes precedence and
   // any drain rejection is swallowed (we never mask the real failure, but we DO wait for quiescence).
   let result: RunResult;
+  // The backend call, once made. Kept so that a run run-core gives up on can still be observed:
+  // whether the call settled after it was told to stop is what the run's record states.
+  let runCall: Promise<RunResult> | undefined;
   try {
+    // A cancellation that landed while this run was being set up — after the worker's own check of
+    // the marker, before the run was armed above (resolving it, reserving its lease, the auth
+    // preflight) — reached only the persisted marker: nothing was registered for the cancel surface to
+    // signal, and a watch's first read comes an interval later. Read the marker once now, so such a
+    // run never calls the backend. A failed read is no answer, as it is for the watch.
+    if (!cancellation.signal.aborted && (await isRunCancelled(tdb, runId).catch(() => false))) {
+      cancellation.abort();
+    }
     // A run whose signal has ALREADY aborted (a caller that passed a spent signal, or a cancellation
     // that landed while this run was being set up) never calls the backend at all.
     if (cancellation.signal.aborted) throw new RunCancelledError(runId);
     // The EFFECTIVE run spec must carry the run's RESOLVED per-run tool specs so a REAL model is
     // OFFERED the tools. A declared agent's `baseAgentSpec` sets `spec.tools: []` (its per-run tools
     // live only in the separate toolFactory → `opts.tools` → the RunContext above), so the spec the
-    // adapter reads would otherwise have NO tools. The fake backend dispatches via `ctx.dispatchTool`
-    // directly (so it never noticed the gap), but a real adapter builds its SDK tool LIST from
+    // adapter reads would otherwise have NO tools. A real adapter builds its SDK tool LIST from
     // `spec.tools` (e.g. OpenAI: `spec.tools.map(...)`) — `ctx.tools` and `spec.tools` MUST agree.
     // Execution still routes through `ctx.dispatchTool` by name (unchanged); this only feeds the
-    // adapter's model-facing tool LIST. For a direct-AgentSpec path `opts.tools` derives from
-    // `spec.tools`, so `tools.map(t.spec)` reproduces the existing `spec.tools` (parity-gate-verified).
+    // adapter's model-facing tool LIST.
     //
-    // PER-RUN WALL-CLOCK BOUND (RAYSPEC_AGENT_RUN_MAX_MS, off unless set). A provider that accepts a
-    // request and never answers keeps this call pending for the model client's whole retry window; on
-    // the durable path that occupies a worker slot for all of it. The bound caps how long we WAIT: it
-    // rejects with a RunBoundTimeoutError, which reaches the callers through the same path a backend
-    // that throws mid-run already takes. It is NOT a cancellation — nothing is asked to stop — so the
-    // model request runs on until it settles by itself. With the variable unset this is the same bare
-    // await of the backend call as before.
-    //
-    // CANCELLATION, by contrast, DOES ask: the run's signal is on `ctx.signal` (an adapter that can
-    // abort its SDK call does), and the race below stops run-core waiting the moment it fires. A run
-    // nobody cancels never aborts that signal, so this resolves with the backend's own answer exactly
-    // as it did before.
-    const runCall = backend.run({ ...spec, tools: tools.map((t) => t.spec) }, ctx);
+    // PER-RUN WALL-CLOCK BOUND (RAYSPEC_AGENT_RUN_MAX_MS; on by default under the managed posture).
+    // When it fires, run-core stops waiting AND aborts the run's signal (below), so a backend that
+    // honours `ctx.signal` stops its provider call — the bound ends the run, it does not merely
+    // abandon it. CANCELLATION aborts the same signal, and the race stops run-core waiting the moment
+    // it fires. A run nobody cancels and that finishes in time resolves with the backend's own answer.
+    runCall = Promise.resolve(backend.run({ ...spec, tools: tools.map((t) => t.spec) }, ctx));
     const bounded = runMaxMs === undefined ? runCall : withRunBound(runCall, runMaxMs, runId);
     result = await withRunCancel(bounded, cancellation.signal, runId);
-  } catch (runErr) {
-    // We gave up while the backend call is still in flight, so make the run's seams inert BEFORE
-    // draining — an abandoned call must not write run_events, must not journal a step and must not
-    // fire a tool for a run we have given up on (see the ABANDONMENT block above for what each seam
-    // then does). `withRunBound` / `withRunCancel` already subscribed to the call, so its eventual
-    // rejection is handled and cannot surface as an unhandled rejection.
+  } catch (caught) {
+    let runErr: unknown = caught;
+    // We gave up while the backend call may still be in flight, so make the run's seams inert BEFORE
+    // anything else — an abandoned call must not write run_events, must not journal a step and must
+    // not fire a tool for a run we have given up on (see the ABANDONMENT block above).
     if (runErr instanceof RunBoundTimeoutError) abandoned = 'bound';
     else if (runErr instanceof RunCancelledError) abandoned = 'cancelled';
+    else if (cancellation.signal.aborted) {
+      // The backend reacted to the abort before run-core's own race did (an abort listener that
+      // rejects synchronously settles the call first): the run was still CANCELLED, and it is reported
+      // as the cancellation it is, not as the backend's own abort error.
+      abandoned = 'cancelled';
+      runErr = new RunCancelledError(runId);
+    }
+    if (abandoned === undefined) {
+      await pipeline.drain().catch(() => {});
+      cancellation.dispose();
+      // The run ended by THROWING: record it terminal, so it does not read back as `running` for
+      // ever. Best-effort for the reason given below; the thrown error is what the caller learns.
+      await recordRunFailed(endDb, runId, classifyUpstreamError(runErr).errorClass).catch(
+        (recordErr: unknown) => {
+          console.error(`[run-core] recording the failure of run ${runId} failed`, recordErr);
+        },
+      );
+      throw runErr;
+    }
+    // Tell the backend to stop. A cancellation has already aborted the signal; the bound aborts it
+    // here, so an expired run frees its provider call exactly as a cancelled one does.
+    cancellation.abort();
+    // Observe what the stop did: the call settles within the kill grace (stopped, or it had
+    // finished), or it does not (unknown). This is what the run's record states — never assumed.
+    const phase = await observeAbandonedCall(runCall, policy.killGraceMs + CALL_SETTLE_MARGIN_MS);
     await pipeline.drain().catch(() => {});
     cancellation.dispose();
+    try {
+      if (abandoned === 'bound' && runMaxMs !== undefined) {
+        await recordRunTimedOut(endDb, runId, { boundMs: runMaxMs, phase });
+      } else if (abandoned === 'cancelled' && (await isRunCancelled(endDb, runId))) {
+        // A run ended through the cancel surface: record the cancellation if nobody has yet, and
+        // state what happened to the call either way (the surface records a run it found executing
+        // as `outcome-unknown`, the truth at that moment, which this side now knows better).
+        const outcome = await recordRunCancelled(endDb, runId, { phase });
+        if (!outcome.cancelled && outcome.status === 'error') {
+          await recordRunCancellationPhase(endDb, runId, phase);
+        }
+      }
+    } catch (recordErr) {
+      // The record is best-effort here: the run is already ended and its caller must learn that, so a
+      // failing write must not replace the run's real reason. It is logged so an operator sees it.
+      console.error(`[run-core] recording the end of run ${runId} failed`, recordErr);
+    }
     throw runErr;
   }
   // The wait is over — the run can no longer be stopped, so release its registration.
@@ -791,7 +915,10 @@ export async function runAgent(
   // surface makes — `lockWaitMs: 0` because THIS call already holds the row's lock and can never wait
   // on it — so exactly one of them ever counts.
   if (await isRunCancelled(tdb, runId)) {
-    await recordRunCancelled(tdb, runId, { lockWaitMs: 0 });
+    const outcome = await recordRunCancelled(tdb, runId, { phase: 'after-call' });
+    if (!outcome.cancelled && outcome.status === 'error') {
+      await recordRunCancellationPhase(tdb, runId, 'after-call');
+    }
     return result;
   }
 

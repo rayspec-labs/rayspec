@@ -70,7 +70,12 @@ import {
   setBootSecrets,
 } from '@rayspec/auth-core';
 import { DEFAULT_SCHEMA_LOCK_TIMEOUT_MS } from '@rayspec/bundle-contract';
-import type { Backend, BackendId } from '@rayspec/core';
+import {
+  type Backend,
+  type BackendId,
+  installOutputRedaction,
+  registerSecretValues,
+} from '@rayspec/core';
 import {
   buildProductTables,
   classifyProductSchema,
@@ -91,20 +96,27 @@ import {
   DbosCronScheduler,
   DbosDurableExecutor,
   DEFAULT_CLEANUP_SCHEDULE,
-  DEFAULT_WORKER_CONCURRENCY,
   migrateWorkflowSystemDatabase,
   ProducerPausedError,
   type ResolvedRun,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
 import {
+  applicationBindingsGranted,
+  assertHandlerRights,
   type BlobStoreFactory,
   type DurableExecutor,
   type DurableExecutorIdentity,
   type DurableRunAuthorizer,
+  type ExecutionPolicy,
   ExtensionLoadError,
+  executionPolicyProblemMessage,
+  executionPolicyProblems,
   FsSourceConfigError,
   type FsSourceFactory,
+  type GrantedRights,
+  HandlerRightsError,
+  InRequestRunGate,
   invokeTriggerHandler,
   type LoadedExtensions,
   loadExtensions,
@@ -112,6 +124,7 @@ import {
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
   type RunJob,
+  resolveExecutionPolicy,
 } from '@rayspec/platform';
 import {
   DEFAULT_EVENT_BUS_RETENTION_HOURS,
@@ -128,7 +141,11 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
-import { type AgentTracingPosture, observedAgentTracing } from './agent-tracing.js';
+import {
+  type AgentTracingPosture,
+  installRedactedTraceExport,
+  observedAgentTracing,
+} from './agent-tracing.js';
 import { BootConfigError } from './boot-config-error.js';
 // The boot's ENVIRONMENT DEMANDS, from the one module that states them. The refusals below are
 // COMPOSED from these records rather than restating them, and the deploy guards ask their conditions
@@ -163,6 +180,7 @@ import {
   prepareProductYamlSpec,
   validateProductYamlSpec,
 } from './product-boot.js';
+import { providerCredential } from './provider-credentials.js';
 import { installEnvProxyDispatcher } from './proxy-dispatcher.js';
 import { gatedProducer, queueProducer, RuntimeFence } from './runtime-fence.js';
 import { type CatalogQuery, readPlatformHead, runtimePlatformHead } from './schema-head.js';
@@ -174,6 +192,7 @@ import {
   mountUnservableReason,
 } from './serve-static.js';
 import { buildSttCapability, FAKE_STT_BOOT_WARNING } from './stt-capability.js';
+import { assertManagedPostureBackends } from './supported-backends.js';
 // TYPE-ONLY: `tenant-provision.ts` imports `applyMigrations` from THIS module, so a value import back
 // would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
 import type { TenantProvisionSecrets } from './tenant-provision.js';
@@ -586,8 +605,22 @@ export interface ServerConfig {
   databaseUrl: string;
   /** PKCS#8 PEM (RS256) — the JWT signing key AND the OIDC provider signing key. */
   jwtSigningKeyPem: string;
+  /**
+   * The signing key in use before the last rotation (`RAYSPEC_JWT_SIGNING_KEY_PREVIOUS`, or its
+   * `_FILE`). Optional. It signs nothing: its public key stays in both key sets, so a token signed
+   * before the rotation verifies until it expires. Remove it once the longest-lived such token has
+   * expired.
+   */
+  previousJwtSigningKeyPem?: string;
   /** The api-key pepper (handed to auth-core by `assembleServer` via `setBootSecrets`). */
   apiKeyPepper: string;
+  /**
+   * The pepper in use before the last rotation (`RAYSPEC_API_KEY_PEPPER_PREVIOUS`, or its `_FILE`).
+   * Optional. While it is set, an API key, refresh session or invite hashed under it still verifies,
+   * and is renewed under the current pepper when it is used (an API key is re-hashed, a session is
+   * replaced on refresh). Remove it once the credentials that matter have been used.
+   */
+  apiKeyPepperPrevious?: string;
   /** The cookie-CSRF allow-list — EXPLICIT; EMPTY default (no cross-origin). Never dev-permissive. */
   allowedOrigins: string[];
   /** Deployer-injected extra CORS request headers — ALLOWED_REQUEST_HEADERS, comma-separated; empty default. */
@@ -773,6 +806,13 @@ export interface ServerConfig {
    */
   hostingPosture?: HostingPosture;
   /**
+   * The execution policy (execution-policy.ts in @rayspec/platform): wall time, provider-call timeout,
+   * kill grace, queue admission, worker concurrency, in-request runs and the cancellation poll, with
+   * the managed posture's defaults. `loadServerConfig` refuses an unusable value. Omitted ⇒ resolved
+   * from `hostingPosture` alone (every bound at its posture default).
+   */
+  executionPolicy?: ExecutionPolicy;
+  /**
    * Single-tenant mode — RAYSPEC_SINGLE_TENANT. `true`: the runtime holds one organization; creating
    * a second is refused on every path (the org store is the one point that decides), open registration
    * only creates that first one, and after it accounts join by invitation. A boot of a database that
@@ -849,6 +889,19 @@ export interface CleanupSettings {
 // closure — can throw and catch the same class; re-exported here so every existing import site keeps
 // naming the identical class object.
 export { BootConfigError };
+
+/** The variable that carries the signing key in use before the last rotation (plus its `_FILE`). */
+export const PREVIOUS_JWT_SIGNING_KEY_VAR = 'RAYSPEC_JWT_SIGNING_KEY_PREVIOUS';
+
+/** The variable that carries the API-key pepper in use before the last rotation (plus its `_FILE`). */
+export const PREVIOUS_API_KEY_PEPPER_VAR = 'RAYSPEC_API_KEY_PEPPER_PREVIOUS';
+
+const MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE =
+  `Boot aborted — ${PREVIOUS_JWT_SIGNING_KEY_VAR} is not a PKCS#8 PEM. It holds the signing key ` +
+  "in use before the last rotation, in the same form as RAYSPEC_JWT_SIGNING_KEY: a value starting '-----BEGIN " +
+  "PRIVATE KEY-----' with REAL newlines, or a file named by " +
+  `${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE. Unset it once the tokens it signed have expired. The value ` +
+  'itself is not echoed here. Fail-closed.';
 
 /**
  * The refusal for a present-but-malformed `RAYSPEC_JWT_SIGNING_KEY`. It names the variable, the shape
@@ -1149,6 +1202,8 @@ function resolveBootSecret(
   const raw = path ? readBootSecretFile(fileVar, path) : env[name];
   if (raw === undefined) return undefined;
   const normalized = normalizeBootSecret(raw);
+  // Every resolved boot secret is redacted from whatever this process writes from now on.
+  registerSecretValues([normalized]);
   if (normalized !== raw && normalized.length > 0) {
     warn(bootSecretNormalizationWarning(path ? fileVar : name, raw));
   }
@@ -1313,6 +1368,14 @@ export function loadServerConfig(
   const dbosSystemDatabaseUrl =
     env.DBOS_SYSTEM_DATABASE_URL?.trim() || deriveDbosSystemUrl(databaseUrl as string);
 
+  // The signing key before the last rotation. Resolved like a boot secret (it is one), but optional:
+  // unset or blank ⇒ one key in the key sets, exactly as before.
+  const previousJwtSigningKeyPem =
+    resolveBootSecret(env, PREVIOUS_JWT_SIGNING_KEY_VAR, warn)?.trim() || undefined;
+  // The pepper before the last rotation, on the same terms.
+  const apiKeyPepperPrevious =
+    resolveBootSecret(env, PREVIOUS_API_KEY_PEPPER_VAR, warn) || undefined;
+
   // Role separation (opt-in): the migration role's connection. Resolved like a boot secret (it holds a
   // password), but optional: unset or blank ⇒ one database role, exactly as before.
   const migrationDatabaseUrl =
@@ -1337,6 +1400,12 @@ export function loadServerConfig(
 
   // the hosting posture and the graceful-shutdown drain (both fail-closed on an invalid value).
   const hostingPosture = parseHostingPosture(env);
+  // the execution policy (fail-closed on a value the policy cannot use — see executionPolicyProblems).
+  const policyProblems = executionPolicyProblems(env);
+  if (policyProblems.length > 0) {
+    throw new BootConfigError(executionPolicyProblemMessage(policyProblems));
+  }
+  const executionPolicy = resolveExecutionPolicy(env);
   const shutdownDrainMs = parseShutdownDrainMs(env);
   // single-tenant mode (fail-closed on an invalid value; off unless set).
   const singleTenant = parseSingleTenantMode(env);
@@ -1348,6 +1417,10 @@ export function loadServerConfig(
     if (secret.fileVariant !== null && path) {
       secretFiles.push({ variable: secret.fileVariant, path: resolve(path) });
     }
+  }
+  for (const variable of [PREVIOUS_JWT_SIGNING_KEY_VAR, PREVIOUS_API_KEY_PEPPER_VAR]) {
+    const file = env[`${variable}_FILE`]?.trim();
+    if (file) secretFiles.push({ variable: `${variable}_FILE`, path: resolve(file) });
   }
 
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
@@ -1374,7 +1447,9 @@ export function loadServerConfig(
   const config: ServerConfig = {
     databaseUrl: databaseUrl as string,
     jwtSigningKeyPem: jwtSigningKeyPem as string,
+    ...(previousJwtSigningKeyPem !== undefined ? { previousJwtSigningKeyPem } : {}),
     apiKeyPepper: apiKeyPepper as string,
+    ...(apiKeyPepperPrevious !== undefined ? { apiKeyPepperPrevious } : {}),
     allowedOrigins,
     allowedRequestHeaders,
     trustedProxies,
@@ -1392,6 +1467,7 @@ export function loadServerConfig(
     authRateMultiplier,
     schemaLockTimeoutMs,
     hostingPosture,
+    executionPolicy,
     singleTenant,
     shutdownDrainMs,
     secretFiles,
@@ -1431,16 +1507,21 @@ export function loadServerConfig(
   // deployDeclaredSpec fail-closes if a playback route is declared without it. NOT trimmed/resolved (a
   // secret is used verbatim); only carried through when present.
   const mediaSigningKey = env.RAYSPEC_MEDIA_SIGNING_KEY;
-  if (mediaSigningKey && mediaSigningKey.length > 0) config.mediaSigningKey = mediaSigningKey;
+  if (mediaSigningKey && mediaSigningKey.length > 0) {
+    config.mediaSigningKey = mediaSigningKey;
+    registerSecretValues([mediaSigningKey]);
+  }
 
   // The STT provider selection (the `init.stt` capability) + its credential. Resolved RAW here — the
   // VALUE is validated where the capability is built: loadServerConfig just resolves them;
   // deployDeclaredSpec fail-closes on an unsupported provider or a missing credential. An UNSET
   // provider is not an error at any point (the capability is simply absent, like an unset fs-source
-  // root). The key is trimmed + only carried through when non-blank (a blank key is no key).
+  // root). The key is trimmed + only carried through when non-blank (a blank key is no key); it is read
+  // through the one provider-credential reader, so DEEPGRAM_API_KEY_FILE and a bundle's bindings file
+  // supply it too (provider-credentials.ts).
   const sttProvider = env.STT_PROVIDER?.trim();
   if (sttProvider) config.sttProvider = sttProvider;
-  const deepgramApiKey = env.DEEPGRAM_API_KEY?.trim();
+  const deepgramApiKey = providerCredential(env, 'DEEPGRAM_API_KEY');
   if (deepgramApiKey) config.deepgramApiKey = deepgramApiKey;
 
   // The TTS provider selection (the `init.tts` capability) + its credential. Resolved RAW here on the
@@ -1448,7 +1529,7 @@ export function loadServerConfig(
   // provider is never an error, and the key is trimmed + only carried through when non-blank.
   const ttsProvider = env.TTS_PROVIDER?.trim();
   if (ttsProvider) config.ttsProvider = ttsProvider;
-  const openaiApiKey = env.OPENAI_API_KEY?.trim();
+  const openaiApiKey = providerCredential(env, 'OPENAI_API_KEY');
   if (openaiApiKey) config.openaiApiKey = openaiApiKey;
 
   return config;
@@ -1660,6 +1741,39 @@ export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
 
 /** The hosting postures: `local` (the default) and `managed` (the public-hosting posture). */
 export type HostingPosture = 'local' | 'managed';
+
+/** The execution policy a boot runs under: the loaded one, else the posture's defaults alone. */
+export function executionPolicyOf(
+  config: Pick<ServerConfig, 'executionPolicy' | 'hostingPosture'>,
+): ExecutionPolicy {
+  return (
+    config.executionPolicy ??
+    resolveExecutionPolicy({ RAYSPEC_HOSTING_POSTURE: config.hostingPosture ?? 'local' })
+  );
+}
+
+/** The durable worker's queue admission, when the policy bounds the queue. */
+function admissionOf(policy: ExecutionPolicy): {
+  admission?: { queueMax?: number; queueMaxPerTenant?: number };
+} {
+  const queueMax = policy.queueMax.value;
+  const queueMaxPerTenant = policy.queueMaxPerTenant.value;
+  if (queueMax === undefined && queueMaxPerTenant === undefined) return {};
+  return {
+    admission: {
+      ...(queueMax === undefined ? {} : { queueMax }),
+      ...(queueMaxPerTenant === undefined ? {} : { queueMaxPerTenant }),
+    },
+  };
+}
+
+/** The in-request run gate the run surface enforces, when the policy bounds in-request runs. */
+function inRequestRunGateOf(config: Pick<ServerConfig, 'executionPolicy' | 'hostingPosture'>): {
+  inRequestRunGate?: InRequestRunGate;
+} {
+  const max = executionPolicyOf(config).syncRunsMax.value;
+  return max === undefined ? {} : { inRequestRunGate: new InRequestRunGate(max) };
+}
 
 /**
  * Parse RAYSPEC_HOSTING_POSTURE. Unset/blank ⇒ `local`. Exactly `local` or `managed`; anything else
@@ -2386,6 +2500,12 @@ async function assembleServerWith(
   // deployment without proxy configuration boots exactly as it did before.
   await installEnvProxyDispatcher();
 
+  // The one redaction path (@rayspec/core redact.ts) on what this process writes: every line on stdout
+  // and stderr, and every agent trace the SDK exports. The secrets it knows by value were registered
+  // as they were resolved (the boot secrets in loadServerConfig, each provider credential when read).
+  installOutputRedaction();
+  await installRedactedTraceExport();
+
   // Hand the two boot secrets to auth-core IN-PROCESS. Its lazy readers — assertBootSecrets (inside
   // createAuthApp) and getApiKeyPepper (the api-key / session-secret / invite-token hashing paths) —
   // then see exactly what loadServerConfig resolved and normalized, including when the caller passed
@@ -2401,6 +2521,9 @@ async function assembleServerWith(
   setBootSecrets({
     jwtSigningKeyPem: config.jwtSigningKeyPem,
     apiKeyPepper: config.apiKeyPepper,
+    ...(config.apiKeyPepperPrevious !== undefined
+      ? { apiKeyPepperPrevious: config.apiKeyPepperPrevious }
+      : {}),
   });
 
   // 1. VALIDATE BEFORE ANYTHING IS MUTATED — the signing key first, then the injected spec. A boot
@@ -2435,6 +2558,25 @@ async function assembleServerWith(
     // kind of change but never the value.
     throw new BootConfigError(MALFORMED_JWT_SIGNING_KEY_MESSAGE);
   }
+  // The key before the last rotation: verification only. Its public key joins both key sets, so a
+  // token it signed keeps verifying until it expires; nothing is signed with it. A key equal to the
+  // current one adds nothing.
+  let previousSigner: Awaited<ReturnType<typeof createSigner>> | undefined;
+  let previousPrivateKey: Awaited<ReturnType<typeof importPKCS8>> | undefined;
+  if (config.previousJwtSigningKeyPem !== undefined) {
+    try {
+      previousSigner = await createSigner(config.previousJwtSigningKeyPem, 'RS256');
+      previousPrivateKey = await importPKCS8(config.previousJwtSigningKeyPem, 'RS256', {
+        extractable: true,
+      });
+    } catch {
+      throw new BootConfigError(MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE);
+    }
+    if (previousSigner.kid === signer.kid) {
+      previousSigner = undefined;
+      previousPrivateKey = undefined;
+    }
+  }
 
   // The injected spec, validated by the SAME per-profile checks its deploy path runs first (the
   // deploy path repeats them; they are pure). Nothing below this line runs for an invalid spec.
@@ -2459,12 +2601,21 @@ async function assembleServerWith(
     db,
     ...(opts.fencePollIntervalMs !== undefined ? { pollIntervalMs: opts.fencePollIntervalMs } : {}),
   });
-  const jwks = new JwksProvider([signer.publicKeyJwk()]);
+  const jwks = new JwksProvider(
+    previousSigner === undefined
+      ? [signer.publicKeyJwk()]
+      : [signer.publicKeyJwk(), previousSigner.publicKeyJwk()],
+  );
   const providerJwk = await exportJWK(privateKey);
+  // The OIDC provider signs with the first key of the set and publishes and verifies with all of them.
+  const providerKeys = [{ ...providerJwk, use: 'sig', alg: 'RS256' }];
+  if (previousPrivateKey !== undefined) {
+    providerKeys.push({ ...(await exportJWK(previousPrivateKey)), use: 'sig', alg: 'RS256' });
+  }
   const oidcProvider = createOidcProvider({
     issuer: config.issuer,
     db,
-    jwks: { keys: [{ ...providerJwk, use: 'sig', alg: 'RS256' }] },
+    jwks: { keys: providerKeys },
     clients: [],
     proxy: true,
   });
@@ -2516,6 +2667,9 @@ async function assembleServerWith(
     // credential, agent runs and playback reread the live membership, and streamed error frames carry
     // fixed messages (AppDeps.hardenedPosture). Off otherwise, so everything behaves as it did.
     hardenedPosture: hardenedPosture(config),
+    // In-request runs past RAYSPEC_AGENT_SYNC_RUNS_MAX are refused with 429 (off unless set, or the
+    // managed posture's default).
+    ...inRequestRunGateOf(config),
   };
 
   //    Every refusal the deploy can decide from the configuration and the document alone, made with
@@ -2525,6 +2679,8 @@ async function assembleServerWith(
   const productOpts = {
     fence,
     registerProductTables: opts.registerProductTables,
+    // The same in-request bound the agent run surface holds: replies and normalizes count against it.
+    ...(baseDeps.inRequestRunGate ? { inRequestRunGate: baseDeps.inRequestRunGate } : {}),
     ...(opts.productDeterministicAgents
       ? { deterministicAgents: opts.productDeterministicAgents }
       : {}),
@@ -3065,6 +3221,62 @@ function fsSourceFactoryFor(config: ServerConfig): FsSourceFactory | undefined {
   }
 }
 
+/** Refuse a boot whose handlers ask for rights this deployment does not grant (handler-rights.ts). */
+function assertBootHandlerRights(
+  spec: RaySpec,
+  config: ServerConfig,
+  capabilities: Parameters<typeof grantedHandlerRights>[0],
+): void {
+  try {
+    assertHandlerRights(spec.handlers, grantedHandlerRights(capabilities), {
+      managedPosture: config.hostingPosture === 'managed',
+    });
+  } catch (err) {
+    if (err instanceof HandlerRightsError) throw new BootConfigError(err.message);
+    throw err;
+  }
+}
+
+/**
+ * The rights this deployment grants a handler (`handlers[].uses`): for each, `null` when the
+ * capability is built for this boot, else what is missing. Built from the same values the engine is
+ * wired with, so a right is granted exactly when its capability reaches the init.
+ */
+function grantedHandlerRights(capabilities: {
+  blobFactory?: unknown;
+  fsSourceFactory?: unknown;
+  sttCapability?: unknown;
+  ttsCapability?: unknown;
+  eventBus?: unknown;
+  durableWorker: boolean;
+  mediaTokenService?: unknown;
+}): GrantedRights {
+  return {
+    blob:
+      capabilities.blobFactory !== undefined
+        ? null
+        : 'no blob backend is built: one is built for a spec that declares a stream route, over ' +
+          'RAYSPEC_BLOB_ROOT or one an extension provides',
+    fsSource:
+      capabilities.fsSourceFactory !== undefined ? null : 'RAYSPEC_FS_SOURCE_ROOT is not set',
+    stt: capabilities.sttCapability !== undefined ? null : 'STT_PROVIDER is not set',
+    tts: capabilities.ttsCapability !== undefined ? null : 'TTS_PROVIDER is not set',
+    emit:
+      capabilities.eventBus !== undefined ? null : 'the spec does not enable deployment.eventBus',
+    enqueue: capabilities.durableWorker
+      ? null
+      : 'no durable worker runs (deployment.durableWorker with agent backends)',
+    mintPlayToken:
+      capabilities.mediaTokenService !== undefined
+        ? null
+        : 'no media signing service is built: one is built for a spec that declares a playback ' +
+          'route, with RAYSPEC_MEDIA_SIGNING_KEY',
+    bindings: applicationBindingsGranted()
+      ? null
+      : 'application bindings are granted only on a bundle deployment (rayspec deploy <file.ray>)',
+  };
+}
+
 /**
  * The media-token service a stream PLAYBACK route is authenticated by (a signed `?token=` media-JWT,
  * HS256, a DISTINCT key from the RS256 API chain), or undefined when no playback route is declared.
@@ -3331,6 +3543,14 @@ async function preflightDeclaredSpec(
   const sttCapability = buildSttCapability(config);
   const ttsCapability = buildTtsCapability(config);
   assertFrontendMountsServable(spec, specPath);
+  // The managed posture runs only the backends of the supported-backend matrix: refuse any other
+  // before anything is built or written (supported-backends.ts).
+  assertManagedPostureBackends({
+    posture: config.hostingPosture,
+    agents: spec.agents.map((a) => ({ name: a.id, backend: a.backend })),
+    sttProvider: config.sttProvider,
+    ttsProvider: config.ttsProvider,
+  });
   // The merged agents' backends: a pack agent may select one no base agent does.
   const agentBackends = opts.agentBackendsFactory?.(spec.agents);
   // A cron or manual trigger is fired by the durable worker, which the deploy wires only for a
@@ -3362,6 +3582,17 @@ async function preflightDeclaredSpec(
   opts.registerProductTables?.(productTables);
 
   const eventBus = spec.deployment?.eventBus?.enabled === true ? makeTenantEventBus({}) : undefined;
+  // Every handler's declared rights must be granted before anything is built on them; under the
+  // managed posture every handler must declare them.
+  assertBootHandlerRights(spec, config, {
+    blobFactory,
+    fsSourceFactory,
+    sttCapability,
+    ttsCapability,
+    eventBus,
+    durableWorker: spec.deployment?.durableWorker === true && agentBackends !== undefined,
+    mediaTokenService,
+  });
   await deploy<ReturnType<typeof createAuthApp>>({
     specSource: merged.specSource,
     migrations: [],
@@ -3609,6 +3840,12 @@ async function deployDeclaredSpec(
   // omit that backend and `buildAgentRegistry` would fail closed at boot on the pack agent. Base-only
   // deploys (empty extensions ⇒ mergeExtensions no-op ⇒ effectiveSpec.agents === base agents) are
   // byte-identical, and a factory that ignores the arg (a test-injected map) is unaffected.
+  assertManagedPostureBackends({
+    posture: config.hostingPosture,
+    agents: effectiveSpec.agents.map((a) => ({ name: a.id, backend: a.backend })),
+    sttProvider: config.sttProvider,
+    ttsProvider: config.ttsProvider,
+  });
   const agentBackends = opts.preflight
     ? opts.preflight.agentBackends
     : opts.agentBackendsFactory?.(effectiveSpec.agents);
@@ -3697,6 +3934,20 @@ async function deployDeclaredSpec(
     eventBusDecl?.enabled === true
       ? (eventBusDecl.retentionHours ?? DEFAULT_EVENT_BUS_RETENTION_HOURS)
       : undefined;
+
+  // ── Handler rights (`handlers[].uses`) ─────────────────────────────────────
+  // A declared right this deployment does not grant refuses the boot, naming the handler and what is
+  // missing; under the managed posture a handler that declares nothing does too. Checked against the
+  // capabilities built just above — the ones the engine is wired with.
+  assertBootHandlerRights(effectiveSpec, config, {
+    blobFactory,
+    fsSourceFactory,
+    sttCapability,
+    ttsCapability,
+    eventBus,
+    durableWorker: effectiveSpec.deployment?.durableWorker === true && agentBackends !== undefined,
+    mediaTokenService,
+  });
 
   // ── The static FRONTEND deploy guard (fail-closed on a mount that cannot be served) ──
   // A declared frontend mount serves built static assets from `dir` (relative to the spec file). FAIL
@@ -3792,35 +4043,17 @@ async function deployDeclaredSpec(
     fence.addExternal([`tts-${config.ttsProvider}`]);
   }
   if (effectiveSpec.deployment?.durableWorker === true && agentBackends) {
-    // ── Fix B (pool starvation): the durable worker gets its OWN dedicated postgres pool, SEPARATE
-    //    from the HTTP/API `db` pool. Each in-flight off-request run holds ONE connection across the
-    //    ENTIRE LLM call (inside `forTenant(workerDb, tenantId).transaction()`), so a worker sharing
-    //    the HTTP pool (max 4) would, under `workerConcurrency` long runs, starve `GET /events` /
-    //    `/health` / every HTTP DB caller. DBOS's own control plane uses its SEPARATE system-DB pool
-    //    (`systemDatabaseUrl`), not this app pool, so this sizing covers only the worker's app-DB run work.
-    //    The pool-ISOLATION property (HTTP pool unaffected) is asserted by worker-pool-isolation.db.test.ts.
-    //
-    //    SIZING ANALYSIS (the autonomous taint write, done HONESTLY against ground
-    //    truth). A run that fires a NON-idempotent tool ALSO acquires a connection for the autonomous
-    //    `markRunTainted` INSERT (a separate non-transactional `forTenant(workerDb,…)` = `taintDb`, so the
-    //    marker commits on its OWN connection and survives the run's tx rollback). So a non-idempotent run
-    //    holds TWO connections at its peak: its run-tx connection (held across the whole LLM call) AND, for
-    //    the duration of the taint INSERT, a second autonomous connection. A held postgres-js
-    //    `tdb.transaction()` DOES pin its pool slot for the whole transaction (empirically confirmed: 2 held
-    //    txs on a `max:2` pool leave a 3rd autonomous query PENDING >3s until a held tx releases). So at
-    //    `workerConcurrency=N` with a pool of EXACTLY N, all N run-tx transactions pin all N slots, none of
-    //    the N autonomous taint INSERTs can acquire a connection, and the worker DEADLOCKS (every run TIMES
-    //    OUT). The `+1` is what makes it SAFE: with `N+1`, the N held run-tx connections leave ≥1 free slot,
-    //    so the N autonomous taint INSERTs SERIALIZE through that single headroom slot — each acquires it,
-    //    does its fast one-shot INSERT, and releases — WITHOUT ever blocking the held run-tx transactions.
-    //    The autonomous writes are short and serialized, so one free slot suffices; they never need N free
-    //    slots at once. The same headroom slot also covers the started-once reserve + the taint READ (both
-    //    run BEFORE the run-tx opens, so they do not even contend with the held run-tx connections).
-    //    `executor-pool-saturation.db.test.ts` PROVES BOTH directions: the shipped `N+1` arm completes all N
-    //    runs; the undersized `pool==N` arm reproduces the deadlock (all N TIME OUT) — so the `+1` is a
-    //    PROVEN minimum, not a guess. INVARIANT (by construction): `WORKER_POOL_MAX > workerConcurrency`.
-    const workerConcurrency = DEFAULT_WORKER_CONCURRENCY;
-    const WORKER_POOL_MAX = workerConcurrency + 1; // strict headroom over concurrency (sufficient — fix E)
+    // The durable worker gets its OWN postgres pool, separate from the HTTP/API `db` pool, so worker
+    // statements never queue behind HTTP callers or the reverse. A run holds no transaction across its
+    // model call, so a run waiting on a provider holds no connection: the pool bounds concurrent
+    // statements, not concurrent runs. It is sized one above the worker concurrency, so every run can
+    // issue a statement at once with a slot to spare; executor-pool-saturation.db.test.ts shows runs
+    // completing on a pool far smaller than the concurrency. DBOS's own control plane uses its separate
+    // system-database pool. The pool isolation (HTTP pool unaffected) is asserted by
+    // worker-pool-isolation.db.test.ts.
+    const policy = executionPolicyOf(config);
+    const workerConcurrency = policy.workerConcurrency;
+    const WORKER_POOL_MAX = workerConcurrency + 1;
     const workerDb = servingPool(config, makeDb(config.databaseUrl, WORKER_POOL_MAX));
     const runAuthorizer = durableRunAuthorizer(baseDeps);
     const executor = new DbosDurableExecutor(
@@ -3857,6 +4090,9 @@ async function deployDeclaredSpec(
         // (and fail-closed kills) a job belonging to the other deployment's spec.
         applicationVersion: deriveDbosApplicationVersion('backend', effectiveSpec.metadata.name),
         workerConcurrency,
+        // Queue admission (RAYSPEC_AGENT_QUEUE_MAX / _PER_TENANT): off unless set, or the managed
+        // posture's defaults.
+        ...admissionOf(policy),
       },
     );
     // Inject the (not-yet-started) executor so buildApp wires the async path; start it after deploy().

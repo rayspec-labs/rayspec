@@ -17,10 +17,15 @@
 // @rayspec/api-auth (deploy.ts, a frozen-surface file — consumed via its EXPORTS only, never edited); the
 // server already depends on api-auth, so re-exporting here spares the wrapper a direct api-auth dep.
 export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
+// The one redaction path, for an entrypoint that writes before (or without) a server boot.
+export { installOutputRedaction, registerSecretValues } from '@rayspec/core';
 // The UPDATE flow: re-export the report-only drift finding type so a wrapper/test can name
 // `BootedServer.drift`. It originates in @rayspec/db (drift-detect.ts); the server already depends on
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.
 export type { DriftFinding } from '@rayspec/db';
+// The bindings a bundle deploy grants: the application's own to its handlers (`init.bindings`), the
+// provider credentials to the adapters that use them — neither through the process environment.
+export { type ApplicationBindingGrant, setApplicationBindings } from '@rayspec/platform';
 // The agent trace-export posture (issue #287). Re-exported here for embedders, but the `rayspec deploy`
 // CLI imports the SAME symbols through the `@rayspec/server/agent-tracing` SUBPATH instead: that module
 // pulls in no adapter, so the deploy path can decide the posture — and write the SDK's switch — before
@@ -150,6 +155,8 @@ export {
   MAX_SCHEMA_LOCK_TIMEOUT_MS,
   MAX_SHUTDOWN_DRAIN_MS,
   MIGRATION_DATABASE_URL_VAR,
+  PREVIOUS_API_KEY_PEPPER_VAR,
+  PREVIOUS_JWT_SIGNING_KEY_VAR,
   type ProductTableRegistrar,
   parseHostingPosture,
   parseSchemaLockTimeoutMs,
@@ -274,6 +281,17 @@ export {
   shadowProductDigests,
   uncoveredDestructiveMessage,
 } from './product-schema-plan.js';
+export {
+  CredentialFileError,
+  type CredentialSource,
+  grantProviderCredentials,
+  isProviderCredentialName,
+  PROVIDER_CREDENTIAL_NAMES,
+  type ProviderCredentialName,
+  providerCredential,
+  providerCredentialSources,
+  providerCredentialSupplied,
+} from './provider-credentials.js';
 // The env-proxy dispatcher restore (issue #287) — `assembleServer` installs it at boot; the predicates
 // and the installer are exported so the gate can be asserted directly (a runtime that implements
 // NODE_USE_ENV_PROXY + the opt-in + a named proxy ⇒ installed; anything else ⇒ the two

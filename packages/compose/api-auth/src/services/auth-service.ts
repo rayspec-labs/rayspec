@@ -27,6 +27,7 @@ import {
   newFamilyId,
   newJti,
   unauthenticated,
+  verificationPeppers,
   verifyPassword,
 } from '@rayspec/auth-core';
 import type { IdentityStore, SessionRow } from '../stores/identity-store.js';
@@ -86,6 +87,21 @@ export class AuthService {
   ) {
     this.graceMs = opts.graceMs ?? REFRESH_GRACE_MS;
     this.now = opts.now ?? Date.now;
+  }
+
+  /**
+   * The session row a presented refresh secret hashes to: under the current pepper, else — during a
+   * pepper rotation — under the previous one. A session found under the previous pepper is replaced
+   * by one hashed under the current pepper when it is refreshed.
+   */
+  private async findSessionBySecret(presentedSecret: string): Promise<SessionRow | undefined> {
+    for (const pepper of verificationPeppers()) {
+      const session = await this.store.findSessionByTokenHash(
+        hashSessionSecret(presentedSecret, pepper),
+      );
+      if (session) return session;
+    }
+    return undefined;
   }
 
   /** Build the JWT claims for a (user, activeOrg, role). */
@@ -259,8 +275,7 @@ export class AuthService {
    * tripping the reuse path.
    */
   async refresh(presentedSecret: string, _ctx: LoginContext = {}): Promise<RefreshOutcome> {
-    const tokenHash = hashSessionSecret(presentedSecret);
-    const session = await this.store.findSessionByTokenHash(tokenHash);
+    const session = await this.findSessionBySecret(presentedSecret);
 
     // Unknown secret → uniform 401, no state change, no family action (cannot revoke a family we
     // cannot even attribute to a user — that would be a confused-deputy forced-logout vector).
@@ -378,7 +393,7 @@ export class AuthService {
 
   /** Logout: revoke the session resolved from the presented secret (idempotent). */
   async logout(presentedSecret: string): Promise<{ audit: AuditEvent[] }> {
-    const session = await this.store.findSessionByTokenHash(hashSessionSecret(presentedSecret));
+    const session = await this.findSessionBySecret(presentedSecret);
     if (session && !session.revokedAt) {
       await this.store.revokeSession(session.id);
       return {
@@ -390,7 +405,7 @@ export class AuthService {
 
   /** Resolve a session row for the authenticate middleware (cookie path). */
   async sessionFromSecret(presentedSecret: string): Promise<SessionRow | undefined> {
-    const session = await this.store.findSessionByTokenHash(hashSessionSecret(presentedSecret));
+    const session = await this.findSessionBySecret(presentedSecret);
     if (!session || session.revokedAt || session.expiresAt.getTime() <= this.now())
       return undefined;
     return session;

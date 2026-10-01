@@ -22,6 +22,7 @@
  * property of an SDK the boot closure loads unavoidably — the alternative would be reaching into that
  * SDK's internal global-symbol registry, which is strictly worse than calling its published API.
  */
+import { redactValue } from '@rayspec/core';
 import { BootConfigError } from './boot-config-error.js';
 
 // Re-exported so a caller that applies the posture BEFORE loading `@rayspec/server` can still name the
@@ -126,7 +127,9 @@ export async function applyDeployAgentTracing(
  * here would turn the export off on an entrypoint whose default has always been the SDK's, and that is
  * a product decision, not a defect fix. So unset and blank fall through untouched, and the resolver
  * decides only once a value is actually stated — which also means an unsupported value refuses in the
- * same message, from the same line, on both entrypoints rather than in a second wording.
+ * same message, from the same line, on both entrypoints rather than in a second wording. The one
+ * exception is the managed posture (`RAYSPEC_HOSTING_POSTURE=managed`), which is opt-in and defaults
+ * the export off the way the deploy path does.
  *
  * Turning the export off is the same pair `applyDeployAgentTracing` takes, and here the SECOND half is
  * the one doing the work: `serve.ts` imports the composition root — and through it `@openai/agents` —
@@ -139,10 +142,40 @@ export async function applyServeAgentTracing(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<AgentTracingPosture | undefined> {
   const raw = env.RAYSPEC_AGENT_TRACING?.trim();
-  if (raw === undefined || raw === '') return undefined;
+  if (raw === undefined || raw === '') {
+    // Under the managed posture the export is off unless the operator states otherwise: there the
+    // code that runs belongs to a customer, which is the deploy path's reason, not a developer's own.
+    if (!managedPosture(env)) return undefined;
+    await disableSdkTracing(env);
+    return 'off';
+  }
   const selected = resolveAgentTracing(env);
   if (selected === 'off') await disableSdkTracing(env);
   return selected;
+}
+
+/**
+ * `RAYSPEC_HOSTING_POSTURE=managed`, read raw: this leaf module runs before the boot validates the
+ * posture (which refuses any other value than `local` or `managed`), and must not import it.
+ */
+function managedPosture(env: NodeJS.ProcessEnv): boolean {
+  return env.RAYSPEC_HOSTING_POSTURE?.trim() === 'managed';
+}
+
+/**
+ * The trace-export posture a process with this environment is under, as the hosting report states it,
+ * without asking the SDK (the report reads no module the boot has not loaded). It follows the
+ * entrypoints above: an explicit `RAYSPEC_AGENT_TRACING` wins; else the SDK's own kill-switch, which
+ * the deploy path writes; else `off` under the managed posture; else the SDK's default, which exports.
+ * A value the boot would refuse cannot be attested as off, so it reports `openai`.
+ */
+export function configuredAgentTraceExport(env: NodeJS.ProcessEnv): AgentTracingPosture {
+  const raw = env.RAYSPEC_AGENT_TRACING?.trim();
+  if (raw === 'off') return 'off';
+  if (raw !== undefined && raw !== '') return 'openai';
+  const sdkSwitch = env[SDK_DISABLE_TRACING_ENV]?.trim();
+  if (sdkSwitch === '1' || sdkSwitch === 'true') return 'off';
+  return managedPosture(env) ? 'off' : 'openai';
 }
 
 /**
@@ -172,4 +205,60 @@ export async function observedAgentTracing(): Promise<AgentTracingPosture> {
   const { getGlobalTraceProvider, NoopTrace } = await import('@openai/agents');
   const probe = getGlobalTraceProvider().createTrace({ name: POSTURE_PROBE_TRACE_NAME });
   return probe instanceof NoopTrace ? 'off' : 'openai';
+}
+
+/** The part of a trace or span the exporter reads. */
+interface ExportableItem {
+  toJSON(): unknown;
+}
+
+/** The part of a trace exporter this wrapper calls. */
+interface TraceExporterLike {
+  export(items: ExportableItem[], signal?: AbortSignal): Promise<void>;
+}
+
+/**
+ * A trace exporter that hands the wrapped one every item through the one redaction path: the JSON an
+ * item serialises to (span data carries tool arguments and outputs) goes through `redactValue`
+ * before it is exported. Everything else about an item reads through unchanged.
+ */
+export class RedactingTraceExporter implements TraceExporterLike {
+  readonly #inner: TraceExporterLike;
+
+  constructor(inner: TraceExporterLike) {
+    this.#inner = inner;
+  }
+
+  export(items: ExportableItem[], signal?: AbortSignal): Promise<void> {
+    return this.#inner.export(items.map(redactedItem), signal);
+  }
+}
+
+function redactedItem(item: ExportableItem): ExportableItem {
+  return new Proxy(item, {
+    get(target, property) {
+      if (property === 'toJSON') return () => redactValue(target.toJSON());
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * Route the agent SDK's trace export through {@link RedactingTraceExporter}: the processors the SDK
+ * installed at import (a batch processor over the OpenAI exporter) are replaced by the same pair with
+ * the redacting wrapper between them. It changes nothing about WHETHER traces are exported (the
+ * posture above decides that), only what an exported one may carry.
+ */
+export async function installRedactedTraceExport(): Promise<void> {
+  const { BatchTraceProcessor, OpenAITracingExporter, setTraceProcessors } = await import(
+    '@openai/agents'
+  );
+  setTraceProcessors([
+    new BatchTraceProcessor(
+      new RedactingTraceExporter(new OpenAITracingExporter()) as unknown as ConstructorParameters<
+        typeof BatchTraceProcessor
+      >[0],
+    ),
+  ]);
 }

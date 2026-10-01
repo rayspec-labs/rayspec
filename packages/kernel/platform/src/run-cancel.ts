@@ -103,6 +103,59 @@ export function runCancelledMessage(runId: string): string {
 }
 
 /**
+ * What had happened to a run's provider call when the run was ended — recorded with the run's
+ * terminal outcome, because "cancelled" alone does not say whether anything reached the provider:
+ *
+ *   before-call      the run ended before its backend was called; nothing was sent.
+ *   call-aborted     the call was in flight, was told to stop, and stopped (the backend settled with
+ *                    a failure within the kill grace).
+ *   after-call       the call had already finished; its result was discarded.
+ *   outcome-unknown  the call was in flight and did not settle within the kill grace, or the run's
+ *                    process could not report back. Whether the provider finished the work — and any
+ *                    effect a tool had — is unknown. Such a run is never re-run automatically.
+ */
+export type RunEndPhase = 'before-call' | 'call-aborted' | 'after-call' | 'outcome-unknown';
+
+/** The recorded message of a cancelled run, by what had happened to its provider call. */
+export function runCancelledPhaseMessage(runId: string, phase: RunEndPhase): string {
+  switch (phase) {
+    case 'before-call':
+      return `run ${runId} was cancelled before its provider call started; nothing was sent.`;
+    case 'call-aborted':
+      return `run ${runId} was cancelled while its provider call was in flight; the call was stopped.`;
+    case 'after-call':
+      return `run ${runId} was cancelled after its provider call had finished; the result was discarded.`;
+    case 'outcome-unknown':
+      return (
+        `run ${runId} was cancelled while its provider call was in flight; whether the provider ` +
+        'finished the call is unknown. The run is not re-run.'
+      );
+  }
+}
+
+/** The recorded message of a run that exceeded its wall-clock bound, by what happened to its call. */
+export function runTimedOutPhaseMessage(
+  runId: string,
+  boundMs: number,
+  phase: RunEndPhase,
+): string {
+  const head = `run ${runId} exceeded the RAYSPEC_AGENT_RUN_MAX_MS bound of ${boundMs}ms`;
+  switch (phase) {
+    case 'before-call':
+      return `${head} before its provider call started; nothing was sent.`;
+    case 'call-aborted':
+      return `${head}; its provider call was stopped.`;
+    case 'after-call':
+      return `${head}; its provider call had finished, and the result was discarded.`;
+    case 'outcome-unknown':
+      return (
+        `${head}; its provider call did not stop within the kill grace, so whether the provider ` +
+        'finished it is unknown. The run is not re-run.'
+      );
+  }
+}
+
+/**
  * Raised when a run is ended on demand while run-core is waiting for the backend. The run's seams go
  * inert exactly as they do when the wall-clock bound fires — the backend call is still in flight and
  * still holding the RunContext, and nothing bound to a cancelled run's handle may issue a statement.
@@ -186,6 +239,11 @@ const liveRuns = new Map<string, AbortController>();
 export interface RunCancellation {
   /** The run's signal — threaded onto `ctx.signal` and raced against the backend call. */
   readonly signal: AbortSignal;
+  /**
+   * Abort the run's signal from inside run-core — the wall-clock bound uses it, so an expired run is
+   * told to stop exactly as a cancelled one is. Idempotent.
+   */
+  abort(): void;
   /** Release the registration (and any link to a caller-supplied signal). Idempotent. */
   dispose(): void;
 }
@@ -319,6 +377,9 @@ export function armRunCancellation(
   if (stopPoll) controller.signal.addEventListener('abort', stopPoll, { once: true });
   return {
     signal: controller.signal,
+    abort() {
+      controller.abort();
+    },
     dispose() {
       stopPoll?.();
       // Only remove OUR registration: two executions of the same runId can overlap (a recovery
@@ -435,10 +496,149 @@ export const RUN_CANCEL_LOCK_WAIT_MS = 2000;
 export async function recordRunCancelled(
   tdb: TenantDb,
   runId: string,
-  opts?: { lockWaitMs?: number; message?: string },
+  opts?: { lockWaitMs?: number; message?: string; phase?: RunEndPhase },
 ): Promise<RunCancellationOutcome> {
-  const lockWaitMs = opts?.lockWaitMs ?? RUN_CANCEL_LOCK_WAIT_MS;
-  const message = opts?.message ?? runCancelledMessage(runId);
+  const phase = opts?.phase;
+  const message =
+    opts?.message ??
+    (phase === undefined ? runCancelledMessage(runId) : runCancelledPhaseMessage(runId, phase));
+  return recordRunEnded(tdb, runId, {
+    stepType: RUN_CANCELLED_STEP_TYPE,
+    stepKey: RUN_CANCELLED_STEP_KEY,
+    errorClass: CANCELLED_CLASS,
+    message,
+    ...(phase === undefined ? {} : { phase }),
+    lockWaitMs: opts?.lockWaitMs ?? RUN_CANCEL_LOCK_WAIT_MS,
+  });
+}
+
+/** The journal step key of a run that exceeded its wall-clock bound (one slot per run). */
+export const RUN_BOUND_STEP_KEY = 'run:bound';
+
+/** The journal step TYPE a wall-clock bound outcome is recorded under (no model call: not `llm`). */
+export const RUN_BOUND_STEP_TYPE = 'bound';
+
+/**
+ * RECORD that a run exceeded its wall-clock bound (`RAYSPEC_AGENT_RUN_MAX_MS`): the header moved to
+ * `error` and one journal step with the neutral `timeout` class, under the same guarded, atomic,
+ * idempotent transition {@link recordRunCancelled} makes. A run that already reached a terminal status
+ * keeps it.
+ */
+export async function recordRunTimedOut(
+  tdb: TenantDb,
+  runId: string,
+  opts: { boundMs: number; phase: RunEndPhase },
+): Promise<RunCancellationOutcome> {
+  return recordRunEnded(tdb, runId, {
+    stepType: RUN_BOUND_STEP_TYPE,
+    stepKey: RUN_BOUND_STEP_KEY,
+    errorClass: 'timeout',
+    message: runTimedOutPhaseMessage(runId, opts.boundMs, opts.phase),
+    phase: opts.phase,
+    lockWaitMs: RUN_CANCEL_LOCK_WAIT_MS,
+  });
+}
+
+/** The journal step key of a run that ended by throwing (one slot per run). */
+export const RUN_FAILED_STEP_KEY = 'run:failed';
+
+/** The journal step TYPE a thrown run's outcome is recorded under. */
+export const RUN_FAILED_STEP_TYPE = 'failure';
+
+/** The recorded message of a run that ended by throwing. It names the class, never the thrown text. */
+export function runFailedMessage(runId: string, errorClass: ErrorClass): string {
+  return `run ${runId} ended with an error (${errorClass}) before it produced a result.`;
+}
+
+/**
+ * RECORD that a run ended by THROWING — no result, no cancellation, no bound: the header moved to
+ * `error` and one journal step with the neutral class of the failure, under the same guarded, atomic,
+ * idempotent transition. Without it such a run would read back as `running` for ever. The thrown
+ * error's own text is not recorded: it can carry internals (a database error, a provider's account
+ * detail) that the run's reader may not see.
+ */
+export async function recordRunFailed(
+  tdb: TenantDb,
+  runId: string,
+  errorClass: ErrorClass,
+): Promise<RunCancellationOutcome> {
+  return recordRunEnded(tdb, runId, {
+    stepType: RUN_FAILED_STEP_TYPE,
+    stepKey: RUN_FAILED_STEP_KEY,
+    errorClass,
+    message: runFailedMessage(runId, errorClass),
+    lockWaitMs: RUN_CANCEL_LOCK_WAIT_MS,
+  });
+}
+
+/**
+ * State what had happened to a CANCELLED run's provider call, once the side that executed it knows.
+ * The cancel surface records a run that was already executing as `outcome-unknown` — the truth at that
+ * moment, and what stays recorded if the executing process dies before it can report. The executing
+ * side then replaces it with what it observed. Only the cancellation step is touched, and only its
+ * message and phase: the header was already moved by whoever recorded the cancellation.
+ */
+export async function recordRunCancellationPhase(
+  tdb: TenantDb,
+  runId: string,
+  phase: RunEndPhase,
+): Promise<void> {
+  await tdb
+    .update(schema.journalSteps, {
+      output: {
+        error: runCancelledPhaseMessage(runId, phase),
+        errorClass: CANCELLED_CLASS,
+        phase,
+      },
+    })
+    .where(
+      and(
+        eq(schema.journalSteps.runId, runId),
+        eq(schema.journalSteps.idempotencyKey, RUN_CANCELLED_STEP_KEY),
+      ),
+    );
+}
+
+/** The phase a run's recorded cancellation states, or undefined when it states none. */
+export async function readRunCancellationPhase(
+  tdb: TenantDb,
+  runId: string,
+): Promise<RunEndPhase | undefined> {
+  const rows = (await tdb
+    .select(schema.journalSteps, { output: schema.journalSteps.output })
+    .where(
+      and(
+        eq(schema.journalSteps.runId, runId),
+        eq(schema.journalSteps.idempotencyKey, RUN_CANCELLED_STEP_KEY),
+      ),
+    )
+    .limit(1)) as Array<{ output: unknown }>;
+  const phase = (rows[0]?.output as { phase?: unknown } | null | undefined)?.phase;
+  return phase === 'before-call' ||
+    phase === 'call-aborted' ||
+    phase === 'after-call' ||
+    phase === 'outcome-unknown'
+    ? phase
+    : undefined;
+}
+
+/**
+ * The shared terminal transition behind {@link recordRunCancelled} and {@link recordRunTimedOut}: move
+ * the header to `error` (guarded on it not already being terminal) and write ONE journal step saying
+ * why, atomically. See {@link recordRunCancelled} for the reporting and lock-wait contract.
+ */
+async function recordRunEnded(
+  tdb: TenantDb,
+  runId: string,
+  end: {
+    stepType: string;
+    stepKey: string;
+    errorClass: ErrorClass;
+    message: string;
+    phase?: RunEndPhase;
+    lockWaitMs: number;
+  },
+): Promise<RunCancellationOutcome> {
   try {
     return await tdb.transaction(
       async (tx) => {
@@ -473,8 +673,8 @@ export async function recordRunCancelled(
           .returning({ runId: schema.runs.runId });
         if (moved.length === 0) {
           // The run finished between the read and the write. Report what it actually is — and write NO
-          // step: a run that produced its own outcome must not gain a contradictory `cancelled` error
-          // step in its ledger (it would inflate the step count and shadow the run's real failure).
+          // step: a run that produced its own outcome must not gain a contradictory error step in its
+          // ledger (it would inflate the step count and shadow the run's real outcome).
           const current = (await tx
             .select(schema.runs, { status: schema.runs.status })
             .where(eq(schema.runs.runId, runId))
@@ -487,35 +687,38 @@ export async function recordRunCancelled(
 
         // The outcome step, written only because the transition above took. Usage and cost are zero:
         // nothing was consumed by ending the run, and the run's roll-ups must keep reporting exactly
-        // what the run actually spent. `onConflictDoNothing` keeps a second cancellation from writing a
+        // what the run actually spent. `onConflictDoNothing` keeps a second record from writing a
         // second step.
         await tx
           .insert(schema.journalSteps, {
             runId,
             backend: header.backend,
-            type: RUN_CANCELLED_STEP_TYPE,
-            idempotencyKey: RUN_CANCELLED_STEP_KEY,
-            inputHash: RUN_CANCELLED_STEP_KEY,
+            type: end.stepType,
+            idempotencyKey: end.stepKey,
+            inputHash: end.stepKey,
             // The `{ error, errorClass }` shape every failing step carries — it is what the run read
-            // path derives the reported error and class from.
-            output: { error: message, errorClass: CANCELLED_CLASS },
+            // path derives the reported error and class from — plus what had happened to the call.
+            output: {
+              error: end.message,
+              errorClass: end.errorClass,
+              ...(end.phase === undefined ? {} : { phase: end.phase }),
+            },
             status: 'error',
-            errorClass: CANCELLED_CLASS,
+            errorClass: end.errorClass,
             authMode: CANCELLED_AUTH_MODE,
           })
           .onConflictDoNothing();
 
         return { cancelled: true, status: 'error' as RunHeaderStatus };
       },
-      { lockTimeoutMs: lockWaitMs },
+      { lockTimeoutMs: end.lockWaitMs },
     );
   } catch (err) {
     if (!isLockTimeout(err)) throw err;
-    // The header row is held by the run's own transaction — it is executing right now. Nothing was
-    // written (the transaction aborted). The run stays MARKED cancelled, so no dispatch will run it
-    // again, and the run itself is what writes the header from here: run-core consults the marker
-    // before its completing write and records the cancellation as the run's own outcome. Report the
-    // status a plain read sees (an MVCC read never waits on the holder).
+    // The header row is held by another transaction for longer than the bound. Nothing was written
+    // (the transaction aborted). The run stays MARKED cancelled, so no dispatch will run it again, and
+    // the run's own side records the outcome when it ends. Report the status a plain read sees (an
+    // MVCC read never waits on the holder).
     const current = (await tdb
       .select(schema.runs, { status: schema.runs.status })
       .where(eq(schema.runs.runId, runId))

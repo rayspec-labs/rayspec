@@ -55,6 +55,8 @@ const TENANT = '00000000-0000-0000-0000-0000000000cc';
 
 /** The variable under test. Saved and restored per test so no arm leaks into the next. */
 const POLL_ENV = 'RAYSPEC_RUN_CANCEL_POLL_MS';
+/** How long a stopped call may take to settle before its outcome is recorded unknown. */
+const GRACE_ENV = 'RAYSPEC_AGENT_KILL_GRACE_MS';
 
 const backend = new FakeSpineBackend();
 
@@ -113,6 +115,15 @@ async function runHeaderStatus(runId: string): Promise<string | undefined> {
 }
 
 /** Every journal step recorded for `runId`, in a deterministic order (the step's natural key). */
+/** What the recorded cancellation states about the run's provider call. */
+async function cancellationPhase(runId: string): Promise<string | null> {
+  const rows = (await db.$client.unsafe(
+    "SELECT output->>'phase' AS phase FROM journal_steps WHERE run_id = $1 AND type = 'cancel'",
+    [runId],
+  )) as unknown as Array<{ phase: string | null }>;
+  return rows[0]?.phase ?? null;
+}
+
 async function journalSteps(
   runId: string,
 ): Promise<Array<{ type: string; status: string; error_class: string | null }>> {
@@ -148,6 +159,7 @@ async function waitForTerminal(jobId: string, ms = 30_000): Promise<string> {
 function restorePollEnv(): void {
   if (savedPollEnv === undefined) delete process.env[POLL_ENV];
   else process.env[POLL_ENV] = savedPollEnv;
+  delete process.env[GRACE_ENV];
 }
 
 beforeAll(async () => {
@@ -214,6 +226,9 @@ describe('DBOS worker cancellation while the run is EXECUTING', () => {
   it('a marker written by another connection ends a run held in flight — nothing signals it', async () => {
     testsRan += 1;
     process.env[POLL_ENV] = '100';
+    // This backend does not honour its signal (the gate below ignores it), so the stopped call never
+    // settles; a short grace keeps the wait for it brief.
+    process.env[GRACE_ENV] = '200';
     const runId = randomUUID();
     // The enqueue-time header the run surface commits before the job is handed to the worker.
     await insertEnqueuedRunHeader(forTenant(db, TENANT), {
@@ -236,11 +251,15 @@ describe('DBOS worker cancellation while the run is EXECUTING', () => {
     // stays in flight and this times out with the gate still shut.
     expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
     expect(await runHeaderStatus(runId)).toBe('error');
-    // Exactly one step: the run's transaction rolled back, so the `llm` step it journaled inside it
-    // is gone and only the cancellation the executor recorded after the rollback remains.
+    // The `llm` step the run journaled before it was held is kept (no transaction rolls it back),
+    // beside the cancellation run-core recorded.
     expect(await journalSteps(runId)).toEqual([
       { type: 'cancel', status: 'error', error_class: 'cancelled' },
+      { type: 'llm', status: 'ok', error_class: null },
     ]);
+    // The backend ignored its signal, so its call never settled within the grace: what happened to
+    // it is recorded as unknown, never claimed as stopped.
+    expect(await cancellationPhase(runId)).toBe('outcome-unknown');
   });
 
   it('PAIRED UNSET ARM: the same marker, with no interval configured, does NOT end the run', async () => {
@@ -261,14 +280,13 @@ describe('DBOS worker cancellation while the run is EXECUTING', () => {
     // Fifteen times the interval the arm above used: ample for a poll to have fired, if one existed.
     await new Promise((r) => setTimeout(r, 1500));
 
-    // The marker alone changes nothing: the workflow has not ended, and the run still holds its
-    // header row inside its own transaction (another connection reads the pre-run `enqueued`, which
-    // is exactly what a run ended by the marker would NOT have left — the executor writes `error`).
+    // The marker alone changes nothing: the workflow has not ended, and the run is still `running`
+    // (a run ended by the marker would read `error`).
     expect(['succeeded', 'failed', 'cancelled']).not.toContain(await executor.status(handle.jobId));
-    expect(await runHeaderStatus(runId)).toBe('enqueued');
+    expect(await runHeaderStatus(runId)).toBe('running');
 
-    // It ends only when the run itself ends — and then it COMMITS, so the step it journaled inside
-    // its transaction survives beside the cancellation it records for itself on the way out.
+    // It ends only when the run itself ends — and then the step it journaled survives beside the
+    // cancellation it records for itself on the way out, which states that its call had finished.
     backend.releaseGate();
     expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
     expect(await runHeaderStatus(runId)).toBe('error');
@@ -276,6 +294,7 @@ describe('DBOS worker cancellation while the run is EXECUTING', () => {
       { type: 'cancel', status: 'error', error_class: 'cancelled' },
       { type: 'llm', status: 'ok', error_class: null },
     ]);
+    expect(await cancellationPhase(runId)).toBe('after-call');
   });
 });
 

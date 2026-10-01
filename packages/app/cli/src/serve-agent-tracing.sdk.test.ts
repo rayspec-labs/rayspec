@@ -46,18 +46,21 @@ interface Probe {
 function run(
   order: string,
   tracing?: string,
+  extra: NodeJS.ProcessEnv = {},
 ): { status: number | null; stdout: string; stderr: string } {
   const env: NodeJS.ProcessEnv = { ...process.env, PROBE_ORDER: order, NODE_ENV: 'production' };
   delete env.OPENAI_AGENTS_DISABLE_TRACING;
   delete env.RAYSPEC_AGENT_TRACING;
+  delete env.RAYSPEC_HOSTING_POSTURE;
   if (tracing !== undefined) env.RAYSPEC_AGENT_TRACING = tracing;
+  Object.assign(env, extra);
   const r = spawnSync(process.execPath, [PROBE], { env, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
 /** The same spawn, for the arms that expect the probe to complete. */
-function probe(order: string, tracing?: string): Probe {
-  const r = run(order, tracing);
+function probe(order: string, tracing?: string, extra: NodeJS.ProcessEnv = {}): Probe {
+  const r = run(order, tracing, extra);
   expect(r.status, r.stderr).toBe(0);
   return JSON.parse(r.stdout.trim().split('\n').at(-1) ?? '{}') as Probe;
 }
@@ -109,6 +112,19 @@ describe('rayspec-serve honours an EXPLICIT RAYSPEC_AGENT_TRACING — asked of t
     expect(p.selected).toBeNull();
     expect(p.trace).toBe('Trace');
     expect(p.sdkSwitch).toBeNull();
+  });
+
+  it('turns the export off under the managed posture when the variable is unset', () => {
+    const p = probe('serve-entrypoint', undefined, { RAYSPEC_HOSTING_POSTURE: 'managed' });
+    expect(p.selected).toBe('off');
+    expect(p.trace).toBe('NoopTrace');
+    expect(p.observed).toBe('off');
+  });
+
+  it("keeps the export the operator states under the managed posture — 'openai' stays armed", () => {
+    const p = probe('serve-entrypoint', 'openai', { RAYSPEC_HOSTING_POSTURE: 'managed' });
+    expect(p.selected).toBe('openai');
+    expect(p.trace).toBe('Trace');
   });
 
   it('REFUSES a value it cannot act on, naming the variable and the value', () => {

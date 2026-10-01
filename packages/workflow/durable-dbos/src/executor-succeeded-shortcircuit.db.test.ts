@@ -13,11 +13,11 @@
  * ALREADY DURABLE → the model is BILLED A SECOND TIME.
  *
  * THE FIX (`executor.ts` `#runAgentJobBody`): after the taint check confirms UNTAINTED and BEFORE the
- * fall-through re-run, read the `runs` header; if it is already terminal-SUCCESS ('completed') complete
- * the step as a NO-OP (`readRunSucceededWithBoundedRetry` → `return`). A genuinely-interrupted untainted
- * run (no completed header) STILL re-runs (the unchanged safe automated retry), and a TAINTED run is
- * STILL quarantined (the taint check runs first) — the short-circuit keys on DURABLE SUCCESS, never on
- * "any recovery".
+ * fall-through re-run, read the `runs` header; if it is already TERMINAL ('completed', or 'error' with
+ * its recorded end) complete the step as a NO-OP (`readRunEndedWithBoundedRetry` → `return`). A
+ * genuinely-interrupted untainted run (no header, or one still 'running') STILL re-runs (the unchanged
+ * safe automated retry), and a TAINTED run is STILL quarantined (the taint check runs first) — the
+ * short-circuit keys on a DURABLE OUTCOME, never on "any recovery".
  *
  * SIMULATING A RECOVERY RE-EXECUTION (the honest, deterministic technique — same as the taint file).
  * DBOS recovery re-invokes an incomplete workflow BODY; a same-workflowID re-enqueue, by contrast, just
@@ -35,8 +35,9 @@
  * fix makes it GREEN (`liveRuns` stays 0). Tests #2-#4 are the fail-the-fix guards: #2 proves the
  * short-circuit does NOT fire on a genuine interruption (no completed header → still re-runs), #3
  * proves it does NOT bypass the taint quarantine (a tainted run with a completed header STILL
- * quarantines), and #4 proves the short-circuit keys STRICTLY on status==='completed' — an 'error'
- * header does NOT short-circuit (still re-runs), so it isn't "any header present".
+ * quarantines), and #4 proves an 'error' header is an outcome too (no re-run, no second bill), while
+ * #5 proves a 'running' header is not — so the short-circuit keys on a terminal status, not on "any
+ * header present".
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -163,7 +164,10 @@ async function seedRunTaint(runId: string): Promise<void> {
  * DELIBERATELY seeds ONLY the header (no journal_steps / run_events) so the short-circuit under test —
  * not run-core's journal replay — is what a re-dispatch keys on (see the file banner's SIMULATING note).
  */
-async function seedRunHeader(runId: string, status: 'completed' | 'error'): Promise<void> {
+async function seedRunHeader(
+  runId: string,
+  status: 'completed' | 'error' | 'running',
+): Promise<void> {
   await forTenant(db, TENANT)
     .insert(schema.runs, {
       runId,
@@ -288,12 +292,11 @@ describe('DBOS worker already-succeeded short-circuit (TEST-FLAKE-2)', () => {
     expect(backend.liveRuns).toBe(0); // never re-ran — the taint quarantine held ahead of the header.
   });
 
-  it('does NOT short-circuit an "error" header: the short-circuit keys STRICTLY on status===\'completed\', not on "any header present"', async () => {
+  it('short-circuits an "error" header too: a run whose end is recorded is never run again', async () => {
     testsRan += 1;
-    // Seed run_started + a `runs` header at status='error' (NOT 'completed') for an UNTAINTED runId —
-    // as a genuinely-failed first attempt would have left it. The short-circuit reads MUST reject this
-    // (RUN_STATUS_SUCCEEDED === 'completed' only), so the re-dispatch STILL re-runs — proving the fix
-    // does not treat "a header exists" as "already succeeded".
+    // Seed run_started + a `runs` header at status='error' for an UNTAINTED runId — what a run that
+    // ended on its wall-clock bound, by a throw or with a returned error leaves. Its outcome is the
+    // record: re-running it would bill the model again and erase the journal step stating its end.
     const runId = randomUUID();
     await seedRunStarted(runId);
     await seedRunHeader(runId, 'error');
@@ -301,7 +304,22 @@ describe('DBOS worker already-succeeded short-circuit (TEST-FLAKE-2)', () => {
 
     const recovery = await executor.enqueue(TENANT, job);
     expect(await waitForTerminal(recovery.jobId)).toBe('succeeded');
-    expect(backend.liveRuns).toBe(1); // RE-RAN — an 'error' header does NOT short-circuit.
+    await new Promise((r) => setTimeout(r, 200));
+    expect(backend.liveRuns).toBe(0); // NOT re-run — the recorded outcome stands.
+  });
+
+  it('does NOT short-circuit a "running" header: an interrupted attempt is re-run', async () => {
+    testsRan += 1;
+    // A header still 'running' is what an attempt that died mid-run leaves: no outcome, so the
+    // untainted run is re-run — the short-circuit keys on a TERMINAL status, not on "a header exists".
+    const runId = randomUUID();
+    await seedRunStarted(runId);
+    await seedRunHeader(runId, 'running');
+    const job: RunJob = { runId, tenantId: TENANT, agentId: 'echo-agent', input: 'running-header' };
+
+    const recovery = await executor.enqueue(TENANT, job);
+    expect(await waitForTerminal(recovery.jobId)).toBe('succeeded');
+    expect(backend.liveRuns).toBe(1); // RE-RAN — an interrupted attempt is retried.
   });
 });
 
@@ -309,7 +327,7 @@ describe('DBOS worker already-succeeded short-circuit (TEST-FLAKE-2)', () => {
 // throws-and-skips its tests, `testsRan` stays 0 and THIS test FAILS the run — a skipped file can never
 // read as a passing (green) file.
 describe('DBOS worker already-succeeded short-circuit — ran-guard (not skippable-as-green)', () => {
-  it('the short-circuit tests ACTUALLY RAN (all four)', () => {
-    expect(testsRan).toBe(4);
+  it('the short-circuit tests ACTUALLY RAN (all five)', () => {
+    expect(testsRan).toBe(5);
   });
 });

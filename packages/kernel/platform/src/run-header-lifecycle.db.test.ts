@@ -9,14 +9,14 @@
  *    is still executing — and reads `completed` afterwards.
  *  - ASYNC: an enqueue-time `enqueued` header transitions to `running` and then to the terminal
  *    status, keeping its enqueue-time `created_at` and healing its identity to what the run resolved.
- *  - ASYNC VISIBILITY: with the run inside the transaction the durable executor wraps it in, a reader
- *    outside that transaction sees the enqueue-time status for the whole run and then the terminal one.
+ *  - A CALLER-HELD TRANSACTION: the durable worker holds none across a run, but `runAgent` may still be
+ *    called inside one; a reader outside it then sees the enqueue-time status for the whole run and
+ *    then the terminal one.
  *  - RECOVERY re-dispatch onto a non-terminal header (a crashed run left `running`) still runs and
  *    reconciles to the healed terminal outcome.
- *  - A run that RETURNS `status:'error'` lands at `error`; a run that THROWS reaches no completing
- *    write at all and leaves its header at `running` (the documented non-terminal residual) — and on
- *    the durable path that write rolls back with the run's transaction, so a run whose enqueue-time
- *    header is missing leaves no header at all.
+ *  - A run that RETURNS `status:'error'` lands at `error`; a run that THROWS is recorded terminal
+ *    `error` by run-core with the neutral class of the failure — and inside a caller-held transaction
+ *    its writes roll back with it, so a run whose enqueue-time header is missing leaves no header.
  *  - The completing write records the identity the RUN resolved — an adapter that reconciles its auth
  *    mode during the run lands the RESULT's value in the header, not the pre-run one.
  *  - The enqueue-time write does NOT wait on a run transaction that holds the header row.
@@ -274,19 +274,26 @@ describe('run-header lifecycle', () => {
     expect((await readHeader(runId))?.status).toBe('error');
   });
 
-  it('a run that THROWS reaches no completing write, so its header stays at running (the non-terminal residual)', async () => {
+  it('a run that THROWS is recorded terminal `error` — never left reading `running` for ever', async () => {
     const tdb = forTenant(appDb, TENANT_A);
     const runId = 'throwing-run';
 
-    // A backend that throws instead of returning a RunResult (a timeout / an exception) — the class
-    // the run surface names separately from a returned `status:'error'`. runAgent rethrows without
-    // any completing write, and on this (sync) path the `running` header has already COMMITTED.
+    // A backend that throws instead of returning a RunResult (an exception) — the class the run
+    // surface names separately from a returned `status:'error'`. runAgent rethrows the error, and
+    // records the run terminal first, with the neutral class and none of the thrown text.
     await expect(runAgent(tdb, new ThrowingBackend(), spec, { runId })).rejects.toThrow(
       'the backend threw',
     );
     const header = await readHeader(runId);
-    expect(header?.status).toBe(RUN_STATUS_RUNNING);
-    expect(isTerminalRunStatus(header?.status ?? '')).toBe(false);
+    expect(header?.status).toBe('error');
+    expect(isTerminalRunStatus(header?.status ?? '')).toBe(true);
+    const steps = (await db.$client.unsafe(
+      "SELECT type, error_class, output->>'error' AS error FROM journal_steps WHERE run_id = $1",
+      [runId],
+    )) as unknown as Array<{ type: string; error_class: string; error: string }>;
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({ type: 'failure', error_class: 'internal' });
+    expect(steps[0]?.error).not.toContain('the backend threw');
   });
 
   it('ASYNC: a run that THROWS rolls its own header write back — with an enqueue-time header one survives, without it none does', async () => {

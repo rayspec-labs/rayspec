@@ -24,6 +24,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@rayspec/core": "workspace:*",
     "argon2": "0.44.0",
     "jose": "6.2.3",
     "zod": "4.4.3"

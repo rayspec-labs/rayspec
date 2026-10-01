@@ -21,15 +21,25 @@ spawned `codex` child is signalled. Once that turn ends, the teardown of the in-
 bridge is **bounded**: it no longer waits on connections that outlive the turn. What that does
 **not** cover:
 
-- **The child is signalled, not killed — and if it does not die, the run does not end.** The SDK
-  spawns with `{ signal }` and no `killSignal`, so aborting sends a single `SIGTERM` and nothing
-  escalates; it then drives the turn with a readline loop over the child's stdout. A child that
-  ignores `SIGTERM` keeps that stdout open, so the loop never ends, `backend.run()` never returns,
-  and its teardown — the bounded bridge close included — never runs at all. This is measured, not
-  assumed: `src/cancel.integration.test.ts` pins it with a stand-in executable that installs an
-  empty `SIGTERM` handler. The bounded teardown fixes a hang **after** the turn ends; it cannot
-  rescue a run whose child refuses to exit.
-- Processes the `codex` child itself spawned are not signalled and can be left orphaned.
+- **A child that ignores `SIGTERM` is killed after the kill grace.** The SDK spawns with
+  `{ signal }` and no `killSignal`, so aborting sends a single `SIGTERM`, and it drives the turn
+  with a readline loop over the child's stdout — a child that ignored the signal would keep that
+  loop, and `backend.run()`, open for good. The adapter therefore points the SDK at a small
+  launcher (written once per process into a private temp directory) that starts the real binary as
+  its own child, forwards the `SIGTERM`, and sends `SIGKILL` once the run's kill grace has passed
+  (`RAYSPEC_AGENT_KILL_GRACE_MS`, default 5000 ms). `src/cancel.integration.test.ts` drives the real
+  SDK against a stand-in executable with an empty `SIGTERM` handler and asserts it is gone after the
+  grace and `run()` settles. If the bundled binary cannot be found or the launcher cannot be
+  written, the adapter runs the binary directly, without the escalation, and logs that once.
+- **A silent child is ended by the provider-call timeout.** With `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`
+  set (or the managed posture's default), a turn that produces no event for that long is aborted
+  through the same controller and the same kill ladder, and the run reports the neutral `timeout`
+  class. A tool call the platform dispatches does not count as silence.
+- The launcher starts the `codex` child in a process group of its own and signals the whole group,
+  so processes the child spawned are ended with it, and it never waits on the relayed output beyond
+  the grace: a process that inherited the child's stdout cannot keep `run()` open. A process the
+  child starts in a session of its own leaves the group and is not signalled; on Windows there are
+  no process groups and only the child is signalled.
 - Whether the real `codex` CLI exits on that signal and reaps its own children is **not verified
   here**. The cancellation tests drive the real SDK against a stand-in executable, so the points
   above are stated as limits rather than measured against the shipped CLI.

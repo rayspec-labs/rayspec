@@ -212,7 +212,11 @@ const spec: AgentSpec = {
   tools: [],
 };
 
-function makeCtx(journal: NoopJournal, signal?: AbortSignal): RunContext {
+function makeCtx(
+  journal: NoopJournal,
+  signal?: AbortSignal,
+  limits?: RunContext['limits'],
+): RunContext {
   return {
     runId: 'run-anth-real-1',
     tenantId: 't1',
@@ -221,11 +225,16 @@ function makeCtx(journal: NoopJournal, signal?: AbortSignal): RunContext {
     tools: [],
     onEvent: async () => {},
     ...(signal ? { signal } : {}),
+    ...(limits ? { limits } : {}),
   };
 }
 
 /** Start a run against a stand-in child and return once that child is live. */
-async function startRunWithLiveChild(opts: { ignoreTerminate: boolean; signal?: AbortSignal }) {
+async function startRunWithLiveChild(opts: {
+  ignoreTerminate: boolean;
+  signal?: AbortSignal;
+  limits?: RunContext['limits'];
+}) {
   const { exePath, pidPath, stdinEofPath } = writeFakeChild({
     ignoreTerminate: opts.ignoreTerminate,
   });
@@ -233,7 +242,7 @@ async function startRunWithLiveChild(opts: { ignoreTerminate: boolean; signal?: 
   tempDirs.push(configRoot);
   const adapter = new AnthropicAdapter({ configRoot, pathToClaudeCodeExecutable: exePath });
 
-  const run = adapter.run(spec, makeCtx(new NoopJournal(), opts.signal));
+  const run = adapter.run(spec, makeCtx(new NoopJournal(), opts.signal, opts.limits));
   // Subscribe now so the eventual settle is never an unhandled rejection, and stamp WHEN it settles
   // — an arm has to be able to say whether the caller got its answer before or after the child died.
   const settled = run.then(
@@ -333,6 +342,39 @@ describe('Anthropic adapter: cancelling a run kills the real child process it dr
         settledAfterAbortMs: outcome.at - abortedAt,
         goneAfterMs,
       });
+    },
+  );
+});
+
+describe('Anthropic adapter: a child that goes silent is ended by the provider-call timeout', () => {
+  it(
+    'no cancellation at all: the silence window ends the run as `timeout`, and a child that ignores SIGTERM is still killed',
+    { timeout: 60_000 },
+    async () => {
+      const TIMEOUT_MS = 300;
+      const startedAt = Date.now();
+      const { pid, settled } = await startRunWithLiveChild({
+        ignoreTerminate: true,
+        limits: { providerCallTimeoutMs: TIMEOUT_MS },
+      });
+      expect(alive(pid)).toBe(true);
+
+      // Nothing cancels this run. The child never says anything, so the watchdog fires after the
+      // window and drives the same termination ladder a cancellation does.
+      const outcome = await settled;
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.res.status).toBe('error');
+        expect(outcome.res.errorClass).toBe('timeout');
+        expect(outcome.res.error).toContain('RAYSPEC_AGENT_REQUEST_TIMEOUT_MS');
+      }
+      expect(outcome.at - startedAt).toBeGreaterThanOrEqual(TIMEOUT_MS);
+      expect(outcome.at - startedAt).toBeLessThan(TIMEOUT_MS + FORCED_KILL_MS);
+
+      // The child ignores SIGTERM, so the forced kill is what ends it — it does not outlive the
+      // ladder.
+      await waitUntilGone(pid, WAIT_FOR_FORCED_KILL_MS);
+      expect(alive(pid)).toBe(false);
     },
   );
 });

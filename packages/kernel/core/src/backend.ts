@@ -123,6 +123,13 @@ export interface RunContext {
    */
   signal?: AbortSignal;
   /**
+   * The execution limits the platform's policy puts on this run's provider calls. An adapter applies
+   * `providerCallTimeoutMs` to every call it makes to its provider (an HTTP request, or the silence of
+   * a stream or a child process) and gives a child process it asked to stop `killGraceMs` before it
+   * kills it. Optional and additive: absent ⇒ the adapter keeps its own defaults.
+   */
+  limits?: RunLimits;
+  /**
    * Central tool dispatch (the ONLY sanctioned tool path — adapters never hold handlers).
    * Owns: validate-in -> idempotency -> timeout -> handler -> validate-out -> opaque-wrap ->
    * one journaled step. Returns opaque `tool_data` on success or a fail-closed `tool_error`
@@ -139,6 +146,17 @@ export interface RunContext {
     rawArgs: unknown,
     toolCallId?: string,
   ) => Promise<ToolDispatchResult>;
+}
+
+/** The execution limits a backend applies to its own provider calls (see `RunContext.limits`). */
+export interface RunLimits {
+  /**
+   * How long one provider call may go unanswered, in milliseconds. Absent ⇒ the backend's own
+   * default (for an SDK client, the client's timeout; for a child process, none).
+   */
+  providerCallTimeoutMs?: number;
+  /** How long a child process that was asked to stop may take before it is killed, in milliseconds. */
+  killGraceMs?: number;
 }
 
 /** What an adapter reports for a single step; the platform stamps the rest. */

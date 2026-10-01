@@ -484,7 +484,10 @@ file, until `SIGINT` / `SIGTERM`.
 > trace export off**, while `rayspec-serve` keeps the agent SDK's own default,
 > which is to export to OpenAI. Both entrypoints honour `RAYSPEC_AGENT_TRACING` —
 > `openai` or `off`, a blank value counting as unset — and fail the boot by name on
-> anything else, so the export is a choice you can state on either one.
+> anything else, so the export is a choice you can state on either one. **To stop
+> `rayspec-serve` from exporting, set `RAYSPEC_AGENT_TRACING=off`.** Under
+> `RAYSPEC_HOSTING_POSTURE=managed` the export is off on both entrypoints unless
+> you set `RAYSPEC_AGENT_TRACING=openai`.
 
 The repo ships a ready-to-run **product-profile** document — one declarative YAML
 with **zero custom code** — at `examples/acme-notes/acme-notes.product.yaml`. It

@@ -122,6 +122,12 @@ export type { TtsCapability, TtsSynthesizeOptions } from './tts.js';
 import type { SttCapability } from './stt.js';
 import type { TtsCapability } from './tts.js';
 
+// The application's own bindings — the declared, granted values a bundle deployment hands its handlers
+// (interface only; the platform builds the reader from the bundle's manifest at deploy time).
+export type { ApplicationBindings, BindingNotGrantedError } from './bindings.js';
+
+import type { ApplicationBindings } from './bindings.js';
+
 // ---------------------------------------------------------------------------------------
 // The store capability facade — a SERIALIZABLE-shaped, NAME-keyed, tenant-bound DB surface.
 // ---------------------------------------------------------------------------------------
@@ -424,6 +430,17 @@ export interface HandlerInit {
    * `enqueue`: the closure has no tenant parameter, so a handler can never emit into another tenant.
    */
   readonly emit?: EmitEvent;
+  /**
+   * The application's own bindings (see `ApplicationBindings`): the values of the names the bundle
+   * declares, provider credentials excluded. OPTIONAL: present on a bundle deployment
+   * (`rayspec deploy <file.ray>`), where these values never enter the process environment; absent on a
+   * YAML deployment, whose handlers read the environment the operator set. A name the bundle does not
+   * declare is refused with an error, not answered with `undefined`.
+   *
+   * POPULATED ON EVERY HANDLER INIT: routes (`handler` and `stream` kind), tools and triggers. It is a
+   * deployment-static, read-only value, not tenant-bound.
+   */
+  readonly bindings?: ApplicationBindings;
 }
 
 /**

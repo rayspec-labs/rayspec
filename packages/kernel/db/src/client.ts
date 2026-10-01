@@ -80,12 +80,23 @@ export function makeDb(
  *
  * `maxPoolSize` (default 4) lets a worker-pool-sizing test pin the pool cap so it can saturate the
  * pool deterministically (e.g. prove N concurrent two-connection runs do not exhaust a correctly-sized
- * pool). Existing callers omit it → the unchanged default-4 behavior.
+ * pool). Existing callers omit it → the unchanged default-4 behavior. `options.applicationName` tags the
+ * pool's sessions, as `makeDb`'s does.
  */
-export function makeDbWithSchema(databaseUrl: string, schemaName: string, maxPoolSize = 4) {
+export function makeDbWithSchema(
+  databaseUrl: string,
+  schemaName: string,
+  maxPoolSize = 4,
+  options: { applicationName?: string } = {},
+) {
   const sql = postgres(databaseUrl, {
     max: maxPoolSize,
-    connection: { search_path: `${schemaName}, public` },
+    connection: {
+      search_path: `${schemaName}, public`,
+      ...(options.applicationName !== undefined
+        ? { application_name: options.applicationName }
+        : {}),
+    },
   });
   const db = drizzle(sql, { schema });
   return Object.assign(db, { $client: sql });

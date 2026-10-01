@@ -999,7 +999,10 @@ classified outcome afterwards.
 A run that does not merely fail but **throws** — the held request hitting its
 timeout, or the per-run wall-clock ceiling configured by `RAYSPEC_AGENT_RUN_MAX_MS`
 (see [`.env.example`](../.env.example) for the environment surface) — produces no run
-result at all. On the JSON path that answers `504 GATEWAY_TIMEOUT` with the platform's
+result at all. The wall-clock ceiling **ends** the run: it aborts the run's signal, so a
+backend that honours it stops its provider call, and records the run terminal with the
+`timeout` class and what happened to the call (see
+[Cancelling a run](#cancelling-a-run) for that vocabulary). On the JSON path that answers `504 GATEWAY_TIMEOUT` with the platform's
 standard error envelope, carrying the neutral `timeout` class in
 `details.errorClass`. Under `Accept: text/event-stream` the same throw cannot
 change a status line already sent, so it ends the stream with a terminal `error`
@@ -1027,20 +1030,35 @@ enqueued → running → completed | error
   durable worker, which is what makes the `runId` that call's `202` hands back
   resolvable straight away instead of a `404` until the run ends. That write is
   best-effort: a run whose enqueue-time write did not land still answers `202`,
-  its id then reads `404` for the whole run as it did before — and never resolves
-  at all if that run ends by throwing, because the header it writes for itself
-  rolls back with the worker transaction it is written in.
-- `running` — execution has started. This is what a **synchronous** run publishes,
-  because it executes outside a transaction; the durable worker runs the agent
-  inside one transaction, so a caller polling an async run reads `enqueued` for
-  the whole run and then the terminal status.
+  and its id reads `404` until the worker starts the run and writes the header
+  itself.
+- `running` — execution has started. Synchronous and asynchronous runs both
+  publish it: neither holds a transaction across the model call, so the header
+  a run writes as it starts is visible at once.
 - `completed` and `error` — the two **terminal** values, and the only two a run
   result carries.
 
 Only the terminal values mean the run is finished, so test a status for
-terminality rather than for the header merely being there: a run that throws
-reaches no completing write, and nothing reaps the non-terminal header it leaves
-behind.
+terminality rather than for the header merely being there. A run that **throws**
+is recorded terminal `error` with the neutral class of the failure (never the
+thrown error's own text); a run whose process dies mid-run keeps `running` until a
+recovery dispatch settles it.
+
+### Run admission
+
+A deployment can bound how many agent runs it holds at once
+([hardened posture → Bounded execution](./hardened-posture.md#bounded-execution)): queued
+and executing `async: true` runs in total (`RAYSPEC_AGENT_QUEUE_MAX`) and per
+organization (`RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT`), and runs one process holds
+in-request (`RAYSPEC_AGENT_SYNC_RUNS_MAX`). Under `RAYSPEC_HOSTING_POSTURE=managed` all
+three have defaults; otherwise they are off unless set. A run past a bound answers
+**`429 RATE_LIMITED`** with a `Retry-After` header and
+`error.details` `{ retryAfterMs, reason: "queue-full", scope, limit }` — `scope` is
+`tenant`, `global` or `in-request` — and nothing is recorded for it: no job, no run
+header, and an `Idempotency-Key` it carried is free again, so the same key can be
+retried. An in-request slot is held until the run itself settles, not until the request
+returns. This `429` is distinct from the run-outcome `429` (an upstream throttle), which
+answers a `RunResult` body.
 
 ### Cancelling a run
 
@@ -1064,11 +1082,20 @@ The response is `200` with:
 
 `cancelled` says whether **this call** made the run terminal. It is `false` when the run
 had **already finished** — its own outcome stands and nothing is overwritten, which also
-makes a repeated cancel harmless rather than an error — and `false` when the run was still
-**holding its own record**: an executing run owns its header row until it ends, so there
-it is the run that writes the cancellation down (see below). `status` is then the status
-the run really has. `signalled` says whether a run executing **in this process** was
-reached.
+makes a repeated cancel harmless rather than an error — and `false` when the run's own side
+recorded the cancellation first. `status` is then the status the run really has.
+`signalled` says whether a run executing **in this process** was reached.
+
+**What the record says about the provider call.** The cancellation step's output carries a
+`phase`: `before-call` (nothing was sent — the run had not started its call),
+`call-aborted` (the call was in flight, was told to stop, and settled within the kill
+grace), `after-call` (the call had already finished; its result was discarded) or
+`outcome-unknown` (the call did not settle within the grace, or the process executing it
+could not report — whether the provider finished it is not known). The cancel surface
+writes what it can know from where it stands — `before-call` for a run still `enqueued`,
+`outcome-unknown` for one `running` — and the process executing the run replaces it with
+what it observed. A run whose outcome is unknown is never re-run automatically. The
+wall-clock bound records the same vocabulary on its `timeout` step.
 
 **What cancelling actually stops, precisely.** Three things happen, and they cover
 different runs:
@@ -1088,31 +1115,17 @@ different runs:
   default under `RAYSPEC_HOSTING_POSTURE=managed`) changes this case:
   a run that is executing re-reads its own cancellation record on that interval and ends
   itself where it runs, with the same terminal state and the same journal as a run
-  cancelled in this process. Two honest consequences. What the run leaves in its journal
-  follows the **invocation shape**, not which process cancelled: the durable worker runs
-  the agent inside a transaction, so that transaction **rolls back**, the steps journaled
-  in it do not survive, and the run ends with the single `cancelled` step; a synchronous
-  run has no transaction, so the steps it already committed stay beside the `cancelled`
-  one. On the durable shape that discard includes the journal step for a non-idempotent
-  tool that already fired — the **quarantine evidence itself is unaffected**, because the
-  taint marker is written on the autonomous handle and commits independently of the run's
-  transaction, so such a run stays tainted and is never re-runnable-as-untainted. Without the variable it runs to completion and keeps them either way. And the
-  response field `signalled` still means "this process's registry reached it", so it stays
-  `false` for a cross-process cancellation even when that cancellation does land.
+  cancelled in this process. No transaction is held across a run on either path, so the
+  steps a cancelled run already journaled — including the step of a non-idempotent tool
+  that fired — are kept beside the `cancelled` one, and a run that fired such a tool stays
+  tainted and is never re-runnable-as-untainted. The response field `signalled` still
+  means "this process's registry reached it", so it stays `false` for a cross-process
+  cancellation even when that cancellation does land.
 
-The cancel request itself never waits for the run it ends. An executing run holds its
-own header row for as long as it runs, so the terminal record is written by whichever
-side can write it: the cancel surface when the run is not holding it, and the run's own
-side when it is — from inside the run when it produces a result, and from the worker
-once the run's transaction has rolled back when it ends by failing instead (a failing
-run takes everything it wrote down with it, including a record made inside it).
-`cancelled: false` with a non-terminal `status` means that second case — the run was
-ended, and its own side records it when it stops: from inside the run when it produces a
-result, from the worker when it ends by failing, and from the next dispatch attempt if
-the process died before either of those could. Should the process running it die after
-the engine has already ended the job, no attempt follows and the header keeps the
-non-terminal status it had; the run is still never executed again, and re-reading it
-reports the status it really has.
+The cancel request itself never waits for the run it ends: no run holds its header row
+for longer than one statement, so the cancel surface records the cancellation at once,
+and the run's own side refines what it says about the provider call when it stops. A run
+whose process died before it could report keeps what the cancel surface recorded.
 
 **Which runs can you name?** Cancellation is by run id, and the only call that hands
 an id back **before** the run ends is an asynchronous one — `async: true` answers
@@ -1142,11 +1155,13 @@ How well the work itself stops depends on the backend:
 | ----------- | --------------------------------------------------------------------------- |
 | `openai`    | The signal is passed into the SDK run call, so the model request is aborted. |
 | `anthropic` | The signal aborts the controller the SDK already holds; the `claude` child is torn down, but not instantly — the SDK closes its input at once, then escalates over roughly two to seven seconds. The adapter's README lists what that window costs. |
-| `codex`     | The signal aborts the streamed turn and signals the spawned child; once the turn ends, the tool-bridge teardown is bounded. Limits: the child gets a `SIGTERM` with no escalation, and processes it spawned itself are not signalled — a child that ignores it keeps the turn (and so the whole run) open, which no teardown can shorten. See the adapter's README. |
+| `codex`     | The signal aborts the streamed turn; the adapter starts the binary through a launcher that forwards the `SIGTERM` and sends `SIGKILL` after `RAYSPEC_AGENT_KILL_GRACE_MS`, so a child that ignores `SIGTERM` is still ended and the run settles. The signals go to the child's process group, so processes it spawned end with it (one that starts a session of its own does not). See the adapter's README. |
 | `pi`        | The prompt call takes no signal, so the session's `abort()` is brought forward; it aborts the agent run's controller, which is the signal the model request carries, so the token stream stops at the transport. A cancel that arrives before the adapter issues the prompt call skips the request; a narrow window between that check and the agent registering its run remains, and the adapter's README records it. |
 
-In every case the platform stops waiting immediately; the table is about the provider
-side, which is the part no platform can promise on an SDK's behalf.
+In every case the platform stops waiting immediately, and records what happened to the
+call; the table is about the provider side. Under `RAYSPEC_HOSTING_POSTURE=managed` only
+the backends of the supported-backend matrix run at all
+([hardened posture](./hardened-posture.md#supported-backends)).
 
 ## `agents`
 
@@ -1424,6 +1439,31 @@ handlers:
   product stores, so its route is gated on `store:read` instead of the default
   `store:write` (see the authorization consequence below). Absent or `false` leaves
   the default gate unchanged.
+- `uses` — optional list of the **rights** the handler asks for: the
+  [optional capabilities](#optional-handler-capabilities) its init may carry —
+  `blob`, `fsSource`, `stt`, `tts`, `emit`, `enqueue`, `mintPlayToken`, `bindings`.
+  With it, the handler is **scoped**: its init carries exactly those capabilities,
+  and reaching for any other configured one throws an error named
+  `ToolRightNotGrantedError` where it asks (`init.emit` on a handler that did not
+  declare `emit`), instead of handing it over. Each right is refused before anything
+  runs when it cannot be honoured: a name outside the list is refused when the
+  document is parsed; a right the handler's kind never receives (a trigger asking
+  for `stt`, a tool asking for `enqueue`, a `{handler}` route asking for `blob`) is
+  refused by the lint (`capability_violation`), and a stream route handler must
+  declare `blob`; a right the deployment does not grant (`stt` without
+  `STT_PROVIDER`, `emit` without `deployment.eventBus`) refuses the boot, naming
+  the handler, the right and what is missing. An empty list declares that the
+  handler uses none. Absent, the handler receives every capability the deployment
+  configured, as before — except under `RAYSPEC_HOSTING_POSTURE=managed`, which
+  refuses a boot whose handler declares no `uses`. A 1.8 parser refuses a spec that
+  uses the key.
+
+  ```yaml
+  handlers:
+    - { id: transcribe, module: handlers/transcribe.mjs, export: run, kind: route, uses: [stt, emit] }
+    - { id: nightly, module: handlers/nightly.mjs, export: run, kind: trigger, uses: [] }
+  ```
+
 - `lintSuppress` — optional list of acknowledged advisories scoped to **this
   handler**; same shape and semantics as [`lintSuppress` on an agent](#agents): a
   `code` naming an advisory (never an error) and a **required, non-empty**
@@ -1493,6 +1533,7 @@ everywhere:
 | `init.stt` | Transcribe audio bytes (speech-to-text). | `handler`-kind routes and tools | `STT_PROVIDER` |
 | `init.tts` | Synthesize audio from text (text-to-speech). | `handler`-kind routes and tools | `TTS_PROVIDER` |
 | `init.emit` | Append a durable, per-tenant-sequenced event to the tenant's stream. | `handler`-kind routes and the tools of an **in-request** agent run (never those of an enqueued one — see below) | `deployment.eventBus.enabled` (a product deployment has it structurally, with nothing to declare) |
+| `init.bindings` | Read the application's own declared bindings (`get(name)`, `names`). | every handler: routes of both kinds, tools and triggers | a bundle deploy (`rayspec deploy <file.ray>`); absent on a YAML deploy |
 
 Two boundaries the table implies are worth spelling out.
 
@@ -1505,6 +1546,27 @@ Two boundaries the table implies are worth spelling out.
   through a `stream` route or a tool, and pass the handler a key, not a handle.
 - A **trigger** handler receives only `{ tenantId, db, triggerName }`, so work that
   needs any capability here belongs in a route or a tool the trigger drives.
+
+#### `init.bindings` — application bindings
+
+On a bundle deployment, the values of the bindings the bundle's manifest declares — the
+application's own names, not the provider keys — reach handlers here, and also the application
+process environment, where code that reads `process.env` finds them as it always did. The provider
+keys never reach either.
+
+```ts
+const secret = init.bindings?.get('WEBHOOK_SIGNING_SECRET'); // a declared name: its value
+init.bindings?.names;                                        // every declared application name
+init.bindings?.get('OPENAI_API_KEY');                        // throws: a provider credential
+init.bindings?.get('SOMETHING_ELSE');                        // throws: not declared
+```
+
+`get` answers a declared name with its value, or `undefined` for an optional binding nobody
+supplied. Any other name throws an error named `BindingNotGrantedError` (its `binding` property names
+what was asked for), so a handler never mistakes "not granted" for "not set": a name the bundle does
+not declare, and a provider credential even when the bundle declares it — those are read by the
+platform for the adapter that uses them. On a YAML deployment the field is absent and handlers read
+the environment the operator set, as before.
 
 #### `init.stt` — transcription
 
@@ -1633,11 +1695,9 @@ the tools of an in-request agent run** only: a `stream`-kind route init and a tr
 init do not carry it (the same boundary the rest of this table draws), and neither
 does the init of a tool an **enqueued** run drives — `async: true`, or any trigger
 whose action is `kind: agent`, since a trigger fires its agent through the same
-durable worker. The worker runs a whole run inside one transaction, and allocating a
-sequence number there would hold the tenant's stream lock until that run committed,
-so the capability is left off rather than made to behave differently off-request. So
-work that must emit belongs in a `handler`-kind route, or in a tool of an agent run
-the request itself drives.
+durable worker, which builds an enqueued run's tools without it. So work that must emit
+belongs in a `handler`-kind route, or in a tool of an agent run the request itself
+drives.
 
 The **tenant is engine-bound**: the capability has no tenant parameter, so a handler
 cannot emit into another tenant — there is nowhere to name one. That is the same
@@ -1857,7 +1917,7 @@ the bundle provides them, and refuses the bundle when the range the extension's
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no
-durable worker and no event bus.
+durable worker, no event bus and no declared egress.
 
 ```yaml
 deployment:
@@ -1914,6 +1974,29 @@ deployment:
   commit inside the transaction the engine opens around the handler, together
   with the writes the handler made in it, so a reader never sees an event
   announcing a change it cannot yet read.
+- `egressHosts` — optional list of the outbound hosts the application calls: a
+  model provider, a webhook receiver, an API a handler talks to.
+
+  ```yaml
+  deployment:
+    egressHosts: [api.openai.com, hooks.example.com]
+  ```
+
+  Each entry is a lowercase DNS hostname of at least two labels; each label is 1
+  to 63 characters of `a-z`, `0-9` and `-`, neither starting nor ending with `-`,
+  and the last label is 2 to 63 letters or an IDNA A-label (`xn--…`). No
+  wildcard, trailing dot, IP address, port or URL; at most 253 characters per
+  host, at most 256 hosts, each once. A document that breaks any of these is
+  refused at the entry's path.
+
+  The declaration is **declarative only**. `rayspec pack` carries it into the
+  bundle manifest as `permissions.egressHosts`, `rayspec bundle verify` refuses a
+  manifest whose hosts differ from the spec's, and every plan reports it
+  (`permissionChanges.egressAdded` and `egressRemoved`). The runtime does **not**
+  block a call to a host that is not listed: the host's network policy (an
+  egress firewall or proxy) enforces it. A spec that uses an agent backend but
+  declares no host is packed with the warning `RAY_W_EGRESS_UNDECLARED`. A 1.8
+  parser refuses a spec that uses the key.
 
 ## `frontend`
 
@@ -2609,6 +2692,16 @@ deployment_overrides:
   `default_model` and `default_provider`. Credentials are **not** named here — a
   deployment supplies them purely through the environment (e.g. `OPENAI_API_KEY`),
   never through the document.
+- `egress_hosts` — optional list of the outbound hosts the product calls, on
+  exactly the terms of the backend profile's
+  [`deployment.egressHosts`](#deployment): lowercase DNS hostnames, declarative
+  only, carried into the bundle manifest and reported in every plan, enforced by
+  the host's network policy and never by the runtime.
+
+  ```yaml
+  deployment_overrides:
+    egress_hosts: [api.openai.com, api.deepgram.com]
+  ```
 
 ---
 

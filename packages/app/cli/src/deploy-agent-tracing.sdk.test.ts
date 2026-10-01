@@ -72,7 +72,8 @@ describe('the deploy path stops the agent trace export — asked of the SDK, not
   });
 
   it('turns the export off even when the boot closure — and the SDK — loaded FIRST', () => {
-    // The shape `rayspec deploy --apply-migration` takes. Writing the environment variable cannot
+    // The shape `rayspec deploy --apply-migration` takes, and `rayspec deploy <file.ray>`, which loads
+    // the server to read and plan the bundle before it serves. Writing the environment variable cannot
     // reach a provider that has already snapshotted it, so this arm fails on an ordering-only fix.
     const p = probe('closure-first');
     expect(p.selected).toBe('off');

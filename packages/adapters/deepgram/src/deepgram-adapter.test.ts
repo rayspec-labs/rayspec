@@ -275,8 +275,14 @@ describe('DeepgramSttAdapter — HTTP + transport error mapping (content-free)',
       if (result.status !== 'failed') throw new Error('expected failed');
       expect(result.error.code).toBe('provider_unavailable');
       expect(result.error.retryable).toBe(retryable);
-      expect(result.error.message).toBe(`deepgram transcription failed: HTTP ${status}`);
+      expect(result.error.message).toBe(
+        status === 401 || status === 403
+          ? `deepgram refused the credential DEEPGRAM_API_KEY (HTTP ${status}): it is invalid, ` +
+              'expired, revoked or not permitted. Supply a valid key.'
+          : `deepgram transcription failed: HTTP ${status}`,
+      );
       expect(result.error.message).not.toContain('super-secret-body');
+      expect(result.error.message).not.toContain(SECRET_KEY);
     });
   }
 

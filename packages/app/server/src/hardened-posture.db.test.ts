@@ -89,10 +89,10 @@ stores:
     columns:
       - { name: body, type: text }
 handlers:
-  - { id: echo_ingest, module: handlers/h.ts, export: echoIngest, kind: route }
-  - { id: mint, module: handlers/h.ts, export: mint, kind: route }
-  - { id: echo_playback, module: handlers/h.ts, export: echoPlayback, kind: route }
-  - { id: boom, module: handlers/h.ts, export: boom, kind: route }
+  - { id: echo_ingest, module: handlers/h.ts, export: echoIngest, kind: route, uses: [blob] }
+  - { id: mint, module: handlers/h.ts, export: mint, kind: route, uses: [mintPlayToken] }
+  - { id: echo_playback, module: handlers/h.ts, export: echoPlayback, kind: route, uses: [blob] }
+  - { id: boom, module: handlers/h.ts, export: boom, kind: route, uses: [] }
 api:
   - { method: GET, path: '/notes', action: { kind: store, store: notes, op: list } }
   - { method: POST, path: '/notes', action: { kind: store, store: notes, op: create } }

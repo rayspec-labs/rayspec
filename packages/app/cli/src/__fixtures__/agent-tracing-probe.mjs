@@ -10,9 +10,10 @@
  * PROBE_ORDER selects which boot shape to replay:
  *   serve             — `rayspec deploy <spec>`: the trace posture is applied before the boot closure
  *                       (and therefore before the agent SDK) is imported.
- *   closure-first     — `rayspec deploy --apply-migration …`: the pre-flight imports `@rayspec/server`
- *                       FIRST, so the SDK's global trace provider already exists — and has already
- *                       snapshotted the kill-switch — by the time the posture is applied.
+ *   closure-first     — `rayspec deploy --apply-migration …` and `rayspec deploy <file.ray>`: the
+ *                       pre-flight (or the bundle read) imports `@rayspec/server` FIRST, so the SDK's
+ *                       global trace provider already exists — and has already snapshotted the
+ *                       kill-switch — by the time the posture is applied.
  *   serve-entrypoint  — `rayspec-serve`: that entrypoint imports the composition root STATICALLY, so
  *                       the closure — and the provider — always exist by the time `main()` runs and
  *                       calls `applyServeAgentTracing`. There is no other order available to it.

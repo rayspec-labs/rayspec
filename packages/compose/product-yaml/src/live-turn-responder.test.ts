@@ -14,6 +14,7 @@
  *  - the live-sink seam: a supplied onEvent threads into runAgent's opts.
  */
 import type { RunResult } from '@rayspec/core';
+import { InRequestRunGate } from '@rayspec/platform';
 import { describe, expect, it, vi } from 'vitest';
 
 const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
@@ -253,6 +254,30 @@ describe('makeLiveTurnResponder', () => {
       runId: replyRunId(TURN_REF),
       message: 'socket hang up',
     });
+  });
+
+  it('holds an in-request slot while the reply runs, and fails `rate_limited` with none free, running nothing', async () => {
+    runAgentMock.mockReset();
+    let finish: (r: RunResult) => void = () => {};
+    runAgentMock.mockImplementationOnce(
+      () =>
+        new Promise<RunResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const gate = new InRequestRunGate(1);
+    const responder = makeLiveTurnResponder({ ...cfg(), inRequestRunGate: gate })('tenant-a');
+    const first = responder.respond({ input: 'x', turnRef: TURN_REF });
+    await vi.waitFor(() => expect(gate.active).toBe(1));
+    // The process's one slot is held: a second reply is refused before any run starts.
+    const second = await responder.respond({ input: 'y', turnRef: 'tenant-a:conv-1:m-2' });
+    expect(second).toMatchObject({ status: 'error', errorClass: 'rate_limited' });
+    expect((second as { message: string }).message).toContain('RAYSPEC_AGENT_SYNC_RUNS_MAX');
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+    // The slot is given back when the run settles.
+    finish(completedRun('ok'));
+    expect(await first).toMatchObject({ status: 'completed' });
+    expect(gate.active).toBe(0);
   });
 
   it('threads a supplied onEvent into runAgent opts (the live-sink seam — no restructuring later)', async () => {

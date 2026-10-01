@@ -711,6 +711,20 @@ function checkResponseProjection(
   return errors;
 }
 
+/** The rights each kind of handler can receive (see `HandlerRight` in grammar.ts). */
+const TOOL_RIGHTS: readonly string[] = ['blob', 'fsSource', 'stt', 'tts', 'emit', 'bindings'];
+const HANDLER_ROUTE_RIGHTS: readonly string[] = [
+  'fsSource',
+  'mintPlayToken',
+  'enqueue',
+  'stt',
+  'tts',
+  'emit',
+  'bindings',
+];
+const STREAM_ROUTE_RIGHTS: readonly string[] = ['blob', 'bindings'];
+const TRIGGER_RIGHTS: readonly string[] = ['bindings'];
+
 /** The full semantic pass. Input is already shape-valid (post-Zod-parse). */
 export function lintSpec(spec: RaySpec): SpecError[] {
   const errors: SpecError[] = [];
@@ -1331,6 +1345,63 @@ export function lintSpec(spec: RaySpec): SpecError[] {
           ),
         );
       }
+    }
+  });
+
+  // ---- handlers[].uses — the rights a handler asks for must be ones its kind receives -----------
+  // A right the handler's init can never carry is refused here, before anything runs: a declaration
+  // the runtime could not honour would otherwise degrade into a missing capability at the call.
+  const routeActionKinds = new Map<string, Set<'handler' | 'stream'>>();
+  for (const route of spec.api) {
+    if (route.action.kind === 'handler' || route.action.kind === 'stream') {
+      const kinds = routeActionKinds.get(route.action.handler) ?? new Set<'handler' | 'stream'>();
+      kinds.add(route.action.kind);
+      routeActionKinds.set(route.action.handler, kinds);
+    }
+  }
+  spec.handlers.forEach((handler, hi) => {
+    if (handler.uses === undefined) return;
+    const viaStream = routeActionKinds.get(handler.id)?.has('stream') === true;
+    const viaHandlerRoute = routeActionKinds.get(handler.id)?.has('handler') === true;
+    let allowed: readonly string[];
+    let receiver: string;
+    if (handler.kind === 'tool') {
+      allowed = TOOL_RIGHTS;
+      receiver = 'a tool';
+    } else if (handler.kind === 'trigger') {
+      allowed = TRIGGER_RIGHTS;
+      receiver = 'a trigger handler';
+    } else if (viaStream && !viaHandlerRoute) {
+      allowed = STREAM_ROUTE_RIGHTS;
+      receiver = 'a stream route handler';
+    } else if (viaHandlerRoute && !viaStream) {
+      allowed = HANDLER_ROUTE_RIGHTS;
+      receiver = 'a {handler} route handler';
+    } else {
+      allowed = [...new Set([...STREAM_ROUTE_RIGHTS, ...HANDLER_ROUTE_RIGHTS])];
+      receiver = 'a route handler';
+    }
+    handler.uses.forEach((right, ui) => {
+      if (!allowed.includes(right)) {
+        errors.push(
+          specError(
+            'capability_violation',
+            `handler '${handler.id}' asks for the right '${right}', which ${receiver} never ` +
+              `receives (it can ask for: ${allowed.join(', ')})`,
+            `handlers[${hi}].uses[${ui}]`,
+          ),
+        );
+      }
+    });
+    if (viaStream && !handler.uses.includes('blob')) {
+      errors.push(
+        specError(
+          'capability_violation',
+          `handler '${handler.id}' serves a stream route, which moves bytes through init.blob; ` +
+            "add 'blob' to its uses",
+          `handlers[${hi}].uses`,
+        ),
+      );
     }
   });
 

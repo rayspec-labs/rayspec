@@ -5,6 +5,7 @@
  * the closed enum below. A 404 for a cross-tenant/missing resource carries NO existence leak (the
  * message is uniform). The HTTP status for each code is fixed by STATUS_BY_CODE.
  */
+import { redactText, redactValue } from '@rayspec/core';
 import { z } from 'zod';
 
 /** The CLOSED set of error codes the API can return. */
@@ -119,5 +120,14 @@ export function errorEnvelope(
   details?: unknown,
 ): ErrorEnvelope {
   const emitDetails = details !== undefined && DETAILS_ALLOWED.has(code);
-  return { error: { code, message, requestId, ...(emitDetails ? { details } : {}) } };
+  // Every error envelope passes the one redaction path: a message or detail that carries a credential
+  // (a provider's error text, a header echoed in a validation detail) leaves without it.
+  return {
+    error: {
+      code,
+      message: redactText(message),
+      requestId,
+      ...(emitDetails ? { details: redactValue(details) } : {}),
+    },
+  };
 }

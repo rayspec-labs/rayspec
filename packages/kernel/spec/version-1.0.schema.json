@@ -760,6 +760,23 @@
               "readonly": {
                 "type": "boolean"
               },
+              "uses": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "blob",
+                    "fsSource",
+                    "stt",
+                    "tts",
+                    "emit",
+                    "enqueue",
+                    "mintPlayToken",
+                    "bindings"
+                  ]
+                },
+                "uniqueItems": true
+              },
               "lintSuppress": {
                 "type": "array",
                 "items": {
@@ -853,6 +870,16 @@
                 }
               },
               "additionalProperties": false
+            },
+            "egressHosts": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$"
+              },
+              "uniqueItems": true
             }
           },
           "additionalProperties": false
@@ -2171,6 +2198,16 @@
                 },
                 "additionalProperties": false
               }
+            },
+            "egress_hosts": {
+              "maxItems": 256,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 253,
+                "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?[.])+(?:[a-z]{2,63}|xn--[a-z0-9-]{0,58}[a-z0-9])$"
+              },
+              "uniqueItems": true
             }
           },
           "additionalProperties": false

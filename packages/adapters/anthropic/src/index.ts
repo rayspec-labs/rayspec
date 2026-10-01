@@ -100,7 +100,14 @@ import type {
   ToolDispatchResult,
   Usage,
 } from '@rayspec/core';
-import { classifyUpstreamError, hashJson, linkAbort } from '@rayspec/core';
+import {
+  type CallWatchdog,
+  classifyUpstreamError,
+  hashJson,
+  linkAbort,
+  ProviderCallTimeoutError,
+  startCallWatchdog,
+} from '@rayspec/core';
 import { z } from 'zod';
 
 /** The single in-proc MCP server name; tools are exposed to the model as `mcp__<NAME>__<tool>`. */
@@ -122,6 +129,68 @@ export interface AnthropicAdapterOptions {
   configRoot: string;
   /** Optional explicit path to the `claude` binary (else the SDK auto-resolves the bundled one). */
   pathToClaudeCodeExecutable?: string;
+  /**
+   * The credentials this backend authenticates with. Given, they are the only Anthropic credentials
+   * the child sees, whatever the process environment holds. Omitted, `ANTHROPIC_API_KEY` and
+   * `CLAUDE_CODE_OAUTH_TOKEN` are read from the process environment when a run starts.
+   */
+  credentials?: AnthropicCredentials;
+}
+
+/** The two credentials the anthropic backend can authenticate with. */
+export interface AnthropicCredentials {
+  /** `ANTHROPIC_API_KEY`: bills the API; takes precedence over the token in the SDK. */
+  apiKey?: string;
+  /** `CLAUDE_CODE_OAUTH_TOKEN`: the subscription harness. */
+  oauthToken?: string;
+}
+
+/**
+ * Names the `claude` child never inherits from this process: the other providers' credentials, the
+ * database connections, and the platform's own settings and boot secrets. The child is a model client;
+ * none of these is its to read, and a child process can be made to print its environment.
+ */
+const CHILD_ENV_WITHHELD = new Set([
+  'OPENAI_API_KEY',
+  'CODEX_API_KEY',
+  'DEEPGRAM_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'OPENAI_API_KEY_FILE',
+  'CODEX_API_KEY_FILE',
+  'DEEPGRAM_API_KEY_FILE',
+  'ANTHROPIC_API_KEY_FILE',
+  'CLAUDE_CODE_OAUTH_TOKEN_FILE',
+  'DATABASE_URL',
+  'DATABASE_URL_FILE',
+  'SHADOW_DATABASE_URL',
+  'MIGRATE_CLEAN_URL',
+  'DRYRUN_PRODUCT_URL',
+  'CLOUD_PROVIDER_TOKEN',
+]);
+const CHILD_ENV_WITHHELD_PREFIXES = ['RAYSPEC_', 'DBOS_', 'PG', 'CLOUD_'];
+
+/**
+ * The environment the `claude` child runs with: this process's environment without the names it never
+ * inherits ({@link CHILD_ENV_WITHHELD}), plus this backend's own credentials and its per-tenant config
+ * directory. Exported so a test can assert exactly what the child receives.
+ */
+export function anthropicChildEnv(
+  source: NodeJS.ProcessEnv,
+  credentials: AnthropicCredentials,
+  configDir: string,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (CHILD_ENV_WITHHELD.has(name)) continue;
+    if (CHILD_ENV_WITHHELD_PREFIXES.some((prefix) => name.startsWith(prefix))) continue;
+    env[name] = value;
+  }
+  if (credentials.apiKey) env.ANTHROPIC_API_KEY = credentials.apiKey;
+  if (credentials.oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = credentials.oauthToken;
+  env.CLAUDE_CONFIG_DIR = configDir;
+  return env;
 }
 
 export interface AuthSelfCheck {
@@ -157,11 +226,24 @@ export class AnthropicAdapter implements Backend {
   readonly id = 'anthropic' as const;
   private readonly configRoot: string;
   private readonly execPath?: string;
+  private readonly fixedCredentials: AnthropicCredentials | undefined;
 
   constructor(opts: AnthropicAdapterOptions) {
     this.configRoot = opts.configRoot;
     this.execPath = opts.pathToClaudeCodeExecutable;
+    this.fixedCredentials = opts.credentials;
     this.assertConfigRoot();
+  }
+
+  /** The credentials a run authenticates with: the ones given at construction, else the environment's. */
+  private credentials(): AnthropicCredentials {
+    if (this.fixedCredentials !== undefined) return this.fixedCredentials;
+    return {
+      ...(process.env.ANTHROPIC_API_KEY ? { apiKey: process.env.ANTHROPIC_API_KEY } : {}),
+      ...(process.env.CLAUDE_CODE_OAUTH_TOKEN
+        ? { oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN }
+        : {}),
+    };
   }
 
   /**
@@ -292,8 +374,9 @@ export class AnthropicAdapter implements Backend {
    *    global /login; absence of a stray key is not evidence of a working subscription).
    */
   envAuthCheck(): AuthSelfCheck {
-    const strayApiKeyDetected = Boolean(process.env.ANTHROPIC_API_KEY);
-    const oauthTokenPresent = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+    const credentials = this.credentials();
+    const strayApiKeyDetected = Boolean(credentials.apiKey);
+    const oauthTokenPresent = Boolean(credentials.oauthToken);
     let authMode: AuthMode;
     let apiKeySource: string;
     if (strayApiKeyDetected) {
@@ -361,13 +444,26 @@ export class AnthropicAdapter implements Backend {
     // work the child already committed upstream is not undone, and a link cannot exist before the
     // controller does, so a run cancelled during setup is caught by the platform race, not here.
     const unlinkCancel = linkAbort(ctx.signal, abortController);
+    // PROVIDER-CALL TIMEOUT (`ctx.limits.providerCallTimeoutMs`): the child is one long call that
+    // streams a message per step, so the bound is on SILENCE — no message from the child within the
+    // window ends the run through the same controller, and so through the same termination ladder. A
+    // tool call the platform dispatches does not count as silence: the dispatcher bounds it itself.
+    // Absent ⇒ inert, as before.
+    const watchdog = startCallWatchdog(ctx.limits?.providerCallTimeoutMs, () =>
+      abortController.abort(),
+    );
 
     // ---- in-proc MCP tool bridge (BRIDGED, not fail-closed) -----------------------------------
     // Register the neutral tools as an IN-PROCESS MCP server whose handler runs in THIS Node
     // process and ONLY: marshal args -> ctx.dispatchTool(name, args, toolCallId) -> return the
     // opaque tool_data/tool_error into the MCP tool-RESULT channel. The adapter holds NO handler;
     // the gate (gate:adapter-handlers) verifies every tool path routes through dispatchTool.
-    const { mcpServers, allowedTools, toolEvents } = this.buildToolBridge(spec, ctx, emit);
+    const { mcpServers, allowedTools, toolEvents } = this.buildToolBridge(
+      spec,
+      ctx,
+      emit,
+      watchdog,
+    );
 
     // The SET of tool names that ARE sanctioned (the in-proc MCP tools, both the bare neutral
     // name e.g. `get_weather` and the model-facing `mcp__rayspec__get_weather`). Used by (a) the
@@ -448,13 +544,16 @@ export class AnthropicAdapter implements Backend {
           // Fully isolated per-tenant run.
           settingSources: [],
           permissionMode: 'bypassPermissions',
-          env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+          // Its own credentials only: never another provider's key, a database URL or a platform
+          // setting (anthropicChildEnv).
+          env: anthropicChildEnv(process.env, this.credentials(), configDir),
           abortController,
           ...(this.execPath ? { pathToClaudeCodeExecutable: this.execPath } : {}),
         },
       });
 
       for await (const msg of q) {
+        watchdog.touch();
         const m = msg as AnthropicMessage;
         if (m.type === 'system' && m.subtype === 'init') {
           // AUTH-MODE SELF-CHECK from the live init message — the definitive source (note:
@@ -538,8 +637,18 @@ export class AnthropicAdapter implements Backend {
       errorRetryAfter = classified.retryAfter;
     } finally {
       // OWN + ABORT the child no matter what — never leak the spawned `claude` process.
+      watchdog.dispose();
       unlinkCancel();
       abortController.abort();
+    }
+    if (watchdog.fired && ctx.limits?.providerCallTimeoutMs !== undefined) {
+      // The run ended because the child went silent: say so, with the neutral `timeout` class, rather
+      // than as whatever the aborted iterator happened to throw.
+      status = 'error';
+      errorMessage = new ProviderCallTimeoutError('anthropic', ctx.limits.providerCallTimeoutMs)
+        .message;
+      errorClass = 'timeout';
+      errorRetryAfter = undefined;
     }
 
     const latencyMs = Date.now() - startedAt;
@@ -660,6 +769,7 @@ export class AnthropicAdapter implements Backend {
     spec: AgentSpec,
     ctx: RunContext,
     emit: (e: NeutralEventInput) => unknown,
+    watchdog?: CallWatchdog,
   ): {
     mcpServers?: Record<string, ReturnType<typeof createSdkMcpServer>>;
     allowedTools: string[];
@@ -709,11 +819,14 @@ export class AnthropicAdapter implements Backend {
             return asMcp(mcpError(JSON.stringify({ kind: 'tool_error', name: t.name, message })));
           }
           toolEvents.count++;
-          const result: ToolDispatchResult = await ctx.dispatchTool(
-            t.name,
-            argsForDispatch,
-            toolCallId,
-          );
+          // The dispatcher bounds the tool call itself; its duration is not the provider's silence.
+          watchdog?.pause();
+          let result: ToolDispatchResult;
+          try {
+            result = await ctx.dispatchTool(t.name, argsForDispatch, toolCallId);
+          } finally {
+            watchdog?.resume();
+          }
           // Return the opaque dispatcher result into the MCP tool-RESULT channel (never raw output).
           return asMcp(
             result.kind === 'tool_error'

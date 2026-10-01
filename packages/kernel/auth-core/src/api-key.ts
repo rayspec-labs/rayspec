@@ -13,7 +13,7 @@
  * in constant time (timingSafeEqual) so a stored-hash comparison cannot be timed.
  */
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { API_KEY_PEPPER_ENV, bootSecretValue } from './config.js';
+import { API_KEY_PEPPER_ENV, API_KEY_PEPPER_PREVIOUS_ENV, bootSecretValue } from './config.js';
 
 /**
  * Read the api-key pepper — what the boot supplied (`setBootSecrets`), else RAYSPEC_API_KEY_PEPPER.
@@ -31,6 +31,28 @@ export function getApiKeyPepper(): string {
     );
   }
   return pepper;
+}
+
+/**
+ * The pepper in use before the last rotation (`RAYSPEC_API_KEY_PEPPER_PREVIOUS`), or `undefined` when
+ * there is none or it equals the current pepper.
+ *
+ * ROTATION WITH AN OVERLAP. Everything new is hashed under the current pepper only. A credential
+ * hashed under the previous one still verifies while it is set: an API key is re-hashed under the
+ * current pepper the first time it is used, a refresh session is replaced by one hashed under the
+ * current pepper when it is refreshed, and an invite resolves until it is redeemed or expires. Once the
+ * previous pepper is unset, a credential that was not renewed in the window no longer verifies.
+ */
+export function getPreviousApiKeyPepper(): string | undefined {
+  const previous = bootSecretValue(API_KEY_PEPPER_PREVIOUS_ENV);
+  if (previous === undefined || previous === getApiKeyPepper()) return undefined;
+  return previous;
+}
+
+/** The peppers a presented credential is checked under: the current one first, then the previous. */
+export function verificationPeppers(): string[] {
+  const previous = getPreviousApiKeyPepper();
+  return previous === undefined ? [getApiKeyPepper()] : [getApiKeyPepper(), previous];
 }
 
 /** HMAC-SHA256 the secret with the boot-required pepper; returns a lowercase hex digest. */

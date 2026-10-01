@@ -640,8 +640,9 @@ bundle, in this order, stopping at the first failure:
 6. **Derived fields.** `requires`, the execution level and the egress hosts
    must be exactly what the spec derives: the capability ids its sections use,
    in code-point order; `in-process` when it declares handlers or extensions,
-   else `none`; and the egress hosts it declares (the grammar declares none yet,
-   so a manifest that lists one is refused). `RAY_MANIFEST_INVALID` with reason
+   else `none`; and the egress hosts it declares (backend `deployment.egressHosts`,
+   product `deployment_overrides.egress_hosts`), compared as a set, so a manifest
+   that lists one more or one fewer is refused. `RAY_MANIFEST_INVALID` with reason
    `requires-mismatch`, `execution-mismatch` or `permissions-mismatch`.
 7. **Secret scan.** A payload file named `.env`, `.env.*`, `id_rsa`,
    `id_ecdsa`, `id_ed25519` or `.pgpass`, or one that contains a PEM private-key
@@ -1304,8 +1305,14 @@ inspect, bind, review, apply, readiness, update, recovery — is
   `{"bindingsFormatVersion": 1, "bindings": [{"name", "value"}]}`. A regular file, not a link,
   owned by you, mode 0600 or stricter (`RAY_BINDINGS_FILE_INSECURE` otherwise); a reserved operator
   name (`DATABASE_URL`, `RAYSPEC_…`, `NODE_…`, a provider key's `_FILE` variant, …) is refused with
-  `RAY_BINDING_RESERVED`. Bindings come only from this file and the process environment. Values
-  never appear in output, logs, plans or receipts; plans carry revision ids.
+  `RAY_BINDING_RESERVED`. A name the bundle does not declare is refused with `RAY_USAGE`, except
+  the key of the speech provider the operator selected (`DEEPGRAM_API_KEY` with
+  `STT_PROVIDER=deepgram`, `OPENAI_API_KEY` with `TTS_PROVIDER=openai`); so is a provider key the
+  environment also names a `_FILE` for. Bindings come only from this file and the process
+  environment (a provider key also from its `<NAME>_FILE`). No value is put into the process
+  environment: provider keys go to the adapters that use them, the application's own names to its
+  handlers as `init.bindings`. Values never appear in output, logs, plans or receipts; plans carry
+  revision ids.
 - **`--dry-run`** — plan only: the bundle is read and verified by the one bundle reader (nothing is
   extracted or run), then planned against the live database. Prints the plan — required bindings,
   schema impact, permission changes, storage, blockers, warnings — with `planDigest`, `preparedAt`

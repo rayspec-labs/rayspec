@@ -65,6 +65,12 @@ abandoned. What that leaves, honestly:
   waiting when the signal fired and discards whatever `run()` eventually returns.
 - **Work already committed upstream is not undone.** Cancellation stops further work; it is not a
   rollback.
+- **A silent provider is ended by the provider-call timeout.** With
+  `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` set (or the managed posture's default), a session that reports
+  no event for that long is stopped with `session.abort()` — the stop a cancellation uses — and the
+  run reports the neutral `timeout` class. A host tool the platform dispatches does not count as
+  silence. `src/hanging-provider.test.ts` drives the real session against a local server that never
+  answers (`PiAdapterOptions.baseUrl`).
 
 For a run cancelled before the prompt call, the adapter invents no terminal state of its own: it
 skips the call and falls through its normal epilogue, so its `RunResult` reads `completed` with no

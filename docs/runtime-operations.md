@@ -28,7 +28,7 @@ add no HTTP route: a caller holds the environment's database connection. `rayspe
 | Operation | Changes the environment | What it does |
 | --- | --- | --- |
 | `inspect()` | no | The runtime version and target, capabilities, the two-part schema head, the active application, the fence and the environment revision. |
-| `inspectHosting()` | no | The hosting posture, whether cross-process run cancellation is on, and the application tenant limit (`applicationTenants`: `singleTenantMode` and `maxApplicationTenants`, read from `RAYSPEC_SINGLE_TENANT`). |
+| `inspectHosting()` | no | The hosting posture, whether cross-process run cancellation is on, the application tenant limit (`applicationTenants`: `singleTenantMode` and `maxApplicationTenants`, read from `RAYSPEC_SINGLE_TENANT`), the execution policy, the supported-backend matrix, and who enforces egress (`egress`: the host network policy; [Egress](./hardened-posture.md#egress)). |
 | `inspectDatabaseIsolation()` | no | With `runtimeRole` set, whether the runtime role holds the isolated database posture, and each check it fails ([Database roles and row-level security](./database-isolation.md)). `inspect()` reports the managed posture as supported only when it does, the release carries a capability receipt and single-tenant mode is on ([Hosting in the hardened posture](./hardened-posture.md)). |
 | `prepare()` | no | Plans a `.ray` bundle against the live schema: a plan with its digest, valid for 30 minutes. |
 | apply (`runApply`) | yes | Runs a plan's steps under the operation lease with receipts; see below. |
@@ -247,7 +247,16 @@ depends on the poll interval:
 | `RAYSPEC_HOSTING_POSTURE=managed`, no interval | on, every 2000 ms |
 | neither | off: the run stops when it returns on its own |
 
-`inspectHosting()` reports which applies to a process.
+`inspectHosting()` reports which applies to a process, together with the whole execution policy
+and the supported-backend matrix ([Hosting in the hardened posture](./hardened-posture.md#bounded-execution)).
+
+What the run's record says is what the process executing it observed: the cancellation step states
+whether the provider call had not started (`before-call`), was stopped (`call-aborted`), had already
+finished (`after-call`), or did not settle within the kill grace (`outcome-unknown`). The cancel
+surface records `outcome-unknown` for a run it finds executing; the executing process replaces it
+when it stops, so a record that still says `outcome-unknown` after the run ended means that process
+could not report. `executor-cross-process-cancel.db.test.ts` in `@rayspec/durable-dbos` drives this
+against a second, real worker process.
 
 ## Limits
 

@@ -349,7 +349,7 @@ describe('DBOS worker cancellation', () => {
     expect(backend.liveRuns).toBe(1);
   });
 
-  it('a cancelled run that ends by FAILING is still recorded terminal, after its transaction rolled back', async () => {
+  it('a run cancelled while it executes elsewhere is recorded terminal AT ONCE, and its later failure does not change that', async () => {
     testsRan += 1;
     const runId = randomUUID();
     // The enqueue-time header the run surface commits before the job is handed to the worker.
@@ -373,25 +373,28 @@ describe('DBOS worker cancellation', () => {
     await waitFor(() => backend.liveRuns === 1);
 
     // The cancel surface's sequence for a run its SIGNAL cannot reach (one executing on another worker
-    // process): the marker, then the bounded terminal write — which gives up, because the run holds its
-    // own header row for as long as it runs and a cancel never waits out the run it is ending.
+    // process): the marker, then the bounded terminal write. The run holds no transaction, so nothing
+    // holds its header row and the write lands at once.
     const tdb = forTenant(db, TENANT);
     await markRunCancelled(tdb, runId);
     expect(await recordRunCancelled(tdb, runId, { lockWaitMs: 200 })).toEqual({
-      cancelled: false,
-      status: 'enqueued',
+      cancelled: true,
+      status: 'error',
     });
+    expect(await runHeaderStatus(runId)).toBe('error');
 
-    // The run now ends by FAILING. Its transaction rolls back, so nothing it wrote survives — the
-    // `running` header transition and the step it journaled are both gone. RED-FIRST tell: without the
-    // executor recording the outcome after that rollback, the header stays 'enqueued' forever and the
-    // run reads as if nobody had ended it, for a caller who was told it was.
+    // The run now ends by FAILING. Its own failure does not overwrite the recorded cancellation, and
+    // the step it journaled before is kept (its statements committed as they were made). The worker
+    // completes the step as a no-op: the run is accounted for.
     backend.releaseGate();
     expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
     expect(await runHeaderStatus(runId)).toBe('error');
     const steps = await journalSteps(runId);
-    expect(steps).toHaveLength(1);
-    expect(steps[0]).toMatchObject({ type: 'cancel', status: 'error', error_class: 'cancelled' });
+    expect(steps.map((st) => st.type).sort()).toEqual(['cancel', 'llm']);
+    expect(steps.find((st) => st.type === 'cancel')).toMatchObject({
+      status: 'error',
+      error_class: 'cancelled',
+    });
   });
 
   it('FAIL-THE-FIX GUARD: an UNCANCELLED run that fails still fails, and gains no cancellation record', async () => {
@@ -419,8 +422,14 @@ describe('DBOS worker cancellation', () => {
     backend.releaseGate();
 
     expect(await waitForTerminal(handle.jobId)).toBe('failed');
-    expect(await runHeaderStatus(runId)).toBe('enqueued');
-    expect(await journalSteps(runId)).toEqual([]);
+    // The failure is recorded as the run's own outcome — never as a cancellation it never had.
+    expect(await runHeaderStatus(runId)).toBe('error');
+    const steps = await journalSteps(runId);
+    expect(steps.map((st) => st.type).sort()).toEqual(['failure', 'llm']);
+    expect(steps.find((st) => st.type === 'failure')).toMatchObject({
+      status: 'error',
+      error_class: 'internal',
+    });
   });
 
   it('the engine cancel ends an enqueued workflow (the neutral `cancel` seam reaches the engine)', async () => {

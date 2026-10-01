@@ -10,10 +10,13 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyUpstreamError,
+  credentialRefusedMessage,
   ERROR_CLASSES,
   type ErrorClass,
   errorToMessage,
+  isCredentialRefusal,
   isErrorClass,
+  upstreamHttpStatus,
 } from './error-class.js';
 
 /** A fake openai-SDK-style APIError: a numeric `status` + a `headers` Headers carrying Retry-After. */
@@ -396,5 +399,32 @@ describe('errorToMessage + isErrorClass', () => {
     expect(isErrorClass('not_a_class')).toBe(false);
     expect(isErrorClass(null)).toBe(false);
     expect(isErrorClass(undefined)).toBe(false);
+  });
+});
+
+describe('a refused credential', () => {
+  it('is a 401 or a 403, read structurally through the wrap chain', () => {
+    expect(isCredentialRefusal(Object.assign(new Error('x'), { status: 401 }))).toBe(true);
+    expect(isCredentialRefusal({ cause: { status: 403 } })).toBe(true);
+    expect(isCredentialRefusal(Object.assign(new Error('x'), { status: 429 }))).toBe(false);
+    expect(isCredentialRefusal(new Error('401 Incorrect API key'))).toBe(false);
+    expect(upstreamHttpStatus({ response: { status: 401 } })).toBe(401);
+  });
+
+  it('is reported by the credential name, never by the provider text that can quote the key', () => {
+    const err = Object.assign(new Error('Incorrect API key provided: sk-ab****WXYZ'), {
+      status: 401,
+    });
+    const message = credentialRefusedMessage('OPENAI_API_KEY', err);
+    expect(message).toContain('refused the credential OPENAI_API_KEY (HTTP 401)');
+    expect(message).not.toContain('WXYZ');
+  });
+
+  it('a classified message passes the redaction path', () => {
+    const classified = classifyUpstreamError(
+      Object.assign(new Error('upstream said Authorization: Bearer tok-123'), { status: 500 }),
+    );
+    expect(classified.errorClass).toBe('upstream_5xx');
+    expect(classified.message).not.toContain('tok-123');
   });
 });

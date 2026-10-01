@@ -213,14 +213,14 @@ export interface AgentBackendDemand {
 /** `OPENAI_API_KEY` for the `openai` extraction backend. */
 export const OPENAI_API_KEY_FOR_OPENAI: BootEnvVar = {
   name: 'OPENAI_API_KEY',
-  fileVariant: null,
+  fileVariant: 'OPENAI_API_KEY_FILE',
   what: "the OpenAI API key (extraction backend 'openai')",
 };
 
 /** `OPENAI_API_KEY` for the `pi` extraction backend — Pi runs on the same key, for a different reason. */
 export const OPENAI_API_KEY_FOR_PI: BootEnvVar = {
   name: 'OPENAI_API_KEY',
-  fileVariant: null,
+  fileVariant: 'OPENAI_API_KEY_FILE',
   what: "the OpenAI API key — Pi runs on it (extraction backend 'pi')",
 };
 
@@ -241,14 +241,14 @@ export const ANTHROPIC_CONFIG_ROOT: BootEnvVar = {
 /** The sanctioned $0 subscription official-harness token for the `anthropic` backend. */
 export const CLAUDE_CODE_OAUTH_TOKEN: BootEnvVar = {
   name: 'CLAUDE_CODE_OAUTH_TOKEN',
-  fileVariant: null,
+  fileVariant: 'CLAUDE_CODE_OAUTH_TOKEN_FILE',
   what: "the sanctioned $0 subscription official-harness token (extraction backend 'anthropic')",
 };
 
 /** The billed API key alternative for the `anthropic` backend. */
 export const ANTHROPIC_API_KEY: BootEnvVar = {
   name: 'ANTHROPIC_API_KEY',
-  fileVariant: null,
+  fileVariant: 'ANTHROPIC_API_KEY_FILE',
   what: "the API key that BILLS the Anthropic API (extraction backend 'anthropic')",
 };
 
@@ -314,7 +314,7 @@ export const STT_PROVIDER: BootEnvVar = {
 /** `DEEPGRAM_API_KEY` — demanded iff the selection is `deepgram`, on either profile. */
 export const DEEPGRAM_API_KEY: BootEnvVar = {
   name: 'DEEPGRAM_API_KEY',
-  fileVariant: null,
+  fileVariant: 'DEEPGRAM_API_KEY_FILE',
   what: 'the Deepgram API key (STT_PROVIDER=deepgram)',
 };
 
@@ -331,7 +331,7 @@ export const TTS_PROVIDER: BootEnvVar = {
 /** `OPENAI_API_KEY` — demanded iff `TTS_PROVIDER=openai` (a different reason from either agent backend). */
 export const OPENAI_API_KEY_FOR_TTS: BootEnvVar = {
   name: 'OPENAI_API_KEY',
-  fileVariant: null,
+  fileVariant: 'OPENAI_API_KEY_FILE',
   what: 'the OpenAI API key for TTS_PROVIDER=openai',
 };
 
@@ -614,7 +614,12 @@ class RequirementSet {
         (variable.fileVariant !== null && isSet(this.#env, variable.fileVariant));
       const alternatives = orAnyOf
         .filter((alt) => alt.name !== variable.name)
-        .map((alt) => ({ name: alt.name, set: isSet(this.#env, alt.name) }));
+        .map((alt) => ({
+          name: alt.name,
+          set:
+            isSet(this.#env, alt.name) ||
+            (alt.fileVariant !== null && isSet(this.#env, alt.fileVariant)),
+        }));
       return {
         name: variable.name,
         fileVariant: variable.fileVariant,

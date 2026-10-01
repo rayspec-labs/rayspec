@@ -83,7 +83,12 @@ import {
   type ResolvedRun,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
-import type { BlobStoreFactory, DurableExecutorIdentity, FsSourceFactory } from '@rayspec/platform';
+import type {
+  BlobStoreFactory,
+  DurableExecutorIdentity,
+  FsSourceFactory,
+  InRequestRunGate,
+} from '@rayspec/platform';
 import {
   FsSourceConfigError,
   makeFsBlobStoreFactory,
@@ -156,8 +161,15 @@ import {
 import { type DeployApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
+import {
+  isProviderCredentialName,
+  type ProviderCredentialName,
+  providerCredential,
+  providerCredentialSupplied,
+} from './provider-credentials.js';
 import { gatedProducer, queueProducer, type RuntimeFence } from './runtime-fence.js';
 import { lockSchemaInTransaction } from './schema-lock.js';
+import { assertManagedPostureBackends, managedBackendRefusal } from './supported-backends.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
 export class ProductBootError extends Error {
@@ -255,6 +267,12 @@ export interface DeployProductYamlOpts {
    * deployment to broker a model call whose model it was never told.
    */
   agentBackendsFactory?: ProductAgentBackendsFactory;
+  /**
+   * The process's bound on in-request agent runs (`RAYSPEC_AGENT_SYNC_RUNS_MAX`) — the same gate the
+   * agent run surface holds, so conversation replies and record normalizes count against it too.
+   * Omitted ⇒ those runs are unbounded (the bound is off, or a direct test caller).
+   */
+  inRequestRunGate?: InRequestRunGate;
 }
 
 /**
@@ -266,7 +284,11 @@ export interface DeployProductYamlOpts {
  * required" wording the CLI matches on to append its searched-`.env`-paths diagnostic.
  */
 function requireEnv(env: NodeJS.ProcessEnv, demand: BootEnvVar): string {
-  const v = env[demand.name]?.trim();
+  // A provider credential is read through the one credential reader (its `_FILE`, a value a bundle
+  // deploy granted, or the plain variable); every other demand is the plain variable.
+  const v = isProviderCredentialName(demand.name)
+    ? providerCredential(env, demand.name as ProviderCredentialName)
+    : env[demand.name]?.trim();
   if (!v) throw new ProductBootError(`${demand.name} is required (${demand.what}). Fail-closed.`);
   return v;
 }
@@ -767,8 +789,11 @@ export function buildSttAdapter(
 ): SttAdapter {
   const selected = selectSttProvider(env);
   if (selected.provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
+  // The execution policy's provider-call timeout bounds every transcription request.
+  const timeoutMs = resolveAgentRequestTimeoutMs(env);
   return new DeepgramSttAdapter({
     apiKey: selected.apiKey,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(defaultModel ? { model: defaultModel } : {}),
     resolver: new BlobRemuxSttMediaResolver(blob),
   });
@@ -839,7 +864,12 @@ export const WIRED_EXTRACTION_BACKENDS = ['openai', 'anthropic', 'pi', 'codex'] 
  * a deployer may legitimately want the API-key path.
  */
 export function anthropicApiKeyOverrideWarning(env: NodeJS.ProcessEnv): string | null {
-  if (!env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || !env.ANTHROPIC_API_KEY?.trim()) return null;
+  if (
+    !providerCredentialSupplied(env, 'CLAUDE_CODE_OAUTH_TOKEN') ||
+    !providerCredentialSupplied(env, 'ANTHROPIC_API_KEY')
+  ) {
+    return null;
+  }
   return (
     '\n⚠️  RAYSPEC PRODUCT BOOT — ANTHROPIC SUBSCRIPTION INTENT WILL BE OVERRIDDEN & BILLED ⚠️\n' +
     '    BOTH CLAUDE_CODE_OAUTH_TOKEN (the $0 subscription harness) AND ANTHROPIC_API_KEY are set.\n' +
@@ -883,8 +913,8 @@ export function anthropicReuseLoginEnabled(env: NodeJS.ProcessEnv): boolean {
  */
 export function anthropicReuseLoginShadowWarning(env: NodeJS.ProcessEnv): string | null {
   if (!anthropicReuseLoginEnabled(env)) return null;
-  const hasApiKey = Boolean(env.ANTHROPIC_API_KEY?.trim());
-  const hasOauth = Boolean(env.CLAUDE_CODE_OAUTH_TOKEN?.trim());
+  const hasApiKey = providerCredentialSupplied(env, 'ANTHROPIC_API_KEY');
+  const hasOauth = providerCredentialSupplied(env, 'CLAUDE_CODE_OAUTH_TOKEN');
   if (!hasApiKey && !hasOauth) return null;
   const present = [
     hasApiKey ? 'ANTHROPIC_API_KEY' : null,
@@ -944,7 +974,13 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       // unchanged; it passes that dir to the child, which reuses the seeded login. Absent the flag the
       // throw below is byte-identical (fail-closed).
       const reuseLogin = anthropicReuseLoginEnabled(env);
-      if (!reuseLogin && !env.CLAUDE_CODE_OAUTH_TOKEN?.trim() && !env.ANTHROPIC_API_KEY?.trim()) {
+      const apiKey = providerCredential(env, 'ANTHROPIC_API_KEY');
+      const oauthToken = providerCredential(env, 'CLAUDE_CODE_OAUTH_TOKEN');
+      const credentials = {
+        ...(apiKey !== undefined ? { apiKey } : {}),
+        ...(oauthToken !== undefined ? { oauthToken } : {}),
+      };
+      if (!reuseLogin && credentials.apiKey === undefined && credentials.oauthToken === undefined) {
         throw new ProductBootError(
           "extraction backend 'anthropic' needs a CLAUDE_CODE_OAUTH_TOKEN (the sanctioned $0 " +
             'subscription official-harness) or an ANTHROPIC_API_KEY (bills the API) — neither is set. ' +
@@ -960,7 +996,8 @@ export function makeExtractionBackend(env: NodeJS.ProcessEnv, backend: string): 
       const shadowWarning = anthropicReuseLoginShadowWarning(env);
       if (shadowWarning) console.warn(shadowWarning);
       const configRoot = requireEnv(env, ANTHROPIC_CONFIG_ROOT);
-      return new AnthropicAdapter({ configRoot });
+      // Its own two credentials, handed over explicitly: the child sees these and no other provider's.
+      return new AnthropicAdapter({ configRoot, credentials });
     }
     case 'pi': {
       const apiKey = requireEnv(env, OPENAI_API_KEY_FOR_PI);
@@ -1054,6 +1091,20 @@ function unwiredExtractionBackendError(backend: string): ProductBootError {
       ' | ',
     )}). Fail-closed.`,
   );
+}
+
+/**
+ * A source that refuses, as it is asked, any backend outside the managed posture's supported-backend
+ * matrix — naming the product model call that asked for it — and otherwise asks `source`.
+ */
+export function managedProductBackends(source: ProductBackendSource): ProductBackendSource {
+  return {
+    backendFor(kind, agentId, backend, model) {
+      const refusal = managedBackendRefusal('agent', backend, `the product ${kind} '${agentId}'`);
+      if (refusal) throw refusal;
+      return source.backendFor(kind, agentId, backend, model);
+    },
+  };
 }
 
 /**
@@ -2007,6 +2058,7 @@ export function buildTurnResponder(
     historyWindow,
     ...(storeContext ? { storeContext } : {}),
     tdbFor: (tenantId: string) => forTenant(db, tenantId),
+    ...(opts.inRequestRunGate ? { inRequestRunGate: opts.inRequestRunGate } : {}),
   });
 }
 
@@ -2320,6 +2372,7 @@ export function buildRecordNormalizer(
     outputSchema,
     ...(structuredMode === 'native' ? { requireNativeStructuredOutput: true } : {}),
     tdbFor: (tenantId: string) => forTenant(db, tenantId),
+    ...(opts.inRequestRunGate ? { inRequestRunGate: opts.inRequestRunGate } : {}),
   };
   return makeLiveRecordNormalizer(normalizerCfg);
 }
@@ -2702,7 +2755,7 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   // every builder below keeps its built-in env construction, unchanged. The factory is called HERE —
   // after the sidecar configs and the capability composition — so it sees the COMPLETE set of model
   // calls the deployed document needs, never one at a time.
-  const productBackends = opts.agentBackendsFactory
+  const boundBackends = opts.agentBackendsFactory
     ? bindProductBackends(opts.agentBackendsFactory, {
         env,
         specPath,
@@ -2711,6 +2764,20 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
         ...(recordNormalizeDecl ? { normalizeAgentId: recordNormalizeDecl.agent } : {}),
       })
     : undefined;
+  // Under the managed posture every product model call is checked against the supported-backend
+  // matrix as it is built, and every speech provider before anything is built — a backend outside the
+  // matrix refuses the boot (supported-backends.ts). Outside the posture nothing is wrapped.
+  if (config.hostingPosture === 'managed') {
+    assertManagedPostureBackends({
+      posture: 'managed',
+      sttProvider: env.STT_PROVIDER?.trim(),
+      ttsProvider: config.ttsProvider,
+    });
+  }
+  const productBackends =
+    config.hostingPosture === 'managed'
+      ? managedProductBackends(boundBackends ?? envProductBackends(env))
+      : boundBackends;
 
   // ── 4. the extraction executor — DEMANDED iff the doc declares agents ─────────────────────────
   // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is

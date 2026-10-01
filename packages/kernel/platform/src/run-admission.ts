@@ -1,0 +1,100 @@
+/**
+ * Run admission — the refusal a bounded queue gives when it is full.
+ *
+ * The execution policy bounds how many agent runs may be queued or executing at once, per tenant
+ * (`RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT`) and in total (`RAYSPEC_AGENT_QUEUE_MAX`), and how many runs one
+ * process holds in-request (`RAYSPEC_AGENT_SYNC_RUNS_MAX`). A run over a bound is refused before
+ * anything is recorded for it: no job, no run header, no reservation kept. The refusal is this neutral
+ * error; the run surface answers it with 429 and a `Retry-After`.
+ */
+
+/** Which bound refused the run. */
+export type RunAdmissionScope = 'tenant' | 'global' | 'in-request';
+
+/** How long a refused caller is advised to wait before it tries again. */
+export const RUN_ADMISSION_RETRY_AFTER_MS = 5_000;
+
+/** Raised when a run is refused because a bounded queue is full. */
+export class RunAdmissionRefusedError extends Error {
+  readonly scope: RunAdmissionScope;
+  readonly limit: number;
+  readonly retryAfterMs: number;
+  constructor(scope: RunAdmissionScope, limit: number) {
+    super(runAdmissionRefusedMessage(scope, limit));
+    this.name = 'RunAdmissionRefusedError';
+    this.scope = scope;
+    this.limit = limit;
+    this.retryAfterMs = RUN_ADMISSION_RETRY_AFTER_MS;
+  }
+}
+
+/** The refusal text: which bound is full, at what size, and what to do. */
+export function runAdmissionRefusedMessage(scope: RunAdmissionScope, limit: number): string {
+  switch (scope) {
+    case 'tenant':
+      return (
+        `The run was not queued: this organization already has ${limit} agent runs queued or ` +
+        'executing (RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT). Retry when some have finished.'
+      );
+    case 'global':
+      return (
+        `The run was not queued: the runtime already has ${limit} agent runs queued or executing ` +
+        '(RAYSPEC_AGENT_QUEUE_MAX). Retry when some have finished.'
+      );
+    case 'in-request':
+      return (
+        `The run was not started: this process already holds ${limit} agent runs in-request ` +
+        '(RAYSPEC_AGENT_SYNC_RUNS_MAX). Retry later, or start the run with async:true.'
+      );
+  }
+}
+
+/**
+ * The bound on runs one process holds IN-REQUEST at once (`RAYSPEC_AGENT_SYNC_RUNS_MAX`). A slot is
+ * taken before the run starts and given back when the run itself settles — not when the request
+ * returns, which a held-request timeout can make happen first — so the bound counts the runs that are
+ * really executing.
+ */
+export class InRequestRunGate {
+  readonly max: number;
+  #active = 0;
+  constructor(max: number) {
+    this.max = max;
+  }
+  /** How many runs hold a slot now. */
+  get active(): number {
+    return this.#active;
+  }
+  /**
+   * Take a slot, or refuse with {@link RunAdmissionRefusedError} when none is free. Returns the
+   * release, which is idempotent.
+   */
+  acquire(): () => void {
+    if (this.#active >= this.max) throw new RunAdmissionRefusedError('in-request', this.max);
+    this.#active += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#active -= 1;
+    };
+  }
+}
+
+/**
+ * Run `start` holding one slot of `gate` until the run it starts settles, or refuse with
+ * {@link RunAdmissionRefusedError} when none is free. With no gate (the bound is off) it just runs.
+ * For an in-request caller of `runAgent` that answers the refusal itself.
+ */
+export async function withInRequestSlot<T>(
+  gate: InRequestRunGate | undefined,
+  start: () => Promise<T>,
+): Promise<T> {
+  if (gate === undefined) return start();
+  const release = gate.acquire();
+  try {
+    return await start();
+  } finally {
+    release();
+  }
+}

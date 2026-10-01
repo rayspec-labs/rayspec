@@ -42,6 +42,7 @@ import type {
 } from '@rayspec/handler-sdk';
 import type { RaySpec, ToolSpecConfig } from '@rayspec/spec';
 import type { PgTable } from 'drizzle-orm/pg-core';
+import { applicationBindingsInit } from './application-bindings.js';
 import type { TenantEventBus } from './event-bus.js';
 import { getHandlerRuntime, type ResolvedHandler } from './handler-runtime.js';
 import { makeHandlerDb } from './store-facade.js';
@@ -119,6 +120,8 @@ function buildNeutralTool(
         ...(tts ? { tts } : {}),
         // The tenant-bound event-bus emit (spread so ABSENT when the bus is not enabled).
         ...(emit ? { emit } : {}),
+        // The application's own bindings, on a bundle deployment (absent otherwise).
+        ...applicationBindingsInit(),
       };
       return getHandlerRuntime().invokeTool(fn, rawArgs, init);
     },

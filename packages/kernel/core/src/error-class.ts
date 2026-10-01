@@ -30,6 +30,8 @@
  * tightening, but not provably zero — hence "best-effort", not "never wrong".
  */
 
+import { redactText } from './redact.js';
+
 /**
  * The neutral error class for a failed run. NEUTRAL platform vocabulary — adapters map their SDK
  * error shape into it (no LCD collapse). `internal` is the fail-closed default for a genuinely
@@ -102,6 +104,38 @@ function extractStatus(err: unknown, depth = 0): number | undefined {
   const errorRange = candidates.find((s) => s >= 400 && s < 600);
   if (errorRange !== undefined) return errorRange;
   return candidates[0];
+}
+
+/** The HTTP status an upstream error carries, as the classifier reads it; `undefined` when none. */
+export function upstreamHttpStatus(err: unknown): number | undefined {
+  try {
+    return extractStatus(err);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether an upstream error is the provider refusing the credential: HTTP 401 (unknown, expired or
+ * revoked) or 403 (not permitted).
+ */
+export function isCredentialRefusal(err: unknown): boolean {
+  const status = upstreamHttpStatus(err);
+  return status === 401 || status === 403;
+}
+
+/**
+ * The message a run records when the provider refused its credential. It names the credential, never
+ * its value, and replaces the provider's own text, which can quote part of the key. The run fails and
+ * is not retried, and no other credential is tried in its place.
+ */
+export function credentialRefusedMessage(credential: string, err: unknown): string {
+  const status = upstreamHttpStatus(err);
+  return (
+    `the model provider refused the credential ${credential} (HTTP ${status ?? 'error'}): it is ` +
+    'invalid, expired, revoked or not permitted for this request. Supply a valid value; the run ' +
+    'is not retried with another credential.'
+  );
 }
 
 /** Collect every finite HTTP status (100–599) in the shallow `cause`/`error` walk, in walk order. */
@@ -200,12 +234,16 @@ function errorName(err: unknown): string {
  * throws) can never blow up the classifier; it falls back to `{ internal, <safe String(err)> }`.
  */
 export function classifyUpstreamError(err: unknown): ClassifiedError {
+  let classified: ClassifiedError;
   try {
-    return classifyUpstreamErrorUnsafe(err);
+    classified = classifyUpstreamErrorUnsafe(err);
   } catch {
     // A hostile error object (throwing getter) must never crash classification — fail closed.
-    return { errorClass: 'internal', message: safeStringify(err) };
+    classified = { errorClass: 'internal', message: safeStringify(err) };
   }
+  // The preserved message is stored in the journal and on the run record, and served back: it goes
+  // through the one redaction path (redact.ts), after the heuristics above have read it whole.
+  return { ...classified, message: redactText(classified.message) };
 }
 
 /** The classification core (may throw if `err` has a hostile getter; wrapped by classifyUpstreamError). */

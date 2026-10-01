@@ -236,6 +236,11 @@ describe('OpenAiTtsAdapter — HTTP + transport error mapping (content-free)', (
       expect((caught as TtsAdapterError).retryable).toBe(retryable);
       expect((caught as TtsAdapterError).message).toContain(`HTTP ${status}`);
       expect((caught as TtsAdapterError).message).not.toContain(leak);
+      expect((caught as TtsAdapterError).message).not.toContain(SECRET_KEY);
+      // A refused key is named as the cause, so the operator knows which credential to replace.
+      expect((caught as TtsAdapterError).message.includes('refused the credential OPENAI_API_KEY')).toBe(
+        status === 401 || status === 403,
+      );
     });
   }
 

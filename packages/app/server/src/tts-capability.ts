@@ -30,7 +30,7 @@
  * in an error message, a result, or a log line).
  */
 import { OPENAI_TTS_POLICY, OpenAiTtsAdapter } from '@rayspec/adapter-openai-tts';
-import type { TtsCapability, TtsSynthesizeOptions } from '@rayspec/platform';
+import type { ExecutionPolicy, TtsCapability, TtsSynthesizeOptions } from '@rayspec/platform';
 import {
   FakeTtsAdapter,
   type TtsAdapter,
@@ -103,6 +103,8 @@ export interface TtsCapabilityConfig {
   readonly ttsProvider?: string;
   /** OPENAI_API_KEY — REQUIRED (eagerly) when the provider is `openai`. */
   readonly openaiApiKey?: string;
+  /** The execution policy; its provider-call timeout bounds every synthesis request. */
+  readonly executionPolicy?: ExecutionPolicy;
 }
 
 /**
@@ -128,7 +130,10 @@ export function buildTtsCapability(config: TtsCapabilityConfig): TtsCapability |
           'TTS_PROVIDER to boot without the speech-synthesis capability.',
       );
     }
-    return new AdapterTtsCapability(new OpenAiTtsAdapter({ apiKey }));
+    const timeoutMs = config.executionPolicy?.requestTimeoutMs.value;
+    return new AdapterTtsCapability(
+      new OpenAiTtsAdapter({ apiKey, ...(timeoutMs === undefined ? {} : { timeoutMs }) }),
+    );
   }
   throw new BootConfigError(
     `Boot aborted — TTS_PROVIDER '${provider}' is not supported (wired: openai | fake). Fail-closed.`,

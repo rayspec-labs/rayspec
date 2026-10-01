@@ -471,8 +471,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface authorizes; what handler code is given; and what it does not protect against (it is not a
   sandbox for custom code).
 
+- **One execution policy bounds every agent run.** Wall time (`RAYSPEC_AGENT_RUN_MAX_MS`), the
+  provider-call timeout (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`, `RAYSPEC_AGENT_MAX_ATTEMPTS`), the kill
+  grace for a child process (`RAYSPEC_AGENT_KILL_GRACE_MS`, new), queue admission for `async` runs
+  in total and per organization (`RAYSPEC_AGENT_QUEUE_MAX`, `RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT`,
+  new), the durable worker's concurrency (`RAYSPEC_AGENT_WORKER_CONCURRENCY`, new, default 4) and
+  in-request runs per process (`RAYSPEC_AGENT_SYNC_RUNS_MAX`, new: synchronous agent runs,
+  conversation reply runs and record normalize runs together) are read in one place.
+  Under `RAYSPEC_HOSTING_POSTURE=managed` every bound has a default (15 minutes per run, 2 minutes per
+  provider call, 2 attempts, a queue of 1000 and 100 per organization, 32 in-request runs, the 2 s
+  cancellation poll) and an unusable value of any of them refuses the boot; without the posture the
+  bounds that predate the policy stay off unless set. `inspectHosting()` reports the resolved policy
+  and where each value came from. See
+  [Hosting in the hardened posture → Bounded execution](./docs/hardened-posture.md#bounded-execution).
+- **A run past a queue or in-request bound is refused with `429`.** `RATE_LIMITED`, a `Retry-After`
+  and `error.details` `{ reason: "queue-full", scope, limit }`; nothing is recorded for the refused
+  run, and an `Idempotency-Key` it carried is free again. Admission counts the durable engine's own
+  queue under one database lock, so a burst is admitted exactly up to the bound.
+- **Every adapter bounds its provider call.** The openai backend's per-request timeout now covers
+  the response body too, so a provider that sends its headers and then stalls is ended; the anthropic, codex and pi backends end a call whose stream or child goes silent for the
+  provider-call timeout, with the neutral `timeout` class; the Deepgram and OpenAI speech adapters
+  bound each request, body included. The auth preflight of a remote backend is bounded by the same
+  timeout. Each is proven against a local provider that never answers or a child that never speaks.
+- **A codex child that ignores `SIGTERM` is killed.** The adapter starts the binary through a small
+  launcher, in a process group of its own, that forwards the `SIGTERM` to the group and sends
+  `SIGKILL` after the kill grace, and never waits on the child's output beyond the grace, so a
+  cancelled or timed-out codex run always settles, even when a process the child started holds its
+  output open.
+- **A run's record says what happened to its provider call.** A run ended by a cancellation or by
+  its wall-clock bound carries `before-call`, `call-aborted`, `after-call` or `outcome-unknown` in its
+  terminal step, as observed by the process executing it; the cancel surface records
+  `outcome-unknown` for a run it finds executing until that process reports. A run cancelled while it
+  was being set up, before it could be signalled, reads its cancellation once before the provider
+  call and never makes it.
+- **The supported-backend matrix for the managed posture.** Under `RAYSPEC_HOSTING_POSTURE=managed`
+  only the openai agent backend and the Deepgram and OpenAI speech providers run; a boot whose
+  agents, product model calls or speech providers use anything else is refused before anything is
+  written, with the backend, what uses it and why. The matrix, with each backend's bounds,
+  cancellation semantics, gaps and the tests that prove them, is in
+  [Hosting in the hardened posture → Supported backends](./docs/hardened-posture.md#supported-backends)
+  and in `inspectHosting().supportedBackends`.
+- **The egress declaration.** A backend spec may list the outbound hosts its application calls in
+  `deployment.egressHosts`, a product spec in `deployment_overrides.egress_hosts`: lowercase DNS
+  hostnames of at least two labels, no wildcard, trailing dot, IP address, port or URL, each once, at
+  most 256. `rayspec pack` carries them into the manifest's `permissions.egressHosts`, which was
+  always empty before; `rayspec bundle verify` re-derives them from the spec and refuses a manifest
+  that lists one more or one fewer (`permissions-mismatch`); `prepare()` reports them as permission
+  changes and covers them by the plan digest. The declaration is for the host network policy to
+  enforce: the runtime blocks no call to an undeclared host. `spec.schema.json`,
+  `version-1.0.schema.json` and `product.schema.json` carry the new fields. A 1.8 parser refuses a
+  spec that uses them.
+- **A guard for outbound requests to a URL the platform did not choose.** `guardedFetch` in
+  `@rayspec/platform` refuses a scheme other than `http:`/`https:`, a URL with credentials, and a
+  loopback, private, link-local, metadata, unspecified, multicast or reserved destination (an IPv4
+  address embedded in IPv6 judged by that address, any IPv6 address outside `2000::/3` refused) — judged
+  on the address the connection uses after DNS resolution, so a name that resolves to `127.0.0.1` or
+  rebinds is refused — and checks every redirect hop the same way. No outbound path of this release
+  takes a URL from a spec or a request; a test holds the list of every outbound call site in the
+  shipped source so that a new one goes through the guard or is reviewed. Handlers are not bound by
+  it: they run in-process, and the host network policy contains them. See
+  [Hosting in the hardened posture → Egress](./docs/hardened-posture.md#egress).
+- **The managed posture exports no agent trace by default, and the hosting report says whether one
+  is exported.** Under `RAYSPEC_HOSTING_POSTURE=managed` an unset `RAYSPEC_AGENT_TRACING` means `off`
+  on `rayspec-serve` and the boot wrappers too, as it already did on `rayspec deploy` (both the YAML
+  and the `.ray` path); `RAYSPEC_AGENT_TRACING=openai` turns the export back on.
+  `inspectHosting()` reports `agentTraceExport` (`off` or `openai`) and `egress` (enforced by the
+  host network policy), and `inspect()` no longer reports the managed posture as supported while
+  traces are exported. Without the managed posture `rayspec-serve` keeps exporting by default, as
+  before; set `RAYSPEC_AGENT_TRACING=off` to stop it. See
+  [Hosting in the hardened posture → Telemetry](./docs/hardened-posture.md#telemetry).
+- **Rotating the JWT signing key without logging anyone out.** `RAYSPEC_JWT_SIGNING_KEY_PREVIOUS`
+  (or its `_FILE`) holds the key in use before a rotation: it signs nothing, and its public key stays
+  in `GET /v1/oauth/jwks` and in the OIDC provider's key set, so a token signed before the rotation
+  verifies until it expires. Unset it after the overlap window; a value that is not a PKCS#8 PEM
+  refuses the boot by name. See
+  [Hosting in the hardened posture → Credentials and rotation](./docs/hardened-posture.md#credentials-and-rotation).
+- **Rotating the API-key pepper with an overlap window.** `RAYSPEC_API_KEY_PEPPER_PREVIOUS` (or its
+  `_FILE`) holds the pepper in use before a rotation: while it is set, an API key, refresh session or
+  invite token hashed under it still verifies and is renewed under the new pepper when it is used
+  (an API key is re-hashed on first use, a session is replaced when it refreshes). Unset it at the end
+  of the window; what was not used by then is refused. A new pepper with no previous one is the reset
+  for a pepper that leaked: every such credential is refused at once, and passwords are unaffected.
+  The operator procedure for both is in
+  [Hosting in the hardened posture → Credentials and rotation](./docs/hardened-posture.md#the-api-key-pepper).
+- **Provider keys from a file, and each to the component that uses it.** `OPENAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY` and `DEEPGRAM_API_KEY` each accept
+  a `<NAME>_FILE` variant — a regular file of the server user, mode 600, never a link — which wins
+  over the plain variable and never falls back to it; a value read from a file stays out of the
+  process environment. A refused key (`401`/`403`) fails the run, transcription or synthesis with a
+  message naming the credential instead of the provider's text, without a retry and without another
+  credential in its place. See
+  [Hosting in the hardened posture → Provider credentials](./docs/hardened-posture.md#provider-credentials).
+- **`init.bindings`: a bundle's own bindings, for its handlers.** On `rayspec deploy <file.ray>` the
+  values of the application names the manifest declares reach every handler kind as
+  `init.bindings.get(name)` (and `names`); a name the bundle does not declare, or a provider
+  credential, throws `BindingNotGrantedError` instead of answering `undefined`. The type ships in
+  `@rayspec/handler-sdk`. See
+  [Spec reference → `init.bindings`](./docs/spec-reference.md#initbindings--application-bindings).
+- **One redaction path for logs, error envelopes, receipts and traces.** Every line a server boot or
+  `rayspec deploy <file.ray>` writes to stdout and stderr, every HTTP error envelope, every
+  runtime-control result envelope, every receipt detail, every run's recorded error, the error a
+  failed durable run leaves in the workflow engine's system database and every exported agent trace
+  passes `redactText`/`redactValue` (`@rayspec/core`): the boot secrets, the
+  provider keys and the binding values the process resolved are removed wherever they occur, and so
+  are bearer tokens, credential headers, URL passwords, PEM private keys, JSON web tokens, RaySpec
+  API keys and `sk-…` provider keys. See
+  [Hosting in the hardened posture → Redaction](./docs/hardened-posture.md#redaction).
+- **Scoped handler rights: `handlers[].uses`.** A handler may list the capabilities it uses
+  (`blob`, `fsSource`, `stt`, `tts`, `emit`, `enqueue`, `mintPlayToken`, `bindings`); its init then
+  carries exactly those, and reaching for another one throws `ToolRightNotGrantedError` instead of
+  arriving. A right outside the list is refused when the document is parsed, one the handler's kind
+  never receives by the lint (`capability_violation`), and one the deployment does not grant by the
+  boot before anything is written, naming the handler and the missing setting. Under
+  `RAYSPEC_HOSTING_POSTURE=managed` a handler without `uses` refuses the boot. Without the key a
+  handler receives what the deployment configured, as before. `spec.schema.json` and
+  `version-1.0.schema.json` carry it; a 1.8 parser refuses a spec that uses it. See
+  [Hosting in the hardened posture → Tool rights](./docs/hardened-posture.md#tool-rights).
+
 ### Changed
 
+- **The durable worker holds no transaction across the model call.** A run's statements commit as
+  they are made, as on the in-request path, so a run waiting on a slow provider holds no database
+  connection and the worker's pool bounds statements, not runs. One execution per run is kept by a
+  lease on the run's started-once marker (a second dispatch waits for it; an execution whose lease is
+  taken over stops its run), and a recovery re-run of an untainted run first removes what the
+  interrupted attempt left. Consequences: an async run reads `running` while it executes rather than
+  `enqueued`; a cancelled run keeps the journal steps it wrote before it was ended; a tool's writes
+  commit as they happen, as they always did in-request; and a recovery or second dispatch of a run
+  whose header is already terminal `error` leaves it as recorded instead of running it again (before,
+  only a `completed` header was left alone).
+- **The wall-clock bound ends the run instead of only abandoning it.** When
+  `RAYSPEC_AGENT_RUN_MAX_MS` expires the run's signal is aborted, so a backend that honours it stops
+  its provider call, and the run is recorded terminal `error` with the `timeout` class. A run that
+  throws is recorded terminal `error` with the neutral class of its failure; neither reads back as
+  `enqueued` or `running` for ever any more. A same-key retry of a thrown, tainted run therefore
+  replays that recorded failure instead of answering `409`.
 - **In the hardened posture, starting or cancelling an agent run rereads the membership.** With
   role separation or single-tenant mode on, `agent:run` is checked against the live membership row,
   like `store:write` and the administrative actions, so a member removed or demoted since their
@@ -689,6 +822,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Under `RAYSPEC_HOSTING_POSTURE=managed`, every handler declares `uses`.** A spec whose handlers
+  do not refuses the boot under the managed posture; add `uses` (an empty list for a handler that
+  uses no optional capability). Without the managed posture nothing changes.
+
+- **Log lines and error messages are redacted.** A line or message that carried a credential shape
+  (a bearer token, a credential header, a URL password, a key) or a value the process holds as a
+  secret now carries `[redacted]` in its place. A log parser that matched on such a value matches on
+  the name around it instead.
+
+- **A bundle deploy hands bindings over differently.** The bindings file may supply only names the
+  bundle declares (plus the selected speech provider's key); any other name is refused with
+  `RAY_USAGE`. A provider key it supplies is no longer written into the process environment: it goes
+  to its adapter alone. The application's own names are still written there, and are also available
+  to handlers as `init.bindings.get(name)`. A YAML deploy is unchanged.
+- **The anthropic backend's child process no longer inherits the whole server environment.** It is
+  started without the other providers' keys, every `_FILE` variant, the database URLs (`DATABASE_URL`,
+  `SHADOW_DATABASE_URL`, `DBOS_…`, `PG…`) and every `RAYSPEC_…` and `CLOUD_…` setting, in every
+  posture: handing a model client the database credentials was unsafe for every deployment. Its own
+  two credentials, proxy settings and everything else are passed as before.
+- **The openai backend no longer registers its key or client as the agent SDK's process-wide
+  default.** Each backend instance uses its own client, so two backends with different keys cannot
+  send each other's. Code outside RaySpec that relied on the default being set by RaySpec must set
+  it itself.
+
+- **Changing the API-key pepper also invalidates refresh sessions and invites,** as it always did;
+  the architecture guide said only API keys were affected, and now says all three. Use
+  `RAYSPEC_API_KEY_PEPPER_PREVIOUS` to rotate without that effect.
+
+- **Bounded execution: what changes without the managed posture.** Nothing is bounded that was
+  not before, with two exceptions that are unsafe for everyone: a codex child that ignores `SIGTERM`
+  is killed after `RAYSPEC_AGENT_KILL_GRACE_MS` (default 5000), and the durable worker no longer
+  holds a database transaction for the length of a run. `RAYSPEC_AGENT_RUN_MAX_MS`, when set, now
+  aborts the run's call and records a terminal outcome. An unusable value of a variable the
+  execution policy adds refuses the boot. Under `RAYSPEC_HOSTING_POSTURE=managed` the policy's
+  defaults apply and a deployment using the anthropic, codex or pi backend, or a fake speech
+  provider, no longer boots — boot it without the posture, or move the agents to `openai`.
 - **The platform chain gains `0015_tenant_row_security`.** It only creates policies and functions
   and enables nothing, so a deployment that does not set `RAYSPEC_MIGRATION_DATABASE_URL` runs
   exactly as before. To turn role separation on for an existing deployment, run the setup SQL on

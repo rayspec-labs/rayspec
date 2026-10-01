@@ -70,8 +70,15 @@ import {
   V1_EXECUTION_LEVELS,
   type ValidationResult,
 } from '@rayspec/bundle-contract';
+import { redactText } from '@rayspec/core';
 import { type Db, verifyTenantIsolation } from '@rayspec/db';
-import { type RunCancelPollSource, resolveRunCancelPoll } from '@rayspec/platform';
+import {
+  type ExecutionPolicy,
+  type RunCancelPollSource,
+  resolveExecutionPolicy,
+  resolveRunCancelPoll,
+} from '@rayspec/platform';
+import { type AgentTracingPosture, configuredAgentTraceExport } from './agent-tracing.js';
 import {
   type DatabaseIsolationStatus,
   type HostingPosture,
@@ -92,6 +99,7 @@ import {
   planProductSchema,
 } from './product-schema-plan.js';
 import { type CatalogQuery, readSchemaHead, runtimePlatformHead } from './schema-head.js';
+import { SUPPORTED_BACKEND_MATRIX, type SupportedBackend } from './supported-backends.js';
 
 /**
  * How this runtime is hosted, beside what `inspect()` reports: the contract's inspect result is a
@@ -119,6 +127,28 @@ export interface HostingReport {
     singleTenantMode: boolean;
     maxApplicationTenants: 1 | null;
   };
+  /**
+   * The execution policy this runtime enforces (execution-policy.ts in @rayspec/platform): each bound
+   * with its value (null ⇒ no bound) and where it came from.
+   */
+  executionPolicy: ExecutionPolicy;
+  /**
+   * The supported-backend matrix (supported-backends.ts): per backend, whether the managed posture
+   * runs it and how its calls are bounded and stopped.
+   */
+  supportedBackends: readonly SupportedBackend[];
+  /**
+   * Who enforces the egress a bundle declares (`permissions.egressHosts`): the host network policy,
+   * never this runtime. The platform's own requests to a URL it did not choose go through
+   * `guardedFetch`, which refuses internal destinations; custom code is not bound by it.
+   */
+  egress: { enforcement: 'host-network-policy'; platformOutboundGuard: true };
+  /**
+   * Whether agent traces leave this process (`openai`) or not (`off`), as the boot applies it: an
+   * explicit `RAYSPEC_AGENT_TRACING`, the deploy path's default, `off` under the managed posture, else
+   * the agent SDK's default, which exports (agent-tracing.ts `configuredAgentTraceExport`).
+   */
+  agentTraceExport: AgentTracingPosture;
 }
 
 /** The operations this adapter implements today, and the hosting report. */
@@ -348,6 +378,32 @@ async function readEnvironmentState(query: CatalogQuery): Promise<EnvironmentSta
 
 /** Build the runtime-control adapter over one environment database. */
 export function createRuntimeControl(options: RuntimeControlOptions): RuntimeControlAdapter {
+  return withRedactedEnvelopes(buildRuntimeControl(options));
+}
+
+/**
+ * Every result envelope the adapter returns passes the one redaction path (`redactText`, @rayspec/core)
+ * on its error and warning messages: a message that quoted a credential — a database error, a value a
+ * caller supplied — leaves without it. The data is the contract's typed result and carries no secret.
+ */
+export function withRedactedEnvelopes(adapter: RuntimeControlAdapter): RuntimeControlAdapter {
+  const redact = <T>(envelope: ResultEnvelope<T>): ResultEnvelope<T> =>
+    ({
+      ...envelope,
+      errors: envelope.errors.map((e) => ({ ...e, message: redactText(e.message) })),
+      warnings: envelope.warnings.map((w) => ({ ...w, message: redactText(w.message) })),
+    }) as ResultEnvelope<T>;
+  return {
+    ...adapter,
+    inspect: async (request) => redact(await adapter.inspect(request)),
+    prepare: async (request) => redact(await adapter.prepare(request)),
+    quiesce: async (request) => redact(await adapter.quiesce(request)),
+    resume: async (request) => redact(await adapter.resume(request)),
+    health: async (request) => redact(await adapter.health(request)),
+  };
+}
+
+function buildRuntimeControl(options: RuntimeControlOptions): RuntimeControlAdapter {
   const now = options.now ?? (() => new Date());
   const query: CatalogQuery = async (sql, params = []) =>
     (await options.db.$client.unsafe(sql, params as never[])) as unknown as Record<
@@ -385,6 +441,10 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
           singleTenantMode,
           maxApplicationTenants: singleTenantMode ? 1 : null,
         },
+        executionPolicy: resolveExecutionPolicy(env),
+        supportedBackends: SUPPORTED_BACKEND_MATRIX,
+        egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
+        agentTraceExport: configuredAgentTraceExport(env),
       };
     },
 
@@ -442,10 +502,15 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
         applicationDigest: state.applicationDigest,
         releaseManifestSha256: options.releaseManifestSha256 ?? null,
         // The managed posture is supported only by a release that ships its capability receipt, on an
-        // environment whose database isolation (role separation and row-level security) is active
-        // and whose runtime runs in single-tenant mode.
+        // environment whose database isolation (role separation and row-level security) is active,
+        // whose runtime runs in single-tenant mode, and which exports no agent trace (the receipt
+        // attests `agentTraceExport: "off"`).
         managedPosture: {
-          supported: receipt !== null && isolation.active && singleTenantMode,
+          supported:
+            receipt !== null &&
+            isolation.active &&
+            singleTenantMode &&
+            configuredAgentTraceExport(options.env ?? process.env) === 'off',
           receiptSha256: receipt,
         },
         fence: state.fence,

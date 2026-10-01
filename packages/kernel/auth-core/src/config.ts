@@ -28,9 +28,20 @@
 
 export const JWT_SIGNING_KEY_ENV = 'RAYSPEC_JWT_SIGNING_KEY';
 export const API_KEY_PEPPER_ENV = 'RAYSPEC_API_KEY_PEPPER';
+/**
+ * The pepper in use before the last rotation. Optional, never required at boot: while it is set, a
+ * credential hashed under it still verifies (see `getPreviousApiKeyPepper`).
+ */
+export const API_KEY_PEPPER_PREVIOUS_ENV = 'RAYSPEC_API_KEY_PEPPER_PREVIOUS';
 
-/** The two boot-required secrets, named by the environment variables that conventionally carry them. */
-export type BootSecretName = typeof JWT_SIGNING_KEY_ENV | typeof API_KEY_PEPPER_ENV;
+/**
+ * The boot secrets, named by the environment variables that conventionally carry them: the two
+ * required ones, and the optional previous pepper.
+ */
+export type BootSecretName =
+  | typeof JWT_SIGNING_KEY_ENV
+  | typeof API_KEY_PEPPER_ENV
+  | typeof API_KEY_PEPPER_PREVIOUS_ENV;
 
 /** The resolved boot secrets a boot hands to this process via `setBootSecrets`. */
 export interface BootSecrets {
@@ -38,6 +49,8 @@ export interface BootSecrets {
   readonly jwtSigningKeyPem: string;
   /** The HMAC pepper for api-key / session-secret / invite-token hashing. */
   readonly apiKeyPepper: string;
+  /** The pepper before the last rotation, while its credentials should still verify. Optional. */
+  readonly apiKeyPepperPrevious?: string;
 }
 
 /**
@@ -54,9 +67,12 @@ let supplied: Partial<Record<BootSecretName, string>> = {};
  * values THIS boot resolved without any of them touching `process.env`.
  */
 export function setBootSecrets(secrets: BootSecrets): void {
+  // The previous pepper is OWNED by the boot too, absent included: a boot that resolved none must not
+  // have an ambient variable keep old credentials alive behind its back.
   supplied = {
     [JWT_SIGNING_KEY_ENV]: secrets.jwtSigningKeyPem,
     [API_KEY_PEPPER_ENV]: secrets.apiKeyPepper,
+    [API_KEY_PEPPER_PREVIOUS_ENV]: secrets.apiKeyPepperPrevious,
   };
 }
 

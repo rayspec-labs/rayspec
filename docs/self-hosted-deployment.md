@@ -100,6 +100,14 @@ name), the process environment (`PATH`, `HOME`, the proxy variables) and the `_F
 provider keys, which name host paths. Set those in the process environment. The contents of the
 bindings file never appear in any output, log, plan or receipt.
 
+The file may supply only the names the bundle declares, plus the speech provider key of the
+provider the operator selected (`DEEPGRAM_API_KEY` with `STT_PROVIDER=deepgram`, `OPENAI_API_KEY`
+with `TTS_PROVIDER=openai`); any other name is refused with `RAY_USAGE`, naming it. A provider key
+may also come from `<NAME>_FILE` in the process environment (a private file of the deploying user),
+but not from both places at once. None of these values is put into the process environment: a
+provider key goes to the adapter that uses it, and the application's own bindings reach its
+handlers as `init.bindings` ([Spec reference](./spec-reference.md#initbindings--application-bindings)).
+
 ## Review
 
 A dry-run reads the bundle, checks the bindings, and plans the deploy against the live database —

@@ -5,7 +5,7 @@
  * An unset or blank value is the default; anything else that is not exactly valid refuses the boot.
  */
 import type { Db } from '@rayspec/db';
-import { MANAGED_RUN_CANCEL_POLL_MS } from '@rayspec/platform';
+import { MANAGED_RUN_CANCEL_POLL_MS, resolveExecutionPolicy } from '@rayspec/platform';
 import { describe, expect, it } from 'vitest';
 import {
   BootConfigError,
@@ -19,6 +19,7 @@ import {
   parseSingleTenantMode,
 } from './composition-root.js';
 import { createRuntimeControl } from './runtime-control.js';
+import { SUPPORTED_BACKEND_MATRIX } from './supported-backends.js';
 
 describe('RAYSPEC_HOSTING_POSTURE', () => {
   it('defaults to local when unset or blank', () => {
@@ -100,6 +101,10 @@ describe('the hosting report beside inspect()', () => {
       hostingPosture: 'local',
       crossProcessCancellation: { enabled: false, pollIntervalMs: null, source: 'off' },
       applicationTenants: { singleTenantMode: false, maxApplicationTenants: null },
+      executionPolicy: resolveExecutionPolicy({}),
+      supportedBackends: SUPPORTED_BACKEND_MATRIX,
+      egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
+      agentTraceExport: 'openai',
     });
   });
 
@@ -112,7 +117,40 @@ describe('the hosting report beside inspect()', () => {
         source: 'hosting-posture',
       },
       applicationTenants: { singleTenantMode: false, maxApplicationTenants: null },
+      executionPolicy: resolveExecutionPolicy({ RAYSPEC_HOSTING_POSTURE: 'managed' }),
+      supportedBackends: SUPPORTED_BACKEND_MATRIX,
+      egress: { enforcement: 'host-network-policy', platformOutboundGuard: true },
+      agentTraceExport: 'off',
     });
+  });
+
+  it('reports the agent trace export the boot applies', () => {
+    const exported = (env: NodeJS.ProcessEnv) => report(env).agentTraceExport;
+    // The agent SDK's own default, which exports, unless something turns it off.
+    expect(exported({})).toBe('openai');
+    // The managed posture turns it off unless the operator states otherwise.
+    expect(exported({ RAYSPEC_HOSTING_POSTURE: 'managed' })).toBe('off');
+    expect(exported({ RAYSPEC_HOSTING_POSTURE: 'managed', RAYSPEC_AGENT_TRACING: 'openai' })).toBe(
+      'openai',
+    );
+    // An explicit value, and the SDK switch the deploy path writes.
+    expect(exported({ RAYSPEC_AGENT_TRACING: 'off' })).toBe('off');
+    expect(exported({ RAYSPEC_AGENT_TRACING: 'openai' })).toBe('openai');
+    expect(exported({ OPENAI_AGENTS_DISABLE_TRACING: '1' })).toBe('off');
+    // A value the boot refuses cannot be attested as off.
+    expect(
+      exported({ RAYSPEC_AGENT_TRACING: 'nonsense', RAYSPEC_HOSTING_POSTURE: 'managed' }),
+    ).toBe('openai');
+  });
+
+  it('reports the execution policy the managed posture applies, with where each bound came from', () => {
+    const policy = report({
+      RAYSPEC_HOSTING_POSTURE: 'managed',
+      RAYSPEC_AGENT_QUEUE_MAX: '7',
+    }).executionPolicy;
+    expect(policy.posture).toBe('managed');
+    expect(policy.runMaxMs.source).toBe('hosting-posture');
+    expect(policy.queueMax).toEqual({ value: 7, source: 'explicit' });
   });
 
   it('reports the tenant limit from RAYSPEC_SINGLE_TENANT', () => {

@@ -1,38 +1,20 @@
 /**
- * The worker app-DB pool sizing under the autonomous taint write. `N+1` is the
- * PROVEN minimum (DB-backed, REAL DBOS engine + Postgres) — proven on ground truth in BOTH directions.
+ * The worker's application-database pool stays BOUNDED while runs wait on slow providers (DB-backed,
+ * REAL DBOS engine + Postgres).
  *
- * ─────────────────────────────────────────────────────────────────────────────────────────────
- * THE MECHANISM (why `N+1`, and why `pool==N` deadlocks).
- * ─────────────────────────────────────────────────────────────────────────────────────────────
- * A run that fires a NON-idempotent tool acquires a SECOND connection — the chokepoint's autonomous
- * `markRunTainted` INSERT runs on a separate non-transactional `forTenant(workerDb,…)` (= `taintDb`, so
- * the marker commits on its OWN connection and survives the run's tx rollback) WHILE the run still holds
- * its run-tx connection. A held postgres-js `tdb.transaction()` DOES pin its pool slot for the whole
- * transaction (empirically confirmed: 2 held txs on a `max:2` pool leave a 3rd autonomous query PENDING
- * >3s until a held tx releases). So at `workerConcurrency=N` with a pool of EXACTLY N, the N run-tx
- * transactions pin all N slots, none of the N autonomous taint INSERTs can acquire a connection, and the
- * worker DEADLOCKS (every run TIMES OUT).
+ * The off-request run holds no transaction across the model call: its statements — the started-once
+ * reserve, the header, the journal, the events, the autonomous taint marker a non-idempotent tool
+ * writes before it fires — each borrow a connection for one statement and give it back. So the number
+ * of runs waiting on a provider is bounded by the worker concurrency, and the number of database
+ * sessions by the pool size, independently of each other.
  *
- * `N+1` is what makes it SAFE: the N held run-tx connections leave ≥1 free slot, so the N autonomous taint
- * INSERTs SERIALIZE through that single headroom slot — each acquires it, does its fast one-shot INSERT,
- * and releases — without ever blocking the held run-tx transactions. The autonomous writes are short and
- * serialized, so one free slot suffices (they never need N free slots at once). The same `+1` slot also
- * covers the started-once reserve + the taint READ (both run BEFORE the run-tx opens).
- *
- * THIS TEST drives the REAL executor (the same DbosDurableExecutor the composition root builds) and PROVES
- * BOTH directions — making the `+1` a proven minimum, not a guess:
- *  - SHIPPED `N+1` arm: pool pinned to `workerConcurrency + 1`, all N runs gated to hold their run-tx
- *    connection SIMULTANEOUSLY, then released to all fire a NON-idempotent tool at once (each needing the
- *    2nd autonomous taint connection). Asserts all N COMPLETE with the side effect firing N times — the
- *    autonomous writes serialized through the one free slot, no hang. NON-VACUOUS (every run succeeds AND
- *    the taint write succeeded N times).
- *  - UNDERSIZED `pool==N` arm (fail-the-fix): pool pinned to EXACTLY `workerConcurrency`, same N concurrent
- *    non-idempotent runs. Asserts the deadlock MANIFESTS — all N TIME OUT within a bounded wait — because
- *    no slot is free for any autonomous taint INSERT. This is the regression a `+1`-removing change would
- *    re-introduce, so it locks in `N+1` as the proven minimum. The arm INTENTIONALLY deadlocks the engine,
- *    so its teardown force-drops its OWN unique sys DB and bounds the shutdown — the deadlocked engine can
- *    never hang the suite/CI.
+ *  - SHIPPED sizing (`workerConcurrency + 1`): N concurrent runs, each firing a non-idempotent tool,
+ *    all complete.
+ *  - A pool FAR SMALLER than the concurrency (2 sessions for 6 runs): all 6 runs are held waiting on a
+ *    slow provider AT ONCE — which a run holding a transaction could never reach with 2 connections —
+ *    while the pool holds at most 2 sessions and none of them sits in a transaction; released, all 6
+ *    complete and each fires its tool exactly once. Before the transaction was removed this pool
+ *    could not even get the 6 runs started.
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -157,11 +139,13 @@ afterAll(async () => {
 async function makeExecutor(
   poolMax: number,
   sysSuffix: string,
-): Promise<{ exec: DbosDurableExecutor; teardown: () => Promise<void> }> {
+  concurrency: number = N,
+): Promise<{ exec: DbosDurableExecutor; teardown: () => Promise<void>; appName?: string }> {
   const sysDb = `${DBOS_SYS_DB}_${sysSuffix}`;
   await dropSysDb(appBaseUrl, sysDb);
   // A worker DB handle pinned to the SAME isolated schema but with the pool cap under test — in the
-  // runtime-role lane the runtime role's.
+  // runtime-role lane the runtime role's. Outside the lane its sessions carry an application name, so
+  // the test can count exactly this pool's sessions in pg_stat_activity.
   const engine = await engineDatabases({
     admin: ddlDb,
     adminUrl: appBaseUrl,
@@ -169,9 +153,10 @@ async function makeExecutor(
     systemDatabaseUrl: withDbName(appBaseUrl, sysDb),
     poolMax,
   });
+  const appName = engine.runtimeRole ? undefined : `rayspec-poolsat-${PID}-${sysSuffix}`;
   const workerDb = engine.runtimeRole
     ? engine.appDb
-    : makeDbWithSchema(appBaseUrl, APP_SCHEMA, poolMax);
+    : makeDbWithSchema(appBaseUrl, APP_SCHEMA, poolMax, { applicationName: appName });
   const deps: DbosExecutorDeps = {
     db: workerDb,
     resolveRun: (job: RunJob): ResolvedRun => {
@@ -182,16 +167,16 @@ async function makeExecutor(
   const exec = new DbosDurableExecutor(deps, {
     name: `rayspec-poolsat-${sysSuffix}`,
     systemDatabaseUrl: engine.systemDatabaseUrl,
-    workerConcurrency: N,
+    workerConcurrency: concurrency,
     deregisterOnShutdown: true,
   });
   await exec.start();
   return {
     exec,
+    ...(appName === undefined ? {} : { appName }),
     teardown: async () => {
-      // Bound the graceful shutdown so a (shadow-mutation-induced) deadlocked workflow cannot hang the
-      // suite forever: if shutdown does not resolve quickly, force-terminate the worker pool's backends
-      // and force-drop the sys DB instead (the WITH (FORCE) drop terminates the lingering engine).
+      // Bound the graceful shutdown so a hung workflow cannot hang the suite: if shutdown does not
+      // resolve quickly, end the worker pool and force-drop the sys DB instead.
       await Promise.race([
         exec.shutdown().catch(() => {}),
         new Promise<void>((r) => setTimeout(r, 5_000)),
@@ -217,43 +202,49 @@ async function waitForTerminal(
   return 'TIMEOUT';
 }
 
-/** Enqueue N gated non-idempotent runs, wait until all N hold their run-tx conn, return their runIds. */
-async function enqueueAndBarrier(exec: DbosDurableExecutor): Promise<string[]> {
+/** Enqueue `count` gated non-idempotent runs, wait until all are held waiting, return their runIds. */
+async function enqueueAndBarrier(exec: DbosDurableExecutor, count: number = N): Promise<string[]> {
   let holding = 0;
   const allHolding = new Promise<void>((resolve) => {
     backend.onHoldingRunTx = () => {
       holding += 1;
-      if (holding >= N) resolve();
+      if (holding >= count) resolve();
     };
   });
   backend.gateBeforeTool = true;
-  backend.fireToolBeforeProceeding = true; // each run fires the non-idempotent tool (needs a 2nd conn)
-  const runIds = Array.from({ length: N }, () => randomUUID());
+  backend.fireToolBeforeProceeding = true; // each run fires the non-idempotent tool once released
+  const runIds = Array.from({ length: count }, () => randomUUID());
   for (const runId of runIds) {
     await exec.enqueue(TENANT, { runId, tenantId: TENANT, agentId: 'charge-agent', input: runId });
   }
-  // Wait until all N runs hold their run-tx connection (bounded so a sizing bug cannot hang the suite).
+  // Wait until every run is held (bounded so a sizing bug cannot hang the suite).
   await Promise.race([
     allHolding,
     new Promise<void>((_, reject) =>
-      setTimeout(
-        () => reject(new Error('not all runs reached the run-tx barrier in time')),
-        15_000,
-      ),
+      setTimeout(() => reject(new Error('not all runs reached the barrier in time')), 15_000),
     ),
   ]);
   return runIds;
 }
 
-describe('worker pool sizing under the autonomous taint write (fix E)', () => {
+/** This pool's sessions right now: how many, and how many sit idle inside an open transaction. */
+async function poolSessions(appName: string): Promise<{ total: number; inTransaction: number }> {
+  const rows = (await ddlDb.$client.unsafe(
+    `SELECT count(*)::int AS total,
+            count(*) FILTER (WHERE state LIKE 'idle in transaction%')::int AS in_tx
+       FROM pg_stat_activity WHERE application_name = $1`,
+    [appName],
+  )) as unknown as Array<{ total: number; in_tx: number }>;
+  return { total: rows[0]?.total ?? 0, inTransaction: rows[0]?.in_tx ?? 0 };
+}
+
+describe('the worker pool stays bounded while runs wait on slow providers', () => {
   it(`SHIPPED sizing N+1: ${N} concurrent non-idempotent runs ALL COMPLETE (no pool-exhaustion hang)`, async () => {
     // Pin the worker pool to the SHIPPED `workerConcurrency + 1` sizing (the composition root's value).
     const { exec, teardown } = await makeExecutor(N + 1, 'ok');
     try {
       const runIds = await enqueueAndBarrier(exec);
-      // All N hold their run-tx conn (pinning N of the N+1 slots); release them to all fire the
-      // non-idempotent tool at once (each needs a 2nd autonomous taint conn). With one free slot the
-      // N autonomous taint INSERTs SERIALIZE through it, so all N complete with no pool-exhaustion hang.
+      // All N are held waiting; release them to all fire the non-idempotent tool at once.
       backend.releasePreTool();
       const outcomes = await Promise.all(runIds.map((id) => waitForTerminal(exec, id, 20_000)));
       expect(outcomes.every((o) => o === 'succeeded')).toBe(true);
@@ -265,27 +256,30 @@ describe('worker pool sizing under the autonomous taint write (fix E)', () => {
     }
   }, 60_000);
 
-  it(`UNDERSIZED pool==N (fail-the-fix): ${N} concurrent non-idempotent runs DEADLOCK (all TIME OUT)`, async () => {
-    // Pin the worker pool to EXACTLY `workerConcurrency` (NO headroom — the `+1` removed). This locks in
-    // `N+1` as a PROVEN minimum: reverting the production `+1` would re-introduce exactly this deadlock.
-    // The arm uses its OWN pid+suffix-unique sys DB ('undersized') so it cannot collide with the N+1 arm.
-    const { exec, teardown } = await makeExecutor(N, 'undersized');
+  it('a pool far smaller than the concurrency: 6 runs wait on a slow provider at once on 2 sessions, none in a transaction, and all complete', async () => {
+    const RUNS = 6;
+    const POOL = 2;
+    const { exec, teardown, appName } = await makeExecutor(POOL, 'small', RUNS);
     try {
-      // All N runs reach the run-tx barrier first — each pins one of the N slots (the pool is exactly N,
-      // so the barrier itself is still reachable; the deadlock manifests only AFTER they fire the tool).
-      const runIds = await enqueueAndBarrier(exec);
-      // Release them to all fire the non-idempotent tool at once. Each now needs a 2nd autonomous taint
-      // connection, but all N slots are pinned by the held run-tx transactions and NONE is free → every
-      // autonomous taint INSERT blocks forever → the worker DEADLOCKS. Asserted by ground truth: NO run
-      // reaches a terminal status within a bounded wait (all TIME OUT). `exec.status` reads the SEPARATE
-      // DBOS system-DB pool, so the status polling is not itself starved by the app-pool deadlock.
+      // All 6 runs reach the provider wait at the same time. A run holding a transaction across the
+      // wait would pin a session each, so 2 sessions could never get 6 runs this far.
+      const runIds = await enqueueAndBarrier(exec, RUNS);
+      if (appName !== undefined) {
+        // Sample the pool while all 6 wait: never more sessions than the pool allows, and none of
+        // them inside a transaction.
+        for (let i = 0; i < 5; i += 1) {
+          const sessions = await poolSessions(appName);
+          expect(sessions.total).toBeLessThanOrEqual(POOL);
+          expect(sessions.inTransaction).toBe(0);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
       backend.releasePreTool();
-      const outcomes = await Promise.all(runIds.map((id) => waitForTerminal(exec, id, 8_000)));
-      // The fail-the-fix direction: the undersized pool deadlocks, so NONE of the runs complete in time.
-      expect(outcomes.every((o) => o === 'TIMEOUT')).toBe(true);
+      const outcomes = await Promise.all(runIds.map((id) => waitForTerminal(exec, id, 20_000)));
+      expect(outcomes.every((o) => o === 'succeeded')).toBe(true);
+      // Each run fired its non-idempotent tool exactly once.
+      expect(sideEffects.count).toBe(RUNS);
     } finally {
-      // The engine is deadlocked; `teardown()` bounds the graceful shutdown and FORCE-drops this arm's
-      // OWN unique sys DB (WITH (FORCE)) so the hung engine cannot leak a DB or hang the suite/CI.
       backend.releasePreTool();
       await teardown();
     }

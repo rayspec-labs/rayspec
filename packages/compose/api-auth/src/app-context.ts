@@ -17,6 +17,7 @@ import type {
   BlobStoreFactory,
   DurableExecutor,
   FsSourceFactory,
+  InRequestRunGate,
   ResolvedHandler,
   SttCapability,
   TenantEventBus,
@@ -457,6 +458,12 @@ export interface AppDeps {
    * the held-request timeout (→ 504 GATEWAY_TIMEOUT) deterministically without a 120s wait.
    */
   runTimeoutMs?: number;
+  /**
+   * The bound on agent runs this process holds IN-REQUEST at once (`RAYSPEC_AGENT_SYNC_RUNS_MAX`).
+   * A run past it is refused with 429 RATE_LIMITED and a Retry-After before anything is recorded for
+   * it; an `async:true` run is not counted (the queue admission bounds those). Absent ⇒ no bound.
+   */
+  inRequestRunGate?: InRequestRunGate;
   /**
    * the OPTIONAL durable-execution engine (the off-request job spine). When wired, an
    * `async:true` run is RESERVED (runId) → ENQUEUED onto the worker → HTTP 202 + the runId returned
