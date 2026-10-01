@@ -54,10 +54,10 @@ import {
   type PrepareData,
   parseTimestamp,
   planDigestInput,
-  schemaValidator,
 } from '@rayspec/bundle-contract';
 import type { Db } from '@rayspec/db';
 import type { ReadApplicationBundle } from '@rayspec/server';
+import { MAX_BINDINGS_FILE_BYTES, parseBindingsFile } from './bindings-file.js';
 import type { ServeReport } from './deploy.js';
 import { type Envelope, type EnvelopeSink, envelope } from './envelope.js';
 
@@ -91,8 +91,6 @@ const VALUE_FLAGS = new Set([
   '--trusted-key',
 ]);
 
-/** The largest bindings file: 256 bindings of at most 64 KiB each, with room for the JSON. */
-const MAX_BINDINGS_FILE_BYTES = 17 * 1024 * 1024;
 /** A public key file is a few hundred bytes; anything above this is not one. */
 const MAX_KEY_FILE_BYTES = 16 * 1024;
 
@@ -329,40 +327,6 @@ async function readTrustedKey(path: string): Promise<KeyObject> {
   return key;
 }
 
-/**
- * The bindings file, parsed against the contract's schema. Its content never appears in a message:
- * a refusal names the member, never a value.
- */
-function parseBindingsFile(bytes: Buffer): Map<string, string> {
-  let document: unknown;
-  try {
-    document = JSON.parse(bytes.toString('utf8'));
-  } catch {
-    refuse('RAY_USAGE', 'the bindings file is not valid JSON');
-  }
-  const validate = schemaValidator('bindingsFile');
-  if (!validate(document)) {
-    const at = validate.errors?.[0]?.instancePath ?? '';
-    refuse(
-      'RAY_USAGE',
-      'the bindings file is not {bindingsFormatVersion: 1, bindings: [{name, value}]} with names ' +
-        `of capital letters, digits and underscores${at === '' ? '' : ` (at ${at})`}`,
-      at === '' ? {} : { path: at },
-    );
-  }
-  const values = new Map<string, string>();
-  const bindings = (document as { bindings: { name: string; value: string }[] }).bindings;
-  for (const [i, b] of bindings.entries()) {
-    if (values.has(b.name)) {
-      refuse('RAY_USAGE', `the bindings file names ${b.name} twice`, {
-        path: `/bindings/${i}/name`,
-      });
-    }
-    values.set(b.name, b.value);
-  }
-  return values;
-}
-
 // ─── plan records ──────────────────────────────────────────────────────────────────────────────
 
 interface PlanRecord {
@@ -547,7 +511,9 @@ async function deploy(
       if (err instanceof server.StateDirectoryError) throw new Refused([err.error]);
       throw err;
     }
-    fileValues = parseBindingsFile(bytes);
+    const parsedBindings = parseBindingsFile(bytes);
+    if (!parsedBindings.ok) throw new Refused([parsedBindings.error]);
+    fileValues = parsedBindings.value;
     server.registerSecretValues(fileValues.values());
   }
   const trustedKeys: KeyObject[] = [];

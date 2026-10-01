@@ -32,7 +32,13 @@
  *                                                        blobs, encrypt with age, write a migration
  *                                                        .ray. The source stays fenced (see export.ts).
  *   rayspec resume --deployment <id> --fence-epoch <n>   Release that fence, at its epoch only.
- *   Both write ONE result envelope to stdout, like the bundle commands.
+ *   rayspec import <migration.ray> --target <state-dir> --identity-file <file> [--dry-run]
+ *                                                        Decrypt and check a migration bundle, then
+ *                                                        restore it into a new, empty target as its
+ *                                                        migration role, verify it and leave it fenced
+ *                                                        until the cutover (see import.ts);
+ *                                                        `--discard-failed` removes a failed import.
+ *   Each writes ONE result envelope to stdout, like the bundle commands.
  *
  * PRODUCTION-MUTATING (`tenant` group — writes to the database DATABASE_URL names):
  *   rayspec tenant ensure …      Idempotently create OR resolve one organization under a chosen id,
@@ -327,7 +333,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
   },
   {
     heading:
-      'MIGRATION (fences a self-hosted deployment, writes its encrypted snapshot, releases the fence):',
+      'MIGRATION (fences a self-hosted deployment, writes its encrypted snapshot, restores it into a new target, releases a fence):',
     commands: [
       {
         name: 'export',
@@ -363,6 +369,46 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 4 owner recovery, policy / 5 lock, database or quiesce deadline,
                                 retryable / 6 schema drift or interrupted (the fence stays) /
                                 7 internal error.`,
+      },
+      {
+        name: 'import',
+        block: `  rayspec import <migration.ray> --target <state-dir> --identity-file <file> --dry-run [--json]
+  rayspec import <migration.ray> --target <state-dir> --identity-file <file>
+                 [--bindings-file <file>] [--json]
+  rayspec import --target <state-dir> --discard-failed [--json]
+                                Restore a migration bundle into a NEW, EMPTY target and leave it
+                                fenced until the cutover; the source stays authoritative. In order:
+                                the bundle through the one reader (the ciphertext's size and SHA-256
+                                before decryption); decryption with the age X25519 identity file (a
+                                protected file: yours, mode 0600) into a private scratch directory
+                                under the target state directory, within the plaintext limit; the
+                                inner snapshot through the same reader; every clear hint against the
+                                authenticated metadata; the embedded application against this runtime
+                                (it must be the exact runtime the source ran); each dump's table of
+                                contents against the restore allowlist (no extension but uuid-ossp in
+                                the workflow system database, one owner, no grant to an unknown role,
+                                no role, event trigger, untrusted language, SECURITY DEFINER function
+                                beyond the platform's two, COPY ... PROGRAM or call into the dump at
+                                restore time); the target: both databases and the blob root empty,
+                                the snapshot's server major, roles prepared. --dry-run stops there
+                                and restores nothing. Otherwise both databases are restored with
+                                pg_restore as the target's migration role, never a superuser, under
+                                the shared schema lock, the objects written unchanged, and everything
+                                verified (row counts, foreign keys, schema head, one organization,
+                                empty credential tables, object digests, the runtime role's posture);
+                                the target is then fenced with the runtime role's writes revoked, and
+                                the result gives the cutover instruction and token (on stderr and in
+                                the receipt). A failure leaves a changed target marked failed;
+                                --discard-failed removes what it restored. Reads DATABASE_URL (the
+                                runtime role), RAYSPEC_MIGRATION_DATABASE_URL (required),
+                                DBOS_SYSTEM_DATABASE_URL, RAYSPEC_BLOB_ROOT and RAYSPEC_PG_RESTORE
+                                (absolute path; default pg_restore on PATH, of the server's major) from
+                                the process environment only, never a .env file. Writes ONE result
+                                envelope to stdout and a local receipt to <state-dir>/receipts/. Exit 0
+                                / 2 usage, archive, digest, decryption, limits / 3 runtime, target,
+                                tenants / 4 not empty, policy, insecure file / 5 lock or database,
+                                retryable / 6 interrupted or a failed restore (the target is marked
+                                failed) / 7 internal error.`,
       },
       {
         name: 'resume',
@@ -653,6 +699,9 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   if ((vector[0] === 'export' || vector[0] === 'resume') && !isHelpFlag(vector[1])) {
     return runMigrationVerb(vector[0], vector.slice(1), json);
   }
+  if (vector[0] === 'import' && !vector.slice(1).some((token) => isHelpFlag(token))) {
+    return runImportVerb(vector.slice(1), json);
+  }
   // `deploy <file.ray>`: a file that starts with a ZIP signature or is named `.ray` takes the bundle
   // path, decided on at most four bytes and before any configuration or `.env` file is read.
   if (vector[0] === 'deploy' && !vector.slice(1).some((token) => isHelpFlag(token))) {
@@ -840,6 +889,43 @@ async function runMigrationVerb(
 }
 
 /**
+ * `rayspec import`. A new verb: one `import` or `import.dry-run` envelope on stdout, with or without
+ * `--json`, the operation id on stderr and, without `--json`, a short description of the result
+ * there. No `.env` file is loaded. SIGINT and SIGTERM stop it at its next safe point.
+ */
+async function runImportVerb(rest: readonly string[], json: boolean): Promise<number> {
+  const operationId = newOperationId();
+  const operation: ResultOperation = rest.includes('--dry-run') ? 'import.dry-run' : 'import';
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  const stdout = reserveStdout();
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    const { runImport } = await import('./import.js');
+    const outcome = await runImport(rest, { operationId, json, signal: controller.signal });
+    if (!json && outcome.summary.length > 0) {
+      await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    await writeEnvelope(stdout.sink, outcome.envelope);
+    return envelopeExitCode(outcome.envelope);
+  } catch (err) {
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    const failed = internalEnvelope(operation, operationId);
+    await writeEnvelope(stdout.sink, failed);
+    return envelopeExitCode(failed);
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    stdout.release();
+  }
+}
+
+/**
  * `rayspec deploy <file.ray>`. A new verb: one `deploy` or `deploy.dry-run` envelope on stdout,
  * with or without `--json`, and the operation id on stderr; without `--json` a short description of
  * the plan or the refusal follows it there. A deploy that serves writes its envelope when it stops.
@@ -892,7 +978,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
   const rest = args.slice(1);
   if (command === undefined) {
     throw new CliError(
-      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `pack`, `deploy`, `export`, `resume`, `tenant`, or `dev`)',
+      'missing command (expected `init`, `doctor`, `plan`, `openapi`, `gen-handler`, `bundle`, `pack`, `deploy`, `export`, `import`, `resume`, `tenant`, or `dev`)',
     );
   }
   // `--version`/`-v` is the one TOP-LEVEL flag, answered BEFORE the leading-dash check below —
@@ -918,7 +1004,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
   if (help !== undefined) return { kind: 'text', text: help };
   if (command.startsWith('-')) {
     throw new CliError(
-      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`export\`, \`resume\`, \`tenant\`, or \`dev\`), got ${command}`,
+      `expected a subcommand (\`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`export\`, \`import\`, \`resume\`, \`tenant\`, or \`dev\`), got ${command}`,
     );
   }
 
@@ -1019,7 +1105,7 @@ async function answer(args: readonly string[], reporting: Reporting): Promise<An
     }
     default:
       throw new CliError(
-        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`export\`, \`resume\`, \`tenant\`, or \`dev\`)`,
+        `unknown command ${JSON.stringify(command)} (expected \`init\`, \`doctor\`, \`plan\`, \`openapi\`, \`gen-handler\`, \`bundle\`, \`pack\`, \`deploy\`, \`export\`, \`import\`, \`resume\`, \`tenant\`, or \`dev\`)`,
       );
   }
 }
