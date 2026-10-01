@@ -1,0 +1,1102 @@
+{
+  "seedFormatVersion": 1,
+  "inventory": {
+    "documents": 50,
+    "text": 40,
+    "pdf": 10,
+    "total_quantity": 2316,
+    "total_lines": 75,
+    "without_category": 10,
+    "without_received_on": 8
+  },
+  "documents": [
+    {
+      "file_id": "doc-001",
+      "file": "documents/doc-001.txt",
+      "content_type": "text/plain",
+      "size_bytes": 121,
+      "sha256": "6fb39dbdd420f888280ad265ecd6e304c33d7449b9c58c17f167425c2ddf8e81",
+      "expected": {
+        "reference": "REF-0001",
+        "title": "Shelf inventory 1",
+        "category": "workshop",
+        "quantity": 13,
+        "received_on": "2026-02-01",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": 8
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-002",
+      "file": "documents/doc-002.txt",
+      "content_type": "text/plain",
+      "size_bytes": 138,
+      "sha256": "f6b81aa10f8118ec6ff2082211b910ac097b34a6fdaaf6b548b4629171d64b91",
+      "expected": {
+        "reference": "REF-0002",
+        "title": "Workshop supplies 2",
+        "category": "office",
+        "quantity": 26,
+        "received_on": "2026-03-02",
+        "lines": [
+          {
+            "description": "labels",
+            "count": 15
+          },
+          {
+            "description": "folders",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-003",
+      "file": "documents/doc-003.txt",
+      "content_type": "text/plain",
+      "size_bytes": 139,
+      "sha256": "2a09f32ae03091ecad0eec4177acc5876d8dc9a83c71b990017837d37063b8b3",
+      "expected": {
+        "reference": "REF-0003",
+        "title": "Größe M uniforms 3",
+        "category": null,
+        "quantity": 39,
+        "received_on": "2026-04-03",
+        "lines": [
+          {
+            "description": "folders",
+            "count": null
+          },
+          {
+            "description": "tape",
+            "count": 25
+          },
+          {
+            "description": "gloves",
+            "count": 28
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-004",
+      "file": "documents/doc-004.txt",
+      "content_type": "text/plain",
+      "size_bytes": 104,
+      "sha256": "bec90c05697e0a4f7dc6953007ece86571672743c7d358530864dde49745febe",
+      "expected": {
+        "reference": "REF-0004",
+        "title": "Café corner restock 4",
+        "category": "garden",
+        "quantity": 52,
+        "received_on": "2026-05-04",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-005",
+      "file": "documents/doc-005.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1965,
+      "sha256": "dfe95f5dc970bd782dbace038e2cfe90e5585bb42ac23cbffe4573ac5a921666",
+      "expected": {
+        "reference": "REF-0005",
+        "title": "Garden tools 5",
+        "category": "storage",
+        "quantity": 65,
+        "received_on": "2026-06-05",
+        "lines": [
+          {
+            "description": "gloves",
+            "count": 36
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-006",
+      "file": "documents/doc-006.txt",
+      "content_type": "text/plain",
+      "size_bytes": 108,
+      "sha256": "1af82d17dc86f5ef497f268c709dc9f211e122a3f58360a31419181e9804038c",
+      "expected": {
+        "reference": "REF-0006",
+        "title": "Archive boxes 6",
+        "category": "workshop",
+        "quantity": 78,
+        "received_on": null,
+        "lines": [
+          {
+            "description": "clips",
+            "count": null
+          },
+          {
+            "description": "hooks",
+            "count": 6
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-007",
+      "file": "documents/doc-007.txt",
+      "content_type": "text/plain",
+      "size_bytes": 155,
+      "sha256": "2feffb9f5dad4dc37ca42de73bc7cff810a71626ce379ea8575936fa54977097",
+      "expected": {
+        "reference": "REF-0007",
+        "title": "Résumé folders 7",
+        "category": "office",
+        "quantity": 91,
+        "received_on": "2026-08-07",
+        "lines": [
+          {
+            "description": "hooks",
+            "count": 10
+          },
+          {
+            "description": "bolts",
+            "count": 13
+          },
+          {
+            "description": "brackets",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-008",
+      "file": "documents/doc-008.txt",
+      "content_type": "text/plain",
+      "size_bytes": 85,
+      "sha256": "2ba261fab3208bebbfac878bdac324be1a2e3e3e3ec08ab921bf1d76206b1743",
+      "expected": {
+        "reference": "REF-0008",
+        "title": "Window cleaning kit 8",
+        "category": null,
+        "quantity": 7,
+        "received_on": "2026-09-08",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-009",
+      "file": "documents/doc-009.txt",
+      "content_type": "text/plain",
+      "size_bytes": 115,
+      "sha256": "8c6e24c32ef4167a15f13c8e7309474e9ec2c530a5cc138d248f546e158828a5",
+      "expected": {
+        "reference": "REF-0009",
+        "title": "Spare cables 9",
+        "category": "garden",
+        "quantity": 20,
+        "received_on": "2026-01-09",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-010",
+      "file": "documents/doc-010.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 2243,
+      "sha256": "786ec373ec34740bfcc5606f7faade96ff333d1b7dfec5edea506785e446b29c",
+      "expected": {
+        "reference": "REF-0010",
+        "title": "Paint samples 10",
+        "category": "storage",
+        "quantity": 33,
+        "received_on": "2026-02-10",
+        "lines": [
+          {
+            "description": "labels",
+            "count": 31
+          },
+          {
+            "description": "folders",
+            "count": 34
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-011",
+      "file": "documents/doc-011.txt",
+      "content_type": "text/plain",
+      "size_bytes": 155,
+      "sha256": "3558f88989e25898060169060f9179946a445d04a4baab55b65ad422cc3a6756",
+      "expected": {
+        "reference": "REF-0011",
+        "title": "Shelf inventory 11",
+        "category": "workshop",
+        "quantity": 46,
+        "received_on": "2026-03-11",
+        "lines": [
+          {
+            "description": "folders",
+            "count": 38
+          },
+          {
+            "description": "tape",
+            "count": null
+          },
+          {
+            "description": "gloves",
+            "count": 4
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-012",
+      "file": "documents/doc-012.txt",
+      "content_type": "text/plain",
+      "size_bytes": 78,
+      "sha256": "a75bcefb711632c8601f30a0c6aae7cdd0b13aa60af6e83827f8ee04357bb157",
+      "expected": {
+        "reference": "REF-0012",
+        "title": "Workshop supplies 12",
+        "category": "office",
+        "quantity": 59,
+        "received_on": null,
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-013",
+      "file": "documents/doc-013.txt",
+      "content_type": "text/plain",
+      "size_bytes": 105,
+      "sha256": "5086aaeace8828a703f32573b10592f908d64a50c9217ae19fd91a95e27b3810",
+      "expected": {
+        "reference": "REF-0013",
+        "title": "Größe M uniforms 13",
+        "category": null,
+        "quantity": 72,
+        "received_on": "2026-05-13",
+        "lines": [
+          {
+            "description": "gloves",
+            "count": 12
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-014",
+      "file": "documents/doc-014.txt",
+      "content_type": "text/plain",
+      "size_bytes": 139,
+      "sha256": "3bece60f05ace0996440f17b46ef1d128c629e5b14cd392c5d27a424739db483",
+      "expected": {
+        "reference": "REF-0014",
+        "title": "Café corner restock 14",
+        "category": "garden",
+        "quantity": 85,
+        "received_on": "2026-06-14",
+        "lines": [
+          {
+            "description": "clips",
+            "count": 19
+          },
+          {
+            "description": "hooks",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-015",
+      "file": "documents/doc-015.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 2513,
+      "sha256": "7ca781d6372bebf031f4bf49a98e6dbb62fdbd869709e25d7209a834e80d0129",
+      "expected": {
+        "reference": "REF-0015",
+        "title": "Garden tools 15",
+        "category": "storage",
+        "quantity": 1,
+        "received_on": "2026-07-15",
+        "lines": [
+          {
+            "description": "hooks",
+            "count": null
+          },
+          {
+            "description": "bolts",
+            "count": 29
+          },
+          {
+            "description": "brackets",
+            "count": 32
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-016",
+      "file": "documents/doc-016.txt",
+      "content_type": "text/plain",
+      "size_bytes": 100,
+      "sha256": "dc1936715fbba932c0729f0d1d73ad0d0c8aac9e429bbd08165ec7f3365d73b6",
+      "expected": {
+        "reference": "REF-0016",
+        "title": "Archive boxes 16",
+        "category": "workshop",
+        "quantity": 14,
+        "received_on": "2026-08-16",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-017",
+      "file": "documents/doc-017.txt",
+      "content_type": "text/plain",
+      "size_bytes": 122,
+      "sha256": "67c79afe0357c38ee35e867af4e75a98b1de3e60b28dfbdb9f14a03373c07e59",
+      "expected": {
+        "reference": "REF-0017",
+        "title": "Résumé folders 17",
+        "category": "office",
+        "quantity": 27,
+        "received_on": "2026-09-17",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": 40
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-018",
+      "file": "documents/doc-018.txt",
+      "content_type": "text/plain",
+      "size_bytes": 100,
+      "sha256": "89482a5288b2abdefc45a8c1c6c2a97d3ddb1accb1da7bd181a611f3f0d4aced",
+      "expected": {
+        "reference": "REF-0018",
+        "title": "Window cleaning kit 18",
+        "category": null,
+        "quantity": 40,
+        "received_on": null,
+        "lines": [
+          {
+            "description": "labels",
+            "count": null
+          },
+          {
+            "description": "folders",
+            "count": 10
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-019",
+      "file": "documents/doc-019.txt",
+      "content_type": "text/plain",
+      "size_bytes": 151,
+      "sha256": "2d81cd72d6acce49a533f96e589c284a5f0650e5aa60b701897ccd313de92120",
+      "expected": {
+        "reference": "REF-0019",
+        "title": "Spare cables 19",
+        "category": "garden",
+        "quantity": 53,
+        "received_on": "2026-02-19",
+        "lines": [
+          {
+            "description": "folders",
+            "count": 14
+          },
+          {
+            "description": "tape",
+            "count": 17
+          },
+          {
+            "description": "gloves",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-020",
+      "file": "documents/doc-020.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1692,
+      "sha256": "74cc4c44856b3527378420f8f3483a6d88579e39b441a61f08e6009f481fa20f",
+      "expected": {
+        "reference": "REF-0020",
+        "title": "Paint samples 20",
+        "category": "storage",
+        "quantity": 66,
+        "received_on": "2026-03-20",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-021",
+      "file": "documents/doc-021.txt",
+      "content_type": "text/plain",
+      "size_bytes": 119,
+      "sha256": "1c62211b893bc5c5b6c6d0f058778ce67fd194dae20ba21d11caf1d973310441",
+      "expected": {
+        "reference": "REF-0021",
+        "title": "Shelf inventory 21",
+        "category": "workshop",
+        "quantity": 79,
+        "received_on": "2026-04-21",
+        "lines": [
+          {
+            "description": "gloves",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-022",
+      "file": "documents/doc-022.txt",
+      "content_type": "text/plain",
+      "size_bytes": 138,
+      "sha256": "4e4c641148e83e27c96ae35a004df1c971bb9374ba85c22ae5ba4f211628098f",
+      "expected": {
+        "reference": "REF-0022",
+        "title": "Workshop supplies 22",
+        "category": "office",
+        "quantity": 92,
+        "received_on": "2026-05-22",
+        "lines": [
+          {
+            "description": "clips",
+            "count": 35
+          },
+          {
+            "description": "hooks",
+            "count": 38
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-023",
+      "file": "documents/doc-023.txt",
+      "content_type": "text/plain",
+      "size_bytes": 138,
+      "sha256": "2e2bba7e5c3397a189bd6c9d94a0acc54cd7e8b6c49be06b79544860efae9378",
+      "expected": {
+        "reference": "REF-0023",
+        "title": "Größe M uniforms 23",
+        "category": null,
+        "quantity": 8,
+        "received_on": "2026-06-23",
+        "lines": [
+          {
+            "description": "hooks",
+            "count": 2
+          },
+          {
+            "description": "bolts",
+            "count": null
+          },
+          {
+            "description": "brackets",
+            "count": 8
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-024",
+      "file": "documents/doc-024.txt",
+      "content_type": "text/plain",
+      "size_bytes": 81,
+      "sha256": "9322a1af66c6a073c8b45350ee6d3a5bd8a03e3d2e8c17d3f941d30a7aec6e7e",
+      "expected": {
+        "reference": "REF-0024",
+        "title": "Café corner restock 24",
+        "category": "garden",
+        "quantity": 21,
+        "received_on": null,
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-025",
+      "file": "documents/doc-025.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1968,
+      "sha256": "2e634aaaf8089a808bfd86cb656c87f2550a8b075bdec32b5e61bae231c554f4",
+      "expected": {
+        "reference": "REF-0025",
+        "title": "Garden tools 25",
+        "category": "storage",
+        "quantity": 34,
+        "received_on": "2026-08-25",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": 16
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-026",
+      "file": "documents/doc-026.txt",
+      "content_type": "text/plain",
+      "size_bytes": 137,
+      "sha256": "7aa9ccf356059e53ad8d4b0183fbdf7f7fe20bef3c0427e9e04c815f1756c881",
+      "expected": {
+        "reference": "REF-0026",
+        "title": "Archive boxes 26",
+        "category": "workshop",
+        "quantity": 47,
+        "received_on": "2026-09-26",
+        "lines": [
+          {
+            "description": "labels",
+            "count": 23
+          },
+          {
+            "description": "folders",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-027",
+      "file": "documents/doc-027.txt",
+      "content_type": "text/plain",
+      "size_bytes": 155,
+      "sha256": "2aba045f6e67e73e71884237b59994ac740f32f5a9236b89fa70a029ba3fc018",
+      "expected": {
+        "reference": "REF-0027",
+        "title": "Résumé folders 27",
+        "category": "office",
+        "quantity": 60,
+        "received_on": "2026-01-27",
+        "lines": [
+          {
+            "description": "folders",
+            "count": null
+          },
+          {
+            "description": "tape",
+            "count": 33
+          },
+          {
+            "description": "gloves",
+            "count": 36
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-028",
+      "file": "documents/doc-028.txt",
+      "content_type": "text/plain",
+      "size_bytes": 87,
+      "sha256": "d5325fa0eb99adc88ebbf95baedfd7040b97a4252e3fc5e76db1daef35407296",
+      "expected": {
+        "reference": "REF-0028",
+        "title": "Window cleaning kit 28",
+        "category": null,
+        "quantity": 73,
+        "received_on": "2026-02-28",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-029",
+      "file": "documents/doc-029.txt",
+      "content_type": "text/plain",
+      "size_bytes": 115,
+      "sha256": "efee8d18f1af7bc3e12179975dc411d5082799536d7e7528d9788a54d4d19c96",
+      "expected": {
+        "reference": "REF-0029",
+        "title": "Spare cables 29",
+        "category": "garden",
+        "quantity": 86,
+        "received_on": "2026-03-01",
+        "lines": [
+          {
+            "description": "gloves",
+            "count": 4
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-030",
+      "file": "documents/doc-030.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1957,
+      "sha256": "ec645421ab15a316d5ea86a8228578f2bf5d6c47081de720002d1ffa246c48f2",
+      "expected": {
+        "reference": "REF-0030",
+        "title": "Paint samples 30",
+        "category": "storage",
+        "quantity": 2,
+        "received_on": null,
+        "lines": [
+          {
+            "description": "clips",
+            "count": null
+          },
+          {
+            "description": "hooks",
+            "count": 14
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-031",
+      "file": "documents/doc-031.txt",
+      "content_type": "text/plain",
+      "size_bytes": 157,
+      "sha256": "2d362b111c9945563c62a2f1764055a63bf7a5269b93eb68ecc97978ff2632f2",
+      "expected": {
+        "reference": "REF-0031",
+        "title": "Shelf inventory 31",
+        "category": "workshop",
+        "quantity": 15,
+        "received_on": "2026-05-03",
+        "lines": [
+          {
+            "description": "hooks",
+            "count": 18
+          },
+          {
+            "description": "bolts",
+            "count": 21
+          },
+          {
+            "description": "brackets",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-032",
+      "file": "documents/doc-032.txt",
+      "content_type": "text/plain",
+      "size_bytes": 102,
+      "sha256": "f7ba5e4cf77fcffce4af416c43e7f5ac4ef6ccf7c79fb562e891238c8a81a1da",
+      "expected": {
+        "reference": "REF-0032",
+        "title": "Workshop supplies 32",
+        "category": "office",
+        "quantity": 28,
+        "received_on": "2026-06-04",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-033",
+      "file": "documents/doc-033.txt",
+      "content_type": "text/plain",
+      "size_bytes": 105,
+      "sha256": "e906cbbf52abd3221825d53ad0619c2e744a5d37b19792a81eb09c978955571b",
+      "expected": {
+        "reference": "REF-0033",
+        "title": "Größe M uniforms 33",
+        "category": null,
+        "quantity": 41,
+        "received_on": "2026-07-05",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-034",
+      "file": "documents/doc-034.txt",
+      "content_type": "text/plain",
+      "size_bytes": 143,
+      "sha256": "8859bcb2fa5ecb096bcba3493585f0946db31e1bf23d2d2bbab5f048f1c0fea3",
+      "expected": {
+        "reference": "REF-0034",
+        "title": "Café corner restock 34",
+        "category": "garden",
+        "quantity": 54,
+        "received_on": "2026-08-06",
+        "lines": [
+          {
+            "description": "labels",
+            "count": 39
+          },
+          {
+            "description": "folders",
+            "count": 2
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-035",
+      "file": "documents/doc-035.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 2512,
+      "sha256": "4947efd89354bf70bd18a2e337a60944270450be2eb76a5b724033deb55d59a0",
+      "expected": {
+        "reference": "REF-0035",
+        "title": "Garden tools 35",
+        "category": "storage",
+        "quantity": 67,
+        "received_on": "2026-09-07",
+        "lines": [
+          {
+            "description": "folders",
+            "count": 6
+          },
+          {
+            "description": "tape",
+            "count": null
+          },
+          {
+            "description": "gloves",
+            "count": 12
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-036",
+      "file": "documents/doc-036.txt",
+      "content_type": "text/plain",
+      "size_bytes": 76,
+      "sha256": "037434509a4717bfde3fa32f4d96a486145c3ccdf740376211f3a655c0cc747f",
+      "expected": {
+        "reference": "REF-0036",
+        "title": "Archive boxes 36",
+        "category": "workshop",
+        "quantity": 80,
+        "received_on": null,
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-037",
+      "file": "documents/doc-037.txt",
+      "content_type": "text/plain",
+      "size_bytes": 120,
+      "sha256": "f125ade3210fd729998f771b4ae298c4965d2bd3257b1ce09d50f35f251e22f4",
+      "expected": {
+        "reference": "REF-0037",
+        "title": "Résumé folders 37",
+        "category": "office",
+        "quantity": 93,
+        "received_on": "2026-02-09",
+        "lines": [
+          {
+            "description": "gloves",
+            "count": 20
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-038",
+      "file": "documents/doc-038.txt",
+      "content_type": "text/plain",
+      "size_bytes": 120,
+      "sha256": "e6cfd1a26f14aec11fb2ddf3a91dd01c67c469f2828b9dfdafcf918e6d8ac9ce",
+      "expected": {
+        "reference": "REF-0038",
+        "title": "Window cleaning kit 38",
+        "category": null,
+        "quantity": 9,
+        "received_on": "2026-03-10",
+        "lines": [
+          {
+            "description": "clips",
+            "count": 27
+          },
+          {
+            "description": "hooks",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-039",
+      "file": "documents/doc-039.txt",
+      "content_type": "text/plain",
+      "size_bytes": 152,
+      "sha256": "3665903db63c50a73f0aeaecc68ec900186a9f32bdc9e67630d4ed92ea4f1678",
+      "expected": {
+        "reference": "REF-0039",
+        "title": "Spare cables 39",
+        "category": "garden",
+        "quantity": 22,
+        "received_on": "2026-04-11",
+        "lines": [
+          {
+            "description": "hooks",
+            "count": null
+          },
+          {
+            "description": "bolts",
+            "count": 37
+          },
+          {
+            "description": "brackets",
+            "count": 40
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-040",
+      "file": "documents/doc-040.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1692,
+      "sha256": "2039cd1a058aa7d4f4d934efe7aec675eca19f9febde44616a6dbbcb31b783f8",
+      "expected": {
+        "reference": "REF-0040",
+        "title": "Paint samples 40",
+        "category": "storage",
+        "quantity": 35,
+        "received_on": "2026-05-12",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-041",
+      "file": "documents/doc-041.txt",
+      "content_type": "text/plain",
+      "size_bytes": 122,
+      "sha256": "92e16ab98e9677acfc65ba6d9d127514f45ebffb3bc2d6ec73f7e8664e213c2b",
+      "expected": {
+        "reference": "REF-0041",
+        "title": "Shelf inventory 41",
+        "category": "workshop",
+        "quantity": 48,
+        "received_on": "2026-06-13",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": 8
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-042",
+      "file": "documents/doc-042.txt",
+      "content_type": "text/plain",
+      "size_bytes": 115,
+      "sha256": "259d4a673b7a8b81080dc9754dba5b0bf2d56a18d674ea9e0a1068afe786e2dc",
+      "expected": {
+        "reference": "REF-0042",
+        "title": "Workshop supplies 42",
+        "category": "office",
+        "quantity": 61,
+        "received_on": null,
+        "lines": [
+          {
+            "description": "labels",
+            "count": null
+          },
+          {
+            "description": "folders",
+            "count": 18
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-043",
+      "file": "documents/doc-043.txt",
+      "content_type": "text/plain",
+      "size_bytes": 140,
+      "sha256": "c8e0ca357099bb0ce84f59e5d133062f2ad1733099614a27c597ef8cc5d3bfe6",
+      "expected": {
+        "reference": "REF-0043",
+        "title": "Größe M uniforms 43",
+        "category": null,
+        "quantity": 74,
+        "received_on": "2026-08-15",
+        "lines": [
+          {
+            "description": "folders",
+            "count": 22
+          },
+          {
+            "description": "tape",
+            "count": 25
+          },
+          {
+            "description": "gloves",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-044",
+      "file": "documents/doc-044.txt",
+      "content_type": "text/plain",
+      "size_bytes": 105,
+      "sha256": "28c607721a866df8838ddb9ac7041f1b716e6e591a361038733032d468cdb0f7",
+      "expected": {
+        "reference": "REF-0044",
+        "title": "Café corner restock 44",
+        "category": "garden",
+        "quantity": 87,
+        "received_on": "2026-09-16",
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-045",
+      "file": "documents/doc-045.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 1963,
+      "sha256": "1cd5da18b73b6a0db8dd3a9803c17f2230cd8abca9bb764a91214a9c6313349f",
+      "expected": {
+        "reference": "REF-0045",
+        "title": "Garden tools 45",
+        "category": "storage",
+        "quantity": 3,
+        "received_on": "2026-01-17",
+        "lines": [
+          {
+            "description": "gloves",
+            "count": null
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-046",
+      "file": "documents/doc-046.txt",
+      "content_type": "text/plain",
+      "size_bytes": 134,
+      "sha256": "923f7b5ac724bc4d1105eff90a6624056f7edb5724510eeb10dde461c9516f17",
+      "expected": {
+        "reference": "REF-0046",
+        "title": "Archive boxes 46",
+        "category": "workshop",
+        "quantity": 16,
+        "received_on": "2026-02-18",
+        "lines": [
+          {
+            "description": "clips",
+            "count": 3
+          },
+          {
+            "description": "hooks",
+            "count": 6
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-047",
+      "file": "documents/doc-047.txt",
+      "content_type": "text/plain",
+      "size_bytes": 156,
+      "sha256": "993f19d03e032ec1b5c218a2a1b99fa5a4b71f7d6780bd26e5215574a8b26046",
+      "expected": {
+        "reference": "REF-0047",
+        "title": "Résumé folders 47",
+        "category": "office",
+        "quantity": 29,
+        "received_on": "2026-03-19",
+        "lines": [
+          {
+            "description": "hooks",
+            "count": 10
+          },
+          {
+            "description": "bolts",
+            "count": null
+          },
+          {
+            "description": "brackets",
+            "count": 16
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-048",
+      "file": "documents/doc-048.txt",
+      "content_type": "text/plain",
+      "size_bytes": 63,
+      "sha256": "616793e2a65b32220833e24dd329299ad373fd33556b10887fab1ead1ed21c12",
+      "expected": {
+        "reference": "REF-0048",
+        "title": "Window cleaning kit 48",
+        "category": null,
+        "quantity": 42,
+        "received_on": null,
+        "lines": []
+      }
+    },
+    {
+      "file_id": "doc-049",
+      "file": "documents/doc-049.txt",
+      "content_type": "text/plain",
+      "size_bytes": 118,
+      "sha256": "d51056f0cc1365c4b57c52f0319f26eaebc01aa911766787628da254f1d5c770",
+      "expected": {
+        "reference": "REF-0049",
+        "title": "Spare cables 49",
+        "category": "garden",
+        "quantity": 55,
+        "received_on": "2026-05-21",
+        "lines": [
+          {
+            "description": "brackets",
+            "count": 24
+          }
+        ]
+      }
+    },
+    {
+      "file_id": "doc-050",
+      "file": "documents/doc-050.pdf",
+      "content_type": "application/pdf",
+      "size_bytes": 2241,
+      "sha256": "c5f8033451d1f92d35f6736acb9641dbfa9f800e53d97291e627c6a5fcd45bf4",
+      "expected": {
+        "reference": "REF-0050",
+        "title": "Paint samples 50",
+        "category": "storage",
+        "quantity": 68,
+        "received_on": "2026-06-22",
+        "lines": [
+          {
+            "description": "labels",
+            "count": 31
+          },
+          {
+            "description": "folders",
+            "count": null
+          }
+        ]
+      }
+    }
+  ]
+}

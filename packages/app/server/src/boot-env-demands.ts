@@ -194,7 +194,9 @@ export const PRODUCT_TENANT_ID: BootEnvVar = {
 export const EXTRACTION_MODE: BootEnvVar = {
   name: 'RAYSPEC_EXTRACTION_MODE',
   fileVariant: null,
-  what: "the extraction executor: 'live' (real runAgent/gpt-5) | 'deterministic' (injected, dev/CI)",
+  what:
+    "the extraction executor: 'live' (real runAgent) | 'deterministic' (the deterministic " +
+    'provider, dev/CI only)',
 };
 
 /** `RAYSPEC_RESPONDER_MODE` — demanded iff a product document declares the conversation input. */

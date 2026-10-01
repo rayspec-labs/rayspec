@@ -33,8 +33,10 @@ This document boots through the REAL server entrypoint (`@rayspec/server`) — t
 
 ### Drive it end-to-end — deterministic (the CI-proven, actually-working path)
 
-The extraction executor is `RAYSPEC_EXTRACTION_MODE=deterministic`. The platform is **product-free**:
-it ships NO executor, so deterministic mode runs behind a thin wrapper that injects one via
+The extraction executor is `RAYSPEC_EXTRACTION_MODE=deterministic`. The runtime's shipped
+[deterministic extraction provider](../../docs/spec-reference.md#the-deterministic-extraction-provider)
+runs only for an extractor whose config selects it, and this example's config names `openai`, so
+deterministic mode here runs behind a thin wrapper that injects an executor via
 `assembleServer(config, { productDeterministicAgents })`. The **merge-gated acceptance e2e is exactly
 that wrapper** and proves the whole loop end-to-end — boot → `PUT /files/{file_id}` → submit →
 `parse_text → store_read → agent → validation → store_write` → the `GET /invoices` views — plus the

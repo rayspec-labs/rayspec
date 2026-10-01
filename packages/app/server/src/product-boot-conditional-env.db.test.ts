@@ -225,8 +225,8 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     setAllFour();
     delete process.env.RAYSPEC_EXTRACTION_MODE;
     await expect(boot(ACME_YAML, demandDbUrl, { stt: false, agents: true })).rejects.toThrow(
-      "RAYSPEC_EXTRACTION_MODE is required (the extraction executor: 'live' (real runAgent/gpt-5) | " +
-        "'deterministic' (injected, dev/CI)). Fail-closed.",
+      "RAYSPEC_EXTRACTION_MODE is required (the extraction executor: 'live' (real runAgent) | " +
+        "'deterministic' (the deterministic provider, dev/CI only)). Fail-closed.",
     );
     armsRan += 1;
   }, 120_000);

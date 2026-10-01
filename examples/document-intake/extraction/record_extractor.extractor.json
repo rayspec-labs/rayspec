@@ -1,0 +1,5 @@
+{
+  "agent_id": "record_extractor",
+  "backend": "deterministic",
+  "schema_file": "record_extractor.schema.json"
+}

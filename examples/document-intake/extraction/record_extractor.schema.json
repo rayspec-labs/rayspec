@@ -1,0 +1,24 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "reference": { "type": "string" },
+    "title": { "type": "string" },
+    "category": { "type": ["string", "null"] },
+    "quantity": { "type": "integer" },
+    "received_on": { "type": ["string", "null"] },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "description": { "type": "string" },
+          "count": { "type": ["integer", "null"] }
+        },
+        "required": ["description", "count"]
+      }
+    }
+  },
+  "required": ["reference", "title", "category", "quantity", "received_on", "lines"]
+}

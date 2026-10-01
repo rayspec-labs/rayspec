@@ -1,0 +1,8 @@
+Reference: REF-0007
+Title: Résumé folders 7
+Category: office
+Quantity: 91
+Received on: 2026-08-07
+Lines: hooks | 10
+Lines: bolts | 13
+Lines: brackets | 

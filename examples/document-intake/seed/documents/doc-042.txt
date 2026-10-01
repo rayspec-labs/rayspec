@@ -1,0 +1,6 @@
+Reference: REF-0042
+Title: Workshop supplies 42
+Category: office
+Quantity: 61
+Lines: labels | 
+Lines: folders | 18

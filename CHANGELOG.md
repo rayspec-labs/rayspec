@@ -727,6 +727,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `owner-recovery`): one transaction consumes it, sets the password and ends the account's sessions,
   and the owner is signed in (`owner_recovery_redeemed`); every token that does not redeem answers
   the same `400`. `owner_recovery_tokens` is a reserved store name.
+- **A deterministic extraction provider, for development and tests only.** Under
+  `RAYSPEC_EXTRACTION_MODE=deterministic` the runtime now runs a shipped provider instead of
+  refusing the boot when no executor is injected, so a product with extractors runs end to end
+  without a provider credential. It reads labelled lines (`Title: …`) of the step's input text into
+  the properties of the extractor's output JSON Schema, converting each to its declared type, and
+  is not an extraction model: it is documented as unsuitable for production extraction, and the
+  boot's non-real-provider banner says so. An extractor uses it only when its config selects it
+  (`"backend": "deterministic"`, with `agent_id` and `schema_file` and no other key); a config
+  that names a real backend is refused in deterministic mode rather than answered by it, a config
+  that selects it is refused in live mode, and `RAYSPEC_HOSTING_POSTURE=managed` refuses it as
+  test-only (`extraction-deterministic`). An injected executor still replaces it. See
+  [Spec reference → the deterministic extraction provider](docs/spec-reference.md#the-deterministic-extraction-provider).
 
 ### Changed
 

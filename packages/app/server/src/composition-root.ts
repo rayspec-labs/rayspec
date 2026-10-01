@@ -2530,9 +2530,9 @@ async function assembleServerWith(
     /** LOCAL table-registration stand-in — register the built product tables (the dev wrapper supplies this). */
     registerProductTables?: ProductTableRegistrar;
     /**
-     * The deterministic Product-YAML extraction executor for
-     * `RAYSPEC_EXTRACTION_MODE=deterministic` (dev/CI — the platform ships none). Ignored for the
-     * classic boot + for live extraction.
+     * A deterministic Product-YAML extraction executor for
+     * `RAYSPEC_EXTRACTION_MODE=deterministic` (dev/CI) that replaces the shipped deterministic
+     * provider. Ignored for the classic boot + for live extraction.
      */
     productDeterministicAgents?: AgentRuntimeRegistry;
     /**

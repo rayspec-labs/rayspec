@@ -1,4 +1,14 @@
 export { AGENT_EXTRACTION_OPERATION, createAgentRuntimeHandler } from './agent-node.js';
+export {
+  DETERMINISTIC_EXTRACTION_BACKEND,
+  type DeterministicExtractionSchema,
+  DeterministicExtractionSchemaError,
+  deterministicExtractionHandler,
+  extractLabelledRecord,
+  inputText,
+  normalizeLabel,
+  parseDeterministicExtractionSchema,
+} from './deterministic-extraction.js';
 export { InMemoryAgentHandlerRegistry } from './fake-handler-registry.js';
 export { fakeAgentExtractionHandler } from './fakes.js';
 export { detectExecutionInputLeak, detectOutputArtifactLeak } from './neutrality.js';

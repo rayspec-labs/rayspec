@@ -34,7 +34,14 @@ import { CodexAdapter } from '@rayspec/adapter-codex';
 import { DeepgramSttAdapter } from '@rayspec/adapter-deepgram';
 import { OpenAIAdapter } from '@rayspec/adapter-openai';
 import { PiAdapter } from '@rayspec/adapter-pi';
-import type { AgentRuntimeRegistry } from '@rayspec/agent-runtime';
+import {
+  type AgentRuntimeRegistry,
+  DETERMINISTIC_EXTRACTION_BACKEND,
+  DeterministicExtractionSchemaError,
+  deterministicExtractionHandler,
+  InMemoryAgentHandlerRegistry,
+  parseDeterministicExtractionSchema,
+} from '@rayspec/agent-runtime';
 import {
   type AppDeps,
   type CleanupResult,
@@ -228,8 +235,9 @@ export interface DeployProductYamlOpts {
   /** Env source (default process.env) — injectable for tests. */
   env?: NodeJS.ProcessEnv;
   /**
-   * The deterministic extraction executor for `RAYSPEC_EXTRACTION_MODE=deterministic` (dev/CI). The
-   * platform ships none (product-free); a deployment/test injects it. LIVE mode ignores this.
+   * A deterministic extraction executor for `RAYSPEC_EXTRACTION_MODE=deterministic` (dev/CI) that
+   * replaces the shipped deterministic provider (`buildDeterministicExtraction`); a test injects one to
+   * script its outputs. LIVE mode ignores this.
    */
   deterministicAgents?: AgentRuntimeRegistry;
   /**
@@ -711,7 +719,10 @@ export function nonRealProviderBanner(
     parts.push('STT_PROVIDER=fake (no real transcription — recordings will not transcribe)');
   }
   if (extractionMode === 'deterministic') {
-    parts.push('RAYSPEC_EXTRACTION_MODE=deterministic (no real gpt-5 extraction)');
+    parts.push(
+      'RAYSPEC_EXTRACTION_MODE=deterministic (no real extraction model — the deterministic ' +
+        'provider reads labelled lines and is not for production extraction)',
+    );
   }
   if (responderMode === 'deterministic') {
     parts.push(
@@ -1659,6 +1670,15 @@ export function buildLiveAgent(
           `not '${extractor.id}' — a per-extractor config must name the extractor it configures. Fail-closed.`,
       );
     }
+    // The deterministic provider never answers a live run: live means a real model was asked for.
+    if (cfg.backend === DETERMINISTIC_EXTRACTION_BACKEND) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the extraction config selects the deterministic extraction ` +
+          'provider, which runs only under RAYSPEC_EXTRACTION_MODE=deterministic and is not for ' +
+          'production extraction. Name a real backend in the config for a live run, or set ' +
+          'RAYSPEC_EXTRACTION_MODE=deterministic for a development or test run. Fail-closed.',
+      );
+    }
     const configDir = dirname(configPath);
     const promptText = resolveExtractorPromptText(specPath, configDir, cfg, extractor);
     const schema = JSON.parse(
@@ -2548,29 +2568,117 @@ function productMediaTokenService(
 }
 
 /**
- * The extraction mode an agent-declaring document runs in: `live`, or `deterministic` with an
- * injected executor (the platform ships none). A document without agents demands no mode.
+ * The extraction mode an agent-declaring document runs in: `live`, or `deterministic`. A document
+ * without agents demands no mode.
  */
 function productExtractionMode(
   env: NodeJS.ProcessEnv,
   hasAgents: boolean,
-  deterministicAgents: AgentRuntimeRegistry | undefined,
 ): 'live' | 'deterministic' | undefined {
   if (!hasAgents) return undefined;
   const mode = requireEnv(env, EXTRACTION_MODE);
-  if (mode === 'live') return mode;
-  if (mode === 'deterministic') {
-    if (!deterministicAgents) {
-      throw new ProductBootError(
-        'RAYSPEC_EXTRACTION_MODE=deterministic requires an injected deterministic executor (the ' +
-          'platform ships none — product-free). Use live mode in production. Fail-closed.',
-      );
-    }
-    return mode;
-  }
+  if (mode === 'live' || mode === 'deterministic') return mode;
   throw new ProductBootError(
     `RAYSPEC_EXTRACTION_MODE '${mode}' is not supported (wired: live | deterministic).`,
   );
+}
+
+/** The keys an extraction config that selects the deterministic provider may carry. */
+const DETERMINISTIC_EXTRACTOR_CONFIG_KEYS = new Set(['agent_id', 'backend', 'schema_file']);
+
+/**
+ * The shipped deterministic extraction provider, one handler per declared extractor, for
+ * `RAYSPEC_EXTRACTION_MODE=deterministic` when no executor is injected. It is a development and test
+ * provider, not for production extraction (see `@rayspec/agent-runtime`'s deterministic-extraction).
+ *
+ * It runs only for an extractor whose config selects it (`"backend": "deterministic"`): a config
+ * that names a real backend is refused rather than answered by this provider, so it never stands in
+ * for a provider the application chose. The config carries `agent_id`, `backend` and `schema_file`
+ * (the output JSON Schema, config-dir-relative) and nothing else — a model or a prompt there would
+ * describe a call that never happens. The managed posture refuses the provider: its capability
+ * `extraction-deterministic` is test-only.
+ */
+export function buildDeterministicExtraction(
+  env: NodeJS.ProcessEnv,
+  specPath: string,
+  spec: ProductSpec,
+  hostingPosture: string | undefined,
+): AgentRuntimeRegistry {
+  if (hostingPosture === 'managed') {
+    throw new ProductBootError(
+      'RAYSPEC_HOSTING_POSTURE=managed does not support the deterministic extraction provider ' +
+        "(RAYSPEC_EXTRACTION_MODE=deterministic): its capability 'extraction-deterministic' is " +
+        'test-only, a stand-in that reads labelled lines and is not for production extraction. ' +
+        'Use RAYSPEC_EXTRACTION_MODE=live with a supported backend. Fail-closed.',
+    );
+  }
+  const registry = new InMemoryAgentHandlerRegistry();
+  for (const extractor of spec.extractors) {
+    const configPath = resolveExtractorConfigPath(env, specPath, spec, extractor.id);
+    let cfg: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(configPath, 'utf8'));
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('the file is not a JSON object');
+      }
+      cfg = parsed as Record<string, unknown>;
+    } catch (e) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': could not read the extraction config at ${configPath} (${
+          e instanceof Error ? e.message : String(e)
+        }).`,
+      );
+    }
+    if (cfg.agent_id !== extractor.id) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the extraction config at ${configPath} names agent ` +
+          `'${String(cfg.agent_id)}', not '${extractor.id}' — a per-extractor config must name the ` +
+          'extractor it configures. Fail-closed.',
+      );
+    }
+    if (cfg.backend !== DETERMINISTIC_EXTRACTION_BACKEND) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': RAYSPEC_EXTRACTION_MODE=deterministic, but its extraction ` +
+          `config selects the backend '${String(cfg.backend)}' — the deterministic extraction ` +
+          'provider never stands in for a provider the application chose. Run ' +
+          `RAYSPEC_EXTRACTION_MODE=live, or set "backend": "${DETERMINISTIC_EXTRACTION_BACKEND}" ` +
+          'for a development or test run. Fail-closed.',
+      );
+    }
+    const unknown = Object.keys(cfg).filter((k) => !DETERMINISTIC_EXTRACTOR_CONFIG_KEYS.has(k));
+    if (unknown.length > 0) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the extraction config at ${configPath} selects the ` +
+          `deterministic provider, which reads only agent_id, backend and schema_file; it also ` +
+          `carries ${unknown.sort().join(', ')}. Remove them. Fail-closed.`,
+      );
+    }
+    if (typeof cfg.schema_file !== 'string' || cfg.schema_file.trim() === '') {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the extraction config at ${configPath} names no ` +
+          'schema_file; the deterministic provider shapes its output by it. Fail-closed.',
+      );
+    }
+    const schemaPath = jailToExtractionDir(
+      dirname(configPath),
+      resolvePath(dirname(configPath), cfg.schema_file),
+      extractor.id,
+    );
+    let schema: ReturnType<typeof parseDeterministicExtractionSchema>;
+    try {
+      schema = parseDeterministicExtractionSchema(JSON.parse(readFileSync(schemaPath, 'utf8')));
+    } catch (e) {
+      const why =
+        e instanceof DeterministicExtractionSchemaError
+          ? e.message
+          : `could not read it (${e instanceof Error ? e.message : String(e)})`;
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the output schema ${cfg.schema_file}: ${why}. Fail-closed.`,
+      );
+    }
+    registry.register(`agent.${extractor.id}`, deterministicExtractionHandler(schema));
+  }
+  return registry;
 }
 
 /**
@@ -2783,14 +2891,18 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is
   // only read inside the `hasAgents` guard). An agent-declaring product ⇒ the demand + the live/
   // deterministic dispatch stay exactly as before.
-  const extractionMode = productExtractionMode(env, hasAgents, opts.deterministicAgents);
+  const extractionMode = productExtractionMode(env, hasAgents);
   let liveAgent: ProductYamlRollout['liveAgent'] | undefined;
   let agents: AgentRuntimeRegistry | undefined;
   if (extractionMode === 'live') {
     // `undefined` triggers the parameter default, so an omitting boot builds exactly as before.
     liveAgent = buildLiveAgent(env, specPath, spec, productBackends);
   } else if (extractionMode === 'deterministic') {
-    agents = opts.deterministicAgents;
+    // An injected executor (a test's or an embedder's) wins; without one the shipped deterministic
+    // provider runs, and only for extractors whose config selects it.
+    agents =
+      opts.deterministicAgents ??
+      buildDeterministicExtraction(env, specPath, spec, config.hostingPosture);
   }
 
   // ── 5. the STT adapter — DEMANDED iff the doc declares an stt.* step ───────────────────────────

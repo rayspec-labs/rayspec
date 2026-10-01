@@ -1,0 +1,6 @@
+Reference: REF-0001
+Title: Shelf inventory 1
+Category: workshop
+Quantity: 13
+Received on: 2026-02-01
+Lines: brackets | 8
