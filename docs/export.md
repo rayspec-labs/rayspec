@@ -60,7 +60,10 @@ The export's result says which barrier held and which did not apply, and so does
 - **`pg_dump` of the database server's major version** on `PATH`, or named by `RAYSPEC_PG_DUMP`
   (an absolute path). `pg_dump --version` must report the same major as the server.
 - **The blob root** in `RAYSPEC_BLOB_ROOT`, when the application keeps blobs. Only the fs blob store
-  is exported; a blob backend an extension provides is refused.
+  is exported. An application that loads any extension is refused
+  (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`), whether or not `RAYSPEC_BLOB_ROOT`
+  is set: an extension may provide a blob backend of its own, which the runtime uses in place of the
+  fs store, and the export cannot tell without running the extension's code.
 - **Disk space** in the state directory for about twice the size of both databases, the blobs and
   the application. The plaintext snapshot is assembled there, in a private directory, and nowhere
   else.
@@ -206,18 +209,26 @@ is fenced and nothing is released.
 
 | What happened | The source | What to do |
 | --- | --- | --- |
-| A precheck refusal (wrong deployment id, drift, a second organization, an extension, an unknown table, no `pg_dump` of the right major, …) | unchanged, not fenced | fix the cause and run the export again |
+| A precheck refusal (wrong deployment id, drift, a second organization, a database extension, an application that loads an extension, an unknown table, no `pg_dump` of the right major, …) | unchanged, not fenced | fix the cause and run the export again |
 | You did not confirm the downtime | unchanged, not fenced | run it again and confirm, or pass `--confirm-quiesce` |
 | The drain did not finish before `--quiesce-deadline` (`RAY_SOURCE_NOT_QUIESCENT`) | fenced | wait for the runs to end and run the export again, or `rayspec resume` |
 | No database write barrier (`database-barrier-unavailable`) | fenced | enable role separation, or stop every runtime process and run it again with `--source-stopped`; or `rayspec resume` |
 | A session that could write is connected (`uncontrolled-writer`), or a run is still marked running (`unreconciled-effects`) | fenced | disconnect it or reconcile the run, then run the export again |
 | Ctrl-C / SIGTERM (`RAY_INTERRUPTED`, exit 6) | fenced | the export stopped at a safe point, ended `pg_dump` and removed its scratch data; run it again, or `rayspec resume` |
-| The process was killed outright | fenced | run the export again: it first removes what the killed run left in `<state-dir>/scratch/` and records the killed run as interrupted |
+| The process was killed outright | fenced, unless it was killed before quiesce took the fence | run the export again, or `rayspec resume`: either one first removes what the killed run left in `<state-dir>/scratch/` and records the killed run as interrupted |
 | The database or the disk failed during the capture (`RAY_INFRA_UNAVAILABLE`) | fenced | fix it and run the export again, or `rayspec resume` |
 
 Every refusal after the fence carries the exact `rayspec resume` command in its message. The export
 never reports a snapshot as consistent unless the fence held at one epoch for the whole capture and
 the blob root and the fence read the same after the dumps as before them.
+
+A process killed outright cannot clean up after itself. Until the next `rayspec export` or
+`rayspec resume` of the deployment runs, `<state-dir>/scratch/` holds its plaintext capture: the
+database dumps (password hashes included), the blob bytes and the inner snapshot. Run one of them
+promptly. If you do neither, make sure no export is running and delete everything in
+`<state-dir>/scratch/` yourself (`rm -rf <state-dir>/scratch/*`; a directory in it that is not
+writable needs `chmod -R u+w` first). Both verbs leave the scratch directory of a running export
+alone.
 
 A process killed while it wrote the bundle may leave a file named `.<output>.<hex>.tmp` beside the
 output. It holds ciphertext only; delete it.
@@ -232,8 +243,11 @@ the time, the digests known by then and the recovery action, in two places:
   be shared, for example with whoever imports the bundle: it holds no secret, connection string, path,
   record or table name — the counts of tables, rows and objects, the digests, the barriers, and a
   refusal's code and reason (never its message).
-- **The environment's receipts**, in `runtime_control_receipts` (kind `export`), from the moment the
-  source is fenced; the `quiesce` the export runs is recorded under the same operation id:
+- **The environment's receipts**, in `runtime_control_receipts` (kind `export`), once you have
+  confirmed the downtime: the `PRECHECK` transition is written there then, followed by `QUIESCING`
+  and the rest, while the source may still be open. A precheck that refuses, or a downtime you do not
+  confirm, changes nothing at the source and is recorded in the local receipt only. The `quiesce` the
+  export runs is recorded under the same operation id:
 
   ```sql
   SELECT operation_kind, event, step, outcome, digest, detail, recorded_at

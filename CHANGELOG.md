@@ -638,7 +638,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read as, and the `rayspec resume --deployment <id> --fence-epoch <n>` that releases it, which
   refuses any other epoch (`RAY_FENCE_MISMATCH`). A second export while fenced reuses the fence at its
   epoch. SIGINT or SIGTERM stops at a safe point, ends `pg_dump`, removes the scratch data and reports
-  `RAY_INTERRUPTED` (exit 6) with the resume command; the next export removes what a killed one left.
+  `RAY_INTERRUPTED` (exit 6) with the resume command; the next export, or `rayspec resume`, removes
+  the plaintext a killed one left in the scratch directory and closes its receipt. An application
+  that loads any extension is refused before the fence (`unsupported-blob-adapter`), even with
+  `RAYSPEC_BLOB_ROOT` set, since an extension's blob backend would be used in place of the fs store.
   Every transition (`PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED`, `BLOCKED`) is recorded
   with its operation id, actor, fence epoch, time, digests and recovery action in a shareable local
   receipt (`<state-dir>/receipts/`, no secret, record or table name) and in the environment's

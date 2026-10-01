@@ -24,7 +24,10 @@
  *  6. SIGINT during the capture ends `pg_dump`, removes the scratch directory, keeps the fence and
  *     reports `RAY_INTERRUPTED` with the resume instruction (exit 6).
  *  7. `resume` releases the fence; writes are accepted again.
- *  8. Without role separation, on a stopped source attested with `--source-stopped`, the export
+ *  8. An export killed during the capture, then `resume` instead of another export: resume removes
+ *     the plaintext the killed export left in the scratch directory, closes its receipt with the
+ *     fence it left, and releases that fence.
+ *  9. Without role separation, on a stopped source attested with `--source-stopped`, the export
  *     succeeds and says which barrier held (`database-stopped-source`) and which did not apply.
  *
  * `pg_dump` and `pg_restore`: the host's when their major is the server's, else the pinned postgres
@@ -78,7 +81,7 @@ if (dbRequired && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARMS = 8;
+const ARMS = 9;
 
 const SUITE_DB = `rayspec_export_cli_${process.pid}`;
 const SYS_DB = `${SUITE_DB}_dbos_sys`;
@@ -301,6 +304,43 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
       const [row] = await sql.unsafe(`SELECT count(*)::int AS n FROM ${table}`);
       return (row as { n: number }).n;
     });
+  }
+
+  /** The environment's receipts of one export, in order. */
+  async function exportReceipts(
+    operationId: string,
+  ): Promise<{ event: string; step: string; outcome: string | null; digest: string | null }[]> {
+    return (await asAdmin((sql) =>
+      sql.unsafe(
+        `SELECT event, step, outcome, digest FROM runtime_control_receipts
+          WHERE operation_id = $1 AND operation_kind = 'export' ORDER BY id`,
+        [operationId],
+      ),
+    )) as unknown as {
+      event: string;
+      step: string;
+      outcome: string | null;
+      digest: string | null;
+    }[];
+  }
+
+  /** Start an export whose pg_dump holds until it is killed; resolves once the capture runs. */
+  async function exportHeldInCapture(
+    name: string,
+    output: string,
+  ): Promise<{ started: ReturnType<typeof start>; dumpPid: number }> {
+    const marker = join(toolsDir, `${name}.started`);
+    const release = join(toolsDir, `${name}.release`);
+    const holding = holdingPgDump(pgDump, toolsDir, marker, release);
+    const started = start(exportArgs(output), cliEnv(roleEnv(), { RAYSPEC_PG_DUMP: holding }));
+    const deadline = Date.now() + 120_000;
+    while (!existsSync(marker)) {
+      if (started.child.exitCode !== null || Date.now() > deadline) {
+        throw new Error(`the capture never started\n${(await started.done).stderr}`);
+      }
+      await pause(100);
+    }
+    return { started, dumpPid: Number(readFileSync(marker, 'utf8')) };
   }
 
   function http(path: string, init: RequestInit = {}): Promise<Response> {
@@ -532,6 +572,13 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     expect(existsSync(join(deployDir, 'no-barrier.ray'))).toBe(false);
     expect((await postNote('during the fence')).status).toBe(503);
     expect(readdirSync(join(state(), 'scratch'))).toEqual([]);
+    // Every receipt the environment took carries the application digest the precheck established,
+    // the refusal included.
+    const blockedRows = await exportReceipts(run.envelope.operationId as string);
+    expect(blockedRows.map((r) => r.step)).toEqual(['PRECHECK', 'QUIESCING', 'BLOCKED']);
+    const applicationDigest = blockedRows[0]?.digest;
+    expect(applicationDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(blockedRows.every((r) => r.digest === applicationDigest)).toBe(true);
 
     const wrong = await cli(
       ['resume', '--deployment', deploymentId(), '--fence-epoch', String(epoch - 1)],
@@ -774,6 +821,7 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
       expect(t.at).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/);
       expect(typeof t.fenceEpoch).toBe('number');
       expect(t.recovery.length).toBeGreaterThan(0);
+      expect(t.digests.applicationDigest, t.state).toBe(snapshot.applicationDigest);
     }
     expect((receipt.transitions as ParsedJson[]).at(-1)).toMatchObject({
       fenceEpoch: f.epoch,
@@ -812,6 +860,9 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
       ['outcome', 'EXPORTED', 'succeeded'],
     ]);
     expect(dbReceipts.filter((r) => r.kind === 'export').at(-1)?.digest).toBe(data.sha256);
+    expect(
+      dbReceipts.filter((r) => r.kind === 'export').every((r) => /^[a-f0-9]{64}$/.test(r.digest)),
+    ).toBe(true);
     // The quiesce the export ran is recorded under the same operation.
     expect(dbReceipts.some((r) => r.kind === 'runtime.quiesce' && r.event === 'intent')).toBe(true);
     armsRan += 1;
@@ -966,6 +1017,64 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     expect(again.envelope.data).toMatchObject({ released: false });
     armsRan += 1;
   }, 120_000);
+
+  it('resume after an export killed during the capture removes its plaintext, closes its receipt and releases its fence', async () => {
+    const before = await fence();
+    expect(before.state).toBe('open');
+    const output = join(deployDir, 'killed-then-resumed.ray');
+    const { started, dumpPid } = await exportHeldInCapture('resumed', output);
+    started.child.kill('SIGKILL');
+    const killed = await started.done;
+    expect(killed.leaked).toBe(0);
+    const gone = Date.now() + 10_000;
+    while (Date.now() < gone) {
+      try {
+        process.kill(dumpPid, 0);
+        await pause(100);
+      } catch {
+        break;
+      }
+    }
+    const epoch = before.epoch + 1;
+    expect(await fence()).toEqual({ state: 'fenced', epoch });
+    // The killed export's plaintext is still there: objects.bin holds the bytes of an upload.
+    const left = readdirSync(join(state(), 'scratch'));
+    const capture = left.find((e) => e.startsWith('rayspec-snapshot-'));
+    expect(capture).toBeDefined();
+    expect(
+      readFileSync(join(state(), 'scratch', capture!, 'objects.bin')).includes('bytes of up-1'),
+    ).toBe(true);
+    const killedId = /operationId: ([0-9a-f-]{36})/.exec(killed.stderr)?.[1];
+    expect(killedId).toBeDefined();
+
+    const resumed = await cli(
+      ['resume', '--deployment', deploymentId(), '--fence-epoch', String(epoch)],
+      cliEnv(roleEnv()),
+    );
+    expect(resumed.code, resumed.stderr).toBe(0);
+    expect(resumed.envelope.data).toMatchObject({ fenceEpoch: epoch, released: true });
+    expect(resumed.stderr).toContain(`interrupted export (${killedId})`);
+    expect(readdirSync(join(state(), 'scratch'))).toEqual([]);
+    expect(existsSync(output)).toBe(false);
+    const closed = JSON.parse(
+      readFileSync(join(state(), 'receipts', `export-${killedId}.json`), 'utf8'),
+    ) as ParsedJson;
+    expect(closed.outcome).toBe('blocked');
+    expect((closed.transitions as ParsedJson[]).at(-1)).toMatchObject({
+      state: 'BLOCKED',
+      interrupted: true,
+      closedBy: resumed.envelope.operationId,
+      fenceEpoch: epoch,
+      fenceState: 'fenced',
+      error: { code: 'RAY_INTERRUPTED' },
+    });
+    const rows = await exportReceipts(killedId!);
+    expect(rows.at(-1)).toMatchObject({ step: 'BLOCKED', outcome: 'failed' });
+    expect(rows.every((r) => /^[a-f0-9]{64}$/.test(r.digest ?? ''))).toBe(true);
+    expect(await fence()).toEqual({ state: 'open', epoch });
+    expect(await noteUntilAccepted('after the killed export was resumed')).toBe(201);
+    armsRan += 1;
+  }, 300_000);
 
   it('without role separation, exports a stopped source the operator attests, and says which barrier held', async () => {
     await stopServer();

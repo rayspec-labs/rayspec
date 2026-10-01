@@ -5,13 +5,30 @@
  * is read from the source, and the terminal prompt. Every envelope validates against the contract's
  * envelope schema. The database-backed suite (`export.db.test.ts`) runs the verbs end to end.
  */
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { schemaValidator } from '@rayspec/bundle-contract';
-import { isAgeX25519Recipient } from '@rayspec/server';
+import { inspectBundle } from '@rayspec/bundle';
+import { type ApplicationManifest, schemaValidator } from '@rayspec/bundle-contract';
+import {
+  EXPORT_LOCK_NAME,
+  ExportReceiptLog,
+  exportReceiptName,
+  isAgeX25519Recipient,
+  openStateDirectory,
+} from '@rayspec/server';
 import { generateX25519Identity, identityToRecipient } from 'age-encryption';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -22,6 +39,7 @@ import {
   parseExportArgs,
   runExport,
 } from './export.js';
+import { runPack } from './pack.js';
 import { RESUME_ARG_OPTIONS, RESUME_ERROR_CODES, runResume } from './resume.js';
 import { CONTRACT_ROOT } from './test-support/bundles.js';
 
@@ -42,7 +60,11 @@ const resumeVerb = verbs.find((v) => v.verb === 'rayspec resume')!;
 
 const dirs: string[] = [];
 afterAll(() => {
-  for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs) {
+    // A staged version directory is read-only.
+    spawnSync('chmod', ['-R', 'u+w', d]);
+    rmSync(d, { recursive: true, force: true });
+  }
 });
 function temp(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
@@ -288,6 +310,25 @@ describe('the checks before the source is read', () => {
     expect(outcome.envelope.errors[0]?.path).toBe('/confirm-quiesce');
   });
 
+  it('refuses --json without --confirm-quiesce even at a terminal, and asks nothing', async () => {
+    const output = new PassThrough();
+    let shown = '';
+    output.on('data', (c: Buffer) => {
+      shown += c.toString('utf8');
+    });
+    const outcome = await runExport(args({ '--confirm-quiesce': '<omit>' }), {
+      operationId: randomUUID(),
+      json: true,
+      env: {},
+      terminal: { input: new PassThrough(), output },
+      progress: () => {},
+    });
+    expect(valid(outcome.envelope), JSON.stringify(valid.errors)).toBe(true);
+    expect(first(outcome)).toBe('RAY_USAGE');
+    expect(outcome.envelope.errors[0]?.path).toBe('/confirm-quiesce');
+    expect(shown).toBe('');
+  });
+
   it('refuses without DATABASE_URL, reading no .env file', async () => {
     const outcome = await run(args());
     expect(first(outcome)).toBe('RAY_USAGE');
@@ -371,5 +412,119 @@ describe('the confirmation at the terminal', () => {
     );
     controller.abort();
     await expect(asked).rejects.toThrow();
+  });
+});
+
+// ─── the deployed application and its blobs ──────────────────────────────────────────────────────
+
+/**
+ * A state directory whose active version is a packed application, with or without an extension.
+ * The extension provides nothing; that it is loaded at all is what the export cannot see past.
+ */
+async function deployedStateDir(withExtension: boolean): Promise<string> {
+  const source = temp('rayspec-export-app-');
+  const files: Record<string, string> = {
+    'rayspec.yaml':
+      "version: '1.0'\nmetadata:\n  name: probe\n  id: probe-app\n  version: '1.0.0'\n" +
+      (withExtension ? 'extensions:\n  - { id: ext, module: ./ext, version: 1.0.0 }\n' : ''),
+    'package.json': JSON.stringify({ name: 'probe', private: true, type: 'module' }),
+  };
+  if (withExtension) {
+    files['ext/package.json'] = JSON.stringify({ name: 'ext', version: '1.0.0', type: 'module' });
+    files['ext/index.js'] = 'export default {};\n';
+  }
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(source, path, '..'), { recursive: true });
+    writeFileSync(join(source, path), content);
+  }
+  const bundle = join(source, 'app.ray');
+  const packed = await runPack(['--spec', join(source, 'rayspec.yaml'), '--output', bundle], {
+    operationId: randomUUID(),
+    cliVersion: '1.8.0',
+  });
+  expect(packed.envelope.ok, JSON.stringify(packed.envelope.errors)).toBe(true);
+  const inspected = await inspectBundle(bundle);
+  if (!inspected.ok) throw new Error(JSON.stringify(inspected.errors));
+  const state = stateDirWith();
+  const dir = await openStateDirectory(state, { create: false });
+  if (dir === null) throw new Error('no state directory');
+  const sha256 = inspected.value.archiveSha256;
+  await dir.stageVersion(bundle, sha256, inspected.value.manifest as ApplicationManifest);
+  await dir.writeActive({
+    bundleSha256: sha256,
+    activatedAt: '2026-10-01T10:00:00Z',
+    environmentRevision: 1,
+  });
+  return state;
+}
+
+describe('the blob store an export reads', () => {
+  const unreachable = { DATABASE_URL: 'postgresql://nobody@127.0.0.1:1/none' };
+
+  it('refuses an application that loads an extension even with RAYSPEC_BLOB_ROOT set, before the source is read', async () => {
+    const state = await deployedStateDir(true);
+    for (const blobRoot of [{ RAYSPEC_BLOB_ROOT: temp('rayspec-blobs-') }, {}]) {
+      const outcome = await run(args({}, state), { ...unreachable, ...blobRoot });
+      expect(first(outcome)).toBe('RAY_EXTERNAL_STATE_UNSUPPORTED/unsupported-blob-adapter');
+      // Refused before the scratch space was taken or the database was opened.
+      expect(existsSync(join(state, 'scratch'))).toBe(false);
+    }
+  }, 60_000);
+
+  it('reads the fs blob root of an application without an extension', async () => {
+    const state = await deployedStateDir(false);
+    const outcome = await run(args({}, state), {
+      ...unreachable,
+      RAYSPEC_BLOB_ROOT: temp('rayspec-blobs-'),
+    });
+    // Past the blob decision, the unreachable database is what stops it.
+    expect(first(outcome)).toBe('RAY_INFRA_UNAVAILABLE');
+  }, 60_000);
+});
+
+// ─── resume after a killed export ────────────────────────────────────────────────────────────────
+
+describe('resume after an export that was killed', () => {
+  it('removes the plaintext the killed export left and closes its receipt, even when it is refused afterwards', async () => {
+    const state = stateDirWith();
+    const dir = await openStateDirectory(state, { create: false });
+    if (dir === null) throw new Error('no state directory');
+    const killed = randomUUID();
+    const log = ExportReceiptLog.start(dir, killed, {
+      deploymentId: DEPLOYMENT,
+      recipient,
+      runHistoryPolicy: 'included',
+      sourceStopped: false,
+      quiesceDeadlineSeconds: 300,
+    });
+    await log.transition('PRECHECK', { fenceEpoch: 2, fenceState: 'open', recovery: 'none' });
+    await log.transition('QUIESCING', { fenceEpoch: 2, fenceState: 'open', recovery: 'r' });
+    const scratch = await dir.scratchDirectory();
+    const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
+      encoding: 'utf8',
+    });
+    writeFileSync(
+      join(scratch, EXPORT_LOCK_NAME),
+      JSON.stringify({ pid: Number(dead.stdout), operationId: killed }),
+    );
+    mkdirSync(join(scratch, 'rayspec-snapshot-left'), { mode: 0o700 });
+    writeFileSync(join(scratch, 'rayspec-snapshot-left', 'objects.bin'), 'bytes of an upload');
+
+    const lines: string[] = [];
+    const resumer = randomUUID();
+    const outcome = await runResume(
+      ['--deployment', DEPLOYMENT, '--fence-epoch', '3', '--state-dir', state],
+      { operationId: resumer, json: true, env: {}, progress: (line) => lines.push(line) },
+    );
+    expect(valid(outcome.envelope), JSON.stringify(valid.errors)).toBe(true);
+    // No DATABASE_URL: the fence is not touched, but the plaintext is gone already.
+    expect(first(outcome)).toBe('RAY_USAGE');
+    expect(readdirSync(scratch)).toEqual([]);
+    expect(lines.join('\n')).toContain(`interrupted export (${killed})`);
+    const receipt = JSON.parse(
+      readFileSync(join(state, 'receipts', `${exportReceiptName(killed)}.json`), 'utf8'),
+    ) as { outcome: string; transitions: { state: string; closedBy?: string }[] };
+    expect(receipt.outcome).toBe('blocked');
+    expect(receipt.transitions.at(-1)).toMatchObject({ state: 'BLOCKED', closedBy: resumer });
   });
 });

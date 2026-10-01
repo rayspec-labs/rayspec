@@ -10,9 +10,10 @@
  * THE SEQUENCE, each step a transition of the migration state machine recorded in the receipts
  * (`export-receipts.ts` in @rayspec/server):
  *
- *   PRECHECK   arguments, the state directory, the configuration, the scratch lock, then the
- *              read-only preflight of the source (`preflightSnapshot`). A refusal here changes
- *              nothing at the source.
+ *   PRECHECK   arguments, the state directory, the configuration, the blob source (an application
+ *              that loads an extension is refused), the scratch lock, then the read-only preflight
+ *              of the source (`preflightSnapshot`), recorded with the application digest it
+ *              established. A refusal here changes nothing at the source.
  *              Then the operator confirms the downtime: `--confirm-quiesce`, or an answer at the
  *              terminal to the plan printed on stderr.
  *   QUIESCING  `quiesce()` takes the source fence (or finds the one an earlier export took, at its
@@ -33,7 +34,8 @@
  * SIGINT and SIGTERM stop the export at its next safe point (a running `pg_dump` is ended): the
  * scratch directory is removed, any fence it took stays, and the envelope reports `RAY_INTERRUPTED`
  * with the resume instruction. A process killed outright leaves its scratch directory; the next
- * export removes it before anything else and closes the killed export's receipt.
+ * export, or `rayspec resume`, removes it before anything else and closes the killed export's
+ * receipt.
  *
  * CONFIGURATION comes from the explicit process environment only, never a `.env` file:
  * `DATABASE_URL` (or `_FILE`), `RAYSPEC_MIGRATION_DATABASE_URL` (role separation),
@@ -61,6 +63,7 @@ import {
 import type { Db } from '@rayspec/db';
 import type {
   CaptureBarrier,
+  ExportDigests,
   ExportReceiptLog,
   ExportScratch,
   ExportSnapshotOptions,
@@ -322,23 +325,37 @@ async function readFence(db: Db): Promise<{ epoch: number; state: 'open' | 'fenc
   }
 }
 
-/** Where the blobs are, when `RAYSPEC_BLOB_ROOT` is not set. */
-async function blobSourceWithoutRoot(
+/**
+ * Where the blobs of the active version are, decided the way the runtime decides it: a blob backend
+ * an extension provides comes before `RAYSPEC_BLOB_ROOT`, so an application that loads any extension
+ * is `unsupported` whether or not the root is set (which extension provides one is known only by
+ * running its code). Otherwise the fs store at `blobRoot`, or none.
+ */
+async function blobSourceOf(
   server: Server,
   stateDir: StateDirectory,
   env: NodeJS.ProcessEnv,
+  blobRoot: string | undefined,
 ): Promise<SnapshotBlobSource> {
+  const fallback: SnapshotBlobSource =
+    blobRoot !== undefined ? { kind: 'fs', root: resolve(blobRoot) } : { kind: 'none' };
   const active = await stateDir.readActive().catch(() => null);
-  if (active === null) return { kind: 'none' };
+  if (active === null) return fallback;
   const root = stateDir.versionPath(active.bundleSha256);
   const manifestBytes = await readFile(join(root, 'ray.json')).catch(() => null);
   const validated = manifestBytes === null ? null : validateManifest(manifestBytes);
   if (validated === null || !validated.ok || validated.value.kind !== 'application') {
     // The preflight refuses this version directory with its own finding.
-    return { kind: 'none' };
+    return fallback;
   }
   const specPath = join(root, ...validated.value.spec.split('/'));
   const specText = await readFile(specPath, 'utf8').catch(() => '');
+  const { parseSpec } = await import('@rayspec/spec');
+  const parsed = parseSpec(specText);
+  if (parsed.ok && parsed.value.extensions.length > 0) {
+    return { kind: 'unsupported', name: 'a blob backend an extension may provide' };
+  }
+  if (blobRoot !== undefined) return fallback;
   const report = await server.checkBootEnv(specPath, specText, { ...env, RAYSPEC_BLOB_ROOT: '' });
   if (report.required.some((r) => r.name === 'RAYSPEC_BLOB_ROOT')) {
     refuse(
@@ -347,12 +364,7 @@ async function blobSourceWithoutRoot(
         'root the deployment serves from',
     );
   }
-  const { parseSpec } = await import('@rayspec/spec');
-  const parsed = parseSpec(specText);
-  if (parsed.ok && parsed.value.extensions.length > 0) {
-    return { kind: 'unsupported', name: 'a blob backend an extension may provide' };
-  }
-  return { kind: 'none' };
+  return fallback;
 }
 
 function userOf(url: string): string {
@@ -409,6 +421,8 @@ export async function runExport(
   let parsed: Parsed | null = null;
   /** The fence this export holds, once quiesce has taken or found it. */
   let fenced: { epoch: number } | null = null;
+  /** The digests established so far; every transition from the precheck's end on carries them. */
+  let known: ExportDigests = {};
 
   const recoveryFor = (deploymentId: string): string =>
     fenced === null
@@ -435,6 +449,7 @@ export async function runExport(
         .transition('BLOCKED', {
           fenceEpoch: fence?.epoch ?? fenced?.epoch ?? null,
           fenceState: fence?.state ?? (fenced === null ? null : 'fenced'),
+          digests: known,
           recovery: recoveryFor(id),
           ...(errors[0] === undefined ? {} : { error: errors[0] }),
         })
@@ -559,10 +574,16 @@ export async function runExport(
     if (pgDump !== undefined && !pgDump.startsWith('/')) {
       refuse('RAY_USAGE', 'RAYSPEC_PG_DUMP must be an absolute path to pg_dump');
     }
-    const blob: SnapshotBlobSource =
-      config.blobRoot !== undefined
-        ? { kind: 'fs', root: resolve(config.blobRoot) }
-        : await blobSourceWithoutRoot(server, dir, env);
+    const blob = await blobSourceOf(server, dir, env, config.blobRoot);
+    if (blob.kind === 'unsupported') {
+      refuse(
+        'RAY_EXTERNAL_STATE_UNSUPPORTED',
+        'the deployed application loads an extension, and an extension may keep the blobs in a ' +
+          'backend of its own, which the runtime prefers over RAYSPEC_BLOB_ROOT; an export reads ' +
+          'the fs blob store only',
+        { reason: 'unsupported-blob-adapter' },
+      );
+    }
     safePoint();
 
     // The scratch space, held for this export alone; what a killed export left there is removed.
@@ -604,11 +625,6 @@ export async function runExport(
         'the environment database could not be read; check that it is reachable and retry',
       );
     }
-    await receipts.transition('PRECHECK', {
-      fenceEpoch: before.epoch,
-      fenceState: before.state,
-      recovery: 'nothing at the source changes until the operator confirms the downtime',
-    });
     const source: Omit<ExportSnapshotOptions, 'fenceEpoch' | 'recipient' | 'output'> = {
       db: control,
       databaseUrl: controlUrl,
@@ -633,6 +649,15 @@ export async function runExport(
     };
     const preflight = await server.preflightSnapshot(source);
     warnings = [...preflight.warnings];
+    // The precheck's transition is recorded once it has finished, with the application digest it
+    // established.
+    if (preflight.facts !== null) known = { applicationDigest: preflight.facts.applicationDigest };
+    await receipts.transition('PRECHECK', {
+      fenceEpoch: before.epoch,
+      fenceState: before.state,
+      digests: known,
+      recovery: 'nothing at the source changes until the operator confirms the downtime',
+    });
     if (preflight.blockers.length > 0 || preflight.facts === null) {
       return await blocked(
         preflight.blockers.length > 0
@@ -675,7 +700,8 @@ export async function runExport(
     }
     safePoint();
 
-    // QUIESCING: from here on the environment's receipts record the export too.
+    // QUIESCING: from the confirmation on the environment's receipts record the export too, the
+    // precheck's transition first.
     await receipts.attach(control);
     const predicted = before.state === 'fenced' ? before.epoch : before.epoch + 1;
     await receipts.transition('QUIESCING', {

@@ -1440,12 +1440,14 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
   the operation id, progress lines and, without `--json`, a summary with the counts and the path of
   the local receipt.
 - **Receipts.** `<state-dir>/receipts/export-<operationId>.json` (mode 0600, shareable: no secret,
-  path, record or table name) and, from the fence on, rows of `runtime_control_receipts` of kind
-  `export` — one per transition `PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED` or
+  path, record or table name) and, once the downtime is confirmed (the `PRECHECK` transition is
+  written then, before the fence is taken), rows of `runtime_control_receipts` of kind `export` — one
+  per transition `PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED` or
   `BLOCKED`, each with the fence epoch, time, digests and recovery action.
 - **Interruption.** SIGINT or SIGTERM stops the export at its next safe point, ends a running
   `pg_dump`, removes the scratch directory, keeps the fence and reports `RAY_INTERRUPTED` (exit 6). A
-  process killed outright leaves its scratch directory, which the next export removes first.
+  process killed outright leaves its scratch directory, plaintext included, until the next `export`
+  or `resume` of the deployment removes it first.
 - **Codes.** The contract's list for the verb — `RAY_USAGE`, `RAY_BINDINGS_FILE_INSECURE`,
   `RAY_OUTPUT_EXISTS`, `RAY_MULTI_TENANT_UNSUPPORTED`, `RAY_OWNER_RECOVERY_REQUIRED`,
   `RAY_EXTERNAL_STATE_UNSUPPORTED`, `RAY_SCHEMA_DRIFT`, `RAY_SOURCE_NOT_QUIESCENT`,
@@ -1473,6 +1475,11 @@ within a second.
 - **Flags:** `--deployment <id>` (required; checked against the state directory and the database,
   else `RAY_USAGE`), `--fence-epoch <n>` (required; the epoch the export reported), `--state-dir`.
 - **Environment:** as for `export`; only the database connections are used.
+- **After a killed export.** Before anything else, `resume` removes what an export killed outright
+  left in `<state-dir>/scratch/` (its plaintext capture), by the rule `export` applies: only when no
+  live process holds the scratch lock, so a running export is left alone. It closes the killed
+  export's receipt as interrupted, with the fence as the environment records it, and says on stderr
+  what it removed. This happens even when the resume itself is refused.
 - **Output:** the result envelope (operation `resume`) with
   `data: { deploymentId, fenceEpoch, released, environmentRevision }`. `released` is `false` when the
   fence was already open at that epoch; nothing changes then.

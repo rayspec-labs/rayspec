@@ -9,6 +9,12 @@
  * writes the barrier revoked, and every runtime process restarts its producers within a second.
  * Resuming a fence that is already open at that epoch changes nothing and says so (`released: false`).
  *
+ * A KILLED EXPORT leaves its plaintext capture in `<state-dir>/scratch/`. Before anything else,
+ * resume removes it by the rule the next export would apply (only when no live process holds the
+ * export's scratch lock; a running export is left alone) and closes the killed export's receipt, so
+ * bringing the source back never keeps a plaintext snapshot on disk. What it removed is reported on
+ * stderr.
+ *
  * The configuration comes from the explicit process environment only, as for `export`. One `resume`
  * envelope on stdout, with or without `--json`.
  */
@@ -53,6 +59,8 @@ export interface ResumeOptions {
   operationId: string;
   json: boolean;
   env?: NodeJS.ProcessEnv;
+  /** Where progress lines go. Default: stderr. */
+  progress?: (line: string) => void;
 }
 
 export interface ResumeOutcome {
@@ -117,10 +125,21 @@ export async function runResume(
   options: ResumeOptions,
 ): Promise<ResumeOutcome> {
   const env = options.env ?? process.env;
+  const progress = options.progress ?? ((line: string) => process.stderr.write(`${line}\n`));
   const server = await import('@rayspec/server');
   server.installOutputRedaction();
   let control: Db | null = null;
   let workflowControl: Db | null = null;
+  /** The state directory and the killed export whose receipt is still to be closed. */
+  let interrupted: { dir: StateDirectory; operationId: string } | null = null;
+  const closeInterrupted = async (db: Db | null): Promise<void> => {
+    if (interrupted === null) return;
+    const { dir, operationId } = interrupted;
+    interrupted = null;
+    await server
+      .closeInterruptedExport(dir, operationId, options.operationId, db)
+      .catch(() => null);
+  };
   const answer = (data: ResumeCliData | null, errors: BundleError[]): ResumeOutcome => {
     const result = envelope('resume', options.operationId, data, errors);
     const first = result.errors[0];
@@ -163,6 +182,29 @@ export async function runResume(
         { path: '/deployment' },
       );
     }
+    const dir = stateDir;
+    if (dir === null) refuse('RAY_USAGE', 'there is no deployment state directory at --state-dir');
+
+    // What a killed export left behind, its plaintext included, goes first.
+    let cleared: Awaited<ReturnType<typeof server.clearInterruptedExportScratch>>;
+    try {
+      cleared = await server.clearInterruptedExportScratch(dir, options.operationId);
+    } catch (err) {
+      if (err instanceof server.StateDirectoryError) throw new Refused([err.error]);
+      throw err;
+    }
+    if (cleared.exportRunning) {
+      progress('an export of this deployment is running; its scratch directory was left alone');
+    } else if (cleared.removedEntries > 0 || cleared.cleanedUpAfter !== null) {
+      progress(
+        `removed what an interrupted export${cleared.cleanedUpAfter === null ? '' : ` (${cleared.cleanedUpAfter})`} ` +
+          'left in the scratch directory',
+      );
+    }
+    if (cleared.cleanedUpAfter !== null) {
+      interrupted = { dir, operationId: cleared.cleanedUpAfter };
+    }
+
     let config: ReturnType<typeof server.loadExportSourceConfig>;
     try {
       config = server.loadExportSourceConfig(env, () => {});
@@ -202,6 +244,7 @@ export async function runResume(
         { path: '/deployment' },
       );
     }
+    await closeInterrupted(control);
     const rc = server.createRuntimeControl({
       db: control,
       ...(runtimeRole !== undefined && runtimeRole !== '' ? { runtimeRole } : {}),
@@ -227,6 +270,8 @@ export async function runResume(
     if (err instanceof Refused) return answer(null, err.errors);
     throw err;
   } finally {
+    // A refusal before the environment was reached still closes the killed export's local receipt.
+    await closeInterrupted(null);
     await workflowControl?.$client.end().catch(() => {});
     await control?.$client.end().catch(() => {});
   }
