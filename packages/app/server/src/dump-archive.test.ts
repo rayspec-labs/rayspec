@@ -158,7 +158,7 @@ describe('readDumpToc', () => {
     }
   });
 
-  it('refuses an implausible entry count, an entry id out of range, a table with OIDs, a bad data offset', async () => {
+  it('refuses an implausible entry count, an entry id out of range, a table with OIDs, an overlong string, a bad data offset', async () => {
     const bytes = newDump(ENTRIES);
     const toc = await readDumpToc(reader(bytes), bytes.length);
     const count = Buffer.from(bytes);
@@ -178,6 +178,14 @@ describe('readDumpToc', () => {
       oids.subarray(at + written.length),
     ]);
     expect(await refusal(withOids)).toMatch(/OIDs/);
+    const long = newDump([entry({ dumpId: 1, desc: 'TABLE', tag: 't' })]);
+    const tag = Buffer.concat([Buffer.from([0, 1, 0, 0, 0]), Buffer.from('t')]);
+    const tagAt = long.indexOf(tag);
+    expect(tagAt).toBeGreaterThan(0);
+    const huge = Buffer.from(long);
+    // The tag claims 32 MiB: refused before it is read, although the archive ends long before.
+    huge.writeUInt32LE(32 * 1024 * 1024, tagAt + 1);
+    expect(await refusal(huge)).toMatch(/longer than an import reads/);
     const offset = newDump([entry({ dumpId: 1, desc: 'TABLE', tag: 't' })]);
     const badOffset = Buffer.from(offset);
     badOffset[badOffset.length - 9] = 7;

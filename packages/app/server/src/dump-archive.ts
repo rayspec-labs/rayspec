@@ -30,6 +30,12 @@ export const MAX_TOC_ENTRIES = 200_000;
 /** The most dependencies one entry may list. */
 const MAX_DEPENDENCIES = 100_000;
 
+/**
+ * The longest single string of a table of contents: a statement, a name. A real one is a few
+ * kilobytes at most; a longer one is refused before it is read into memory.
+ */
+export const MAX_TOC_STRING_BYTES = 16 * 1024 * 1024;
+
 function version(major: number, minor: number, revision: number): number {
   return (major * 256 + minor) * 256 + revision;
 }
@@ -179,6 +185,11 @@ export async function readDumpToc(read: DumpByteReader, size: number): Promise<D
   const readStr = async (): Promise<string | null> => {
     const length = await readInt();
     if (length < 0) return null;
+    if (length > MAX_TOC_STRING_BYTES) {
+      throw new DumpArchiveError(
+        'the dump holds a table-of-contents string longer than an import reads',
+      );
+    }
     return (await c.bytes(length)).toString('utf8');
   };
   const readOffset = async (): Promise<number> => {
