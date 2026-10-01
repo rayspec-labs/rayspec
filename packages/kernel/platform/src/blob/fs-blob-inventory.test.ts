@@ -20,7 +20,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { BlobInventoryError, listFsBlobs } from './fs-blob-inventory.js';
+import { BlobInventoryError, listFsBlobs, MAX_SNAPSHOT_KEY_LENGTH } from './fs-blob-inventory.js';
 import { makeFsBlobStoreFactory } from './fs-blob-store.js';
 
 const TENANT_A = '0000000a-0000-4000-8000-000000000000';
@@ -158,7 +158,8 @@ describe('listFsBlobs', () => {
     async () => {
       const root = await seeded();
       const segment = 'k'.repeat(200);
-      const deep = [segment, segment, segment, segment, segment, 'tail'].join('/');
+      const deep = [...Array.from({ length: 6 }, () => segment), 'tail'].join('/');
+      expect(deep.length).toBeGreaterThan(MAX_SNAPSHOT_KEY_LENGTH);
       await makeFsBlobStoreFactory(root)(TENANT_B).put(deep, new Uint8Array([1]));
       expect((await refusal(root)).kind).toBe('unrepresentable-key');
     },
