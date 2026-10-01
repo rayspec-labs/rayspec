@@ -64,8 +64,10 @@ import {
   isTerminalRunStatus,
   type JobPrincipal,
   markRunCancelled,
+  RunAdmissionRefusedError,
   RunBoundTimeoutError,
   RunCancelledError,
+  type RunEndPhase,
   type RunHeaderStatus,
   recordRunCancelled,
   rehydrateConversation,
@@ -348,6 +350,28 @@ export async function executeAgentRun(
   // the runId is run-core-assigned (undefined → randomUUID inside runAgent).
   const freshRunId = idemKey ? reservedRunId : undefined;
 
+  // IN-REQUEST ADMISSION (`RAYSPEC_AGENT_SYNC_RUNS_MAX`): a run past the bound is refused before it
+  // starts, and the reservation this call won is given back (nothing ran, so a same-key retry may run
+  // it). The slot is held until the RUN settles — not until this request returns, which the held-
+  // request timeout below can make happen first — so the bound counts the runs really executing.
+  let releaseSlot: () => void = () => {};
+  if (deps.inRequestRunGate) {
+    try {
+      releaseSlot = deps.inRequestRunGate.acquire();
+    } catch (err) {
+      if (!(err instanceof RunAdmissionRefusedError)) throw err;
+      if (idemKey) {
+        await deps.idempotency.release(tenantId, RUN_IDEM_SCOPE, idemKey).catch(() => {});
+      }
+      throw withRetryAfter(c, admissionRefusal(err));
+    }
+  }
+  /** The run, with its in-request slot given back once it settles either way. */
+  const holdingSlot = (run: Promise<RunResult>): Promise<RunResult> => {
+    run.then(releaseSlot, releaseSlot);
+    return run;
+  };
+
   if (wantsSse) {
     // SSE: stream NeutralEvents as they are produced. run-core's pipeline PERSISTS each event to
     // run_events BEFORE flushing it to this sink (persist-before-flush), so a reconnect resumes
@@ -362,17 +386,19 @@ export async function executeAgentRun(
     return streamSSE(c, async (stream) => {
       try {
         const sseResult = await withTimeout(
-          runAgent(tdb, entry.backend, spec, {
-            tools: runTools,
-            runId: freshRunId,
-            ...persistOpts,
-            onEvent: async (event) => {
-              // 1:1 NeutralEvent → SSE frame, fail-closed: a frame we cannot faithfully
-              // serialize is OMITTED (never fabricated). seq is the resume cursor (Last-Event-ID).
-              const frame = toSseFrame(event);
-              if (frame) await stream.writeSSE(frame);
-            },
-          }),
+          holdingSlot(
+            runAgent(tdb, entry.backend, spec, {
+              tools: runTools,
+              runId: freshRunId,
+              ...persistOpts,
+              onEvent: async (event) => {
+                // 1:1 NeutralEvent → SSE frame, fail-closed: a frame we cannot faithfully
+                // serialize is OMITTED (never fabricated). seq is the resume cursor (Last-Event-ID).
+                const frame = toSseFrame(event);
+                if (frame) await stream.writeSSE(frame);
+              },
+            }),
+          ),
           timeoutMs,
         );
         // HTTP1-IDEMP-1: mirror the JSON path's transient-release on a RETURNED status:'error'. An
@@ -450,7 +476,9 @@ export async function executeAgentRun(
   let result: RunResult;
   try {
     result = await withTimeout(
-      runAgent(tdb, entry.backend, spec, { tools: runTools, runId: freshRunId, ...persistOpts }),
+      holdingSlot(
+        runAgent(tdb, entry.backend, spec, { tools: runTools, runId: freshRunId, ...persistOpts }),
+      ),
       timeoutMs,
     );
   } catch (err) {
@@ -652,27 +680,20 @@ async function enqueueAgentRun(
 
   // Create the run header, then enqueue the neutral RunJob onto the durable worker (the durable
   // workflowID = runId). The worker resolves agentId → { backend, spec, tools } at fire time and runs
-  // the EXISTING runAgent off-request inside forTenant(db, tenantId).transaction(). The reservation is
-  // KEPT (in-flight).
+  // the EXISTING runAgent off-request. The reservation is KEPT (in-flight).
   //
   // The header is written BEFORE the enqueue so that — when it lands — the runId this call hands back
   // RESOLVES on GET /v1/runs/{id} and on the GET /v1/runs/{id}/events path the 202 advertises for the
-  // WHOLE run, instead of 404ing until the worker finishes it — and so no worker can already hold this
-  // runId's header row inside its run transaction when the write runs (the job does not exist yet).
-  // Tenant-scoped from the SERVER-DERIVED tenantId through the TenantDb chokepoint — the same tenant
-  // the job runs under. `headerCreated` records whether THIS call created the row, so the failure path
-  // below can remove it again for a job that provably never existed.
+  // WHOLE run, instead of 404ing until the worker starts it. Tenant-scoped from the SERVER-DERIVED
+  // tenantId through the TenantDb chokepoint — the same tenant the job runs under. `headerCreated`
+  // records whether THIS call created the row, so the failure path below can remove it again for a
+  // job that provably never existed.
   //
   // BEST-EFFORT: this write is ADVISORY, so it gets its OWN try/catch — a failing header write must
-  // not turn an enqueue the caller could have had into a 5xx. What a failure costs is NOT cosmetic:
-  // a run that RETURNS re-persists its header either way (run-core's `markRunHeaderRunning` INSERTs
-  // when none exists), but the durable worker runs the agent inside ONE transaction
-  // (`tdb.transaction(...)`, packages/workflow/durable-dbos/src/executor.ts), so a run that THROWS
-  // rolls that write back and leaves NO header at all. A failure here therefore means this runId 404s
-  // on GET /v1/runs/{id} and on the advertised events path for the whole run — and for good, if the
-  // run ends by throwing (a timeout, an exception out of the backend). The failure is LOGGED in the
-  // operational `console.error('[api-auth] …')` style rather than swallowed, so an operator sees that
-  // it happened.
+  // not turn an enqueue the caller could have had into a 5xx. What a failure costs: the runId 404s on
+  // GET /v1/runs/{id} until the worker starts the run (run-core's `markRunHeaderRunning` INSERTs a
+  // header when none exists). The failure is LOGGED in the operational `console.error('[api-auth] …')`
+  // style rather than swallowed, so an operator sees that it happened.
   const headerDb = forTenant(deps.db, inp.tenantId);
   let headerCreated = false;
   try {
@@ -697,6 +718,15 @@ async function enqueueAgentRun(
       ...(inp.requestedBy !== undefined ? { requestedBy: inp.requestedBy } : {}),
     });
   } catch (err) {
+    // QUEUE ADMISSION refused the run: the engine recorded nothing for it, so undo what this call
+    // recorded — the reservation and the header — and refuse with 429. Nothing was queued.
+    if (err instanceof RunAdmissionRefusedError) {
+      if (inp.idemKey) {
+        await deps.idempotency.release(inp.tenantId, RUN_IDEM_SCOPE, inp.idemKey).catch(() => {});
+      }
+      if (headerCreated) await deleteEnqueuedRunHeader(headerDb, runId).catch(() => {});
+      throw admissionRefusal(err);
+    }
     // The enqueue THREW — but the throw does NOT prove the job did not start. The
     // durable engine persists the workflow status BEFORE `enqueue` resolves (DBOS `startWorkflow`
     // writes the row first), so a throw AFTER that persist means the workflow WILL still run on the
@@ -741,7 +771,7 @@ async function enqueueAsyncRun(
   deps: AppDeps,
   inp: AsyncEnqueueInput,
 ): Promise<Response> {
-  const { runId, deduped } = await enqueueAgentRun(deps, {
+  const enqueued = enqueueAgentRun(deps, {
     tenantId: inp.tenantId,
     agentId: inp.agentId,
     input: inp.input,
@@ -752,6 +782,10 @@ async function enqueueAsyncRun(
     reservedRunId: inp.reservedRunId,
     ...(inp.persistTo !== undefined ? { persistTo: inp.persistTo } : {}),
     ...(inp.requestedBy !== undefined ? { requestedBy: inp.requestedBy } : {}),
+  });
+  const { runId, deduped } = await enqueued.catch((err: unknown) => {
+    // A queue-admission refusal carries its retry advice as a Retry-After header too.
+    throw err instanceof ApiError ? withRetryAfter(c, err) : err;
   });
   // A same-key dedupe → the loser body (omits `status`: the prior run may already be COMPLETED/FAILED,
   // so echoing 'enqueued' would be a lie — the caller reads the real state from GET /v1/runs/{id}). A
@@ -1151,6 +1185,11 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
       // written, signalled or asked of the engine. Cancelling is a mutation, so this must precede it.
       const ownership = await tdb.runHeaderOwnership(runId);
       if (ownership !== 'owned') throw new ApiError('NOT_FOUND', 'Not found.');
+      // What the run's provider call can be said to have seen, from where the run stands now: a run
+      // still `enqueued` has called nothing; a run `running` may be in its call, so what happened to
+      // the call is unknown HERE — the side executing it records what it observed when it ends.
+      const phase: RunEndPhase =
+        (await readRunHeaderStatus(tdb, runId)) === 'enqueued' ? 'before-call' : 'outcome-unknown';
 
       // The MARKER — the durable record a dispatch (fresh or a recovery re-dispatch) consults. Written
       // before anything is signalled, so a process that dies mid-cancel still leaves a run that no
@@ -1178,11 +1217,10 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
       }
 
       // The TERMINAL OUTCOME — the run made terminal with the neutral `cancelled` class, exactly the way
-      // every other outcome reaches GET /v1/runs/{id}. LAST, and bounded: it is the only step that
-      // touches the run's own header row, which an executing run's transaction holds. `cancelled:false`
-      // says this call did not move the header — the run had already finished and keeps its outcome, or
-      // it is still executing and records the cancellation itself when it ends.
-      const outcome = await recordRunCancelled(tdb, runId);
+      // every other outcome reaches GET /v1/runs/{id}, with what can be said of its provider call. LAST,
+      // and bounded. `cancelled:false` says this call did not move the header — the run had already
+      // finished and keeps its outcome, or its own side recorded the cancellation first.
+      const outcome = await recordRunCancelled(tdb, runId, { phase });
 
       return c.json(
         { runId, cancelled: outcome.cancelled, status: outcome.status, signalled },
@@ -1195,6 +1233,31 @@ function registerRunCancelRoute(app: OpenAPIHono<AppEnv>, deps: AppDeps): void {
 // ---------------------------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * The 429 a queue-admission refusal answers with: RATE_LIMITED, the refusal's own message (it names
+ * the bound and the variable that sets it, never another tenant's runs), and the retry advice.
+ */
+function admissionRefusal(err: RunAdmissionRefusedError): ApiError {
+  return new ApiError('RATE_LIMITED', err.message, {
+    retryAfterMs: err.retryAfterMs,
+    reason: 'queue-full',
+    scope: err.scope,
+    limit: err.limit,
+  });
+}
+
+/**
+ * Put a RATE_LIMITED error's retry advice (`details.retryAfterMs`) on the response as `Retry-After`,
+ * in whole seconds rounded up. Any other error is returned unchanged.
+ */
+function withRetryAfter(c: Context<AppEnv>, err: ApiError): ApiError {
+  const ms = (err.details as { retryAfterMs?: unknown } | undefined)?.retryAfterMs;
+  if (err.code === 'RATE_LIMITED' && typeof ms === 'number' && Number.isFinite(ms) && ms > 0) {
+    c.header('Retry-After', String(Math.ceil(ms / 1000)));
+  }
+  return err;
+}
 
 /**
  * The message a streamed run's terminal `error` frame carries for a thrown failure — fixed per class,

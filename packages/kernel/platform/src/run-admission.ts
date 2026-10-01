@@ -48,3 +48,35 @@ export function runAdmissionRefusedMessage(scope: RunAdmissionScope, limit: numb
       );
   }
 }
+
+/**
+ * The bound on runs one process holds IN-REQUEST at once (`RAYSPEC_AGENT_SYNC_RUNS_MAX`). A slot is
+ * taken before the run starts and given back when the run itself settles — not when the request
+ * returns, which a held-request timeout can make happen first — so the bound counts the runs that are
+ * really executing.
+ */
+export class InRequestRunGate {
+  readonly max: number;
+  #active = 0;
+  constructor(max: number) {
+    this.max = max;
+  }
+  /** How many runs hold a slot now. */
+  get active(): number {
+    return this.#active;
+  }
+  /**
+   * Take a slot, or refuse with {@link RunAdmissionRefusedError} when none is free. Returns the
+   * release, which is idempotent.
+   */
+  acquire(): () => void {
+    if (this.#active >= this.max) throw new RunAdmissionRefusedError('in-request', this.max);
+    this.#active += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#active -= 1;
+    };
+  }
+}

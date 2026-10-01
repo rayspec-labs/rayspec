@@ -314,8 +314,8 @@ describe('in-request THROW-path quarantine (JSON) — a post-side-effect throw',
 
     // Same Idempotency-Key retry. WITHOUT the taint-aware throw-release, the blanket release freed the
     // reservation → the agent RE-RUNS fresh → charge_card fires AGAIN (count → 2, RED). WITH it, the
-    // tainted run keeps its reservation → the retry hits the loser path (the thrown run wrote no run
-    // header → 409) → the side effect fires EXACTLY ONCE (count stays 1, GREEN).
+    // tainted run keeps its reservation → the retry hits the loser path, which replays the thrown run's
+    // recorded terminal failure → the side effect fires EXACTLY ONCE (count stays 1, GREEN).
     const second = await jsonRequest(h.app, 'POST', '/v1/agents/charge-agent/runs', {
       body: { input: 'order-throw' },
       headers,
@@ -324,8 +324,11 @@ describe('in-request THROW-path quarantine (JSON) — a post-side-effect throw',
     expect(sideEffects.count).toBe(1);
     // The retry did NOT execute a second live run of the agent.
     expect(backend.liveRuns).toBe(1);
-    // The quarantined thrown run is surfaced loudly (the loser path 409s a still-reserved, header-less run).
-    expect(second.status).toBe(409);
+    // The quarantined thrown run is replayed as the failure it recorded — never re-run.
+    expect(second.status).toBe(200);
+    const replayed = await second.json();
+    expect(replayed.status).toBe('error');
+    expect(replayed.errorClass).toBe('internal');
   });
 
   it('OVER-QUARANTINE GUARD (throw path): an IDEMPOTENT-only run that THREW still RE-RUNS on a same-key retry (it is NOT quarantined)', async () => {
@@ -429,20 +432,20 @@ describe('in-request THROW-path quarantine (SSE) — a post-side-effect throw', 
 
     // Same-key SSE retry. WITHOUT the taint-aware throw-release (runs.ts SSE catch), the blanket release
     // freed the reservation → the agent RE-RUNS fresh → charge_card fires AGAIN (count → 2, RED). WITH
-    // it, the tainted run keeps its reservation → the retry hits the loser path (the thrown run wrote no
-    // run header → the SSE loser 409s) → the side effect fires EXACTLY ONCE (count stays 1, GREEN).
+    // it, the tainted run keeps its reservation → the retry hits the loser path, which replays the thrown
+    // run's recorded terminal failure → the side effect fires EXACTLY ONCE (count stays 1, GREEN).
     const secondRes = await h.app.request('/v1/agents/charge-agent/runs', {
       method: 'POST',
       headers,
       body,
     });
-    await secondRes.text();
+    const replay = await secondRes.text();
     // The WHOLE invariant: the non-idempotent side effect fired EXACTLY ONCE across the retry.
     expect(sideEffects.count).toBe(1);
     // The retry did NOT execute a second live run of the agent.
     expect(backend.liveRuns).toBe(1);
-    // The quarantined thrown run is surfaced loudly (the SSE loser path 409s a still-reserved,
-    // header-less run — the same fail-closed outcome the JSON throw-path retry produces).
-    expect(secondRes.status).toBe(409);
+    // The quarantined thrown run is replayed from its durable event log — never re-run.
+    expect(secondRes.status).toBe(200);
+    expect(replay).toContain('run_started');
   });
 });

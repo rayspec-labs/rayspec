@@ -190,6 +190,7 @@ export {
 } from './handlers/index.js';
 export { rehydrateConversation } from './rehydrate.js';
 export {
+  InRequestRunGate,
   RUN_ADMISSION_RETRY_AFTER_MS,
   RunAdmissionRefusedError,
   type RunAdmissionScope,

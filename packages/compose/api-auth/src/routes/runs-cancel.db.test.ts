@@ -352,6 +352,11 @@ describe('POST /v1/runs/:id/cancel — a durable run that has not started', () =
 describe('POST /v1/runs/:id/cancel — an EXECUTING run receives the signal', () => {
   it('frees the held work, not merely the request: the in-flight run is aborted and reads back cancelled', async () => {
     const { token, orgId } = await principal('cancelexec@example.com', 'CancelExecOrg');
+    // This fake does not honour its signal, so run-core waits the kill grace (plus its margin) for the
+    // stopped call before it records the outcome unknown; a short grace keeps that well inside the
+    // fake's own hard cap, so a released gate below still means something.
+    const savedGrace = process.env.RAYSPEC_AGENT_KILL_GRACE_MS;
+    process.env.RAYSPEC_AGENT_KILL_GRACE_MS = '100';
     // Hold the run open mid-flight (the deterministic barrier — no fixed sleeps).
     const armed = backend.arm();
 
@@ -388,6 +393,14 @@ describe('POST /v1/runs/:id/cancel — an EXECUTING run receives the signal', ()
     const body = (await read.json()) as { status: string; errorClass: string | null };
     expect(body.status).toBe('error');
     expect(body.errorClass).toBe('cancelled');
+    // The fake ignored its signal, so its call never settled: the record says the outcome is unknown.
+    const phase = (await h.db.$client.unsafe(
+      "SELECT output->>'phase' AS phase FROM journal_steps WHERE run_id = $1 AND type = 'cancel'",
+      [runId],
+    )) as unknown as Array<{ phase: string }>;
+    expect(phase[0]?.phase).toBe('outcome-unknown');
+    if (savedGrace === undefined) delete process.env.RAYSPEC_AGENT_KILL_GRACE_MS;
+    else process.env.RAYSPEC_AGENT_KILL_GRACE_MS = savedGrace;
   });
 });
 
