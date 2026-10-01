@@ -40,3 +40,86 @@ export function onAbortSignal(source: AbortSignal | undefined, onAbort: () => vo
   source.addEventListener('abort', onAbort, { once: true });
   return () => source.removeEventListener('abort', onAbort);
 }
+
+/**
+ * Raised (or recorded) when a provider call outlives `RunLimits.providerCallTimeoutMs`. The class NAME
+ * carries `Timeout`, which is what `classifyUpstreamError` keys the neutral `timeout` class off.
+ */
+export class ProviderCallTimeoutError extends Error {
+  readonly timeoutMs: number;
+  constructor(backend: string, timeoutMs: number) {
+    super(
+      `the ${backend} provider call did not answer within ${timeoutMs}ms ` +
+        '(RAYSPEC_AGENT_REQUEST_TIMEOUT_MS) and was stopped.',
+    );
+    this.name = 'ProviderCallTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/** A running provider-call watchdog (see {@link startCallWatchdog}). */
+export interface CallWatchdog {
+  /** The call produced output: start the silence window again. */
+  touch(): void;
+  /** Stop counting (a tool call the platform bounds itself is in progress). */
+  pause(): void;
+  /** Count again after {@link pause}, from a fresh window. */
+  resume(): void;
+  /** Whether the watchdog fired. */
+  readonly fired: boolean;
+  /** Stop the watchdog for good. Idempotent. */
+  dispose(): void;
+}
+
+/**
+ * Watch a provider call for SILENCE: when `timeoutMs` passes with no {@link CallWatchdog.touch},
+ * `onTimeout` runs once. For a backend whose call is a stream or a child process, silence is the one
+ * measure of "the provider stopped answering" that does not also cut off a long but productive run.
+ * `timeoutMs` undefined yields an inert watchdog. The timer is unref'd, so it never holds a process
+ * open on its own.
+ */
+export function startCallWatchdog(
+  timeoutMs: number | undefined,
+  onTimeout: () => void,
+): CallWatchdog {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let fired = false;
+  let live = timeoutMs !== undefined;
+  const arm = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    if (!live || timeoutMs === undefined) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (!live) return;
+      live = false;
+      fired = true;
+      onTimeout();
+    }, timeoutMs);
+    timer.unref?.();
+  };
+  let paused = 0;
+  arm();
+  return {
+    touch() {
+      if (paused === 0) arm();
+    },
+    pause() {
+      paused += 1;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+    resume() {
+      paused = Math.max(0, paused - 1);
+      if (paused === 0) arm();
+    },
+    get fired() {
+      return fired;
+    },
+    dispose() {
+      live = false;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
+}
