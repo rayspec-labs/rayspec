@@ -53,22 +53,11 @@ import { readOperationReceipts } from './operation-lease.js';
 import { readProductSchemaDigest, runtimePlatformHead } from './schema-head.js';
 
 /**
- * Undo the newest platform migration (the row-level tenant policies and the isolation functions), so
- * the database is one migration behind this runtime, as a database left by the previous release is.
+ * Undo the newest platform migration (the owner recovery tokens table), so the database is one
+ * migration behind this runtime, as a database left by the previous release is.
  */
 const UNDO_NEWEST_MIGRATION = `
-DROP FUNCTION rayspec_same_tenant_reference();
-DROP FUNCTION rayspec_invite_tenant(text);
-DROP FUNCTION rayspec_run_owned_elsewhere(text);
-DO $undo$
-DECLARE t text;
-BEGIN
-  FOR t IN SELECT c.relname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid
-            WHERE p.polname = 'tenant_isolation' LOOP
-    EXECUTE format('DROP POLICY tenant_isolation ON %I', t);
-  END LOOP;
-END
-$undo$;
+DROP TABLE owner_recovery_tokens;
 `;
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -360,7 +349,7 @@ describe.skipIf(!baseUrl)('apply after a crash', () => {
     await runAndKill('legacy-platform', 'after-step-effect');
     const killed = { operationId: await startedBy('platform-migrations') };
     const [newest] = await sql<{ present: boolean }[]>`
-      SELECT to_regprocedure('public.rayspec_invite_tenant(text)') IS NOT NULL AS present`;
+      SELECT to_regclass('public.owner_recovery_tokens') IS NOT NULL AS present`;
     expect(newest?.present).toBe(true);
 
     const db = processDb();

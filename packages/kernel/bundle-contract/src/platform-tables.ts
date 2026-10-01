@@ -63,11 +63,21 @@ export const PRODUCT_LEDGER_TABLES: readonly PlatformTable[] = [
   t('product_migration_ledger', 'platform-migration-ledger'),
 ];
 
+/**
+ * The owner recovery tokens: one-time credentials the operator issues for an owner who holds no
+ * password. Live credential state keyed by the pepper, so the identity policy resets them like the
+ * sessions, API keys and invites, and a snapshot never carries their rows.
+ */
+export const IDENTITY_RECOVERY_TABLES: readonly PlatformTable[] = [
+  t('owner_recovery_tokens', 'credential-state'),
+];
+
 /** Every platform table of the application database. */
 export const PLATFORM_TABLES: readonly PlatformTable[] = [
   ...CONTRACT_PLATFORM_TABLES,
   ...RUNTIME_CONTROL_TABLES,
   ...PRODUCT_LEDGER_TABLES,
+  ...IDENTITY_RECOVERY_TABLES,
 ];
 
 /** The names of the platform tables in schema `public`: every other table there is a product table. */

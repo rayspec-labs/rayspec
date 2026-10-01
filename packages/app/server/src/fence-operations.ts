@@ -22,6 +22,11 @@
  * one transaction. Every process sees the fence open within one poll and restarts its producers.
  * Resuming a fence that is already open at that epoch changes nothing and says so (`released: false`).
  *
+ * A FENCE AN IMPORT HOLDS (`import` in the barrier record) is released only by that import's cutover:
+ * a target that is ready for its cutover once its cutover token was checked and consumed
+ * (`import-cutover.ts`), a target an import failed on never — it is discarded. Every other resume of
+ * it is refused (`RAY_USAGE`), and a quiesce keeps the hold as it found it.
+ *
  * HEALTH answers liveness (always true: this code is running) and readiness from the probes in
  * `health.ts`: the database and the schema from here, and whatever the in-process server adds
  * (bindings, assets, the durable worker and its system database).
@@ -91,6 +96,11 @@ export interface FenceOperationOptions {
    * and the fence stays held. A CLI aborts it on SIGINT or SIGTERM.
    */
   signal?: AbortSignal;
+  /**
+   * The cutover that consumed an import's cutover token: only a resume that names it releases the
+   * fence that import holds.
+   */
+  cutoverBy?: string;
 }
 
 function envelope<T>(
@@ -133,6 +143,32 @@ async function rows<T>(tx: LeaseTx, text: string, params: unknown[] = []): Promi
 
 type DatabaseBarrier = 'database-write-role' | 'database-stopped-source';
 
+/** What a cutover token binds, as the fence keeps it: the token itself only as its SHA-256. */
+export interface CutoverHold {
+  tokenSha256: string;
+  migrationBundleSha256: string;
+  applicationDigest: string;
+  targetDeploymentId: string;
+  sourceFenceEpoch: number;
+  targetFenceEpoch: number;
+  targetEnvironmentRevision: number;
+  /** SHA-256 of what the target's catalogs held when the import ended (`import-catalog.ts`). */
+  catalogSha256: string;
+  issuedAt: string;
+  expiresAt: string;
+  /** The cutover that consumed the token, once one did. */
+  usedBy?: string;
+}
+
+/** An import's hold on the fence of its target. */
+export interface ImportHold {
+  operationId: string;
+  state: 'ready-for-cutover' | 'failed';
+  /** SHA-256 of what the target's catalogs held when the import ended. */
+  catalogSha256?: string;
+  cutover?: CutoverHold;
+}
+
 /** The barriers recorded with the fence: what quiesce held, and what resume must restore. */
 export interface BarrierRecord {
   database: {
@@ -143,6 +179,57 @@ export interface BarrierRecord {
     workflowSystemGrants?: RecordedGrant[];
   };
   objects: { barrier: 'object-writes'; state: 'held' | 'unavailable' };
+  /** Set while an import holds the fence of its target. */
+  import?: ImportHold;
+}
+
+function readCutoverHold(value: unknown): CutoverHold | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const c = value as Record<string, unknown>;
+  const text = ['tokenSha256', 'migrationBundleSha256', 'applicationDigest', 'targetDeploymentId'];
+  const numbers = ['sourceFenceEpoch', 'targetFenceEpoch', 'targetEnvironmentRevision'];
+  if (
+    !text.every((k) => typeof c[k] === 'string') ||
+    !numbers.every((k) => Number.isSafeInteger(c[k])) ||
+    typeof c.catalogSha256 !== 'string' ||
+    typeof c.issuedAt !== 'string' ||
+    typeof c.expiresAt !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    tokenSha256: c.tokenSha256 as string,
+    migrationBundleSha256: c.migrationBundleSha256 as string,
+    applicationDigest: c.applicationDigest as string,
+    targetDeploymentId: c.targetDeploymentId as string,
+    sourceFenceEpoch: c.sourceFenceEpoch as number,
+    targetFenceEpoch: c.targetFenceEpoch as number,
+    targetEnvironmentRevision: c.targetEnvironmentRevision as number,
+    catalogSha256: c.catalogSha256,
+    issuedAt: c.issuedAt,
+    expiresAt: c.expiresAt,
+    ...(typeof c.usedBy === 'string' ? { usedBy: c.usedBy } : {}),
+  };
+}
+
+/**
+ * An import's hold as recorded; a member that is there but unreadable is a failed import's, so it
+ * still keeps the fence from being released.
+ */
+function readImportHold(value: unknown): ImportHold | undefined {
+  if (value === undefined || value === null) return undefined;
+  const v = (typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const operationId = typeof v.operationId === 'string' ? v.operationId : '';
+  const cutover = readCutoverHold(v.cutover);
+  if (v.state === 'ready-for-cutover' && operationId !== '') {
+    return {
+      operationId,
+      state: 'ready-for-cutover',
+      ...(typeof v.catalogSha256 === 'string' ? { catalogSha256: v.catalogSha256 } : {}),
+      ...(cutover ? { cutover } : {}),
+    };
+  }
+  return { operationId, state: 'failed' };
 }
 
 /** Read the barrier record kept with the fence; null when there is none or it is malformed. */
@@ -165,7 +252,29 @@ export function readBarrierRecord(value: unknown): BarrierRecord | null {
       workflowSystemGrants: readRecordedGrants(db.workflowSystemGrants),
     },
     objects: { barrier: 'object-writes', state: objects.state === 'held' ? 'held' : 'unavailable' },
+    ...('import' in v ? { import: readImportHold(v.import) as ImportHold } : {}),
   };
+}
+
+/**
+ * Why a resume may not release a fence an import holds, or null when it may: only the cutover that
+ * consumed the import's token releases it.
+ */
+function importHoldRefusal(hold: ImportHold | undefined, cutoverBy?: string): BundleError | null {
+  if (hold === undefined) return null;
+  if (hold.state === 'failed') {
+    return bundleError(
+      'RAY_USAGE',
+      'this fence keeps a target an import failed on from serving; it is never resumed: discard ' +
+        'the target with `rayspec import --target <target state directory> --discard-failed`',
+    );
+  }
+  if (cutoverBy !== undefined && hold.cutover?.usedBy === cutoverBy) return null;
+  return bundleError(
+    'RAY_USAGE',
+    'this fence keeps an imported target from serving until its cutover; release it with ' +
+      '`rayspec import --target <target state directory> --cutover-token <token>`',
+  );
 }
 
 function reportedBarriers(record: BarrierRecord): QuiesceData['barriers'] {
@@ -431,6 +540,7 @@ export async function quiesceOperation(
       const next: BarrierRecord = {
         database,
         objects: { barrier: 'object-writes', state: drain.drained ? 'held' : 'unavailable' },
+        ...(earlier?.import !== undefined ? { import: earlier.import } : {}),
       };
       await l.mutate(async (tx) => {
         await tx.unsafe(
@@ -489,6 +599,12 @@ export async function quiesceOperation(
 
 class FenceMismatch extends Error {}
 
+class ImportHeld extends Error {
+  constructor(readonly error: BundleError) {
+    super(error.message);
+  }
+}
+
 export async function resumeOperation(
   request: ResumeRequest,
   operationId: string,
@@ -520,6 +636,11 @@ export async function resumeOperation(
          FROM runtime_control_state WHERE id = 1`,
     )) as unknown as { fence_state: string; fence_epoch: string; fence_barriers: unknown }[];
     const recorded = readBarrierRecord(current?.fence_barriers);
+    const held =
+      current?.fence_state === 'fenced' && Number(current.fence_epoch) === request.fenceEpoch
+        ? importHoldRefusal(recorded?.import, options.cutoverBy)
+        : null;
+    if (held !== null) throw new ImportHeld(held);
     if (
       current?.fence_state === 'fenced' &&
       Number(current.fence_epoch) === request.fenceEpoch &&
@@ -558,6 +679,8 @@ export async function resumeOperation(
           };
         }
         const barriers = readBarrierRecord(row.fence_barriers);
+        const refusal = importHoldRefusal(barriers?.import, options.cutoverBy);
+        if (refusal !== null) throw new ImportHeld(refusal);
         if (barriers?.database.state === 'held' && barriers.database.role !== undefined) {
           await restoreWrites(tx, barriers.database.role, barriers.database.grants ?? []);
         }
@@ -579,6 +702,10 @@ export async function resumeOperation(
     await lease.release('succeeded', { fenceEpoch: result.fenceEpoch, released: result.released });
     return envelope(operation, operationId, result);
   } catch (err) {
+    if (err instanceof ImportHeld) {
+      await lease.release('refused').catch(() => {});
+      return envelope<ResumeData>(operation, operationId, null, [err.error]);
+    }
     if (err instanceof FenceMismatch) {
       await lease.release('refused').catch(() => {});
       return envelope<ResumeData>(operation, operationId, null, [

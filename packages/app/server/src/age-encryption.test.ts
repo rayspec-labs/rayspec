@@ -11,6 +11,11 @@
  *    the matching identity and with no other, whose size is the one the format fixes for the
  *    plaintext, and leaves nothing behind when it is stopped or fails.
  *  - When the reference `age` command is on PATH, it decrypts the ciphertext too.
+ *  - `decryptFile` decrypts every X25519 vector that expects success to its payload and refuses every
+ *    other one with `RAY_DECRYPTION_FAILED`, leaving no plaintext; it refuses a wrong identity, a
+ *    passphrase file, a truncated or flipped ciphertext (keeping none of the chunks it had already
+ *    decrypted) and a plaintext over its budget before decrypting a byte.
+ *  - `parseAgeX25519Identity` takes the one identity of an `age-keygen` file and nothing else.
  */
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
@@ -38,7 +43,13 @@ import {
 } from 'age-encryption';
 import * as vectors from 'cctv-age';
 import { afterAll, describe, expect, it } from 'vitest';
-import { EncryptionAborted, encryptFile, isAgeX25519Recipient } from './age-encryption.js';
+import {
+  decryptFile,
+  EncryptionAborted,
+  encryptFile,
+  isAgeX25519Recipient,
+  parseAgeX25519Identity,
+} from './age-encryption.js';
 
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
@@ -341,4 +352,171 @@ describe('encryptFile', () => {
       expect(Buffer.from(decrypted.stdout).equals(plaintext)).toBe(true);
     },
   );
+});
+
+// ─── decryptFile ───────────────────────────────────────────────────────────────────────────────
+
+describe('decryptFile', () => {
+  const LIMIT = 64 * 1024 * 1024;
+  const code = (r: { ok: true } | { ok: false; errors: { code: string; reason?: string }[] }) =>
+    r.ok ? 'ok' : `${r.errors[0]!.code}/${r.errors[0]!.reason ?? ''}`;
+
+  async function encrypted(plaintext: Buffer) {
+    const dir = workDir();
+    const identity = await generateX25519Identity();
+    const plain = join(dir, 'inner.zip');
+    writeFileSync(plain, plaintext);
+    const written = await encryptFile(
+      plain,
+      join(dir, 'migration.age'),
+      await identityToRecipient(identity),
+    );
+    if (!written.ok) throw new Error('encryption failed');
+    return { dir, identity, ciphertext: join(dir, 'migration.age') };
+  }
+
+  const x25519Vectors = VECTORS.filter(
+    (v) =>
+      v.meta.identity?.startsWith('AGE-SECRET-KEY-1') === true &&
+      v.meta.passphrase === undefined &&
+      v.meta.armored !== 'yes',
+  );
+
+  it('decrypts every X25519 vector that succeeds, and refuses every other one leaving nothing', async () => {
+    expect(x25519Vectors.filter((v) => v.meta.expect === 'success').length).toBeGreaterThan(5);
+    expect(x25519Vectors.filter((v) => v.meta.expect !== 'success').length).toBeGreaterThan(20);
+    for (const vector of x25519Vectors) {
+      const dir = workDir();
+      writeFileSync(join(dir, 'in.age'), vector.body);
+      const out = join(dir, 'out.zip');
+      const result = await decryptFile(join(dir, 'in.age'), out, vector.meta.identity!, {
+        maxPlaintextBytes: LIMIT,
+      });
+      if (vector.meta.expect === 'success') {
+        expect(code(result), vector.name).toBe('ok');
+        expect(sha(readFileSync(out)), vector.name).toBe(vector.meta.payload);
+        expect(statSync(out).mode & 0o777, vector.name).toBe(0o600);
+      } else {
+        expect(code(result), vector.name).toBe('RAY_DECRYPTION_FAILED/');
+        expect(existsSync(out), vector.name).toBe(false);
+      }
+    }
+  });
+
+  it('decrypts with the matching identity and reports the ciphertext it read', async () => {
+    const plaintext = randomBytes(3 * 64 * 1024 + 99);
+    const { dir, identity, ciphertext } = await encrypted(plaintext);
+    const out = join(dir, 'out.zip');
+    const result = await decryptFile(ciphertext, out, identity, { maxPlaintextBytes: LIMIT });
+    expect(code(result)).toBe('ok');
+    if (!result.ok) return;
+    expect(readFileSync(out).equals(plaintext)).toBe(true);
+    expect(result.value).toEqual({
+      path: out,
+      size: plaintext.length,
+      ciphertextSha256: sha(readFileSync(ciphertext)),
+      ciphertextSize: statSync(ciphertext).size,
+    });
+  });
+
+  it('refuses another identity, and a passphrase file, leaving no plaintext', async () => {
+    const { dir, ciphertext } = await encrypted(randomBytes(1000));
+    const other = await decryptFile(
+      ciphertext,
+      join(dir, 'a.zip'),
+      await generateX25519Identity(),
+      {
+        maxPlaintextBytes: LIMIT,
+      },
+    );
+    expect(code(other)).toBe('RAY_DECRYPTION_FAILED/');
+    const passphrase = VECTORS.find(
+      (v) =>
+        v.meta.passphrase !== undefined && v.meta.expect === 'success' && v.meta.armored !== 'yes',
+    );
+    expect(passphrase).toBeDefined();
+    writeFileSync(join(dir, 'scrypt.age'), passphrase!.body);
+    const scrypt = await decryptFile(
+      join(dir, 'scrypt.age'),
+      join(dir, 'b.zip'),
+      await generateX25519Identity(),
+      { maxPlaintextBytes: LIMIT },
+    );
+    expect(code(scrypt)).toBe('RAY_DECRYPTION_FAILED/');
+    expect(readdirSync(dir).sort()).toEqual(['inner.zip', 'migration.age', 'scrypt.age']);
+  });
+
+  it('refuses a truncated ciphertext and a flipped byte in its last chunk, keeping none of the chunks before it', async () => {
+    // Several 64 KiB chunks: the ones before the damage decrypt and are written, then removed.
+    const plaintext = randomBytes(5 * 64 * 1024 + 7);
+    for (const damage of ['truncate', 'flip'] as const) {
+      const { dir, identity, ciphertext } = await encrypted(plaintext);
+      const bytes = readFileSync(ciphertext);
+      if (damage === 'truncate') truncateSync(ciphertext, bytes.length - 16);
+      else {
+        const at = bytes.length - 10;
+        bytes[at] = bytes[at]! ^ 0x01;
+        writeFileSync(ciphertext, bytes);
+      }
+      const out = join(dir, 'out.zip');
+      const result = await decryptFile(ciphertext, out, identity, { maxPlaintextBytes: LIMIT });
+      expect(code(result), damage).toBe('RAY_DECRYPTION_FAILED/');
+      expect(existsSync(out), damage).toBe(false);
+    }
+  });
+
+  it('refuses a plaintext over its budget before decrypting, and an existing destination', async () => {
+    const plaintext = randomBytes(200_000);
+    const { dir, identity, ciphertext } = await encrypted(plaintext);
+    const budget = 100_000;
+    expect(plaintext.length).toBeGreaterThan(budget);
+    const out = join(dir, 'out.zip');
+    const over = await decryptFile(ciphertext, out, identity, { maxPlaintextBytes: budget });
+    expect(code(over)).toBe('RAY_LIMIT_EXCEEDED/extracted-size');
+    // Creating the destination exclusively proves the refused decryption left no file behind.
+    writeFileSync(out, 'already here', { flag: 'wx' });
+    const exists = await decryptFile(ciphertext, out, identity, { maxPlaintextBytes: LIMIT });
+    expect(code(exists)).toBe('RAY_USAGE/');
+    expect(readFileSync(out, 'utf8')).toBe('already here');
+  });
+
+  it('stops when its signal aborts and leaves no partial plaintext', async () => {
+    const { dir, identity, ciphertext } = await encrypted(randomBytes(4 * 64 * 1024));
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      decryptFile(ciphertext, join(dir, 'out.zip'), identity, {
+        maxPlaintextBytes: LIMIT,
+        signal: controller.signal,
+      }),
+    ).rejects.toBeInstanceOf(EncryptionAborted);
+    expect(existsSync(join(dir, 'out.zip'))).toBe(false);
+  });
+});
+
+describe('parseAgeX25519Identity', () => {
+  it('takes the one identity of an age-keygen file', async () => {
+    const identity = await generateX25519Identity();
+    const recipient = await identityToRecipient(identity);
+    const file = `# created: 2026-10-01T08:00:00Z\n# public key: ${recipient}\n${identity}\n`;
+    expect(parseAgeX25519Identity(file)).toBe(identity);
+    expect(parseAgeX25519Identity(`\r\n${identity}\r\n\r\n`)).toBe(identity);
+  });
+
+  it('refuses no identity, two, a post-quantum one, a passphrase and a broken checksum', async () => {
+    const identity = await generateX25519Identity();
+    const flipped = `${identity.slice(0, -1)}${identity.endsWith('Q') ? 'P' : 'Q'}`;
+    for (const text of [
+      '',
+      '# only a comment\n',
+      `${identity}\n${await generateX25519Identity()}\n`,
+      `${await generateHybridIdentity()}\n`,
+      'correct horse battery staple\n',
+      `${flipped}\n`,
+      `${identity.toLowerCase()}\n`,
+      await identityToRecipient(identity),
+    ]) {
+      expect(parseAgeX25519Identity(text), text.slice(0, 20)).toBeNull();
+    }
+  });
 });

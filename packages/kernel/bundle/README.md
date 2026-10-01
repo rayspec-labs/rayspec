@@ -108,7 +108,9 @@ database exists, `payload/object-index.json`, `payload/objects.bin`) and the mig
   `applicationDigest` against `payload/application.ray` (`application-digest`), the object index
   with its ranges covering `objects.bin` exactly (`object-range`), `objectCount`, and each
   object's stored range and logical bytes against the index and the stored blob header
-  (`object-sha256`). It writes nothing.
+  (`object-sha256`). It writes nothing. The result locates every payload entry in the archive
+  (`entries`: path, data offset, size and inventory SHA-256), so a caller holding the archive file
+  reads an entry's bytes in place; whoever reads them again hashes them again.
 
 ## Signatures
 

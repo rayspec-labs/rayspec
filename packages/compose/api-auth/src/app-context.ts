@@ -36,6 +36,7 @@ import type { IdempotencyStore } from './stores/idempotency-store.js';
 import type { IdentityStore } from './stores/identity-store.js';
 import type { InviteStore } from './stores/invite-store.js';
 import type { OrgStore } from './stores/org-store.js';
+import type { OwnerRecoveryStore } from './stores/owner-recovery-store.js';
 
 /**
  * One entry in the MINIMAL agent registry (seam). Resolves an agent `{id}` to a BASE
@@ -396,6 +397,8 @@ export interface AppDeps {
   idempotency: IdempotencyStore;
   /** The out-of-band org-invite store (issue / resolve-by-token / consume). */
   inviteStore: InviteStore;
+  /** The operator-issued owner-recovery tokens (redeem-by-token). */
+  ownerRecoveryStore: OwnerRecoveryStore;
   authService: AuthService;
   /** Optional mounted OIDC provider (omit to skip the /oidc mount in unit-only suites). */
   oidcProvider?: Provider;

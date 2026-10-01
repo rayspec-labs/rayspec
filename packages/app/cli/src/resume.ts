@@ -8,6 +8,8 @@
  * exactly `--fence-epoch` (`RAY_FENCE_MISMATCH` otherwise), grants the runtime role back exactly the
  * writes the barrier revoked, and every runtime process restarts its producers within a second.
  * Resuming a fence that is already open at that epoch changes nothing and says so (`released: false`).
+ * A fence an import holds is never released here (`RAY_USAGE`): an imported target is released by its
+ * cutover (`rayspec import --target <dir> --cutover-token <token>`), a failed one is discarded.
  *
  * A KILLED EXPORT leaves its plaintext capture in `<state-dir>/scratch/`. Before anything else,
  * resume removes it by the rule the next export would apply (only when no live process holds the

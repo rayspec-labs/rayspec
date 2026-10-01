@@ -58,6 +58,7 @@ export const GLOBAL_TABLES: readonly { schema: string; table: string; orgColumn?
   { schema: 'public', table: 'memberships', orgColumn: 'org_id' },
   { schema: 'public', table: 'oidc_models' },
   { schema: 'public', table: 'orgs', orgColumn: 'id' },
+  { schema: 'public', table: 'owner_recovery_tokens', orgColumn: 'org_id' },
   { schema: 'public', table: 'product_migration_ledger' },
   { schema: 'public', table: 'runtime_control_processes' },
   { schema: 'public', table: 'runtime_control_receipts' },

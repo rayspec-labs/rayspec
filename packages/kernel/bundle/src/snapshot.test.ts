@@ -174,6 +174,27 @@ describe('writeSnapshotArchive', () => {
     expect(read.ok && read.value.snapshot).toEqual(written.value.snapshot);
   });
 
+  it('locates every payload entry in the archive, in inventory order', async () => {
+    const f = fixture();
+    const out = join(workDir(), 'located.zip');
+    expect(outcome(await writeSnapshotArchive(out, { snapshot: f.snapshot, files: f.files }))).toBe(
+      'ok',
+    );
+    const read = await inspectSnapshotArchive(out);
+    expect(outcome(read)).toBe('ok');
+    if (!read.ok) return;
+    const bytes = readFileSync(out);
+    expect(read.value.entries.map((e) => e.path)).toEqual(
+      read.value.snapshot.inventory.map((e) => e.path),
+    );
+    for (const entry of read.value.entries) {
+      const data = bytes.subarray(entry.dataOffset, entry.dataOffset + entry.size);
+      const given = f.files.find((file) => file.path === entry.path) as { bytes: Uint8Array };
+      expect(Buffer.from(given.bytes).equals(data), entry.path).toBe(true);
+      expect(sha(data)).toBe(entry.sha256);
+    }
+  });
+
   it('gives the same bytes for the same input, files given in any order', async () => {
     const f = fixture();
     const a = join(workDir(), 'a.zip');

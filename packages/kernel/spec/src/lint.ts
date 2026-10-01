@@ -121,6 +121,7 @@ export const RESERVED_STORE_NAMES: ReadonlySet<string> = new Set([
   'api_keys',
   'auth_audit',
   'oidc_models',
+  'owner_recovery_tokens',
   // The global runtime-control tables (the environment's state row, its operation receipts and the
   // heartbeats of its running processes).
   'runtime_control_state',

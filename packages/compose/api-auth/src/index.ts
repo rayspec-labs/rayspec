@@ -143,3 +143,10 @@ export {
   OrgTombstonedError,
   SingleTenantLimitError,
 } from './stores/org-store.js';
+export {
+  type IssuedOwnerRecovery,
+  OwnerRecoveryIssueError,
+  type OwnerRecoveryIssueRefusal,
+  OwnerRecoveryStore,
+  type RedeemedOwnerRecovery,
+} from './stores/owner-recovery-store.js';

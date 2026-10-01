@@ -56,7 +56,10 @@ The export's result says which barrier held and which did not apply, and so does
 - **The deployment was deployed from a bundle** (`rayspec deploy <file.ray>`), and you run the
   export with its state directory (`--state-dir`, default `.rayspec-state`).
 - **One organization**, and at least one member of it with a password: after the import every API
-  key, session and invite stops working, so someone must be able to sign in.
+  key, session and invite stops working, so someone must be able to sign in. An owner who holds only
+  an API key regains access on the target through owner recovery
+  ([Importing a deployment](./import.md#owner-recovery)); an organization in which nobody holds a
+  password is still refused (`RAY_OWNER_RECOVERY_REQUIRED`).
 - **`pg_dump` of the database server's major version** on `PATH`, or named by `RAYSPEC_PG_DUMP`
   (an absolute path). `pg_dump --version` must report the same major as the server.
 - **The blob root** in `RAYSPEC_BLOB_ROOT`, when the application keeps blobs. Only the fs blob store
@@ -190,6 +193,9 @@ The bundle states this as its identity policy:
 Tell your users before the cutover that they will sign in again and that API keys must be reissued.
 
 ## After the export
+
+Import the bundle into the new environment with `rayspec import` ([Importing a deployment](./import.md)):
+it restores into an empty target, verifies it, and keeps the target fenced until you cut over.
 
 The source stays fenced at the epoch the result names. While the bundle is imported and checked,
 keep it that way: the source is the authority until the cutover, and a source that accepts writes

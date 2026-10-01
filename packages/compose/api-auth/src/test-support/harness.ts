@@ -39,6 +39,7 @@ import { IdempotencyStore } from '../stores/idempotency-store.js';
 import { IdentityStore } from '../stores/identity-store.js';
 import { InviteStore } from '../stores/invite-store.js';
 import { OrgStore } from '../stores/org-store.js';
+import { OwnerRecoveryStore } from '../stores/owner-recovery-store.js';
 
 /**
  * A mutable, test-controlled clock. A grace-window test drives it deterministically instead of
@@ -176,6 +177,17 @@ function buildFullSchemaSql(SCHEMA: string): string {
   CREATE UNIQUE INDEX invites_token_hash_idx ON invites (token_hash);
   CREATE INDEX invites_tenant_idx ON invites (tenant_id);
 
+  CREATE TABLE owner_recovery_tokens (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    org_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash text NOT NULL, expires_at timestamptz NOT NULL,
+    consumed_at timestamptz, revoked_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now()
+  );
+  CREATE UNIQUE INDEX owner_recovery_tokens_hash_idx ON owner_recovery_tokens (token_hash);
+  CREATE INDEX owner_recovery_tokens_user_idx ON owner_recovery_tokens (user_id);
+
   CREATE TABLE journal_steps (
     step_id uuid PRIMARY KEY DEFAULT gen_random_uuid(), run_id text NOT NULL,
     tenant_id uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
@@ -251,7 +263,7 @@ function buildFullSchemaSql(SCHEMA: string): string {
 
 const ALL_TABLES =
   'orgs, users, memberships, sessions, api_keys, auth_audit, oidc_models, ' +
-  'idempotency_keys, invites, journal_steps, conversation_items, runs, run_events, ' +
+  'idempotency_keys, invites, owner_recovery_tokens, journal_steps, conversation_items, runs, run_events, ' +
   'tenant_events, tenant_event_streams';
 
 /**
@@ -542,6 +554,7 @@ export async function createHarness(
   const auditStore = new AuditStore(appDb);
   const idempotency = new IdempotencyStore(appDb);
   const inviteStore = new InviteStore(appDb);
+  const ownerRecoveryStore = new OwnerRecoveryStore(appDb);
   // A short grace window (30ms) so the reuse-detection tests exercise both sides of the grace
   // boundary. Production uses the default ~10s window. When `useFakeClock` is set, the grace tests
   // drive an injected clock (advance/reset) so the boundary is deterministic — no wall-clock race.
@@ -579,6 +592,7 @@ export async function createHarness(
     auditStore,
     idempotency,
     inviteStore,
+    ownerRecoveryStore,
     authService,
     oidcProvider,
     ...(opts.hardenedPosture === true ? { hardenedPosture: true } : {}),
@@ -719,6 +733,7 @@ export async function createDeployHarness(opts: {
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
   const inviteStore = new InviteStore(db);
+  const ownerRecoveryStore = new OwnerRecoveryStore(db);
   const authService = new AuthService(identityStore, signer, { graceMs: 30 });
 
   const deps: AppDeps = {
@@ -732,6 +747,7 @@ export async function createDeployHarness(opts: {
     auditStore,
     idempotency,
     inviteStore,
+    ownerRecoveryStore,
     authService,
     allowedOrigins: ['https://app.rayspec.test'],
     // the deploy harness does not exercise body-refresh — default cookie-only.

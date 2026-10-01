@@ -75,6 +75,7 @@ describe('classifyApplicationTables', () => {
         'idempotency_keys',
         'invites',
         'oidc_models',
+        'owner_recovery_tokens',
         'runtime_control_processes',
         'runtime_control_receipts',
         'runtime_control_state',

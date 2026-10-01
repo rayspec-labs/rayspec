@@ -302,6 +302,43 @@ export const invites = pgTable(
   ],
 );
 
+/**
+ * owner_recovery_tokens — the operator's way back in for an organization owner who holds no password
+ * (whose only credential was an API key, which a new pepper breaks). The operator issues a token for
+ * one owner (`rayspec tenant recover-owner`); the owner redeems it once over HTTP, setting a password
+ * and starting a session. GLOBAL, like `sessions` and `api_keys`: it is resolved by the presented
+ * token before any tenant is known, through the platform's global store, never through `forTenant`.
+ *
+ * HASHES ONLY: `token_hash` is the HMAC-SHA256, under the API-key pepper with its own domain prefix,
+ * of the opaque token, which is printed once to the operator and stored nowhere. `consumed_at` is the
+ * single-use marker, stamped in one atomic UPDATE; `revoked_at` marks a token a newer one for the same
+ * owner replaced. Neither row ever travels with a snapshot (category `credential-state`).
+ */
+export const ownerRecoveryTokens = pgTable(
+  'owner_recovery_tokens',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    orgId: uuid('org_id')
+      .notNull()
+      .references(() => orgs.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /** HMAC-SHA256 (with the server pepper) of the opaque recovery token. UNIQUE — the redeem key. */
+    tokenHash: text('token_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /** Single-use marker: NULL until redeemed. */
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    /** Set when a newer token for the same owner replaced this one. */
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('owner_recovery_tokens_hash_idx').on(t.tokenHash),
+    index('owner_recovery_tokens_user_idx').on(t.userId),
+  ],
+);
+
 // ---------------------------------------------------------------------------------------
 // Run journal (retrofit: tenant_id text → uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE)
 // ---------------------------------------------------------------------------------------

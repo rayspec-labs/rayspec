@@ -331,6 +331,50 @@ dropped first. The suite that proves the capture (`snapshot-capture.db.test.ts`)
 `pg_dump` and `pg_restore` when their major is the server's; on a host without them it runs both
 from the same pinned `postgres` image `docker-compose.yml` runs, through `docker run`.
 
+## Importing a snapshot
+
+`rayspec import` ([Importing a deployment](./import.md) is the operator guide) is built on a typed
+library in `@rayspec/server` too, in four steps, each refusing with a contract code:
+
+- `openMigrationBundle` reads the migration bundle with the one reader (the ciphertext's size and
+  SHA-256 against the inventory before anything is decrypted), decrypts it with the operator's age
+  X25519 identity into a private scratch directory within the migration plaintext limit
+  (`decryptFile`), reads the inner snapshot archive with the same reader, compares every clear hint
+  with the authenticated metadata, and reads the embedded application through the full reader
+  pipeline for this runtime.
+- `planDumps` reads each dump's table of contents from the archive bytes (`readDumpToc`), refuses one
+  that `pg_restore --list` reads differently (`listDump`), and judges it by the restore allowlist
+  (`planDumpRestore`): the kinds of object restored, the exact statements of each, one owner, no grant
+  to an unknown role, no extension but the workflow engine's `uuid-ossp`, no role, event trigger,
+  untrusted language, definer function beyond the platform's two, `COPY … PROGRAM`, or call into the
+  dump from an expression the restore evaluates, and each entry in the section `pg_dump` puts its
+  kind in. Its result is the list of entries to restore, ordered pre-data, data, post-data.
+- `inspectImportTarget` checks, read-only, that the target's databases and blob root are empty, the
+  server is the snapshot's major, the migration role is not privileged and the roles are prepared.
+- `restoreImport` takes the shared schema lock on the target's application database and holds it
+  while it withholds the migration role's default privileges that would give the runtime role writes,
+  and `pg_restore` restores the approved entries of each dump in one transaction, as the migration
+  role, with no owner, privilege, comment or tablespace from the dump (`restoreDump`), after which
+  the catalog must hold exactly what the plan creates (`readCatalog`, `catalogDifference`); writes the
+  stored blob files unchanged; brings the runtime role's posture in force (`applyTenantIsolation`)
+  and checks it; verifies the row counts, foreign keys, schema head, the one organization, the empty
+  credential tables and every object's digests; records each account's carried identity in the
+  target's `auth_audit` (`applyIdentityPolicy`); checks the row counts and the catalogs again;
+  records the target's own deployment id; and fences the target (`quiesce`), turning the fence into
+  the import's hold (`import` in the barrier record) with the writes the runtime role is owed
+  recorded for the cutover, then gives the default privileges back. A `resume` never releases a fence
+  an import holds; `consumeCutoverToken` checks the cutover token (`issueCutoverToken`,
+  `renewCutoverToken`) against its binding and the catalogs, marks it used, and only then does
+  `resume`, given that cutover (`cutoverBy`), release it and grant the writes.
+  `discardImportTarget` drops what the migration role owns in both databases, empties the blob root
+  and gives back the withheld default privileges, for a target a failed import left.
+
+The CLI then mints the target's own boot secrets (`mintBootSecrets`) into the directory
+`--secrets-out` names. Each transition — `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER`, `CUTOVER`,
+`COMPLETE`, `BLOCKED` — is recorded by
+`ImportReceiptLog` in the target state directory's local receipt and, once the target is verified, in
+its `runtime_control_receipts` (kind `import`).
+
 ## Cross-process run cancellation
 
 `POST /v1/runs/{id}/cancel` always records the cancellation, and a run that has not started never
