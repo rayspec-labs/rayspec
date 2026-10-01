@@ -109,6 +109,15 @@ in every posture.
 | `RAYSPEC_AGENT_SYNC_RUNS_MAX` | in-request runs one process holds at once: synchronous `POST /v1/agents/{id}/runs`, conversation reply runs and record normalize runs together | 32 | no bound |
 | `RAYSPEC_RUN_CANCEL_POLL_MS` | how soon a cancellation reaches a run in another worker process | 2000 | off |
 
+`RAYSPEC_AGENT_RUN_MAX_MS` bounds the provider call, not the end of the run as the caller sees it.
+At expiry the call is told to stop and run-core waits up to the kill grace plus one second for it to
+settle. It then writes the terminal record, which needs a database connection from the pool. Under
+heavy parallel load that wait for a connection is not bounded by the policy, so the request can end
+later than the wall time plus the grace. A probe with 60 parallel runs on a pool of 4, a 400 ms wall
+time and a 200 ms grace saw runs end up to 1730 ms after they started. The provider call itself had
+stopped at the bound. Where the end matters, keep `RAYSPEC_AGENT_SYNC_RUNS_MAX` and
+`RAYSPEC_AGENT_WORKER_CONCURRENCY` in proportion to the connections the database pool holds.
+
 A run past a queue or in-request bound is refused with `429 RATE_LIMITED`, a `Retry-After`, and
 `error.details` `{ reason: "queue-full", scope, limit }`, before anything is recorded for it. A
 conversation reply or record normalize past the in-request bound runs nothing either; it answers
