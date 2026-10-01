@@ -150,6 +150,7 @@ export {
   MAX_SCHEMA_LOCK_TIMEOUT_MS,
   MAX_SHUTDOWN_DRAIN_MS,
   MIGRATION_DATABASE_URL_VAR,
+  PREVIOUS_JWT_SIGNING_KEY_VAR,
   type ProductTableRegistrar,
   parseHostingPosture,
   parseSchemaLockTimeoutMs,

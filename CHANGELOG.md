@@ -534,6 +534,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   traces are exported. Without the managed posture `rayspec-serve` keeps exporting by default, as
   before; set `RAYSPEC_AGENT_TRACING=off` to stop it. See
   [Hosting in the hardened posture → Telemetry](./docs/hardened-posture.md#telemetry).
+- **Rotating the JWT signing key without logging anyone out.** `RAYSPEC_JWT_SIGNING_KEY_PREVIOUS`
+  (or its `_FILE`) holds the key in use before a rotation: it signs nothing, and its public key stays
+  in `GET /v1/oauth/jwks` and in the OIDC provider's key set, so a token signed before the rotation
+  verifies until it expires. Unset it after the overlap window; a value that is not a PKCS#8 PEM
+  refuses the boot by name. See
+  [Hosting in the hardened posture → Credentials and rotation](./docs/hardened-posture.md#credentials-and-rotation).
 
 ### Changed
 

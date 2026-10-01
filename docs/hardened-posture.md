@@ -147,6 +147,27 @@ same matrix.
 | `openai` | text-to-speech | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a synthesis | none | a cancelled run does not stop a synthesis in flight | `packages/adapters/openai-tts/src/hanging-provider.test.ts` |
 | `fake` | text-to-speech | test-only | not applicable | not applicable | none | staging and conformance only | — |
 
+## Credentials and rotation
+
+### The JWT signing key
+
+`RAYSPEC_JWT_SIGNING_KEY` signs every access token and the OIDC provider's tokens. To rotate it
+without logging anyone out:
+
+1. Generate a new key (`openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048`).
+2. Restart with the new key in `RAYSPEC_JWT_SIGNING_KEY` and the old one in
+   `RAYSPEC_JWT_SIGNING_KEY_PREVIOUS` (or `RAYSPEC_JWT_SIGNING_KEY_PREVIOUS_FILE`). New tokens are
+   signed with the new key; both public keys are published (`GET /v1/oauth/jwks`, `/oidc/jwks`), so a
+   token signed before the restart verifies until it expires.
+3. After the overlap window, restart without `RAYSPEC_JWT_SIGNING_KEY_PREVIOUS`. The window is the
+   access-token lifetime (`RAYSPEC_ACCESS_TOKEN_TTL_SECONDS`, 480 s by default) plus 30 s of clock
+   tolerance, or one hour if OIDC clients use the provider's access tokens. A token the old key signed
+   is refused from then on.
+
+A previous key that is not a PKCS#8 PEM refuses the boot, naming the variable and nothing of the
+value. A previous key equal to the current one changes nothing. Refresh sessions are not signed with
+this key and are unaffected.
+
 ## Telemetry
 
 The agent SDK of the `openai` backend exports agent traces to OpenAI by default: run metadata and,

@@ -591,6 +591,13 @@ export interface ServerConfig {
   databaseUrl: string;
   /** PKCS#8 PEM (RS256) — the JWT signing key AND the OIDC provider signing key. */
   jwtSigningKeyPem: string;
+  /**
+   * The signing key in use before the last rotation (`RAYSPEC_JWT_SIGNING_KEY_PREVIOUS`, or its
+   * `_FILE`). Optional. It signs nothing: its public key stays in both key sets, so a token signed
+   * before the rotation verifies until it expires. Remove it once the longest-lived such token has
+   * expired.
+   */
+  previousJwtSigningKeyPem?: string;
   /** The api-key pepper (handed to auth-core by `assembleServer` via `setBootSecrets`). */
   apiKeyPepper: string;
   /** The cookie-CSRF allow-list — EXPLICIT; EMPTY default (no cross-origin). Never dev-permissive. */
@@ -873,6 +880,16 @@ export { BootConfigError };
  *
  * It carries NO byte of the value.
  */
+/** The variable that carries the signing key in use before the last rotation (plus its `_FILE`). */
+export const PREVIOUS_JWT_SIGNING_KEY_VAR = 'RAYSPEC_JWT_SIGNING_KEY_PREVIOUS';
+
+const MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE =
+  `Boot aborted — ${PREVIOUS_JWT_SIGNING_KEY_VAR} is not a PKCS#8 PEM. It holds the signing key ` +
+  'in use before the last rotation, in the same form as RAYSPEC_JWT_SIGNING_KEY: a value starting ' +
+  "'-----BEGIN PRIVATE KEY-----' with REAL newlines, or a file named by " +
+  `${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE. Unset it once the tokens it signed have expired. The value ` +
+  'itself is not echoed here. Fail-closed.';
+
 const MALFORMED_JWT_SIGNING_KEY_MESSAGE =
   "Boot aborted — RAYSPEC_JWT_SIGNING_KEY is not a PKCS#8 PEM. Expected a value starting '-----BEGIN " +
   "PRIVATE KEY-----' with REAL newlines. A value copied out of .env keeps its surrounding quotes and " +
@@ -1325,6 +1342,11 @@ export function loadServerConfig(
   const dbosSystemDatabaseUrl =
     env.DBOS_SYSTEM_DATABASE_URL?.trim() || deriveDbosSystemUrl(databaseUrl as string);
 
+  // The signing key before the last rotation. Resolved like a boot secret (it is one), but optional:
+  // unset or blank ⇒ one key in the key sets, exactly as before.
+  const previousJwtSigningKeyPem =
+    resolveBootSecret(env, PREVIOUS_JWT_SIGNING_KEY_VAR, warn)?.trim() || undefined;
+
   // Role separation (opt-in): the migration role's connection. Resolved like a boot secret (it holds a
   // password), but optional: unset or blank ⇒ one database role, exactly as before.
   const migrationDatabaseUrl =
@@ -1367,6 +1389,13 @@ export function loadServerConfig(
       secretFiles.push({ variable: secret.fileVariant, path: resolve(path) });
     }
   }
+  const previousKeyFile = env[`${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE`]?.trim();
+  if (previousKeyFile) {
+    secretFiles.push({
+      variable: `${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE`,
+      path: resolve(previousKeyFile),
+    });
+  }
 
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
   // trim/lowercase coercion of an ambiguous value), mirroring RAYSPEC_GDPR_PURGE_ENABLED — an
@@ -1392,6 +1421,7 @@ export function loadServerConfig(
   const config: ServerConfig = {
     databaseUrl: databaseUrl as string,
     jwtSigningKeyPem: jwtSigningKeyPem as string,
+    ...(previousJwtSigningKeyPem !== undefined ? { previousJwtSigningKeyPem } : {}),
     apiKeyPepper: apiKeyPepper as string,
     allowedOrigins,
     allowedRequestHeaders,
@@ -2487,6 +2517,25 @@ async function assembleServerWith(
     // kind of change but never the value.
     throw new BootConfigError(MALFORMED_JWT_SIGNING_KEY_MESSAGE);
   }
+  // The key before the last rotation: verification only. Its public key joins both key sets, so a
+  // token it signed keeps verifying until it expires; nothing is signed with it. A key equal to the
+  // current one adds nothing.
+  let previousSigner: Awaited<ReturnType<typeof createSigner>> | undefined;
+  let previousPrivateKey: Awaited<ReturnType<typeof importPKCS8>> | undefined;
+  if (config.previousJwtSigningKeyPem !== undefined) {
+    try {
+      previousSigner = await createSigner(config.previousJwtSigningKeyPem, 'RS256');
+      previousPrivateKey = await importPKCS8(config.previousJwtSigningKeyPem, 'RS256', {
+        extractable: true,
+      });
+    } catch {
+      throw new BootConfigError(MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE);
+    }
+    if (previousSigner.kid === signer.kid) {
+      previousSigner = undefined;
+      previousPrivateKey = undefined;
+    }
+  }
 
   // The injected spec, validated by the SAME per-profile checks its deploy path runs first (the
   // deploy path repeats them; they are pure). Nothing below this line runs for an invalid spec.
@@ -2511,12 +2560,21 @@ async function assembleServerWith(
     db,
     ...(opts.fencePollIntervalMs !== undefined ? { pollIntervalMs: opts.fencePollIntervalMs } : {}),
   });
-  const jwks = new JwksProvider([signer.publicKeyJwk()]);
+  const jwks = new JwksProvider(
+    previousSigner === undefined
+      ? [signer.publicKeyJwk()]
+      : [signer.publicKeyJwk(), previousSigner.publicKeyJwk()],
+  );
   const providerJwk = await exportJWK(privateKey);
+  // The OIDC provider signs with the first key of the set and publishes and verifies with all of them.
+  const providerKeys = [{ ...providerJwk, use: 'sig', alg: 'RS256' }];
+  if (previousPrivateKey !== undefined) {
+    providerKeys.push({ ...(await exportJWK(previousPrivateKey)), use: 'sig', alg: 'RS256' });
+  }
   const oidcProvider = createOidcProvider({
     issuer: config.issuer,
     db,
-    jwks: { keys: [{ ...providerJwk, use: 'sig', alg: 'RS256' }] },
+    jwks: { keys: providerKeys },
     clients: [],
     proxy: true,
   });
