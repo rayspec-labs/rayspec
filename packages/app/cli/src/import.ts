@@ -6,6 +6,8 @@
  *   rayspec import <migration.ray> --target <state-dir> --identity-file <file>
  *                  --secrets-out <new-dir> [--bindings-file <file>] [--json]
  *   rayspec import --target <state-dir> --discard-failed [--json]
+ *   rayspec import --target <state-dir> --cutover-token <token> [--json]
+ *   rayspec import --target <state-dir> --renew-cutover-token [--json]
  *
  * THE DRY RUN is the passive eligibility plan: the outer bundle through the one reader, its
  * ciphertext's size and digest, the decryption with the identity file into a private scratch
@@ -27,15 +29,21 @@
  *                      digests read back;
  *                      then the identity policy: each account's carried identity recorded in the
  *                      target's security audit, the credentials reset;
- *   READY_FOR_CUTOVER  the target is fenced with the runtime role's writes revoked, and its own boot
- *                      secrets (signing key, API-key pepper, media key) are minted into the new
- *                      directory `--secrets-out` names; the result and the receipt give the cutover
- *                      instruction and the cutover token, which binds the migration bundle, the
- *                      target and both fence epochs; stderr lists who signs in again, which owner
- *                      needs owner recovery and who has no way in;
+ *   READY_FOR_CUTOVER  the target's fence is held by the import (the runtime role never held a
+ *                      write on anything restored), and its own boot secrets (signing key, API-key
+ *                      pepper, media key) are minted into the new directory `--secrets-out` names;
+ *                      stderr gives the cutover instruction and, once, the cutover token, which binds
+ *                      the migration bundle, the target, both fence epochs, the target's environment
+ *                      revision and its catalogs, works once and expires after 15 minutes; it also
+ *                      lists who signs in again, which owner needs owner recovery and who has no way
+ *                      in;
+ *   CUTOVER            `--cutover-token` checked and consumed the token (`import-cutover.ts`);
+ *   COMPLETE           the target's fence is released and the runtime role granted its writes: the
+ *                      target may serve. A plain `rayspec resume` never releases the fence an import
+ *                      holds; `--renew-cutover-token` replaces an expired or spent token;
  *   BLOCKED            any refusal or failure: the source stays authoritative; a target the import
- *                      changed is marked failed (`import.json`, the receipts) and is removed only by
- *                      `--discard-failed`.
+ *                      changed is marked failed (`import.json`, the receipts, the fence) and is
+ *                      removed only by `--discard-failed`.
  *
  * SIGINT and SIGTERM stop at the next safe point; a running `pg_restore` is ended and rolls back. A
  * process killed outright leaves its scratch data and the mark `IMPORTING`; the next `rayspec import`
@@ -54,6 +62,7 @@ import {
   type BundleError,
   type BundleWarning,
   bundleError,
+  CONTRACT_VERSION,
   formatTimestamp,
   isReservedBindingName,
   type SchemaHead,
@@ -77,6 +86,8 @@ export const IMPORT_ARG_OPTIONS = {
   'secrets-out': { type: 'string' },
   'dry-run': { type: 'boolean' },
   'discard-failed': { type: 'boolean' },
+  'cutover-token': { type: 'string' },
+  'renew-cutover-token': { type: 'boolean' },
 } as const satisfies NonNullable<ParseArgsConfig['options']>;
 
 /** An identity file is a few lines; anything larger is not one. */
@@ -142,6 +153,9 @@ interface Parsed {
   secretsOut: string | null;
   dryRun: boolean;
   discardFailed: boolean;
+  /** The cutover token `--cutover-token` passes, or null. */
+  cutoverToken: string | null;
+  renewCutoverToken: boolean;
 }
 
 class Refused extends Error {
@@ -177,7 +191,17 @@ export function parseImportArgs(args: readonly string[]): Parsed {
     });
   }
   const discardFailed = values['discard-failed'] === true;
-  if (discardFailed) {
+  const cutoverToken = (values['cutover-token'] as string | undefined) ?? null;
+  const renewCutoverToken = values['renew-cutover-token'] === true;
+  const targetForms = [discardFailed, cutoverToken !== null, renewCutoverToken].filter(Boolean);
+  if (targetForms.length > 1) {
+    refuse(
+      'RAY_USAGE',
+      '--discard-failed, --cutover-token and --renew-cutover-token are three different steps; ' +
+        'give one',
+    );
+  }
+  if (targetForms.length === 1) {
     if (
       positionals.length > 0 ||
       values['identity-file'] !== undefined ||
@@ -187,8 +211,15 @@ export function parseImportArgs(args: readonly string[]): Parsed {
     ) {
       refuse(
         'RAY_USAGE',
-        '--discard-failed takes --target alone: it discards what a failed import left in that target',
+        discardFailed
+          ? '--discard-failed takes --target alone: it discards what a failed import left in that target'
+          : 'the cutover of an import takes --target alone: the import is the one that target holds',
       );
+    }
+    if (cutoverToken === '') {
+      refuse('RAY_USAGE', '--cutover-token needs the token the import printed', {
+        path: '/cutover-token',
+      });
     }
     return {
       bundle: null,
@@ -198,6 +229,8 @@ export function parseImportArgs(args: readonly string[]): Parsed {
       secretsOut: null,
       dryRun: false,
       discardFailed,
+      cutoverToken,
+      renewCutoverToken,
     };
   }
   if (positionals.length !== 1 || positionals[0] === '') {
@@ -237,6 +270,8 @@ export function parseImportArgs(args: readonly string[]): Parsed {
     secretsOut,
     dryRun,
     discardFailed,
+    cutoverToken: null,
+    renewCutoverToken: false,
   };
 }
 
@@ -268,7 +303,7 @@ function importRecordOf(value: unknown): ImportRecord | null {
     v === null ||
     v.importFormatVersion !== 1 ||
     typeof v.operationId !== 'string' ||
-    (v.state !== 'IMPORTING' && v.state !== 'READY_FOR_CUTOVER' && v.state !== 'BLOCKED')
+    !['IMPORTING', 'READY_FOR_CUTOVER', 'CUTOVER', 'COMPLETE', 'BLOCKED'].includes(v.state ?? '')
   ) {
     return null;
   }
@@ -412,6 +447,12 @@ export async function runImport(
     if (p.discardFailed) {
       return await discard(server, dir, record, targetConfig, options, answer, progress, p.target);
     }
+    if (p.cutoverToken !== null || p.renewCutoverToken) {
+      return await cutover(server, dir, record, targetConfig, options, answer, progress, {
+        target: p.target,
+        token: p.cutoverToken,
+      });
+    }
 
     // The target state directory holds no deployment and no import.
     const present = (await dir.deploymentState()).filter((name) => name !== 'plans');
@@ -420,11 +461,14 @@ export async function runImport(
         'RAY_TARGET_NOT_EMPTY',
         record === null
           ? 'the target state directory already holds a deployment; import into a new, empty one'
-          : record.state === 'READY_FOR_CUTOVER'
+          : record.state === 'READY_FOR_CUTOVER' || record.state === 'CUTOVER'
             ? 'the target state directory holds an import that is ready for its cutover; import ' +
               'into a new, empty one'
-            : `the target holds a failed import (${record.operationId}); discard it with ` +
-              `\`${server.discardInstruction(p.target)}\`, then import again`,
+            : record.state === 'COMPLETE'
+              ? 'the target state directory holds an imported deployment that was cut over; import ' +
+                'into a new, empty one'
+              : `the target holds a failed import (${record.operationId}); discard it with ` +
+                `\`${server.discardInstruction(p.target)}\`, then import again`,
         { path: '/target' },
       );
     }
@@ -558,6 +602,7 @@ export async function runImport(
       createdAt: formatTimestamp(new Date()),
       applicationId: snapshot.applicationId,
     });
+    let withheld: ImportRecord['withheldDefaultWrites'];
     const mark = async (state: ImportRecord['state']) =>
       dir.writeImportRecord({
         importFormatVersion: 1,
@@ -567,6 +612,7 @@ export async function runImport(
         sourceFenceEpoch: snapshot.fenceEpoch,
         state,
         updatedAt: formatTimestamp(new Date()),
+        ...(withheld === undefined ? {} : { withheldDefaultWrites: withheld }),
       } satisfies ImportRecord);
     await mark('IMPORTING');
     const receipts: ImportReceiptLog = server.ImportReceiptLog.start(dir, options.operationId, {
@@ -603,6 +649,10 @@ export async function runImport(
       migrationBundleSha256: o.bundleSha256,
       workDir: o.scratchDir,
       ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      onWithheld: async (found) => {
+        withheld = found;
+        await mark('IMPORTING');
+      },
       onVerifying: async () => {
         progress('verifying the target');
         await receipts.transition('VERIFYING', {
@@ -656,6 +706,7 @@ export async function runImport(
     try {
       secretFiles = await server.mintBootSecrets(secretsOut as string);
     } catch {
+      await server.markImportFailed(control as Db, options.operationId).catch(() => {});
       await receipts
         .transition('BLOCKED', {
           sourceFenceEpoch: snapshot.fenceEpoch,
@@ -674,7 +725,8 @@ export async function runImport(
       ]);
     }
 
-    // READY_FOR_CUTOVER: the cutover token binds the migration, the target and both fences.
+    // READY_FOR_CUTOVER: the cutover token binds the migration, the target, both fences and the
+    // target's catalogs; it is shown once, here, and works once.
     const app = tableTotals('application');
     const sys = tableTotals('workflow-system');
     await receipts.summarize({
@@ -694,37 +746,59 @@ export async function runImport(
         noCredential: value.identity.counts['no-credential'],
       },
     });
-    const issuedAt = new Date();
-    const token = {
-      cutoverTokenFormatVersion: 1 as const,
+    const importOf = {
+      operationId: options.operationId,
+      deploymentId,
       migrationBundleSha256: o.bundleSha256,
-      applicationDigest: snapshot.applicationDigest,
-      targetDeploymentId: deploymentId,
       sourceFenceEpoch: snapshot.fenceEpoch,
-      targetFenceEpoch: value.targetFenceEpoch,
-      targetEnvironmentRevision: value.targetEnvironmentRevision,
-      issuedAt: formatTimestamp(issuedAt),
-      expiresAt: formatTimestamp(new Date(issuedAt.getTime() + server.CUTOVER_TOKEN_LIFETIME_MS)),
     };
-    const tokenSha256 = await receipts.cutover(token);
-    const cutover =
-      `cutover: keep the source fenced at epoch ${snapshot.fenceEpoch}; release the target's fence ` +
-      `with \`rayspec resume --deployment ${deploymentId} --fence-epoch ${value.targetFenceEpoch} ` +
-      `--state-dir ${p.target}\` (the target's environment), then deploy the application the source ` +
-      `ran (sha256 ${snapshot.applicationDigest}) there with the new boot secrets: ` +
+    const issued = await withWorkflowSystem(
+      server,
+      control,
+      targetConfig.migrationWorkflowSystemDatabaseUrl,
+      (workflowSystem) =>
+        server.issueCutoverToken(
+          { control: control as Db, workflowSystem, runtimeRole },
+          importOf,
+          snapshot.applicationDigest,
+        ),
+    );
+    if (!issued.ok) {
+      await server.markImportFailed(control as Db, options.operationId).catch(() => {});
+      await receipts
+        .transition('BLOCKED', {
+          sourceFenceEpoch: snapshot.fenceEpoch,
+          targetFenceEpoch: value.targetFenceEpoch,
+          digests,
+          recovery: blockedRecovery,
+          ...(issued.errors[0] === undefined ? {} : { error: issued.errors[0] }),
+        })
+        .catch(() => {});
+      await mark('BLOCKED');
+      return answer(null, issued.errors);
+    }
+    const { token, binding, tokenSha256 } = issued.value;
+    await receipts.cutover(binding, tokenSha256);
+    const deployLine =
+      `then deploy the application the source ran (sha256 ${snapshot.applicationDigest}) there ` +
+      'with the new boot secrets: ' +
       `RAYSPEC_JWT_SIGNING_KEY_FILE=${secretFiles.RAYSPEC_JWT_SIGNING_KEY} ` +
       `RAYSPEC_API_KEY_PEPPER_FILE=${secretFiles.RAYSPEC_API_KEY_PEPPER}, and ` +
       `RAYSPEC_MEDIA_SIGNING_KEY from ${secretFiles.RAYSPEC_MEDIA_SIGNING_KEY} when the application ` +
       'has a playback route';
+    const cutoverLine =
+      `cutover: keep the source fenced at epoch ${snapshot.fenceEpoch}; release the target with ` +
+      `\`rayspec import --target ${p.target} --cutover-token <token>\` (the target's environment), ` +
+      deployLine;
     await receipts.transition('READY_FOR_CUTOVER', {
       sourceFenceEpoch: snapshot.fenceEpoch,
       targetFenceEpoch: value.targetFenceEpoch,
       digests,
       recovery:
-        `cutover: keep the source fenced at epoch ${snapshot.fenceEpoch}; release the target's ` +
-        `fence with \`rayspec resume --deployment ${deploymentId} --fence-epoch ` +
-        `${value.targetFenceEpoch}\`, then deploy the application the source ran on the target. ` +
-        `Cutover token ${tokenSha256}`,
+        `cutover: keep the source fenced at epoch ${snapshot.fenceEpoch}; release the target with ` +
+        '`rayspec import --target <target state directory> --cutover-token <token>` within 15 ' +
+        'minutes, or issue a new token with `--renew-cutover-token`; then deploy the application ' +
+        `the source ran on the target. Cutover token SHA-256 ${tokenSha256}`,
     });
     await mark('READY_FOR_CUTOVER');
     const data: ImportData = {
@@ -747,9 +821,10 @@ export async function runImport(
           'OIDC artifacts were not carried)',
         ...identityLines(value.identity),
         `the target is fenced at epoch ${value.targetFenceEpoch} and accepts no traffic until the cutover`,
-        cutover,
-        `cutover token ${tokenSha256}, valid until ${token.expiresAt}: binds the migration bundle, the ` +
-          `target and both fence epochs`,
+        cutoverLine,
+        `cutover token ${token}: works once, until ${binding.expiresAt}; it binds the migration ` +
+          "bundle, the target, both fence epochs, the target's environment revision and its " +
+          'catalogs, and is shown only here',
         `receipt: ${dir.root}/receipts/${server.importReceiptName(options.operationId)}.json` +
           (receipts.databaseReceiptsFailed ? ' (the target did not take every receipt)' : ''),
       ],
@@ -869,10 +944,12 @@ async function discard(
     }
     return answer(null, [], ['the target holds no failed import; nothing was discarded']);
   }
-  if (record.state === 'READY_FOR_CUTOVER') {
+  if (record.state !== 'BLOCKED' && record.state !== 'IMPORTING') {
     refuse(
       'RAY_USAGE',
-      'the target holds an import that is ready for its cutover, not a failed one; it is not discarded',
+      record.state === 'COMPLETE'
+        ? 'the target holds an imported deployment that was cut over; it is never discarded'
+        : 'the target holds an import that is ready for its cutover, not a failed one; it is not discarded',
       { path: '/target' },
     );
   }
@@ -881,6 +958,7 @@ async function discard(
     progress(`discarding the failed import ${record.operationId}`);
     const discarded = await server.discardImportTarget(control, config, {
       deploymentId: record.deploymentId,
+      withheldDefaultWrites: server.readWithheldDefaultWrites(record.withheldDefaultWrites),
     });
     if (!discarded.ok) return answer(null, discarded.errors);
     await dir.removeDeploymentState();
@@ -892,6 +970,154 @@ async function discard(
           `root are empty again, and ${target} holds no deployment; its receipts stay`,
         `run the import again (operation ${options.operationId})`,
       ],
+    );
+  } finally {
+    await control.$client.end().catch(() => {});
+  }
+}
+
+/** Run `fn` with the target's workflow system database open, or null when it has none. */
+async function withWorkflowSystem<T>(
+  server: Server,
+  control: Db | null,
+  url: string,
+  fn: (workflowSystem: Db | null) => Promise<T>,
+): Promise<T> {
+  const workflowSystem = await server.openWorkflowSystemDatabase(control as Db, url);
+  try {
+    return await fn(workflowSystem);
+  } finally {
+    await workflowSystem?.$client.end().catch(() => {});
+  }
+}
+
+/**
+ * `--cutover-token`: check and consume the import's cutover token, then release the target's fence,
+ * granting the runtime role its writes. `--renew-cutover-token`: replace the token.
+ */
+async function cutover(
+  server: Server,
+  dir: StateDirectory,
+  record: ImportRecord | null,
+  config: Parameters<Server['discardImportTarget']>[1],
+  options: ImportOptions,
+  answer: (data: unknown, errors: BundleError[], summary?: string[]) => ImportOutcome,
+  progress: (line: string) => void,
+  step: { target: string; token: string | null },
+): Promise<ImportOutcome> {
+  if (record === null || (record.state !== 'READY_FOR_CUTOVER' && record.state !== 'CUTOVER')) {
+    refuse(
+      'RAY_USAGE',
+      record === null
+        ? 'the target state directory holds no import'
+        : record.state === 'COMPLETE'
+          ? 'the import of this target was cut over already'
+          : 'the import of this target did not end ready for its cutover',
+      { path: '/target' },
+    );
+  }
+  const importOf = {
+    operationId: record.operationId,
+    deploymentId: record.deploymentId,
+    migrationBundleSha256: record.migrationBundleSha256,
+    sourceFenceEpoch: record.sourceFenceEpoch,
+  };
+  const writeRecord = (state: ImportRecord['state']) =>
+    dir.writeImportRecord({ ...record, state, updatedAt: formatTimestamp(new Date()) });
+  const control = server.openControlDatabase(config.migrationDatabaseUrl, 2);
+  try {
+    const receipts = await server.ImportReceiptLog.reopen(dir, record.operationId);
+    if (receipts === null) {
+      refuse('RAY_USAGE', 'the target state directory holds no receipt of its import', {
+        path: '/target',
+      });
+    }
+    await receipts.attach(control, { replay: false });
+    const digests = { migrationBundleSha256: record.migrationBundleSha256 };
+    return await withWorkflowSystem(
+      server,
+      control,
+      config.migrationWorkflowSystemDatabaseUrl,
+      async (workflowSystem) => {
+        const dbs = { control, workflowSystem, runtimeRole: config.runtimeRole };
+        if (step.token === null) {
+          progress(`issuing a new cutover token for the import ${record.operationId}`);
+          const renewed = await server.renewCutoverToken(dbs, importOf);
+          if (!renewed.ok) return answer(null, renewed.errors);
+          const { token, binding, tokenSha256 } = renewed.value;
+          await receipts.cutover(binding, tokenSha256);
+          await receipts.transition('READY_FOR_CUTOVER', {
+            sourceFenceEpoch: record.sourceFenceEpoch,
+            targetFenceEpoch: binding.targetFenceEpoch,
+            digests,
+            recovery:
+              'a new cutover token was issued; the earlier one no longer works. Cutover token ' +
+              `SHA-256 ${tokenSha256}`,
+          });
+          await writeRecord('READY_FOR_CUTOVER');
+          return answer(
+            null,
+            [],
+            [
+              `cutover: \`rayspec import --target ${step.target} --cutover-token <token>\``,
+              `cutover token ${token}: works once, until ${binding.expiresAt}; the earlier token no ` +
+                'longer works',
+            ],
+          );
+        }
+
+        progress(`checking the cutover token of the import ${record.operationId}`);
+        const consumed = await server.consumeCutoverToken(
+          dbs,
+          importOf,
+          step.token,
+          options.operationId,
+        );
+        if (!consumed.ok) return answer(null, consumed.errors);
+        const { fenceEpoch } = consumed.value;
+        await receipts.transition('CUTOVER', {
+          sourceFenceEpoch: record.sourceFenceEpoch,
+          targetFenceEpoch: fenceEpoch,
+          digests,
+          recovery:
+            'the cutover token is used; should the fence not be released, issue a new token with ' +
+            '`rayspec import --target <target state directory> --renew-cutover-token` and cut over ' +
+            'again',
+        });
+        await writeRecord('CUTOVER');
+        const rc = server.createRuntimeControl({
+          db: control,
+          runtimeRole: config.runtimeRole,
+          ...(workflowSystem !== null ? { workflowSystemDb: workflowSystem } : {}),
+          cutoverBy: options.operationId,
+        });
+        const resumed = await rc.resume({
+          contractVersion: CONTRACT_VERSION,
+          operationId: options.operationId,
+          actor: server.IMPORT_ACTOR,
+          fenceEpoch,
+        });
+        if (!resumed.ok || resumed.data === null) return answer(null, resumed.errors);
+        await receipts.transition('COMPLETE', {
+          sourceFenceEpoch: record.sourceFenceEpoch,
+          targetFenceEpoch: fenceEpoch,
+          digests,
+          recovery:
+            'the target serves: switching traffic back to the source after the target took new ' +
+            'writes is not a rollback; reconcile or migrate the new data first',
+        });
+        await writeRecord('COMPLETE');
+        return answer(
+          null,
+          [],
+          [
+            `cut over: the target's fence (epoch ${fenceEpoch}) is released and its runtime role ` +
+              `may write; environment revision ${resumed.data.environmentRevision}`,
+            'deploy the application the source ran on the target with the boot secrets the import ' +
+              `minted, and keep the source fenced at epoch ${record.sourceFenceEpoch}`,
+          ],
+        );
+      },
     );
   } finally {
     await control.$client.end().catch(() => {});

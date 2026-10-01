@@ -11,6 +11,10 @@
  *     refused before anything reaches the target.
  *  3. Dumps an export never writes — an extension, a role, a SECURITY DEFINER function, `COPY FROM
  *     PROGRAM` — are refused by the allowlist; nothing of them runs, nothing reaches the target.
+ *  3b. A dump whose trigger functions run SQL from a string — one trigger placed before the data it
+ *     would fire on, one on the security audit the import writes itself — restores every row before
+ *     either trigger exists, and what the second one creates is found in the catalog: the target is
+ *     marked failed and discarded.
  *  4. A dump that restores two organizations is refused and its restore discarded.
  *  5. A non-empty target (a table, a blob) is refused, in the dry run and the import.
  *  6. A snapshot of another runtime is refused.
@@ -20,15 +24,20 @@
  *  8. An import killed during the restore leaves the target marked failed: the next import refuses
  *     it and closes the killed run's receipt; `--discard-failed` empties it.
  *  9. SIGINT during the restore ends `pg_restore` (exit 6); the target is discarded the same way.
- * 10. The full round trip: every row of both databases and every file equals the source's —
+ * 10. The full round trip, while a writer connected as the target's runtime role tries to insert
+ *     throughout and is refused every time: every row of both databases and every file equals the
+ *     source's —
  *     non-ASCII text, NULLs, JSON, a foreign key, three users with their password hashes (one owner
  *     holds none: their only credential was an API key) — the credential tables are empty, each
  *     account's carried identity is in the target's security audit, stderr says who signs in again
  *     and which owner needs owner recovery, the target's own boot secrets are in a new private
  *     directory and in no output, every transition is in the receipts, the target is fenced with its
  *     runtime role unable to write, and the source is untouched.
- * 11. The cutover: owner recovery is refused while the target is fenced; `rayspec resume` releases
- *     the fence; the application deployed there with the secrets the import minted serves the
+ * 11. The cutover: `rayspec resume` does not release the fence the import holds; a wrong token, an
+ *     expired one and a target whose catalog changed are refused; a renewed token replaces the old
+ *     one; owner recovery is refused while the target is fenced; the cutover with the token releases
+ *     the fence once (the token is spent, and a second cutover is refused); the application deployed
+ *     there with the secrets the import minted serves the
  *     imported rows; a member signs in with the password they had; the source's access token,
  *     refresh session, API key and invite are all refused; the key-only owner gets a recovery token
  *     printed once, redeems it once (a second redemption fails), signs in with the new password and
@@ -112,7 +121,7 @@ if (dbRequired && !baseUrl) {
   );
 }
 let armsRan = 0;
-const ARMS = 12;
+const ARMS = 13;
 
 const SOURCE_DB = `rayspec_import_src_${process.pid}`;
 const TARGET_DB = `rayspec_import_tgt_${process.pid}`;
@@ -489,6 +498,100 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     armsRan += 1;
   }, 600_000);
 
+  it('restores every row before a trigger of the dump exists, and finds what a trigger function created during the import', async () => {
+    const dump = parts.files.get(SNAPSHOT_PATHS.database)!;
+    const functionEntry = (
+      base: DumpTocEntry,
+      tag: string,
+      sql: string,
+      dumpId: number,
+    ): DumpTocEntry => ({
+      ...base,
+      dumpId,
+      oid: String(dumpId),
+      tag: `${tag}()`,
+      namespace: 'public',
+      defn:
+        `CREATE FUNCTION public.${tag}() RETURNS trigger\n    LANGUAGE plpgsql\n` +
+        `    AS $$\nBEGIN\n\tEXECUTE '${sql}';\n\tRETURN NEW;\nEND;\n$$;\n`,
+    });
+    const triggerEntry = (
+      base: DumpTocEntry,
+      table: string,
+      fn: string,
+      dumpId: number,
+    ): DumpTocEntry => ({
+      ...base,
+      dumpId,
+      oid: String(dumpId),
+      tag: `${table} ${fn}`,
+      namespace: 'public',
+      section: 4,
+      defn:
+        `CREATE TRIGGER ${fn} BEFORE INSERT ON public.${table} FOR EACH ROW EXECUTE FUNCTION ` +
+        `public.${fn}();\n`,
+    });
+    const forged = await forgeDump(dump, (entries) => {
+      const firstData = entries.findIndex((e) => e.desc === 'TABLE DATA');
+      expect(firstData).toBeGreaterThan(0);
+      const fn = entries.find((e) => e.desc === 'FUNCTION')!;
+      const trigger = entries.find((e) => e.desc === 'TRIGGER')!;
+      return [
+        ...entries.slice(0, firstData),
+        functionEntry(fn, 'fired_during_copy', 'CREATE SCHEMA fired_during_copy', 900_101),
+        functionEntry(
+          fn,
+          'fired_after_restore',
+          'CREATE OR REPLACE VIEW public.fired_after_restore AS SELECT 1',
+          900_102,
+        ),
+        // In the archive before every row: pg_restore follows the list the import hands it.
+        triggerEntry(trigger, 'import_notes', 'fired_during_copy', 900_103),
+        triggerEntry(trigger, 'auth_audit', 'fired_after_restore', 900_104),
+        ...entries.slice(firstData),
+      ];
+    });
+    expect(
+      parts.snapshot.tableCounts.find((t) => t.table === 'import_notes')!.rows,
+    ).toBeGreaterThan(0);
+    const bundle = await rebuildMigrationBundle(parts, {
+      recipient: source.recipient,
+      target: appTarget,
+      files: { [SNAPSHOT_PATHS.database]: forged },
+    });
+    const dry = await cli(importArgs(bundle, ['--dry-run']));
+    expect(dry.code, dry.stderr).toBe(0);
+    const run = await cli(importArgs(bundle, ['--bindings-file', bindingsFile]));
+    expect(run.code, run.stderr).toBe(4);
+    expect(run.envelope.errors[0]).toMatchObject({
+      code: 'RAY_POLICY_DENIED',
+      reason: 'privileged-statement',
+    });
+    expect(run.envelope.errors[0].message).toContain('views');
+    // Every row came in before the trigger on it existed; the trigger on the audit fired when the
+    // import wrote it, and what it created was found.
+    const [found] = (await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe(
+        `SELECT to_regnamespace('fired_during_copy') IS NULL AS no_schema,
+                to_regclass('public.fired_after_restore') IS NOT NULL AS view,
+                (SELECT count(*)::int FROM import_notes) AS notes`,
+      ),
+    )) as unknown as [{ no_schema: boolean; view: boolean; notes: number }];
+    expect(found).toEqual({
+      no_schema: true,
+      view: true,
+      notes: parts.snapshot.tableCounts.find((t) => t.table === 'import_notes')!.rows,
+    });
+    expect(JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8'))).toMatchObject({
+      state: 'BLOCKED',
+    });
+    expect(await fenceOf(TARGET_DB)).toMatchObject({ state: 'fenced' });
+    const discarded = await cli(['import', '--target', stateDir, '--discard-failed']);
+    expect(discarded.code, discarded.stderr).toBe(0);
+    await expectTargetUntouched();
+    armsRan += 1;
+  }, 600_000);
+
   it('refuses a dump that restores two organizations, whatever snapshot.json says, and discards the restore', async () => {
     // A copy of the source with a second organization, dumped the way an export dumps.
     await asAdmin(adminUrl, 'postgres', (sql) =>
@@ -633,6 +736,22 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
         state: 'BLOCKED',
       });
       expect(await fenceOf(TARGET_DB)).toMatchObject({ state: 'fenced' });
+      // A failed target's fence is never resumed.
+      const failed = JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8')) as {
+        deploymentId: string;
+      };
+      const resumeFailed = await cli([
+        'resume',
+        '--deployment',
+        failed.deploymentId,
+        '--fence-epoch',
+        String((await fenceOf(TARGET_DB))!.epoch),
+        '--state-dir',
+        stateDir,
+      ]);
+      expect(resumeFailed.code, resumeFailed.stderr).toBe(2);
+      expect(resumeFailed.envelope.errors[0].message).toContain('--discard-failed');
+      expect(await fenceOf(TARGET_DB)).toMatchObject({ state: 'fenced' });
       const again = await cli(importArgs(source.bundle, ['--dry-run']));
       expect(again.code).toBe(4);
       expect(again.envelope.errors[0]).toMatchObject({ code: 'RAY_TARGET_NOT_EMPTY' });
@@ -765,14 +884,72 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
 
   let imported: CliRun;
   let importedSecrets = '';
+  let cutoverToken = '';
+
+  /**
+   * A writer connected as the target's runtime role that tries to insert a row every few
+   * milliseconds until stopped; it counts what happened to each try.
+   */
+  function runtimeWriter() {
+    const tally = { written: 0, noTable: 0, denied: 0, other: [] as string[] };
+    let stopped = false;
+    const done = (async () => {
+      const runtime = postgres(target.roles.app.runtime, { max: 1, onnotice: () => {} });
+      try {
+        while (!stopped) {
+          try {
+            await runtime.begin(async (tx) => {
+              await tx.unsafe("SELECT set_config('app.current_tenant', $1, true)", [SOURCE_TENANT]);
+              await tx.unsafe(
+                "INSERT INTO import_ticks (tenant_id, trigger_name) VALUES ($1, 'written-before-cutover')",
+                [SOURCE_TENANT],
+              );
+            });
+            tally.written += 1;
+          } catch (err) {
+            const e = err as { code?: string; message?: string };
+            if (e.code === '42P01') tally.noTable += 1;
+            else if (e.code === '42501' && /permission denied for table/.test(e.message ?? '')) {
+              tally.denied += 1;
+            } else tally.other.push(`${e.code} ${e.message}`);
+          }
+          await pause(5);
+        }
+      } finally {
+        await runtime.end();
+      }
+    })();
+    return {
+      tally,
+      stop: async () => {
+        stopped = true;
+        await done;
+        return tally;
+      },
+    };
+  }
 
   it('imports the bundle: every row and file equals the source, credentials are reset, the target is fenced and the source untouched', async () => {
     const sourceFence = await fenceOf(source.db);
     const sourceBlobs = (await listFsBlobs(source.blobRoot, { phase: 'quiesced' })).objects;
-    imported = await cli(importArgs(source.bundle, ['--bindings-file', bindingsFile]));
+    const writer = runtimeWriter();
+    try {
+      imported = await cli(importArgs(source.bundle, ['--bindings-file', bindingsFile]));
+    } finally {
+      await writer.stop();
+    }
     importedSecrets = lastSecretsOut;
     const run = imported;
     expect(run.code, run.stderr).toBe(0);
+    // The runtime role wrote nothing at any point of the import: before the restore the table did
+    // not exist, after it every insert was refused for want of the privilege.
+    expect(writer.tally.other).toEqual([]);
+    expect(writer.tally.written).toBe(0);
+    expect(writer.tally.noTable).toBeGreaterThan(0);
+    expect(writer.tally.denied).toBeGreaterThan(0);
+    expect(await rowsOf(TARGET_DB, 'public', 'import_ticks')).toEqual(
+      await rowsOf(source.db, 'public', 'import_ticks'),
+    );
     const data = run.envelope.data as ParsedJson;
     expect(data).toMatchObject({
       bundleSha256: source.exported.sha256,
@@ -799,8 +976,12 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     expect(JSON.parse(readFileSync(join(stateDir, 'deployment.json'), 'utf8')).deploymentId).toBe(
       deploymentId,
     );
-    expect(run.stderr).toContain(`rayspec resume --deployment ${deploymentId} --fence-epoch 1`);
-    expect(run.stderr).toMatch(/cutover token [0-9a-f]{64}/);
+    expect(run.stderr).toContain(`rayspec import --target ${stateDir} --cutover-token <token>`);
+    cutoverToken = /cutover token ([0-9a-f]{64}): works once/.exec(run.stderr)?.[1] ?? '';
+    expect(cutoverToken).toMatch(/^[0-9a-f]{64}$/);
+    // Shown once, on stderr; never in the envelope.
+    expect(run.stderr.split(cutoverToken)).toHaveLength(2);
+    expect(run.stdout).not.toContain(cutoverToken);
 
     // Every row of both databases: the included ones equal the source's, the excluded ones are empty.
     const excluded = new Set(parts.snapshot.excludedDataCategories);
@@ -984,7 +1165,10 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       sourceFenceEpoch: source.exported.fenceEpoch,
       targetFenceEpoch: 1,
     });
+    const tokenSha256 = createHash('sha256').update(cutoverToken).digest('hex');
+    expect(receipt.cutover.tokenSha256).toBe(tokenSha256);
     for (const s of [
+      cutoverToken,
       ...secrets(),
       stateDir,
       NON_ASCII,
@@ -1006,6 +1190,17 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       ['step-finished', 'VERIFYING', null],
       ['outcome', 'READY_FOR_CUTOVER', 'succeeded'],
     ]);
+    // The target keeps the token's SHA-256 only, in its fence and its receipts.
+    const held = await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe(
+        `SELECT (SELECT fence_barriers::text FROM runtime_control_state WHERE id = 1) AS fence,
+                (SELECT string_agg(coalesce(digest, '') || ' ' || coalesce(detail::text, ''), ' ')
+                   FROM runtime_control_receipts) AS receipts`,
+      ),
+    );
+    expect(held[0]!.fence).toContain(tokenSha256);
+    expect(held[0]!.receipts).toContain(tokenSha256);
+    expect(`${held[0]!.fence} ${held[0]!.receipts}`).not.toContain(cutoverToken);
     // The target's receipts are its own: the import's, and the fence it took under the same id.
     const [others] = (await asAdmin(adminUrl, TARGET_DB, (sql) =>
       sql.unsafe(
@@ -1034,7 +1229,7 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     return { ...run, result: run.envelope as ParsedJson };
   }
 
-  it('the cutover: the new boot secrets serve the imported rows; passwords sign in; every copied session, refresh token, API key and invite fails; owner recovery works once', async () => {
+  it('the cutover: the token releases the fence once; the new boot secrets serve the imported rows; passwords sign in; every copied session, refresh token, API key and invite fails; owner recovery works once', async () => {
     const deploymentId = imported.envelope.data.deploymentId as string;
     const recoveryEnv = {
       ...targetEnv(),
@@ -1050,7 +1245,8 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
     expect(early.result).not.toHaveProperty('recoveryToken');
     expect(await rowsOf(TARGET_DB, 'public', 'owner_recovery_tokens')).toEqual([]);
 
-    const resumed = await cli([
+    // A plain resume does not release the fence the import holds.
+    const resumeArgs = [
       'resume',
       '--deployment',
       deploymentId,
@@ -1058,9 +1254,121 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       '1',
       '--state-dir',
       stateDir,
+    ];
+    const plain = await cli(resumeArgs);
+    expect(plain.code, plain.stderr).toBe(2);
+    expect(plain.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+    expect(plain.envelope.errors[0].message).toContain('--cutover-token');
+    expect(await fenceOf(TARGET_DB)).toEqual({ state: 'fenced', epoch: 1 });
+
+    const cutoverArgs = (token: string) => [
+      'import',
+      '--target',
+      stateDir,
+      '--cutover-token',
+      token,
+    ];
+    // Another token is refused.
+    const other = await cli(cutoverArgs(createHash('sha256').update(randomUUID()).digest('hex')));
+    expect(other.code, other.stderr).toBe(4);
+    expect(other.envelope.errors[0]).toMatchObject({ code: 'RAY_POLICY_DENIED' });
+    expect(other.envelope.errors[0].message).toContain('not the one this import issued');
+    // An expired token is refused (its expiry moved into the past, as 15 minutes would).
+    const setExpiry = (at: string) =>
+      asAdmin(adminUrl, TARGET_DB, (sql) =>
+        sql.unsafe(
+          `UPDATE runtime_control_state
+              SET fence_barriers = jsonb_set(fence_barriers, '{import,cutover,expiresAt}', to_jsonb($1::text))
+            WHERE id = 1`,
+          [at],
+        ),
+      );
+    const [{ expiresAt }] = (await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe(
+        'SELECT fence_barriers #>> \'{import,cutover,expiresAt}\' AS "expiresAt" FROM runtime_control_state WHERE id = 1',
+      ),
+    )) as unknown as [{ expiresAt: string }];
+    expect(Date.parse(expiresAt) - Date.now()).toBeGreaterThan(60_000);
+    expect(Date.parse(expiresAt) - Date.now()).toBeLessThanOrEqual(15 * 60_000);
+    await setExpiry('2026-01-01T00:00:00Z');
+    const expired = await cli(cutoverArgs(cutoverToken));
+    expect(expired.code, expired.stderr).toBe(4);
+    expect(expired.envelope.errors[0]).toMatchObject({ code: 'RAY_POLICY_DENIED' });
+    expect(expired.envelope.errors[0].message).toContain('expired');
+    // A renewed token replaces it; the old token no longer works.
+    const renewed = await cli(['import', '--target', stateDir, '--renew-cutover-token']);
+    expect(renewed.code, renewed.stderr).toBe(0);
+    const token = /cutover token ([0-9a-f]{64}): works once/.exec(renewed.stderr)?.[1] ?? '';
+    expect(token).toMatch(/^[0-9a-f]{64}$/);
+    expect(token).not.toBe(cutoverToken);
+    const old = await cli(cutoverArgs(cutoverToken));
+    expect(old.code).toBe(4);
+    expect(old.envelope.errors[0].message).toContain('not the one this import issued');
+    // A target whose catalog changed since the import is not cut over.
+    await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe('CREATE VIEW public.added_after_import AS SELECT 1 AS one'),
+    );
+    const changed = await cli(cutoverArgs(token));
+    expect(changed.code, changed.stderr).toBe(6);
+    expect(changed.envelope.errors[0]).toMatchObject({ code: 'RAY_RECONCILIATION_REQUIRED' });
+    await asAdmin(adminUrl, TARGET_DB, (sql) => sql.unsafe('DROP VIEW public.added_after_import'));
+    expect(await fenceOf(TARGET_DB)).toEqual({ state: 'fenced', epoch: 1 });
+    expect(JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8')).state).toBe(
+      'READY_FOR_CUTOVER',
+    );
+
+    // The cutover: the token works, once.
+    const cut = await cli(cutoverArgs(token));
+    expect(cut.code, cut.stderr).toBe(0);
+    expect(cut.envelope).toMatchObject({ ok: true, operation: 'import', data: null });
+    expect(cut.stderr).toContain("cut over: the target's fence (epoch 1) is released");
+    expect(await fenceOf(TARGET_DB)).toEqual({ state: 'open', epoch: 1 });
+    expect(JSON.parse(readFileSync(join(stateDir, 'import.json'), 'utf8')).state).toBe('COMPLETE');
+    const again = await cli(cutoverArgs(token));
+    expect(again.code).toBe(2);
+    expect(again.envelope.errors[0].message).toContain('cut over already');
+    // Single use holds in the target itself, not only in the state directory.
+    const recordPath = join(stateDir, 'import.json');
+    const completed = readFileSync(recordPath, 'utf8');
+    writeFileSync(recordPath, completed.replace('"COMPLETE"', '"READY_FOR_CUTOVER"'), {
+      mode: 0o600,
+    });
+    try {
+      const reused = await cli(cutoverArgs(token));
+      expect(reused.code, reused.stderr).toBe(4);
+      expect(reused.envelope.errors[0]).toMatchObject({ code: 'RAY_POLICY_DENIED' });
+    } finally {
+      writeFileSync(recordPath, completed, { mode: 0o600 });
+    }
+    const operationId = imported.envelope.operationId as string;
+    const receipt = JSON.parse(
+      readFileSync(join(stateDir, 'receipts', `import-${operationId}.json`), 'utf8'),
+    ) as ParsedJson;
+    expect(receipt.outcome).toBe('complete');
+    expect((receipt.transitions as ParsedJson[]).map((t) => t.state)).toEqual([
+      'IMPORTING',
+      'VERIFYING',
+      'READY_FOR_CUTOVER',
+      'READY_FOR_CUTOVER',
+      'CUTOVER',
+      'COMPLETE',
     ]);
-    expect(resumed.code, resumed.stderr).toBe(0);
-    expect(resumed.envelope.data).toMatchObject({ released: true });
+    expect(receipt.cutover.tokenSha256).toBe(createHash('sha256').update(token).digest('hex'));
+    const stepRows = await asAdmin(adminUrl, TARGET_DB, (sql) =>
+      sql.unsafe(
+        `SELECT step, outcome FROM runtime_control_receipts
+          WHERE operation_id = $1 AND operation_kind = 'import' ORDER BY id`,
+        [operationId],
+      ),
+    );
+    expect(stepRows.map((r) => [r.step, r.outcome])).toEqual([
+      ['IMPORTING', null],
+      ['VERIFYING', null],
+      ['READY_FOR_CUTOVER', 'succeeded'],
+      ['READY_FOR_CUTOVER', 'succeeded'],
+      ['CUTOVER', null],
+      ['COMPLETE', 'succeeded'],
+    ]);
 
     // The application, deployed with the secrets the import minted, read through their _FILE mounts.
     const port = await freePort();

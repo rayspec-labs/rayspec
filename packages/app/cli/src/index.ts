@@ -39,6 +39,7 @@
  *                                                        migration role, verify it, mint the target's
  *                                                        own boot secrets and leave it fenced until
  *                                                        the cutover (see import.ts);
+ *                                                        `--cutover-token` releases it, once;
  *                                                        `--discard-failed` removes a failed import.
  *   rayspec tenant recover-owner --email <address>       Issue a one-time owner-recovery token for an
  *                                                        owner who holds no password; printed once.
@@ -380,6 +381,8 @@ const HELP_SECTIONS: readonly HelpSection[] = [
   rayspec import <migration.ray> --target <state-dir> --identity-file <file>
                  --secrets-out <new-dir> [--bindings-file <file>] [--json]
   rayspec import --target <state-dir> --discard-failed [--json]
+  rayspec import --target <state-dir> --cutover-token <token> [--json]
+  rayspec import --target <state-dir> --renew-cutover-token [--json]
                                 Restore a migration bundle into a NEW, EMPTY target and leave it
                                 fenced until the cutover; the source stays authoritative. In order:
                                 the bundle through the one reader (the ciphertext's size and SHA-256
@@ -392,22 +395,31 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 contents against the restore allowlist (no extension but uuid-ossp in
                                 the workflow system database, one owner, no grant to an unknown role,
                                 no role, event trigger, untrusted language, SECURITY DEFINER function
-                                beyond the platform's two, COPY ... PROGRAM or call into the dump at
-                                restore time); the target: both databases and the blob root empty,
+                                beyond the platform's two, COPY ... PROGRAM, call into the dump or a
+                                server function at restore time, entry outside its section); the
+                                target: both databases and the blob root empty,
                                 the snapshot's server major, roles prepared. --dry-run stops there
-                                and restores nothing. Otherwise both databases are restored with
-                                pg_restore as the target's migration role, never a superuser, under
-                                the shared schema lock, the objects written unchanged, and everything
-                                verified (row counts, foreign keys, schema head, one organization,
-                                empty credential tables, object digests, the runtime role's posture);
-                                each account's carried identity is recorded in the target's security
-                                audit; the target is then fenced with the runtime role's writes
-                                revoked, its own signing key, API-key pepper and media key are minted
-                                into the new directory --secrets-out names (mode 0700, files 0600,
-                                never printed), and the result gives the cutover instruction and token
-                                (on stderr and in the receipt), and on stderr who signs in again,
-                                which owner needs owner recovery and that every API key is reissued. A failure leaves a changed target marked failed;
-                                --discard-failed removes what it restored. Reads DATABASE_URL (the
+                                and restores nothing. Otherwise the runtime role's default write
+                                privileges are withheld (it writes nothing restored until the
+                                cutover), both databases are restored with pg_restore as the target's
+                                migration role, never a superuser, under the shared schema lock,
+                                pre-data, data, post-data, each catalog checked to hold exactly what
+                                the restore plan creates, the objects written unchanged, and
+                                everything verified (row counts, foreign keys, schema head, one
+                                organization, empty credential tables, object digests, the runtime
+                                role's posture); each account's carried identity is recorded in the
+                                target's security audit; the import then holds the target's fence,
+                                its own signing key, API-key pepper and media key are minted into
+                                the new directory --secrets-out names (mode 0700, files 0600, never
+                                printed), and stderr gives the cutover instruction, the cutover
+                                token (shown once; works once, for 15 minutes; the receipts keep its
+                                SHA-256), who signs in again, which owner needs owner recovery and
+                                that every API key is reissued. --cutover-token checks and consumes
+                                the token against what it binds (bundle, target, both fence epochs,
+                                environment revision, catalogs) and only then releases the fence and
+                                grants the runtime role its writes; --renew-cutover-token replaces an
+                                expired or spent token. A failure leaves a changed target marked
+                                failed; --discard-failed removes what it restored. Reads DATABASE_URL (the
                                 runtime role), RAYSPEC_MIGRATION_DATABASE_URL (required),
                                 DBOS_SYSTEM_DATABASE_URL, RAYSPEC_BLOB_ROOT and RAYSPEC_PG_RESTORE
                                 (absolute path; default pg_restore on PATH, of the server's major) from
@@ -425,7 +437,8 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 reported, and give the runtime role back the writes the barrier
                                 revoked; runtime processes restart their producers within a second.
                                 A fence already open at that epoch is left alone (released: false).
-                                Same configuration as export. Writes ONE result envelope. Exit 0 /
+                                A fence an import holds is never released here (RAY_USAGE): the
+                                import's --cutover-token does. Same configuration as export. Writes ONE result envelope. Exit 0 /
                                 2 usage / 4 another epoch (RAY_FENCE_MISMATCH) / 5 database
                                 unavailable / 7 internal error.`,
       },

@@ -99,6 +99,41 @@ describe('parseImportArgs', () => {
       discardFailed: true,
     });
   });
+
+  it('takes the cutover and the renewal of its token with --target alone, one step at a time', () => {
+    const usage = (args: string[]) => {
+      try {
+        parseImportArgs(args);
+        return 'parsed';
+      } catch (err) {
+        return (err as { errors?: { code: string }[] }).errors?.[0]?.code ?? 'thrown';
+      }
+    };
+    const token = 'a'.repeat(64);
+    expect(parseImportArgs(['--target', 't', '--cutover-token', token])).toMatchObject({
+      bundle: null,
+      cutoverToken: token,
+      renewCutoverToken: false,
+      discardFailed: false,
+    });
+    expect(parseImportArgs(['--target', 't', '--renew-cutover-token'])).toMatchObject({
+      bundle: null,
+      cutoverToken: null,
+      renewCutoverToken: true,
+    });
+    for (const args of [
+      ['m.ray', '--target', 't', '--cutover-token', token],
+      ['--target', 't', '--cutover-token', token, '--identity-file', 'k'],
+      ['--target', 't', '--cutover-token', token, '--renew-cutover-token'],
+      ['--target', 't', '--cutover-token', token, '--discard-failed'],
+      ['--target', 't', '--renew-cutover-token', '--discard-failed'],
+      ['--target', 't', '--renew-cutover-token', '--dry-run'],
+      ['--target', 't', '--cutover-token', ''],
+      ['--cutover-token', token],
+    ]) {
+      expect(usage(args), args.join(' ')).toBe('RAY_USAGE');
+    }
+  });
 });
 
 describe('runImport before a database', () => {
@@ -193,5 +228,14 @@ describe('runImport before a database', () => {
     // A target that already holds a deployment is not imported into.
     const refused = await run(args(await identityFile(0o600), deployed));
     expect(refused).toMatchObject({ code: 'RAY_TARGET_NOT_EMPTY', exit: 4 });
+  });
+
+  it('cuts over nothing where no import is ready for its cutover', async () => {
+    const empty = join(temporaryDirectory('import-target-'), 'state');
+    for (const step of [['--cutover-token', 'b'.repeat(64)], ['--renew-cutover-token']]) {
+      const answered = await run(['--target', empty, ...step]);
+      expect(answered, step[0]).toMatchObject({ code: 'RAY_USAGE', exit: 2 });
+      expect(answered.message).toContain('holds no import');
+    }
   });
 });
