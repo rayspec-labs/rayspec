@@ -8,10 +8,12 @@
  *                            deployment serves, replaced atomically (temporary file, fsync, rename)
  *   versions/<bundleSha256>/ the extracted, immutable version directory of each staged bundle
  *   plans/<planDigest>.json  a plan record written by `rayspec deploy --dry-run`
- *   receipts/<name>.json     the local operation receipt of an export, which names no secret, no
- *                            record content and no store
- *   scratch/                 the private scratch space of an export: its lock file and, while it
- *                            runs, the directory its plaintext snapshot is captured into
+ *   receipts/<name>.json     the local operation receipt of an export or an import, which names no
+ *                            secret, no record content and no store
+ *   scratch/                 the private scratch space of an export or an import: its lock file and,
+ *                            while it runs, the directory its plaintext snapshot is in
+ *   import.json              on an import target: the state the last import left it in
+ *                            (`IMPORTING`, `READY_FOR_CUTOVER`, `BLOCKED`) and which import
  *
  * It never holds a secret value, a connection string or a key: the database and the blob root come
  * from the explicit process environment, and a plan record carries binding revision ids, never values.
@@ -381,6 +383,42 @@ export class StateDirectory {
   /** Switch the active version: `active.json` is replaced in one rename. */
   async writeActive(record: ActiveRecord): Promise<void> {
     await writeAtomically(this.root, 'active.json', canonicalJsonFile(record));
+  }
+
+  /** `import.json`, or null on a state directory no import has used. */
+  async readImportRecord(): Promise<unknown | null> {
+    return readStateJson(join(this.root, 'import.json'), 'import.json');
+  }
+
+  /** Replace `import.json` atomically. */
+  async writeImportRecord(record: unknown): Promise<void> {
+    await writeAtomically(this.root, 'import.json', canonicalJsonFile(record));
+  }
+
+  /**
+   * What makes this directory hold a deployment or an import: the names of `deployment.json`,
+   * `active.json`, `import.json`, `versions/` and `plans/` that exist. Receipts and the scratch space
+   * do not count.
+   */
+  async deploymentState(): Promise<string[]> {
+    const present: string[] = [];
+    for (const name of ['deployment.json', 'active.json', 'import.json', 'versions', 'plans']) {
+      if (await exists(join(this.root, name))) present.push(name);
+    }
+    return present;
+  }
+
+  /**
+   * Remove what a discarded import left: `deployment.json`, `active.json`, `import.json`, `versions/`
+   * and `plans/`. The receipts stay, so the record of what happened survives the target.
+   */
+  async removeDeploymentState(): Promise<void> {
+    for (const name of ['deployment.json', 'active.json', 'import.json']) {
+      await rm(join(this.root, name), { force: true });
+    }
+    for (const name of ['versions', 'plans']) {
+      if (await exists(join(this.root, name))) await removeTree(join(this.root, name));
+    }
   }
 
   /** Write a plan record; it names no secret. */

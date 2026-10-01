@@ -26,15 +26,19 @@ export type { DriftFinding } from '@rayspec/db';
 // The bindings a bundle deploy grants: the application's own to its handlers (`init.bindings`), the
 // provider credentials to the adapters that use them — neither through the process environment.
 export { type ApplicationBindingGrant, setApplicationBindings } from '@rayspec/platform';
-// age v1 encryption to one X25519 recipient (the age authors' implementation), and the migration
-// bundle that carries an encrypted inner snapshot archive.
+// age v1 encryption to one X25519 recipient (the age authors' implementation), its decryption with
+// the matching identity, and the migration bundle that carries an encrypted inner snapshot archive.
 export {
   AGE_X25519_ENCRYPTION,
+  type DecryptedFile,
+  type DecryptOptions,
+  decryptFile,
   type EncryptedFile,
   EncryptionAborted,
   type EncryptOptions,
   encryptFile,
   isAgeX25519Recipient,
+  parseAgeX25519Identity,
 } from './age-encryption.js';
 // The agent trace-export posture (issue #287). Re-exported here for embedders, but the `rayspec deploy`
 // CLI imports the SAME symbols through the `@rayspec/server/agent-tracing` SUBPATH instead: that module
@@ -210,6 +214,27 @@ export {
   StateDirectoryError,
   verifyVersion,
 } from './deployment-state.js';
+// An import: the dump's table of contents read from its bytes, the allowlist that decides what of it
+// reaches the target, the migration bundle opened and checked, the target checked, restored,
+// verified and fenced, and the receipts of every transition.
+export {
+  DumpArchiveError,
+  type DumpHeader,
+  type DumpToc,
+  type DumpTocEntry,
+  readDumpToc,
+  tocListing,
+} from './dump-archive.js';
+export {
+  type CountedTable,
+  type DumpDatabase,
+  type DumpPolicyInput,
+  type DumpPolicyResult,
+  type DumpRestorePlan,
+  lexSql,
+  planDumpRestore,
+  type SqlToken,
+} from './dump-policy.js';
 // The receipts of an export (the local, shareable one and the environment's) and its scratch space.
 export {
   closeInterruptedExport,
@@ -245,6 +270,33 @@ export {
   schemaProbe,
 } from './health.js';
 export {
+  CUTOVER_TOKEN_LIFETIME_MS,
+  type CutoverToken,
+  closeInterruptedImport,
+  discardInstruction,
+  IMPORT_ACTOR,
+  type ImportDigests,
+  type ImportReceipt,
+  ImportReceiptLog,
+  type ImportRecord,
+  type ImportState,
+  type ImportSummary,
+  type ImportTransition,
+  importReceiptName,
+} from './import-receipts.js';
+export {
+  discardImportTarget,
+  type ImportTargetConfig,
+  type ImportTargetFacts,
+  type ImportTargetInspection,
+  type ImportVerification,
+  inspectImportTarget,
+  type RestoredImport,
+  type RestoreImportOptions,
+  type RestoreImportResult,
+  restoreImport,
+} from './import-target.js';
+export {
   type MigrationBundleInput,
   MigrationWriteAborted,
   type MigrationWriteOptions,
@@ -279,8 +331,17 @@ export {
   PgDumpError,
   type PgDumpTool,
   pgDumpMajor,
+  pgToolMajor,
   resolvePgDump,
+  resolvePgTool,
 } from './pg-dump.js';
+export {
+  type DumpSource,
+  listDump,
+  PgRestoreAborted,
+  RESTORE_OPTIONS,
+  restoreDump,
+} from './pg-restore.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so
@@ -430,6 +491,17 @@ export {
   type ExportSnapshotResult,
   exportSnapshot,
 } from './snapshot-export.js';
+export {
+  type ImportApplication,
+  type ImportDump,
+  isRestorableObjectKey,
+  type OpenedMigration,
+  type OpenMigrationOptions,
+  type OpenMigrationResult,
+  openMigrationBundle,
+  type PlanDumpsOptions,
+  planDumps,
+} from './snapshot-import.js';
 export {
   type ClassifiedTable,
   classifyApplicationTables,

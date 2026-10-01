@@ -67,10 +67,11 @@ async function isExecutableFile(path: string): Promise<boolean> {
 }
 
 /**
- * The `pg_dump` to run: `explicit` when given (an absolute path to an executable file, or a tool),
- * else the first executable `pg_dump` on `PATH`. Null when there is none.
+ * A PostgreSQL client tool to run: `explicit` when given (an absolute path to an executable file, or
+ * a tool), else the first executable `name` on `PATH`. Null when there is none.
  */
-export async function resolvePgDump(
+export async function resolvePgTool(
+  name: 'pg_dump' | 'pg_restore',
   explicit?: string | PgDumpTool,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<PgDumpTool | null> {
@@ -81,14 +82,25 @@ export async function resolvePgDump(
   }
   for (const dir of (env.PATH ?? '').split(delimiter)) {
     if (dir === '' || !isAbsolute(dir)) continue;
-    const candidate = join(dir, 'pg_dump');
+    const candidate = join(dir, name);
     if (await isExecutableFile(candidate)) return { command: candidate };
   }
   return null;
 }
 
+/**
+ * The `pg_dump` to run: `explicit` when given (an absolute path to an executable file, or a tool),
+ * else the first executable `pg_dump` on `PATH`. Null when there is none.
+ */
+export async function resolvePgDump(
+  explicit?: string | PgDumpTool,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<PgDumpTool | null> {
+  return resolvePgTool('pg_dump', explicit, env);
+}
+
 /** The environment a child runs with: the parent's without any `PG*` variable, plus `extra`. */
-function childEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
+export function childEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(process.env)) {
     if (!name.startsWith('PG')) env[name] = value;
@@ -103,6 +115,7 @@ function childEnv(extra: Record<string, string>): NodeJS.ProcessEnv {
 export function connectionEnvironment(
   url: string,
   rewriteHost?: PgDumpTool['rewriteHost'],
+  applicationName = 'rayspec-snapshot',
 ): Record<string, string> {
   let u: URL;
   try {
@@ -124,7 +137,7 @@ export function connectionEnvironment(
     PGPORT: address.port,
     PGDATABASE: database,
     PGCONNECT_TIMEOUT: '10',
-    PGAPPNAME: 'rayspec-snapshot',
+    PGAPPNAME: applicationName,
   };
   if (u.username !== '') env.PGUSER = decodeURIComponent(u.username);
   if (u.password !== '') env.PGPASSWORD = decodeURIComponent(u.password);
@@ -204,10 +217,18 @@ function run(
 
 /** The major version `pg_dump --version` reports. Throws `PgDumpError` when it reports none. */
 export async function pgDumpMajor(tool: PgDumpTool): Promise<number> {
+  return pgToolMajor(tool, 'pg_dump');
+}
+
+/** The major version `<tool> --version` reports. Throws `PgDumpError` when it reports none. */
+export async function pgToolMajor(
+  tool: PgDumpTool,
+  name: 'pg_dump' | 'pg_restore',
+): Promise<number> {
   const outcome = await run(tool, ['--version'], childEnv({}), { timeoutMs: VERSION_TIMEOUT_MS });
   const match = /\(PostgreSQL\)\s+(\d+)/.exec(outcome.stdout.toString('utf8'));
   if (outcome.code !== 0 || match === null) {
-    throw new PgDumpError('pg_dump --version did not report a PostgreSQL version');
+    throw new PgDumpError(`${name} --version did not report a PostgreSQL version`);
   }
   return Number(match[1]);
 }
