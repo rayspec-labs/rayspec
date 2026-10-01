@@ -99,6 +99,11 @@ import {
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { PausableQueue } from './pausable-queue.js';
+import {
+  DEFAULT_SYSTEM_DATABASE_CLOSE_TIMEOUT_MS,
+  guardSystemDatabaseClose,
+  launchedSystemDatabase,
+} from './system-database-close.js';
 
 /**
  * The neutral run-resolution the executor needs to turn a `RunJob` back into a runnable run — the
@@ -220,6 +225,12 @@ export interface DbosExecutorConfig {
    * a normal shutdown). Only the multi-executor reliability test harness sets it. NOT a production path.
    */
   readonly deregisterOnShutdown?: boolean;
+  /**
+   * How long `shutdown()` lets the workflow system database close once the engine has drained, in
+   * milliseconds (default {@link DEFAULT_SYSTEM_DATABASE_CLOSE_TIMEOUT_MS}). Running workflows are
+   * awaited before this starts. Past it the close is abandoned and `shutdown()` rejects saying so.
+   */
+  readonly systemDatabaseCloseTimeoutMs?: number;
 }
 
 /**
@@ -973,8 +984,30 @@ export class DbosDurableExecutor implements DurableExecutor {
     // (`awaitRunningWorkflows` in the installed 4.21.6 dbos-executor.js) — so an in-flight runAgentJob
     // FINISHES before this resolves (no orphaned mid-run job). `deregisterOnShutdown` (TEST-ONLY) also
     // clears the process-global workflow registry so a fresh executor can re-register in the same process.
+    // BOUNDED CLOSE: once drained, DBOS closes the workflow system database, and a notification
+    // listener reconnecting at that moment (after an outage of that database) held the close forever
+    // in the installed 4.21.6. The guard releases what that reconnect publishes, stops it from
+    // rescheduling, and bounds the close (system-database-close.ts).
+    // An SDK-layout fault still shuts the engine down (unguarded) and is reported afterwards.
+    const closeTimeoutMs =
+      this.#config.systemDatabaseCloseTimeoutMs ?? DEFAULT_SYSTEM_DATABASE_CLOSE_TIMEOUT_MS;
+    let close: ReturnType<typeof guardSystemDatabaseClose> | undefined;
+    let layoutFault: unknown;
+    try {
+      const systemDatabase = launchedSystemDatabase();
+      if (systemDatabase) close = guardSystemDatabaseClose(systemDatabase, closeTimeoutMs);
+    } catch (e) {
+      layoutFault = e;
+    }
     await DBOS.shutdown(this.#config.deregisterOnShutdown ? { deregister: true } : undefined);
     this.#started = false;
+    if (layoutFault !== undefined) throw layoutFault;
+    if (close?.timedOut()) {
+      throw new Error(
+        `DbosDurableExecutor.shutdown: the workflow system database did not close within ` +
+          `${closeTimeoutMs} ms after the engine drained; its remaining connections were abandoned.`,
+      );
+    }
   }
 
   /**
