@@ -4,7 +4,7 @@
  * snapshot whose entries, application digest, object ranges or object digests do not hold together.
  */
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -35,6 +35,21 @@ function workDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'rayspec-snapshot-archive-'));
   dirs.push(dir);
   return dir;
+}
+
+/**
+ * Write a snapshot the writer must refuse into a directory of its own, and check that nothing is
+ * left there: neither the destination nor the plaintext temporary archive the read-back refused.
+ */
+async function writeRefused(
+  name: string,
+  input: Parameters<typeof writeSnapshotArchive>[1],
+  options?: Parameters<typeof writeSnapshotArchive>[2],
+): Promise<string> {
+  const dir = workDir();
+  const r = await writeSnapshotArchive(join(dir, name), input, options);
+  expect(readdirSync(dir)).toEqual([]);
+  return outcome(r);
 }
 
 const TENANT = '00000000-0000-4000-8000-000000000001';
@@ -183,12 +198,10 @@ describe('writeSnapshotArchive', () => {
     expect(readFileSync(out, 'utf8')).toBe('already here');
     const withInventory = { ...f.snapshot, inventory: [] } as unknown as SnapshotDocumentInput;
     expect(
-      outcome(
-        await writeSnapshotArchive(join(workDir(), 'x.zip'), {
-          snapshot: withInventory,
-          files: f.files,
-        }),
-      ),
+      await writeRefused('x.zip', {
+        snapshot: withInventory,
+        files: f.files,
+      }),
     ).toBe('RAY_USAGE/');
   });
 
@@ -212,12 +225,10 @@ describe('writeSnapshotArchive', () => {
       },
     });
     expect(
-      outcome(
-        await writeSnapshotArchive(join(workDir(), 'gap.zip'), {
-          snapshot: gap.snapshot,
-          files: gap.files,
-        }),
-      ),
+      await writeRefused('gap.zip', {
+        snapshot: gap.snapshot,
+        files: gap.files,
+      }),
     ).toBe('RAY_DIGEST_MISMATCH/object-range');
     const digest = fixture({
       edit: (i) => {
@@ -225,12 +236,10 @@ describe('writeSnapshotArchive', () => {
       },
     });
     expect(
-      outcome(
-        await writeSnapshotArchive(join(workDir(), 'digest.zip'), {
-          snapshot: digest.snapshot,
-          files: digest.files,
-        }),
-      ),
+      await writeRefused('digest.zip', {
+        snapshot: digest.snapshot,
+        files: digest.files,
+      }),
     ).toBe('RAY_DIGEST_MISMATCH/object-sha256');
     const stored = fixture({
       edit: (i) => {
@@ -238,43 +247,38 @@ describe('writeSnapshotArchive', () => {
       },
     });
     expect(
-      outcome(
-        await writeSnapshotArchive(join(workDir(), 'stored.zip'), {
-          snapshot: stored.snapshot,
-          files: stored.files,
-        }),
-      ),
+      await writeRefused('stored.zip', {
+        snapshot: stored.snapshot,
+        files: stored.files,
+      }),
     ).toBe('RAY_DIGEST_MISMATCH/object-sha256');
   });
 
   it('refuses an application digest that is not the embedded bundle and a wrong object count', async () => {
     const f = fixture();
     expect(
-      outcome(
-        await writeSnapshotArchive(join(workDir(), 'app.zip'), {
-          snapshot: { ...f.snapshot, applicationDigest: 'b'.repeat(64) },
-          files: f.files,
-        }),
-      ),
+      await writeRefused('app.zip', {
+        snapshot: { ...f.snapshot, applicationDigest: 'b'.repeat(64) },
+        files: f.files,
+      }),
     ).toBe('RAY_DIGEST_MISMATCH/application-digest');
     expect(
-      outcome(
-        await writeSnapshotArchive(join(workDir(), 'count.zip'), {
-          snapshot: { ...f.snapshot, objectCount: 3 },
-          files: f.files,
-        }),
-      ),
+      await writeRefused('count.zip', {
+        snapshot: { ...f.snapshot, objectCount: 3 },
+        files: f.files,
+      }),
     ).toBe('RAY_DIGEST_MISMATCH/object-range');
   });
 
   it('refuses a snapshot above the migration limit before writing it', async () => {
     const f = fixture();
-    const r = await writeSnapshotArchive(
-      join(workDir(), 'big.zip'),
-      { snapshot: f.snapshot, files: f.files },
-      { limits: { migrationExtractedBytes: 1024 } },
-    );
-    expect(outcome(r)).toBe('RAY_LIMIT_EXCEEDED/migration-size');
+    expect(
+      await writeRefused(
+        'big.zip',
+        { snapshot: f.snapshot, files: f.files },
+        { limits: { migrationExtractedBytes: 1024 } },
+      ),
+    ).toBe('RAY_LIMIT_EXCEEDED/migration-size');
   });
 });
 
