@@ -158,6 +158,7 @@ import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
 import { gatedProducer, queueProducer, type RuntimeFence } from './runtime-fence.js';
 import { lockSchemaInTransaction } from './schema-lock.js';
+import { assertManagedPostureBackends, managedBackendRefusal } from './supported-backends.js';
 
 /** A fail-closed product-boot config defect (a missing/invalid env or config file). */
 export class ProductBootError extends Error {
@@ -767,8 +768,11 @@ export function buildSttAdapter(
 ): SttAdapter {
   const selected = selectSttProvider(env);
   if (selected.provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
+  // The execution policy's provider-call timeout bounds every transcription request.
+  const timeoutMs = resolveAgentRequestTimeoutMs(env);
   return new DeepgramSttAdapter({
     apiKey: selected.apiKey,
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(defaultModel ? { model: defaultModel } : {}),
     resolver: new BlobRemuxSttMediaResolver(blob),
   });
@@ -1054,6 +1058,20 @@ function unwiredExtractionBackendError(backend: string): ProductBootError {
       ' | ',
     )}). Fail-closed.`,
   );
+}
+
+/**
+ * A source that refuses, as it is asked, any backend outside the managed posture's supported-backend
+ * matrix — naming the product model call that asked for it — and otherwise asks `source`.
+ */
+export function managedProductBackends(source: ProductBackendSource): ProductBackendSource {
+  return {
+    backendFor(kind, agentId, backend, model) {
+      const refusal = managedBackendRefusal('agent', backend, `the product ${kind} '${agentId}'`);
+      if (refusal) throw refusal;
+      return source.backendFor(kind, agentId, backend, model);
+    },
+  };
 }
 
 /**
@@ -2702,7 +2720,7 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   // every builder below keeps its built-in env construction, unchanged. The factory is called HERE —
   // after the sidecar configs and the capability composition — so it sees the COMPLETE set of model
   // calls the deployed document needs, never one at a time.
-  const productBackends = opts.agentBackendsFactory
+  const boundBackends = opts.agentBackendsFactory
     ? bindProductBackends(opts.agentBackendsFactory, {
         env,
         specPath,
@@ -2711,6 +2729,20 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
         ...(recordNormalizeDecl ? { normalizeAgentId: recordNormalizeDecl.agent } : {}),
       })
     : undefined;
+  // Under the managed posture every product model call is checked against the supported-backend
+  // matrix as it is built, and every speech provider before anything is built — a backend outside the
+  // matrix refuses the boot (supported-backends.ts). Outside the posture nothing is wrapped.
+  if (config.hostingPosture === 'managed') {
+    assertManagedPostureBackends({
+      posture: 'managed',
+      sttProvider: env.STT_PROVIDER?.trim(),
+      ttsProvider: config.ttsProvider,
+    });
+  }
+  const productBackends =
+    config.hostingPosture === 'managed'
+      ? managedProductBackends(boundBackends ?? envProductBackends(env))
+      : boundBackends;
 
   // ── 4. the extraction executor — DEMANDED iff the doc declares agents ─────────────────────────
   // A zero-agent doc has nothing to extract, so it demands NO RAYSPEC_EXTRACTION_MODE (the env is

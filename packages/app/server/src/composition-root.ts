@@ -91,7 +91,6 @@ import {
   DbosCronScheduler,
   DbosDurableExecutor,
   DEFAULT_CLEANUP_SCHEDULE,
-  DEFAULT_WORKER_CONCURRENCY,
   migrateWorkflowSystemDatabase,
   ProducerPausedError,
   type ResolvedRun,
@@ -102,9 +101,13 @@ import {
   type DurableExecutor,
   type DurableExecutorIdentity,
   type DurableRunAuthorizer,
+  type ExecutionPolicy,
   ExtensionLoadError,
+  executionPolicyProblemMessage,
+  executionPolicyProblems,
   FsSourceConfigError,
   type FsSourceFactory,
+  InRequestRunGate,
   invokeTriggerHandler,
   type LoadedExtensions,
   loadExtensions,
@@ -112,6 +115,7 @@ import {
   makeFsBlobStoreFactory,
   makeFsSourceFactory,
   type RunJob,
+  resolveExecutionPolicy,
 } from '@rayspec/platform';
 import {
   DEFAULT_EVENT_BUS_RETENTION_HOURS,
@@ -174,6 +178,7 @@ import {
   mountUnservableReason,
 } from './serve-static.js';
 import { buildSttCapability, FAKE_STT_BOOT_WARNING } from './stt-capability.js';
+import { assertManagedPostureBackends } from './supported-backends.js';
 // TYPE-ONLY: `tenant-provision.ts` imports `applyMigrations` from THIS module, so a value import back
 // would be a runtime cycle. The shape of the secret pair belongs with the code that consumes it.
 import type { TenantProvisionSecrets } from './tenant-provision.js';
@@ -773,6 +778,13 @@ export interface ServerConfig {
    */
   hostingPosture?: HostingPosture;
   /**
+   * The execution policy (execution-policy.ts in @rayspec/platform): wall time, provider-call timeout,
+   * kill grace, queue admission, worker concurrency, in-request runs and the cancellation poll, with
+   * the managed posture's defaults. `loadServerConfig` refuses an unusable value. Omitted ⇒ resolved
+   * from `hostingPosture` alone (every bound at its posture default).
+   */
+  executionPolicy?: ExecutionPolicy;
+  /**
    * Single-tenant mode — RAYSPEC_SINGLE_TENANT. `true`: the runtime holds one organization; creating
    * a second is refused on every path (the org store is the one point that decides), open registration
    * only creates that first one, and after it accounts join by invitation. A boot of a database that
@@ -1337,6 +1349,12 @@ export function loadServerConfig(
 
   // the hosting posture and the graceful-shutdown drain (both fail-closed on an invalid value).
   const hostingPosture = parseHostingPosture(env);
+  // the execution policy (fail-closed on a value the policy cannot use — see executionPolicyProblems).
+  const policyProblems = executionPolicyProblems(env);
+  if (policyProblems.length > 0) {
+    throw new BootConfigError(executionPolicyProblemMessage(policyProblems));
+  }
+  const executionPolicy = resolveExecutionPolicy(env);
   const shutdownDrainMs = parseShutdownDrainMs(env);
   // single-tenant mode (fail-closed on an invalid value; off unless set).
   const singleTenant = parseSingleTenantMode(env);
@@ -1392,6 +1410,7 @@ export function loadServerConfig(
     authRateMultiplier,
     schemaLockTimeoutMs,
     hostingPosture,
+    executionPolicy,
     singleTenant,
     shutdownDrainMs,
     secretFiles,
@@ -1660,6 +1679,39 @@ export function parseAuthRateMultiplier(env: NodeJS.ProcessEnv): number {
 
 /** The hosting postures: `local` (the default) and `managed` (the public-hosting posture). */
 export type HostingPosture = 'local' | 'managed';
+
+/** The execution policy a boot runs under: the loaded one, else the posture's defaults alone. */
+export function executionPolicyOf(
+  config: Pick<ServerConfig, 'executionPolicy' | 'hostingPosture'>,
+): ExecutionPolicy {
+  return (
+    config.executionPolicy ??
+    resolveExecutionPolicy({ RAYSPEC_HOSTING_POSTURE: config.hostingPosture ?? 'local' })
+  );
+}
+
+/** The durable worker's queue admission, when the policy bounds the queue. */
+function admissionOf(policy: ExecutionPolicy): {
+  admission?: { queueMax?: number; queueMaxPerTenant?: number };
+} {
+  const queueMax = policy.queueMax.value;
+  const queueMaxPerTenant = policy.queueMaxPerTenant.value;
+  if (queueMax === undefined && queueMaxPerTenant === undefined) return {};
+  return {
+    admission: {
+      ...(queueMax === undefined ? {} : { queueMax }),
+      ...(queueMaxPerTenant === undefined ? {} : { queueMaxPerTenant }),
+    },
+  };
+}
+
+/** The in-request run gate the run surface enforces, when the policy bounds in-request runs. */
+function inRequestRunGateOf(config: Pick<ServerConfig, 'executionPolicy' | 'hostingPosture'>): {
+  inRequestRunGate?: InRequestRunGate;
+} {
+  const max = executionPolicyOf(config).syncRunsMax.value;
+  return max === undefined ? {} : { inRequestRunGate: new InRequestRunGate(max) };
+}
 
 /**
  * Parse RAYSPEC_HOSTING_POSTURE. Unset/blank ⇒ `local`. Exactly `local` or `managed`; anything else
@@ -2516,6 +2568,9 @@ async function assembleServerWith(
     // credential, agent runs and playback reread the live membership, and streamed error frames carry
     // fixed messages (AppDeps.hardenedPosture). Off otherwise, so everything behaves as it did.
     hardenedPosture: hardenedPosture(config),
+    // In-request runs past RAYSPEC_AGENT_SYNC_RUNS_MAX are refused with 429 (off unless set, or the
+    // managed posture's default).
+    ...inRequestRunGateOf(config),
   };
 
   //    Every refusal the deploy can decide from the configuration and the document alone, made with
@@ -3331,6 +3386,14 @@ async function preflightDeclaredSpec(
   const sttCapability = buildSttCapability(config);
   const ttsCapability = buildTtsCapability(config);
   assertFrontendMountsServable(spec, specPath);
+  // The managed posture runs only the backends of the supported-backend matrix: refuse any other
+  // before anything is built or written (supported-backends.ts).
+  assertManagedPostureBackends({
+    posture: config.hostingPosture,
+    agents: spec.agents.map((a) => ({ name: a.id, backend: a.backend })),
+    sttProvider: config.sttProvider,
+    ttsProvider: config.ttsProvider,
+  });
   // The merged agents' backends: a pack agent may select one no base agent does.
   const agentBackends = opts.agentBackendsFactory?.(spec.agents);
   // A cron or manual trigger is fired by the durable worker, which the deploy wires only for a
@@ -3609,6 +3672,12 @@ async function deployDeclaredSpec(
   // omit that backend and `buildAgentRegistry` would fail closed at boot on the pack agent. Base-only
   // deploys (empty extensions ⇒ mergeExtensions no-op ⇒ effectiveSpec.agents === base agents) are
   // byte-identical, and a factory that ignores the arg (a test-injected map) is unaffected.
+  assertManagedPostureBackends({
+    posture: config.hostingPosture,
+    agents: effectiveSpec.agents.map((a) => ({ name: a.id, backend: a.backend })),
+    sttProvider: config.sttProvider,
+    ttsProvider: config.ttsProvider,
+  });
   const agentBackends = opts.preflight
     ? opts.preflight.agentBackends
     : opts.agentBackendsFactory?.(effectiveSpec.agents);
@@ -3792,35 +3861,17 @@ async function deployDeclaredSpec(
     fence.addExternal([`tts-${config.ttsProvider}`]);
   }
   if (effectiveSpec.deployment?.durableWorker === true && agentBackends) {
-    // ── Fix B (pool starvation): the durable worker gets its OWN dedicated postgres pool, SEPARATE
-    //    from the HTTP/API `db` pool. Each in-flight off-request run holds ONE connection across the
-    //    ENTIRE LLM call (inside `forTenant(workerDb, tenantId).transaction()`), so a worker sharing
-    //    the HTTP pool (max 4) would, under `workerConcurrency` long runs, starve `GET /events` /
-    //    `/health` / every HTTP DB caller. DBOS's own control plane uses its SEPARATE system-DB pool
-    //    (`systemDatabaseUrl`), not this app pool, so this sizing covers only the worker's app-DB run work.
-    //    The pool-ISOLATION property (HTTP pool unaffected) is asserted by worker-pool-isolation.db.test.ts.
-    //
-    //    SIZING ANALYSIS (the autonomous taint write, done HONESTLY against ground
-    //    truth). A run that fires a NON-idempotent tool ALSO acquires a connection for the autonomous
-    //    `markRunTainted` INSERT (a separate non-transactional `forTenant(workerDb,…)` = `taintDb`, so the
-    //    marker commits on its OWN connection and survives the run's tx rollback). So a non-idempotent run
-    //    holds TWO connections at its peak: its run-tx connection (held across the whole LLM call) AND, for
-    //    the duration of the taint INSERT, a second autonomous connection. A held postgres-js
-    //    `tdb.transaction()` DOES pin its pool slot for the whole transaction (empirically confirmed: 2 held
-    //    txs on a `max:2` pool leave a 3rd autonomous query PENDING >3s until a held tx releases). So at
-    //    `workerConcurrency=N` with a pool of EXACTLY N, all N run-tx transactions pin all N slots, none of
-    //    the N autonomous taint INSERTs can acquire a connection, and the worker DEADLOCKS (every run TIMES
-    //    OUT). The `+1` is what makes it SAFE: with `N+1`, the N held run-tx connections leave ≥1 free slot,
-    //    so the N autonomous taint INSERTs SERIALIZE through that single headroom slot — each acquires it,
-    //    does its fast one-shot INSERT, and releases — WITHOUT ever blocking the held run-tx transactions.
-    //    The autonomous writes are short and serialized, so one free slot suffices; they never need N free
-    //    slots at once. The same headroom slot also covers the started-once reserve + the taint READ (both
-    //    run BEFORE the run-tx opens, so they do not even contend with the held run-tx connections).
-    //    `executor-pool-saturation.db.test.ts` PROVES BOTH directions: the shipped `N+1` arm completes all N
-    //    runs; the undersized `pool==N` arm reproduces the deadlock (all N TIME OUT) — so the `+1` is a
-    //    PROVEN minimum, not a guess. INVARIANT (by construction): `WORKER_POOL_MAX > workerConcurrency`.
-    const workerConcurrency = DEFAULT_WORKER_CONCURRENCY;
-    const WORKER_POOL_MAX = workerConcurrency + 1; // strict headroom over concurrency (sufficient — fix E)
+    // The durable worker gets its OWN postgres pool, separate from the HTTP/API `db` pool, so worker
+    // statements never queue behind HTTP callers or the reverse. A run holds no transaction across its
+    // model call, so a run waiting on a provider holds no connection: the pool bounds concurrent
+    // statements, not concurrent runs. It is sized one above the worker concurrency, so every run can
+    // issue a statement at once with a slot to spare; executor-pool-saturation.db.test.ts shows runs
+    // completing on a pool far smaller than the concurrency. DBOS's own control plane uses its separate
+    // system-database pool. The pool isolation (HTTP pool unaffected) is asserted by
+    // worker-pool-isolation.db.test.ts.
+    const policy = executionPolicyOf(config);
+    const workerConcurrency = policy.workerConcurrency;
+    const WORKER_POOL_MAX = workerConcurrency + 1;
     const workerDb = servingPool(config, makeDb(config.databaseUrl, WORKER_POOL_MAX));
     const runAuthorizer = durableRunAuthorizer(baseDeps);
     const executor = new DbosDurableExecutor(
@@ -3857,6 +3908,9 @@ async function deployDeclaredSpec(
         // (and fail-closed kills) a job belonging to the other deployment's spec.
         applicationVersion: deriveDbosApplicationVersion('backend', effectiveSpec.metadata.name),
         workerConcurrency,
+        // Queue admission (RAYSPEC_AGENT_QUEUE_MAX / _PER_TENANT): off unless set, or the managed
+        // posture's defaults.
+        ...admissionOf(policy),
       },
     );
     // Inject the (not-yet-started) executor so buildApp wires the async path; start it after deploy().

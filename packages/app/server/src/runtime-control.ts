@@ -71,7 +71,12 @@ import {
   type ValidationResult,
 } from '@rayspec/bundle-contract';
 import { type Db, verifyTenantIsolation } from '@rayspec/db';
-import { type RunCancelPollSource, resolveRunCancelPoll } from '@rayspec/platform';
+import {
+  type ExecutionPolicy,
+  type RunCancelPollSource,
+  resolveExecutionPolicy,
+  resolveRunCancelPoll,
+} from '@rayspec/platform';
 import {
   type DatabaseIsolationStatus,
   type HostingPosture,
@@ -92,6 +97,7 @@ import {
   planProductSchema,
 } from './product-schema-plan.js';
 import { type CatalogQuery, readSchemaHead, runtimePlatformHead } from './schema-head.js';
+import { SUPPORTED_BACKEND_MATRIX, type SupportedBackend } from './supported-backends.js';
 
 /**
  * How this runtime is hosted, beside what `inspect()` reports: the contract's inspect result is a
@@ -119,6 +125,16 @@ export interface HostingReport {
     singleTenantMode: boolean;
     maxApplicationTenants: 1 | null;
   };
+  /**
+   * The execution policy this runtime enforces (execution-policy.ts in @rayspec/platform): each bound
+   * with its value (null ⇒ no bound) and where it came from.
+   */
+  executionPolicy: ExecutionPolicy;
+  /**
+   * The supported-backend matrix (supported-backends.ts): per backend, whether the managed posture
+   * runs it and how its calls are bounded and stopped.
+   */
+  supportedBackends: readonly SupportedBackend[];
 }
 
 /** The operations this adapter implements today, and the hosting report. */
@@ -385,6 +401,8 @@ export function createRuntimeControl(options: RuntimeControlOptions): RuntimeCon
           singleTenantMode,
           maxApplicationTenants: singleTenantMode ? 1 : null,
         },
+        executionPolicy: resolveExecutionPolicy(env),
+        supportedBackends: SUPPORTED_BACKEND_MATRIX,
       };
     },
 

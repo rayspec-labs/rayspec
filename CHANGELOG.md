@@ -471,8 +471,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surface authorizes; what handler code is given; and what it does not protect against (it is not a
   sandbox for custom code).
 
+- **One execution policy bounds every agent run.** Wall time (`RAYSPEC_AGENT_RUN_MAX_MS`), the
+  provider-call timeout (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`, `RAYSPEC_AGENT_MAX_ATTEMPTS`), the kill
+  grace for a child process (`RAYSPEC_AGENT_KILL_GRACE_MS`, new), queue admission for `async` runs
+  in total and per organization (`RAYSPEC_AGENT_QUEUE_MAX`, `RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT`,
+  new), the durable worker's concurrency (`RAYSPEC_AGENT_WORKER_CONCURRENCY`, new, default 4) and
+  in-request runs per process (`RAYSPEC_AGENT_SYNC_RUNS_MAX`, new) are read in one place.
+  Under `RAYSPEC_HOSTING_POSTURE=managed` every bound has a default (15 minutes per run, 2 minutes per
+  provider call, 2 attempts, a queue of 1000 and 100 per organization, 32 in-request runs, the 2 s
+  cancellation poll) and an unusable value of any of them refuses the boot; without the posture the
+  bounds that predate the policy stay off unless set. `inspectHosting()` reports the resolved policy
+  and where each value came from. See
+  [Hosting in the hardened posture → Bounded execution](./docs/hardened-posture.md#bounded-execution).
+- **A run past a queue or in-request bound is refused with `429`.** `RATE_LIMITED`, a `Retry-After`
+  and `error.details` `{ reason: "queue-full", scope, limit }`; nothing is recorded for the refused
+  run, and an `Idempotency-Key` it carried is free again. Admission counts the durable engine's own
+  queue under one database lock, so a burst is admitted exactly up to the bound.
+- **Every adapter bounds its provider call.** The openai backend keeps its per-request client
+  timeout; the anthropic, codex and pi backends end a call whose stream or child goes silent for the
+  provider-call timeout, with the neutral `timeout` class; the Deepgram and OpenAI speech adapters
+  bound each request, body included. The auth preflight of a remote backend is bounded by the same
+  timeout. Each is proven against a local provider that never answers or a child that never speaks.
+- **A codex child that ignores `SIGTERM` is killed.** The adapter starts the binary through a small
+  launcher that forwards the `SIGTERM` and sends `SIGKILL` after the kill grace, so a cancelled or
+  timed-out codex run always settles.
+- **A run's record says what happened to its provider call.** A run ended by a cancellation or by
+  its wall-clock bound carries `before-call`, `call-aborted`, `after-call` or `outcome-unknown` in its
+  terminal step, as observed by the process executing it; the cancel surface records
+  `outcome-unknown` for a run it finds executing until that process reports.
+- **The supported-backend matrix for the managed posture.** Under `RAYSPEC_HOSTING_POSTURE=managed`
+  only the openai agent backend and the Deepgram and OpenAI speech providers run; a boot whose
+  agents, product model calls or speech providers use anything else is refused before anything is
+  written, with the backend, what uses it and why. The matrix, with each backend's bounds,
+  cancellation semantics, gaps and the tests that prove them, is in
+  [Hosting in the hardened posture → Supported backends](./docs/hardened-posture.md#supported-backends)
+  and in `inspectHosting().supportedBackends`.
+
 ### Changed
 
+- **The durable worker holds no transaction across the model call.** A run's statements commit as
+  they are made, as on the in-request path, so a run waiting on a slow provider holds no database
+  connection and the worker's pool bounds statements, not runs. One execution per run is kept by a
+  lease on the run's started-once marker (a second dispatch waits for it; an execution whose lease is
+  taken over stops its run), and a recovery re-run of an untainted run first removes what the
+  interrupted attempt left. Consequences: an async run reads `running` while it executes rather than
+  `enqueued`; a cancelled run keeps the journal steps it wrote before it was ended; a tool's writes
+  commit as they happen, as they always did in-request.
+- **The wall-clock bound ends the run instead of only abandoning it.** When
+  `RAYSPEC_AGENT_RUN_MAX_MS` expires the run's signal is aborted, so a backend that honours it stops
+  its provider call, and the run is recorded terminal `error` with the `timeout` class. A run that
+  throws is recorded terminal `error` with the neutral class of its failure; neither reads back as
+  `enqueued` or `running` for ever any more. A same-key retry of a thrown, tainted run therefore
+  replays that recorded failure instead of answering `409`.
 - **In the hardened posture, starting or cancelling an agent run rereads the membership.** With
   role separation or single-tenant mode on, `agent:run` is checked against the live membership row,
   like `store:write` and the administrative actions, so a member removed or demoted since their
@@ -689,6 +739,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
+- **Bounded execution: what changes without the managed posture.** Nothing is bounded that was
+  not before, with two exceptions that are unsafe for everyone: a codex child that ignores `SIGTERM`
+  is killed after `RAYSPEC_AGENT_KILL_GRACE_MS` (default 5000), and the durable worker no longer
+  holds a database transaction for the length of a run. `RAYSPEC_AGENT_RUN_MAX_MS`, when set, now
+  aborts the run's call and records a terminal outcome. An unusable value of a variable the
+  execution policy adds refuses the boot. Under `RAYSPEC_HOSTING_POSTURE=managed` the policy's
+  defaults apply and a deployment using the anthropic, codex or pi backend, or a fake speech
+  provider, no longer boots — boot it without the posture, or move the agents to `openai`.
 - **The platform chain gains `0015_tenant_row_security`.** It only creates policies and functions
   and enables nothing, so a deployment that does not set `RAYSPEC_MIGRATION_DATABASE_URL` runs
   exactly as before. To turn role separation on for an existing deployment, run the setup SQL on

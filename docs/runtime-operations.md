@@ -247,7 +247,16 @@ depends on the poll interval:
 | `RAYSPEC_HOSTING_POSTURE=managed`, no interval | on, every 2000 ms |
 | neither | off: the run stops when it returns on its own |
 
-`inspectHosting()` reports which applies to a process.
+`inspectHosting()` reports which applies to a process, together with the whole execution policy
+and the supported-backend matrix ([Hosting in the hardened posture](./hardened-posture.md#bounded-execution)).
+
+What the run's record says is what the process executing it observed: the cancellation step states
+whether the provider call had not started (`before-call`), was stopped (`call-aborted`), had already
+finished (`after-call`), or did not settle within the kill grace (`outcome-unknown`). The cancel
+surface records `outcome-unknown` for a run it finds executing; the executing process replaces it
+when it stops, so a record that still says `outcome-unknown` after the run ended means that process
+could not report. `executor-cross-process-cancel.db.test.ts` in `@rayspec/durable-dbos` drives this
+against a second, real worker process.
 
 ## Limits
 

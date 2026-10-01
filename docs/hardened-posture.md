@@ -16,7 +16,7 @@ hosting posture as supported only when all of it is on.
 | --- | --- | --- |
 | `RAYSPEC_MIGRATION_DATABASE_URL` (or `_FILE`), with the roles from `database-roles.sql` | Role separation and row-level security: the migration role changes the schema, the server serves as a runtime role that cannot bypass the tenant policies. See [Database roles and row-level security](./database-isolation.md). | one role migrates and serves |
 | `RAYSPEC_SINGLE_TENANT=true` | Single-tenant mode: the runtime holds one organization. Creating a second one is refused on every path (the HTTP routes, the operator bootstrap, `rayspec tenant ensure`); open registration only creates that first one, and after it an account is made by redeeming an invite. | any number of organizations; open registration |
-| `RAYSPEC_HOSTING_POSTURE=managed` | The public `/recovery-scope` probe is not registered, and cross-process run cancellation is on by default. | `local` |
+| `RAYSPEC_HOSTING_POSTURE=managed` | The public `/recovery-scope` probe is not registered, cross-process run cancellation is on by default, every execution bound has a default ([Bounded execution](#bounded-execution)), and a boot that would use a backend outside the [supported-backend matrix](#supported-backends) is refused. | `local` |
 | `RAYSPEC_TRUSTED_PROXIES` | Behind a reverse proxy, the proxy addresses whose forwarding headers are believed; nothing else can set the client address. | the socket peer is the client |
 
 `RAYSPEC_SINGLE_TENANT` accepts exactly `true` or `false`; any other value refuses the boot, so a
@@ -87,6 +87,64 @@ again when it starts, and a streamed run's `error` frame carries the error's own
 A read (`store:read`, `agent:read`, `events:read`, `org:read`, `apikey:read`) trusts the role in the
 access token for that token's lifetime (`RAYSPEC_ACCESS_TOKEN_TTL_SECONDS`, 480 seconds by default).
 Every write, run start and administrative action rereads the membership.
+
+## Bounded execution
+
+Every bound on agent execution is one **execution policy**, read at boot and reported by
+`createRuntimeControl(...).inspectHosting().executionPolicy` with where each value came from
+(`explicit`, `hosting-posture`, `default` or `off`). Under the managed posture every bound has a
+default; without it the defaults are the behaviour before the policy existed, except the two that hold
+in every posture.
+
+| Variable | Bounds | Managed default | Without the posture |
+| --- | --- | --- | --- |
+| `RAYSPEC_AGENT_RUN_MAX_MS` | one whole run, wall clock; on expiry the run's signal is aborted and the run is recorded `error` with the neutral `timeout` class | 900000 | no bound |
+| `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | one provider call (see the matrix below for what that means per backend) | 120000 | the client's own default |
+| `RAYSPEC_AGENT_MAX_ATTEMPTS` | attempts per HTTP model request | 2 | the client's own default |
+| `RAYSPEC_AGENT_KILL_GRACE_MS` | SIGTERM to SIGKILL for a child process; how long run-core waits for a stopped call to settle | 5000 | 5000 |
+| `RAYSPEC_AGENT_QUEUE_MAX` | queued and executing `async` runs, in total | 1000 | no bound |
+| `RAYSPEC_AGENT_QUEUE_MAX_PER_TENANT` | queued and executing `async` runs, per organization | 100 | no bound |
+| `RAYSPEC_AGENT_WORKER_CONCURRENCY` | durable runs one worker process executes at once | 4 | 4 |
+| `RAYSPEC_AGENT_SYNC_RUNS_MAX` | in-request runs one process holds at once | 32 | no bound |
+| `RAYSPEC_RUN_CANCEL_POLL_MS` | how soon a cancellation reaches a run in another worker process | 2000 | off |
+
+A run past a queue or in-request bound is refused with `429 RATE_LIMITED`, a `Retry-After`, and
+`error.details` `{ reason: "queue-full", scope, limit }`, before anything is recorded for it. Under
+the managed posture an unusable value of any of these variables refuses the boot; without it, the
+variables added with the policy refuse the boot and the older four treat an unusable value as unset.
+
+**What a run that is ended records.** A run ended by a cancellation or by its wall-clock bound is
+recorded terminal `error` with one journal step whose output states what happened to its provider
+call, as observed by the process executing it: `before-call` (nothing was sent), `call-aborted` (the
+call settled within the kill grace after it was told to stop), `after-call` (the call had already
+finished; its result was discarded) or `outcome-unknown` (it did not settle in time, or the executing
+process could not report). A run whose outcome is unknown is never re-run automatically; one that
+fired a non-idempotent tool stays quarantined as before.
+
+**No transaction across the model call.** A run's database statements commit as they are made, on
+the durable worker as on the in-request path, so a run waiting on a slow provider holds no
+database connection. One execution per run is kept by a lease on the run's started-once marker, which
+the executing worker renews: a second dispatch of the same run waits until the lease is given up or
+lapses, and an execution whose lease was taken over stops its own run.
+
+## Supported backends
+
+The managed posture runs only the backends below marked `allowed`. A boot under the posture whose
+agents, product model calls or speech providers use any other backend is refused before anything is
+written, with a message naming the backend, what uses it and why; nothing is swapped silently. The
+columns state what this repository's tests prove; `inspectHosting().supportedBackends` reports the
+same matrix.
+
+| Backend | Kind | Managed posture | Provider-call bound | Cancellation and the wall-clock bound | Child process | Not covered | Proven by |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `openai` | agent | allowed | every HTTP request: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`, at most `RAYSPEC_AGENT_MAX_ATTEMPTS` attempts | the run's signal aborts the HTTP request | none | a tool call already dispatched runs to its own tool timeout | `packages/adapters/openai/src/hanging-provider.test.ts` |
+| `anthropic` | agent | self-host-only | silence of the child: no message for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | the SDK query ends; stdin closes at once, SIGTERM after 2 s, SIGKILL 5 s later | killed 7 s after the abort (fixed by the SDK) | the child's own children are not signalled; a host that exits inside the ladder can orphan a child that ignores SIGTERM | `packages/adapters/anthropic/src/cancellation.real-process.test.ts` |
+| `codex` | agent | self-host-only | silence of the turn: no event for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | the streamed turn ends; the launcher forwards SIGTERM to the child | killed `RAYSPEC_AGENT_KILL_GRACE_MS` after an ignored SIGTERM | the child's own children are not signalled; without the bundled binary the escalation is unavailable (logged) | `packages/adapters/codex/src/cancel.integration.test.ts` |
+| `pi` | agent | self-host-only | silence of the session: no event for `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | `session.abort()` aborts the HTTP request | none | compaction and branch-summary requests are not reached by the abort; a tool ignores its own abort signal | `packages/adapters/pi/src/hanging-provider.test.ts` |
+| `deepgram` | speech-to-text | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a transcription | none | a cancelled run does not stop a transcription in flight | `packages/adapters/deepgram/src/hanging-provider.test.ts` |
+| `fake` | speech-to-text | test-only | not applicable | not applicable | none | staging and conformance only | — |
+| `openai` | text-to-speech | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a synthesis | none | a cancelled run does not stop a synthesis in flight | `packages/adapters/openai-tts/src/hanging-provider.test.ts` |
+| `fake` | text-to-speech | test-only | not applicable | not applicable | none | staging and conformance only | — |
 
 ## What handler code is given
 

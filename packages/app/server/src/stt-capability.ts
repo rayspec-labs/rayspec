@@ -28,7 +28,7 @@
  */
 import { createHash } from 'node:crypto';
 import { DeepgramSttAdapter } from '@rayspec/adapter-deepgram';
-import type { SttCapability, SttTranscribeOptions } from '@rayspec/platform';
+import type { ExecutionPolicy, SttCapability, SttTranscribeOptions } from '@rayspec/platform';
 import {
   FakeSttAdapter,
   type SttAdapter,
@@ -253,6 +253,8 @@ export interface SttCapabilityConfig {
   readonly sttProvider?: string;
   /** DEEPGRAM_API_KEY — REQUIRED (eagerly) when the provider is `deepgram`. */
   readonly deepgramApiKey?: string;
+  /** The execution policy; its provider-call timeout bounds every transcription request. */
+  readonly executionPolicy?: ExecutionPolicy;
 }
 
 /**
@@ -274,7 +276,15 @@ export function buildSttCapability(config: SttCapabilityConfig): SttCapability |
           'STT_PROVIDER to boot without the transcription capability.',
       );
     }
-    return new AdapterSttCapability((resolver) => new DeepgramSttAdapter({ apiKey, resolver }));
+    const timeoutMs = config.executionPolicy?.requestTimeoutMs.value;
+    return new AdapterSttCapability(
+      (resolver) =>
+        new DeepgramSttAdapter({
+          apiKey,
+          resolver,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        }),
+    );
   }
   throw new BootConfigError(
     `Boot aborted — STT_PROVIDER '${provider}' is not supported (wired: deepgram | fake). Fail-closed.`,

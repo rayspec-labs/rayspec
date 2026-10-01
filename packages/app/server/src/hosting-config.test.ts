@@ -5,7 +5,7 @@
  * An unset or blank value is the default; anything else that is not exactly valid refuses the boot.
  */
 import type { Db } from '@rayspec/db';
-import { MANAGED_RUN_CANCEL_POLL_MS } from '@rayspec/platform';
+import { MANAGED_RUN_CANCEL_POLL_MS, resolveExecutionPolicy } from '@rayspec/platform';
 import { describe, expect, it } from 'vitest';
 import {
   BootConfigError,
@@ -19,6 +19,7 @@ import {
   parseSingleTenantMode,
 } from './composition-root.js';
 import { createRuntimeControl } from './runtime-control.js';
+import { SUPPORTED_BACKEND_MATRIX } from './supported-backends.js';
 
 describe('RAYSPEC_HOSTING_POSTURE', () => {
   it('defaults to local when unset or blank', () => {
@@ -100,6 +101,8 @@ describe('the hosting report beside inspect()', () => {
       hostingPosture: 'local',
       crossProcessCancellation: { enabled: false, pollIntervalMs: null, source: 'off' },
       applicationTenants: { singleTenantMode: false, maxApplicationTenants: null },
+      executionPolicy: resolveExecutionPolicy({}),
+      supportedBackends: SUPPORTED_BACKEND_MATRIX,
     });
   });
 
@@ -112,7 +115,19 @@ describe('the hosting report beside inspect()', () => {
         source: 'hosting-posture',
       },
       applicationTenants: { singleTenantMode: false, maxApplicationTenants: null },
+      executionPolicy: resolveExecutionPolicy({ RAYSPEC_HOSTING_POSTURE: 'managed' }),
+      supportedBackends: SUPPORTED_BACKEND_MATRIX,
     });
+  });
+
+  it('reports the execution policy the managed posture applies, with where each bound came from', () => {
+    const policy = report({
+      RAYSPEC_HOSTING_POSTURE: 'managed',
+      RAYSPEC_AGENT_QUEUE_MAX: '7',
+    }).executionPolicy;
+    expect(policy.posture).toBe('managed');
+    expect(policy.runMaxMs.source).toBe('hosting-posture');
+    expect(policy.queueMax).toEqual({ value: 7, source: 'explicit' });
   });
 
   it('reports the tenant limit from RAYSPEC_SINGLE_TENANT', () => {

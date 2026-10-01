@@ -165,6 +165,8 @@ describe.skipIf(!baseUrl)('the boot validates before it mutates', () => {
     'RAYSPEC_CRON_TENANT_ID',
     'RAYSPEC_RESPONDER_MODE',
     'RAYSPEC_NORMALIZE_MODE',
+    'RAYSPEC_HOSTING_POSTURE',
+    'RAYSPEC_AGENT_QUEUE_MAX',
   ] as const;
 
   /** Every relation outside the system schemas, plus whether a `drizzle` schema exists. */
@@ -457,6 +459,30 @@ ${handler}`,
         opts: withOpenAi,
         message:
           /agent 'helper' selects backend 'anthropic' which is not in the injected agentBackends map/,
+      },
+      {
+        // The managed posture runs only the backends of its supported-backend matrix.
+        name: 'managed-other-backend.yaml',
+        spec: OTHER_BACKEND_SPEC,
+        opts: withOpenAi,
+        env: { RAYSPEC_HOSTING_POSTURE: 'managed' },
+        message:
+          /RAYSPEC_HOSTING_POSTURE=managed does not support the agent backend 'anthropic' \(declared by agent 'helper'\): its capability 'agent-backend-anthropic' is self-host-only.*Supported under the managed posture: openai/,
+      },
+      {
+        name: 'managed-fake-stt.yaml',
+        spec: VALID_SPEC,
+        env: { RAYSPEC_HOSTING_POSTURE: 'managed', STT_PROVIDER: 'fake' },
+        message:
+          /does not support the speech-to-text provider \(STT_PROVIDER\) 'fake' \(STT_PROVIDER\): its capability 'stt-fake' is test-only/,
+      },
+      {
+        // A bound the execution policy cannot use refuses the boot (a variable the policy adds is
+        // refused in either posture).
+        name: 'bad-policy.yaml',
+        spec: VALID_SPEC,
+        env: { RAYSPEC_AGENT_QUEUE_MAX: 'lots' },
+        message: /RAYSPEC_AGENT_QUEUE_MAX='lots' must be a whole number from 1 to 2147483647/,
       },
       {
         name: 'missing-handler.yaml',
