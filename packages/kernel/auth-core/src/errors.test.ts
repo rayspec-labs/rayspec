@@ -91,3 +91,16 @@ describe('errorEnvelope details-strip', () => {
     expect(DETAILS_ALLOWED.has('SERVICE_UNAVAILABLE')).toBe(false);
   });
 });
+
+describe('errorEnvelope with an adversarial detail', () => {
+  it('a validation detail echoing a MiB-long unknown key is built within a second', () => {
+    // A strict body schema rejects an unknown key and names it in the issue: the key is the caller's.
+    const key = 'eyJaaaa-'.repeat((1024 * 1024) / 8);
+    const started = Date.now();
+    const env = errorEnvelope('VALIDATION_ERROR', `Unrecognized key: "${key}"`, 'rid', {
+      issues: [{ path: '', message: `Unrecognized key: "${key}"` }],
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(env.error.code).toBe('VALIDATION_ERROR');
+  });
+});

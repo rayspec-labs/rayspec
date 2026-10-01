@@ -60,11 +60,23 @@ export function resetRegisteredSecretsForTests(): void {
   ordered = [];
 }
 
-/** The credential shapes, each with its replacement. Every pattern is linear: no nested repetition. */
+/**
+ * The credential shapes, each with its replacement.
+ *
+ * TIME LINEAR IN THE TEXT. The text can be attacker-controlled (a rejected request body is echoed in a
+ * validation detail) and redaction runs on the event loop, so no pattern may take time quadratic in
+ * the text. A failed attempt at one start position scans a stretch of text; a pattern is linear only
+ * when no OTHER start position lies inside that stretch, or every start would rescan it. So each
+ * pattern whose stretch is a run of characters starts only where such a run begins (a lookbehind
+ * refusing a run character before it, where `\b` would also accept a start after a `-` or `.` inside
+ * the run), and a PEM body stops at the next `BEGIN` rather than scanning across it. A key glued to a
+ * preceding `-` (`x-eyJ…`) is therefore not recognised as a token; it is not a form a credential is
+ * written in.
+ */
 const SHAPES: readonly [RegExp, string][] = [
-  // A PEM private key block, whatever its type.
+  // A PEM private key block, whatever its type. The body never runs into a following BEGIN.
   [
-    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
+    /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----(?:(?!-----BEGIN )[\s\S])*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g,
     `-----BEGIN PRIVATE KEY-----${REDACTED}-----END PRIVATE KEY-----`,
   ],
   // A credential header in header form: `Authorization: …` up to the end of the line.
@@ -72,19 +84,20 @@ const SHAPES: readonly [RegExp, string][] = [
     /\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key)(\s*:\s*)[^\r\n]+/gi,
     `$1$2${REDACTED}`,
   ],
-  // The same header in JSON form: `"authorization": "…"`.
+  // The same header in JSON form: `"authorization": "…"`. A name whose quote is escaped (inside
+  // another string) is not a start, so a string that never closes is scanned once.
   [
-    /("(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key)"\s*:\s*)"(?:[^"\\]|\\.)*"/gi,
+    /((?<!\\)"(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key)"\s*:\s*)"(?:[^"\\]|\\.)*"/gi,
     `$1"${REDACTED}"`,
   ],
   // A bearer token anywhere.
   [/\b(bearer)\s+[A-Za-z0-9\-._~+/]+=*/gi, `$1 ${REDACTED}`],
   // The password of a URL: scheme://user:password@host.
-  [/\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, `$1${REDACTED}@`],
+  [/(?<![a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi, `$1${REDACTED}@`],
   // A JSON web token: three base64url parts, the first two of which encode JSON objects.
-  [/\beyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+/g, REDACTED],
+  [/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+/g, REDACTED],
   // A RaySpec API key plaintext: `rk_<prefix>.<secret>`.
-  [/\brk_[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{16,}/g, REDACTED],
+  [/(?<![A-Za-z0-9_-])rk_[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{16,}/g, REDACTED],
   // A provider key of the `sk-…` form (OpenAI, Anthropic).
   [/\bsk-[A-Za-z0-9_-]{16,}/g, REDACTED],
 ];

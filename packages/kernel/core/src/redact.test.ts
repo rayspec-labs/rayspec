@@ -80,6 +80,36 @@ describe('credential shapes', () => {
   });
 });
 
+describe('the shapes take time linear in the text', () => {
+  /** One MiB of `unit`, repeated: the size of the largest request body the server reads. */
+  const mib = (unit: string): string => unit.repeat(Math.ceil((1024 * 1024) / unit.length));
+  // Each unit is a start of one shape that never completes, so every start position fails. A pattern
+  // that rescans from every start takes minutes on these; a linear one takes milliseconds.
+  it.each([
+    ['a JSON web token', 'eyJaaaa-'],
+    ['a RaySpec API key', 'rk_aaaa-'],
+    ['a PEM private key', '-----BEGIN PRIVATE KEY-----'],
+    ['a JSON header value that never closes', '"cookie":"\\'],
+    ['a URL scheme', 'a.'],
+    ['a header name without a colon', 'authorization '],
+    ['a bearer token', 'bearer '],
+    ['a provider key', 'sk-'],
+  ])('%s: one MiB of failing starts is redacted within a second', (_what, unit) => {
+    const text = mib(unit);
+    const started = Date.now();
+    redactText(text);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it('a credential after a MiB of failing starts is still found', () => {
+    const jwt = 'eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ1In0.c2lnbmF0dXJl';
+    const key = 'rk_AbCdEf.0123456789abcdefghijklmnop';
+    const out = redactText(`${mib('eyJaaaa-')} ${jwt} ${key}`);
+    expect(out).not.toContain('c2lnbmF0dXJl');
+    expect(out).not.toContain('0123456789abcdefghij');
+  });
+});
+
 describe('redactValue', () => {
   it('redacts every string at any depth, and the value of a secret-named property', () => {
     registerSecretValues(['nested-canary-value']);
