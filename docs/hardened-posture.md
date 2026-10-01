@@ -248,6 +248,35 @@ During a rotation every presented API key is checked under both peppers, found o
 unknown key costs stays the same as a known one's. Both behaviours are proven against a running
 server in `packages/app/server/src/api-key-pepper-rotation.db.test.ts`.
 
+## Redaction
+
+Everything the runtime writes passes one redaction path (`redactText` and `redactValue` in
+`@rayspec/core`), in every posture:
+
+| Sink | What passes it |
+| --- | --- |
+| Log lines | every write to stdout and stderr of a server boot and of `rayspec deploy <file.ray>`, whoever prints it — the platform, a library, a handler |
+| HTTP error envelopes | the `message` and `details` of every error response |
+| Runtime-control envelopes | the error and warning messages of `inspect`, `prepare`, `quiesce`, `resume` and `health` |
+| Receipts | the `detail` of every apply and fence receipt, before it is written |
+| Traces | the error a failed run records in its journal step and on the run, and every agent trace the SDK exports |
+
+It removes two kinds of thing:
+
+- **Values the process holds**, wherever they occur: every boot secret as it is resolved (the
+  database URLs, the JWT signing keys, the peppers, the media signing key), every provider key as it
+  is read, and every binding value a bundle deploy supplies, of either kind. A value shorter than 8
+  characters is not registered: it occurs in ordinary text.
+- **Shapes of a credential**, whoever holds it: a bearer token; the value of an `authorization`,
+  `proxy-authorization`, `cookie`, `set-cookie` or `x-api-key` header; the password of a URL; a PEM
+  private key; a JSON web token; a RaySpec API key; a provider key of the `sk-…` form.
+
+It is a last line, not a licence to log secrets: a value split across two writes, or encoded before
+it is written, is not recognised. A run's journal and events keep tool arguments and outputs as the
+run produced them (they are the organization's data, under its row policies, and a replay depends on
+them); only their error messages are redacted. A canary of every binding kind is driven through
+every sink in `packages/app/server/src/redaction-canaries.test.ts`.
+
 ## Telemetry
 
 The agent SDK of the `openai` backend exports agent traces to OpenAI by default: run metadata and,

@@ -513,6 +513,9 @@ async function deploy(
   }
 
   const server = await import('@rayspec/server');
+  // Everything this process writes from here on — the envelope, the boot's lines, a handler's — passes
+  // the one redaction path, and every binding value below is registered with it as it is read.
+  server.installOutputRedaction();
 
   // Protected files: the bindings file, the trusted keys, the state directory.
   let fileValues = new Map<string, string>();
@@ -529,6 +532,7 @@ async function deploy(
       throw err;
     }
     fileValues = parseBindingsFile(bytes);
+    server.registerSecretValues(fileValues.values());
   }
   const trustedKeys: KeyObject[] = [];
   for (const path of parsed.trustedKeys) trustedKeys.push(await readTrustedKey(path));
@@ -635,6 +639,7 @@ async function deploy(
     }
     if (value !== undefined && value !== '') values.set(b.name, value);
   }
+  server.registerSecretValues(values.values());
   // Neither kind of value is written to the process environment: the provider credentials are granted
   // to the adapters that use them, the application's own to its handlers (`init.bindings`), once the
   // deploy is past its dry-run.

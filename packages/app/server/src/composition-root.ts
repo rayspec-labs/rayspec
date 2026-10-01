@@ -70,7 +70,12 @@ import {
   setBootSecrets,
 } from '@rayspec/auth-core';
 import { DEFAULT_SCHEMA_LOCK_TIMEOUT_MS } from '@rayspec/bundle-contract';
-import type { Backend, BackendId } from '@rayspec/core';
+import {
+  type Backend,
+  type BackendId,
+  installOutputRedaction,
+  registerSecretValues,
+} from '@rayspec/core';
 import {
   buildProductTables,
   classifyProductSchema,
@@ -132,7 +137,11 @@ import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { type Env, Hono, type MiddlewareHandler } from 'hono';
 import { exportJWK, importPKCS8 } from 'jose';
 import { stringify as stringifyYaml } from 'yaml';
-import { type AgentTracingPosture, observedAgentTracing } from './agent-tracing.js';
+import {
+  type AgentTracingPosture,
+  installRedactedTraceExport,
+  observedAgentTracing,
+} from './agent-tracing.js';
 import { BootConfigError } from './boot-config-error.js';
 // The boot's ENVIRONMENT DEMANDS, from the one module that states them. The refusals below are
 // COMPOSED from these records rather than restating them, and the deploy guards ask their conditions
@@ -1189,6 +1198,8 @@ function resolveBootSecret(
   const raw = path ? readBootSecretFile(fileVar, path) : env[name];
   if (raw === undefined) return undefined;
   const normalized = normalizeBootSecret(raw);
+  // Every resolved boot secret is redacted from whatever this process writes from now on.
+  registerSecretValues([normalized]);
   if (normalized !== raw && normalized.length > 0) {
     warn(bootSecretNormalizationWarning(path ? fileVar : name, raw));
   }
@@ -1492,7 +1503,10 @@ export function loadServerConfig(
   // deployDeclaredSpec fail-closes if a playback route is declared without it. NOT trimmed/resolved (a
   // secret is used verbatim); only carried through when present.
   const mediaSigningKey = env.RAYSPEC_MEDIA_SIGNING_KEY;
-  if (mediaSigningKey && mediaSigningKey.length > 0) config.mediaSigningKey = mediaSigningKey;
+  if (mediaSigningKey && mediaSigningKey.length > 0) {
+    config.mediaSigningKey = mediaSigningKey;
+    registerSecretValues([mediaSigningKey]);
+  }
 
   // The STT provider selection (the `init.stt` capability) + its credential. Resolved RAW here — the
   // VALUE is validated where the capability is built: loadServerConfig just resolves them;
@@ -2481,6 +2495,12 @@ async function assembleServerWith(
   // Gated: with no proxy opt-in the call touches nothing (it does not even load undici), so a
   // deployment without proxy configuration boots exactly as it did before.
   await installEnvProxyDispatcher();
+
+  // The one redaction path (@rayspec/core redact.ts) on what this process writes: every line on stdout
+  // and stderr, and every agent trace the SDK exports. The secrets it knows by value were registered
+  // as they were resolved (the boot secrets in loadServerConfig, each provider credential when read).
+  installOutputRedaction();
+  await installRedactedTraceExport();
 
   // Hand the two boot secrets to auth-core IN-PROCESS. Its lazy readers — assertBootSecrets (inside
   // createAuthApp) and getApiKeyPepper (the api-key / session-secret / invite-token hashing paths) —

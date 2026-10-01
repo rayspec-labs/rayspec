@@ -30,6 +30,8 @@
  * tightening, but not provably zero — hence "best-effort", not "never wrong".
  */
 
+import { redactText } from './redact.js';
+
 /**
  * The neutral error class for a failed run. NEUTRAL platform vocabulary — adapters map their SDK
  * error shape into it (no LCD collapse). `internal` is the fail-closed default for a genuinely
@@ -232,12 +234,16 @@ function errorName(err: unknown): string {
  * throws) can never blow up the classifier; it falls back to `{ internal, <safe String(err)> }`.
  */
 export function classifyUpstreamError(err: unknown): ClassifiedError {
+  let classified: ClassifiedError;
   try {
-    return classifyUpstreamErrorUnsafe(err);
+    classified = classifyUpstreamErrorUnsafe(err);
   } catch {
     // A hostile error object (throwing getter) must never crash classification — fail closed.
-    return { errorClass: 'internal', message: safeStringify(err) };
+    classified = { errorClass: 'internal', message: safeStringify(err) };
   }
+  // The preserved message is stored in the journal and on the run record, and served back: it goes
+  // through the one redaction path (redact.ts), after the heuristics above have read it whole.
+  return { ...classified, message: redactText(classified.message) };
 }
 
 /** The classification core (may throw if `err` has a hostile getter; wrapped by classifyUpstreamError). */

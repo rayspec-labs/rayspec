@@ -17,6 +17,8 @@
 // @rayspec/api-auth (deploy.ts, a frozen-surface file — consumed via its EXPORTS only, never edited); the
 // server already depends on api-auth, so re-exporting here spares the wrapper a direct api-auth dep.
 export { DeployError, type PlannedMigration } from '@rayspec/api-auth';
+// The one redaction path, for an entrypoint that writes before (or without) a server boot.
+export { installOutputRedaction, registerSecretValues } from '@rayspec/core';
 // The UPDATE flow: re-export the report-only drift finding type so a wrapper/test can name
 // `BootedServer.drift`. It originates in @rayspec/db (drift-detect.ts); the server already depends on
 // @rayspec/db, so re-exporting here spares a consumer a direct db dep. Additive — a pure type re-export.

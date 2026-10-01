@@ -11,6 +11,7 @@
  * and speech adapters; handler code is not the component that needs them). Nothing is answered with
  * `undefined` except a declared, optional binding nobody supplied.
  */
+import { registerSecretValues } from '@rayspec/core';
 import type { ApplicationBindings } from '@rayspec/handler-sdk';
 
 /** The error the reader throws for a name that is not granted. */
@@ -75,6 +76,8 @@ export function applicationBindingsReader(grant: ApplicationBindingGrant): Appli
 
 /** Grant this process's handlers the application bindings of the deployment it serves. */
 export function setApplicationBindings(grant: ApplicationBindingGrant | undefined): void {
+  // Every supplied value, of either kind, is redacted from whatever this process writes.
+  if (grant !== undefined) registerSecretValues(grant.values.values());
   reader = grant === undefined ? undefined : applicationBindingsReader(grant);
 }
 

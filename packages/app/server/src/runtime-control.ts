@@ -70,6 +70,7 @@ import {
   V1_EXECUTION_LEVELS,
   type ValidationResult,
 } from '@rayspec/bundle-contract';
+import { redactText } from '@rayspec/core';
 import { type Db, verifyTenantIsolation } from '@rayspec/db';
 import {
   type ExecutionPolicy,
@@ -377,6 +378,32 @@ async function readEnvironmentState(query: CatalogQuery): Promise<EnvironmentSta
 
 /** Build the runtime-control adapter over one environment database. */
 export function createRuntimeControl(options: RuntimeControlOptions): RuntimeControlAdapter {
+  return withRedactedEnvelopes(buildRuntimeControl(options));
+}
+
+/**
+ * Every result envelope the adapter returns passes the one redaction path (`redactText`, @rayspec/core)
+ * on its error and warning messages: a message that quoted a credential — a database error, a value a
+ * caller supplied — leaves without it. The data is the contract's typed result and carries no secret.
+ */
+export function withRedactedEnvelopes(adapter: RuntimeControlAdapter): RuntimeControlAdapter {
+  const redact = <T>(envelope: ResultEnvelope<T>): ResultEnvelope<T> =>
+    ({
+      ...envelope,
+      errors: envelope.errors.map((e) => ({ ...e, message: redactText(e.message) })),
+      warnings: envelope.warnings.map((w) => ({ ...w, message: redactText(w.message) })),
+    }) as ResultEnvelope<T>;
+  return {
+    ...adapter,
+    inspect: async (request) => redact(await adapter.inspect(request)),
+    prepare: async (request) => redact(await adapter.prepare(request)),
+    quiesce: async (request) => redact(await adapter.quiesce(request)),
+    resume: async (request) => redact(await adapter.resume(request)),
+    health: async (request) => redact(await adapter.health(request)),
+  };
+}
+
+function buildRuntimeControl(options: RuntimeControlOptions): RuntimeControlAdapter {
   const now = options.now ?? (() => new Date());
   const query: CatalogQuery = async (sql, params = []) =>
     (await options.db.$client.unsafe(sql, params as never[])) as unknown as Record<

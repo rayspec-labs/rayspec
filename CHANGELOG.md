@@ -562,6 +562,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   credential, throws `BindingNotGrantedError` instead of answering `undefined`. The type ships in
   `@rayspec/handler-sdk`. See
   [Spec reference → `init.bindings`](./docs/spec-reference.md#initbindings--application-bindings).
+- **One redaction path for logs, error envelopes, receipts and traces.** Every line a server boot or
+  `rayspec deploy <file.ray>` writes to stdout and stderr, every HTTP error envelope, every
+  runtime-control result envelope, every receipt detail, every run's recorded error and every
+  exported agent trace passes `redactText`/`redactValue` (`@rayspec/core`): the boot secrets, the
+  provider keys and the binding values the process resolved are removed wherever they occur, and so
+  are bearer tokens, credential headers, URL passwords, PEM private keys, JSON web tokens, RaySpec
+  API keys and `sk-…` provider keys. See
+  [Hosting in the hardened posture → Redaction](./docs/hardened-posture.md#redaction).
 
 ### Changed
 
@@ -794,6 +802,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take it as a peer).
 
 ### Upgrade notes
+
+- **Log lines and error messages are redacted.** A line or message that carried a credential shape
+  (a bearer token, a credential header, a URL password, a key) or a value the process holds as a
+  secret now carries `[redacted]` in its place. A log parser that matched on such a value matches on
+  the name around it instead.
 
 - **A bundle deploy hands bindings over differently.** The bindings file may supply only names the
   bundle declares (plus the selected speech provider's key); any other name is refused with

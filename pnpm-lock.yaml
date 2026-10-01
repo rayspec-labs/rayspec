@@ -725,6 +725,9 @@ importers:
 
   packages/kernel/auth-core:
     dependencies:
+      '@rayspec/core':
+        specifier: workspace:*
+        version: link:../core
       argon2:
         specifier: 0.44.0
         version: 0.44.0

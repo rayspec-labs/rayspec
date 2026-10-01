@@ -22,6 +22,7 @@
  */
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import { PLATFORM_GRANTABLE_BINDINGS } from '@rayspec/bundle-contract';
+import { registerSecretValues } from '@rayspec/core';
 import { BootConfigError } from './boot-config-error.js';
 
 /** A provider credential name (reserved-bindings.json `platformGrantable`). */
@@ -70,7 +71,10 @@ export function grantProviderCredentials(values: ReadonlyMap<string, string>): v
     if (!isProviderCredentialName(name)) {
       throw new Error(`${name} is not a provider credential and is never read by the platform`);
     }
-    if (value.trim() !== '') granted.set(name, value.trim());
+    if (value.trim() !== '') {
+      granted.set(name, value.trim());
+      registerSecretValues([value]);
+    }
   }
 }
 
@@ -143,6 +147,16 @@ function readCredentialFile(variable: string, path: string): string {
 
 /** The value of one provider credential and where it came from, or `undefined` when none is set. */
 export function providerCredentialWithSource(
+  env: NodeJS.ProcessEnv,
+  name: ProviderCredentialName,
+): { value: string; source: CredentialSource } | undefined {
+  const resolved = resolveCredential(env, name);
+  // A credential read for use is redacted from whatever this process writes from now on.
+  if (resolved !== undefined) registerSecretValues([resolved.value]);
+  return resolved;
+}
+
+function resolveCredential(
   env: NodeJS.ProcessEnv,
   name: ProviderCredentialName,
 ): { value: string; source: CredentialSource } | undefined {

@@ -22,6 +22,7 @@
  * property of an SDK the boot closure loads unavoidably — the alternative would be reaching into that
  * SDK's internal global-symbol registry, which is strictly worse than calling its published API.
  */
+import { redactValue } from '@rayspec/core';
 import { BootConfigError } from './boot-config-error.js';
 
 // Re-exported so a caller that applies the posture BEFORE loading `@rayspec/server` can still name the
@@ -204,4 +205,60 @@ export async function observedAgentTracing(): Promise<AgentTracingPosture> {
   const { getGlobalTraceProvider, NoopTrace } = await import('@openai/agents');
   const probe = getGlobalTraceProvider().createTrace({ name: POSTURE_PROBE_TRACE_NAME });
   return probe instanceof NoopTrace ? 'off' : 'openai';
+}
+
+/** The part of a trace or span the exporter reads. */
+interface ExportableItem {
+  toJSON(): unknown;
+}
+
+/** The part of a trace exporter this wrapper calls. */
+interface TraceExporterLike {
+  export(items: ExportableItem[], signal?: AbortSignal): Promise<void>;
+}
+
+/**
+ * A trace exporter that hands the wrapped one every item through the one redaction path: the JSON an
+ * item serialises to (span data carries tool arguments and outputs) goes through `redactValue`
+ * before it is exported. Everything else about an item reads through unchanged.
+ */
+export class RedactingTraceExporter implements TraceExporterLike {
+  readonly #inner: TraceExporterLike;
+
+  constructor(inner: TraceExporterLike) {
+    this.#inner = inner;
+  }
+
+  export(items: ExportableItem[], signal?: AbortSignal): Promise<void> {
+    return this.#inner.export(items.map(redactedItem), signal);
+  }
+}
+
+function redactedItem(item: ExportableItem): ExportableItem {
+  return new Proxy(item, {
+    get(target, property) {
+      if (property === 'toJSON') return () => redactValue(target.toJSON());
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * Route the agent SDK's trace export through {@link RedactingTraceExporter}: the processors the SDK
+ * installed at import (a batch processor over the OpenAI exporter) are replaced by the same pair with
+ * the redacting wrapper between them. It changes nothing about WHETHER traces are exported (the
+ * posture above decides that), only what an exported one may carry.
+ */
+export async function installRedactedTraceExport(): Promise<void> {
+  const { BatchTraceProcessor, OpenAITracingExporter, setTraceProcessors } = await import(
+    '@openai/agents'
+  );
+  setTraceProcessors([
+    new BatchTraceProcessor(
+      new RedactingTraceExporter(new OpenAITracingExporter()) as unknown as ConstructorParameters<
+        typeof BatchTraceProcessor
+      >[0],
+    ),
+  ]);
 }
