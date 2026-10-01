@@ -165,12 +165,14 @@ export {
   type HostingPosture,
   isStaticProfile,
   loadExportSourceConfig,
+  loadOwnerRecoverySecrets,
   loadServerConfig,
   loadStaticServerConfig,
   loadTenantProvisionSecrets,
   MAX_SCHEMA_LOCK_TIMEOUT_MS,
   MAX_SHUTDOWN_DRAIN_MS,
   MIGRATION_DATABASE_URL_VAR,
+  type OwnerRecoverySecrets,
   PREVIOUS_API_KEY_PEPPER_VAR,
   PREVIOUS_JWT_SIGNING_KEY_VAR,
   type ProductTableRegistrar,
@@ -270,6 +272,16 @@ export {
   schemaProbe,
 } from './health.js';
 export {
+  applyIdentityPolicy,
+  BOOT_SECRET_FILES,
+  type BootSecretName,
+  bootSecretsDirectoryRefusal,
+  type IdentityAction,
+  type IdentityReport,
+  type IdentityReportUser,
+  mintBootSecrets,
+} from './import-identity.js';
+export {
   CUTOVER_TOKEN_LIFETIME_MS,
   type CutoverToken,
   closeInterruptedImport,
@@ -323,6 +335,13 @@ export {
   readOperationReceipts,
   unfinishedSteps,
 } from './operation-lease.js';
+// The OPERATOR owner-recovery path — a one-time token for an owner who holds no password, redeemed at
+// POST /v1/auth/owner-recovery. Exported for `rayspec tenant recover-owner`.
+export {
+  issueOwnerRecovery,
+  OwnerRecoveryError,
+  type OwnerRecoveryInput,
+} from './owner-recovery.js';
 // The snapshot of a fenced source, as an export takes it: the read-only preflight of everything a
 // snapshot must carry or cannot carry, and the capture of the plaintext inner snapshot archive under
 // the fence (the caller encrypts it). `pg_dump` is found and run by `pg-dump.ts`.

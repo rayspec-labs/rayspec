@@ -34,9 +34,12 @@
  *  5. the verification: the tables and their row counts are exactly the snapshot's, every foreign key
  *     is there and validated (reference integrity), the schema head is the snapshot's, exactly one
  *     organization owns every tenant row and object, the credential tables are empty (sessions, API
- *     keys, invites and OIDC artifacts are reset), and every restored blob file, read back, has the
+ *     keys, invites, OIDC artifacts and owner-recovery tokens are reset), and every restored blob file, read back, has the
  *     index's size, header and both digests;
- *  6. the runtime-control state of the target: its own deployment id and a fence taken at once, with
+ *  6. the identity policy (`import-identity.ts`): each account's carried identity recorded in the
+ *     target's security audit, and who signs in again, who needs owner recovery and who has no way
+ *     in reported;
+ *  7. the runtime-control state of the target: its own deployment id and a fence taken at once, with
  *     the runtime role's writes revoked, so no runtime serves the target until the cutover releases
  *     the fence.
  * A failure from step 1 on leaves the target marked failed (the caller's receipts and `import.json`)
@@ -70,6 +73,7 @@ import {
 } from '@rayspec/db';
 import { BlobInventoryError, listFsBlobs } from '@rayspec/platform';
 import { quiesceOperation } from './fence-operations.js';
+import { applyIdentityPolicy, type IdentityReport } from './import-identity.js';
 import { ensureRuntimeControlState } from './operation-lease.js';
 import { PgDumpError, type PgDumpTool, pgToolMajor, resolvePgTool } from './pg-dump.js';
 import { PgRestoreAborted, restoreDump } from './pg-restore.js';
@@ -380,6 +384,8 @@ export interface RestoredImport {
     passwordHashes: 'preserved' | 'reset';
     forcedLogin: boolean;
   };
+  /** Who signs in again, who needs owner recovery, who has no way in. */
+  identity: IdentityReport;
 }
 
 export interface RestoreImportOptions {
@@ -393,6 +399,8 @@ export interface RestoreImportOptions {
   deploymentId: string;
   operationId: string;
   actor: string;
+  /** The migration bundle's digest, recorded with the identity the import carried. */
+  migrationBundleSha256: string;
   /** A private directory for the restore lists. */
   workDir: string;
   /** Called when verification starts. */
@@ -801,7 +809,8 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         }
         const [credentials] = await query(
           `SELECT (SELECT count(*) FROM sessions)::int + (SELECT count(*) FROM api_keys)::int +
-                  (SELECT count(*) FROM invites)::int + (SELECT count(*) FROM oidc_models)::int AS n,
+                  (SELECT count(*) FROM invites)::int + (SELECT count(*) FROM oidc_models)::int +
+                  (SELECT count(*) FROM owner_recovery_tokens)::int AS n,
                   (SELECT count(*) FROM memberships m WHERE m.org_id <> $1::uuid)::int AS foreign_members`,
           [tenantId],
         );
@@ -817,7 +826,14 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         }
         if (config.blobRoot !== null) await verifyObjects(config.blobRoot, opened.objectIndex);
 
-        return { tenantId, foreignKeys };
+        // 6. The identity policy: the carried identity recorded, the credentials reset.
+        const identity = await applyIdentityPolicy(control, {
+          tenantId,
+          operationId: options.operationId,
+          migrationBundleSha256: options.migrationBundleSha256,
+        });
+
+        return { tenantId, foreignKeys, identity };
       },
       { timeoutMs: options.lockTimeoutMs },
     );
@@ -865,6 +881,7 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
           passwordHashes,
           forcedLogin: true,
         },
+        identity: restored.identity,
       },
     };
   } catch (err) {

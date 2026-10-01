@@ -94,6 +94,10 @@ export interface ImportSummary {
     passwordHashes: 'preserved' | 'reset';
     forcedLogin: boolean;
   };
+  /** The target's own signing key, pepper and media key, minted by the import; never their values. */
+  bootSecrets: 'reissued';
+  /** How many accounts sign in again, need owner recovery, or have no way in. */
+  identity: { signInAgain: number; ownerRecovery: number; noCredential: number };
 }
 
 /** The local operation receipt of one import. */

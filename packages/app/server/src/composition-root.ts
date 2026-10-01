@@ -57,6 +57,7 @@ import {
   makeTenantEventBus,
   makeTenantEventWake,
   OrgStore,
+  OwnerRecoveryStore,
   type PlannedMigration,
   runScheduledCleanup,
 } from '@rayspec/api-auth';
@@ -156,6 +157,7 @@ import {
   declaresStreamRoute,
   fireableTriggers,
   isStaticProfile,
+  OWNER_RECOVERY_BOOT_SECRETS,
   PROVISION_BOOT_SECRETS,
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
@@ -1263,6 +1265,50 @@ export function loadTenantProvisionSecrets(
     // The same single-tenant switch the server reads, so provisioning cannot create the second
     // organization a single-tenant runtime would then refuse to boot with.
     ...(parseSingleTenantMode(env) ? { singleTenant: true } : {}),
+  };
+}
+
+/** The secrets `rayspec tenant recover-owner` uses — resolved by `loadOwnerRecoverySecrets`. */
+export interface OwnerRecoverySecrets {
+  readonly databaseUrl: string;
+  readonly apiKeyPepper: string;
+  /** The migration role's connection, when the deployment separates its database roles. */
+  readonly migrationDatabaseUrl?: string;
+}
+
+/**
+ * Resolve the owner-recovery secrets from the explicit environment, each honouring its `<VAR>_FILE`
+ * variant, exactly as the boot resolves them. A missing one aborts with the variables' names, never a
+ * value.
+ */
+export function loadOwnerRecoverySecrets(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: BootWarnSink = consoleWarn,
+): OwnerRecoverySecrets {
+  const missing: string[] = [];
+  const resolvedSecrets = new Map<string, string>();
+  for (const secret of OWNER_RECOVERY_BOOT_SECRETS) {
+    const value = resolveBootSecret(env, secret.name, warn);
+    if (!value || value.trim().length === 0) missing.push(secret.name);
+    else resolvedSecrets.set(secret.name, value);
+  }
+  if (missing.length > 0) {
+    throw new BootConfigError(
+      `Refusing to issue an owner recovery token — required env var(s) missing: ${missing.join(', ')}. ` +
+        `${OWNER_RECOVERY_BOOT_SECRETS.map((s) => `${s.name} is ${s.what}`).join('; ')}. ` +
+        'Each also accepts a <VAR>_FILE variant — ' +
+        `${OWNER_RECOVERY_BOOT_SECRETS.map((s) => s.fileVariant).join(', ')} — ` +
+        'naming a file to read the value from, which TAKES PRECEDENCE over the plain variable when ' +
+        'set. Fail-closed.',
+      missing,
+    );
+  }
+  const migrationDatabaseUrl =
+    resolveBootSecret(env, MIGRATION_DATABASE_URL_VAR, warn)?.trim() || undefined;
+  return {
+    databaseUrl: resolvedSecrets.get('DATABASE_URL') as string,
+    apiKeyPepper: resolvedSecrets.get('RAYSPEC_API_KEY_PEPPER') as string,
+    ...(migrationDatabaseUrl !== undefined ? { migrationDatabaseUrl } : {}),
   };
 }
 
@@ -2705,6 +2751,7 @@ async function assembleServerWith(
   const auditStore = new AuditStore(db);
   const idempotency = new IdempotencyStore(db);
   const inviteStore = new InviteStore(db);
+  const ownerRecoveryStore = new OwnerRecoveryStore(db);
   const authService = new AuthService(identityStore, signer);
 
   const baseDeps: Omit<AppDeps, 'engine'> = {
@@ -2721,6 +2768,7 @@ async function assembleServerWith(
     auditStore,
     idempotency,
     inviteStore,
+    ownerRecoveryStore,
     authService,
     oidcProvider,
     // EXPLICIT, possibly-empty allow-list — never dev-permissive (loadServerConfig enforced this).

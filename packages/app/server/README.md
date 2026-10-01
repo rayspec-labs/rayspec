@@ -91,8 +91,14 @@ and judges it by the restore allowlist (`planDumpRestore`). `inspectImportTarget
 is empty and prepared; `restoreImport` restores both databases with `pg_restore` as the target's
 migration role (`restoreDump`), writes the objects, verifies everything and fences the target;
 `discardImportTarget` empties a target a failed import left. `ImportReceiptLog` records the
-transitions. `rayspec import` is built on them; see `docs/import.md` and
-`docs/runtime-operations.md`, "Importing a snapshot".
+transitions. `applyIdentityPolicy` records each account's carried identity in the target's audit and
+reports who signs in again and which owner needs owner recovery; `mintBootSecrets` mints the target's
+own signing key, pepper and media key into a new private directory. `rayspec import` is built on
+them; see `docs/import.md` and `docs/runtime-operations.md`, "Importing a snapshot".
+
+`issueOwnerRecovery` (with `loadOwnerRecoverySecrets`) issues a one-time owner-recovery token for an
+owner who holds no password, storing only its HMAC under the deployment's pepper; the owner redeems
+it at `POST /v1/auth/owner-recovery`. `rayspec tenant recover-owner` is built on it.
 
 `applyBundle` applies a plan `prepare()` produced for a bundle staged into its version directory
 (`openStateDirectory(...).stageVersion`): it recomputes the plan digest before it writes anything

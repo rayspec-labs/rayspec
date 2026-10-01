@@ -126,6 +126,27 @@ export const PROVISION_BOOT_SECRETS: readonly BootEnvVar[] = [
   },
 ];
 
+/**
+ * The OWNER RECOVERY path's own unconditional set — `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER`, and
+ * not the JWT signing key: issuing a recovery token mints no JWT. The pepper must be the one the
+ * deployment that redeems the token runs with, or the token can never be redeemed. Consumed by
+ * `loadOwnerRecoverySecrets`.
+ */
+export const OWNER_RECOVERY_BOOT_SECRETS: readonly BootEnvVar[] = [
+  {
+    name: 'DATABASE_URL',
+    fileVariant: 'DATABASE_URL_FILE',
+    what: 'the Postgres connection string of the deployment whose owner is recovered',
+  },
+  {
+    name: 'RAYSPEC_API_KEY_PEPPER',
+    fileVariant: 'RAYSPEC_API_KEY_PEPPER_FILE',
+    what:
+      'the api-key pepper the recovery token is hashed with, and it must be the SAME value the ' +
+      'deployment runs with or the token can never be redeemed',
+  },
+];
+
 // ── B. DOCUMENT-CONDITIONAL — demanded iff the deployed document declares the thing ───────────────
 
 /** `RAYSPEC_BLOB_ROOT` — demanded iff a `kind:'stream'` route (or a byte-moving product capability) exists. */
