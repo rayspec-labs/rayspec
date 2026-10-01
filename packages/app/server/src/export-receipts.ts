@@ -14,9 +14,10 @@
  *    digests, codes and states only. A refusal is recorded by its code and reason, never its message,
  *    which may name a table.
  *  - The ENVIRONMENT'S RECEIPTS, rows of `runtime_control_receipts` under the export's operation id
- *    (kind `export`, one `step-finished` per transition, then the `outcome`), from the moment the
- *    export starts to fence the source. A precheck that blocks changes nothing at the source, so it
- *    is recorded locally only.
+ *    (kind `export`, one `step-finished` per transition, then the `outcome`), once the operator has
+ *    confirmed the downtime: the PRECHECK transition is written there then, followed by QUIESCING
+ *    and the rest. A precheck that blocks, or a downtime that is not confirmed, changes nothing at
+ *    the source, so it is recorded locally only.
  *
  * A KILLED EXPORT leaves a local receipt without an outcome. The next export of the deployment finds
  * it once it holds the scratch lock (the killed process can no longer be running), and closes it as
@@ -264,11 +265,31 @@ function isExportReceipt(value: unknown): value is ExportReceipt {
   );
 }
 
+/** The fence as the environment records it now, or null when it cannot be read. */
+async function liveFence(db: Db): Promise<{ epoch: number; state: 'open' | 'fenced' } | null> {
+  try {
+    const rows = (await db.$client.unsafe(
+      'SELECT fence_state, fence_epoch::text AS fence_epoch FROM runtime_control_state WHERE id = 1',
+    )) as unknown as { fence_state: string; fence_epoch: string }[];
+    const row = rows[0];
+    if (row === undefined) return null;
+    return {
+      epoch: Number(row.fence_epoch),
+      state: row.fence_state === 'fenced' ? 'fenced' : 'open',
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Close the local receipt of an export that was killed before it ended: a BLOCKED transition with
  * `interrupted: true` and `closedBy`, recorded in the environment's receipts too when that export
- * had reached them and `db` is given. Returns the fence epoch the killed export last recorded, or
- * null when there was nothing to close.
+ * had reached them and `db` is given. The fence it records, and the epoch its resume instruction
+ * names, are the environment's at the time of closing when `db` can read them: an export killed
+ * while it was quiescing recorded the fence as it was before quiesce took it. Without `db`, the
+ * epoch is the one the killed export last recorded as fenced, or the one quiesce was about to take.
+ * Returns that fence epoch, or null when there was nothing to close.
  */
 export async function closeInterruptedExport(
   stateDir: StateDirectory,
@@ -285,20 +306,31 @@ export async function closeInterruptedExport(
   }
   if (!isExportReceipt(found) || found.outcome !== null) return null;
   const last = found.transitions.at(-1);
-  const fenceEpoch = [...found.transitions]
+  const reachedEnvironment = found.transitions.some((t) => t.state === 'QUIESCING');
+  const live = db === null || !reachedEnvironment ? null : await liveFence(db);
+  const recordedFenced = [...found.transitions]
     .reverse()
     .find((t) => t.fenceState === 'fenced')?.fenceEpoch;
-  const reachedEnvironment = found.transitions.some((t) => t.state === 'QUIESCING');
+  // A quiesce that was running when the export was killed takes the next epoch of an open fence.
+  const predicted =
+    last?.state === 'QUIESCING' && last.fenceState === 'open' && last.fenceEpoch !== null
+      ? last.fenceEpoch + 1
+      : last?.fenceEpoch;
+  const fenceEpoch = live?.epoch ?? recordedFenced ?? predicted ?? null;
+  const fenceState: ExportTransition['fenceState'] =
+    live?.state ?? (recordedFenced !== undefined ? 'fenced' : reachedEnvironment ? null : 'open');
   const t: ExportTransition = {
     state: 'BLOCKED',
     at: formatTimestamp(new Date()),
-    fenceEpoch: last?.fenceEpoch ?? null,
-    fenceState: last?.fenceState ?? null,
+    fenceEpoch,
+    fenceState,
     digests: { ...(last?.digests ?? {}) },
-    recovery: reachedEnvironment
-      ? 'the export was killed before it finished; the source may stay fenced: run the export ' +
-        `again, or release the fence with ${resumeInstruction(found.deploymentId, fenceEpoch ?? last?.fenceEpoch ?? 0)}`
-      : 'the export was killed during its precheck; nothing changed at the source',
+    recovery: !reachedEnvironment
+      ? 'the export was killed during its precheck; nothing changed at the source'
+      : live?.state === 'open'
+        ? 'the export was killed before it finished; the source is not fenced'
+        : 'the export was killed before it finished; the source may stay fenced: run the export ' +
+          `again, or release the fence with ${resumeInstruction(found.deploymentId, fenceEpoch ?? 0)}`,
     error: { code: 'RAY_INTERRUPTED' },
     interrupted: true,
     closedBy,
@@ -309,5 +341,5 @@ export async function closeInterruptedExport(
   if (db !== null && reachedEnvironment) {
     await appendExportTransition(db, found, t).catch(() => {});
   }
-  return { fenceEpoch: fenceEpoch ?? null };
+  return { fenceEpoch };
 }

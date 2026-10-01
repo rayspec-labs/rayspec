@@ -10,7 +10,9 @@
  * A KILLED EXPORT cannot clean up: its lock and its capture directory, plaintext included, stay
  * behind. The next export finds a lock whose process is gone, removes everything else in `scratch/`
  * (only exports write there, and none is running), removes the lock, takes its own, and reports
- * which operation it cleaned up after, so that operation's receipt can be closed.
+ * which operation it cleaned up after, so that operation's receipt can be closed. `resume` does the
+ * same through `clearInterruptedExportScratch`, so bringing the source back after a killed export
+ * leaves no plaintext either.
  *
  * The liveness check is `kill(pid, 0)`: a process id the system reused for an unrelated process
  * keeps a stale lock looking live, and the export is refused until that process ends or the operator
@@ -156,5 +158,45 @@ export async function takeExportScratch(
         await unlink(lock).catch(() => {});
       }
     },
+  };
+}
+
+/** What `clearInterruptedExportScratch` found. */
+export interface ScratchClearance {
+  /** The operation a killed export left its scratch data under, now removed; null when none. */
+  cleanedUpAfter: string | null;
+  removedEntries: number;
+  /** An export of this deployment is running: its scratch directory was left alone. */
+  exportRunning: boolean;
+}
+
+/**
+ * Remove what a killed export left in the scratch directory, by the rule `takeExportScratch` applies:
+ * only when no live process holds the lock. The lock is taken for the moment of the removal and given
+ * up again. A running export is never disturbed (`exportRunning`), and a state directory without a
+ * scratch directory is left without one. Throws `StateDirectoryError` when the scratch directory is
+ * unsafe (open to others, or not the operator's).
+ */
+export async function clearInterruptedExportScratch(
+  stateDir: StateDirectory,
+  operationId: string,
+): Promise<ScratchClearance> {
+  if ((await lstat(join(stateDir.root, 'scratch')).catch(() => null)) === null) {
+    return { cleanedUpAfter: null, removedEntries: 0, exportRunning: false };
+  }
+  let scratch: ExportScratch;
+  try {
+    scratch = await takeExportScratch(stateDir, operationId);
+  } catch (err) {
+    if (err instanceof StateDirectoryError && err.error.code === 'RAY_LOCK_TIMEOUT') {
+      return { cleanedUpAfter: null, removedEntries: 0, exportRunning: true };
+    }
+    throw err;
+  }
+  await scratch.release();
+  return {
+    cleanedUpAfter: scratch.cleanedUpAfter,
+    removedEntries: scratch.removedEntries,
+    exportRunning: false,
   };
 }

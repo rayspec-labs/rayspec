@@ -11,12 +11,25 @@ import { join } from 'node:path';
 import { inspectBundle } from '@rayspec/bundle';
 import { MIGRATION_CIPHERTEXT_PATH } from '@rayspec/bundle-contract';
 import { Decrypter, generateX25519Identity, identityToRecipient } from 'age-encryption';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import * as age from './age-encryption.js';
 import {
   type MigrationBundleInput,
   MigrationWriteAborted,
   writeMigrationBundle,
 } from './migration-bundle.js';
+
+// The encryption is the real one; a test may wrap one call to act between it and the bundle write.
+vi.mock('./age-encryption.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./age-encryption.js')>();
+  return { ...original, encryptFile: vi.fn(original.encryptFile) };
+});
+const realEncryptFile = (
+  await vi.importActual<typeof import('./age-encryption.js')>('./age-encryption.js')
+).encryptFile;
+afterEach(() => {
+  vi.mocked(age.encryptFile).mockImplementation(realEncryptFile);
+});
 
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
@@ -155,6 +168,36 @@ describe('writeMigrationBundle', () => {
     await expect(
       writeMigrationBundle(out, input, { signal: controller.signal }),
     ).rejects.toBeInstanceOf(MigrationWriteAborted);
+    expect(readdirSync(join(out, '..'))).toEqual([]);
+    expect(readdirSync(input.workDir)).toEqual(['snapshot.zip']);
+  });
+
+  it('stops when its signal aborts after the encryption and before the bundle is written', async () => {
+    const { input, out } = await fixture();
+    const controller = new AbortController();
+    vi.mocked(age.encryptFile).mockImplementationOnce(async (...args) => {
+      const encrypted = await realEncryptFile(...args);
+      controller.abort();
+      return encrypted;
+    });
+    await expect(
+      writeMigrationBundle(out, input, { signal: controller.signal }),
+    ).rejects.toBeInstanceOf(MigrationWriteAborted);
+    expect(readdirSync(join(out, '..'))).toEqual([]);
+    expect(readdirSync(input.workDir)).toEqual(['snapshot.zip']);
+  });
+
+  it('refuses, and removes, a bundle that does not carry the ciphertext the encryption reported', async () => {
+    const { input, out } = await fixture();
+    vi.mocked(age.encryptFile).mockImplementationOnce(async (...args) => {
+      const encrypted = await realEncryptFile(...args);
+      // The ciphertext file no longer holds what was encrypted when the bundle reads it.
+      return encrypted.ok
+        ? { ok: true, value: { ...encrypted.value, sha256: 'f'.repeat(64) } }
+        : encrypted;
+    });
+    const written = await writeMigrationBundle(out, input);
+    expect(written.ok ? 'ok' : written.errors[0]!.code).toBe('RAY_INTERNAL');
     expect(readdirSync(join(out, '..'))).toEqual([]);
     expect(readdirSync(input.workDir)).toEqual(['snapshot.zip']);
   });

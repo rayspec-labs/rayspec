@@ -15,12 +15,15 @@
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import {
+  appendFileSync,
   existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -270,6 +273,51 @@ describe('encryptFile', () => {
       encryptFile(plain, join(dir, 'out.age'), recipient, { signal: controller.signal }),
     ).rejects.toBeInstanceOf(EncryptionAborted);
     expect(existsSync(join(dir, 'out.age'))).toBe(false);
+  });
+
+  it('refuses a plaintext reached through a symbolic link and writes nothing', async () => {
+    const dir = workDir();
+    const plain = join(dir, 'inner.zip');
+    writeFileSync(plain, 'plaintext');
+    symlinkSync(plain, join(dir, 'link.zip'));
+    const { recipient } = await keyPair();
+    const result = await encryptFile(join(dir, 'link.zip'), join(dir, 'out.age'), recipient);
+    expect(result.ok ? 'ok' : result.errors[0]!.code).toBe('RAY_USAGE');
+    expect(existsSync(join(dir, 'out.age'))).toBe(false);
+  });
+
+  /**
+   * A signal that is never aborted but changes the plaintext the first time the encryption looks at
+   * it, while the file is being read.
+   */
+  function changingOnFirstLook(change: () => void): AbortSignal {
+    let changed = false;
+    return {
+      get aborted() {
+        if (!changed) {
+          changed = true;
+          change();
+        }
+        return false;
+      },
+    } as AbortSignal;
+  }
+
+  it('refuses a plaintext that grows or shrinks while it is encrypted, and leaves no ciphertext', async () => {
+    const { recipient } = await keyPair();
+    for (const [name, change] of [
+      ['grows', (path: string) => appendFileSync(path, randomBytes(64 * 1024))],
+      ['shrinks', (path: string) => truncateSync(path, 1024)],
+    ] as const) {
+      const dir = workDir();
+      const plain = join(dir, 'inner.zip');
+      writeFileSync(plain, randomBytes(4 * 1024 * 1024));
+      const result = await encryptFile(plain, join(dir, 'out.age'), recipient, {
+        signal: changingOnFirstLook(() => change(plain)),
+      });
+      expect(result.ok ? 'ok' : result.errors[0]!.code, name).toBe('RAY_INTERNAL');
+      expect(existsSync(join(dir, 'out.age')), name).toBe(false);
+    }
   });
 
   const age = spawnSync('age', ['--version'], { encoding: 'utf8' });

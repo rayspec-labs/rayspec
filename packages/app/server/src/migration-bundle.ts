@@ -107,6 +107,8 @@ export async function writeMigrationBundle(
     if (!written.ok) return written;
     const entry = written.value.manifest.inventory[0];
     if (entry?.sha256 !== encrypted.value.sha256 || entry.size !== encrypted.value.size) {
+      // The bundle this call linked into place (it never replaces a file) is not handed out.
+      await unlink(written.value.path).catch(() => {});
       return {
         ok: false,
         errors: [

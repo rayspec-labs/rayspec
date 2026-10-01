@@ -5,7 +5,16 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -14,7 +23,11 @@ import {
   type StateDirectory,
   StateDirectoryError,
 } from './deployment-state.js';
-import { EXPORT_LOCK_NAME, takeExportScratch } from './export-scratch.js';
+import {
+  clearInterruptedExportScratch,
+  EXPORT_LOCK_NAME,
+  takeExportScratch,
+} from './export-scratch.js';
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -80,8 +93,11 @@ describe('takeExportScratch', () => {
     );
     mkdirSync(join(scratchDir, 'rayspec-snapshot-left'), { mode: 0o700 });
     writeFileSync(join(scratchDir, 'rayspec-snapshot-left', 'database.dump'), 'rows');
-    // A directory the owner cannot write is removed too.
-    mkdirSync(join(scratchDir, 'rayspec-snapshot-left', 'sealed'), { mode: 0o500 });
+    // A directory the owner cannot write is removed too, with the plaintext inside it.
+    const sealed = join(scratchDir, 'rayspec-snapshot-left', 'sealed');
+    mkdirSync(sealed, { mode: 0o700 });
+    writeFileSync(join(sealed, 'objects.bin'), 'bytes of an upload');
+    chmodSync(sealed, 0o500);
 
     const mine = randomUUID();
     const scratch = await takeExportScratch(dir, mine);
@@ -90,5 +106,56 @@ describe('takeExportScratch', () => {
     expect(readdirSync(scratchDir)).toEqual([EXPORT_LOCK_NAME]);
     await scratch.release();
     expect(readdirSync(scratchDir)).toEqual([]);
+  });
+});
+
+describe('clearInterruptedExportScratch', () => {
+  it('removes what a killed export left, names it, and holds no lock afterwards', async () => {
+    const dir = await stateDir();
+    const scratchDir = await dir.scratchDirectory();
+    const killed = randomUUID();
+    writeFileSync(
+      join(scratchDir, EXPORT_LOCK_NAME),
+      JSON.stringify({ pid: deadPid(), operationId: killed }),
+    );
+    mkdirSync(join(scratchDir, 'rayspec-snapshot-left'), { mode: 0o700 });
+    writeFileSync(join(scratchDir, 'rayspec-snapshot-left', 'objects.bin'), 'bytes of an upload');
+
+    const cleared = await clearInterruptedExportScratch(dir, randomUUID());
+    expect(cleared).toEqual({ cleanedUpAfter: killed, removedEntries: 1, exportRunning: false });
+    expect(readdirSync(scratchDir)).toEqual([]);
+    // A later export takes the scratch space without finding anything to clean up.
+    const next = await takeExportScratch(dir, randomUUID());
+    expect(next.cleanedUpAfter).toBeNull();
+    await next.release();
+  });
+
+  it('leaves the scratch directory of a running export alone', async () => {
+    const dir = await stateDir();
+    const scratchDir = await dir.scratchDirectory();
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+    try {
+      const running = randomUUID();
+      writeFileSync(
+        join(scratchDir, EXPORT_LOCK_NAME),
+        JSON.stringify({ pid: child.pid, operationId: running }),
+      );
+      mkdirSync(join(scratchDir, 'rayspec-snapshot-live'), { mode: 0o700 });
+      const cleared = await clearInterruptedExportScratch(dir, randomUUID());
+      expect(cleared).toEqual({ cleanedUpAfter: null, removedEntries: 0, exportRunning: true });
+      expect(readdirSync(scratchDir).sort()).toEqual([EXPORT_LOCK_NAME, 'rayspec-snapshot-live']);
+    } finally {
+      child.kill('SIGKILL');
+    }
+  });
+
+  it('creates no scratch directory where there was none', async () => {
+    const dir = await stateDir();
+    expect(await clearInterruptedExportScratch(dir, randomUUID())).toEqual({
+      cleanedUpAfter: null,
+      removedEntries: 0,
+      exportRunning: false,
+    });
+    expect(existsSync(join(dir.root, 'scratch'))).toBe(false);
   });
 });

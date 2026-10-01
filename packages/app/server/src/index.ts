@@ -224,7 +224,13 @@ export {
   exportReceiptName,
   resumeInstruction,
 } from './export-receipts.js';
-export { EXPORT_LOCK_NAME, type ExportScratch, takeExportScratch } from './export-scratch.js';
+export {
+  clearInterruptedExportScratch,
+  EXPORT_LOCK_NAME,
+  type ExportScratch,
+  type ScratchClearance,
+  takeExportScratch,
+} from './export-scratch.js';
 // Liveness and readiness: the probes `/health` runs and the runtime-control `health()` reports.
 export {
   bindingsProbe,

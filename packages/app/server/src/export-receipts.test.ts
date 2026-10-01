@@ -10,6 +10,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bundleError, CONTRACT_VERSION } from '@rayspec/bundle-contract';
+import type { Db } from '@rayspec/db';
 import { afterAll, describe, expect, it } from 'vitest';
 import { openStateDirectory, type StateDirectory } from './deployment-state.js';
 import {
@@ -163,5 +164,63 @@ describe('the local receipt of an export', () => {
     // A receipt that already ended, or none at all, is left alone.
     expect(await closeInterruptedExport(dir, killed, randomUUID(), null)).toBeNull();
     expect(await closeInterruptedExport(dir, randomUUID(), closer, null)).toBeNull();
+  });
+
+  /** A killed export's receipt that ends while quiesce was taking the fence at epoch 2 → 3. */
+  async function killedWhileQuiescing(dir: StateDirectory): Promise<string> {
+    const killed = randomUUID();
+    const log = ExportReceiptLog.start(dir, killed, inputs);
+    await log.transition('PRECHECK', {
+      fenceEpoch: 2,
+      fenceState: 'open',
+      digests: { applicationDigest: DIGEST },
+      recovery: 'none',
+    });
+    await log.transition('QUIESCING', {
+      fenceEpoch: 2,
+      fenceState: 'open',
+      digests: { applicationDigest: DIGEST },
+      recovery: resumeInstruction(inputs.deploymentId, 3),
+    });
+    return killed;
+  }
+
+  it('closes an export killed while quiescing with the epoch quiesce takes, not the open one', async () => {
+    const dir = await stateDir();
+    const killed = await killedWhileQuiescing(dir);
+    expect(await closeInterruptedExport(dir, killed, randomUUID(), null)).toEqual({
+      fenceEpoch: 3,
+    });
+    const closed = readReceipt(dir, killed).transitions.at(-1);
+    expect(closed).toMatchObject({ state: 'BLOCKED', fenceEpoch: 3, fenceState: null });
+    expect(closed?.digests).toEqual({ applicationDigest: DIGEST });
+    expect(closed?.recovery).toContain(
+      'rayspec resume --deployment abcdef0123456789 --fence-epoch 3',
+    );
+  });
+
+  it("closes a killed export with the environment's fence when the database can be read", async () => {
+    const fenceOf = (state: string, epoch: string): Db =>
+      ({
+        $client: { unsafe: async () => [{ fence_state: state, fence_epoch: epoch }] },
+      }) as unknown as Db;
+
+    const dir = await stateDir();
+    const fenced = await killedWhileQuiescing(dir);
+    expect(await closeInterruptedExport(dir, fenced, randomUUID(), fenceOf('fenced', '3'))).toEqual(
+      { fenceEpoch: 3 },
+    );
+    const closed = readReceipt(dir, fenced).transitions.at(-1);
+    expect(closed).toMatchObject({ fenceEpoch: 3, fenceState: 'fenced' });
+    expect(closed?.recovery).toContain('--fence-epoch 3');
+
+    // Killed before quiesce took the fence: the source is open, and no resume is offered.
+    const open = await killedWhileQuiescing(dir);
+    await closeInterruptedExport(dir, open, randomUUID(), fenceOf('open', '2'));
+    const reopened = readReceipt(dir, open).transitions.at(-1);
+    expect(reopened).toMatchObject({ fenceEpoch: 2, fenceState: 'open' });
+    expect(reopened?.recovery).toBe(
+      'the export was killed before it finished; the source is not fenced',
+    );
   });
 });
