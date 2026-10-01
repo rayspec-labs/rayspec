@@ -401,6 +401,22 @@ class Interrupted extends Error {}
  * Run `rayspec deploy <file.ray> ...`. Returns the envelope to write, or `served` once the
  * deployment serves.
  */
+/**
+ * Write the application-defined bindings a bindings file supplied into the application process
+ * environment: the platform never reads them, and the application finds them there. A provider
+ * credential is skipped — it is granted to its adapter alone and never enters the environment, so a
+ * child process does not inherit it. A binding the explicit environment supplied is there already.
+ */
+export function exportApplicationBindings(
+  env: NodeJS.ProcessEnv,
+  fileValues: ReadonlyMap<string, string>,
+  isProviderCredentialName: (name: string) => boolean,
+): void {
+  for (const [name, value] of fileValues) {
+    if (!isProviderCredentialName(name)) env[name] = value;
+  }
+}
+
 export async function runDeployBundle(
   args: readonly string[],
   options: BundleDeployOptions,
@@ -640,9 +656,10 @@ async function deploy(
     if (value !== undefined && value !== '') values.set(b.name, value);
   }
   server.registerSecretValues(values.values());
-  // Neither kind of value is written to the process environment: the provider credentials are granted
-  // to the adapters that use them, the application's own to its handlers (`init.bindings`), once the
-  // deploy is past its dry-run.
+  // Where each kind of value goes, once the deploy is past its dry-run: a provider credential only to
+  // the adapter that uses it, never into the process environment; an application-defined binding into
+  // the application process environment, as the bindings contract says, and to its handlers as
+  // `init.bindings`.
   const shadowDatabaseUrl = env.SHADOW_DATABASE_URL?.trim() || undefined;
   const runtime = {
     trustedKeys,
@@ -760,6 +777,7 @@ async function deploy(
   server.grantProviderCredentials(
     new Map([...fileValues].filter(([name]) => server.isProviderCredentialName(name))),
   );
+  exportApplicationBindings(env, fileValues, server.isProviderCredentialName);
   server.setApplicationBindings({
     declared: bundle.manifest.bindings.map((b) => b.name),
     providerCredentials: server.PROVIDER_CREDENTIAL_NAMES,

@@ -8,8 +8,8 @@
  * adapters, a platform setting — is refused with an error, never answered with `undefined`, so a
  * handler that reaches for a value it was not granted fails where it asks.
  *
- * The values never enter the process environment on a bundle deployment, so they do not reach a child
- * process or code that enumerates the environment. This is not a sandbox: handler code runs in the
+ * The same values are also in the application process environment, as the bindings contract has
+ * them; the provider credentials are in neither. This is not a sandbox: handler code runs in the
  * runtime process.
  */
 export interface ApplicationBindings {

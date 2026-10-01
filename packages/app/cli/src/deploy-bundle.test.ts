@@ -36,6 +36,7 @@ import {
 import {
   BUNDLE_DEPLOY_ARG_OPTIONS,
   deployTarget,
+  exportApplicationBindings,
   hasBundleSuffix,
   isBundleDeploy,
 } from './deploy-bundle.js';
@@ -505,5 +506,22 @@ maybeDescribe('the flags of the bundle path are documented', () => {
     const section = doc.slice(heading, doc.indexOf('\n## ', heading + 1));
     const synopsis = /```\n([\s\S]*?)\n```/.exec(section)?.[1] ?? '';
     for (const flag of flags) expect(names(synopsis, flag), flag).toBe(true);
+  });
+});
+
+describe("where a bindings file's values go", () => {
+  it('an application-defined binding into the application process environment; a provider key not', () => {
+    const env: NodeJS.ProcessEnv = { PATH: '/bin' };
+    exportApplicationBindings(
+      env,
+      new Map([
+        ['WEBHOOK_SIGNING_SECRET', CANARY],
+        ['OPENAI_API_KEY', `${CANARY}-provider`],
+      ]),
+      (name) => name === 'OPENAI_API_KEY',
+    );
+    expect(env.WEBHOOK_SIGNING_SECRET).toBe(CANARY);
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.PATH).toBe('/bin');
   });
 });
