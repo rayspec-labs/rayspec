@@ -2679,6 +2679,8 @@ async function assembleServerWith(
   const productOpts = {
     fence,
     registerProductTables: opts.registerProductTables,
+    // The same in-request bound the agent run surface holds: replies and normalizes count against it.
+    ...(baseDeps.inRequestRunGate ? { inRequestRunGate: baseDeps.inRequestRunGate } : {}),
     ...(opts.productDeterministicAgents
       ? { deterministicAgents: opts.productDeterministicAgents }
       : {}),

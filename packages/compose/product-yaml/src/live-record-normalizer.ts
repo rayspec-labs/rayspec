@@ -28,7 +28,12 @@
 import { createHash } from 'node:crypto';
 import type { AgentSpec, Backend, RunResult } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
-import { runAgent } from '@rayspec/platform';
+import {
+  type InRequestRunGate,
+  RunAdmissionRefusedError,
+  runAgent,
+  withInRequestSlot,
+} from '@rayspec/platform';
 import {
   type RecordNormalizeOutcome,
   type RecordNormalizerFactory,
@@ -52,6 +57,12 @@ export interface LiveRecordNormalizerConfig {
   readonly requireNativeStructuredOutput?: boolean;
   /** Build the tenant-bound chokepoint handle (the boot passes `(t) => forTenant(db, t)`). */
   readonly tdbFor: (tenantId: string) => TenantDb;
+  /**
+   * The process's bound on in-request agent runs (`RAYSPEC_AGENT_SYNC_RUNS_MAX`), shared with every
+   * other in-request run surface. A normalize run takes a slot until it settles; with none free the
+   * normalize fails with the neutral `rate_limited` class and nothing is run. Absent ⇒ unbounded.
+   */
+  readonly inRequestRunGate?: InRequestRunGate;
 }
 
 /** framing for the raw record input: it is UNTRUSTED DATA to normalize, never instructions. */
@@ -114,11 +125,16 @@ export function makeLiveRecordNormalizer(cfg: LiveRecordNormalizerConfig): Recor
 
       let result: RunResult;
       try {
-        result = await runAgent(tdb, cfg.backend, spec, {
-          runId,
-          ...(cfg.requireNativeStructuredOutput ? { requireNativeStructuredOutput: true } : {}),
-        });
+        result = await withInRequestSlot(cfg.inRequestRunGate, () =>
+          runAgent(tdb, cfg.backend, spec, {
+            runId,
+            ...(cfg.requireNativeStructuredOutput ? { requireNativeStructuredOutput: true } : {}),
+          }),
+        );
       } catch (e) {
+        if (e instanceof RunAdmissionRefusedError) {
+          return { status: 'error', errorClass: 'rate_limited', message: e.message };
+        }
         return { status: 'error', message: e instanceof Error ? e.message : String(e) };
       }
       if (result.status !== 'completed') {

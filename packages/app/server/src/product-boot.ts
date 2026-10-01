@@ -83,7 +83,12 @@ import {
   type ResolvedRun,
   SystemCleanupScheduler,
 } from '@rayspec/durable-dbos';
-import type { BlobStoreFactory, DurableExecutorIdentity, FsSourceFactory } from '@rayspec/platform';
+import type {
+  BlobStoreFactory,
+  DurableExecutorIdentity,
+  FsSourceFactory,
+  InRequestRunGate,
+} from '@rayspec/platform';
 import {
   FsSourceConfigError,
   makeFsBlobStoreFactory,
@@ -262,6 +267,12 @@ export interface DeployProductYamlOpts {
    * deployment to broker a model call whose model it was never told.
    */
   agentBackendsFactory?: ProductAgentBackendsFactory;
+  /**
+   * The process's bound on in-request agent runs (`RAYSPEC_AGENT_SYNC_RUNS_MAX`) — the same gate the
+   * agent run surface holds, so conversation replies and record normalizes count against it too.
+   * Omitted ⇒ those runs are unbounded (the bound is off, or a direct test caller).
+   */
+  inRequestRunGate?: InRequestRunGate;
 }
 
 /**
@@ -2047,6 +2058,7 @@ export function buildTurnResponder(
     historyWindow,
     ...(storeContext ? { storeContext } : {}),
     tdbFor: (tenantId: string) => forTenant(db, tenantId),
+    ...(opts.inRequestRunGate ? { inRequestRunGate: opts.inRequestRunGate } : {}),
   });
 }
 
@@ -2360,6 +2372,7 @@ export function buildRecordNormalizer(
     outputSchema,
     ...(structuredMode === 'native' ? { requireNativeStructuredOutput: true } : {}),
     tdbFor: (tenantId: string) => forTenant(db, tenantId),
+    ...(opts.inRequestRunGate ? { inRequestRunGate: opts.inRequestRunGate } : {}),
   };
   return makeLiveRecordNormalizer(normalizerCfg);
 }

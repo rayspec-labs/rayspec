@@ -13,7 +13,11 @@ import type { RunResult } from '@rayspec/core';
 import { describe, expect, it, vi } from 'vitest';
 
 const { runAgentMock } = vi.hoisted(() => ({ runAgentMock: vi.fn() }));
-vi.mock('@rayspec/platform', () => ({ runAgent: runAgentMock }));
+// Only `runAgent` is faked; the in-request slot and its refusal stay the real ones.
+vi.mock('@rayspec/platform', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@rayspec/platform')>()),
+  runAgent: runAgentMock,
+}));
 // Override ONLY drizzle's `eq` (spread the real module so @rayspec/db's table builders stay intact) so
 // the run-id-keyed ATTACH fake below can read the EXACT run id loadCompletedNormalize queries on
 // (where(runs.runId == runId)) — reproducing the real payload-keyed attach contract.
@@ -22,6 +26,7 @@ vi.mock('drizzle-orm', async (importOriginal) => {
   return { ...actual, eq: (_col: unknown, value: unknown) => ({ __runId: value }) };
 });
 
+const { InRequestRunGate } = await import('@rayspec/platform');
 const { makeLiveRecordNormalizer, normalizeRunId } = await import('./live-record-normalizer.js');
 type LiveRecordNormalizerConfig = import('./live-record-normalizer.js').LiveRecordNormalizerConfig;
 
@@ -107,6 +112,28 @@ describe('normalizeRunId', () => {
 });
 
 describe('makeLiveRecordNormalizer', () => {
+  it('holds an in-request slot while the normalize runs, and fails `rate_limited` with none free, running nothing', async () => {
+    runAgentMock.mockReset();
+    let finish: (r: RunResult) => void = () => {};
+    runAgentMock.mockImplementationOnce(
+      () =>
+        new Promise<RunResult>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const gate = new InRequestRunGate(1);
+    const normalizer = makeLiveRecordNormalizer({ ...cfg(), inRequestRunGate: gate })(TENANT);
+    const first = normalizer.normalize({ record: { title: 'a' }, recordId: RECORD_ID });
+    await vi.waitFor(() => expect(gate.active).toBe(1));
+    const second = await normalizer.normalize({ record: { title: 'b' }, recordId: 'rec-2' });
+    expect(second).toMatchObject({ status: 'error', errorClass: 'rate_limited' });
+    expect((second as { message: string }).message).toContain('RAYSPEC_AGENT_SYNC_RUNS_MAX');
+    expect(runAgentMock).toHaveBeenCalledTimes(1);
+    finish(completedRun({ title: 'A' }));
+    expect(await first).toEqual({ status: 'normalized', record: { title: 'A' } });
+    expect(gate.active).toBe(0);
+  });
+
   it('runs FRESH under the deterministic id with the exact tool-less single-turn structured spec; returns the structured output as the normalized record', async () => {
     runAgentMock.mockReset();
     runAgentMock.mockResolvedValue(completedRun({ title: 'FIXED', normalized: true }));

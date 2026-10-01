@@ -80,3 +80,21 @@ export class InRequestRunGate {
     };
   }
 }
+
+/**
+ * Run `start` holding one slot of `gate` until the run it starts settles, or refuse with
+ * {@link RunAdmissionRefusedError} when none is free. With no gate (the bound is off) it just runs.
+ * For an in-request caller of `runAgent` that answers the refusal itself.
+ */
+export async function withInRequestSlot<T>(
+  gate: InRequestRunGate | undefined,
+  start: () => Promise<T>,
+): Promise<T> {
+  if (gate === undefined) return start();
+  const release = gate.acquire();
+  try {
+    return await start();
+  } finally {
+    release();
+  }
+}

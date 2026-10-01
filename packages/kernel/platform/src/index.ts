@@ -220,6 +220,7 @@ export {
   RunAdmissionRefusedError,
   type RunAdmissionScope,
   runAdmissionRefusedMessage,
+  withInRequestSlot,
 } from './run-admission.js';
 // Run cancellation: the persisted marker every dispatch consults before executing, the process-local
 // signal run-core threads onto `ctx.signal` and races the backend call against, and the journaled

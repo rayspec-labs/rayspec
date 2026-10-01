@@ -48,7 +48,13 @@ import type {
 } from '@rayspec/conversation-runtime';
 import type { AgentSpec, Backend, EventSink, RunResult } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
-import { isTerminalRunStatus, runAgent } from '@rayspec/platform';
+import {
+  type InRequestRunGate,
+  isTerminalRunStatus,
+  RunAdmissionRefusedError,
+  runAgent,
+  withInRequestSlot,
+} from '@rayspec/platform';
 import { eq } from 'drizzle-orm';
 
 /** What the boot bakes into the live responder (constant across a deployment's requests). */
@@ -67,6 +73,12 @@ export interface LiveTurnResponderConfig {
   readonly storeContext?: ConversationStoreContextRead;
   /** Build the tenant-bound chokepoint handle (the boot passes `(t) => forTenant(db, t)`). */
   readonly tdbFor: (tenantId: string) => TenantDb;
+  /**
+   * The process's bound on in-request agent runs (`RAYSPEC_AGENT_SYNC_RUNS_MAX`), shared with every
+   * other in-request run surface. A reply run takes a slot until it settles; with none free the reply
+   * fails with the neutral `rate_limited` class and nothing is run. Absent ⇒ unbounded.
+   */
+  readonly inRequestRunGate?: InRequestRunGate;
 }
 
 /** Shape a sha256 hex digest into the v5-shaped UUID (the `agentSubRunId` recipe). */
@@ -173,12 +185,17 @@ export function makeLiveTurnResponder(
 
       let result: RunResult;
       try {
-        result = await runAgent(tdb, cfg.backend, spec, {
-          runId,
-          // The live-sink seam: forward the live sink verbatim when the caller supplies one.
-          ...(onEvent ? { onEvent: onEvent as EventSink } : {}),
-        });
+        result = await withInRequestSlot(cfg.inRequestRunGate, () =>
+          runAgent(tdb, cfg.backend, spec, {
+            runId,
+            // The live-sink seam: forward the live sink verbatim when the caller supplies one.
+            ...(onEvent ? { onEvent: onEvent as EventSink } : {}),
+          }),
+        );
       } catch (e) {
+        if (e instanceof RunAdmissionRefusedError) {
+          return { status: 'error', runId, errorClass: 'rate_limited', message: e.message };
+        }
         return {
           status: 'error',
           runId,
