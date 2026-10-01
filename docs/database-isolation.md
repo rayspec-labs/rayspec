@@ -169,7 +169,10 @@ connections, and reports `reader: single-role` when it reads with the one role i
 ([Snapshots of a fenced source](./runtime-operations.md#snapshots-of-a-fenced-source)).
 `rayspec export` takes the snapshot role's connection from `RAYSPEC_SNAPSHOT_DATABASE_URL` (or its
 `_FILE`) and connects as the migration role through `RAYSPEC_MIGRATION_DATABASE_URL`
-([Exporting a deployment](./export.md)).
+([Exporting a deployment](./export.md)). `rayspec import` restores a snapshot as the target's
+migration role, never a superuser: every object it restores belongs to that role, and the migration
+role's default privileges, which this setup creates, give the runtime and snapshot roles their
+grants on them ([Importing a deployment](./import.md)).
 
 ## Turning it off
 

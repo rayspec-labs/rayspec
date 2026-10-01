@@ -23,10 +23,10 @@ documented exception, `--help`, which prints plain text there instead (see
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
 | `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse, and `pack` for an application it cannot package or an output that exists. |
-| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide, or an application declares a `@rayspec/*` range that excludes the runtime it pins; for `export`, state a snapshot cannot carry (a second organization, an unknown table, no database write barrier). Bundle verbs, `pack`, `deploy <file.ray>` and `export` only. |
-| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify, a fence epoch that is not the held one. Bundle verbs, `pack`, `deploy <file.ray>`, `export` and `resume` only. |
-| `5`  | Retryable — a database that cannot be reached, a lock another operation holds, a source that did not drain before the deadline. `deploy <file.ray>`, `export` and `resume` only. |
-| `6`  | Interrupted by SIGINT or SIGTERM before the command finished, or blocked until reconciled (schema drift). Bundle verbs, `pack`, `deploy <file.ray>` and `export` only. |
+| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide, or an application declares a `@rayspec/*` range that excludes the runtime it pins; for `export`, state a snapshot cannot carry (a second organization, an unknown table, no database write barrier); for `import`, a snapshot of another runtime or server major, or a dump with a second organization. Bundle verbs, `pack`, `deploy <file.ray>`, `export` and `import` only. |
+| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify, a fence epoch that is not the held one, a dump the import allowlist refuses, an import target that is not empty. Bundle verbs, `pack`, `deploy <file.ray>`, `export`, `import` and `resume` only. |
+| `5`  | Retryable — a database that cannot be reached, a lock another operation holds, a source that did not drain before the deadline. `deploy <file.ray>`, `export`, `import` and `resume` only. |
+| `6`  | Interrupted by SIGINT or SIGTERM before the command finished, or blocked until reconciled (schema drift, a failed restore). Bundle verbs, `pack`, `deploy <file.ray>`, `export` and `import` only. |
 | `7`  | An unexpected internal failure (a defect, not a verdict). A short JSON error is written to **stderr**. |
 
 The existing commands keep `0`, `1` and `2` for every outcome they have; only
@@ -49,10 +49,12 @@ The commands split into these groups:
 - **`pack`** writes one `.ray` application bundle from an application that is
   already built. It builds, imports and runs nothing, and writes nothing but its
   output file. It answers with the result envelope too.
-- **`export`** and **`resume`** move a self-hosted deployment: `export` fences it
-  and writes its complete snapshot, encrypted, as a migration bundle; `resume`
-  releases the fence. Both answer with the result envelope. See
-  [Exporting a deployment](./export.md).
+- **`export`**, **`import`** and **`resume`** move a self-hosted deployment:
+  `export` fences it and writes its complete snapshot, encrypted, as a migration
+  bundle; `import` restores that bundle into a new, empty target and leaves it
+  fenced until the cutover; `resume` releases a fence. All three answer with the
+  result envelope. See [Exporting a deployment](./export.md) and
+  [Importing a deployment](./import.md).
 - A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
   database `DATABASE_URL` names (and applies the committed migration chain to
   it), so it is deliberately *not* under `dev`, which is local-only. It prints no
@@ -1462,6 +1464,127 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
 
 ---
 
+## `import`
+
+```
+rayspec import <migration.ray> --target <state-dir> --identity-file <file> --dry-run [--json]
+rayspec import <migration.ray> --target <state-dir> --identity-file <file>
+               [--bindings-file <file>] [--json]
+rayspec import --target <state-dir> --discard-failed [--json]
+```
+
+Restores a migration bundle into a **new, empty** target — two databases and a blob root — as the
+target's migration role, verifies it, and leaves it **fenced** until the cutover. The source stays
+authoritative throughout. The operator guide is [Importing a deployment](./import.md).
+
+- **Order.** The bundle through the reader (the ciphertext's size and SHA-256 before anything is
+  decrypted); decryption with the identity file into a private scratch directory under
+  `<target>/scratch/`, within the migration plaintext limit; the inner snapshot through the same
+  reader; every clear hint of the bundle (application, runtime, target) against the authenticated
+  metadata; the embedded application through the full reader pipeline for this runtime, which must
+  be the runtime the snapshot was taken with; each dump's table of contents, read from its bytes,
+  compared with `pg_restore --list`, and judged by the restore allowlist; then the target. The dry
+  run stops there. The import goes on through `IMPORTING` (both databases restored under the shared
+  schema lock, workflow system database first, then the objects), `VERIFYING` and
+  `READY_FOR_CUTOVER`, or `BLOCKED`.
+- **The restore allowlist.** Restored: schemas (`drizzle` in the application database, `dbos` in the
+  workflow system database), tables, sequences, defaults, constraints, foreign keys, indexes,
+  triggers, row-level policies, functions in `sql` or `plpgsql`, table data, sequence values. Each
+  entry must be exactly the statements its kind consists of. Refused (`RAY_POLICY_DENIED`): any
+  extension in the application database and any but `uuid-ossp` in the workflow system database
+  (`unsupported-extension`); an object of another owner, or a grant to a role the dump's default
+  privileges do not name (`unmapped-owner`); everything else — a role, an event trigger, a view, a
+  type, a language, a large object, a function in another language or `SECURITY DEFINER` (beyond
+  the platform's two lookups, unchanged), `LEAKPROOF`, a setting other than the search path, data
+  loaded by anything but `COPY … FROM stdin`, a call into the dump (or a server function) from an
+  expression the restore evaluates (`privileged-statement`). Privileges, comments and the dump's
+  owner are not restored: every object belongs to the target's migration role, and the target's
+  runtime and snapshot roles get the grants the database roles setup gives.
+- **The target** must be empty — no table, sequence, function, type, schema besides `public`,
+  extension or large object in either database, nothing in the blob root, no deployment or import in
+  the state directory (`RAY_TARGET_NOT_EMPTY`) — on the snapshot's server major
+  (`RAY_TARGET_UNSUPPORTED`), with its roles prepared by the database roles setup and a workflow
+  system database when the snapshot carries one (`RAY_USAGE`). The restoring role may not be a
+  superuser or create roles (`RAY_POLICY_DENIED` `posture-refused`).
+- **Verification.** The bytes restored hash to the inventory; the tables and their row counts are the
+  snapshot's; every foreign key is there and validated; the schema head is the snapshot's; exactly one
+  organization owns every tenant row and object (`RAY_MULTI_TENANT_UNSUPPORTED` otherwise, and a dump
+  restoring two organizations is discarded at once); sessions, API keys, invites and OIDC artifacts
+  are empty; the runtime role holds the isolated posture; every object read back has the index's
+  size, header and both digests.
+- **Flags.**
+  - `<migration.ray>`: the bundle `rayspec export` wrote.
+  - `--target <state-dir>` (required): the target's state directory, created (mode 0700) when it does
+    not exist. It must hold no deployment.
+  - `--identity-file <file>` (required): the age identity file (`age-keygen`), with exactly one X25519
+    identity. A protected file: a regular file of yours, mode 0600 (`RAY_BINDINGS_FILE_INSECURE`).
+  - `--bindings-file <file>` (import only): the target application's bindings, in the deploy's format.
+    Reserved names are refused (`RAY_BINDING_RESERVED`), undeclared names `RAY_USAGE`, and a required
+    binding neither the file nor the environment supplies is `RAY_BINDING_MISSING`. The values are
+    checked, not kept: give them again when you deploy at the cutover.
+  - `--dry-run`: the eligibility plan only.
+  - `--discard-failed`: with `--target` alone. Removes what a failed or killed import restored — every
+    object the migration role owns in both target databases, everything in the blob root, and the
+    state directory's deployment and import records (its receipts stay). A target that is ready for
+    its cutover, or that holds a deployment, is never discarded.
+- **Environment** (explicit, never a `.env` file): `DATABASE_URL` (or `_FILE`; the target's runtime
+  role), `RAYSPEC_MIGRATION_DATABASE_URL` (or `_FILE`; required: the restore runs as this role),
+  `DBOS_SYSTEM_DATABASE_URL`, `RAYSPEC_BLOB_ROOT` (required when the snapshot carries objects; empty
+  or absent), `RAYSPEC_PG_RESTORE` (an absolute path; default the first `pg_restore` on `PATH`, which
+  must be of the server's major). No output carries a value.
+- **Output:** the result envelope on stdout (operation `import.dry-run` or `import`), with or without
+  `--json`. The dry run's `data`:
+  `{ bundleSha256, eligible, applicationId, applicationVersion, sourceRuntime, schemaHead, fenceEpoch, workflowSystemDatabase, blockers }`
+  (`fenceEpoch` is the source's, the snapshot was taken under it). A target finding is an error and
+  also a blocker in `data`, with `eligible: false`. The import's `data`:
+
+  ```json
+  {
+    "bundleSha256": "…",
+    "deploymentId": "8c1f0a2b3c4d5e6f",
+    "status": "ready-for-cutover",
+    "applicationDigest": "…",
+    "schemaHead": { "platform": "0015_tenant_row_security", "product": "…" },
+    "verification": { "checksums": "match", "tableCounts": "match", "objects": "match", "referenceIntegrity": "match" },
+    "credentialReset": { "sessions": "reset", "apiKeys": "reset", "invites": "reset", "oidcArtifacts": "reset", "passwordHashes": "preserved", "forcedLogin": true }
+  }
+  ```
+
+  On stderr: the operation id, progress lines and, without `--json`, a summary with the counts, the
+  target's fence epoch, the cutover instruction and the cutover token (below).
+- **Cutover.** The target is fenced at epoch 1 with its runtime role's writes revoked, so nothing
+  serves it. The cutover token — the SHA-256 of `{migrationBundleSha256, applicationDigest,
+  targetDeploymentId, sourceFenceEpoch, targetFenceEpoch, targetEnvironmentRevision, issuedAt,
+  expiresAt}`, valid 15 minutes — binds the migration bundle, the target and both fences; it is in the
+  summary and the receipts. To cut over: keep the source fenced, release the target with
+  `rayspec resume --deployment <target id> --fence-epoch <n> --state-dir <target>` in the target's
+  environment, and deploy the application the source ran there (`rayspec deploy <file.ray>
+  --state-dir <target>`), with the target's own boot secrets.
+- **Receipts.** `<target>/receipts/import-<operationId>.json` (mode 0600, shareable: no secret, path,
+  record or table name) and, once the target is verified, rows of `runtime_control_receipts` of kind
+  `import` in the target — one per transition `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER` or
+  `BLOCKED`, each with both fence epochs, the time, the digests and the recovery action.
+  `<target>/import.json` says which import left the target in which state.
+- **Interruption and failure.** SIGINT or SIGTERM stops the import at its next safe point and ends a
+  running `pg_restore`, whose transaction rolls back (`RAY_INTERRUPTED`, exit 6). A failure after the
+  target changed is `RAY_RECONCILIATION_REQUIRED` (exit 6) or the refusal that found it; the target is
+  marked failed (`import.json` `BLOCKED`) until `--discard-failed`. A process killed outright leaves
+  its scratch data and `import.json` at `IMPORTING`; the next `import` of the target removes the
+  scratch data (so does `resume`), closes the killed run's receipt and marks the target failed.
+- **Codes.** The contract's lists for the two forms — `RAY_USAGE`, `RAY_INVALID_ARCHIVE`,
+  `RAY_LIMIT_EXCEEDED`, `RAY_MANIFEST_INVALID`, `RAY_DIGEST_MISMATCH`, `RAY_DECRYPTION_FAILED`,
+  `RAY_BINDINGS_FILE_INSECURE`, `RAY_RUNTIME_UNSUPPORTED`, `RAY_TARGET_UNSUPPORTED`,
+  `RAY_TARGET_NOT_EMPTY`, `RAY_MULTI_TENANT_UNSUPPORTED`, `RAY_INFRA_UNAVAILABLE`, `RAY_INTERNAL`,
+  and for the import also `RAY_BINDING_RESERVED`, `RAY_BINDING_MISSING`, `RAY_POLICY_DENIED`,
+  `RAY_LOCK_TIMEOUT`, `RAY_RECONCILIATION_REQUIRED` and `RAY_INTERRUPTED` — and, from the embedded
+  application's reader pipeline, its codes (`RAY_CAPABILITY_UNSUPPORTED`, `RAY_SPEC_INVALID`, …); the
+  dry run also reports `RAY_POLICY_DENIED` for a dump the allowlist refuses.
+- **Exit:** `0` eligible or ready for cutover, `2` usage, archive, manifest, digest, decryption or a
+  limit, `3` runtime, target or tenants, `4` not empty, policy or an insecure file, `5` retryable
+  (database, lock), `6` interrupted or a failed restore, `7` internal error.
+
+---
+
 ## `resume`
 
 ```
@@ -1470,7 +1593,7 @@ rayspec resume --deployment <id> --fence-epoch <n> [--state-dir <dir>] [--json]
 
 Releases the source fence an export took, only at the epoch it is held at, and grants the runtime
 role back exactly the writes the barrier revoked. Every runtime process restarts its producers
-within a second.
+within a second. On an import target it is the cutover: it releases the fence the import took.
 
 - **Flags:** `--deployment <id>` (required; checked against the state directory and the database,
   else `RAY_USAGE`), `--fence-epoch <n>` (required; the epoch the export reported), `--state-dir`.
@@ -1601,6 +1724,8 @@ It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
   to recover from an interrupted one.
 - **[Exporting a deployment](./export.md)** — planning the downtime, what an export
   carries and resets, and recovery when it is interrupted.
+- **[Importing a deployment](./import.md)** — preparing an empty target, what a dump
+  may contain, the cutover, and recovery when an import fails.
 - **[Getting started](./getting-started.md)** — these commands in sequence.
 - **[Spec reference](./spec-reference.md)** — the grammar `doctor`/`plan`/`openapi`
   check.

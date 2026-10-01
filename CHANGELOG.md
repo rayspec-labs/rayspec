@@ -652,6 +652,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receipts. The configuration comes from the process environment only, with the new
   `RAYSPEC_SNAPSHOT_DATABASE_URL` for the read-only snapshot role and `RAYSPEC_PG_DUMP` for an
   explicit `pg_dump`. New guide: [Exporting a deployment](./docs/export.md).
+- **`rayspec import`: restore a migration bundle into a new, empty target.**
+  `rayspec import <migration.ray> --target <state-dir> --identity-file <file> --dry-run` is the
+  passive eligibility plan: the bundle through the one reader, the ciphertext's size and SHA-256
+  checked before decryption, the decryption with the age X25519 identity file (a protected file:
+  yours, mode 0600) into a private scratch directory within the migration plaintext limit, the inner
+  snapshot through the same reader, every clear hint of the bundle against the authenticated
+  snapshot (`RAY_DIGEST_MISMATCH` `inner-metadata`), the embedded application against this exact
+  runtime, each dump against the restore allowlist, and the target — both databases and the blob root
+  empty (`RAY_TARGET_NOT_EMPTY`), the snapshot's server major, the roles prepared. Without
+  `--dry-run` the import restores both databases with `pg_restore` as the target's migration role,
+  never a superuser, under the shared schema lock, in one transaction each, with no owner, privilege,
+  comment or tablespace from the dump; writes every stored blob file unchanged; verifies the bytes
+  restored, the row counts, the foreign keys, the schema head, the one organization, the empty
+  credential tables, the runtime role's posture and every object's digests; and fences the target
+  with its runtime role's writes revoked until the cutover, which `rayspec resume` performs. The
+  restore allowlist reads each dump's table of contents from its bytes and compares it with
+  `pg_restore --list`: it refuses an extension (only `uuid-ossp` in the workflow system database,
+  `unsupported-extension`), another owner or a grant to an unknown role (`unmapped-owner`), and a
+  role, an event trigger, a view, a type, an untrusted language, a `SECURITY DEFINER` function beyond
+  the platform's two, `COPY … PROGRAM`, a call into the dump from an expression the restore evaluates
+  or any statement beside the ones an entry may hold (`privileged-statement`). A dump that restores a
+  second organization is refused and its restore discarded (`RAY_MULTI_TENANT_UNSUPPORTED`). Every
+  transition (`IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER`, `BLOCKED`) is recorded in a shareable
+  local receipt and the target's receipts; the result gives the cutover instruction and a cutover
+  token binding the migration bundle, the target and both fence epochs. A failed import leaves the
+  target marked failed in `<target>/import.json`; `rayspec import --target <dir> --discard-failed`
+  removes what it restored. `RAYSPEC_PG_RESTORE` names an explicit `pg_restore`. New guide:
+  [Importing a deployment](./docs/import.md).
+- **`@rayspec/server` exports the import's building blocks**: `openMigrationBundle`, `planDumps`,
+  `inspectImportTarget`, `restoreImport`, `discardImportTarget`, `ImportReceiptLog`, the custom-format
+  table-of-contents reader `readDumpToc`, the restore allowlist `planDumpRestore`, `decryptFile` and
+  `parseAgeX25519Identity`, and `listDump`/`restoreDump` for `pg_restore`. The inner snapshot reader
+  of `@rayspec/bundle` reports where each payload entry lies in the archive
+  (`SnapshotInspection.entries`), and `@rayspec/db` exports the platform's definer-function
+  allowlist (`ISOLATION_DEFINER_FUNCTIONS`, `normalizeFunctionBody`).
 
 ### Changed
 

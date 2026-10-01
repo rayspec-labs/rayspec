@@ -191,6 +191,9 @@ Tell your users before the cutover that they will sign in again and that API key
 
 ## After the export
 
+Import the bundle into the new environment with `rayspec import` ([Importing a deployment](./import.md)):
+it restores into an empty target, verifies it, and keeps the target fenced until you cut over.
+
 The source stays fenced at the epoch the result names. While the bundle is imported and checked,
 keep it that way: the source is the authority until the cutover, and a source that accepts writes
 again makes the bundle stale. Once the new environment serves, keep the source fenced for the

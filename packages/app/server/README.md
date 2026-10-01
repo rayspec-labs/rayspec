@@ -82,6 +82,18 @@ scratch space for one export at a time and removes what a killed one left. `rays
 `rayspec resume` are built on them; see `docs/export.md` and `docs/runtime-operations.md`,
 "Snapshots of a fenced source".
 
+An import is the other end. `openMigrationBundle` decrypts a migration bundle with the operator's
+X25519 identity (`decryptFile`, `parseAgeX25519Identity`) into a private scratch directory and checks
+it through the one reader: the ciphertext, the inner snapshot archive, every clear hint against the
+authenticated metadata, the embedded application against this runtime. `planDumps` reads each dump's
+table of contents from its bytes (`readDumpToc`), compares it with `pg_restore --list` (`listDump`)
+and judges it by the restore allowlist (`planDumpRestore`). `inspectImportTarget` checks the target
+is empty and prepared; `restoreImport` restores both databases with `pg_restore` as the target's
+migration role (`restoreDump`), writes the objects, verifies everything and fences the target;
+`discardImportTarget` empties a target a failed import left. `ImportReceiptLog` records the
+transitions. `rayspec import` is built on them; see `docs/import.md` and
+`docs/runtime-operations.md`, "Importing a snapshot".
+
 `applyBundle` applies a plan `prepare()` produced for a bundle staged into its version directory
 (`openStateDirectory(...).stageVersion`): it recomputes the plan digest before it writes anything
 and again under the lease, then runs the platform chain, the product change, the application record
