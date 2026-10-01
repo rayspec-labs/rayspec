@@ -10,6 +10,11 @@ from the contract's closed error vocabulary.
   canonical JSON rules, validate it with its JSON Schema (Ajv 2020, strict), then apply the
   rules a schema cannot express. The first failure comes back as `errors[0]`; hostile input never
   throws.
+- `validateObjectIndex` — `payload/object-index.json` of a snapshot: canonical JSON, the schema,
+  entries sorted by tenant and then key by byte value with each pair once, and stored ranges that
+  start at offset 0, follow one another without a gap or an overlap and, given the size of
+  `objects.bin`, end exactly where it ends (`RAY_DIGEST_MISMATCH` `object-range`). `SNAPSHOT_PATHS`
+  and `SNAPSHOT_ROOT_NAME` name the fixed entries of the inner snapshot archive.
 - `checkRuntimeAdmission` — the runtime, target, capability and reserved-binding checks of a
   validated manifest against one runtime.
 - `canonicalJson`, `canonicalJsonFile`, `parseJsonDocument` — keys in code-point order, safe

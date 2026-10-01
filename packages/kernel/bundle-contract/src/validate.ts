@@ -15,7 +15,7 @@
 import { compareCodePoints, parseJsonDocument } from './canonical-json.js';
 import { type BundleError, type BundleErrorCode, bundleError, type ErrorReason } from './errors.js';
 import { type ContractSchemaName, failingPointer, schemaValidator } from './schemas.js';
-import type { ManagedReceipt, RayManifest, Snapshot } from './types.js';
+import type { ManagedReceipt, ObjectIndex, RayManifest, Snapshot } from './types.js';
 import {
   capability,
   type ExecutionLevel,
@@ -275,6 +275,85 @@ export function validateSnapshot(
   });
 }
 
+export interface ObjectIndexValidationOptions extends DocumentValidationOptions {
+  /**
+   * The size of `payload/objects.bin`. When given, the stored ranges must cover it exactly: the
+   * last one ends where the file ends. A safe integer of 0 or more, else `RAY_USAGE`.
+   */
+  objectsSize?: number;
+}
+
+/**
+ * Validate `payload/object-index.json`: canonical JSON bytes no larger than the migration extracted
+ * byte limit (`RAY_LIMIT_EXCEEDED` `object-index-size`), the schema (`$defs/objectIndex`), then the
+ * order rule (entries sorted by `tenantId`, then `key`, by byte value, each pair once:
+ * `RAY_MANIFEST_INVALID` `inventory-unsorted` or `inventory-duplicate`) and the range rule (one
+ * stored range per entry, the first at offset 0, each next one where the previous ends, the last at
+ * `objectsSize`: `RAY_DIGEST_MISMATCH` `object-range`). The digests of the bytes in each range are
+ * checked by whoever holds `objects.bin`.
+ */
+export function validateObjectIndex(
+  input: Uint8Array | string,
+  options: ObjectIndexValidationOptions = {},
+): ValidationResult<ObjectIndex> {
+  return guarded('the object index', options, (limits) => {
+    const objectsSize = options?.objectsSize;
+    if (objectsSize !== undefined && !(Number.isSafeInteger(objectsSize) && objectsSize >= 0)) {
+      return refuse('RAY_USAGE', 'the objects.bin size is not an integer of 0 or more');
+    }
+    const parsed = parseDocument('the object index', input, limits, {
+      maxBytes: limits.migrationExtractedBytes,
+      sizeReason: 'object-index-size',
+      canonical: true,
+    });
+    if (!parsed.ok) return parsed;
+    const structural = checkSchema<ObjectIndex>(
+      'the object index',
+      'snapshot',
+      parsed.value,
+      '/$defs/objectIndex',
+    );
+    if (!structural.ok) return structural;
+    const objects = structural.value.objects;
+    for (let i = 1; i < objects.length; i++) {
+      const a = objects[i - 1]!;
+      const b = objects[i]!;
+      const order = compareCodePoints(a.tenantId, b.tenantId) || compareCodePoints(a.key, b.key);
+      if (order === 0) {
+        return refuse('RAY_MANIFEST_INVALID', 'the object index lists an object twice', {
+          reason: 'inventory-duplicate',
+          path: `/objects/${i}/key`,
+        });
+      }
+      if (order > 0) {
+        return refuse(
+          'RAY_MANIFEST_INVALID',
+          'the object index is not sorted by tenant and key by byte value',
+          { reason: 'inventory-unsorted', path: `/objects/${i}/key` },
+        );
+      }
+    }
+    let end = 0;
+    for (const [i, object] of objects.entries()) {
+      if (object.storedOffset !== end) {
+        return refuse(
+          'RAY_DIGEST_MISMATCH',
+          'a stored range does not start where the previous one ends',
+          { reason: 'object-range', path: `/objects/${i}/storedOffset` },
+        );
+      }
+      end = object.storedOffset + object.storedSize;
+    }
+    if (objectsSize !== undefined && end !== objectsSize) {
+      return refuse('RAY_DIGEST_MISMATCH', 'the stored ranges do not end where objects.bin ends', {
+        reason: 'object-range',
+        path: '/objects',
+      });
+    }
+    return structural;
+  });
+}
+
 /**
  * Validate a managed receipt: strict JSON (no duplicate keys, floats, non-NFC strings or unsafe
  * integers; canonical bytes are not required of a receipt), the schema, and then every listed
@@ -312,6 +391,7 @@ const JSON_FAILURE_MESSAGES: Record<string, string> = {
   'manifest-size': 'is larger than the manifest byte limit',
   'snapshot-size': 'is larger than the snapshot.json byte limit',
   'receipt-size': 'is larger than the receipt byte limit',
+  'object-index-size': 'is larger than the migration extracted byte limit',
   'json-depth': 'nests deeper than the JSON depth limit',
   bom: 'starts with a byte order mark',
   'invalid-utf8': 'is not valid UTF-8',
@@ -326,7 +406,7 @@ interface DocumentRules {
   /** The byte limit of this document. */
   maxBytes: number;
   /** The reason a document above `maxBytes` is refused with. */
-  sizeReason: 'manifest-size' | 'snapshot-size' | 'receipt-size';
+  sizeReason: 'manifest-size' | 'snapshot-size' | 'receipt-size' | 'object-index-size';
   /** Whether the bytes must be canonical JSON. */
   canonical: boolean;
 }
@@ -376,8 +456,9 @@ function checkSchema<T>(
   document: string,
   schema: ContractSchemaName,
   value: unknown,
+  pointer = '',
 ): ValidationResult<T> {
-  const validate = schemaValidator(schema);
+  const validate = schemaValidator(schema, pointer);
   if (validate(value)) return { ok: true, value: value as T };
   const first = validate.errors?.[0];
   const path = first === undefined ? '' : failingPointer(first);

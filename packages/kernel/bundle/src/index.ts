@@ -1,5 +1,6 @@
 /**
- * @rayspec/bundle — the one reader and writer of RaySpec application bundles (`.ray`).
+ * @rayspec/bundle — the one reader and writer of RaySpec application bundles (`.ray`) and of the
+ * inner snapshot archive a migration bundle encrypts.
  *
  * The reader implements the strict ZIP profile and the hostile-input rules of the bundle contract
  * in the contract's order, streams under byte and time budgets, and never imports, evaluates or
@@ -33,6 +34,14 @@ export {
   signatureMessage,
   verifySignatureFile,
 } from './signature.js';
+export {
+  inspectSnapshotArchive,
+  type SnapshotArchiveOptions,
+  type SnapshotDocumentInput,
+  type SnapshotInspection,
+  type WrittenSnapshotArchive,
+  writeSnapshotArchive,
+} from './snapshot.js';
 export type { Clock } from './source.js';
 export {
   type BundleFile,

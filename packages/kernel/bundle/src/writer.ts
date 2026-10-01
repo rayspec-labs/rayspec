@@ -84,7 +84,8 @@ export interface WrittenBundle {
 const CHUNK_BYTES = 1024 * 1024;
 const READ_FLAGS = constants.O_RDONLY | constants.O_NOFOLLOW;
 
-interface PreparedFile {
+/** A payload file measured for writing: its name bytes, size, digests and content source. */
+export interface PreparedFile {
   path: string;
   name: Buffer;
   size: number;
@@ -205,7 +206,7 @@ export async function writeBundle(
   }
 }
 
-function resolveLimits(limits: Partial<ReaderLimits> | undefined): ReaderLimits {
+export function resolveLimits(limits: Partial<ReaderLimits> | undefined): ReaderLimits {
   try {
     return resolveReaderLimits(limits);
   } catch {
@@ -222,7 +223,7 @@ function isEd25519PrivateKey(key: unknown): key is KeyObject {
   );
 }
 
-async function checkDestination(
+export async function checkDestination(
   path: string,
   signaturePath: string | undefined,
   overwrite: boolean,
@@ -246,9 +247,14 @@ async function checkDestination(
 
 // ─── files and manifest ────────────────────────────────────────────────────────────────────────
 
-async function prepareFiles(
+/**
+ * Check and measure the payload files, sorted by name bytes. `rootDocument` is the one name outside
+ * `payload/` the archive will also hold, so the set is checked as the reader will see it.
+ */
+export async function prepareFiles(
   files: readonly BundleFile[] | undefined,
   limits: ReaderLimits,
+  rootDocument: string = MANIFEST_NAME,
 ): Promise<PreparedFile[]> {
   if (!Array.isArray(files)) throw refusal('RAY_USAGE', 'the files are not a list');
   const out: PreparedFile[] = [];
@@ -276,12 +282,12 @@ async function prepareFiles(
     }
   }
   out.sort((a, b) => compareBytes(a.path, b.path));
-  const clash = checkNameSet([...out.map((f) => f.path), MANIFEST_NAME]);
+  const clash = checkNameSet([...out.map((f) => f.path), rootDocument]);
   if (clash !== null) throw refusal('RAY_USAGE', `the file paths clash (${clash})`);
   return out;
 }
 
-function prepared(path: string, bytes: Uint8Array): PreparedFile {
+export function prepared(path: string, bytes: Uint8Array): PreparedFile {
   return {
     path,
     name: Buffer.from(path, 'ascii'),
@@ -357,15 +363,19 @@ function manifestFor(input: BundleManifestInput | undefined, inventory: Inventor
 
 // ─── the archive ───────────────────────────────────────────────────────────────────────────────
 
-function sizeOf(entries: readonly PreparedFile[]): number {
+export function sizeOf(entries: readonly PreparedFile[]): number {
   let size = END_RECORD_SIZE;
   for (const e of entries)
     size += LOCAL_HEADER_SIZE + CENTRAL_RECORD_SIZE + 2 * e.name.length + e.size;
   return size;
 }
 
-async function writeArchive(path: string, entries: readonly PreparedFile[]): Promise<void> {
-  const out = await open(path, 'wx', 0o644);
+export async function writeArchive(
+  path: string,
+  entries: readonly PreparedFile[],
+  mode = 0o644,
+): Promise<void> {
+  const out = await open(path, 'wx', mode);
   try {
     const directory: Buffer[] = [];
     let offset = 0;
@@ -411,7 +421,7 @@ async function copySourceFile(entry: PreparedFile, out: fsp.FileHandle): Promise
   }
 }
 
-function temporaryPath(target: string): string {
+export function temporaryPath(target: string): string {
   return join(dirname(target), `.${basename(target)}.${randomBytes(8).toString('hex')}.tmp`);
 }
 
@@ -426,7 +436,7 @@ async function writeWhole(path: string, bytes: Uint8Array): Promise<void> {
 }
 
 /** Move a finished temporary file into place, atomically, never over an existing file unless asked. */
-async function place(from: string, to: string, overwrite: boolean): Promise<void> {
+export async function place(from: string, to: string, overwrite: boolean): Promise<void> {
   if (overwrite) {
     await rename(from, to);
     return;
