@@ -168,6 +168,38 @@ A previous key that is not a PKCS#8 PEM refuses the boot, naming the variable an
 value. A previous key equal to the current one changes nothing. Refresh sessions are not signed with
 this key and are unaffected.
 
+### The API-key pepper
+
+`RAYSPEC_API_KEY_PEPPER` is the HMAC key of three stored credentials: API keys (machine-client
+secrets included), refresh sessions and invite tokens. Passwords are argon2id with their own salt and
+never touch it. The pepper has a versioned form:
+
+**Rotation, with an overlap window.**
+
+1. Restart with a new pepper in `RAYSPEC_API_KEY_PEPPER` and the old one in
+   `RAYSPEC_API_KEY_PEPPER_PREVIOUS` (or `_FILE`). Everything new is hashed under the new pepper; a
+   credential hashed under the old one still verifies and is renewed when it is used: an API key is
+   re-hashed under the new pepper on its first use, a refresh session is replaced by one hashed under
+   the new pepper when it refreshes, and an invite stays redeemable until it is redeemed or expires.
+2. Keep the window open long enough for the credentials that matter to be used: your automation's
+   API keys at least once, your users' refresh sessions (30 days at most).
+3. Restart without `RAYSPEC_API_KEY_PEPPER_PREVIOUS`. A credential renewed in the window keeps
+   working; one that was not is refused like any unknown credential (`401`; an invite answers that it
+   is invalid or expired). Users sign in again with their passwords; mint new API keys for anything
+   still refused.
+
+**Reset, for a pepper that leaked.** Restart with a new pepper and **no** previous pepper. Every API
+key, refresh session and outstanding invite is refused at once; users sign in again with their
+passwords; mint new API keys; reissue invites, and for an organization whose only credential was an
+API key, issue an owner invite with
+`rayspec tenant ensure --org-id <id> --name <n> --owner-email <e> --owner-invite-out <path> --reissue-owner-invite`.
+The old rows stay in the database and simply never verify again; revoke them through the API-key
+routes to keep the listings tidy.
+
+During a rotation every presented API key is checked under both peppers, found or not, so the work an
+unknown key costs stays the same as a known one's. Both behaviours are proven against a running
+server in `packages/app/server/src/api-key-pepper-rotation.db.test.ts`.
+
 ## Telemetry
 
 The agent SDK of the `openai` backend exports agent traces to OpenAI by default: run metadata and,

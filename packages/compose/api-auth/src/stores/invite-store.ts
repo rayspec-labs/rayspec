@@ -17,7 +17,7 @@
  * HASHES ONLY: only the HMAC `token_hash` of the opaque invite token is stored (plaintext shown ONCE
  * at issue, conveyed out-of-band). No HTTP / Hono type appears here — pure DB + neutral row shapes.
  */
-import { hashInviteToken } from '@rayspec/auth-core';
+import { hashInviteToken, verificationPeppers } from '@rayspec/auth-core';
 import type { Db, TenantDb } from '@rayspec/db';
 import { forTenant, inviteTenantByTokenHash, schema } from '@rayspec/db';
 import { and, eq, gt, isNull } from 'drizzle-orm';
@@ -106,8 +106,14 @@ export class InviteStore {
    * leak). Validation (expiry / consumed) is the caller's job on the returned row.
    */
   async resolveByToken(presentedToken: string): Promise<ResolvedInvite | undefined> {
-    const tokenHash = hashInviteToken(presentedToken);
-    const tenantId = await inviteTenantByTokenHash(this.db, tokenHash);
+    // Under the current pepper, else — during a pepper rotation — under the previous one.
+    let tokenHash = '';
+    let tenantId: string | undefined;
+    for (const pepper of verificationPeppers()) {
+      tokenHash = hashInviteToken(presentedToken, pepper);
+      tenantId = await inviteTenantByTokenHash(this.db, tokenHash);
+      if (tenantId !== undefined) break;
+    }
     if (tenantId === undefined) return undefined;
     const rows = (await forTenant(this.db, tenantId)
       .select(schema.invites)

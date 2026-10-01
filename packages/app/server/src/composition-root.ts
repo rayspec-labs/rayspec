@@ -600,6 +600,13 @@ export interface ServerConfig {
   previousJwtSigningKeyPem?: string;
   /** The api-key pepper (handed to auth-core by `assembleServer` via `setBootSecrets`). */
   apiKeyPepper: string;
+  /**
+   * The pepper in use before the last rotation (`RAYSPEC_API_KEY_PEPPER_PREVIOUS`, or its `_FILE`).
+   * Optional. While it is set, an API key, refresh session or invite hashed under it still verifies,
+   * and is renewed under the current pepper when it is used (an API key is re-hashed, a session is
+   * replaced on refresh). Remove it once the credentials that matter have been used.
+   */
+  apiKeyPepperPrevious?: string;
   /** The cookie-CSRF allow-list — EXPLICIT; EMPTY default (no cross-origin). Never dev-permissive. */
   allowedOrigins: string[];
   /** Deployer-injected extra CORS request headers — ALLOWED_REQUEST_HEADERS, comma-separated; empty default. */
@@ -882,6 +889,9 @@ export { BootConfigError };
  */
 /** The variable that carries the signing key in use before the last rotation (plus its `_FILE`). */
 export const PREVIOUS_JWT_SIGNING_KEY_VAR = 'RAYSPEC_JWT_SIGNING_KEY_PREVIOUS';
+
+/** The variable that carries the API-key pepper in use before the last rotation (plus its `_FILE`). */
+export const PREVIOUS_API_KEY_PEPPER_VAR = 'RAYSPEC_API_KEY_PEPPER_PREVIOUS';
 
 const MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE =
   `Boot aborted — ${PREVIOUS_JWT_SIGNING_KEY_VAR} is not a PKCS#8 PEM. It holds the signing key ` +
@@ -1346,6 +1356,9 @@ export function loadServerConfig(
   // unset or blank ⇒ one key in the key sets, exactly as before.
   const previousJwtSigningKeyPem =
     resolveBootSecret(env, PREVIOUS_JWT_SIGNING_KEY_VAR, warn)?.trim() || undefined;
+  // The pepper before the last rotation, on the same terms.
+  const apiKeyPepperPrevious =
+    resolveBootSecret(env, PREVIOUS_API_KEY_PEPPER_VAR, warn) || undefined;
 
   // Role separation (opt-in): the migration role's connection. Resolved like a boot secret (it holds a
   // password), but optional: unset or blank ⇒ one database role, exactly as before.
@@ -1389,12 +1402,9 @@ export function loadServerConfig(
       secretFiles.push({ variable: secret.fileVariant, path: resolve(path) });
     }
   }
-  const previousKeyFile = env[`${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE`]?.trim();
-  if (previousKeyFile) {
-    secretFiles.push({
-      variable: `${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE`,
-      path: resolve(previousKeyFile),
-    });
+  for (const variable of [PREVIOUS_JWT_SIGNING_KEY_VAR, PREVIOUS_API_KEY_PEPPER_VAR]) {
+    const file = env[`${variable}_FILE`]?.trim();
+    if (file) secretFiles.push({ variable: `${variable}_FILE`, path: resolve(file) });
   }
 
   // the tenant data-erasure OPERATOR gate, fail-closed: STRICTLY the exact string "true" (no
@@ -1423,6 +1433,7 @@ export function loadServerConfig(
     jwtSigningKeyPem: jwtSigningKeyPem as string,
     ...(previousJwtSigningKeyPem !== undefined ? { previousJwtSigningKeyPem } : {}),
     apiKeyPepper: apiKeyPepper as string,
+    ...(apiKeyPepperPrevious !== undefined ? { apiKeyPepperPrevious } : {}),
     allowedOrigins,
     allowedRequestHeaders,
     trustedProxies,
@@ -2483,6 +2494,9 @@ async function assembleServerWith(
   setBootSecrets({
     jwtSigningKeyPem: config.jwtSigningKeyPem,
     apiKeyPepper: config.apiKeyPepper,
+    ...(config.apiKeyPepperPrevious !== undefined
+      ? { apiKeyPepperPrevious: config.apiKeyPepperPrevious }
+      : {}),
   });
 
   // 1. VALIDATE BEFORE ANYTHING IS MUTATED — the signing key first, then the injected spec. A boot

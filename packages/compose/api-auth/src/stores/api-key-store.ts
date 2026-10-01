@@ -9,7 +9,7 @@
  * a WRONG secret all perform the SAME dummy constant-time HMAC work and return the same generic
  * miss — no observable branch on prefix existence or revocation state.
  */
-import { hashApiKey, verifyApiKey } from '@rayspec/auth-core';
+import { getPreviousApiKeyPepper, hashApiKey, verifyApiKey } from '@rayspec/auth-core';
 import type { Db } from '@rayspec/db';
 import { schema } from '@rayspec/db';
 import { and, eq } from 'drizzle-orm';
@@ -139,11 +139,27 @@ export class ApiKeyStore {
     // verify (no extra inline hash).
     const storedHash = row?.keyHash ?? dummyKeyHash();
     const secretOk = verifyApiKey(storedHash, secret);
+    // During a pepper rotation every presented key is ALSO checked under the previous pepper, found or
+    // not, so the work stays uniform within the configuration.
+    const previous = getPreviousApiKeyPepper();
+    const previousOk = previous !== undefined && verifyApiKey(storedHash, secret, previous);
 
     if (!row) return undefined;
     const now = Date.now();
     const active = !row.revokedAt && (!row.expiresAt || row.expiresAt.getTime() > now);
-    if (!active || !secretOk) return undefined;
+    if (!active || !(secretOk || previousOk)) return undefined;
+
+    // A key hashed under the previous pepper is re-hashed under the current one on its first use, so it
+    // survives the end of the rotation window. Best effort and conditional on the hash it replaces: a
+    // write the fence withholds or the database refuses leaves the key verifying through the previous
+    // pepper until the next use.
+    if (!secretOk && this.#stampsLastUse()) {
+      await this.db
+        .update(schema.apiKeys)
+        .set({ keyHash: hashApiKey(secret) })
+        .where(and(eq(schema.apiKeys.id, row.id), eq(schema.apiKeys.keyHash, storedHash)))
+        .catch(() => undefined);
+    }
 
     // Best-effort last-used stamp (not on the timing-sensitive miss path): skipped while a source
     // fence refuses writes, and a stamp the database refuses (the write barrier a quiesce holds

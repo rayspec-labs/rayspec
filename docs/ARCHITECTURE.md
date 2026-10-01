@@ -366,8 +366,9 @@ credential material keyed by that specific secret:
 - **The API-key pepper (`RAYSPEC_API_KEY_PEPPER`).** Every API-key row stores an HMAC
   of the key computed with the pepper. Restore the dump under a **freshly-minted**
   pepper and those stored HMACs no longer match, so the copied API keys all fail to
-  verify (`401`) — even though the rows are physically present. That is the *only* thing
-  a new pepper breaks: the copied API keys, nothing else. The data and the org
+  verify (`401`) — even though the rows are physically present. The same pepper keys
+  refresh sessions and invite tokens, so those stop verifying too: users sign in again,
+  and outstanding invites are reissued. The data and the org
   identities stay reachable — **user passwords are hashed with argon2id** (each hash
   carries its own salt and params; the pepper never touches passwords), so they survive
   the restore untouched. An org owner simply **logs in again** (password intact), gets a

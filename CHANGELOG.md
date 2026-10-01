@@ -540,6 +540,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   verifies until it expires. Unset it after the overlap window; a value that is not a PKCS#8 PEM
   refuses the boot by name. See
   [Hosting in the hardened posture → Credentials and rotation](./docs/hardened-posture.md#credentials-and-rotation).
+- **Rotating the API-key pepper with an overlap window.** `RAYSPEC_API_KEY_PEPPER_PREVIOUS` (or its
+  `_FILE`) holds the pepper in use before a rotation: while it is set, an API key, refresh session or
+  invite token hashed under it still verifies and is renewed under the new pepper when it is used
+  (an API key is re-hashed on first use, a session is replaced when it refreshes). Unset it at the end
+  of the window; what was not used by then is refused. A new pepper with no previous one is the reset
+  for a pepper that leaked: every such credential is refused at once, and passwords are unaffected.
+  The operator procedure for both is in
+  [Hosting in the hardened posture → Credentials and rotation](./docs/hardened-posture.md#the-api-key-pepper).
 
 ### Changed
 
@@ -772,6 +780,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   take it as a peer).
 
 ### Upgrade notes
+
+- **Changing the API-key pepper also invalidates refresh sessions and invites,** as it always did;
+  the architecture guide said only API keys were affected, and now says all three. Use
+  `RAYSPEC_API_KEY_PEPPER_PREVIOUS` to rotate without that effect.
 
 - **Bounded execution: what changes without the managed posture.** Nothing is bounded that was
   not before, with two exceptions that are unsafe for everyone: a codex child that ignores `SIGTERM`
