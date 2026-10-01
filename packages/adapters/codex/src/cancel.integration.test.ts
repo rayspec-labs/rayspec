@@ -73,15 +73,28 @@ const POLL_MS = 25;
 function writeFakeCodexBinary(
   dir: string,
   pidFile: string,
-  opts: { ignoresSigterm?: boolean } = {},
+  opts: { ignoresSigterm?: boolean; grandchildPidFile?: string } = {},
 ): string {
   const bin = join(dir, 'codex');
   const pid = JSON.stringify(pidFile);
+  // A grandchild that inherits the binary's stdout, ignores SIGTERM and lives 20 s: it holds the pipe
+  // the launcher relays open after the binary itself is gone.
+  const grandchild =
+    opts.grandchildPidFile === undefined
+      ? []
+      : [
+          "const { spawn } = require('node:child_process');",
+          `const gc = spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(
+            "process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 20000); setInterval(() => {}, 1000);",
+          )}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
+          `writeFileSync(${JSON.stringify(opts.grandchildPidFile)}, String(gc.pid));`,
+        ];
   writeFileSync(
     bin,
     [
       `#!${process.execPath}`,
       "const { writeFileSync, renameSync } = require('node:fs');",
+      ...grandchild,
       `writeFileSync(${pid} + '.tmp', String(process.pid));`,
       `renameSync(${pid} + '.tmp', ${pid});`,
       ...(opts.ignoresSigterm ? ["process.on('SIGTERM', () => {});"] : []),
@@ -245,6 +258,51 @@ describe('Codex adapter: cancelling a run ends the REAL spawned child and run() 
     const res = await run;
     expect(res.status).toBe('error');
     expect(res.backend).toBe('codex');
+  });
+
+  it('a child whose own child holds its stdout: the whole group is killed and run() settles', async () => {
+    // The binary ignores SIGTERM and has started a process that inherited its stdout. Killing the
+    // binary alone would leave that process holding the pipe the launcher relays, and run() open
+    // until it exits by itself (20 s here). The launcher signals the binary's whole process group and
+    // never waits on the relayed pipe beyond the grace.
+    expect(process.env.CODEX_HOME).toBeUndefined();
+    const grandchildPidFile = join(dir, 'grandchild.pid');
+    codexPathOverride = writeFakeCodexBinary(dir, pidFile, {
+      ignoresSigterm: true,
+      grandchildPidFile,
+    });
+    const controller = new AbortController();
+    const ctx: RunContext = {
+      runId: 'run-codex-cancel-group',
+      tenantId: 'tenant-test',
+      journal: new FakeJournal(),
+      replay: false,
+      authMode: 'codex-subscription-oauth',
+      tools: [],
+      signal: controller.signal,
+      limits: { killGraceMs: KILL_GRACE_MS },
+    };
+    const adapter = new CodexAdapter({ codexPathOverride, codexHome: dir });
+    const run = adapter.run({ ...baseSpec }, ctx);
+
+    expect(await waitFor(() => existsSync(pidFile) && existsSync(grandchildPidFile))).toBe(true);
+    const pid = Number(readFileSync(pidFile, 'utf8'));
+    const grandchild = Number(readFileSync(grandchildPidFile, 'utf8'));
+    leakedPid = pid;
+    try {
+      expect(isAlive(grandchild)).toBe(true);
+      const abortedAt = Date.now();
+      controller.abort();
+      const outcome = await Promise.race([
+        run.then(() => 'settled' as const),
+        delay(5_000, 'still pending' as const),
+      ]);
+      expect(outcome).toBe('settled');
+      expect(Date.now() - abortedAt).toBeLessThan(KILL_GRACE_MS + 3_000);
+      expect(await waitFor(() => !isAlive(pid) && !isAlive(grandchild))).toBe(true);
+    } finally {
+      if (isAlive(grandchild)) process.kill(grandchild, 'SIGKILL');
+    }
   });
 
   it('a child that says NOTHING is ended by the provider-call timeout, with no cancellation', async () => {

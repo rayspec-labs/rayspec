@@ -8,6 +8,9 @@
  *    the run settles with the neutral `timeout` class, within a bound of the timeout × attempts.
  *  - The run's abort signal ends the call without any timeout configured: the run settles promptly
  *    after the abort, and the server sees the request's connection closed.
+ *  - The request timeout covers the whole exchange, not only the wait for the headers: a provider
+ *    that answers its headers and then stalls the body, or trickles it a byte at a time, is ended by
+ *    it too.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -43,6 +46,12 @@ let server: Server;
 let requests = 0;
 let closedByClient = 0;
 const held: ServerResponse[] = [];
+/**
+ * How the provider misbehaves: say nothing at all; send the headers and the start of the body, then
+ * nothing; or send the headers and then one space every 100 ms for ever.
+ */
+let mode: 'silent' | 'stall-after-headers' | 'trickle' = 'silent';
+const trickles: ReturnType<typeof setInterval>[] = [];
 let savedBaseUrl: string | undefined;
 
 beforeAll(async () => {
@@ -56,6 +65,16 @@ beforeAll(async () => {
     // Read the body and then say nothing at all: the provider that accepted and went silent.
     req.resume();
     held.push(res);
+    if (mode === 'silent') return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"id":"resp_1",');
+    if (mode === 'trickle') {
+      const timer = setInterval(() => {
+        if (!res.writableEnded && !res.destroyed) res.write(' ');
+      }, 100);
+      trickles.push(timer);
+      res.on('close', () => clearInterval(timer));
+    }
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   savedBaseUrl = process.env.OPENAI_BASE_URL;
@@ -65,6 +84,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (savedBaseUrl === undefined) delete process.env.OPENAI_BASE_URL;
   else process.env.OPENAI_BASE_URL = savedBaseUrl;
+  for (const timer of trickles) clearInterval(timer);
   for (const res of held) res.destroy();
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -99,6 +119,34 @@ describe('OpenAI adapter: a provider that never answers', () => {
     expect(elapsed).toBeLessThan(5_000);
     expect(journal.records).toHaveLength(1);
     expect(journal.records[0]?.status).toBe('error');
+  });
+
+  it.each([
+    ['answers its headers and then stalls the body', 'stall-after-headers'],
+    ['answers its headers and then trickles the body', 'trickle'],
+  ] as const)('a provider that %s is ended by the request timeout too', async (_what, how) => {
+    mode = how;
+    try {
+      const before = requests;
+      const adapter = new OpenAIAdapter({
+        apiKey: 'not-a-real-key',
+        timeoutMs: 300,
+        maxAttempts: 1,
+      });
+      const started = Date.now();
+      const res = await Promise.race([
+        adapter.run({ ...spec }, ctxFor(`run-openai-${how}`, new FakeJournal())),
+        new Promise<undefined>((r) => setTimeout(() => r(undefined), 5_000)),
+      ]);
+      expect(requests).toBeGreaterThan(before);
+      // Settled on the timeout — never left waiting on a body that does not end.
+      expect(res).toBeDefined();
+      expect(res?.status).toBe('error');
+      expect(res?.errorClass).toBe('timeout');
+      expect(Date.now() - started).toBeLessThan(5_000);
+    } finally {
+      mode = 'silent';
+    }
   });
 
   it('with more than one attempt allowed the whole call stays within timeout × attempts', async () => {

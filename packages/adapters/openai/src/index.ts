@@ -181,6 +181,23 @@ export function toOutputType(outputSchema: {
   };
 }
 
+/**
+ * A `fetch` whose every request, the response BODY included, ends after `timeoutMs`. The openai
+ * client's own `timeout` covers only the wait for the response headers: it clears its timer once
+ * `fetch` resolves (`openai@6.44.0` client.mjs, `fetchWithTimeout`), so a provider that sends its
+ * headers and then stalls or trickles the body would hold the call for as long as it liked. This
+ * signal stays attached to the response, so the body read is ended by it too. It is combined with the
+ * client's own signal, which carries the run's cancellation. The rejection is the platform's
+ * `TimeoutError`, classified `timeout`.
+ */
+function wholeExchangeFetch(timeoutMs: number): typeof fetch {
+  return (input, init) => {
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline;
+    return globalThis.fetch(input, { ...init, signal });
+  };
+}
+
 export class OpenAIAdapter implements Backend {
   readonly id = 'openai' as const;
   private readonly apiKey: string;
@@ -213,7 +230,9 @@ export class OpenAIAdapter implements Backend {
     if (this.client === undefined) {
       this.client = new OpenAI({
         apiKey: this.apiKey,
-        ...(this.timeoutMs !== undefined ? { timeout: this.timeoutMs } : {}),
+        ...(this.timeoutMs !== undefined
+          ? { timeout: this.timeoutMs, fetch: wholeExchangeFetch(this.timeoutMs) }
+          : {}),
         // Clamped at 0 so the retry count can never go NEGATIVE. `openai@6.44.0` decides whether to
         // retry with a truthiness test on the remaining count (`if (retriesRemaining)`,
         // openai/client.mjs:372 and :422) and decrements it per attempt (:563), so a negative count

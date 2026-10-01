@@ -6,18 +6,25 @@
  * stdout until it closes. A child that ignores SIGTERM therefore keeps the turn — and `run()` — open
  * for good. The SDK exposes neither the child nor a kill signal, so the escalation cannot be added
  * around the SDK; it is added UNDER it: the SDK is pointed (through its `codexPathOverride` option) at
- * a small launcher that starts the real binary as ITS child, relays stdin, stdout and stderr, and on
- * SIGTERM or SIGINT forwards the signal and arms a SIGKILL for `grace` milliseconds later. The
- * launcher exits when the binary has exited, which closes the stdout the SDK reads, so `run()`
- * settles within the grace whatever the binary does with SIGTERM.
+ * a small launcher that starts the real binary as ITS child, in a process group of its own, relays
+ * stdin, stdout and stderr, and on SIGTERM or SIGINT forwards the signal to that whole group and arms
+ * a SIGKILL of the group for `grace` milliseconds later.
+ *
+ * The launcher's exit is what closes the stdout the SDK reads, so it does not wait for the relayed
+ * pipe to end: a process the binary started can hold that pipe open after the binary itself is gone.
+ * Once the binary has exited after a stop, the launcher kills what is left of the group at once; and
+ * whenever the binary has exited, the launcher exits at the latest `grace` milliseconds later, the
+ * group killed first, whether or not the relayed output has ended; what is left of the group when
+ * the launcher exits is killed. So `run()` settles shortly after the grace whatever the binary or its
+ * children do with SIGTERM.
  *
  * The launcher is written once per process into a private temp directory (mode 0700, file 0700) with
  * this process's own `node` as its interpreter. It receives the binary to start and the grace through
  * two variables of the curated child env, and removes both before it starts the binary.
  *
- * WHAT IT DOES NOT COVER: processes the codex binary starts itself are not signalled by the launcher
- * (it signals its direct child, never a process group), and a SIGKILL of the launcher itself — which
- * nothing here sends — would orphan the binary.
+ * WHAT IT DOES NOT COVER: a process the binary starts that leaves the group (a new session of its own)
+ * is not signalled, and a SIGKILL of the launcher itself — which nothing here sends — would orphan
+ * the group. On Windows there are no process groups to signal; only the binary is.
  */
 import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -38,30 +45,45 @@ function launcherSource(interpreter: string): string {
     "const { spawn } = require('node:child_process');",
     `const target = process.env.${LAUNCHER_TARGET_ENV};`,
     `const grace = Number(process.env.${LAUNCHER_GRACE_ENV});`,
+    'const graceMs = Number.isFinite(grace) && grace > 0 ? grace : 5000;',
     'const env = { ...process.env };',
     `delete env.${LAUNCHER_TARGET_ENV};`,
     `delete env.${LAUNCHER_GRACE_ENV};`,
     "if (!target) { process.stderr.write('codex launcher: no executable given\\n'); process.exit(127); }",
-    "const child = spawn(target, process.argv.slice(2), { env, stdio: ['pipe', 'pipe', 'pipe'] });",
+    "const grouped = process.platform !== 'win32';",
+    "const child = spawn(target, process.argv.slice(2), { env, stdio: ['pipe', 'pipe', 'pipe'], detached: grouped });",
     'process.stdin.pipe(child.stdin);',
     "child.stdin.on('error', () => {});",
     'child.stdout.pipe(process.stdout);',
     'child.stderr.pipe(process.stderr);',
+    // Signal the binary's whole group (a negative pid), or the binary alone where there is none.
+    'const signalGroup = (signal) => {',
+    '  try { if (grouped) process.kill(-child.pid, signal); else child.kill(signal); }',
+    '  catch { try { child.kill(signal); } catch {} }',
+    '};',
+    'let stopping = false;',
     'let forced;',
+    'let exited = false;',
     'const stop = (signal) => {',
-    '  if (child.exitCode !== null || child.signalCode !== null) return;',
-    '  try { child.kill(signal); } catch {}',
-    '  if (forced === undefined) {',
-    "    forced = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, Number.isFinite(grace) && grace > 0 ? grace : 5000);",
-    '  }',
+    '  stopping = true;',
+    "  if (exited) { signalGroup('SIGKILL'); return; }",
+    '  signalGroup(signal);',
+    "  if (forced === undefined) forced = setTimeout(() => signalGroup('SIGKILL'), graceMs);",
     '};',
     "process.on('SIGTERM', () => stop('SIGTERM'));",
     "process.on('SIGINT', () => stop('SIGINT'));",
+    // Whatever the binary left in its group does not outlive the launcher.
+    "process.on('exit', () => { if (exited) signalGroup('SIGKILL'); });",
     "child.on('error', (err) => { process.stderr.write(`codex launcher: ${err.message}\\n`); process.exit(127); });",
     "child.on('exit', (code, signal) => {",
+    '  exited = true;',
     '  if (forced !== undefined) clearTimeout(forced);',
     '  process.exitCode = code ?? (signal ? 1 : 0);',
     '  if (signal) process.stderr.write(`codex exited on ${signal}\\n`);',
+    // After a stop nothing of the group is wanted: end what holds the relayed pipe open.
+    "  if (stopping) signalGroup('SIGKILL');",
+    // Never wait on the relayed pipe beyond the grace: end the group, then leave.
+    "  setTimeout(() => { signalGroup('SIGKILL'); process.exit(); }, stopping ? Math.min(graceMs, 200) : graceMs).unref();",
     '});',
     '',
   ].join('\n');

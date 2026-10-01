@@ -35,8 +35,11 @@ bridge is **bounded**: it no longer waits on connections that outlive the turn. 
   set (or the managed posture's default), a turn that produces no event for that long is aborted
   through the same controller and the same kill ladder, and the run reports the neutral `timeout`
   class. A tool call the platform dispatches does not count as silence.
-- Processes the `codex` child itself spawned are not signalled by the launcher (it signals its direct
-  child, never a process group) and can be left orphaned.
+- The launcher starts the `codex` child in a process group of its own and signals the whole group,
+  so processes the child spawned are ended with it, and it never waits on the relayed output beyond
+  the grace: a process that inherited the child's stdout cannot keep `run()` open. A process the
+  child starts in a session of its own leaves the group and is not signalled; on Windows there are
+  no process groups and only the child is signalled.
 - Whether the real `codex` CLI exits on that signal and reaps its own children is **not verified
   here**. The cancellation tests drive the real SDK against a stand-in executable, so the points
   above are stated as limits rather than measured against the shipped CLI.

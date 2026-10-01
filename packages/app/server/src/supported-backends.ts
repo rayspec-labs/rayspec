@@ -53,8 +53,8 @@ export const SUPPORTED_BACKEND_MATRIX: readonly SupportedBackend[] = [
     capability: 'agent-backend-openai',
     managed: 'allowed',
     callTimeout:
-      'every HTTP request: RAYSPEC_AGENT_REQUEST_TIMEOUT_MS on the client, at most ' +
-      'RAYSPEC_AGENT_MAX_ATTEMPTS attempts',
+      'every HTTP request, response body included: RAYSPEC_AGENT_REQUEST_TIMEOUT_MS on the ' +
+      'client, at most RAYSPEC_AGENT_MAX_ATTEMPTS attempts',
     cancellation: "the run's signal aborts the HTTP request; the record says `call-aborted`",
     childProcess: 'none',
     gaps: ['a tool call already dispatched runs to its own tool timeout'],
@@ -89,10 +89,13 @@ export const SUPPORTED_BACKEND_MATRIX: readonly SupportedBackend[] = [
     callTimeout:
       'silence of the turn: no event for RAYSPEC_AGENT_REQUEST_TIMEOUT_MS ends the run as `timeout`',
     cancellation:
-      "the run's signal ends the streamed turn; the launcher forwards SIGTERM to the child",
-    childProcess: 'killed: SIGKILL RAYSPEC_AGENT_KILL_GRACE_MS after an ignored SIGTERM',
+      "the run's signal ends the streamed turn; the launcher forwards SIGTERM to the child's " +
+      'process group',
+    childProcess:
+      'the process group is killed: SIGKILL RAYSPEC_AGENT_KILL_GRACE_MS after an ignored SIGTERM',
     gaps: [
-      'processes the child starts are not signalled (no process group)',
+      'a process the child starts in a session of its own is not signalled; on Windows only the ' +
+        'child is',
       'without the bundled binary or a writable temp directory the escalation is unavailable (logged)',
     ],
     evidence: ['packages/adapters/codex/src/cancel.integration.test.ts'],
