@@ -79,7 +79,9 @@ describe('pi adapter: a provider that never answers', () => {
       replay: false,
       authMode: 'api-key',
       tools: [],
-      limits: { providerCallTimeoutMs: 400 },
+      // Long enough for the SDK to set up its session and send the request on a loaded CI runner,
+      // so the timeout ends a call that is really in flight rather than one never sent.
+      limits: { providerCallTimeoutMs: 2_000 },
     };
     const started = Date.now();
     const res = await adapter.run({ ...spec }, ctx);
@@ -88,8 +90,8 @@ describe('pi adapter: a provider that never answers', () => {
     expect(res.status).toBe('error');
     expect(res.errorClass).toBe('timeout');
     expect(res.error).toContain('RAYSPEC_AGENT_REQUEST_TIMEOUT_MS');
-    expect(elapsed).toBeGreaterThanOrEqual(350);
-    expect(elapsed).toBeLessThan(5_000);
+    expect(elapsed).toBeGreaterThanOrEqual(1_950);
+    expect(elapsed).toBeLessThan(10_000);
     // The held request was closed by the client: the provider is not left serving it.
     await waitFor(() => closedByClient > closedBefore);
     expect(closedByClient).toBeGreaterThan(closedBefore);
