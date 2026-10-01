@@ -109,6 +109,25 @@ describe('classifyAddress', () => {
     ['ff02::1', 'multicast'],
     ['2001:db8::1', 'reserved'],
     ['2001:0:4136:e378::1', 'reserved'],
+    // IPv4-translated: judged by the IPv4 address it carries.
+    ['::ffff:0:127.0.0.1', 'loopback'],
+    ['::ffff:0:a9fe:a9fe', 'metadata'],
+    ['::ffff:0:10.0.0.1', 'private'],
+    ['::ffff:0:8.8.8.8', 'public'],
+    // The local-use NAT64 prefix: where it carries the IPv4 address is the operator's choice.
+    ['64:ff9b:1::a9fe:a9fe', 'reserved'],
+    ['64:ff9b:1::808:808', 'reserved'],
+    // Benchmarking, the newer documentation prefix, and the rest of the protocol assignments.
+    ['2001:2::1', 'reserved'],
+    ['2001:10::1', 'reserved'],
+    ['3fff::1', 'reserved'],
+    ['3fff:fff:ffff::1', 'reserved'],
+    ['3fff:1000::1', 'public'],
+    // Outside global unicast.
+    ['100::1', 'reserved'],
+    ['5f00::1', 'reserved'],
+    ['4000::1', 'reserved'],
+    ['2001:200::1', 'public'],
     ['2606:4700:4700::1111', 'public'],
     ['not-an-address', 'reserved'],
   ])('%s is %s', (address, kind) => {
@@ -127,6 +146,8 @@ describe('guardedFetch: what it refuses before connecting', () => {
     ['http://[fd00:ec2::254]/latest/meta-data/', 'metadata'],
     ['http://10.0.0.1/', 'private'],
     ['http://0.0.0.0:PORT/', 'unspecified'],
+    ['http://[::ffff:0:a9fe:a9fe]/latest/meta-data/', 'metadata'],
+    ['http://[64:ff9b:1::a9fe:a9fe]/latest/meta-data/', 'reserved'],
   ])('an IP literal: %s', async (template, kind) => {
     const target = await serve(ok);
     const err = await refusal(guardedFetch(template.replace('PORT', String(target.port))));

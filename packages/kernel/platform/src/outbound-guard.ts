@@ -6,9 +6,10 @@
  * WHAT IS REFUSED. A destination address that is loopback, private (RFC 1918, unique-local IPv6),
  * carrier-grade NAT, link-local (which holds the cloud metadata endpoints `169.254.169.254` and
  * `169.254.170.2`), unspecified, multicast, broadcast, reserved, or a documentation or benchmarking
- * range; an IPv4 address embedded in IPv6 (mapped, NAT64, 6to4) is judged by the IPv4 address it
- * carries. A scheme other than `http:` or `https:`, and a URL that carries a user name or password,
- * are refused before any address is looked at.
+ * range; an IPv4 address embedded in IPv6 (mapped, translated, NAT64, 6to4) is judged by the IPv4
+ * address it carries, and an IPv6 address outside global unicast (2000::/3) is never public. A
+ * scheme other than `http:` or `https:`, and a URL that carries a user name or password, are refused
+ * before any address is looked at.
  *
  * AFTER RESOLUTION, NOT BEFORE. A host name is checked on the address the connection actually uses:
  * the guard is the connection's own `lookup`, so it judges every address the resolver returns and the
@@ -140,6 +141,10 @@ function classifyIpv6(address: string): AddressClass {
   if (zeroToFive && g5 === 0 && g6 === 0 && g7 === 1) return 'loopback';
   // IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d) addresses.
   if (zeroToFive && (g5 === 0xffff || g5 === 0)) return classifyIpv4(embeddedIpv4(groups, 6));
+  // IPv4-translated (::ffff:0:a.b.c.d, stateless translation) carries it in its last 32 bits too.
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0xffff && g5 === 0) {
+    return classifyIpv4(embeddedIpv4(groups, 6));
+  }
   // NAT64 (64:ff9b::/96) carries the IPv4 address in its last 32 bits.
   if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) {
     return classifyIpv4(embeddedIpv4(groups, 6));
@@ -150,10 +155,16 @@ function classifyIpv6(address: string): AddressClass {
   if ((g0 & 0xffc0) === 0xfe80) return 'link-local';
   if ((g0 & 0xffc0) === 0xfec0) return 'private';
   if ((g0 & 0xff00) === 0xff00) return 'multicast';
+  // Everything outside global unicast (2000::/3) is not a public destination. That includes the
+  // local-use NAT64 prefix (64:ff9b:1::/48), whose IPv4 address sits where the operator's prefix
+  // length puts it — so the guard cannot read it and refuses the whole prefix.
+  if (g0 < 0x2000 || g0 > 0x3fff) return 'reserved';
+  // Documentation (2001:db8::/32, 3fff::/20).
   if (g0 === 0x2001 && g1 === 0x0db8) return 'reserved';
-  // Teredo (2001::/32) tunnels to an address the guard cannot see.
-  if (g0 === 0x2001 && g1 === 0) return 'reserved';
-  if (g0 === 0x0100 && g1 === 0 && g2 === 0 && g3 === 0) return 'reserved';
+  if (g0 === 0x3fff && g1 < 0x1000) return 'reserved';
+  // The protocol assignments (2001::/23): Teredo (2001::/32), which tunnels to an address the guard
+  // cannot see, benchmarking (2001:2::/48), and the other special-purpose blocks.
+  if (g0 === 0x2001 && g1 < 0x0200) return 'reserved';
   return 'public';
 }
 
