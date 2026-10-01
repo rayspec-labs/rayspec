@@ -45,6 +45,7 @@ export {
 } from './errors.js';
 export {
   CONTRACT_PLATFORM_TABLES,
+  IDENTITY_RECOVERY_TABLES,
   PLATFORM_TABLES,
   type PlatformTable,
   PRODUCT_LEDGER_TABLES,

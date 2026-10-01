@@ -1,11 +1,12 @@
 /**
  * The platform table list restates the committed snapshot categories and adds only the
  * runtime-control tables and the product migration ledger, under the categories the contract
- * reserves for them.
+ * reserves for them, and the owner recovery tokens under the category of the other credentials.
  */
 import { describe, expect, it } from 'vitest';
 import {
   CONTRACT_PLATFORM_TABLES,
+  IDENTITY_RECOVERY_TABLES,
   PLATFORM_TABLES,
   PRODUCT_LEDGER_TABLES,
   PUBLIC_PLATFORM_TABLE_NAMES,
@@ -46,6 +47,7 @@ describe('platform tables', () => {
       ...CONTRACT_PLATFORM_TABLES,
       ...RUNTIME_CONTROL_TABLES,
       ...PRODUCT_LEDGER_TABLES,
+      ...IDENTITY_RECOVERY_TABLES,
     ]);
   });
 
@@ -64,6 +66,19 @@ describe('platform tables', () => {
     ]);
   });
 
+  it('add the owner recovery tokens as credential state, whose rows no snapshot carries', () => {
+    expect(IDENTITY_RECOVERY_TABLES).toEqual([
+      {
+        database: 'application',
+        schema: 'public',
+        table: 'owner_recovery_tokens',
+        category: 'credential-state',
+      },
+    ]);
+    const credentialTables = categories.tables.filter((t) => t.category === 'credential-state');
+    expect(credentialTables.map((t) => t.table)).toContain('sessions');
+  });
+
   it('name each table once, each under a known category', () => {
     const names = PLATFORM_TABLES.map((p) => `${p.schema}.${p.table}`);
     expect(new Set(names).size).toBe(names.length);
@@ -75,6 +90,7 @@ describe('platform tables', () => {
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('runtime_control_receipts')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('runtime_control_processes')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('product_migration_ledger')).toBe(true);
+    expect(PUBLIC_PLATFORM_TABLE_NAMES.has('owner_recovery_tokens')).toBe(true);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.has('__drizzle_migrations')).toBe(false);
     expect(PUBLIC_PLATFORM_TABLE_NAMES.size).toBe(PLATFORM_TABLES.length - 1);
   });
