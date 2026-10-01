@@ -6,7 +6,9 @@ command group (`rayspec tenant ensure` — idempotently create or resolve the
 organization a deployment binds to), `rayspec pack` (write a built application into
 one `.ray` application bundle, running none of it), the passive `rayspec bundle inspect`
 and `rayspec bundle verify`, the production-mutating `rayspec deploy` (a spec, or a `.ray`
-bundle planned with `--dry-run` and deployed by its reviewed plan digest), and a clearly
+bundle planned with `--dry-run` and deployed by its reviewed plan digest), `rayspec export`
+(fence a self-hosted deployment and write its complete snapshot as one age-encrypted migration
+bundle) with `rayspec resume` (release that fence), and a clearly
 separated, local-dev `dev` command group
 (scaffolding, secret minting). Every subcommand emits
 machine-parseable JSON to stdout — `--help` is the one exception and prints plain

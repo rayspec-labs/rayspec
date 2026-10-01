@@ -237,10 +237,12 @@ found.
 
 ## Snapshots of a fenced source
 
-An export carries the environment to another host as one encrypted snapshot. Its first half is a
-typed library in `@rayspec/server`, like the operations above: `preflightSnapshot` checks the
-source and `captureSnapshot` takes the plaintext inner snapshot archive under the fence. Encrypting
-that archive is the next step; the capture never writes outside a private scratch directory.
+An export carries the environment to another host as one encrypted snapshot. `rayspec export` runs
+it ([Exporting a deployment](./export.md) is the operator guide); underneath it is a typed library
+in `@rayspec/server`, like the operations above: `preflightSnapshot` checks the source,
+`captureSnapshot` takes the plaintext inner snapshot archive under the fence, and `exportSnapshot`
+encrypts that archive with age to one X25519 recipient and writes the migration bundle
+(`writeMigrationBundle`). Nothing is written outside a private scratch directory but the bundle.
 
 ### What preflight checks
 
@@ -255,7 +257,7 @@ order:
 | The role the dumps read as can read every table of both databases past row-level security | `RAY_USAGE` |
 | The blobs are in the fs blob store, and its root holds nothing the store would not have written: no stray entry, link, malformed file or key a snapshot cannot carry | `RAY_EXTERNAL_STATE_UNSUPPORTED` (`unsupported-blob-adapter`); an upload that never finished: `unreconciled-effects`; an unreadable root: `RAY_INFRA_UNAVAILABLE` |
 | At most 500,000 objects, and the objects and the application within the migration archive limit (2 GiB); free space in the scratch directory for about twice the databases, objects and application | `RAY_LIMIT_EXCEEDED` (`object-index-size`, `migration-size`); `RAY_INFRA_UNAVAILABLE` |
-| No database extension other than `plpgsql` in either database | `RAY_POLICY_DENIED` (`unsupported-extension`) |
+| No database extension other than `plpgsql` in the application database, and none but `uuid-ossp` (which the durable engine's own migrations create) in the workflow system database | `RAY_POLICY_DENIED` (`unsupported-extension`) |
 | Exactly one organization, and no blob of another tenant | `RAY_MULTI_TENANT_UNSUPPORTED` |
 | A member of the organization holds a password, so someone can sign in after the import resets every API key, session and invite | `RAY_OWNER_RECOVERY_REQUIRED` |
 | Every table is a platform table or a product store of the application, with a name `snapshot.json` can state; state the caller names that the snapshot cannot carry | `RAY_EXTERNAL_STATE_UNSUPPORTED` (`unknown-table`, or the reason the caller gives) |
@@ -287,7 +289,15 @@ Finally it writes the inner archive (`snapshot.json`, `payload/application.ray`,
 `payload/database.dump`, `payload/workflow-system.dump` when that database exists,
 `payload/object-index.json`, `payload/objects.bin`) with the one snapshot writer, which reads it back
 before it keeps it. Only the archive stays in the scratch directory; the caller removes the
-directory once it has encrypted the archive. Any refusal or failure removes it at once.
+directory once it has encrypted the archive. Any refusal or failure removes it at once, and so does
+a stop request: an abort signal (`signal`) ends a running `pg_dump` and reports `RAY_INTERRUPTED`.
+
+`exportSnapshot` runs the capture, encrypts the archive into the same directory with age to the
+recipient (the age authors' implementation, `age-encryption`, tested against the official age test
+vectors), and writes the migration bundle — `ray.json` of kind `migration` and the one payload file
+`payload/migration.age` — beside the output, reads it back through the bundle reader and links it
+into place with mode 0600. It removes the scratch directory on every path. A recipient that is not an
+X25519 recipient (`age1…`) is refused; there is no passphrase mode.
 
 The result says who read and which barriers held:
 
@@ -348,5 +358,5 @@ against a second, real worker process.
 
 - Receipts are never pruned; the table grows by a few rows per schema change.
 - There is no CLI verb for `resolveInterruptedStep` yet; call it as above.
-- `export` and `resume` as CLI verbs are not available yet; the library operations are, and the
-  snapshot capture stops at the plaintext inner archive, which the caller encrypts.
+- `rayspec import` is not available yet: a migration bundle is written and verified, and restoring
+  it into a new environment is the importer's part.

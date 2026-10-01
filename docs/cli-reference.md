@@ -23,9 +23,10 @@ documented exception, `--help`, which prints plain text there instead (see
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
 | `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse, and `pack` for an application it cannot package or an output that exists. |
-| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide, or an application declares a `@rayspec/*` range that excludes the runtime it pins. Bundle verbs and `pack` only. |
-| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify. Bundle verbs and `pack` only. |
-| `6`  | Interrupted by SIGINT or SIGTERM before the command finished. Bundle verbs and `pack` only. |
+| `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide, or an application declares a `@rayspec/*` range that excludes the runtime it pins; for `export`, state a snapshot cannot carry (a second organization, an unknown table, no database write barrier). Bundle verbs, `pack`, `deploy <file.ray>` and `export` only. |
+| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify, a fence epoch that is not the held one. Bundle verbs, `pack`, `deploy <file.ray>`, `export` and `resume` only. |
+| `5`  | Retryable — a database that cannot be reached, a lock another operation holds, a source that did not drain before the deadline. `deploy <file.ray>`, `export` and `resume` only. |
+| `6`  | Interrupted by SIGINT or SIGTERM before the command finished, or blocked until reconciled (schema drift). Bundle verbs, `pack`, `deploy <file.ray>` and `export` only. |
 | `7`  | An unexpected internal failure (a defect, not a verdict). A short JSON error is written to **stderr**. |
 
 The existing commands keep `0`, `1` and `2` for every outcome they have; only
@@ -48,6 +49,10 @@ The commands split into these groups:
 - **`pack`** writes one `.ray` application bundle from an application that is
   already built. It builds, imports and runs nothing, and writes nothing but its
   output file. It answers with the result envelope too.
+- **`export`** and **`resume`** move a self-hosted deployment: `export` fences it
+  and writes its complete snapshot, encrypted, as a migration bundle; `resume`
+  releases the fence. Both answer with the result envelope. See
+  [Exporting a deployment](./export.md).
 - A **production-mutating `tenant` group** — `tenant ensure`. It writes to the
   database `DATABASE_URL` names (and applies the committed migration chain to
   it), so it is deliberately *not* under `dev`, which is local-only. It prints no
@@ -1360,6 +1365,122 @@ deploy, or reconciliation required · `7` an internal error.
 
 ---
 
+## `export`
+
+```
+rayspec export --deployment <id> --recipient <age1...> --output <migration.ray>
+               --run-history <included|excluded> [--confirm-quiesce] [--source-stopped]
+               [--quiesce-deadline <seconds>] [--state-dir <dir>] [--json]
+```
+
+Writes the deployment's complete snapshot — the deployed application, the application database,
+the workflow system database (whole, when it exists) and every blob — as one migration bundle
+encrypted with age to the X25519 recipient, and leaves the source **fenced**. The operator guide is
+[Exporting a deployment](./export.md).
+
+- **Order.** A read-only precheck of the source; the operator's confirmation of the downtime; the
+  fence (`quiesce`: writes, uploads, triggers and the run queue stopped, runs drained) with a
+  database write barrier; the capture of both databases and the blobs under that one fence epoch,
+  counts and digests verified; encryption in a private scratch directory under the state
+  directory; the bundle written to `--output`, read back and linked into place; the scratch
+  directory removed. Each step is a transition recorded in the receipts (below).
+- **Flags.**
+  - `--deployment <id>` (required): the `deploymentId` of the state directory; it must also be the
+    one the database records, else `RAY_USAGE`.
+  - `--recipient <age1...>` (required): the age X25519 recipient. A passphrase, an identity and the
+    post-quantum or tag recipients are refused (`RAY_USAGE`).
+  - `--output <file>` (required): refused if it exists (`RAY_OUTPUT_EXISTS`). Written with mode
+    0600. Plaintext is never written there or anywhere outside the scratch directory.
+  - `--run-history <included|excluded>` (required, no default): whether runs, run events, journals,
+    conversation items and workflow runs leave the source.
+  - `--confirm-quiesce`: confirms the downtime. Required with `--json` or without a terminal;
+    otherwise the plan is printed on the terminal and `yes` is asked for.
+  - `--source-stopped`: the operator attests that every runtime process is stopped. The database
+    barrier without role separation; the export checks that no other session is connected.
+  - `--quiesce-deadline <seconds>`: how long runs in flight are drained (default 300, at most
+    86400).
+  - `--state-dir <dir>`: the deployment state directory (default `.rayspec-state`).
+- **Environment** (explicit, never a `.env` file): `DATABASE_URL` (or `_FILE`),
+  `RAYSPEC_MIGRATION_DATABASE_URL` (or `_FILE`; role separation),
+  `RAYSPEC_SNAPSHOT_DATABASE_URL` (or `_FILE`; the read-only snapshot role),
+  `DBOS_SYSTEM_DATABASE_URL`, `RAYSPEC_BLOB_ROOT`, `RAYSPEC_PG_DUMP` (an absolute path; default the
+  first `pg_dump` on `PATH`, which must be of the server's major). No output carries a value.
+- **Database barrier.** With role separation the runtime role's writes are revoked until `resume`
+  (`database-write-role`); without it, only a stopped source attested with `--source-stopped`
+  (`database-stopped-source`). With neither the export fences, then refuses before any capture with
+  `RAY_EXTERNAL_STATE_UNSUPPORTED` / `database-barrier-unavailable`; the source stays fenced.
+- **A second export while fenced** reuses the fence at its epoch.
+- **Output:** the result envelope on stdout (operation `export`), with or without `--json`:
+
+  ```json
+  {
+    "contractVersion": "1.0.0-draft.2",
+    "ok": true,
+    "operation": "export",
+    "operationId": "…",
+    "data": {
+      "deploymentId": "3f9c0a1b2c3d4e5f",
+      "outputPath": "/srv/handover/app-migration.ray",
+      "sha256": "…",
+      "ciphertextSha256": "…",
+      "ciphertextSize": 48213374,
+      "fenceEpoch": 4,
+      "sourceState": "fenced",
+      "excludedDataCategories": ["credential-state", "request-replay-state", "runtime-control-state", "security-audit-log"],
+      "recovery": "The source stays fenced at epoch 4 (database barrier database-write-role held, database-stopped-source not-applied, object-writes held; snapshot read as snapshot-role). …"
+    },
+    "errors": [],
+    "warnings": []
+  }
+  ```
+
+  `recovery` names the barriers that held and did not apply, who the snapshot read as
+  (`snapshot-role` or `single-role`), and the `rayspec resume` command. On a refusal `data` is
+  `null`; after the fence was taken, `errors[0].message` ends with the resume command. On stderr:
+  the operation id, progress lines and, without `--json`, a summary with the counts and the path of
+  the local receipt.
+- **Receipts.** `<state-dir>/receipts/export-<operationId>.json` (mode 0600, shareable: no secret,
+  path, record or table name) and, from the fence on, rows of `runtime_control_receipts` of kind
+  `export` — one per transition `PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED` or
+  `BLOCKED`, each with the fence epoch, time, digests and recovery action.
+- **Interruption.** SIGINT or SIGTERM stops the export at its next safe point, ends a running
+  `pg_dump`, removes the scratch directory, keeps the fence and reports `RAY_INTERRUPTED` (exit 6). A
+  process killed outright leaves its scratch directory, which the next export removes first.
+- **Codes.** The contract's list for the verb — `RAY_USAGE`, `RAY_BINDINGS_FILE_INSECURE`,
+  `RAY_OUTPUT_EXISTS`, `RAY_MULTI_TENANT_UNSUPPORTED`, `RAY_OWNER_RECOVERY_REQUIRED`,
+  `RAY_EXTERNAL_STATE_UNSUPPORTED`, `RAY_SCHEMA_DRIFT`, `RAY_SOURCE_NOT_QUIESCENT`,
+  `RAY_LIMIT_EXCEEDED`, `RAY_LOCK_TIMEOUT`, `RAY_INFRA_UNAVAILABLE`, `RAY_INTERRUPTED`,
+  `RAY_INTERNAL` — and, from the precheck and the capture, `RAY_POLICY_DENIED`
+  (`unsupported-extension`), `RAY_DIGEST_MISMATCH` (`bundle-sha256`, `object-sha256`),
+  `RAY_RUNTIME_UNSUPPORTED`, `RAY_TARGET_UNSUPPORTED` and `RAY_FENCE_MISMATCH`.
+- **Exit:** `0` exported, `2` usage, an existing output, a limit or a digest, `3` external state,
+  tenants, runtime or target, `4` owner recovery, an insecure state directory, policy or another
+  epoch, `5` retryable (database, lock, drain deadline), `6` interrupted or schema drift, `7` internal
+  error.
+
+---
+
+## `resume`
+
+```
+rayspec resume --deployment <id> --fence-epoch <n> [--state-dir <dir>] [--json]
+```
+
+Releases the source fence an export took, only at the epoch it is held at, and grants the runtime
+role back exactly the writes the barrier revoked. Every runtime process restarts its producers
+within a second.
+
+- **Flags:** `--deployment <id>` (required; checked against the state directory and the database,
+  else `RAY_USAGE`), `--fence-epoch <n>` (required; the epoch the export reported), `--state-dir`.
+- **Environment:** as for `export`; only the database connections are used.
+- **Output:** the result envelope (operation `resume`) with
+  `data: { deploymentId, fenceEpoch, released, environmentRevision }`. `released` is `false` when the
+  fence was already open at that epoch; nothing changes then.
+- **Exit:** `0` released or already open, `2` usage, `4` another epoch (`RAY_FENCE_MISMATCH`), `5`
+  the database cannot be reached, `7` internal error.
+
+---
+
 ## `rayspec-serve` — the boot server
 
 ```
@@ -1471,6 +1592,8 @@ It listens on `PORT` (default `8080`) and shuts down gracefully on `SIGINT` /
   bind, review, apply, readiness, update and recovery of a `.ray` deployment.
 - **[Runtime operations](./runtime-operations.md)** — what a deploy records, and how
   to recover from an interrupted one.
+- **[Exporting a deployment](./export.md)** — planning the downtime, what an export
+  carries and resets, and recovery when it is interrupted.
 - **[Getting started](./getting-started.md)** — these commands in sequence.
 - **[Spec reference](./spec-reference.md)** — the grammar `doctor`/`plan`/`openapi`
   check.

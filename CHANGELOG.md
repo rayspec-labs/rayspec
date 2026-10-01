@@ -592,8 +592,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployed application rebuilt byte for byte from the state directory and matching the database's
   record, the schema head and product ledger (`RAY_SCHEMA_DRIFT`), a `pg_dump` of the server's major,
   the reading role's access past row-level security, the fs blob store walked completely, the
-  migration size and object limits, free scratch space, database extensions
-  (`RAY_POLICY_DENIED` `unsupported-extension`), exactly one organization and no blob of another
+  migration size and object limits, free scratch space, database extensions — none in the
+  application database, and in the workflow system database none but `uuid-ossp`, which the durable
+  engine's own migrations create there (`RAY_POLICY_DENIED` `unsupported-extension`), exactly one
+  organization and no blob of another
   tenant (`RAY_MULTI_TENANT_UNSUPPORTED`), a password-holding member (`RAY_OWNER_RECOVERY_REQUIRED`),
   and every table being a platform table or a product store (`RAY_EXTERNAL_STATE_UNSUPPORTED`
   `unknown-table`). `captureSnapshot` takes the plaintext inner snapshot archive under the fence: it
@@ -615,6 +617,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `validateObjectIndex` (`@rayspec/bundle-contract`) validates `payload/object-index.json`.
   `listFsBlobs` (`@rayspec/platform`) walks an fs blob root and lists every stored object with the
   length and digest its header states, refusing anything the store would not have written.
+- **Migration bundles, encrypted with age.** `writeMigrationBundle` (`@rayspec/server`) encrypts an
+  inner snapshot archive with age v1 to one X25519 recipient and writes it as the only payload file
+  (`payload/migration.age`) of a migration-kind `.ray`, mode 0600, read back by the one reader and
+  never written over an existing file, through the one bundle writer (`writeBundle` gains
+  `fileMode`); `encryptFile` and `isAgeX25519Recipient` are its parts. A
+  passphrase, an identity and the post-quantum or tag recipients are refused. The encryption is the
+  age authors' JavaScript implementation, `age-encryption` 0.3.1 (BSD-3-Clause; new dependency,
+  with `@noble/*` and `@scure/base`, in the SBOM and the notices), run against every official age
+  test vector (`cctv-age`, a test-only dependency); RaySpec implements no primitive.
+- **`rayspec export` and `rayspec resume`: move a self-hosted deployment as one encrypted bundle.**
+  `rayspec export --deployment <id> --recipient <age1…> --output <migration.ray> --run-history
+  <included|excluded>` runs a read-only precheck, asks the operator to confirm the downtime (or takes
+  `--confirm-quiesce`), fences the source with a database write barrier — the runtime role's writes
+  revoked under role separation, or a stopped source attested with `--source-stopped`, else
+  `RAY_EXTERNAL_STATE_UNSUPPORTED` `database-barrier-unavailable` with the source fenced — captures
+  both databases and the blobs under that one fence epoch, encrypts the snapshot in a private scratch
+  directory under the state directory and writes the migration bundle (mode 0600, never over an
+  existing file). The source stays fenced; the result names the barriers that held, who the snapshot
+  read as, and the `rayspec resume --deployment <id> --fence-epoch <n>` that releases it, which
+  refuses any other epoch (`RAY_FENCE_MISMATCH`). A second export while fenced reuses the fence at its
+  epoch. SIGINT or SIGTERM stops at a safe point, ends `pg_dump`, removes the scratch data and reports
+  `RAY_INTERRUPTED` (exit 6) with the resume command; the next export removes what a killed one left.
+  Every transition (`PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED`, `BLOCKED`) is recorded
+  with its operation id, actor, fence epoch, time, digests and recovery action in a shareable local
+  receipt (`<state-dir>/receipts/`, no secret, record or table name) and in the environment's
+  receipts. The configuration comes from the process environment only, with the new
+  `RAYSPEC_SNAPSHOT_DATABASE_URL` for the read-only snapshot role and `RAYSPEC_PG_DUMP` for an
+  explicit `pg_dump`. New guide: [Exporting a deployment](./docs/export.md).
 
 ### Changed
 
