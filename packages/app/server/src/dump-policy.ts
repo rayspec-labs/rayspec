@@ -42,8 +42,14 @@
  *    whose rows the snapshot excludes carries no data, and a counted table with rows carries its data
  *    (`RAY_DIGEST_MISMATCH` `inner-metadata` otherwise).
  *
- * The result is the list of entries to restore, in archive order, which the import hands to
- * `pg_restore --use-list`.
+ *  - ORDER. Each restored entry must be in the section `pg_dump` puts its kind in (pre-data, data,
+ *    post-data), and the restore list runs the sections in that order whatever the archive's order:
+ *    every row is copied in before a trigger, index, constraint or policy of the dump exists.
+ *
+ * The result is the list of entries to restore, by section and in archive order within one, which
+ * the import hands to `pg_restore --use-list`. What the dump's functions could do once they run is
+ * checked again after the restore (`import-target.ts`): the catalog must hold what the plan restores
+ * and nothing else.
  */
 import { type BundleError, bundleError, type ErrorReason } from '@rayspec/bundle-contract';
 import { ISOLATION_DEFINER_FUNCTIONS, normalizeFunctionBody } from '@rayspec/db';
@@ -299,12 +305,8 @@ const DENIED_FUNCTIONS = new Set([
   'pg_file_write',
   'pg_file_rename',
   'pg_file_unlink',
-  'lo_import',
-  'lo_export',
-  'lo_from_bytea',
-  'lo_put',
-  'lo_create',
-  'lo_unlink',
+  'loread',
+  'lowrite',
   'set_config',
   'pg_terminate_backend',
   'pg_cancel_backend',
@@ -317,21 +319,42 @@ const DENIED_FUNCTIONS = new Set([
   'pg_sleep',
   'pg_sleep_for',
   'pg_sleep_until',
-  'pg_advisory_lock',
-  'pg_advisory_lock_shared',
-  'pg_advisory_xact_lock',
-  'pg_advisory_xact_lock_shared',
-  'pg_try_advisory_lock',
-  'pg_try_advisory_lock_shared',
-  'pg_try_advisory_xact_lock',
-  'pg_try_advisory_xact_lock_shared',
-  'dblink',
-  'dblink_exec',
-  'dblink_connect',
-  'dblink_connect_u',
-  'dblink_send_query',
   'pg_import_system_collations',
 ]);
+
+/**
+ * Built-in functions refused only where the restore itself evaluates them (a check, a default, an
+ * index or policy expression): sending a notification once per restored row. A function body may
+ * notify — the workflow engine's triggers do — since it runs only when the application writes.
+ */
+const DENIED_AT_RESTORE = new Set(['pg_notify']);
+
+/**
+ * Prefixes of built-in function families refused as a whole: every large-object function (`lo_creat`,
+ * `lo_open`, `lo_put`, `lo_truncate`, …), every advisory lock and unlock, every file and directory
+ * reader, and `dblink`.
+ */
+const DENIED_FUNCTION_PREFIXES = [
+  'lo_',
+  'pg_advisory_',
+  'pg_try_advisory_',
+  'pg_read_',
+  'pg_ls_',
+  'pg_file_',
+  'dblink',
+];
+
+/**
+ * Whether a built-in function, by its name, is one a restored statement (`restore`) or a function
+ * body (`body`) may not call.
+ */
+export function isDeniedFunction(name: string, where: 'restore' | 'body'): boolean {
+  return (
+    DENIED_FUNCTIONS.has(name) ||
+    DENIED_FUNCTION_PREFIXES.some((p) => name.startsWith(p)) ||
+    (where === 'restore' && DENIED_AT_RESTORE.has(name))
+  );
+}
 
 /** Phrases a function body may not hold, matched on its tokens outside strings. */
 const DENIED_BODY_PHRASES: readonly (readonly string[])[] = [
@@ -378,6 +401,34 @@ const SESSION_DEFINITIONS: Readonly<Record<string, string>> = {
   SEARCHPATH: "SELECT pg_catalog.set_config('search_path', '', false);\n",
 };
 
+/** The sections of a custom-format archive, as `pg_dump` numbers them. */
+const PRE_DATA = 2;
+const DATA = 3;
+const POST_DATA = 4;
+
+/**
+ * The section `pg_dump` puts each restored kind in. A table's data is loaded before any trigger,
+ * index, constraint or policy exists, so nothing of the dump fires while rows are copied in; an entry
+ * in another section than its kind's is refused, and the restore list is ordered by section.
+ */
+const KIND_SECTIONS: Readonly<Record<string, number>> = {
+  SCHEMA: PRE_DATA,
+  EXTENSION: PRE_DATA,
+  FUNCTION: PRE_DATA,
+  TABLE: PRE_DATA,
+  SEQUENCE: PRE_DATA,
+  'SEQUENCE OWNED BY': PRE_DATA,
+  DEFAULT: PRE_DATA,
+  'TABLE DATA': DATA,
+  'SEQUENCE SET': DATA,
+  CONSTRAINT: POST_DATA,
+  'FK CONSTRAINT': POST_DATA,
+  INDEX: POST_DATA,
+  TRIGGER: POST_DATA,
+  POLICY: POST_DATA,
+  'ROW SECURITY': POST_DATA,
+};
+
 /** Kinds that belong to the database itself; only a restore that creates the database runs them. */
 const DATABASE_KINDS = new Set(['DATABASE', 'DATABASE PROPERTIES']);
 
@@ -400,7 +451,7 @@ export interface DumpPolicyInput {
 export interface DumpRestorePlan {
   /** The role that owns every object of the dump. */
   owner: string;
-  /** The entries to restore, in archive order. */
+  /** The entries to restore, by section, in archive order within one. */
   restore: DumpTocEntry[];
   /** The `--use-list` file for `pg_restore`: one line per entry to restore. */
   useList: string;
@@ -410,6 +461,10 @@ export interface DumpRestorePlan {
   functions: string[];
   /** The extensions the restore creates. */
   extensions: string[];
+  /** The schemas besides `public` the restore creates. */
+  schemas: string[];
+  /** How many triggers the restore creates. */
+  triggers: number;
 }
 
 export type DumpPolicyResult =
@@ -514,7 +569,7 @@ function checkCalls(
           );
         }
       }
-      if (DENIED_FUNCTIONS.has(last)) {
+      if (isDeniedFunction(last, 'restore')) {
         throw denied('privileged-statement', ctx.input.database, entry, 'calls a server function');
       }
       i = name.next - 1;
@@ -526,7 +581,7 @@ function checkCalls(
     }
     const schema = name.parts[0]!;
     if (name.parts.length === 2 && schema === 'pg_catalog') {
-      if (DENIED_FUNCTIONS.has(last)) {
+      if (isDeniedFunction(last, 'restore')) {
         throw denied('privileged-statement', ctx.input.database, entry, 'calls a server function');
       }
     } else if (
@@ -578,6 +633,9 @@ function checkEntry(ctx: Context, entry: DumpTocEntry): void {
   }
   if (entry.desc !== 'TABLE DATA' && entry.copyStmt !== null && entry.copyStmt !== '') {
     throw refuse('carries a COPY statement outside table data');
+  }
+  if (KIND_SECTIONS[entry.desc] !== undefined && entry.section !== KIND_SECTIONS[entry.desc]) {
+    throw refuse('is not in the section pg_dump puts its kind in');
   }
 
   switch (entry.desc) {
@@ -953,7 +1011,7 @@ function checkFunction(ctx: Context, entry: DumpTocEntry, s: readonly SqlToken[]
     const t = bodyTokens[at]!;
     if (
       (t.kind === 'word' || t.kind === 'quoted') &&
-      DENIED_FUNCTIONS.has(t.value) &&
+      isDeniedFunction(t.value, 'body') &&
       bodyTokens[at + 1]?.value === '('
     ) {
       throw refuse('is a function whose body calls a server function');
@@ -1085,6 +1143,17 @@ export function planDumpRestore(input: DumpPolicyInput): DumpPolicyResult {
     if (err instanceof PolicyRefusal) return { ok: false, errors: [err.error] };
     throw err;
   }
+}
+
+/**
+ * The entries in the order `pg_restore --use-list` runs them: every pre-data entry, then the data,
+ * then every post-data entry, each section in archive order. `pg_restore` follows the list, not the
+ * archive, so an archive that puts a trigger before the data it would fire on restores it after.
+ */
+function inSectionOrder(entries: readonly DumpTocEntry[]): DumpTocEntry[] {
+  return [PRE_DATA, DATA, POST_DATA].flatMap((section) =>
+    entries.filter((e) => KIND_SECTIONS[e.desc] === section),
+  );
 }
 
 function plan(input: DumpPolicyInput): DumpRestorePlan {
@@ -1237,12 +1306,15 @@ function plan(input: DumpPolicyInput): DumpRestorePlan {
   const functions = restore
     .filter((e) => e.desc === 'FUNCTION')
     .map((e) => `${e.namespace}.${e.tag}`);
+  const ordered = inSectionOrder(restore);
   return {
     owner,
-    restore,
-    useList: restore.map((e) => `${e.dumpId}; ${e.tableoid} ${e.oid} ${e.desc}\n`).join(''),
+    restore: ordered,
+    useList: ordered.map((e) => `${e.dumpId}; ${e.tableoid} ${e.oid} ${e.desc}\n`).join(''),
     foreignKeys: restore.filter((e) => e.desc === 'FK CONSTRAINT').length,
     functions,
     extensions: restore.filter((e) => e.desc === 'EXTENSION').map((e) => e.tag),
+    schemas: restore.filter((e) => e.desc === 'SCHEMA').map((e) => e.tag),
+    triggers: restore.filter((e) => e.desc === 'TRIGGER').length,
   };
 }

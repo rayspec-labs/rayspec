@@ -171,12 +171,14 @@ function applicationDump(): DumpTocEntry[] {
       'drizzle',
       '__drizzle_migrations_id_seq',
       "SELECT pg_catalog.setval('drizzle.__drizzle_migrations_id_seq', 16, true);\n",
+      { section: 3 },
     ),
     entry(
       'SEQUENCE SET',
       'public',
       'receipts_id_seq',
       "SELECT pg_catalog.setval('public.receipts_id_seq', 1, false);\n",
+      { section: 3 },
     ),
     entry(
       'CONSTRAINT',
@@ -328,6 +330,18 @@ describe('the lexer', () => {
     expect(statements[2]![1]).toMatchObject({ kind: 'quoted', value: 'semi;colon' });
   });
 
+  it('reads a backslash-escaped quote inside an escape string as part of the string', () => {
+    // Read as a standard string, the quote after the backslash would end it and leave a second
+    // statement outside; Postgres reads E'…' with backslash escapes, so it is one string.
+    const statements = splitStatements(lexSql("SELECT E'a\\'; CREATE ROLE evil; --';"));
+    expect(statements).toHaveLength(1);
+    expect(statements[0]![1]).toMatchObject({
+      kind: 'string',
+      value: "a'; CREATE ROLE evil; --",
+    });
+    expect(splitStatements(lexSql("SELECT 'a\\'; SELECT 2;"))).toHaveLength(2);
+  });
+
   it('refuses SQL it cannot read: an unterminated string, quote, dollar quote or comment', () => {
     for (const sql of ["SELECT 'open", 'SELECT "open', 'SELECT $x$ open', 'SELECT /* open']) {
       expect(() => lexSql(sql), sql).toThrow();
@@ -361,6 +375,54 @@ describe('a dump of the platform', () => {
       'public.receipts_append_only()',
     ]);
     expect(result.value.extensions).toEqual([]);
+  });
+
+  it('restores every row before a trigger of the dump exists, whatever order the archive puts them in', () => {
+    // A trigger placed before the data in the archive: pg_restore --use-list runs the list's order.
+    const base = applicationDump();
+    const trigger = base.find((e) => e.desc === 'TRIGGER')!;
+    const firstData = base.findIndex((e) => e.desc === 'TABLE DATA');
+    const reordered = [
+      ...base.slice(0, firstData).filter((e) => e !== trigger),
+      trigger,
+      ...base.slice(firstData).filter((e) => e !== trigger),
+    ];
+    expect(reordered.indexOf(trigger)).toBeLessThan(
+      reordered.findIndex((e) => e.desc === 'TABLE DATA'),
+    );
+    const result = judge(reordered);
+    expect(outcome(result)).toBe('ok');
+    if (!result.ok) return;
+    const listed = result.value.useList
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.replace(/^[0-9]+; [0-9]+ [0-9]+ /, ''));
+    const lastData = listed.lastIndexOf('TABLE DATA');
+    expect(lastData).toBeGreaterThan(0);
+    expect(listed.indexOf('TRIGGER')).toBeGreaterThan(lastData);
+    expect(listed.lastIndexOf('SEQUENCE SET')).toBeLessThan(listed.indexOf('CONSTRAINT'));
+    for (const kind of ['FUNCTION', 'TABLE', 'SEQUENCE', 'DEFAULT', 'SCHEMA']) {
+      expect(listed.lastIndexOf(kind), kind).toBeLessThan(listed.indexOf('TABLE DATA'));
+    }
+    expect(result.value.restore.map((e) => e.desc)).toEqual(listed);
+  });
+
+  it('refuses an entry in another section than the one pg_dump puts its kind in', () => {
+    for (const [desc, tag, section] of [
+      ['TRIGGER', 'receipts receipts_no_rewrite', 2],
+      ['TRIGGER', 'receipts receipts_no_rewrite', 3],
+      ['INDEX', 'notes_tenant_idx', 3],
+      ['POLICY', 'notes tenant_isolation', 2],
+      ['TABLE DATA', 'orgs', 4],
+      ['SEQUENCE SET', '__drizzle_migrations_id_seq', 2],
+      ['FUNCTION', 'receipts_append_only()', 4],
+      ['TABLE', 'orgs', 3],
+    ] as const) {
+      expect(
+        outcome(judge(withEntry({ desc, tag }, (e) => ({ ...e, section })))),
+        `${desc} ${section}`,
+      ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    }
   });
 
   it('takes the workflow system database with the uuid-ossp extension its engine creates, and its default', () => {
@@ -488,6 +550,14 @@ describe('owners, grants and roles', () => {
     ).toBe('RAY_POLICY_DENIED/unmapped-owner');
   });
 
+  it('refuses privileges of an object another role owns', () => {
+    expect(
+      outcome(
+        judge(withEntry({ desc: 'ACL', tag: 'TABLE notes' }, (e) => ({ ...e, owner: 'intruder' }))),
+      ),
+    ).toBe('RAY_POLICY_DENIED/unmapped-owner');
+  });
+
   it('refuses a role and a role membership, wherever they are put', () => {
     expect(
       outcome(
@@ -533,6 +603,99 @@ describe('kinds of object', () => {
       expect(outcome(judge([...applicationDump(), entry(desc, 'public', 'x', defn)])), desc).toBe(
         'RAY_POLICY_DENIED/privileged-statement',
       );
+    }
+  });
+
+  it('refuses a comment entry that is not one COMMENT ON, and a COPY statement on an entry that is not data', () => {
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'COMMENT', tag: 'TABLE notes' }, (e) => ({
+            ...e,
+            defn: `${e.defn}CREATE ROLE evil;\n`,
+          })),
+        ),
+      ),
+    ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'COMMENT', tag: 'TABLE notes' }, (e) => ({
+            ...e,
+            defn: 'SELECT 1;\n',
+          })),
+        ),
+      ),
+    ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'TABLE', tag: 'orgs' }, (e) => ({
+            ...e,
+            copyStmt: 'COPY public.orgs (id, name) FROM stdin;\n',
+          })),
+        ),
+      ),
+    ).toBe('RAY_POLICY_DENIED/privileged-statement');
+  });
+
+  it('refuses an index of another access method than the built-in ones', () => {
+    for (const method of ['bloom', 'evil_am']) {
+      expect(
+        outcome(
+          judge(
+            withEntry({ desc: 'INDEX', tag: 'notes_tenant_idx' }, (e) => ({
+              ...e,
+              defn: (e.defn ?? '').replace('USING btree', `USING ${method}`),
+            })),
+          ),
+        ),
+        method,
+      ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    }
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'INDEX', tag: 'notes_tenant_idx' }, (e) => ({
+            ...e,
+            defn: (e.defn ?? '').replace('USING btree', 'USING gin'),
+          })),
+        ),
+      ),
+    ).toBe('ok');
+  });
+
+  it('refuses a table that inherits, is partitioned, or names an access method in its definition', () => {
+    for (const tail of [
+      ')\nINHERITS (orgs);\n',
+      ')\nPARTITION BY RANGE (id);\n',
+      ')\nUSING heap;\n',
+    ]) {
+      expect(
+        outcome(
+          judge(
+            withEntry({ desc: 'TABLE', tag: 'notes' }, (e) => ({
+              ...e,
+              defn: (e.defn ?? '').replace(');\n\n', `${tail}\n`),
+            })),
+          ),
+        ),
+        tail,
+      ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    }
+  });
+
+  it('refuses a ROW SECURITY entry that alters its table in any other way too', () => {
+    for (const defn of [
+      'ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY, ALTER COLUMN body SET DEFAULT public.evil();\n',
+      'ALTER TABLE public.notes ENABLE ROW LEVEL SECURITY, NO FORCE ROW LEVEL SECURITY;\n',
+      'ALTER TABLE public.notes DISABLE ROW LEVEL SECURITY;\n',
+      'ALTER TABLE public.orgs ENABLE ROW LEVEL SECURITY;\n',
+    ]) {
+      expect(
+        outcome(judge(withEntry({ desc: 'ROW SECURITY', tag: 'notes' }, (e) => ({ ...e, defn })))),
+        defn,
+      ).toBe('RAY_POLICY_DENIED/privileged-statement');
     }
   });
 
@@ -685,6 +848,71 @@ describe('no dump code at restore time', () => {
         call,
       ).toBe('RAY_POLICY_DENIED/privileged-statement');
     }
+  });
+
+  it('refuses a large-object, notify or advisory-lock function in an expression the restore evaluates, and in a body', () => {
+    for (const call of [
+      'lo_creat(-1)',
+      'pg_catalog.lowrite(lo_open(1, 131072), name::bytea)',
+      'pg_catalog.lo_open(1, 131072)',
+      'loread(1, 1)',
+      'lo_get(1)',
+      'pg_catalog.lo_truncate(0, 0)',
+      'lo_put(1, 0, name::bytea)',
+      'pg_notify(name, name)',
+      'pg_advisory_unlock_all()',
+      'pg_catalog.pg_advisory_unlock(1)',
+    ]) {
+      expect(
+        outcome(
+          judge(
+            withEntry({ desc: 'TABLE', tag: 'orgs' }, (e) => ({
+              ...e,
+              defn: (e.defn ?? '').replace('length(name) > 0', `${call} IS NOT NULL`),
+            })),
+          ),
+        ),
+        call,
+      ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    }
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'FUNCTION', tag: 'receipts_append_only()' }, (e) => ({
+            ...e,
+            defn: APPEND_ONLY.replace(
+              'RAISE EXCEPTION',
+              'PERFORM lo_creat(-1);\n\tRAISE EXCEPTION',
+            ),
+          })),
+        ),
+      ),
+    ).toBe('RAY_POLICY_DENIED/privileged-statement');
+    // A function body may notify, as the workflow engine's triggers do; it runs only on a write.
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'FUNCTION', tag: 'receipts_append_only()' }, (e) => ({
+            ...e,
+            defn: APPEND_ONLY.replace(
+              'RAISE EXCEPTION',
+              "PERFORM pg_notify('channel', TG_OP);\n\tRAISE EXCEPTION",
+            ),
+          })),
+        ),
+      ),
+    ).toBe('ok');
+    // A built-in of the same shape that touches nothing stays allowed.
+    expect(
+      outcome(
+        judge(
+          withEntry({ desc: 'TABLE', tag: 'orgs' }, (e) => ({
+            ...e,
+            defn: (e.defn ?? '').replace('length(name) > 0', 'lower(name) <> upper(name)'),
+          })),
+        ),
+      ),
+    ).toBe('ok');
   });
 
   it('refuses a trigger whose function the dump does not define as a trigger function', () => {
