@@ -78,12 +78,28 @@ export interface SnapshotArchiveOptions {
   clock?: Clock;
 }
 
+/** Where one payload entry's bytes lie in the archive. Every snapshot entry is stored, not compressed. */
+export interface SnapshotEntryLocation {
+  path: SnapshotInventoryPath;
+  /** The offset of the entry's first data byte in the archive. */
+  dataOffset: number;
+  size: number;
+  /** The SHA-256 the inventory states, which the bytes matched when the archive was read. */
+  sha256: string;
+}
+
 export interface SnapshotInspection {
   snapshot: Snapshot;
   objectIndex: ObjectIndex;
   /** Lowercase hex SHA-256 of the complete archive bytes. */
   archiveSha256: string;
   archiveSize: number;
+  /**
+   * The payload entries in inventory order, located in the archive, so a caller that holds the
+   * archive file can read an entry's bytes without extracting it. A caller that reads them again
+   * hashes them again: the archive may have changed since it was read.
+   */
+  entries: SnapshotEntryLocation[];
 }
 
 export interface WrittenSnapshotArchive extends SnapshotInspection {
@@ -332,6 +348,10 @@ async function readSnapshot(
     objectIndex: index.value,
     archiveSha256: archiveHash.digest('hex'),
     archiveSize: source.size,
+    entries: snapshot.inventory.map((entry) => {
+      const e = present.get(entry.path)!;
+      return { path: entry.path, dataOffset: e.dataOffset, size: e.size, sha256: entry.sha256 };
+    }),
   };
 }
 

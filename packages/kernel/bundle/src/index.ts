@@ -38,6 +38,7 @@ export {
   inspectSnapshotArchive,
   type SnapshotArchiveOptions,
   type SnapshotDocumentInput,
+  type SnapshotEntryLocation,
   type SnapshotInspection,
   type WrittenSnapshotArchive,
   writeSnapshotArchive,
