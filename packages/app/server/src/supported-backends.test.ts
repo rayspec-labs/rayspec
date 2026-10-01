@@ -44,7 +44,10 @@ describe('the supported-backend matrix', () => {
 
   it('docs/hardened-posture.md renders exactly these rows', () => {
     const doc = readFileSync(join(repoRoot, 'docs', 'hardened-posture.md'), 'utf8');
-    const section = doc.slice(doc.indexOf('## Supported backends'));
+    // The section runs to the next second-level heading; later sections have tables of their own.
+    const start = doc.indexOf('## Supported backends');
+    const end = doc.indexOf('\n## ', start + 1);
+    const section = doc.slice(start, end === -1 ? undefined : end);
     const rows = section
       .split('\n')
       .filter((line) => line.startsWith('| `'))

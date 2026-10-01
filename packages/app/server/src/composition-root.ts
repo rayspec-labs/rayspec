@@ -890,17 +890,6 @@ export interface CleanupSettings {
 // naming the identical class object.
 export { BootConfigError };
 
-/**
- * The refusal for a present-but-malformed `RAYSPEC_JWT_SIGNING_KEY`. It names the variable, the shape
- * expected, and the two ways an operator actually arrives here — both of which come from the value
- * `rayspec dev gen-secrets` writes, a single line carrying literal `\n` behind a leading `"`. The
- * entrypoint's local `.env` loader un-escapes that form, and it skips any variable already present in
- * the environment, so a value copied out of `.env` into an inline assignment is never un-escaped:
- * with the dotenv quotes still attached the PEM header is not at offset 0, and with them stripped the
- * literal `\n` survives into base64 decoding.
- *
- * It carries NO byte of the value.
- */
 /** The variable that carries the signing key in use before the last rotation (plus its `_FILE`). */
 export const PREVIOUS_JWT_SIGNING_KEY_VAR = 'RAYSPEC_JWT_SIGNING_KEY_PREVIOUS';
 
@@ -914,6 +903,17 @@ const MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE =
   `${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE. Unset it once the tokens it signed have expired. The value ` +
   'itself is not echoed here. Fail-closed.';
 
+/**
+ * The refusal for a present-but-malformed `RAYSPEC_JWT_SIGNING_KEY`. It names the variable, the shape
+ * expected, and the two ways an operator actually arrives here — both of which come from the value
+ * `rayspec dev gen-secrets` writes, a single line carrying literal `\n` behind a leading `"`. The
+ * entrypoint's local `.env` loader un-escapes that form, and it skips any variable already present in
+ * the environment, so a value copied out of `.env` into an inline assignment is never un-escaped:
+ * with the dotenv quotes still attached the PEM header is not at offset 0, and with them stripped the
+ * literal `\n` survives into base64 decoding.
+ *
+ * It carries NO byte of the value.
+ */
 const MALFORMED_JWT_SIGNING_KEY_MESSAGE =
   "Boot aborted — RAYSPEC_JWT_SIGNING_KEY is not a PKCS#8 PEM. Expected a value starting '-----BEGIN " +
   "PRIVATE KEY-----' with REAL newlines. A value copied out of .env keeps its surrounding quotes and " +
@@ -3219,16 +3219,6 @@ function fsSourceFactoryFor(config: ServerConfig): FsSourceFactory | undefined {
   }
 }
 
-/**
- * The media-token service a stream PLAYBACK route is authenticated by (a signed `?token=` media-JWT,
- * HS256, a DISTINCT key from the RS256 API chain), or undefined when no playback route is declared.
- * A playback route without a valid media signing key is refused: it would be unauthenticated.
- */
-/**
- * The rights this deployment grants a handler (`handlers[].uses`): for each, `null` when the
- * capability is built for this boot, else what is missing. Built from the same values the engine is
- * wired with, so a right is granted exactly when its capability reaches the init.
- */
 /** Refuse a boot whose handlers ask for rights this deployment does not grant (handler-rights.ts). */
 function assertBootHandlerRights(
   spec: RaySpec,
@@ -3245,6 +3235,11 @@ function assertBootHandlerRights(
   }
 }
 
+/**
+ * The rights this deployment grants a handler (`handlers[].uses`): for each, `null` when the
+ * capability is built for this boot, else what is missing. Built from the same values the engine is
+ * wired with, so a right is granted exactly when its capability reaches the init.
+ */
 function grantedHandlerRights(capabilities: {
   blobFactory?: unknown;
   fsSourceFactory?: unknown;
@@ -3280,6 +3275,11 @@ function grantedHandlerRights(capabilities: {
   };
 }
 
+/**
+ * The media-token service a stream PLAYBACK route is authenticated by (a signed `?token=` media-JWT,
+ * HS256, a DISTINCT key from the RS256 API chain), or undefined when no playback route is declared.
+ * A playback route without a valid media signing key is refused: it would be unauthenticated.
+ */
 function mediaTokenServiceFor(
   effectiveSpec: RaySpec,
   config: ServerConfig,

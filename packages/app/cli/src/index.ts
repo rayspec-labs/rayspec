@@ -271,7 +271,9 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 Deploy the bundle and serve it. A plan that changes the schema or the
                                 grants must be the reviewed one: pass the planDigest the dry-run
                                 printed. Bindings come only from --bindings-file (JSON, mode 0600,
-                                owned by you; never printed) and the process environment. The bundle
+                                owned by you; never printed; only names the bundle declares) and
+                                the process environment, never into it: provider keys go to their
+                                adapters, the application's own to init.bindings. The bundle
                                 is staged into an immutable version directory, the boot validates
                                 everything, then the apply runs the platform chain and the product
                                 delta and switches the active version; a failed deploy leaves the
