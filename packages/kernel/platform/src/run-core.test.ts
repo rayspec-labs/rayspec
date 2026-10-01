@@ -928,9 +928,8 @@ describe('run-core run-header reconcile on heal', () => {
     expect(obs.status).toBe('completed');
     expect(obs.quarantined).toBe(false);
 
-    // The durable executor's double-bill short-circuit keys STRICTLY on runs.status==='completed'
-    // (RUN_STATUS_SUCCEEDED). A stale 'error' header would make it return false → the untainted run is
-    // re-dispatched and re-billed. Assert the exact column value that guard reads.
+    // The healed run's header must say what the run produced: a stale 'error' header would report a
+    // completed run as failed to every reader of the header. Assert the exact column value.
     const header = await db
       .select({ status: schema.runs.status })
       .from(schema.runs)

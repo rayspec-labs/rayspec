@@ -69,7 +69,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { DBOS, StatusString } from '@dbos-inc/dbos-sdk';
-import type { AgentSpec, Backend, NeutralTool } from '@rayspec/core';
+import {
+  type AgentSpec,
+  type Backend,
+  type NeutralTool,
+  REDACTED,
+  redactText,
+  redactValue,
+} from '@rayspec/core';
 import type { Db } from '@rayspec/db';
 import { forTenant, schema, type TenantDb } from '@rayspec/db';
 import type {
@@ -83,6 +90,7 @@ import type {
 import {
   isRunCancelled,
   isRunTainted,
+  isTerminalRunStatus,
   markRunCancelled,
   RunAdmissionRefusedError,
   recordRunCancelled,
@@ -367,6 +375,44 @@ async function clearInterruptedAttempt(tdb: TenantDb, runId: string): Promise<vo
   await tdb.delete(schema.conversationItems).where(eq(schema.conversationItems.runId, runId));
 }
 
+/** How deep a chain of `cause`s is followed when a thrown error is redacted. */
+const REDACT_CAUSE_DEPTH = 5;
+
+/**
+ * Pass a thrown value through the redaction path before it leaves the step: an error keeps its class
+ * (callers match on it) and has its message, stack and own properties redacted, its `cause` chain
+ * too. An error whose fields cannot be written is replaced by a plain error carrying the redacted
+ * message.
+ */
+export function redactThrown(thrown: unknown, depth = 0): unknown {
+  if (!(thrown instanceof Error)) return redactValue(thrown);
+  try {
+    thrown.message = redactText(thrown.message);
+    if (typeof thrown.stack === 'string') thrown.stack = redactText(thrown.stack);
+    const fields = thrown as unknown as Record<string, unknown>;
+    for (const key of Object.keys(fields)) {
+      if (key !== 'cause') fields[key] = redactValue(fields[key]);
+    }
+    if (thrown.cause !== undefined) {
+      thrown.cause = depth < REDACT_CAUSE_DEPTH ? redactThrown(thrown.cause, depth + 1) : REDACTED;
+    }
+    return thrown;
+  } catch {
+    return new Error(redactText(String(thrown.message)));
+  }
+}
+
+/** The step body, with whatever it throws passed through {@link redactThrown}. */
+function redactingThrows(body: () => Promise<void>): () => Promise<void> {
+  return async () => {
+    try {
+      await body();
+    } catch (err) {
+      throw redactThrown(err);
+    }
+  };
+}
+
 /**
  * The `body_hash` sentinel for a `run_started` marker row. The marker's identity is its
  * (tenant, scope, idemKey=runId) UNIQUE key — the body_hash is unused for it (it is NOT an
@@ -484,53 +530,35 @@ export async function readCancelledWithBoundedRetry(
 }
 
 /**
- * The terminal-SUCCESS value of the `runs` header `status` column — the `RunResult.status` success
- * literal ('completed', verified doc-first against `@rayspec/core`'s `RunResult = z.object({ status:
- * z.enum(['completed','error']) … })`), persisted VERBATIM by run-core's header upsert
- * (`insert(schema.runs, { status: result.status })`). A recovery re-dispatch of an already-'completed'
- * run must NOT re-run `runAgent` (TEST-FLAKE-2 — the double-model-bill window; see the short-circuit
- * in `#runAgentJobBody`). This is the SAME literal the workflow-durable `agent-node` reconstruct path
- * keys on when it attaches a completed sub-run instead of re-running it.
- */
-export const RUN_STATUS_SUCCEEDED = 'completed';
-
-/**
- * Read whether the run's `runs` header is already at the terminal-SUCCESS status (closing TEST-FLAKE-2,
- * the double-model-bill window). Mirrors `readTaintWithBoundedRetry`: it RETRIES a transient DB read
- * error a bounded number of times (reusing the same `TAINT_READ_*` bounded-read policy), and returns
- * `true` iff a SUCCESSFUL read finds a `RUN_STATUS_SUCCEEDED` header for `runId`.
+ * Read whether the run's `runs` header is at a TERMINAL status (`completed` or `error`, the
+ * `RunResult.status` values run-core and the end records persist): the run has ended and its outcome
+ * is recorded, so a recovery or a second dispatch must not run it again (the double-model-bill
+ * window). Mirrors `readTaintWithBoundedRetry`: it RETRIES a transient DB read error a bounded number
+ * of times (the same `TAINT_READ_*` policy).
  *
  * SAFETY DIRECTION — deliberately OPPOSITE `readTaintWithBoundedRetry`. On a PERSISTENT read failure
- * this returns **false** (it NEVER throws), so the caller FALLS THROUGH to the existing safe re-run.
- * That is sound because the short-circuit only runs AFTER the taint check has already confirmed the run
- * UNTAINTED — an untainted run is safe to re-run (no non-idempotent side effect fired), so an unreadable
- * header costs at most a possible re-bill, which is EXACTLY today's untainted behavior. An uncertain
- * TAINT must block a re-run (hence that helper rethrows); an uncertain SUCCESS must never SKIP a
- * genuinely-needed retry (hence this one falls through).
+ * this returns **false** (it NEVER throws), so the caller FALLS THROUGH to the safe re-run. That is
+ * sound because the short-circuit only runs AFTER the taint check has already confirmed the run
+ * UNTAINTED — an untainted run is safe to re-run (no non-idempotent side effect fired), so an
+ * unreadable header costs at most a possible re-bill. An uncertain TAINT must block a re-run (hence
+ * that helper rethrows); an uncertain END must never SKIP a genuinely-needed retry (hence this one
+ * falls through).
  */
-export async function readRunSucceededWithBoundedRetry(
-  tdb: TenantDb,
-  runId: string,
-): Promise<boolean> {
+export async function readRunEndedWithBoundedRetry(tdb: TenantDb, runId: string): Promise<boolean> {
   for (let attempt = 1; attempt <= TAINT_READ_MAX_ATTEMPTS; attempt++) {
     try {
       const rows = (await tdb
         .select(schema.runs, { status: schema.runs.status })
         .where(eq(schema.runs.runId, runId))
         .limit(1)) as Array<{ status: string }>;
-      return rows[0]?.status === RUN_STATUS_SUCCEEDED;
+      const status = rows[0]?.status;
+      return status !== undefined && isTerminalRunStatus(status);
     } catch {
       if (attempt < TAINT_READ_MAX_ATTEMPTS) {
         await new Promise((r) => setTimeout(r, TAINT_READ_BACKOFF_MS * 2 ** (attempt - 1)));
       }
     }
   }
-  // Every attempt failed: FALL THROUGH to the existing safe re-run (return false, never throw) — a
-  // DELIBERATE, safe swallow: the run is already confirmed UNTAINTED, so re-running only risks a
-  // re-bill (exactly today's behavior); an uncertain SUCCESS must never SKIP a genuinely-needed retry.
-  // A CODE regression that breaks this read DETERMINISTICALLY is still caught by the short-circuit's
-  // own test (a throwing read returns false → the run re-runs → `liveRuns` increments, going red) —
-  // the residual uncovered case is only a rare PRODUCTION persistent-DB failure on this read alone.
   return false;
 }
 
@@ -634,7 +662,9 @@ export class DbosDurableExecutor implements DurableExecutor {
    */
   async #runAgentJobBody(job: RunJob): Promise<void> {
     await DBOS.runStep(
-      async () => {
+      // What the step throws is stored by the engine in its system database (message and stack), so
+      // it leaves through the redaction path like every other record of the run.
+      redactingThrows(async () => {
         const tdb = forTenant(this.#deps.db, job.tenantId);
 
         // ── Cancellation: a run that was ended is never executed, and never RE-executed ────────
@@ -695,12 +725,16 @@ export class DbosDurableExecutor implements DurableExecutor {
           if (tainted) {
             throw new DurableRunNotRetriedError(job.runId);
           }
-          // ── Already-succeeded short-circuit (the double-MODEL-BILL window) ──────────────────
-          // The run may have ALREADY SUCCEEDED on the first attempt while the engine still
-          // re-dispatches it (a step-outcome checkpoint lost under load). Re-running would bill the
-          // model a second time for a result that is already durable, so complete as a NO-OP. A
-          // persistent header-read failure falls through to the safe re-run (the run is untainted).
-          if (await readRunSucceededWithBoundedRetry(tdb, job.runId)) {
+          // ── Already-ended short-circuit (the double-MODEL-BILL window) ──────────────────────
+          // The run may have ALREADY ENDED on an earlier attempt while the engine still dispatches
+          // it again: a step-outcome checkpoint lost under load, or a second dispatch that waited on
+          // the first execution's lease. An ended run carries a terminal header — `completed`, or
+          // `error` with its recorded end (a wall-clock bound whose outcome is unknown, a throw, a
+          // returned error). Its outcome is the record: re-running would bill the model again, and
+          // would erase the journal step that states how it ended. So complete as a NO-OP. Only a
+          // header still `enqueued`/`running` (or none) is an interrupted attempt. A persistent
+          // header-read failure falls through to the safe re-run (the run is untainted).
+          if (await readRunEndedWithBoundedRetry(tdb, job.runId)) {
             return;
           }
           // An interrupted, untainted attempt: clear what it left, then re-run.
@@ -753,7 +787,7 @@ export class DbosDurableExecutor implements DurableExecutor {
           // the lease lapses. Best-effort: a failure only means the waiter waits for the expiry.
           await releaseRunLease(tdb, job.runId, executionId).catch(() => {});
         }
-      },
+      }),
       // The step is NOT retried in-step (default retriesAllowed:false) — no in-step auto-retry.
       { name: 'runAgent', retriesAllowed: false },
     );

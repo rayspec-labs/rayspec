@@ -4,7 +4,10 @@
  *  - ONE EXECUTION AT A TIME. The run holds no transaction across its model call, so what keeps a
  *    second dispatch of the same run from executing alongside the first is the lease the started-once
  *    marker carries. A dispatch that finds a live lease waits; it runs only once the lease lapses, and
- *    the re-run starts from a clean record. An execution whose lease is taken over stops its run.
+ *    the re-run starts from a clean record. A run that ENDED while the dispatch waited (a terminal
+ *    header) is never run again. An execution whose lease is taken over stops its run.
+ *  - WHAT THE ENGINE STORES. The error a failed run throws reaches the engine's system database only
+ *    through the redaction path.
  *  - QUEUE ADMISSION. With a per-tenant and a global bound configured, a burst of enqueues is admitted
  *    exactly up to the bound and every enqueue past it is refused with `RunAdmissionRefusedError` —
  *    nothing is queued for a refused run. A re-enqueue of a run that already exists is never refused.
@@ -16,10 +19,16 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { AgentSpec } from '@rayspec/core';
+import type { AgentSpec, Backend, RunContext, RunResult } from '@rayspec/core';
 import { forTenant, schema } from '@rayspec/db';
 import { makeDbWithSchema } from '@rayspec/db/testing';
-import { RunAdmissionRefusedError, type RunJob } from '@rayspec/platform';
+import {
+  markRunHeaderRunning,
+  RUN_BOUND_STEP_KEY,
+  RunAdmissionRefusedError,
+  type RunJob,
+  recordRunTimedOut,
+} from '@rayspec/platform';
 import { config as loadDotenv } from 'dotenv';
 import postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -50,6 +59,20 @@ const QUEUE_MAX_PER_TENANT = 3;
 const QUEUE_MAX = 5;
 
 const backend = new FakeSpineBackend();
+
+/** A credential-shaped value a failing provider quotes back in its error text. */
+const LEAKED_KEY = 'sk-proj-0123456789abcdefABCDEF0123';
+
+/** A backend whose call fails with an error that quotes a credential, as a provider's text can. */
+class LeakyFailingBackend implements Backend {
+  readonly id = 'openai' as const;
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+  async run(_spec: AgentSpec, _ctx: RunContext): Promise<RunResult> {
+    throw new Error(`provider refused: Authorization: Bearer ${LEAKED_KEY} (key ${LEAKED_KEY})`);
+  }
+}
 
 const baseSpec: AgentSpec = {
   name: 'echo',
@@ -150,6 +173,8 @@ beforeAll(async () => {
     db: engine.appDb,
     resolveRun: (job: RunJob): ResolvedRun => {
       if (job.agentId === 'echo-agent') return { backend, spec: baseSpec };
+      if (job.agentId === 'leaky-agent')
+        return { backend: new LeakyFailingBackend(), spec: baseSpec };
       throw new Error(`unknown agent '${job.agentId}'`);
     },
   };
@@ -250,6 +275,52 @@ describe('one execution at a time — the started-once lease', () => {
     expect(first[0]?.type).toBe('run_started');
   });
 
+  it('a dispatch waiting on a live lease does not re-run a run that ENDED meanwhile (a wall-clock bound, outcome unknown)', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    const tdb = forTenant(db, TENANT);
+    // Another execution holds the run: its header reads `running` and its lease is live.
+    await markRunHeaderRunning(tdb, {
+      runId,
+      backend: 'openai',
+      authMode: 'api-key',
+      agentName: baseSpec.name,
+      model: baseSpec.model,
+    });
+    await seedForeignLease(runId, Date.now() + 60_000);
+    const handle = await executor.enqueue(TENANT, {
+      runId,
+      tenantId: TENANT,
+      agentId: 'echo-agent',
+      input: 'wait-then-ended',
+    });
+    // The second dispatch is waiting on the lease.
+    await new Promise((r) => setTimeout(r, 1_000));
+    expect(backend.liveRuns).toBe(0);
+    // The holder ends on its wall-clock bound with the provider call's outcome unknown, records it,
+    // and gives its lease up — what an execution does as it ends.
+    await recordRunTimedOut(tdb, runId, { boundMs: 1_000, phase: 'outcome-unknown' });
+    await db.$client.unsafe(
+      `UPDATE idempotency_keys SET snapshot = jsonb_set(snapshot, '{leaseUntil}', '0'::jsonb)
+       WHERE scope = $1 AND idem_key = $2`,
+      [RUN_STARTED_SCOPE, runId],
+    );
+    // The waiter takes the lease over, finds the run ended, and completes without running it.
+    expect(await waitForTerminal(handle.jobId)).toBe('succeeded');
+    await new Promise((r) => setTimeout(r, 200));
+    expect(backend.liveRuns).toBe(0);
+    // The record of how the run ended is kept, not cleared for a re-run.
+    const steps = (await db.$client.unsafe(
+      'SELECT idempotency_key FROM journal_steps WHERE run_id = $1',
+      [runId],
+    )) as unknown as Array<{ idempotency_key: string }>;
+    expect(steps.map((r) => r.idempotency_key)).toEqual([RUN_BOUND_STEP_KEY]);
+    const header = (await db.$client.unsafe('SELECT status FROM runs WHERE run_id = $1', [
+      runId,
+    ])) as unknown as Array<{ status: string }>;
+    expect(header[0]?.status).toBe('error');
+  });
+
   it('an execution whose lease is taken over stops its own run', async () => {
     testsRan += 1;
     process.env.RAYSPEC_AGENT_KILL_GRACE_MS = '100';
@@ -273,6 +344,35 @@ describe('one execution at a time — the started-once lease', () => {
     // completing alongside the other execution — although the backend's gate is never released.
     expect(await waitForTerminal(handle.jobId, 10_000)).toBe('failed');
     backend.releaseGate();
+  });
+});
+
+describe('what the engine stores for a failed run', () => {
+  it('the error a run threw is redacted before the engine stores it', async () => {
+    testsRan += 1;
+    const runId = randomUUID();
+    const handle = await executor.enqueue(TENANT, {
+      runId,
+      tenantId: TENANT,
+      agentId: 'leaky-agent',
+      input: 'fails',
+    });
+    expect(await waitForTerminal(handle.jobId)).toBe('failed');
+    const sys = postgres(engine?.systemDatabaseUrl as string, { max: 1 });
+    try {
+      const stored = (await sys.unsafe(
+        `SELECT coalesce(error, '') AS error FROM dbos.operation_outputs WHERE workflow_uuid = $1
+         UNION ALL
+         SELECT coalesce(error, '') FROM dbos.workflow_status WHERE workflow_uuid = $1`,
+        [handle.jobId],
+      )) as unknown as Array<{ error: string }>;
+      const text = stored.map((r) => r.error).join('\n');
+      // The failure is stored, and it says what failed — without the credential it quoted.
+      expect(text).toContain('provider refused');
+      expect(text).not.toContain(LEAKED_KEY);
+    } finally {
+      await sys.end();
+    }
   });
 });
 
@@ -357,6 +457,6 @@ describe('queue admission under a burst', () => {
 
 describe('execution bounds — ran-guard (not skippable-as-green)', () => {
   it('the bounds tests ACTUALLY RAN', () => {
-    expect(testsRan).toBe(4);
+    expect(testsRan).toBe(6);
   });
 });
