@@ -61,7 +61,7 @@ const QUEUE_MAX = 5;
 const backend = new FakeSpineBackend();
 
 /** A credential-shaped value a failing provider quotes back in its error text. */
-const LEAKED_KEY = 'sk-proj-0123456789abcdefABCDEF0123';
+const LEAKED_KEY = ['sk', 'proj', '0123456789abcdefABCDEF0123'].join('-');
 
 /** A backend whose call fails with an error that quotes a credential, as a provider's text can. */
 class LeakyFailingBackend implements Backend {

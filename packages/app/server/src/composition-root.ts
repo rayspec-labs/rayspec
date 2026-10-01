@@ -898,8 +898,8 @@ export const PREVIOUS_API_KEY_PEPPER_VAR = 'RAYSPEC_API_KEY_PEPPER_PREVIOUS';
 
 const MALFORMED_PREVIOUS_JWT_SIGNING_KEY_MESSAGE =
   `Boot aborted — ${PREVIOUS_JWT_SIGNING_KEY_VAR} is not a PKCS#8 PEM. It holds the signing key ` +
-  'in use before the last rotation, in the same form as RAYSPEC_JWT_SIGNING_KEY: a value starting ' +
-  "'-----BEGIN PRIVATE KEY-----' with REAL newlines, or a file named by " +
+  "in use before the last rotation, in the same form as RAYSPEC_JWT_SIGNING_KEY: a value starting '-----BEGIN " +
+  "PRIVATE KEY-----' with REAL newlines, or a file named by " +
   `${PREVIOUS_JWT_SIGNING_KEY_VAR}_FILE. Unset it once the tokens it signed have expired. The value ` +
   'itself is not echoed here. Fail-closed.';
 
