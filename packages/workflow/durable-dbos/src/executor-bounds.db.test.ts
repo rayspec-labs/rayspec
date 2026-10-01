@@ -189,7 +189,7 @@ describe('one execution at a time — the started-once lease', () => {
   it('a dispatch that finds a LIVE lease waits, and runs only once the lease lapses', async () => {
     testsRan += 1;
     const runId = randomUUID();
-    const leaseUntil = Date.now() + 1_500;
+    const leaseUntil = Date.now() + 5_000;
     await seedForeignLease(runId, leaseUntil);
     const handle = await executor.enqueue(TENANT, {
       runId,
@@ -198,7 +198,7 @@ describe('one execution at a time — the started-once lease', () => {
       input: 'wait-for-lease',
     });
     // While the other execution's lease is live, this dispatch does not run the backend.
-    await new Promise((r) => setTimeout(r, 900));
+    await new Promise((r) => setTimeout(r, 3_500));
     expect(Date.now()).toBeLessThan(leaseUntil);
     expect(backend.liveRuns).toBe(0);
     // Once it lapses, the (untainted) run is taken over and runs.
