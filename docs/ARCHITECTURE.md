@@ -164,9 +164,11 @@ The validation is deliberately one-sided: a preflight's answer is checked, a
 `resolveAuth()` answer is still taken as given. That asymmetry is what keeps the
 older contract byte-identical — validating it now would newly refuse a backend
 that answers off-vocabulary at runtime, where that run completes today. The
-preflight is also unbounded: it holds the run until it returns, and on the durable
-path it does so inside the transaction the worker wraps the run in, so a hanging
-remote preflight pins a pooled connection for its duration.
+preflight is bounded by the execution policy's provider-call timeout
+(`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`) when one applies: a preflight that does not
+answer in time refuses the run with the neutral `timeout` class before anything is
+written. Without a timeout it holds the run until it returns; it holds no database
+connection while it waits.
 
 ### 2. The fail-closed tenant chokepoint
 
@@ -537,8 +539,10 @@ hangs is reported unreachable rather than leaving the probe without an answer; l
 (`GET /livez`) only says the process answers. Neither names a host, a path or a secret. The boot
 banner's route list is kept as it was, so a legacy deploy prints the same output; it does not list
 `/livez`. Under `RAYSPEC_HOSTING_POSTURE=managed`
-the public `/recovery-scope` probe is not registered, and cross-process run cancellation is on
-by default (`RAYSPEC_RUN_CANCEL_POLL_MS` 2000 unless set); `inspectHosting()` reports both.
+the public `/recovery-scope` probe is not registered, cross-process run cancellation is on
+by default (`RAYSPEC_RUN_CANCEL_POLL_MS` 2000 unless set), every bound of the execution policy has a
+default, and a backend outside the supported-backend matrix refuses the boot; `inspectHosting()`
+reports all of it.
 
 ---
 

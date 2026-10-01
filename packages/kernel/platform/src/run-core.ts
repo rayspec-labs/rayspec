@@ -36,6 +36,7 @@ import {
   classifyUpstreamError,
   computeCost,
   isErrorClass,
+  ProviderCallTimeoutError,
   reconcileCost,
 } from '@rayspec/core';
 import { schema, type TenantDb } from '@rayspec/db';
@@ -187,6 +188,23 @@ async function observeAbandonedCall(
       ),
       unknown,
     ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Settle with `work`, or reject with `onTimeout()` once `ms` pass first. The timer is unref'd and
+ * cleared when the race settles; a late rejection of `work` is already handled by the race.
+ */
+async function withDeadline<T>(work: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(onTimeout()), ms);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([work, deadline]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -499,6 +517,9 @@ export async function runAgent(
     requireNativeStructuredOutput: opts.requireNativeStructuredOutput,
   });
 
+  // The execution policy this run is bounded by, read once per run.
+  const policy = opts.policy ?? resolveExecutionPolicy();
+
   // The run's effective instant — every journaled step is priced as-of THIS timestamp from
   // the effective-dated registry, so all steps in a run cost consistently. Runs are
   // priced as-of EXECUTION TIME (now) — `runAt` is the wall clock at this live run. There is NO
@@ -597,7 +618,11 @@ export async function runAgent(
   // context-aware preflight is asked THERE instead — it receives the server-derived run identity and
   // returns a mode it has actually BOUND; the answer is validated against the neutral vocabulary and a
   // refusal ends the run before this line's consumers exist.
-  const authMode = await resolvePreRunAuthMode(backend, {
+  //
+  // The resolution is a provider call too — a remote preflight can hang — so it is bounded by the
+  // policy's provider-call timeout when one applies: past it the run is refused with the neutral
+  // `timeout` class before anything is written, as any other preflight refusal is.
+  const preflight = resolvePreRunAuthMode(backend, {
     runId,
     tenantId: tdb.tenantId,
     agentName: spec.name,
@@ -606,6 +631,13 @@ export async function runAgent(
       ? {}
       : { credentialBindingRef: opts.credentialBindingRef }),
   });
+  const preflightTimeoutMs = policy.requestTimeoutMs.value;
+  const authMode =
+    preflightTimeoutMs === undefined
+      ? await preflight
+      : await withDeadline(preflight, preflightTimeoutMs, () => {
+          return new ProviderCallTimeoutError(`${backend.id} auth preflight`, preflightTimeoutMs);
+        });
 
   // Publish the run header NOW that the run is starting, so the run-read routes resolve this runId
   // while the run is in flight instead of only once it finishes. Additive: this INSERTS a missing
@@ -721,7 +753,6 @@ export async function runAgent(
   // `opts.taintDb ?? tdb` — the AUTONOMOUS-COMMIT contract stated on that option — because a read that
   // failed inside the run's own transaction would abort it server-side and take the run down with it,
   // and because a timer is the one seam that can fire with no call chain to consult `abandoned`.
-  const policy = opts.policy ?? resolveExecutionPolicy();
   const cancelPollMs = policy.cancelPollMs.value;
   const cancellation = armRunCancellation(
     runId,

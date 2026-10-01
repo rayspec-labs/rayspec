@@ -28,6 +28,7 @@ import type {
 import { classifyUpstreamError } from '@rayspec/core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RunAbandonedError, RunBoundTimeoutError } from './agent-bounds.js';
+import { resolveExecutionPolicy } from './execution-policy.js';
 import { runAgent } from './run-core.js';
 import { insertEnqueuedRunHeader } from './run-header.js';
 import { isRunTainted } from './run-taint.js';
@@ -483,6 +484,30 @@ describe('per-run wall-clock bound', () => {
       }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     expect(await runHeaderStatus('bound-durable-no-header')).toBe('error');
+  });
+
+  it('an auth preflight that never answers is refused at the provider-call timeout, before anything is written', async () => {
+    const backend = {
+      id: 'openai' as const,
+      async resolveAuth() {
+        return 'api-key' as const;
+      },
+      preflightAuth: () => new Promise<never>(() => {}),
+      async run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+        return completedResult(ctx);
+      },
+    };
+    const started = Date.now();
+    const err = await runAgent(forTenant(appDb, TENANT_A), backend as unknown as Backend, spec, {
+      runId: 'bound-preflight',
+      policy: resolveExecutionPolicy({ RAYSPEC_AGENT_REQUEST_TIMEOUT_MS: '150' }),
+    }).catch((e: unknown) => e);
+    expect(classifyUpstreamError(err).errorClass).toBe('timeout');
+    expect((err as Error).message).toContain('auth preflight');
+    expect(Date.now() - started).toBeLessThan(2_000);
+    // Refused before the header transition: nothing about the run was written.
+    expect(await runHeaderStatus('bound-preflight')).toBeUndefined();
+    expect(await countJournalSteps('bound-preflight')).toBe(0);
   });
 
   it('UNSET: a run slower than any bound still completes (today’s unbounded behaviour)', async () => {
