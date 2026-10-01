@@ -3,7 +3,9 @@
 The platform composition surface. Ships the extension seam (`defineExtension`) that
 extensions import, plus concrete deployer-injected backends such as the fs-backed
 `BlobStore` (tenant-bound by construction and path-jailed; the neutral `BlobStore`
-interface itself lives in `@rayspec/handler-sdk`).
+interface itself lives in `@rayspec/handler-sdk`). `listFsBlobs(root)` walks a whole fs blob
+root for the operator's snapshot: every stored object of every tenant with the length and digest
+its header states, sorted by tenant and key, refusing anything the store would not have written.
 
 Part of [RaySpec](https://rayspec.dev) — **file-deployable AI infrastructure**: describe a
 product's backend in one declarative YAML file, and RaySpec stands up accounts and
