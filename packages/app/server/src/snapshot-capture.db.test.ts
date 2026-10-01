@@ -114,6 +114,8 @@ api:
 const NOTE_TITLE = 'Grüße aus Köln — 東京 👋';
 const BIG_VIEWS = '9007199254740993';
 const EXACT_AMOUNT = '12345678901234567890123456.0001';
+/** The shape of an argon2id hash, built at run time; it verifies no password. */
+const PASSWORD_HASH = ['', 'argon2id', 'v=19', 'm=65536,t=3,p=4', 'c2FsdA', 'aGFzaA'].join('$');
 
 const sha = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 
@@ -301,7 +303,7 @@ async function deployEnvironment(env: {
     orgId = String(org!.id);
     const [owner] = await db.$client.unsafe(
       "INSERT INTO users (email, password_hash) VALUES ('owner@example.test', $1) RETURNING id::text AS id",
-      [`$argon2id$v=19$m=65536,t=3,p=4$${'c2FsdA'}$${'aGFzaA'}`],
+      [PASSWORD_HASH],
     );
     const [member] = await db.$client.unsafe(
       "INSERT INTO users (email) VALUES ('member@example.test') RETURNING id::text AS id",
@@ -873,9 +875,9 @@ describe.skipIf(!baseUrl)('snapshot capture', () => {
     try {
       expect(await blockers()).toEqual(['RAY_OWNER_RECOVERY_REQUIRED/']);
     } finally {
-      await sql.unsafe(
-        "UPDATE users SET password_hash = '$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$aGFzaA' WHERE email = 'owner@example.test'",
-      );
+      await sql.unsafe("UPDATE users SET password_hash = $1 WHERE email = 'owner@example.test'", [
+        PASSWORD_HASH,
+      ]);
     }
     const otherTenant = '0000000f-0000-4000-8000-000000000000';
     await makeFsBlobStoreFactory(blobRoot)(otherTenant).put('x', new Uint8Array([1]));

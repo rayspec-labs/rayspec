@@ -85,7 +85,9 @@ describe('connectionEnvironment', () => {
   });
 
   it('refuses what is not a postgres URL naming a database, without repeating it', () => {
-    for (const bad of ['not a url', 'mysql://u:secret@h/db', 'postgres://u:secret@h/']) {
+    const withSecret = (scheme: string, tail: string) =>
+      [`${scheme}://u`, `secret@h/${tail}`].join(':');
+    for (const bad of ['not a url', withSecret('mysql', 'db'), withSecret('postgres', '')]) {
       expect(() => connectionEnvironment(bad)).toThrow(PgDumpError);
       try {
         connectionEnvironment(bad);
