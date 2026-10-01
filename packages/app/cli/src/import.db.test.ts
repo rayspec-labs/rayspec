@@ -610,6 +610,17 @@ describe.skipIf(!baseUrl)('rayspec import — a source, an export and one target
       const again = await cli(importArgs(source.bundle, ['--dry-run']));
       expect(again.code).toBe(4);
       expect(again.envelope.errors[0]).toMatchObject({ code: 'RAY_TARGET_NOT_EMPTY' });
+      // A discard drops nothing in a database that does not record the failed import's deployment.
+      const recordPath = join(stateDir, 'import.json');
+      const record = readFileSync(recordPath, 'utf8');
+      const failedId = (JSON.parse(record) as { deploymentId: string }).deploymentId;
+      expect(failedId).toMatch(/^[0-9a-f]{16}$/);
+      writeFileSync(recordPath, record.replace(failedId, 'ffffffffffffffff'), { mode: 0o600 });
+      const elsewhere = await cli(['import', '--target', stateDir, '--discard-failed']);
+      expect(elsewhere.code).toBe(2);
+      expect(elsewhere.envelope.errors[0]).toMatchObject({ code: 'RAY_USAGE' });
+      expect(await contents(TARGET_DB)).toBeGreaterThan(0);
+      writeFileSync(recordPath, record, { mode: 0o600 });
       const discarded = await cli(['import', '--target', stateDir, '--discard-failed']);
       expect(discarded.code, discarded.stderr).toBe(0);
       await expectTargetUntouched();

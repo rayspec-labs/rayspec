@@ -211,7 +211,8 @@ fence with `rayspec resume` at the epoch the export reported.
 `--discard-failed` removes every object the migration role owns in both target databases (it owns
 everything the import restored), everything in the blob root, and the deployment and import records
 of the state directory; the receipts stay. It refuses a target that is ready for its cutover or holds
-a deployment. The source is never touched by an import, whatever happens.
+a deployment, and touches no database that does not record the failed import's deployment id (or,
+when the restore failed before the application database, holds anything at all). The source is never touched by an import, whatever happens.
 
 ## Receipts
 

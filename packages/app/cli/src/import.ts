@@ -779,15 +779,10 @@ async function discard(
   }
   const control = server.openControlDatabase(config.migrationDatabaseUrl, 2);
   try {
-    const identity = await server.readEnvironmentIdentity(control).catch(() => null);
-    if (identity?.deploymentId != null && identity.deploymentId !== record.deploymentId) {
-      refuse(
-        'RAY_USAGE',
-        'the database named by the environment belongs to another deployment than the failed import',
-      );
-    }
     progress(`discarding the failed import ${record.operationId}`);
-    const discarded = await server.discardImportTarget(control, config);
+    const discarded = await server.discardImportTarget(control, config, {
+      deploymentId: record.deploymentId,
+    });
     if (!discarded.ok) return answer(null, discarded.errors);
     await dir.removeDeploymentState();
     return answer(

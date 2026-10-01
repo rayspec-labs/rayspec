@@ -56,6 +56,7 @@ import {
   CONTRACT_VERSION,
   formatTimestamp,
   type ObjectIndex,
+  RUNTIME_CONTROL_TABLES,
   SNAPSHOT_PATHS,
   type Snapshot,
 } from '@rayspec/bundle-contract';
@@ -111,6 +112,11 @@ export interface ImportTargetInspection {
 function databaseNameOf(url: string): string {
   return decodeURIComponent(new URL(url).pathname.replace(/^\//, ''));
 }
+
+/** The runtime-control tables, which hold the target's own state once the restore created them. */
+const RUNTIME_CONTROL_TABLE_NAMES: ReadonlySet<string> = new Set(
+  RUNTIME_CONTROL_TABLES.map((t) => t.table),
+);
 
 /** Everything in a database an import would merge with; all zero in an empty one. */
 async function databaseContents(db: Db): Promise<Record<string, number>> {
@@ -630,6 +636,17 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
             throw verificationFailed('a dump changed while it was restored', 'entry-sha256');
           }
           foreignKeys += dump.plan.foreignKeys;
+          if (dump.database === 'application') {
+            // The target's own runtime-control state, at once: its deployment id is how a discard
+            // knows the database is the one this import changed.
+            await control.$client.begin(async (tx) => {
+              await ensureRuntimeControlState(tx);
+              await tx.unsafe(
+                'UPDATE runtime_control_state SET deployment_id = $1, updated_at = now() WHERE id = 1',
+                [options.deploymentId],
+              );
+            });
+          }
         }
 
         // 2. Exactly one organization, whatever snapshot.json says.
@@ -731,6 +748,9 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
             );
           }
           for (const t of expected) {
+            // The runtime-control tables are the target's own from the restore on; the allowlist
+            // let no row of the source's into them.
+            if (database === 'application' && RUNTIME_CONTROL_TABLE_NAMES.has(t.table)) continue;
             const [row] = (await db.$client.unsafe(
               `SELECT count(*)::text AS n FROM "${t.schema}"."${t.table}"`,
             )) as unknown as { n: string }[];
@@ -797,14 +817,6 @@ export async function restoreImport(options: RestoreImportOptions): Promise<Rest
         }
         if (config.blobRoot !== null) await verifyObjects(config.blobRoot, opened.objectIndex);
 
-        // 6. The target's own runtime-control state.
-        await control.$client.begin(async (tx) => {
-          await ensureRuntimeControlState(tx);
-          await tx.unsafe(
-            'UPDATE runtime_control_state SET deployment_id = $1, updated_at = now() WHERE id = 1',
-            [options.deploymentId],
-          );
-        });
         return { tenantId, foreignKeys };
       },
       { timeoutMs: options.lockTimeoutMs },
@@ -1032,7 +1044,47 @@ async function discardDatabases(control: Db, workflowSystemUrl: string): Promise
 export async function discardImportTarget(
   control: Db,
   config: ImportTargetConfig,
+  failed: { deploymentId: string },
 ): Promise<{ ok: true } | { ok: false; errors: BundleError[] }> {
+  // Only the database this import changed: it records the import's deployment id, or it holds no
+  // relation at all (the restore failed before the application database).
+  try {
+    const [found] = (await control.$client.unsafe(
+      `SELECT to_regclass('public.runtime_control_state') IS NOT NULL AS control,
+              (SELECT count(*)::int FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                  AND n.nspname NOT LIKE 'pg\\_%') AS relations`,
+    )) as unknown as { control: boolean; relations: number }[];
+    let owner: string | null = null;
+    if (found?.control === true) {
+      const [row] = (await control.$client.unsafe(
+        'SELECT deployment_id FROM runtime_control_state WHERE id = 1',
+      )) as unknown as { deployment_id: string | null }[];
+      owner = row?.deployment_id ?? null;
+    }
+    if (owner !== failed.deploymentId && (found?.relations ?? 0) > 0) {
+      return {
+        ok: false,
+        errors: [
+          bundleError(
+            'RAY_USAGE',
+            'the database the environment names does not hold the failed import of this state ' +
+              'directory; nothing was discarded',
+          ),
+        ],
+      };
+    }
+  } catch {
+    return {
+      ok: false,
+      errors: [
+        bundleError(
+          'RAY_INFRA_UNAVAILABLE',
+          "the target's databases could not be read; check that they are reachable and retry",
+        ),
+      ],
+    };
+  }
   try {
     await withSchemaLock(control, async () => {
       await discardDatabases(control, config.migrationWorkflowSystemDatabaseUrl);
