@@ -34,6 +34,8 @@ const REFUSED: readonly [string, string][] = [
   ['https://example.com', 'a URL'],
   ['example.com:443', 'a port'],
   ['Example.com', 'an uppercase letter'],
+  ['example.COM', 'an uppercase last label'],
+  ['shop.XN--bcher-kva', 'an uppercase IDNA last label'],
   ['example.c0m', 'a last label that is not alphabetic'],
   ['localhost', 'a single label'],
   ['-api.example.com', 'a label that starts with a hyphen'],

@@ -17,6 +17,7 @@ import {
   providerCredentialSources,
   providerCredentialSupplied,
   providerCredentialWithSource,
+  readCredentialFile,
   resetGrantedProviderCredentialsForTests,
 } from './provider-credentials.js';
 
@@ -114,6 +115,28 @@ describe('providerCredential', () => {
     expect(err.message).toContain(says);
     expect(err.message).not.toContain(CANARY);
     expect(err.message).not.toContain('the-plain-one');
+  });
+});
+
+describe.skipIf(typeof process.getuid !== 'function')('the owner of a credential file', () => {
+  it('a private file of the runtime user is read', () => {
+    const path = file('own', CANARY);
+    expect(readCredentialFile('OPENAI_API_KEY_FILE', path, process.getuid?.())).toBe(CANARY);
+  });
+
+  it('a private file of another user is refused as insecure, naming no byte of it', () => {
+    const path = file('foreign', CANARY);
+    const other = (process.getuid?.() ?? 0) + 1;
+    let err: unknown;
+    try {
+      readCredentialFile('OPENAI_API_KEY_FILE', path, other);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(CredentialFileError);
+    expect((err as CredentialFileError).insecure).toBe(true);
+    expect((err as CredentialFileError).message).toContain('not owned by the user');
+    expect((err as CredentialFileError).message).not.toContain(CANARY);
   });
 });
 

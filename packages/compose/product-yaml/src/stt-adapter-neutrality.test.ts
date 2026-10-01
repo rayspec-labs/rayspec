@@ -47,6 +47,17 @@ const CONFINED_PROVIDER_FILES = [
   join(sttAdapterPackageRoot, 'src/deepgram-adapter.live.test.ts'),
 ];
 
+/**
+ * Reviewed test files that are not provider access but trip the scan, each with why: they reach no
+ * provider and read no key. A new entry is a review decision, like an entry above.
+ */
+const REVIEWED_LOCAL_TEST_FILES = [
+  // Serves a fake provider on 127.0.0.1 that never answers, to prove the request timeout.
+  join(sttAdapterPackageRoot, 'src/hanging-provider.test.ts'),
+  // Asserts that a refused key is reported by its NAME (DEEPGRAM_API_KEY); the adapter is given a fake fetch.
+  join(sttAdapterPackageRoot, 'src/deepgram-adapter.test.ts'),
+];
+
 // ── Confinement scan config — the same constants the removed harness used ─────────
 /** Executable source extensions scanned for network/key access (README/manifest can name the strings
  *  legitimately, so non-code files are not scanned). */
@@ -460,6 +471,10 @@ describe('STT provider-neutral public surface (structural allowlist)', () => {
 describe('STT live-provider confinement', () => {
   it('confines ALL live provider access to the manifest-declared provider adapter file(s)', () => {
     const declared = new Set(CONFINED_PROVIDER_FILES.map((path) => resolve(path)));
+    const reviewed = new Set(REVIEWED_LOCAL_TEST_FILES.map((path) => resolve(path)));
+    for (const path of reviewed) {
+      expect(existsSync(path), `reviewed test file is missing: ${rel(path)}`).toBe(true);
+    }
     for (const path of declared) {
       expect(existsSync(path), `declared confined provider file is missing: ${rel(path)}`).toBe(
         true,
@@ -478,6 +493,7 @@ describe('STT live-provider confinement', () => {
         if (hits.length > 0) confinedFilesWithAccess += 1;
         continue;
       }
+      if (reviewed.has(resolved)) continue;
       for (const hit of hits) breaches.push(`  - ${rel(resolved)}:${hit.line}: ${hit.signal}`);
     }
     expect(

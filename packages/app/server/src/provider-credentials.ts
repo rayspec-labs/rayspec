@@ -94,9 +94,14 @@ function uid(): number | undefined {
 /**
  * Read a credential from the file a `<NAME>_FILE` variable names, refusing anything that is not a
  * private regular file of the user the runtime runs as. Messages name the variable and the path, never
- * a byte of the file.
+ * a byte of the file. `owner` is the user the file must belong to: the runtime's own, or none where
+ * the platform has no user ids.
  */
-function readCredentialFile(variable: string, path: string): string {
+export function readCredentialFile(
+  variable: string,
+  path: string,
+  owner: number | undefined = uid(),
+): string {
   const refuse = (why: string, insecure = false) =>
     new CredentialFileError(
       `Boot aborted — ${variable} points at '${path}', which ${why}. A credential file must be a ` +
@@ -117,7 +122,6 @@ function readCredentialFile(variable: string, path: string): string {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw refuse('is not a regular file', true);
-    const owner = uid();
     if (owner !== undefined && stat.uid !== owner) {
       throw refuse('is not owned by the user the runtime runs as', true);
     }
