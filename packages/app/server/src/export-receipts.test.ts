@@ -6,7 +6,15 @@
  * database-backed export suite of the CLI.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bundleError, CONTRACT_VERSION } from '@rayspec/bundle-contract';
@@ -85,7 +93,15 @@ describe('the local receipt of an export', () => {
       now: at,
     });
     const path = join(dir.root, 'receipts', `${exportReceiptName(operationId)}.json`);
-    expect(statSync(path).mode & 0o777).toBe(0o600);
+    // Judge and read the receipt through one descriptor, so the mode checked is the file read.
+    const fd = openSync(path, 'r');
+    let receiptText: string;
+    try {
+      expect(fstatSync(fd).mode & 0o777).toBe(0o600);
+      receiptText = readFileSync(fd, 'utf8');
+    } finally {
+      closeSync(fd);
+    }
     expect(statSync(join(dir.root, 'receipts')).mode & 0o777).toBe(0o700);
     const receipt = readReceipt(dir, operationId);
     expect(receipt).toMatchObject({
@@ -110,7 +126,7 @@ describe('the local receipt of an export', () => {
       'rayspec resume --deployment abcdef0123456789 --fence-epoch 1',
     );
     // The recipient is covered by the digest, never written.
-    expect(readFileSync(path, 'utf8')).not.toContain(RECIPIENT);
+    expect(receiptText).not.toContain(RECIPIENT);
   });
 
   it('records a refusal by its code and reason, never its message', async () => {

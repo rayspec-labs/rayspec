@@ -39,9 +39,12 @@ import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -795,8 +798,15 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     // The receipts: every transition, locally and in the environment.
     const operationId = run.envelope.operationId as string;
     const receiptPath = join(state(), 'receipts', `export-${operationId}.json`);
-    expect(statSync(receiptPath).mode & 0o777).toBe(0o600);
-    const receiptText = readFileSync(receiptPath, 'utf8');
+    // Judge and read the receipt through one descriptor, so the mode checked is the file read.
+    const receiptFd = openSync(receiptPath, 'r');
+    let receiptText: string;
+    try {
+      expect(fstatSync(receiptFd).mode & 0o777).toBe(0o600);
+      receiptText = readFileSync(receiptFd, 'utf8');
+    } finally {
+      closeSync(receiptFd);
+    }
     const receipt = JSON.parse(receiptText) as ParsedJson;
     expect(receipt).toMatchObject({
       operation: 'export',
