@@ -22,17 +22,11 @@
  * and compared for equality — and then compared against the absolute expected value, so the equality
  * can never be green on two empty shapes.
  *
- * TWO MEASURED FACTS SHAPE THESE ASSERTIONS. A run holds its `runs` header at an uncommitted
- * `running` inside its own transaction, so another connection reads the pre-run `enqueued` — never
- * `running`. And the enqueue-time header must exist BEFORE the run (the fixture writes it, as the run
- * surface does, outside the run's transaction), or a cancelled run's rollback leaves no `runs` row at
- * all and the terminal comparison compares two absences.
- *
- * ONE ARM IS DELIBERATELY NOT THE DURABLE SHAPE. What a cancelled run leaves in its journal is
- * decided by whether it ran inside a transaction, not by which process cancelled it, so the last
- * test runs the SYNCHRONOUS shape — `runAgent` on a plain tenant handle, no transaction, no
- * `taintDb`, as the run surface invokes it — and pins that its committed steps SURVIVE beside the
- * cancellation. Both shapes are documented; neither claim rests on the other's measurement.
+ * WHAT A CANCELLED RUN LEAVES. No transaction is held across a run, so the steps it journaled before
+ * it was ended are kept beside the cancellation, and the cancellation states what happened to the
+ * provider call: the fixture's backend honours its signal, so the record says the call was stopped.
+ * The last test runs the SYNCHRONOUS shape — `runAgent` on a plain tenant handle with no `taintDb`, as
+ * the run surface invokes it — and pins that it leaves exactly what the durable shape leaves.
  *
  * This file never skips: `makeTestDb()` throws without DATABASE_URL, and the ran-guard at the bottom
  * fails loudly if the arms above did not execute.
@@ -218,8 +212,23 @@ const CANCELLED_SHAPE = {
       error_class: 'cancelled',
       idempotency_key: 'run:cancelled',
     },
+    {
+      type: 'llm',
+      status: 'ok',
+      error_class: null,
+      idempotency_key: 'llm:cross-process:0',
+    },
   ],
 };
+
+/** What the recorded cancellation states about the run's provider call. */
+async function cancellationPhase(runId: string): Promise<string | null> {
+  const rows = (await db.$client.unsafe(
+    "SELECT output->>'phase' AS phase FROM journal_steps WHERE run_id = $1 AND type = 'cancel'",
+    [runId],
+  )) as unknown as Array<{ phase: string | null }>;
+  return rows[0]?.phase ?? null;
+}
 
 /**
  * Wrap a TenantDb so a test can watch (or break) exactly the handle the poll reads through. `onUse`
@@ -393,12 +402,15 @@ describe('ACCEPTANCE 1 — a run in a second process observes the cancellation a
     const childOutcome = await child.done;
     const observedMs = Date.now() - markedAt;
 
-    // The step set first: it is what makes a failure here read as "the run was not ended" rather than
-    // as a timeout. Without the poll the child burns the whole gate, completes, and COMMITS — leaving
-    // the `llm` step beside the cancellation step, and taking BACKEND_GATE_MS to do it.
+    // The outcome first: it is what makes a failure here read as "the run was not ended" rather than
+    // as a timeout. Without the poll the child burns the whole gate and completes, taking
+    // BACKEND_GATE_MS to do it.
     expect(childOutcome).toMatchObject({ outcome: 'cancelled', errorName: 'RunCancelledError' });
     const crossShape = await terminalShape(childCfg.runId);
     expect(crossShape).toEqual(CANCELLED_SHAPE);
+    // The child's backend was told to stop and did: the record says so, observed in the child.
+    expect(childOutcome.sawAbort).toBe(true);
+    expect(await cancellationPhase(childCfg.runId)).toBe('call-aborted');
 
     // The in-process control: the SAME fixture function, the SAME shape, cancelled the way the
     // in-process path cancels — marker then signal — with no poll configured in this process.
@@ -419,6 +431,7 @@ describe('ACCEPTANCE 1 — a run in a second process observes the cancellation a
     // so the equality cannot be satisfied by two empty shapes.
     expect(crossShape).toEqual(controlShape);
     expect(controlShape).toEqual(CANCELLED_SHAPE);
+    expect(await cancellationPhase(localCfg.runId)).toBe('call-aborted');
     // And it was prompt: the run stopped burning the gate instead of running it out.
     expect(observedMs).toBeLessThan(OBSERVE_WITHIN_MS);
   });
@@ -449,13 +462,15 @@ describe('the managed hosting posture turns the cross-process poll on by default
     const child = spawnCrossProcessRun(childCfg, { env: {} });
     await child.inGate;
     await markRunCancelled(forTenant(appDb, TENANT_A), childCfg.runId);
-    // Nothing re-reads the marker, so the run burns its gate and completes.
+    // Nothing re-reads the marker, so the run burns its gate and completes — and its record says the
+    // cancellation came after the call had finished.
     expect(await child.done).toMatchObject({ outcome: 'completed' });
+    expect(await cancellationPhase(childCfg.runId)).toBe('after-call');
   });
 });
 
 describe('ACCEPTANCE 3 — a cancelled run that fired a non-idempotent tool stays quarantined', () => {
-  it('the taint survives the rollback, the run stays marked cancelled, and the journal shows only the cancellation', async () => {
+  it('the taint is kept, the run stays marked cancelled, and the journal keeps the tool step beside the cancellation', async () => {
     testsRan += 1;
     const childCfg = config('cross-tainted', { fireNonIdempotentTool: true });
     const child = spawnCrossProcessRun(childCfg, 100);
@@ -464,14 +479,15 @@ describe('ACCEPTANCE 3 — a cancelled run that fired a non-idempotent tool stay
     expect(await child.done).toMatchObject({ outcome: 'cancelled' });
 
     const tdb = forTenant(appDb, TENANT_A);
-    // The taint was committed on the AUTONOMOUS handle before the side effect, so the run's rollback
-    // could not take it — the evidence that a non-idempotent tool already fired is still there.
+    // The taint was committed before the side effect — the evidence that a non-idempotent tool
+    // already fired is there.
     expect(await isRunTainted(tdb, childCfg.runId)).toBe(true);
     // Still marked cancelled, so no dispatch (fresh or recovery) can ever run it again.
     expect(await isRunCancelled(tdb, childCfg.runId)).toBe(true);
-    // And the ledger shows the cancellation only: the tool step it journaled inside the transaction
-    // went down with the rollback, exactly as a cancelled run's other writes do.
-    expect(await terminalShape(childCfg.runId)).toEqual(CANCELLED_SHAPE);
+    // And the ledger keeps the tool step the run journaled: the effect happened and is on record.
+    const shape = await terminalShape(childCfg.runId);
+    expect(shape.headerStatus).toBe('error');
+    expect(shape.steps.map((st) => st.type).sort()).toEqual(['cancel', 'llm', 'tool']);
   });
 });
 
@@ -492,8 +508,8 @@ describe('a poll read that FAILS can neither end a run nor fail one', () => {
     expect(uses.filter((m) => m === 'select').length).toBeGreaterThan(0);
     expect(outcome).toEqual({ outcome: 'completed', errorName: null });
     expect(backend.sawAbort).toBe(false);
-    // The run's transaction COMMITTED: its header is terminal and the step it journaled inside is
-    // there. A failed read cost the run nothing at all.
+    // The run completed: its header is terminal and the step it journaled is there. A failed read
+    // cost the run nothing at all.
     expect(await terminalShape(cfg.runId)).toEqual({
       headerStatus: 'completed',
       steps: [
@@ -508,15 +524,12 @@ describe('a poll read that FAILS can neither end a run nor fail one', () => {
   });
 });
 
-describe('what a cancelled run leaves in its journal follows the INVOCATION SHAPE', () => {
-  it('the synchronous shape has no transaction to roll back, so it KEEPS the steps it committed', async () => {
+describe('what a cancelled run leaves does not depend on the INVOCATION SHAPE', () => {
+  it('the synchronous shape leaves exactly what the durable shape leaves', async () => {
     testsRan += 1;
-    // Every arm above runs the DURABLE shape — `runAgent` inside `tdb.transaction()` — where the
-    // rollback is what leaves a cancelled run with the single `cancelled` step. The SYNCHRONOUS HTTP
-    // path runs `runAgent` on a plain tenant handle with no transaction and no `taintDb` (the run
-    // surface's `forTenant(deps.db, tenantId)`), so there is nothing to roll back and the steps it
-    // journaled are already committed when the cancellation lands. Both shapes are documented; this
-    // pins the one the durable arms cannot reach, so neither claim can quietly stop being true.
+    // The SYNCHRONOUS HTTP path runs `runAgent` on a plain tenant handle with no `taintDb` (the run
+    // surface's `forTenant(deps.db, tenantId)`). Neither shape holds a transaction across the run, so
+    // a cancelled run keeps the steps it committed in both, beside the cancellation.
     process.env[POLL_ENV] = '25';
     const cfg = config('sync-shape-keeps-steps');
     const backend = new GatedRunBackend(cfg);

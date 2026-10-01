@@ -1,85 +1,49 @@
 /**
- * Agent-run bounds — the optional upper bounds an operator can put on an agent run.
+ * Agent-run bounds — the per-run bounds run-core and the composition root read.
  *
- * Four variables, all OFF unless set, so a deployment that sets none behaves exactly as it did
- * before they existed:
- *
- *   RAYSPEC_AGENT_REQUEST_TIMEOUT_MS  per HTTP request the model client makes (the OpenAI adapter
- *                                     carries it onto the client it registers)
- *   RAYSPEC_AGENT_MAX_ATTEMPTS        how many attempts that client makes for one request
- *   RAYSPEC_AGENT_RUN_MAX_MS          wall clock run-core waits for one whole run
+ *   RAYSPEC_AGENT_REQUEST_TIMEOUT_MS  per provider call (the adapters carry it onto their clients,
+ *                                     streams and child processes)
+ *   RAYSPEC_AGENT_MAX_ATTEMPTS        how many attempts an HTTP model client makes for one request
+ *   RAYSPEC_AGENT_RUN_MAX_MS          wall clock for one whole run; when it expires the run's signal
+ *                                     is aborted, so the backend is told to stop
  *   RAYSPEC_RUN_CANCEL_POLL_MS        how often an executing run re-reads its own cancellation
  *                                     marker, so a cancellation issued in another process reaches it
- *                                     (on by default under RAYSPEC_HOSTING_POSTURE=managed)
  *
- * The parsing rule is the one `resolveBootTimeoutMs` uses for RAYSPEC_BOOT_TIMEOUT_MS: trim, parse,
- * and fall back to the default on anything unusable. Here the default is "off", so an absent or
- * non-numeric value — and any value outside 1 … {@link MAX_BOUND} after flooring — leaves the run
- * exactly as unbounded, and as unwatched, as it is today.
+ * The resolution rule — parsing, the managed posture's defaults, what an unusable value means — is the
+ * execution policy's (execution-policy.ts); the functions here read one value off it. Outside the
+ * managed posture all four are off unless set, so a deployment that sets none behaves as it did
+ * before they existed, and an absent, non-numeric or out-of-range value (anything outside 1 …
+ * 2147483647 after flooring) leaves the run as unbounded as an unset one.
  */
+import { MANAGED_DEFAULTS, resolveExecutionPolicy } from './execution-policy.js';
 
 /**
- * The largest value any of these variables may carry: the largest delay a timer can hold.
- *
- * A timer given a longer delay does not wait longer — it fires after 1ms (Node warns
- * `TimeoutOverflowWarning: … does not fit into a 32-bit signed integer. Timeout duration was set to
- * 1.`). Accepting such a value would therefore INVERT the bound it configures: a ceiling meant to be
- * generous would abandon every run after a millisecond. The same ceiling is applied to the attempt
- * COUNT, which no timer holds, so that one rule covers all four variables — and a request-attempt
- * count above two billion is not a configuration anyone means.
- */
-const MAX_BOUND = 2_147_483_647;
-
-/**
- * Parse a bound value: a positive integer no greater than {@link MAX_BOUND}. Anything else — absent,
- * non-numeric, 0, negative, or too large — is "not set", which every consumer reads as NO bound.
- *
- * The floor runs BEFORE the range check, so the number that is range-checked is exactly the number
- * the caller gets. Checking first would let any 0 < v < 1 (`0.5`, `0.001`) pass the check and then
- * floor to 0 — the sentinel this contract calls "not set", but as a NUMBER, so every consumer would
- * take it as a live bound of zero: a run ceiling of 0ms, an attempt count of 0 that maps to a
- * negative retry count, or a cancellation poll that re-reads its marker as fast as the event loop
- * will hand it a turn.
- *
- * Out-of-range collapses to "not set" rather than clamping to {@link MAX_BOUND}: a ceiling above
- * 24.8 days and no ceiling at all express the same intent, so treating them alike keeps the contract
- * to one sentence, and silently substituting a different number than the operator wrote is the kind
- * of surprise these variables exist to remove.
- */
-function positiveInt(raw: string | undefined): number | undefined {
-  const trimmed = raw?.trim();
-  if (!trimmed) return undefined;
-  const n = Math.floor(Number(trimmed));
-  if (!Number.isFinite(n) || n <= 0 || n > MAX_BOUND) return undefined;
-  return n;
-}
-
-/**
- * The per-request timeout for the model client, in milliseconds (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`).
- * Undefined ⇒ the client keeps its own default.
+ * The per-request timeout for the model client, in milliseconds (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`,
+ * or the managed posture's default — see execution-policy.ts). Undefined ⇒ the client keeps its own
+ * default.
  */
 export function resolveAgentRequestTimeoutMs(
   env: NodeJS.ProcessEnv = process.env,
 ): number | undefined {
-  return positiveInt(env.RAYSPEC_AGENT_REQUEST_TIMEOUT_MS);
+  return resolveExecutionPolicy(env).requestTimeoutMs.value;
 }
 
 /**
- * How many attempts the model client makes for one request (`RAYSPEC_AGENT_MAX_ATTEMPTS`) — the
- * first try plus its retries, so 1 means a single attempt. Undefined ⇒ the client keeps its own
- * default.
+ * How many attempts the model client makes for one request (`RAYSPEC_AGENT_MAX_ATTEMPTS`, or the
+ * managed posture's default) — the first try plus its retries, so 1 means a single attempt.
+ * Undefined ⇒ the client keeps its own default.
  */
 export function resolveAgentMaxAttempts(env: NodeJS.ProcessEnv = process.env): number | undefined {
-  return positiveInt(env.RAYSPEC_AGENT_MAX_ATTEMPTS);
+  return resolveExecutionPolicy(env).maxAttempts.value;
 }
 
 /**
- * The wall-clock upper bound for one whole run, in milliseconds (`RAYSPEC_AGENT_RUN_MAX_MS`).
- * Undefined ⇒ run-core waits for the backend as long as it takes (the behaviour before this
- * variable existed).
+ * The wall-clock upper bound for one whole run, in milliseconds (`RAYSPEC_AGENT_RUN_MAX_MS`, or the
+ * managed posture's default). Undefined ⇒ run-core waits for the backend as long as it takes (the
+ * behaviour of a local posture without the variable).
  */
 export function resolveRunMaxMs(env: NodeJS.ProcessEnv = process.env): number | undefined {
-  return positiveInt(env.RAYSPEC_AGENT_RUN_MAX_MS);
+  return resolveExecutionPolicy(env).runMaxMs.value;
 }
 
 /**
@@ -87,7 +51,7 @@ export function resolveRunMaxMs(env: NodeJS.ProcessEnv = process.env): number | 
  * does not set one: a cancellation issued anywhere reaches a run executing in another worker process
  * within about two seconds, for one indexed read per executing run per interval.
  */
-export const MANAGED_RUN_CANCEL_POLL_MS = 2_000;
+export const MANAGED_RUN_CANCEL_POLL_MS = MANAGED_DEFAULTS.cancelPollMs;
 
 /** Where the cancellation poll interval came from. */
 export type RunCancelPollSource = 'explicit' | 'hosting-posture' | 'off';
@@ -105,10 +69,10 @@ export function resolveRunCancelPoll(env: NodeJS.ProcessEnv = process.env): {
   intervalMs: number | undefined;
   source: RunCancelPollSource;
 } {
-  const explicit = positiveInt(env.RAYSPEC_RUN_CANCEL_POLL_MS);
-  if (explicit !== undefined) return { intervalMs: explicit, source: 'explicit' };
-  if (env.RAYSPEC_HOSTING_POSTURE?.trim() === 'managed') {
-    return { intervalMs: MANAGED_RUN_CANCEL_POLL_MS, source: 'hosting-posture' };
+  const resolved = resolveExecutionPolicy(env).cancelPollMs;
+  if (resolved.source === 'explicit') return { intervalMs: resolved.value, source: 'explicit' };
+  if (resolved.source === 'hosting-posture') {
+    return { intervalMs: resolved.value, source: 'hosting-posture' };
   }
   return { intervalMs: undefined, source: 'off' };
 }
@@ -155,10 +119,9 @@ export type RunAbandonReason = 'bound' | 'cancelled';
 /**
  * Raised when a seam of an ABANDONED run is used: `runAgent` has rejected — because the wall-clock
  * bound fired, or because the run was cancelled — and the backend call it stopped waiting for is still
- * in flight and still holding the RunContext. Every seam on that context is bound to the run's
- * `TenantDb` — on the durable path the run's transaction, which is rolled back the moment `runAgent`
- * rejects — so run-core refuses the call rather than issuing a statement through a handle the run no
- * longer owns.
+ * in flight and still holding the RunContext. A run that was given up on writes nothing further: its
+ * outcome is recorded once, by run-core, and a late write from the call it abandoned would contradict
+ * it — so run-core refuses the call.
  */
 export class RunAbandonedError extends Error {
   readonly runId: string;
@@ -184,9 +147,10 @@ export class RunAbandonedError extends Error {
 /** The operator-facing message: what expired, and what it did and did not stop. */
 export function runBoundTimeoutMessage(runId: string, boundMs: number): string {
   return (
-    `run ${runId} exceeded the RAYSPEC_AGENT_RUN_MAX_MS bound of ${boundMs}ms and was given up on. ` +
-    'The bound stops run-core waiting; it does not cancel the model call, which continues until it ' +
-    'settles on its own. Raise RAYSPEC_AGENT_RUN_MAX_MS if legitimate runs need longer.'
+    `run ${runId} exceeded the RAYSPEC_AGENT_RUN_MAX_MS bound of ${boundMs}ms and was ended. The ` +
+    "run's signal was aborted, so a backend that honours it stops its provider call; the run's " +
+    'record says whether the call was stopped. Raise RAYSPEC_AGENT_RUN_MAX_MS if legitimate runs ' +
+    'need longer.'
   );
 }
 

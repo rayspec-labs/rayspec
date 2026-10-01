@@ -3,24 +3,19 @@
  *
  * A provider that accepts a request and never answers keeps `backend.run()` pending for as long as
  * the SDK's own retry window lasts; on the durable path that occupies a worker slot for the whole
- * time. The bound puts a ceiling on how long run-core WAITS: when it expires, `runAgent` rejects.
+ * time. The bound ENDS such a run: when it expires, run-core aborts the run's signal — so a backend
+ * that honours `ctx.signal` stops its provider call — waits at most the kill grace for the call to
+ * settle, records the run terminal with the neutral `timeout` class and what happened to the call
+ * (`call-aborted` when it settled, `outcome-unknown` when it did not), and rejects.
  *
- * WHAT THE BOUND DOES NOT DO: it does not cancel the in-flight SDK call. The bound asks nothing to
- * stop — it is a deadline on how long run-core waits, so the model call keeps running until it settles
- * on its own and the bound frees the caller (and, on the durable path, the worker slot), not the
- * provider request. ENDING the run is the separate, explicit path: a cancellation aborts the run's
- * signal, which run-core races the backend call against and puts on `ctx.signal` for the adapter (see
- * run-cancel.db.test.ts). What the bound DOES guarantee once it has fired is asserted below, seam by
- * seam — and the two paths share that machinery: an event the abandoned call emits
- * is dropped, a journal read or write it makes is refused, a transcript rehydrate is refused, and a
- * tool dispatch it STARTS after that point is refused closed (no handler run, no step, no taint
- * marker). A dispatch already inside the dispatcher is the separate case asserted alongside them: it
- * is not stopped, so its handler runs and its journal step is then refused.
+ * Once the bound has fired the run's seams are inert, asserted below seam by seam: an event the
+ * abandoned call emits is dropped, a journal read or write it makes is refused, a transcript
+ * rehydrate is refused, and a tool dispatch it STARTS after that point is refused closed (no handler
+ * run, no step, no taint marker). A dispatch already inside the dispatcher is the separate case: it is
+ * not stopped, so its handler runs and its journal step is then refused.
  *
- * Both product callers reach the model through this one `runAgent`, and they differ only in the
- * handle they pass: the sync HTTP path calls it OUTSIDE any transaction; the durable worker calls it
- * INSIDE `forTenant(db, tenantId).transaction(...)` with a separate autonomous-commit `taintDb`. Both
- * invocation shapes are exercised here.
+ * Both product callers reach the model through this one `runAgent`; neither holds a transaction across
+ * it, and the durable worker passes a `taintDb`. Both invocation shapes are exercised here.
  */
 import type {
   AgentSpec,
@@ -86,6 +81,8 @@ class SilentBackend implements Backend {
   readonly id = 'openai' as const;
   entered = 0;
   ctx?: RunContext;
+  /** Whether the run's signal aborted while the call was held — the bound telling it to stop. */
+  sawAbort = false;
   private release?: () => void;
 
   async resolveAuth() {
@@ -95,6 +92,9 @@ class SilentBackend implements Backend {
   run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
     this.entered += 1;
     this.ctx = ctx;
+    ctx.signal?.addEventListener('abort', () => {
+      this.sawAbort = true;
+    });
     return new Promise<RunResult>((resolve) => {
       this.release = () => resolve(completedResult(ctx));
     });
@@ -123,6 +123,9 @@ class InFlightDispatchBackend implements Backend {
 
   run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
     this.dispatched = ctx.dispatchTool?.('charge_card', { amount: 42 }, 'call-in-flight');
+    // Observed by the test later; a handler now keeps its rejection from reading as unhandled while
+    // run-core waits for the stopped call.
+    this.dispatched?.catch(() => {});
     return new Promise<RunResult>((resolve) => {
       this.release = () => resolve(completedResult(ctx));
     });
@@ -132,6 +135,28 @@ class InFlightDispatchBackend implements Backend {
   finish(): void {
     this.release?.();
     this.release = undefined;
+  }
+}
+
+/**
+ * The provider that honours its signal: `run()` never answers on its own, and an abort ends the call
+ * at once with an `AbortError`, as a provider SDK does.
+ */
+class AbortableBackend implements Backend {
+  readonly id = 'openai' as const;
+  sawAbort = false;
+  async resolveAuth() {
+    return 'api-key' as const;
+  }
+  run(_spec: AgentSpec, ctx: RunContext): Promise<RunResult> {
+    return new Promise<RunResult>((_resolve, reject) => {
+      ctx.signal?.addEventListener('abort', () => {
+        this.sawAbort = true;
+        const err = new Error('the provider call was aborted');
+        err.name = 'AbortError';
+        reject(err);
+      });
+    });
   }
 }
 
@@ -156,13 +181,28 @@ async function countRunEvents(runId: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
-/** journal_steps rows for a run, read on the pool (so only COMMITTED rows are counted). */
+/**
+ * journal_steps rows for a run OTHER than the bound's own outcome step, read on the pool (so only
+ * COMMITTED rows are counted) — the steps the abandoned call could have written.
+ */
 async function countJournalSteps(runId: string): Promise<number> {
   const rows = (await db.$client.unsafe(
-    'SELECT count(*)::int AS n FROM journal_steps WHERE run_id = $1',
+    "SELECT count(*)::int AS n FROM journal_steps WHERE run_id = $1 AND type <> 'bound'",
     [runId],
   )) as unknown as { n: number }[];
   return rows[0]?.n ?? 0;
+}
+
+/** The bound's recorded outcome step: its class and what it states about the provider call. */
+async function boundOutcome(
+  runId: string,
+): Promise<{ errorClass: string | null; phase: string | null } | undefined> {
+  const rows = (await db.$client.unsafe(
+    "SELECT error_class, output->>'phase' AS phase FROM journal_steps WHERE run_id = $1 AND type = 'bound'",
+    [runId],
+  )) as unknown as { error_class: string | null; phase: string | null }[];
+  const row = rows[0];
+  return row === undefined ? undefined : { errorClass: row.error_class, phase: row.phase };
 }
 
 /** The run's header status, or undefined when no header row exists. */
@@ -210,6 +250,7 @@ function setBound(value: string | undefined): void {
 }
 
 const savedBound = process.env.RAYSPEC_AGENT_RUN_MAX_MS;
+const savedGrace = process.env.RAYSPEC_AGENT_KILL_GRACE_MS;
 const open: { finish(): void }[] = [];
 
 beforeAll(async () => {
@@ -223,12 +264,16 @@ beforeEach(async () => {
   );
   await seedOrgs(db, TENANT_A);
   setBound(undefined);
+  // A short kill grace: a call that ignores its signal is recorded unknown quickly.
+  process.env.RAYSPEC_AGENT_KILL_GRACE_MS = '50';
   sideEffectFires = 0;
 });
 
 afterEach(() => {
   for (const b of open.splice(0)) b.finish();
   setBound(savedBound);
+  if (savedGrace === undefined) delete process.env.RAYSPEC_AGENT_KILL_GRACE_MS;
+  else process.env.RAYSPEC_AGENT_KILL_GRACE_MS = savedGrace;
 });
 
 afterAll(async () => {
@@ -237,33 +282,50 @@ afterAll(async () => {
 });
 
 describe('per-run wall-clock bound', () => {
-  it('SYNC invocation shape (no transaction): a run that outlives the bound rejects', async () => {
+  it('SYNC invocation shape: a run that outlives the bound is told to stop, recorded, and rejects', async () => {
     setBound('120');
-    const backend = new SilentBackend();
-    open.push(backend);
+    const backend = new AbortableBackend();
     const started = Date.now();
     await expect(
       runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'bound-sync' }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
-    expect(backend.entered).toBe(1);
-    // It rejected because the bound expired, not because the backend answered: the backend is still
-    // pending, and the rejection landed no earlier than the bound.
-    expect(Date.now() - started).toBeGreaterThanOrEqual(110);
+    // The bound ENDS the run: the backend's signal aborted, so it stopped its call — and the
+    // rejection landed no earlier than the bound and promptly after it (the call settled at once).
+    expect(backend.sawAbort).toBe(true);
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(110);
+    expect(elapsed).toBeLessThan(1_000);
+    expect(await runHeaderStatus('bound-sync')).toBe('error');
+    expect(await boundOutcome('bound-sync')).toEqual({
+      errorClass: 'timeout',
+      phase: 'call-aborted',
+    });
   });
 
-  it('DURABLE invocation shape (inside the run transaction, with a taintDb): the same bound applies', async () => {
+  it('a call that IGNORES its signal is recorded `outcome-unknown`, never claimed stopped', async () => {
     setBound('120');
     const backend = new SilentBackend();
     open.push(backend);
-    // Mirror the durable executor: runAgent runs INSIDE forTenant(db,tenant).transaction() and gets a
-    // SEPARATE autonomous-commit TenantDb for the taint marker.
     await expect(
-      forTenant(appDb, TENANT_A).transaction((txTdb) =>
-        runAgent(txTdb, backend, spec, {
-          runId: 'bound-durable',
-          taintDb: forTenant(appDb, TENANT_A),
-        }),
-      ),
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'bound-unknown' }),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    expect(backend.sawAbort).toBe(true);
+    expect(await runHeaderStatus('bound-unknown')).toBe('error');
+    expect(await boundOutcome('bound-unknown')).toEqual({
+      errorClass: 'timeout',
+      phase: 'outcome-unknown',
+    });
+  });
+
+  it('DURABLE invocation shape (with a taintDb): the same bound applies', async () => {
+    setBound('120');
+    const backend = new SilentBackend();
+    open.push(backend);
+    await expect(
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
+        runId: 'bound-durable',
+        taintDb: forTenant(appDb, TENANT_A),
+      }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     expect(backend.entered).toBe(1);
   });
@@ -310,8 +372,8 @@ describe('per-run wall-clock bound', () => {
       runAgent(forTenant(appDb, TENANT_A), backend, spec, { runId: 'bound-journal' }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     // The abandoned SDK call settles LATER and journals its step then — that is the normal shape of
-    // an adapter's error/success branch. The journal is bound to the run's tdb (on the durable path a
-    // transaction that has already rolled back), so the call is refused rather than issued.
+    // an adapter's error/success branch. The run's outcome is already recorded, so the call is
+    // refused rather than issued.
     await expect(
       backend.ctx?.journal.record({
         type: 'llm',
@@ -364,7 +426,8 @@ describe('per-run wall-clock bound', () => {
     const backend = new InFlightDispatchBackend();
     open.push(backend);
     // The handler is held for 600ms — five times the bound — so the dispatch is provably still inside
-    // the dispatcher when the bound fires.
+    // the dispatcher when the bound fires. run-core then waits up to the kill grace plus the settle
+    // margin for the call it stopped; the backend never settles, so the handler finishes meanwhile.
     await expect(
       runAgent(forTenant(appDb, TENANT_A), backend, spec, {
         runId: 'bound-in-flight',
@@ -372,9 +435,7 @@ describe('per-run wall-clock bound', () => {
       }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     // The run-core gate covers a dispatch that ARRIVES once the flag is set. This one was already
-    // past it, so nothing refuses it: the side effect had not fired when the run rejected, and it
-    // fires afterwards.
-    expect(sideEffectFires).toBe(0);
+    // past it, so nothing refuses it: the side effect fires although the run was given up on.
     const dispatched = backend.dispatched;
     expect(dispatched).toBeDefined();
     // What the dispatch returns to the abandoned call is the journal seam's refusal, NOT the neutral
@@ -388,11 +449,11 @@ describe('per-run wall-clock bound', () => {
     expect(await countJournalSteps('bound-in-flight')).toBe(0);
   });
 
-  it('DURABLE shape, header PRE-WRITTEN by the enqueue: the bound leaves it at `enqueued`', async () => {
+  it('DURABLE shape, header PRE-WRITTEN by the enqueue: the bound leaves it terminal `error`', async () => {
     setBound('120');
     const backend = new SilentBackend();
     open.push(backend);
-    // The API enqueue path writes the `enqueued` header BEFORE the job is handed to the worker (#164).
+    // The API enqueue path writes the `enqueued` header BEFORE the job is handed to the worker.
     await insertEnqueuedRunHeader(forTenant(appDb, TENANT_A), {
       runId: 'bound-durable-header',
       backend: 'openai',
@@ -400,38 +461,28 @@ describe('per-run wall-clock bound', () => {
       model: spec.model,
     });
     await expect(
-      forTenant(appDb, TENANT_A).transaction((txTdb) =>
-        runAgent(txTdb, backend, spec, {
-          runId: 'bound-durable-header',
-          taintDb: forTenant(appDb, TENANT_A),
-        }),
-      ),
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
+        runId: 'bound-durable-header',
+        taintDb: forTenant(appDb, TENANT_A),
+      }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
-    // run-core's `enqueued` → `running` write is inside the run transaction, which rolls back with the
-    // rejection, and no completing write is reached. So a bounded durable run leaves NO terminal
-    // header: the row reads exactly as the enqueue wrote it. This is what the CHANGELOG states.
-    expect(await runHeaderStatus('bound-durable-header')).toBe('enqueued');
+    // A bounded run reads back as ended with the neutral `timeout` class — never as `enqueued` or
+    // `running` for ever.
+    expect(await runHeaderStatus('bound-durable-header')).toBe('error');
+    expect((await boundOutcome('bound-durable-header'))?.errorClass).toBe('timeout');
   });
 
-  it('DURABLE shape, NO header pre-written: the bound leaves no `runs` row at all', async () => {
+  it("DURABLE shape, NO header pre-written: run-core's own header is moved terminal", async () => {
     setBound('120');
     const backend = new SilentBackend();
     open.push(backend);
-    // The header-less shape, constructed BY HAND here: nothing wrote a pre-enqueue header for this
-    // runId. It is the shape run-core must survive, not a claim about how a job arrives — both
-    // enqueue paths (the API's async run surface and the trigger fire path) write that header today,
-    // so this is the residual case where the write was skipped, not the cron path.
-    // run-core's own header write is inside the run transaction, so the rejection rolls it back and
-    // nothing about this run is left in `runs` — there is no header to test for terminality.
     await expect(
-      forTenant(appDb, TENANT_A).transaction((txTdb) =>
-        runAgent(txTdb, backend, spec, {
-          runId: 'bound-durable-no-header',
-          taintDb: forTenant(appDb, TENANT_A),
-        }),
-      ),
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
+        runId: 'bound-durable-no-header',
+        taintDb: forTenant(appDb, TENANT_A),
+      }),
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
-    expect(await runHeaderStatus('bound-durable-no-header')).toBeUndefined();
+    expect(await runHeaderStatus('bound-durable-no-header')).toBe('error');
   });
 
   it('UNSET: a run slower than any bound still completes (today’s unbounded behaviour)', async () => {

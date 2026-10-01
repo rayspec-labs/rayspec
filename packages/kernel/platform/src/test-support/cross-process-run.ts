@@ -10,16 +10,13 @@
  * is what lets the test compare their terminal state and journal for equality and mean it.
  *
  * THE SHAPE IS THE DURABLE ONE, because that is the shape the boundary exists in: an enqueue-time
- * `runs` header committed BEFORE the run (the run surface writes it outside the run's transaction,
- * so a run that rolls back still has a header to move), then `runAgent` inside `tdb.transaction()`
- * with a SEPARATE autonomous-commit handle for `taintDb`. The catch mirrors the durable worker: a
- * run that ends by throwing rolled its transaction back, taking any record it made with it, so the
- * cancellation is recorded AFTER the rollback on the autonomous handle — the same guarded,
- * idempotent transition the cancel surface makes.
+ * `runs` header committed BEFORE the run (the run surface writes it), then `runAgent` on the run's
+ * tenant handle — no transaction is held across the run — with a `taintDb` handle. The catch mirrors
+ * the durable worker: a cancelled run that ends by throwing is recorded with the same guarded,
+ * idempotent transition the cancel surface makes (run-core has normally recorded it already).
  *
  * The child prints one JSON object per stdout line: `{"phase":"in-gate"}` once the run is in flight
- * inside its transaction with its journal step already written, then `{"phase":"done",...}` with the
- * outcome. The parent uses the first line as its barrier — never a sleep — and the second as the
+ * with its journal step already written, then `{"phase":"done",...}` with the outcome. The parent uses the first line as its barrier — never a sleep — and the second as the
  * observation.
  *
  * This lives under `test-support/` deliberately: that directory is excluded from the package build
@@ -84,12 +81,10 @@ function nonIdempotentTool(): NeutralTool {
 }
 
 /**
- * A backend that journals ONE `llm` step and then holds the run for `gateMs`.
- *
- * The step is what makes the difference between the two behaviours legible in the journal rather than
- * only on the clock: it is written INSIDE the run's transaction, so it survives iff that transaction
- * commits. A run that is ended while it is held rolls back and leaves only the cancellation step; a
- * run that is never ended runs the gate out, commits, and leaves both.
+ * A backend that journals ONE `llm` step and then holds the run for `gateMs` — the provider call in
+ * flight. It honours its signal the way a provider SDK does: an abort ends the held call at once with
+ * an `AbortError`, so a run that is ended while it is held settles within milliseconds and its record
+ * states that the call was stopped.
  */
 export class GatedRunBackend implements Backend {
   readonly id = 'openai' as const;
@@ -129,7 +124,19 @@ export class GatedRunBackend implements Backend {
       authMode: 'api-key',
     });
     this.onGate?.();
-    await new Promise((r) => setTimeout(r, this.cfg.gateMs));
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, this.cfg.gateMs);
+      const signal = ctx.signal;
+      if (signal === undefined) return;
+      const onAbort = () => {
+        clearTimeout(timer);
+        const err = new Error('the provider call was aborted');
+        err.name = 'AbortError';
+        reject(err);
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    });
     return {
       runId: ctx.runId,
       backend: this.id,
@@ -151,7 +158,7 @@ export class GatedRunBackend implements Backend {
  * Run ONE arm in the durable invocation shape and report how it ended.
  *
  * `rawDb` is the raw Drizzle handle the caller owns; the two `forTenant` handles minted from it are
- * the run's transactional one and the autonomous-commit one, exactly as the durable worker mints them.
+ * the run's handle and the `taintDb` one.
  * `taintDbOverride` replaces only the autonomous one, so a test can observe or break exactly the
  * handle the poll reads through; the child never passes it.
  */
@@ -173,19 +180,16 @@ export async function runDurableShapeCancellable(
   const taintDb: TenantDb = taintDbOverride ?? forTenant(rawDb, cfg.tenantId);
   const tools = cfg.fireNonIdempotentTool ? [nonIdempotentTool()] : undefined;
   try {
-    await tdb.transaction((txTdb) =>
-      runAgent(txTdb, backend, CROSS_PROCESS_SPEC, {
-        runId: cfg.runId,
-        taintDb,
-        ...(tools ? { tools } : {}),
-      }),
-    );
+    await runAgent(tdb, backend, CROSS_PROCESS_SPEC, {
+      runId: cfg.runId,
+      taintDb,
+      ...(tools ? { tools } : {}),
+    });
     return { outcome: 'completed', errorName: null };
   } catch (err) {
-    // The durable worker's contract, reproduced: a run that ends by THROWING rolled its transaction
-    // back, so anything run-core wrote inside it — including a cancellation it recorded — is gone.
-    // Record it here instead, after the rollback, on the autonomous handle, where the header row is
-    // free. A run that failed for its own reasons is reported as the failure it was.
+    // The durable worker's contract, reproduced: a cancelled run that ends by THROWING is recorded
+    // with the guarded, idempotent transition (a no-op when run-core already recorded it). A run that
+    // failed for its own reasons is reported as the failure it was.
     const errorName = err instanceof Error ? err.name : String(err);
     if (!(await isRunCancelled(taintDb, cfg.runId))) return { outcome: 'failed', errorName };
     await recordRunCancelled(taintDb, cfg.runId);

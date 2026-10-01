@@ -113,6 +113,22 @@ export type {
   LiveSink,
 } from './event-pipeline.js';
 export { DEFAULT_MAX_QUEUE, EventPipeline } from './event-pipeline.js';
+// The execution policy: every bound on agent execution (wall time, provider call, queue admission,
+// parallelism, cancellation poll) resolved in one place, with the managed posture's defaults.
+export {
+  DEFAULT_AGENT_KILL_GRACE_MS,
+  DEFAULT_AGENT_WORKER_CONCURRENCY,
+  EXECUTION_POLICY_VARIABLES,
+  type ExecutionPolicy,
+  executionPolicyProblemMessage,
+  executionPolicyProblems,
+  MANAGED_DEFAULTS,
+  type PolicyProblem,
+  type PolicySource,
+  type PolicyValue,
+  resolveExecutionPolicy,
+  runLimitsOf,
+} from './execution-policy.js';
 // The minimal extension-pack mechanism: the `defineExtension` manifest
 // contract + `loadExtensions` (directory-only path-jailed resolution, version-pin FAIL-CLOSED,
 // multi-root handler jail, and the merge of pack store/handler/tooling/api fragments + capability
@@ -173,6 +189,12 @@ export {
   withoutCredentials,
 } from './handlers/index.js';
 export { rehydrateConversation } from './rehydrate.js';
+export {
+  RUN_ADMISSION_RETRY_AFTER_MS,
+  RunAdmissionRefusedError,
+  type RunAdmissionScope,
+  runAdmissionRefusedMessage,
+} from './run-admission.js';
 // Run cancellation: the persisted marker every dispatch consults before executing, the process-local
 // signal run-core threads onto `ctx.signal` and races the backend call against, and the journaled
 // terminal outcome (`errorClass: 'cancelled'`) the cancel surface records for both the not-yet-started
@@ -182,22 +204,35 @@ export {
   CANCELLED_CLASS,
   isRunCancelled,
   markRunCancelled,
+  RUN_BOUND_STEP_KEY,
+  RUN_BOUND_STEP_TYPE,
   RUN_CANCEL_LOCK_WAIT_MS,
   RUN_CANCELLED_BODY_HASH,
   RUN_CANCELLED_SCOPE,
   RUN_CANCELLED_STEP_KEY,
   RUN_CANCELLED_STEP_TYPE,
+  RUN_FAILED_STEP_KEY,
+  RUN_FAILED_STEP_TYPE,
   type RunCancellation,
   type RunCancellationOutcome,
   RunCancelledError,
   type RunCancelPoll,
+  type RunEndPhase,
+  readRunCancellationPhase,
+  recordRunCancellationPhase,
   recordRunCancelled,
+  recordRunFailed,
+  recordRunTimedOut,
   runCancelledMessage,
+  runCancelledPhaseMessage,
+  runFailedMessage,
+  runTimedOutPhaseMessage,
   signalRunCancelled,
   withRunCancel,
 } from './run-cancel.js';
 export type { CostContext, CostRollup, RunOptions } from './run-core.js';
 export {
+  CALL_SETTLE_MARGIN_MS,
   isSubscriptionBilling,
   makeJournalSink,
   rollupRunCost,
