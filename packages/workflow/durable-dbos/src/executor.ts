@@ -6,10 +6,25 @@
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * `@rayspec/platform` / `run-core` / the four SDK adapters carry NO `@dbos-inc/dbos-sdk` import —
  * the engine asymmetry is absorbed HERE. This adapter runs the EXISTING `runAgent`
- * off-request, UNCHANGED, inside one DBOS workflow whose single durable step calls it inside
- * `forTenant(db, tenantId).transaction()` (so the `app.current_tenant` GUC is populated → RLS-ready).
- * It adds NO new persistence/streaming layer: events still persist to `run_events` via run-core's
- * pipeline; the client resumes via the shipped `GET /v1/runs/{id}/events?lastEventId=`.
+ * off-request, UNCHANGED, inside one DBOS workflow whose single durable step calls it on a
+ * tenant-bound `forTenant(db, tenantId)` handle. It adds NO new persistence/streaming layer: events
+ * still persist to `run_events` via run-core's pipeline; the client resumes via the shipped
+ * `GET /v1/runs/{id}/events?lastEventId=`.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * NO TRANSACTION ACROSS THE MODEL CALL.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * A run's statements commit as they are made, exactly as on the in-request path, so a run waiting on
+ * a slow provider holds no database connection: the worker pool's size bounds statements, not runs.
+ * What the one long transaction used to provide is provided explicitly instead:
+ *  - ONE EXECUTION AT A TIME. The started-once marker carries a LEASE (an execution id and an expiry
+ *    the executing worker renews). A second dispatch of the same run — a recovery re-dispatch while the
+ *    first is still alive — waits for the lease to lapse instead of executing alongside it, and an
+ *    execution that finds its lease taken over stops its own run.
+ *  - A CLEAN RE-RUN. A crashed attempt's rows (events, journal, transcript) used to vanish with the
+ *    rollback; a re-run of an untainted run now removes them before it starts, so the re-run's record
+ *    is its own. Tool writes are NOT undone: a tool's effects commit as they happen, as they always did
+ *    on the in-request path — which is why a re-run is only ever automatic for an untainted run.
  *
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  * DURABILITY CONTRACT — WHOLE-RUN RE-EXECUTION, HONEST.
@@ -52,6 +67,7 @@
  * persist), so a same-key retry replays the terminal failure rather than re-running.
  */
 
+import { randomUUID } from 'node:crypto';
 import { DBOS, StatusString } from '@dbos-inc/dbos-sdk';
 import type { AgentSpec, Backend, NeutralTool } from '@rayspec/core';
 import type { Db } from '@rayspec/db';
@@ -68,10 +84,11 @@ import {
   isRunCancelled,
   isRunTainted,
   markRunCancelled,
+  RunAdmissionRefusedError,
   recordRunCancelled,
   runAgent,
 } from '@rayspec/platform';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import { PausableQueue } from './pausable-queue.js';
 
@@ -79,8 +96,8 @@ import { PausableQueue } from './pausable-queue.js';
  * The neutral run-resolution the executor needs to turn a `RunJob` back into a runnable run — the
  * SAME shape the sync run surface resolves (an `AgentRegistryEntry`): the base spec, the backend,
  * and EITHER a per-run tenant-bound `toolFactory` (declared agents — its `HandlerDb` closes over the
- * run's TenantDb) OR a static `tools` list. The worker builds the tools from the
- * SAME transactional handle it runs `runAgent` on, so the tools' HandlerDb shares the GUC transaction.
+ * run's TenantDb) OR a static `tools` list. The worker builds the tools from the SAME tenant-bound
+ * handle it runs `runAgent` on.
  */
 export interface ResolvedRun {
   readonly backend: Backend;
@@ -90,8 +107,8 @@ export interface ResolvedRun {
   readonly tools?: NeutralTool[];
   /**
    * Build this run's tenant-bound tools from a `TenantDb` (a declared agent's per-run factory — the
-   * SAME `entry.toolFactory` the sync path calls). The worker calls it with the run's TRANSACTIONAL
-   * TenantDb so the tools' HandlerDb shares the GUC transaction (RLS-ready). Optional (no-tool agent).
+   * SAME `entry.toolFactory` the sync path calls). The worker calls it with the run's tenant-bound
+   * TenantDb. Optional (no-tool agent).
    */
   readonly toolFactory?: (tdb: TenantDb) => NeutralTool[];
   /**
@@ -173,6 +190,18 @@ export interface DbosExecutorConfig {
    * default). Bounds how many `runAgentJob`s this worker runs at once.
    */
   readonly workerConcurrency?: number;
+  /**
+   * Queue admission: how many agent runs may be queued or executing at once, in total and per tenant,
+   * before `enqueue` refuses a new one with `RunAdmissionRefusedError`. Counted over the engine's own
+   * queue, so it covers every process that shares the system database. Absent bound ⇒ not checked.
+   */
+  readonly admission?: { readonly queueMax?: number; readonly queueMaxPerTenant?: number };
+  /**
+   * How long an execution's lease on its run lasts without renewal, in milliseconds (default
+   * {@link DEFAULT_RUN_LEASE_TTL_MS}). The executing worker renews it every third of this. A second
+   * dispatch of the same run waits until the lease lapses.
+   */
+  readonly runLeaseTtlMs?: number;
   /** Silence DBOS's own console logging in tests (a DLogger-shaped sink). Optional. */
   readonly logger?: ConstructorLoggerOption;
   /**
@@ -199,6 +228,144 @@ export const DEFAULT_WORKER_CONCURRENCY = 4;
 
 /** The `idempotency_keys` scope for the per-run "started-once" safety marker (the started-once guard). */
 export const RUN_STARTED_SCOPE = 'run_started';
+
+/** How long an execution's lease on its run lasts without renewal, by default. */
+export const DEFAULT_RUN_LEASE_TTL_MS = 30_000;
+
+/**
+ * The advisory-lock key admission takes on the application database, so that counting the queue and
+ * enqueueing are one step for every process: the ASCII of `rays` (the namespace the schema lock uses)
+ * and a slot of its own.
+ */
+export const ADMISSION_LOCK_NAMESPACE = 0x72617973;
+export const ADMISSION_LOCK_SLOT = 3;
+
+/** The started-once marker's snapshot: whose execution holds the run, and until when. */
+interface RunLease {
+  runId: string;
+  executionId?: string;
+  /** Epoch milliseconds. */
+  leaseUntil?: number;
+}
+
+/** Reserve the started-once marker for a FIRST execution, with its lease. True ⇔ this call won. */
+async function reserveRunLease(
+  tdb: TenantDb,
+  runId: string,
+  executionId: string,
+  ttlMs: number,
+): Promise<boolean> {
+  const lease: RunLease = { runId, executionId, leaseUntil: Date.now() + ttlMs };
+  const reserved = await tdb
+    .insert(schema.idempotencyKeys, {
+      scope: RUN_STARTED_SCOPE,
+      idemKey: runId,
+      bodyHash: RUN_STARTED_BODY_HASH,
+      snapshot: lease,
+    })
+    .onConflictDoNothing()
+    .returning();
+  return reserved.length > 0;
+}
+
+/** Read the current lease on a run (undefined when the marker is absent). */
+async function readRunLease(tdb: TenantDb, runId: string): Promise<RunLease | undefined> {
+  const rows = (await tdb
+    .select(schema.idempotencyKeys, { snapshot: schema.idempotencyKeys.snapshot })
+    .where(
+      and(
+        eq(schema.idempotencyKeys.scope, RUN_STARTED_SCOPE),
+        eq(schema.idempotencyKeys.idemKey, runId),
+      ),
+    )
+    .limit(1)) as Array<{ snapshot: unknown }>;
+  const snap = rows[0]?.snapshot as RunLease | null | undefined;
+  return snap ?? undefined;
+}
+
+/**
+ * Move the lease to `executionId`, but only from the holder this caller saw (`from`; undefined = a
+ * marker written before leases existed). A compare-and-set: of two executions taking over at once,
+ * exactly one moves it. True ⇔ this call moved it.
+ */
+async function moveRunLease(
+  tdb: TenantDb,
+  runId: string,
+  from: string | undefined,
+  executionId: string,
+  ttlMs: number,
+): Promise<boolean> {
+  const lease: RunLease = { runId, executionId, leaseUntil: Date.now() + ttlMs };
+  const holder = sql`${schema.idempotencyKeys.snapshot}->>'executionId'`;
+  const moved = await tdb
+    .update(schema.idempotencyKeys, { snapshot: lease })
+    .where(
+      and(
+        eq(schema.idempotencyKeys.scope, RUN_STARTED_SCOPE),
+        eq(schema.idempotencyKeys.idemKey, runId),
+        from === undefined ? isNull(holder) : eq(holder, from),
+      ),
+    )
+    .returning({ idemKey: schema.idempotencyKeys.idemKey });
+  return moved.length > 0;
+}
+
+/** Give up this execution's lease (it ended): the lease then reads as lapsed. */
+async function releaseRunLease(tdb: TenantDb, runId: string, executionId: string): Promise<void> {
+  await moveRunLease(tdb, runId, executionId, executionId, 0);
+}
+
+/**
+ * Renew this execution's lease on an interval while its run executes. When a renewal finds the lease
+ * held by another execution (it lapsed — this worker could not reach the database for a whole lease —
+ * and a recovery took the run over), `onLost` runs once: two executions of one run must not continue
+ * side by side. A failed renewal is retried on the next tick; the lease only lapses if they all fail.
+ */
+function startLeaseRenewal(
+  tdb: TenantDb,
+  runId: string,
+  executionId: string,
+  ttlMs: number,
+  onLost: () => void,
+): () => void {
+  let live = true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const schedule = (): void => {
+    timer = setTimeout(() => void tick(), Math.max(1, Math.floor(ttlMs / 3)));
+    timer.unref?.();
+  };
+  const tick = async (): Promise<void> => {
+    let held: boolean | undefined;
+    try {
+      held = await moveRunLease(tdb, runId, executionId, executionId, ttlMs);
+    } catch {
+      held = undefined; // no answer: ask again next tick
+    }
+    if (!live) return;
+    if (held === false) {
+      live = false;
+      onLost();
+      return;
+    }
+    schedule();
+  };
+  schedule();
+  return () => {
+    live = false;
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
+/**
+ * Remove what an interrupted attempt of an UNTAINTED run left behind — its events, journal steps and
+ * transcript — so the re-run's record is its own. The tables are the ones run-core writes per run; the
+ * markers (`idempotency_keys`) and the run header are kept, the header being moved by the re-run.
+ */
+async function clearInterruptedAttempt(tdb: TenantDb, runId: string): Promise<void> {
+  await tdb.delete(schema.runEvents).where(eq(schema.runEvents.runId, runId));
+  await tdb.delete(schema.journalSteps).where(eq(schema.journalSteps.runId, runId));
+  await tdb.delete(schema.conversationItems).where(eq(schema.conversationItems.runId, runId));
+}
 
 /**
  * The `body_hash` sentinel for a `run_started` marker row. The marker's identity is its
@@ -367,6 +534,22 @@ export async function readRunSucceededWithBoundedRetry(
   return false;
 }
 
+/**
+ * Count the agent runs queued or executing on the engine's queue — all of them, or one tenant's — up to
+ * `atMost` (a count that reached the bound is all admission needs to know).
+ */
+async function countBacklog(atMost: number, tenantId?: string): Promise<number> {
+  const rows = await DBOS.listWorkflows({
+    queueName: AGENT_RUNS_QUEUE,
+    status: [StatusString.ENQUEUED, StatusString.PENDING, StatusString.DELAYED],
+    ...(tenantId === undefined ? {} : { attributes: { tenantId } }),
+    limit: atMost,
+    loadInput: false,
+    loadOutput: false,
+  });
+  return rows.length;
+}
+
 export class DbosDurableExecutor implements DurableExecutor {
   readonly #deps: DbosExecutorDeps;
   readonly #config: DbosExecutorConfig;
@@ -459,19 +642,13 @@ export class DbosDurableExecutor implements DurableExecutor {
         // it has not dequeued, but it is not the whole guarantee: OUR marker is authoritative for the
         // same reason the started-once guard is (the engine memoizes step OUTPUTS, not our Drizzle
         // writes), and it is what a RECOVERY re-dispatch — which re-invokes this body from the start —
-        // consults. A cancelled run completes the step as a NO-OP: its terminal outcome (the neutral
-        // `cancelled` class) is journaled by the cancel surface for a run that had not started, and by
-        // the side that ended for a run that was already executing when it was ended — see the rollback
-        // catch below. Failing the workflow here would add an engine-level error on top of a run that
-        // is already accounted for.
+        // consults. A cancelled run completes the step as a NO-OP: its terminal outcome is recorded by
+        // the cancel surface, or by run-core for a run that was executing when it was ended.
         if (await readCancelledWithBoundedRetry(tdb, job.runId)) {
           // Record before returning. `recordRunCancelled` is idempotent and guarded on the run not
-          // already being terminal, so for the ordinary case — a run cancelled before it started, whose
-          // outcome the cancel surface already wrote — this reads the header, sees a terminal status and
-          // writes nothing. It earns its place in the branch a RECOVERY re-dispatch takes: a run
-          // cancelled WHILE EXECUTING whose worker died before it could unwind was recorded by neither
-          // side (the cancel surface gave up on the header row the run was holding), and without this
-          // the header would stay non-terminal for good while the caller had been told the run ended.
+          // already being terminal, so for the ordinary case this reads the header, sees a terminal
+          // status and writes nothing. It earns its place for a run cancelled WHILE EXECUTING whose
+          // worker died before it could record anything.
           await recordRunCancelled(tdb, job.runId);
           return;
         }
@@ -489,133 +666,124 @@ export class DbosDurableExecutor implements DurableExecutor {
         }
 
         // ── Resolve the run FIRST (before the marker) ─────────────────────────────────────────
-        // resolveRun reads the agent definition LIVE (no serialized object graph). It runs BEFORE
-        // the started-once reserve on purpose (fix D): a transient resolve failure (e.g. the agent
-        // registry is momentarily unbound on a too-early recovery dispatch — see fix F) throws here
-        // WITHOUT committing the marker, so the workflow re-runs cleanly on the next recovery attempt
-        // instead of poisoning the runId (a marker committed before a resolve failure would make the
-        // runId permanently un-retryable). A genuinely-unknown agentId still throws → status 'failed'
-        // (fail-closed). The marker is still committed BEFORE runAgent (the side effect) — see below —
-        // so the safety invariant (a crashed run is never silently re-fired) is preserved.
+        // resolveRun reads the agent definition LIVE. It runs BEFORE the started-once reserve on
+        // purpose: a transient resolve failure throws here WITHOUT committing the marker, so the
+        // workflow re-runs cleanly on the next recovery attempt instead of poisoning the runId. A
+        // genuinely-unknown agentId still throws → status 'failed' (fail-closed).
         const resolved = this.#deps.resolveRun(job);
 
-        // ── Layer 2: the started-once guard, TAINT-AWARE quarantine ───────────────────────────
+        // ── The started-once guard, with its lease ─────────────────────────────────────────────
         // Atomically reserve the per-run "started" marker AFTER resolveRun but BEFORE runAgent (the
-        // marker-before-side-effect ordering the safety invariant depends on). The reserve is a single
-        // INSERT..ON CONFLICT DO NOTHING RETURNING over UNIQUE(tenant, scope, idem_key) — the same
-        // atomic primitive the run surface uses. The marker row is PERMANENT until pruned.
-        const reserved = await tdb
-          .insert(schema.idempotencyKeys, {
-            scope: RUN_STARTED_SCOPE,
-            idemKey: job.runId,
-            bodyHash: RUN_STARTED_BODY_HASH,
-            snapshot: { runId: job.runId },
-          })
-          .onConflictDoNothing()
-          .returning();
-        if (reserved.length === 0) {
-          // The marker already exists ⇒ this is a RECOVERY of a run that already started once. The
+        // marker-before-side-effect ordering the safety invariant depends on), carrying this
+        // execution's lease. The marker row is PERMANENT until pruned.
+        const ttlMs = this.#config.runLeaseTtlMs ?? DEFAULT_RUN_LEASE_TTL_MS;
+        const executionId = randomUUID();
+        if (!(await reserveRunLease(tdb, job.runId, executionId, ttlMs))) {
+          // The marker exists ⇒ this run was started before: a RECOVERY re-dispatch, or a second
+          // dispatch while the first is still executing. Wait for any live execution to end (its
+          // lease lapses or the run completes) — never execute alongside it.
+          const claim = await this.#claimStartedRun(tdb, job.runId, executionId, ttlMs);
+          if (claim === 'done') return;
           // The quarantine decision is keyed on the NON-IDEMPOTENT-TAINT marker:
           //  - TAINTED (a non-idempotent tool already fired ⇒ the chokepoint wrote the `run_taint`
-          //    marker on its OWN connection, so it SURVIVED the crash) → QUARANTINE: refuse to re-run
-          //    (a whole-run re-execution would re-fire the side effect). Terminal, manual review.
-          //  - UNTAINTED (idempotent / no-tool) → the run is SAFELY re-runnable, so ALLOW the recovery
-          //    re-execution (automated retry for the safe class) instead of dead-lettering it. We fall
-          //    through to run `runAgent` again (run-core upserts the header/journal under the same runId).
-          // The taint read goes through the SAME tdb (tenant-scoped). Two DISTINCT terminal outcomes —
-          // do NOT collapse a transient READ ERROR into "tainted" (fix C):
-          //  - the read SUCCEEDS and returns tainted=true → the run DID fire a non-idempotent tool →
-          //    QUARANTINE: throw the terminal `DurableRunNotRetriedError` (refuse the re-run forever).
-          //  - the read THROWS (a momentary DB blip) → we must NOT silently re-run on an uncertain taint
-          //    (the safety direction holds), but we must ALSO not permanently dead-letter a SAFE run as a
-          //    "quarantine": RETRY the READ a bounded number of times first, and only if it STILL fails
-          //    rethrow the ORIGINAL DB error. The original error is recorded as the step outcome (terminal-
-          //    failed, diagnosable as a transient DB issue — NOT a taint quarantine), and the run is NEVER
-          //    re-executed off an unresolved taint read. (Whole-run re-execution memoizes a thrown step
-          //    error, so making the READ itself retryable in-place — not the run — is the correct seam.)
+          //    marker before it fired) → QUARANTINE: refuse to re-run. Terminal, manual review.
+          //  - UNTAINTED (idempotent / no-tool) → SAFELY re-runnable: fall through and run again.
+          // A transient READ ERROR is not collapsed into "tainted": the read is retried a bounded
+          // number of times and, if it still fails, the original DB error is the step's outcome — the
+          // run is NEVER re-executed off an unresolved taint read.
           const tainted = await readTaintWithBoundedRetry(tdb, job.runId);
           if (tainted) {
             throw new DurableRunNotRetriedError(job.runId);
           }
-          // ── Already-succeeded short-circuit (TEST-FLAKE-2 — the double-MODEL-BILL window) ──────
-          // The run is UNTAINTED, but it may have ALREADY SUCCEEDED on the first attempt: run-core
-          // commits the `runs` header (status='completed') at the END of the first `runAgent`, yet DBOS
-          // can still RE-DISPATCH this workflow afterwards (a step-outcome checkpoint lost under load —
-          // the observed cron-scheduler flake where `liveRuns` intermittently saw 2). The untainted
-          // fall-through would then re-invoke `runAgent` for a result that is ALREADY DURABLE → the
-          // model is BILLED A SECOND TIME. So: if the durable header is already terminal-SUCCESS,
-          // complete the step as a NO-OP (the durable result stands; do NOT re-run, do NOT re-bill).
-          // On a PERSISTENT header-read failure the helper returns false → we FALL THROUGH to the safe
-          // re-run (never SKIP a needed retry): the run is already known untainted, so a re-run is safe
-          // and the only cost is a possible re-bill — exactly today's untainted behavior.
+          // ── Already-succeeded short-circuit (the double-MODEL-BILL window) ──────────────────
+          // The run may have ALREADY SUCCEEDED on the first attempt while the engine still
+          // re-dispatches it (a step-outcome checkpoint lost under load). Re-running would bill the
+          // model a second time for a result that is already durable, so complete as a NO-OP. A
+          // persistent header-read failure falls through to the safe re-run (the run is untainted).
           if (await readRunSucceededWithBoundedRetry(tdb, job.runId)) {
-            return; // durable success already exists — a no-op success step, NOT a re-bill re-run.
+            return;
           }
-          // else: untainted + no completed header ⇒ a genuinely-interrupted SAFE run — fall through and
-          // re-run (the unchanged safe automated retry for the untainted class).
+          // An interrupted, untainted attempt: clear what it left, then re-run.
+          await clearInterruptedAttempt(tdb, job.runId);
         }
 
-        // ── Run the EXISTING runAgent off-request, inside the GUC transaction ─────────────────
+        // ── Run the EXISTING runAgent off-request ─────────────────────────────────────────────
         const effectiveSpec: AgentSpec = {
           ...resolved.spec,
           input: job.input,
           ...(job.instructions !== undefined ? { instructions: job.instructions } : {}),
           ...(job.maxTurns !== undefined ? { maxTurns: job.maxTurns } : {}),
         };
-        // The AUTONOMOUS-COMMIT taint handle: a SEPARATE non-transactional forTenant(db, tenantId) so the
-        // chokepoint's `run_taint` marker commits on its OWN connection BEFORE the side effect — it
-        // SURVIVES a crash that rolls back the run's `tdb.transaction()` below (a crashed-after-side-
-        // effect run stays visibly tainted, never re-runnable-as-untainted). This is the off-request
-        // analog of the `run_started` reserve, which the executor also commits OUTSIDE the run's tx.
-        const taintDb = forTenant(this.#deps.db, job.tenantId);
-        // Wrap runAgent in the tenant GUC transaction (RLS-ready). run-core persists the journal /
-        // run_events / run header / conversation under this runId, tenant-scoped — UNCHANGED. Build
-        // the run's tools from the SAME transactional handle (prefer the tenant-bound factory, like
-        // the sync run surface) so a tool handler's HandlerDb shares the GUC transaction.
+        // This execution's own stop: aborted when its lease is found taken over, so two executions of
+        // one run never continue side by side. Linked into the run's signal by run-core.
+        const leaseLost = new AbortController();
+        const stopRenewal = startLeaseRenewal(tdb, job.runId, executionId, ttlMs, () =>
+          leaseLost.abort(),
+        );
         try {
-          await tdb.transaction(async (txTenant) => {
-            const tools = resolved.toolFactory ? resolved.toolFactory(txTenant) : resolved.tools;
-            await runAgent(txTenant, resolved.backend, effectiveSpec, {
-              runId: job.runId,
-              taintDb,
-              ...(tools ? { tools } : {}),
-              // Output persistence: when the job carries `persistTo`, write the run's validated output
-              // into the resolved store (exactly-once — the header completing-transition gate makes a
-              // recovery re-dispatch of an already-completed run a NO second write).
-              ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
-              ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
-            });
+          const tools = resolved.toolFactory ? resolved.toolFactory(tdb) : resolved.tools;
+          await runAgent(tdb, resolved.backend, effectiveSpec, {
+            runId: job.runId,
+            // The run's handle commits each statement as it is made, so the taint marker, the
+            // cancellation watch and the run's terminal record all go through it directly.
+            taintDb: tdb,
+            signal: leaseLost.signal,
+            ...(tools ? { tools } : {}),
+            // Output persistence: when the job carries `persistTo`, write the run's validated output
+            // into the resolved store (exactly-once — the header completing-transition gate makes a
+            // recovery re-dispatch of an already-completed run a NO second write).
+            ...(job.persistTo !== undefined ? { persistTo: job.persistTo } : {}),
+            ...(resolved.productTables ? { productTables: resolved.productTables } : {}),
           });
         } catch (err) {
-          // ── A CANCELLED run that ends by REJECTING is still recorded terminal ──────────────────
-          // A run that produces a result records the cancellation itself, from inside the transaction
-          // it is holding the header row with (run-core consults the marker before its completing
-          // write). A run that ends by THROWING cannot: the rejection rolls this transaction back, so
-          // anything run-core wrote — including that record — is gone with it. And the cancel surface
-          // may well have given up on the header row while the run still held it (it is bounded on
-          // purpose, so a cancel never waits out the run it is ending). Without this, such a run has
-          // no terminal record at all: its header keeps the pre-run status forever and nothing says
-          // it was ended.
-          //
-          // So record it HERE — after the rollback, on the body's own non-transactional handle (the
-          // same autonomy the taint marker relies on), where the row is free. The write is the same
-          // guarded, idempotent transition the cancel surface makes, so a cancellation already
-          // recorded stays as it is. The step then completes as a NO-OP for the same reason a
-          // dispatch of an already-cancelled run does: the run is fully accounted for, and failing
-          // the workflow would add an engine-level error on top of a recorded outcome.
-          //
-          // Only a CANCELLED run takes this path. A run that failed on its own rethrows unchanged,
-          // and so does one whose cancellation read cannot be resolved — an unreadable marker must
-          // never swallow a run's real failure.
+          // ── A CANCELLED run that ends by REJECTING is accounted for, not failed ───────────────
+          // run-core records a cancelled run's outcome itself (with what happened to its provider
+          // call); the record below is the same guarded, idempotent transition, kept for a run whose
+          // own record could not be written. The step then completes as a NO-OP: failing the
+          // workflow would add an engine-level error on top of a recorded outcome. A run that failed
+          // on its own rethrows unchanged, and so does one whose cancellation read cannot be
+          // resolved — an unreadable marker must never swallow a run's real failure.
           const cancelled = await readCancelledWithBoundedRetry(tdb, job.runId).catch(() => false);
           if (!cancelled) throw err;
           await recordRunCancelled(tdb, job.runId);
           return;
+        } finally {
+          stopRenewal();
+          // Give the lease up, so a dispatch waiting on this run takes over at once rather than when
+          // the lease lapses. Best-effort: a failure only means the waiter waits for the expiry.
+          await releaseRunLease(tdb, job.runId, executionId).catch(() => {});
         }
       },
       // The step is NOT retried in-step (default retriesAllowed:false) — no in-step auto-retry.
       { name: 'runAgent', retriesAllowed: false },
     );
+  }
+
+  /**
+   * Take over a run whose started-once marker already exists. Waits while another execution holds a
+   * live lease; returns `done` when the run was cancelled (and is recorded), and `claimed` once this
+   * execution holds the lease — the caller then decides, taint first, whether the run may run again.
+   * An execution gives its lease up when it ends, so a waiter takes over at once; a lease that lapsed
+   * because its holder died is noticed within one renewal interval.
+   */
+  async #claimStartedRun(
+    tdb: TenantDb,
+    runId: string,
+    executionId: string,
+    ttlMs: number,
+  ): Promise<'done' | 'claimed'> {
+    for (;;) {
+      if (await readCancelledWithBoundedRetry(tdb, runId)) {
+        await recordRunCancelled(tdb, runId);
+        return 'done';
+      }
+      const lease = await readRunLease(tdb, runId);
+      const live = lease?.leaseUntil !== undefined && lease.leaseUntil > Date.now();
+      if (!live && (await moveRunLease(tdb, runId, lease?.executionId, executionId, ttlMs))) {
+        return 'claimed';
+      }
+      await new Promise((r) => setTimeout(r, Math.max(1, Math.floor(ttlMs / 3))));
+    }
   }
 
   async start(): Promise<void> {
@@ -695,14 +863,47 @@ export class DbosDurableExecutor implements DurableExecutor {
         'DbosDurableExecutor.enqueue called before start() — launch the engine first.',
       );
     }
+    const runAgentJob = this.#runAgentJob;
     // The durable workflow id IS the pre-minted, idempotency-reserved runId: DBOS's workflow-id
     // idempotency law (same id ⇒ at most one workflow) + our reserve interlock to exactly one job
     // per Idempotency-Key. The queue dequeues + runs it off-request with the worker-concurrency cap.
-    const handle = await DBOS.startWorkflow(this.#runAgentJob, {
-      workflowID: job.runId,
-      queueName: AGENT_RUNS_QUEUE,
-    })(job);
-    return { jobId: handle.workflowID };
+    // The tenant rides as a workflow attribute, which is what admission counts a tenant's runs by.
+    const start = async (): Promise<EnqueueResult> => {
+      const handle = await DBOS.startWorkflow(runAgentJob, {
+        workflowID: job.runId,
+        queueName: AGENT_RUNS_QUEUE,
+        workflowAttributes: { tenantId: job.tenantId },
+      })(job);
+      return { jobId: handle.workflowID };
+    };
+    const admission = this.#config.admission;
+    if (admission?.queueMax === undefined && admission?.queueMaxPerTenant === undefined) {
+      return start();
+    }
+    // QUEUE ADMISSION. Counting and enqueueing are one step for every process: they run under one
+    // advisory lock on the application database, so a burst cannot all pass the count before any of
+    // them is counted. The count is the engine's own queue (queued and executing), which every
+    // process sharing the system database writes to.
+    const tdb = forTenant(this.#deps.db, job.tenantId);
+    return tdb.withAdvisoryLock(ADMISSION_LOCK_NAMESPACE, ADMISSION_LOCK_SLOT, async () => {
+      // A re-enqueue of a run that already exists is not a new run: the engine answers it with the
+      // existing workflow, so it is never refused.
+      if ((await DBOS.getWorkflowStatus(job.runId)) === null) {
+        if (admission.queueMaxPerTenant !== undefined) {
+          const tenantBacklog = await countBacklog(admission.queueMaxPerTenant, job.tenantId);
+          if (tenantBacklog >= admission.queueMaxPerTenant) {
+            throw new RunAdmissionRefusedError('tenant', admission.queueMaxPerTenant);
+          }
+        }
+        if (admission.queueMax !== undefined) {
+          const backlog = await countBacklog(admission.queueMax);
+          if (backlog >= admission.queueMax) {
+            throw new RunAdmissionRefusedError('global', admission.queueMax);
+          }
+        }
+      }
+      return start();
+    });
   }
 
   async status(jobId: string): Promise<DurableJobStatus> {

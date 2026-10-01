@@ -108,9 +108,10 @@ let productTables: Map<string, PgTable>;
 let unregisterTables: (() => void) | undefined;
 
 /**
- * Captures the `app.current_tenant` GUC value read INSIDE the run's own `tdb.transaction()` body —
- * deliverable-2 proof that the off-request run executes inside the GUC-populated transaction
- * (RLS-ready). Reset per test; written by the wrapDb proxy below.
+ * Captures the `app.current_tenant` GUC value read at the end of any `tdb.transaction()` body the run
+ * path opens. The off-request run holds NO transaction across the model call, so a plain run opens
+ * none and this stays null — the proof that the run does not pin a connection while it waits. Reset
+ * per test; written by the wrapDb proxy below.
  */
 const capturedGuc: { value: string | null } = { value: null };
 
@@ -312,10 +313,10 @@ describe('DBOS durable spine — runAgent off-request', () => {
     // runAgent ran exactly once, off-request (the enqueue returned before this completed).
     expect(backend.liveRuns).toBe(1);
 
-    // Deliverable 2: the off-request run executed inside forTenant(db,tenantId).transaction() with the
-    // app.current_tenant GUC POPULATED to this tenant (RLS-ready) — read back from inside the run's own
-    // tx by the wrapDb proxy. Not blind: a run NOT wrapped in tdb.transaction() would leave this null.
-    expect(capturedGuc.value).toBe(TENANT);
+    // The off-request run holds NO transaction across the model call: its statements commit as they
+    // are made, so the wrapDb proxy never saw a transaction body. Not blind: wrapping runAgent in
+    // tdb.transaction() again would set this to the tenant.
+    expect(capturedGuc.value).toBeNull();
 
     // The run HEADER persisted (tenant-scoped), status completed, the final text from the fake run.
     const tdb = forTenant(db, TENANT);
@@ -446,12 +447,10 @@ describe('DBOS durable spine — runAgent off-request', () => {
     expect(headers).toHaveLength(1);
   });
 
-  it('crash-mid-tx recovery: the run_started marker SURVIVES runAgent tx rollback → a re-enqueue does NOT re-run runAgent (fix I, fail-the-fix)', async () => {
+  it('crash-mid-run recovery: the run_started marker SURVIVES a run that throws → a re-enqueue does NOT re-run runAgent (fail-the-fix)', async () => {
     // The backend throws INSIDE runAgent (after the reserve marker committed, mid-run) on the FIRST
-    // invocation — exactly a crash inside the run's own tdb.transaction() (the run header/journal
-    // write rolls back). The started-once marker is reserved BEFORE that tx, so it MUST survive the
-    // rollback. This is fail-the-fix: moving the reserve INSIDE tdb.transaction() would roll the
-    // marker back too → the marker would be ABSENT and a re-enqueue WOULD re-run runAgent.
+    // invocation. The started-once marker is reserved BEFORE runAgent, so it is committed whatever
+    // the run does after it, and a re-enqueue is refused.
     const runId = randomUUID();
     backend.throwMidRunTimes = 1; // throw on the first run only; a (hypothetical) re-run would succeed
     const job: RunJob = {
@@ -466,18 +465,18 @@ describe('DBOS durable spine — runAgent off-request', () => {
     expect(firstStatus).toBe('failed'); // the throw made the workflow terminal-failed
     expect(backend.liveRuns).toBe(1); // runAgent was entered exactly once (it threw)
 
-    // (a) The run_started marker IS present despite the throw — proving the reserve committed OUTSIDE
-    //     runAgent's (rolled-back) tx. If the reserve were inside that tx, this row would be gone.
+    // (a) The run_started marker IS present despite the throw.
     const markers = await db.$client.unsafe(
       'SELECT 1 FROM idempotency_keys WHERE tenant_id = $1 AND scope = $2 AND idem_key = $3',
       [TENANT, RUN_STARTED_SCOPE, runId],
     );
     expect(markers).toHaveLength(1);
-    // The run header did NOT persist (runAgent's tx rolled back on the throw).
-    const headersAfterCrash = await db.$client.unsafe('SELECT 1 FROM runs WHERE run_id = $1', [
+    // The run header records the failure: no transaction is held across the run, so the start of
+    // the run and its end by throwing are both on record.
+    const headersAfterCrash = await db.$client.unsafe('SELECT status FROM runs WHERE run_id = $1', [
       runId,
     ]);
-    expect(headersAfterCrash).toHaveLength(0);
+    expect(headersAfterCrash).toEqual([{ status: 'error' }]);
 
     // (b) A same-runId re-enqueue must NOT re-invoke runAgent: the started-once guard loses the
     //     reserve (marker already present) → DurableRunNotRetriedError → terminal-failed, runAgent
