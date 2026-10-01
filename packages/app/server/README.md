@@ -68,6 +68,13 @@ role, and open the control connection with `openControlDatabase` so the stopped-
 tell its sessions from a runtime's. None of it adds an HTTP route; see `docs/ARCHITECTURE.md`,
 "Runtime control".
 
+`preflightSnapshot` checks, read-only and before any fence, whether an environment can be exported,
+and `captureSnapshot` takes its plaintext inner snapshot archive under the fence `quiesce()` took:
+both databases dumped with the operator's `pg_dump` (`resolvePgDump`) in the snapshot that counts
+their rows, every blob of the fs blob store with both digests, the deployed application, and the
+barriers and the reading role it relied on. The caller encrypts the archive and removes the scratch
+directory; see `docs/runtime-operations.md`, "Snapshots of a fenced source".
+
 `applyBundle` applies a plan `prepare()` produced for a bundle staged into its version directory
 (`openStateDirectory(...).stageVersion`): it recomputes the plan digest before it writes anything
 and again under the lease, then runs the platform chain, the product change, the application record

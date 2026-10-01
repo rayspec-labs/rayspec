@@ -128,7 +128,8 @@ async function rows<T>(tx: LeaseTx, text: string, params: unknown[] = []): Promi
 
 type DatabaseBarrier = 'database-write-role' | 'database-stopped-source';
 
-interface BarrierRecord {
+/** The barriers recorded with the fence: what quiesce held, and what resume must restore. */
+export interface BarrierRecord {
   database: {
     barrier: DatabaseBarrier;
     state: 'held' | 'unavailable';
@@ -139,7 +140,8 @@ interface BarrierRecord {
   objects: { barrier: 'object-writes'; state: 'held' | 'unavailable' };
 }
 
-function readBarrierRecord(value: unknown): BarrierRecord | null {
+/** Read the barrier record kept with the fence; null when there is none or it is malformed. */
+export function readBarrierRecord(value: unknown): BarrierRecord | null {
   if (typeof value !== 'object' || value === null) return null;
   const v = value as Record<string, unknown>;
   const db = v.database as Record<string, unknown> | undefined;

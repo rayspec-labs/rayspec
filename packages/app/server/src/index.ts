@@ -229,6 +229,15 @@ export {
   readOperationReceipts,
   unfinishedSteps,
 } from './operation-lease.js';
+// The snapshot of a fenced source, as an export takes it: the read-only preflight of everything a
+// snapshot must carry or cannot carry, and the capture of the plaintext inner snapshot archive under
+// the fence (the caller encrypts it). `pg_dump` is found and run by `pg-dump.ts`.
+export {
+  PgDumpError,
+  type PgDumpTool,
+  pgDumpMajor,
+  resolvePgDump,
+} from './pg-dump.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so
@@ -364,6 +373,27 @@ export {
 export { assembleOptsFromEnv } from './serve-opts.js';
 // The bounded graceful shutdown both entrypoints run on SIGINT/SIGTERM.
 export { type DrainableServer, type ShutdownOutcome, shutdownHttpServer } from './shutdown.js';
+export {
+  type CaptureBarrier,
+  type CapturedSnapshot,
+  type CaptureResult,
+  type CaptureSnapshotOptions,
+  captureSnapshot,
+  type ExcludedTable,
+} from './snapshot-capture.js';
+export {
+  type ClassifiedTable,
+  classifyApplicationTables,
+  excludedDataCategories,
+  identityPolicy,
+  preflightSnapshot,
+  type RunHistoryPolicy,
+  type SnapshotBlobSource,
+  type SnapshotPreflight,
+  type SnapshotSourceFacts,
+  type SnapshotSourceOptions,
+  type UnsupportedSourceState,
+} from './snapshot-source.js';
 // The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
 // handoff that leaves no platform user behind. It lives in the composition root because it is the only
 // package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach

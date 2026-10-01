@@ -587,6 +587,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler receives what the deployment configured, as before. `spec.schema.json` and
   `version-1.0.schema.json` carry it; a 1.8 parser refuses a spec that uses it. See
   [Hosting in the hardened posture → Tool rights](./docs/hardened-posture.md#tool-rights).
+- **Snapshots of a fenced source: preflight and capture, as a library.** `preflightSnapshot`
+  (`@rayspec/server`) checks, read-only and before any fence, everything an export needs: the
+  deployed application rebuilt byte for byte from the state directory and matching the database's
+  record, the schema head and product ledger (`RAY_SCHEMA_DRIFT`), a `pg_dump` of the server's major,
+  the reading role's access past row-level security, the fs blob store walked completely, the
+  migration size and object limits, free scratch space, database extensions
+  (`RAY_POLICY_DENIED` `unsupported-extension`), exactly one organization and no blob of another
+  tenant (`RAY_MULTI_TENANT_UNSUPPORTED`), a password-holding member (`RAY_OWNER_RECOVERY_REQUIRED`),
+  and every table being a platform table or a product store (`RAY_EXTERNAL_STATE_UNSUPPORTED`
+  `unknown-table`). `captureSnapshot` takes the plaintext inner snapshot archive under the fence: it
+  refuses without the fence at the given epoch, without a held database write barrier
+  (`database-barrier-unavailable`), with a session that could write (`uncontrolled-writer`) or a run
+  still marked running (`unreconciled-effects`); it copies every stored blob into `objects.bin` with
+  both digests checked, dumps each database with `pg_dump --snapshot` in the transaction that counts
+  its rows, dumps the workflow system database whole when it exists, refuses a blob root or fence
+  that changed meanwhile (`RAY_SOURCE_NOT_QUIESCENT`), and reports who read (`snapshot-role` or
+  `single-role`) and which barriers held. Credential, replay, audit and runtime-control rows never
+  leave the source, run history follows the required `included`/`excluded` policy, and every
+  exclusion is listed. `pg_dump` is the operator's (an absolute path, or the first on `PATH`) and
+  gets its connection through the libpq environment only. See
+  [Runtime operations → Snapshots of a fenced source](./docs/runtime-operations.md#snapshots-of-a-fenced-source).
+- **The inner snapshot archive and its object index.** `writeSnapshotArchive` and
+  `inspectSnapshotArchive` (`@rayspec/bundle`) write and read the strict stored ZIP rooted at
+  `snapshot.json`, checking the inventory, the application digest, the object ranges
+  (`RAY_DIGEST_MISMATCH` `object-range`) and both digests of every object (`object-sha256`);
+  `validateObjectIndex` (`@rayspec/bundle-contract`) validates `payload/object-index.json`.
+  `listFsBlobs` (`@rayspec/platform`) walks an fs blob root and lists every stored object with the
+  length and digest its header states, refusing anything the store would not have written.
 
 ### Changed
 

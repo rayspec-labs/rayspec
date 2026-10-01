@@ -164,7 +164,9 @@ With role separation, `quiesce()` holds the database barrier by revoking the run
 heartbeat table, and `resume()` grants back exactly what it revoked
 ([Runtime operations](./runtime-operations.md)). Only a table's owner can do that, so the adapter's
 database connection is the migration role's. The snapshot role keeps its reads, which is what an
-export dumps with.
+export dumps with: `captureSnapshot` reads both databases as the snapshot role when it is given its
+connections, and reports `reader: single-role` when it reads with the one role instead
+([Snapshots of a fenced source](./runtime-operations.md#snapshots-of-a-fenced-source)).
 
 ## Turning it off
 
