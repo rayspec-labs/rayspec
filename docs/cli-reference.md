@@ -871,6 +871,68 @@ deployment at all.
 
 ---
 
+## `tenant recover-owner`
+
+```
+rayspec tenant recover-owner --email <address> [--org-id <uuid>] [--ttl-seconds <n>]
+```
+
+Issues a **one-time owner-recovery token** for an active owner who holds **no password** — an owner
+whose only credential was an API key, which a new API-key pepper breaks (after an
+[import](./import.md#owner-recovery), for example). The owner redeems it once over HTTP, sets a
+password and is signed in. The operator's authority is the database and the deployment's pepper;
+no running server is needed to issue, and the command mounts no route.
+
+- **Postgres:** yes, directly — `RAYSPEC_MIGRATION_DATABASE_URL` when set, else `DATABASE_URL`. It
+  runs no migration.
+- **Secrets:** `DATABASE_URL` and `RAYSPEC_API_KEY_PEPPER`, each also honouring its `<VAR>_FILE`
+  variant. The pepper must be the **one the deployment runs with**: the token is stored as its HMAC
+  under it, and a token hashed under another pepper never redeems.
+- **What it writes,** in one transaction: one `owner_recovery_tokens` row (the HMAC, the owner, the
+  expiry), the replacement of any token still outstanding for that owner, and an
+  `owner_recovery_issued` row in `auth_audit` (who and until when, not the token).
+- **Refusals** (`ok: false`, exit 1, nothing written): `NO_SUCH_OWNER` (no active owner with that
+  address), `AMBIGUOUS_ORGANIZATION` (the account owns more than one; pass `--org-id`),
+  `PASSWORD_PRESENT` (the owner signs in with their password), `ENVIRONMENT_FENCED` (an exported
+  source, or an import target before its cutover), `INVALID_EMAIL`, `SECRETS_MISSING`,
+  `RECOVERY_FAILED` (the database could not be reached).
+- **Flags:**
+  - `--email <address>` — **required**. The owner to recover.
+  - `--org-id <uuid>` — the organization, when the account owns more than one.
+  - `--ttl-seconds <n>` — the token's lifetime; default 1800 (30 minutes), clamped to 5 minutes – 24
+    hours.
+- **Output:** ONE JSON object on stdout, the **only** place the token ever appears:
+
+  ```json
+  {
+    "ok": true,
+    "command": "tenant recover-owner",
+    "orgId": "…",
+    "userId": "…",
+    "recoveryId": "…",
+    "expiresAt": "2026-10-01T10:30:00.000Z",
+    "replaced": 0,
+    "recoveryToken": "…",
+    "redeemPath": "/v1/auth/owner-recovery",
+    "errors": []
+  }
+  ```
+
+  Do not capture it in a log; hand the token to the owner over a channel you trust. `--json` is not
+  available for this command (the result envelope has no operation for it): with `--json` it refuses
+  with exit 2 and prints nothing on stdout.
+- **Redeeming:** `POST /v1/auth/owner-recovery` with `{"token": "…", "password": "…"}` (and
+  `deliverRefreshTokenInBody` as for login). Unauthenticated and rate-limited per source
+  (`owner-recovery`, 10 a minute). One transaction checks the token is unexpired, unused and not
+  replaced and that the account is still an active owner without a password, consumes it, sets the
+  password and ends any session the account had; the answer is a signed-in owner
+  (`{accessToken, tokenType, expiresIn, activeOrgId, userId, role: "owner"}`, the refresh secret in the
+  cookie). Every token that does not redeem — unknown, expired, used, replaced — answers the same
+  `400`. The redemption is audited as `owner_recovery_redeemed` and the session's `login`.
+- **Exit:** `0` issued, `1` refused, `2` usage.
+
+---
+
 ## `dev gen-secrets`
 
 ```
@@ -1469,7 +1531,7 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
 ```
 rayspec import <migration.ray> --target <state-dir> --identity-file <file> --dry-run [--json]
 rayspec import <migration.ray> --target <state-dir> --identity-file <file>
-               [--bindings-file <file>] [--json]
+               --secrets-out <new-dir> [--bindings-file <file>] [--json]
 rayspec import --target <state-dir> --discard-failed [--json]
 ```
 
@@ -1509,15 +1571,25 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
 - **Verification.** The bytes restored hash to the inventory; the tables and their row counts are the
   snapshot's; every foreign key is there and validated; the schema head is the snapshot's; exactly one
   organization owns every tenant row and object (`RAY_MULTI_TENANT_UNSUPPORTED` otherwise, and a dump
-  restoring two organizations is discarded at once); sessions, API keys, invites and OIDC artifacts
-  are empty; the runtime role holds the isolated posture; every object read back has the index's
-  size, header and both digests.
+  restoring two organizations is discarded at once); sessions, API keys, invites, OIDC artifacts and
+  owner-recovery tokens are empty; the runtime role holds the isolated posture; every object read back
+  has the index's size, header and both digests.
+- **Identity.** After the verification each account's carried identity — user id, and password hash
+  when it has one — is recorded in the target's `auth_audit` (event `identity_imported`, with the
+  operation id and the bundle's digest). The target's own boot secrets are then minted into
+  `--secrets-out`: `jwt-signing-key.pem` (RS256 PKCS#8), `api-key-pepper` and `media-signing-key`,
+  directory 0700, files 0600, never printed. The source's secrets are never carried, so every API
+  key, refresh session, invite, access token and playback URL of the source is refused by the target;
+  passwords keep working.
 - **Flags.**
   - `<migration.ray>`: the bundle `rayspec export` wrote.
   - `--target <state-dir>` (required): the target's state directory, created (mode 0700) when it does
     not exist. It must hold no deployment.
   - `--identity-file <file>` (required): the age identity file (`age-keygen`), with exactly one X25519
     identity. A protected file: a regular file of yours, mode 0600 (`RAY_BINDINGS_FILE_INSECURE`).
+  - `--secrets-out <new-dir>` (import only, required): a new directory, under an existing one, for the
+    target's own boot secrets. An existing path is refused (`RAY_USAGE`) before anything is
+    decrypted.
   - `--bindings-file <file>` (import only): the target application's bindings, in the deploy's format.
     Reserved names are refused (`RAY_BINDING_RESERVED`), undeclared names `RAY_USAGE`, and a required
     binding neither the file nor the environment supplies is `RAY_BINDING_MISSING`. The values are
@@ -1550,8 +1622,12 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
   }
   ```
 
-  On stderr: the operation id, progress lines and, without `--json`, a summary with the counts, the
-  target's fence epoch, the cutover instruction and the cutover token (below).
+  On stderr: the operation id, progress lines and, without `--json`, a summary with the counts, who
+  signs in again with their password, which owner needs owner recovery (no password; see
+  [`tenant recover-owner`](#tenant-recover-owner)) and which account has no way in, that every API key
+  is reissued, the target's fence epoch, the cutover instruction naming the secret files and the
+  cutover token (below). The receipt's summary keeps only the counts (`identity`) and
+  `bootSecrets: "reissued"`.
 - **Cutover.** The target is fenced at epoch 1 with its runtime role's writes revoked, so nothing
   serves it. The cutover token — the SHA-256 of `{migrationBundleSha256, applicationDigest,
   targetDeploymentId, sourceFenceEpoch, targetFenceEpoch, targetEnvironmentRevision, issuedAt,
@@ -1559,7 +1635,10 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
   summary and the receipts. To cut over: keep the source fenced, release the target with
   `rayspec resume --deployment <target id> --fence-epoch <n> --state-dir <target>` in the target's
   environment, and deploy the application the source ran there (`rayspec deploy <file.ray>
-  --state-dir <target>`), with the target's own boot secrets.
+  --state-dir <target>`), with the target's own boot secrets
+  (`RAYSPEC_JWT_SIGNING_KEY_FILE=<new-dir>/jwt-signing-key.pem`,
+  `RAYSPEC_API_KEY_PEPPER_FILE=<new-dir>/api-key-pepper`, and `RAYSPEC_MEDIA_SIGNING_KEY` from
+  `<new-dir>/media-signing-key` when the application has a playback route).
 - **Receipts.** `<target>/receipts/import-<operationId>.json` (mode 0600, shareable: no secret, path,
   record or table name) and, once the target is verified, rows of `runtime_control_receipts` of kind
   `import` in the target — one per transition `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER` or
@@ -1569,7 +1648,8 @@ authoritative throughout. The operator guide is [Importing a deployment](./impor
   running `pg_restore`, whose transaction rolls back (`RAY_INTERRUPTED`, exit 6). A failure after the
   target changed is `RAY_RECONCILIATION_REQUIRED` (exit 6) or the refusal that found it; the target is
   marked failed (`import.json` `BLOCKED`, and fenced with its runtime role's writes revoked once its
-  application database was restored) until `--discard-failed`. A process killed outright leaves
+  application database was restored) until `--discard-failed`; so is a verified target whose
+  `--secrets-out` could not be written. A process killed outright leaves
   its scratch data and `import.json` at `IMPORTING`; the next `import` of the target removes the
   scratch data (so does `resume`), closes the killed run's receipt and marks the target failed.
 - **Codes.** The contract's lists for the two forms — `RAY_USAGE`, `RAY_INVALID_ARCHIVE`,

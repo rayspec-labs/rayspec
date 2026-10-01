@@ -236,8 +236,8 @@ this key and are unaffected.
 
 ### The API-key pepper
 
-`RAYSPEC_API_KEY_PEPPER` is the HMAC key of three stored credentials: API keys (machine-client
-secrets included), refresh sessions and invite tokens. Passwords are argon2id with their own salt and
+`RAYSPEC_API_KEY_PEPPER` is the HMAC key of four stored credentials: API keys (machine-client
+secrets included), refresh sessions, invite tokens and owner-recovery tokens. Passwords are argon2id with their own salt and
 never touch it. The pepper has a versioned form:
 
 **Rotation, with an overlap window.**
@@ -256,9 +256,9 @@ never touch it. The pepper has a versioned form:
 
 **Reset, for a pepper that leaked.** Restart with a new pepper and **no** previous pepper. Every API
 key, refresh session and outstanding invite is refused at once; users sign in again with their
-passwords; mint new API keys; reissue invites, and for an organization whose only credential was an
-API key, issue an owner invite with
-`rayspec tenant ensure --org-id <id> --name <n> --owner-email <e> --owner-invite-out <path> --reissue-owner-invite`.
+passwords; mint new API keys; reissue invites, and for an owner whose only credential was an API key
+(who holds no password), issue a one-time recovery token with
+`rayspec tenant recover-owner --email <e>` ([CLI reference](./cli-reference.md#tenant-recover-owner)).
 The old rows stay in the database and simply never verify again; revoke them through the API-key
 routes to keep the listings tidy.
 

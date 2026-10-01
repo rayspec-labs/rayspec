@@ -355,12 +355,14 @@ library in `@rayspec/server` too, in four steps, each refusing with a contract c
   role, with no owner, privilege, comment or tablespace from the dump (`restoreDump`); writes the
   stored blob files unchanged; brings the runtime role's posture in force (`applyTenantIsolation`)
   and checks it; verifies the row counts, foreign keys, schema head, the one organization, the empty
-  credential tables and every object's digests; records the target's own deployment id; and fences
+  credential tables and every object's digests; records each account's carried identity in the
+  target's `auth_audit` (`applyIdentityPolicy`); records the target's own deployment id; and fences
   the target with the runtime role's writes revoked (`quiesce`), so it serves nothing until the
   cutover releases the fence (`resume`). `discardImportTarget` drops what the migration role owns in
   both databases and empties the blob root, for a target a failed import left.
 
-Each transition — `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER`, `BLOCKED` — is recorded by
+The CLI then mints the target's own boot secrets (`mintBootSecrets`) into the directory
+`--secrets-out` names. Each transition — `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER`, `BLOCKED` — is recorded by
 `ImportReceiptLog` in the target state directory's local receipt and, once the target is verified, in
 its `runtime_control_receipts` (kind `import`).
 

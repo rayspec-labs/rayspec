@@ -56,7 +56,10 @@ The export's result says which barrier held and which did not apply, and so does
 - **The deployment was deployed from a bundle** (`rayspec deploy <file.ray>`), and you run the
   export with its state directory (`--state-dir`, default `.rayspec-state`).
 - **One organization**, and at least one member of it with a password: after the import every API
-  key, session and invite stops working, so someone must be able to sign in.
+  key, session and invite stops working, so someone must be able to sign in. An owner who holds only
+  an API key regains access on the target through owner recovery
+  ([Importing a deployment](./import.md#owner-recovery)); an organization in which nobody holds a
+  password is still refused (`RAY_OWNER_RECOVERY_REQUIRED`).
 - **`pg_dump` of the database server's major version** on `PATH`, or named by `RAYSPEC_PG_DUMP`
   (an absolute path). `pg_dump --version` must report the same major as the server.
 - **The blob root** in `RAYSPEC_BLOB_ROOT`, when the application keeps blobs. Only the fs blob store

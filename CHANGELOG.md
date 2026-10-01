@@ -687,9 +687,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `@rayspec/bundle` reports where each payload entry lies in the archive
   (`SnapshotInspection.entries`), and `@rayspec/db` exports the platform's definer-function
   allowlist (`ISOLATION_DEFINER_FUNCTIONS`, `normalizeFunctionBody`).
+- **The identity of an imported target.** `rayspec import` now requires `--secrets-out <new-dir>`
+  and mints the target's own boot secrets there — an RS256 signing key (`jwt-signing-key.pem`), an
+  API-key pepper and a media signing key, directory mode 0700, files 0600, printed nowhere — so
+  nothing keyed by the source's secrets works on the target: its access tokens, refresh sessions,
+  API keys, invites and playback URLs are refused, while passwords (argon2id, keyed by no secret)
+  keep working. After the verification the import records each account's carried identity — user
+  id, and password hash when it has one — in the target's `auth_audit` (`identity_imported`, naming
+  the import and the bundle's digest), checks the credential tables empty once more, and lists on
+  stderr who signs in again with their password, which owner needs owner recovery because they hold
+  no password, which account has no way in, and that every API key of the source is reissued; the
+  receipt keeps the counts and `bootSecrets: "reissued"`.
+- **Owner recovery: `rayspec tenant recover-owner` and `POST /v1/auth/owner-recovery`.** For an
+  active owner who holds no password — an owner whose only credential was an API key, which a new
+  pepper breaks — the operator issues a one-time token against the deployment's database with its
+  pepper: `rayspec tenant recover-owner --email <address> [--org-id <uuid>] [--ttl-seconds <n>]`.
+  The token is printed once, in the command's JSON object on stdout; the new platform table
+  `owner_recovery_tokens` (migration `0016_owner_recovery`, a global table under the snapshot
+  category `credential-state`) keeps only its HMAC under the pepper, a newer token replaces an
+  outstanding one, and `owner_recovery_issued` is audited. The command refuses an owner with a
+  password, an account that is not an active owner and a fenced environment. The owner redeems the
+  token once at `POST /v1/auth/owner-recovery` with a new password (rate-limited per source as
+  `owner-recovery`): one transaction consumes it, sets the password and ends the account's sessions,
+  and the owner is signed in (`owner_recovery_redeemed`); every token that does not redeem answers
+  the same `400`. `owner_recovery_tokens` is a reserved store name.
 
 ### Changed
 
+- **`docs/ARCHITECTURE.md` on restores and the boot secrets.** It said a new API-key pepper breaks
+  only the copied API keys; the pepper also keys refresh sessions, invite tokens and owner-recovery
+  tokens, which a new pepper breaks just the same. The section now says what each boot secret keys,
+  and separates a backup restore paired with the secrets it was taken under (every credential keeps
+  working) from a portability import (every credential is reset by design). The import guide gains
+  the operator's whole move: dry run, restore and verify, private testing, cutover, the recovery
+  window and why switching DNS back after new writes is not a rollback.
 - **The durable worker holds no transaction across the model call.** A run's statements commit as
   they are made, as on the in-request path, so a run waiting on a slow provider holds no database
   connection and the worker's pool bounds statements, not runs. One execution per run is kept by a

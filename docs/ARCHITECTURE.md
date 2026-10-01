@@ -354,42 +354,61 @@ what a handler is **handed**; they do not contain code that goes looking. Only a
 boundary outside the process (a dedicated VM or container, its own database, host
 egress rules) contains code that is not trusted.
 
-### Restore and key rotation
+### Restore, import and the boot secrets
 
-The boot secrets live in the environment, never in the database — which has a sharp
-operational consequence when you **restore a database dump under different secrets**.
-A full dump restores the rows whole — orgs, users, memberships, the argon2id password
-hashes, the API-key rows, and all tenant data — so at the DB level everything survives
-and stays reachable. The only thing a freshly-minted secret permanently breaks is the
-credential material keyed by that specific secret:
+The boot secrets live in the environment, never in the database, and each one keys
+credentials that the database stores only as a hash or not at all. So a database moved
+under **different** secrets keeps every row, and loses every credential keyed by the old
+secrets:
 
-- **The API-key pepper (`RAYSPEC_API_KEY_PEPPER`).** Every API-key row stores an HMAC
-  of the key computed with the pepper. Restore the dump under a **freshly-minted**
-  pepper and those stored HMACs no longer match, so the copied API keys all fail to
-  verify (`401`) — even though the rows are physically present. The same pepper keys
-  refresh sessions and invite tokens, so those stop verifying too: users sign in again,
-  and outstanding invites are reissued. The data and the org
-  identities stay reachable — **user passwords are hashed with argon2id** (each hash
-  carries its own salt and params; the pepper never touches passwords), so they survive
-  the restore untouched. An org owner simply **logs in again** (password intact), gets a
-  fresh JWT minted under the current signing key, and reaches the tenant data exactly as
-  before. The fix is not to recover the old keys but to **mint new API keys** after a
-  restore. The one genuine edge, noted honestly: an org whose *sole* credential was an
-  API key (no user login at all) has nothing to log in with, so it needs a fresh
-  key/identity established out of band.
-- **The JWT/OIDC signing key (`RAYSPEC_JWT_SIGNING_KEY`).** The same class of problem:
-  tokens issued under the old key fail to verify under a new one. This one **self-heals**
-  — a user simply signs in again and gets a fresh token minted under the current key.
-  (It is the same re-login that restores API access above, because user passwords are
-  pepper-independent; only a copied API key, which cannot "log in again," must be
-  re-minted rather than self-healing.)
+| Secret | What it keys | Under a new value |
+| --- | --- | --- |
+| API-key pepper (`RAYSPEC_API_KEY_PEPPER`) | API keys, refresh sessions, invite tokens and owner-recovery tokens: each stored row is an HMAC under the pepper | every API key answers `401`, every refresh session `401` (users sign in again), every pending invite and recovery token is refused |
+| Signing key (`RAYSPEC_JWT_SIGNING_KEY`) | access tokens and the OIDC artifacts | every token the old key signed answers `401`; a fresh sign-in mints a new one |
+| Media signing key (`RAYSPEC_MEDIA_SIGNING_KEY`) | playback tokens | every outstanding playback URL stops working |
 
-The practical rule: **keep a restored dump paired with the secrets it was created under**
-(back up the environment/secret material alongside the database), or plan to re-mint the
-affected **API keys** after a cross-environment restore. This is stated for the **trusted,
-single-node** posture; it is not a claim that restoring a database into a public,
-multi-tenant deployment is safe — that requires the separate hardening layer above (see
-[`SECURITY.md`](../SECURITY.md)).
+Password hashes are argon2id with their own salt and parameters; no secret touches them,
+so every member with a password signs in with it under any secrets. The pepper is not
+"only" the API keys' secret: it breaks refresh sessions and invites just the same, which
+`api-key-pepper-rotation.db.test.ts` and the import suite show against real databases.
+
+That gives two distinct ways to bring a database up somewhere else:
+
+- **A backup restore** is continuity: the operator's own backup of the database, credentials
+  included, restored and served with **the secrets it was taken under**. Every session,
+  refresh token, API key and invite keeps working, and so does an unexpired access token.
+  Keep each backup paired with the secret revision it needs (store both together, encrypted);
+  a backup restored under fresh secrets is a credential reset, as the table above says.
+- **A portability import** (`rayspec import`, [Importing a deployment](./import.md)) is a
+  reset by design: the migration bundle carries no secret and no credential row (sessions,
+  API keys, invites, OIDC artifacts and recovery tokens are dumped empty), and the import
+  mints the target's own signing key, pepper and media key. User ids, memberships and
+  password hashes are carried; each account's carried identity is recorded in the target's
+  `auth_audit` (`identity_imported`, naming the import and the bundle's digest), which is the
+  only path by which a password hash enters a new environment. Before the cutover the import
+  lists who signs in again, which owner needs owner recovery and that every API key is
+  reissued.
+
+To change a secret on a running deployment without a reset, rotate it with an overlap
+window ([Credentials and rotation](./hardened-posture.md#credentials-and-rotation)): the
+previous pepper keeps verifying, and each credential is renewed under the new one when it is
+used.
+
+**Owner recovery.** An owner whose only credential was an API key has nothing to sign in
+with once the pepper changes. The operator, whose authority is the database and the
+deployment's pepper, runs `rayspec tenant recover-owner --email <address>` against the
+deployment once it serves: it refuses an owner who holds a password, an account that is not
+an active owner and a fenced environment, stores only the HMAC of a one-time token, records
+`owner_recovery_issued` and prints the token once. The owner redeems it at
+`POST /v1/auth/owner-recovery` with a new password: one transaction checks the token is
+unexpired, unused and not replaced, consumes it, sets the password and ends any session the
+account had, records `owner_recovery_redeemed`, and signs the owner in. A second redemption
+is refused like an unknown token. Members without a password who are not owners have no such
+path; the import report names them.
+
+All of this is stated for the **trusted, single-node** posture; it is not a claim that
+restoring a database into a public, multi-tenant deployment is safe — that requires the
+separate hardening layer above (see [`SECURITY.md`](../SECURITY.md)).
 
 ---
 
