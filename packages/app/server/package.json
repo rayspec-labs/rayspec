@@ -62,6 +62,7 @@
     "@rayspec/adapter-openai-tts": "workspace:*",
     "@rayspec/stt-port": "workspace:*",
     "@rayspec/tts-port": "workspace:*",
+    "age-encryption": "0.3.1",
     "drizzle-orm": "0.45.2",
     "hono": "4.13.9",
     "jose": "6.2.3",
@@ -70,6 +71,7 @@
   },
   "devDependencies": {
     "@types/node": "22.12.0",
+    "cctv-age": "0.2.0",
     "dotenv": "17.4.2",
     "postgres": "3.4.9",
     "tsx": "4.22.4",

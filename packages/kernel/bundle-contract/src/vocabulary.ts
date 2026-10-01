@@ -410,3 +410,26 @@ export const NOTICES_PATH = 'payload/THIRD-PARTY-NOTICES.txt';
 
 /** The one inventory path of a migration bundle. */
 export const MIGRATION_CIPHERTEXT_PATH = 'payload/migration.age';
+
+// ─── the inner snapshot archive ────────────────────────────────────────────────────────────────
+
+/** The root document of the inner snapshot archive, the one entry outside `payload/`. */
+export const SNAPSHOT_ROOT_NAME = 'snapshot.json';
+
+/** The fixed inventory paths of the inner snapshot archive. */
+export const SNAPSHOT_PATHS = {
+  application: 'payload/application.ray',
+  database: 'payload/database.dump',
+  workflowSystem: 'payload/workflow-system.dump',
+  objectIndex: 'payload/object-index.json',
+  objects: 'payload/objects.bin',
+} as const;
+
+/** The most objects one object index lists (snapshot.schema.json `$defs/objectIndex`). */
+export const MAX_SNAPSHOT_OBJECTS = 500_000;
+
+/** The most `tableCounts` entries one `snapshot.json` carries. */
+export const MAX_SNAPSHOT_TABLE_COUNTS = 10_000;
+
+/** The largest size, offset or inventory entry a snapshot document can state. */
+export const MAX_SNAPSHOT_ENTRY_BYTES = 4_294_967_294;

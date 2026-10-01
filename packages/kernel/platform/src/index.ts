@@ -83,8 +83,17 @@ export {
   withRunBound,
 } from './agent-bounds.js';
 export {
+  BlobInventoryError,
+  type BlobInventoryErrorKind,
   BlobJailError,
   BlobStoreConfigError,
+  type FsBlobInventory,
+  type FsBlobWalkOptions,
+  type FsBlobWalkPhase,
+  type FsInFlightWrite,
+  type FsStoredBlob,
+  listFsBlobs,
+  MAX_SNAPSHOT_KEY_LENGTH,
   makeFsBlobStoreFactory,
 } from './blob/index.js';
 export type { DispatchDeps, SeqlessEventSink } from './dispatch.js';

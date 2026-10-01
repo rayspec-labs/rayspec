@@ -188,6 +188,15 @@ structural gate. It needs:
   `RAYSPEC_JWT_SIGNING_KEY` and `RAYSPEC_API_KEY_PEPPER` themselves. The one that
   spawns an example's `dev-boot.mjs` passes an exported value through (CI exports
   both) and generates only what is missing.
+- **`pg_dump` and `pg_restore` of the server's major (16)** for the snapshot suite of
+  `@rayspec/server` and the export suite of `@rayspec/cli`. They use the host's when their
+  major matches; otherwise they run both from the pinned `postgres` image of
+  `docker-compose.yml` through `docker run`, so Docker alone is enough. The export suite hands
+  the CLI an executable wrapper around that image as `RAYSPEC_PG_DUMP`;
+  `RAYSPEC_TEST_PG_TOOLS=docker` makes it use the image on a host that has the tools too.
+- **The `age` command on the `PATH`** (optional): the age encryption suite of `@rayspec/server`
+  then also decrypts what it encrypts with the reference implementation; without it that one
+  test skips.
 - **`ffmpeg` on the `PATH`** for the media suites. Without it they skip; set
   `RAYSPEC_REQUIRE_MEDIA_TESTS=true` to turn that skip into a failure.
 - **The runtime-role lane.** CI runs the database-backed suites of `@rayspec/api-auth`,

@@ -587,6 +587,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler receives what the deployment configured, as before. `spec.schema.json` and
   `version-1.0.schema.json` carry it; a 1.8 parser refuses a spec that uses it. See
   [Hosting in the hardened posture → Tool rights](./docs/hardened-posture.md#tool-rights).
+- **Snapshots of a fenced source: preflight and capture, as a library.** `preflightSnapshot`
+  (`@rayspec/server`) checks, read-only and before any fence, everything an export needs: the
+  deployed application rebuilt byte for byte from the state directory and matching the database's
+  record, the schema head and product ledger (`RAY_SCHEMA_DRIFT`), a `pg_dump` of the server's major,
+  the reading role's access past row-level security, the fs blob store walked completely, the
+  migration size and object limits, free scratch space, database extensions — none in the
+  application database, and in the workflow system database none but `uuid-ossp`, which the durable
+  engine's own migrations create there (`RAY_POLICY_DENIED` `unsupported-extension`), exactly one
+  organization and no blob of another
+  tenant (`RAY_MULTI_TENANT_UNSUPPORTED`), a password-holding member (`RAY_OWNER_RECOVERY_REQUIRED`),
+  and every table being a platform table or a product store (`RAY_EXTERNAL_STATE_UNSUPPORTED`
+  `unknown-table`). `captureSnapshot` takes the plaintext inner snapshot archive under the fence: it
+  refuses without the fence at the given epoch, without a held database write barrier
+  (`database-barrier-unavailable`), with a session that could write (`uncontrolled-writer`) or a run
+  still marked running (`unreconciled-effects`); it copies every stored blob into `objects.bin` with
+  both digests checked, dumps each database with `pg_dump --snapshot` in the transaction that counts
+  its rows, dumps the workflow system database whole when it exists, refuses a blob root or fence
+  that changed meanwhile (`RAY_SOURCE_NOT_QUIESCENT`), and reports who read (`snapshot-role` or
+  `single-role`) and which barriers held. Credential, replay, audit and runtime-control rows never
+  leave the source, run history follows the required `included`/`excluded` policy, and every
+  exclusion is listed. `pg_dump` is the operator's (an absolute path, or the first on `PATH`) and
+  gets its connection through the libpq environment only. See
+  [Runtime operations → Snapshots of a fenced source](./docs/runtime-operations.md#snapshots-of-a-fenced-source).
+- **The inner snapshot archive and its object index.** `writeSnapshotArchive` and
+  `inspectSnapshotArchive` (`@rayspec/bundle`) write and read the strict stored ZIP rooted at
+  `snapshot.json`, checking the inventory, the application digest, the object ranges
+  (`RAY_DIGEST_MISMATCH` `object-range`) and both digests of every object (`object-sha256`);
+  `validateObjectIndex` (`@rayspec/bundle-contract`) validates `payload/object-index.json`.
+  `listFsBlobs` (`@rayspec/platform`) walks an fs blob root and lists every stored object with the
+  length and digest its header states, refusing anything the store would not have written.
+- **Migration bundles, encrypted with age.** `writeMigrationBundle` (`@rayspec/server`) encrypts an
+  inner snapshot archive with age v1 to one X25519 recipient and writes it as the only payload file
+  (`payload/migration.age`) of a migration-kind `.ray`, mode 0600, read back by the one reader and
+  never written over an existing file, through the one bundle writer (`writeBundle` gains
+  `fileMode`); `encryptFile` and `isAgeX25519Recipient` are its parts. A
+  passphrase, an identity and the post-quantum or tag recipients are refused. The encryption is the
+  age authors' JavaScript implementation, `age-encryption` 0.3.1 (BSD-3-Clause; new dependency,
+  with `@noble/*` and `@scure/base`, in the SBOM and the notices), run against every official age
+  test vector (`cctv-age`, a test-only dependency); RaySpec implements no primitive.
+- **`rayspec export` and `rayspec resume`: move a self-hosted deployment as one encrypted bundle.**
+  `rayspec export --deployment <id> --recipient <age1…> --output <migration.ray> --run-history
+  <included|excluded>` runs a read-only precheck, asks the operator to confirm the downtime (or takes
+  `--confirm-quiesce`), fences the source with a database write barrier — the runtime role's writes
+  revoked under role separation, or a stopped source attested with `--source-stopped`, else
+  `RAY_EXTERNAL_STATE_UNSUPPORTED` `database-barrier-unavailable` with the source fenced — captures
+  both databases and the blobs under that one fence epoch, encrypts the snapshot in a private scratch
+  directory under the state directory and writes the migration bundle (mode 0600, never over an
+  existing file). The source stays fenced; the result names the barriers that held, who the snapshot
+  read as, and the `rayspec resume --deployment <id> --fence-epoch <n>` that releases it, which
+  refuses any other epoch (`RAY_FENCE_MISMATCH`). A second export while fenced reuses the fence at its
+  epoch. SIGINT or SIGTERM stops at a safe point, ends `pg_dump`, removes the scratch data and reports
+  `RAY_INTERRUPTED` (exit 6) with the resume command; the next export, or `rayspec resume`, removes
+  the plaintext a killed one left in the scratch directory and closes its receipt. An application
+  that loads any extension is refused before the fence (`unsupported-blob-adapter`), even with
+  `RAYSPEC_BLOB_ROOT` set, since an extension's blob backend would be used in place of the fs store.
+  An upload being written during the precheck is normal operation: it is reported as in flight and
+  left to the fence's drain; only a temporary upload file still there after the drain refuses, in the
+  capture (`unreconciled-effects`), with the source fenced. `listFsBlobs` takes the phase (`live` or
+  `quiesced`) that decides which of the two a temporary file is.
+  Every transition (`PRECHECK`, `QUIESCING`, `FROZEN`, `EXPORTING`, `EXPORTED`, `BLOCKED`) is recorded
+  with its operation id, actor, fence epoch, time, digests and recovery action in a shareable local
+  receipt (`<state-dir>/receipts/`, no secret, record or table name) and in the environment's
+  receipts. The configuration comes from the process environment only, with the new
+  `RAYSPEC_SNAPSHOT_DATABASE_URL` for the read-only snapshot role and `RAYSPEC_PG_DUMP` for an
+  explicit `pg_dump`. New guide: [Exporting a deployment](./docs/export.md).
 
 ### Changed
 

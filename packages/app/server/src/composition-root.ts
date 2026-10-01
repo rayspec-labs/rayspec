@@ -1266,6 +1266,77 @@ export function loadTenantProvisionSecrets(
   };
 }
 
+/** The read-only snapshot role's connection to the application database (or its `_FILE`). */
+export const SNAPSHOT_DATABASE_URL_VAR = 'RAYSPEC_SNAPSHOT_DATABASE_URL';
+
+/**
+ * Where an export (and the resume that follows it) finds the source, read from the explicit
+ * environment only. Each connection that carries a password resolves like a boot secret: a set
+ * `<VAR>_FILE` wins, and the value joins the redaction registry.
+ */
+export interface ExportSourceConfig {
+  /** `DATABASE_URL`: the runtime role under role separation, else the one role. */
+  databaseUrl: string;
+  /** `DBOS_SYSTEM_DATABASE_URL`, else derived from `DATABASE_URL` as the runtime derives it. */
+  dbosSystemDatabaseUrl: string;
+  /** `RAYSPEC_MIGRATION_DATABASE_URL`: set with role separation; the export's control connection. */
+  migrationDatabaseUrl?: string;
+  /** The migration role on the workflow system database. */
+  migrationDbosSystemDatabaseUrl?: string;
+  /** `RAYSPEC_SNAPSHOT_DATABASE_URL`: the read-only snapshot role, when one is configured. */
+  snapshotDatabaseUrl?: string;
+  /** The snapshot role on the workflow system database. */
+  snapshotDbosSystemDatabaseUrl?: string;
+  /** `RAYSPEC_BLOB_ROOT`, when set. */
+  blobRoot?: string;
+}
+
+/**
+ * Read the source configuration of an export or a resume from `env`. Throws `BootConfigError` naming
+ * `DATABASE_URL` when it is missing, or a connection string that is not a URL. No `.env` file is
+ * consulted: the caller passes the explicit process environment.
+ */
+export function loadExportSourceConfig(
+  env: NodeJS.ProcessEnv,
+  warn: BootWarnSink = consoleWarn,
+): ExportSourceConfig {
+  const databaseUrl = resolveBootSecret(env, 'DATABASE_URL', warn)?.trim();
+  if (!databaseUrl) {
+    throw new BootConfigError(
+      'Refusing to run — required env var missing: DATABASE_URL (or DATABASE_URL_FILE), the ' +
+        "deployment's application database.",
+      ['DATABASE_URL'],
+    );
+  }
+  const dbosSystemDatabaseUrl =
+    env.DBOS_SYSTEM_DATABASE_URL?.trim() || deriveDbosSystemUrl(databaseUrl);
+  const migrationDatabaseUrl =
+    resolveBootSecret(env, MIGRATION_DATABASE_URL_VAR, warn)?.trim() || undefined;
+  const snapshotDatabaseUrl =
+    resolveBootSecret(env, SNAPSHOT_DATABASE_URL_VAR, warn)?.trim() || undefined;
+  const blobRoot = env.RAYSPEC_BLOB_ROOT?.trim() || undefined;
+  return {
+    databaseUrl,
+    dbosSystemDatabaseUrl,
+    ...(migrationDatabaseUrl !== undefined
+      ? {
+          migrationDatabaseUrl,
+          migrationDbosSystemDatabaseUrl: withDatabaseOf(
+            migrationDatabaseUrl,
+            dbosSystemDatabaseUrl,
+          ),
+        }
+      : {}),
+    ...(snapshotDatabaseUrl !== undefined
+      ? {
+          snapshotDatabaseUrl,
+          snapshotDbosSystemDatabaseUrl: withDatabaseOf(snapshotDatabaseUrl, dbosSystemDatabaseUrl),
+        }
+      : {}),
+    ...(blobRoot !== undefined ? { blobRoot } : {}),
+  };
+}
+
 /**
  * Read + VALIDATE the boot config from the ambient environment, FAIL CLOSED on anything missing or
  * unsafe. The only filesystem read is a `<VAR>_FILE` secret mount (`resolveBootSecret`); nothing

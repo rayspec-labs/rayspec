@@ -235,6 +235,102 @@ the step. To clear it:
 Recording an outcome repeats nothing and reverses nothing; it only tells the next apply what you
 found.
 
+## Snapshots of a fenced source
+
+An export carries the environment to another host as one encrypted snapshot. `rayspec export` runs
+it ([Exporting a deployment](./export.md) is the operator guide); underneath it is a typed library
+in `@rayspec/server`, like the operations above: `preflightSnapshot` checks the source,
+`captureSnapshot` takes the plaintext inner snapshot archive under the fence, and `exportSnapshot`
+encrypts that archive with age to one X25519 recipient and writes the migration bundle
+(`writeMigrationBundle`). Nothing is written outside a private scratch directory but the bundle.
+
+### What preflight checks
+
+`preflightSnapshot` reads, writes nothing, and takes no fence. Every finding is a blocker, in this
+order:
+
+| Check | Blocker |
+| --- | --- |
+| The state directory's active bundle, rebuilt byte for byte with the one bundle writer, is the application the database records, built for this runtime; the deployment id is the state directory's and the database's | `RAY_USAGE`, `RAY_DIGEST_MISMATCH` (`bundle-sha256`), `RAY_RUNTIME_UNSUPPORTED` |
+| The platform head is one this runtime ships; the product schema is the one the product ledger recorded | `RAY_SCHEMA_DRIFT` (warning `RAY_W_PRODUCT_SCHEMA_UNLEDGERED` without ledger rows) |
+| The server major is 14 or later, and the `pg_dump` found has the same major | `RAY_TARGET_UNSUPPORTED`, `RAY_USAGE` |
+| The role the dumps read as can read every table of both databases past row-level security | `RAY_USAGE` |
+| The blobs are in the fs blob store, and its root holds nothing the store would not have written: no stray entry, link, malformed file or key a snapshot cannot carry. `rayspec export` passes an application that loads any extension as an unsupported blob source, with or without `RAYSPEC_BLOB_ROOT`, because an extension's blob backend comes before the fs store | `RAY_EXTERNAL_STATE_UNSUPPORTED` (`unsupported-blob-adapter`); an unreadable root: `RAY_INFRA_UNAVAILABLE`. The temporary file of an upload depends on the phase: before the fence (`live`, `preflightSnapshot`'s default) it is an upload in flight, counted in `uploadsInFlight` and in the budgets, not a blocker; under the fence (`quiesced`, the capture's preflight, after the drain) it is an upload that never finished: `unreconciled-effects`, and the fence stays |
+| At most 500,000 objects, and the objects and the application within the migration archive limit (2 GiB); free space in the scratch directory for about twice the databases, objects and application | `RAY_LIMIT_EXCEEDED` (`object-index-size`, `migration-size`); `RAY_INFRA_UNAVAILABLE` |
+| No database extension other than `plpgsql` in the application database, and none but `uuid-ossp` (which the durable engine's own migrations create) in the workflow system database | `RAY_POLICY_DENIED` (`unsupported-extension`) |
+| Exactly one organization, and no blob of another tenant | `RAY_MULTI_TENANT_UNSUPPORTED` |
+| A member of the organization holds a password, so someone can sign in after the import resets every API key, session and invite | `RAY_OWNER_RECOVERY_REQUIRED` |
+| Every table is a platform table or a product store of the application, with a name `snapshot.json` can state; state the caller names that the snapshot cannot carry | `RAY_EXTERNAL_STATE_UNSUPPORTED` (`unknown-table`, or the reason the caller gives) |
+
+### What the capture does
+
+`captureSnapshot` takes the fence epoch `quiesce()` returned and the run-history policy (`included`
+or `excluded`; there is no default). Before it reads anything for the snapshot it requires:
+
+- the fence held at exactly that epoch (`RAY_FENCE_MISMATCH`; `RAY_SOURCE_NOT_QUIESCENT` when it was
+  released);
+- the database write barrier recorded with the fence held — the runtime role's writes revoked
+  (role separation), or a stopped source the operator attested and quiesce checked. Without either
+  it refuses with `RAY_EXTERNAL_STATE_UNSUPPORTED` (`database-barrier-unavailable`), and the fence
+  stays held; object writes fenced, else `RAY_SOURCE_NOT_QUIESCENT`;
+- every preflight check passing again;
+- no session that could write: with the role barrier only the fenced runtime role's sessions may be
+  connected, with a stopped source none but the export's own (`uncontrolled-writer`);
+- no run, workflow run or workflow node still marked running (`unreconciled-effects`).
+
+Then, in a directory of mode 0700 under the scratch parent, it rebuilds the deployed application,
+copies every stored blob file into `objects.bin` in the order of the object index (hashing each
+stored file, and the logical bytes against the digest its header states), and dumps each database
+in custom format inside one `REPEATABLE READ READ ONLY` transaction whose snapshot `pg_dump` reads
+(`--snapshot`), counting the rows of every table in that same snapshot. The workflow system database
+is dumped whole whenever it exists at that moment. It then lists the blob root and reads the fence
+again: a changed object or a released fence refuses the capture (`RAY_SOURCE_NOT_QUIESCENT`).
+Finally it writes the inner archive (`snapshot.json`, `payload/application.ray`,
+`payload/database.dump`, `payload/workflow-system.dump` when that database exists,
+`payload/object-index.json`, `payload/objects.bin`) with the one snapshot writer, which reads it back
+before it keeps it. Only the archive stays in the scratch directory; the caller removes the
+directory once it has encrypted the archive. Any refusal or failure removes it at once, and so does
+a stop request: an abort signal (`signal`) ends a running `pg_dump` and reports `RAY_INTERRUPTED`.
+
+`exportSnapshot` runs the capture, encrypts the archive into the same directory with age to the
+recipient (the age authors' implementation, `age-encryption`, tested against the official age test
+vectors), and writes the migration bundle — `ray.json` of kind `migration` and the one payload file
+`payload/migration.age` — beside the output, reads it back through the bundle reader and links it
+into place with mode 0600. It removes the scratch directory on every path. A recipient that is not an
+X25519 recipient (`age1…`) is refused; there is no passphrase mode.
+
+The result says who read and which barriers held:
+
+| Field | Values |
+| --- | --- |
+| `reader` | `snapshot-role` when a read-only snapshot role is configured; `single-role` when the dumps read with the one database role |
+| `barriers` | `database-write-role`, `database-stopped-source` and `object-writes`, each `held`, `unavailable`, or `not-applied` for the form of the database barrier the fence did not use |
+
+### What a snapshot carries
+
+| Data category | Rows in the snapshot |
+| --- | --- |
+| identity and tenancy (organization, users with their password hashes, memberships), product stores, the tenant event bus, the platform and product migration ledgers, the whole workflow system database, every blob | yes |
+| run history (runs, run events, journal steps, conversation items, workflow runs, nodes and artifacts) | as the run-history policy says |
+| credential state (API keys, sessions, invites, OAuth artifacts), idempotency replay state, the authentication audit log, runtime-control state | never |
+
+Tables whose rows stay at the source are dumped with their schema only, so the target reaches the
+same schema head with them empty; their row count in `snapshot.json` is 0, the count they restore
+with. `excludedDataCategories` lists every category whose rows were not exported, and the result's
+`excludedTables` names each such table. The identity policy in `snapshot.json` states what the
+target keeps (user ids, password hashes unless `passwordHashes: 'reset'` is asked for), resets
+(sessions, API keys, invites, OAuth artifacts), reissues (the signing key, the API-key pepper, the
+media signing key) and invalidates (media playback tokens).
+
+### `pg_dump`
+
+The dumps run the operator's `pg_dump`: the one named by an absolute path, or the first on `PATH`.
+Its major version must be the server's. The connection reaches it through the libpq environment
+(`PGHOST`, `PGUSER`, `PGPASSWORD`, …), never its arguments, and an inherited `PG*` variable is
+dropped first. The suite that proves the capture (`snapshot-capture.db.test.ts`) uses the host's
+`pg_dump` and `pg_restore` when their major is the server's; on a host without them it runs both
+from the same pinned `postgres` image `docker-compose.yml` runs, through `docker run`.
+
 ## Cross-process run cancellation
 
 `POST /v1/runs/{id}/cancel` always records the cancellation, and a run that has not started never
@@ -262,4 +358,5 @@ against a second, real worker process.
 
 - Receipts are never pruned; the table grows by a few rows per schema change.
 - There is no CLI verb for `resolveInterruptedStep` yet; call it as above.
-- `export` and `resume` as CLI verbs are not available yet; the library operations are.
+- `rayspec import` is not available yet: a migration bundle is written and verified, and restoring
+  it into a new environment is the importer's part.

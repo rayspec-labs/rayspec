@@ -68,6 +68,20 @@ role, and open the control connection with `openControlDatabase` so the stopped-
 tell its sessions from a runtime's. None of it adds an HTTP route; see `docs/ARCHITECTURE.md`,
 "Runtime control".
 
+`preflightSnapshot` checks, read-only and before any fence, whether an environment can be exported,
+and `captureSnapshot` takes its plaintext inner snapshot archive under the fence `quiesce()` took:
+both databases dumped with the operator's `pg_dump` (`resolvePgDump`) in the snapshot that counts
+their rows, every blob of the fs blob store with both digests, the deployed application, and the
+barriers and the reading role it relied on. `exportSnapshot` runs that capture and writes the
+migration bundle: the archive encrypted with age to one X25519 recipient (`writeMigrationBundle`,
+`encryptFile`, `isAgeX25519Recipient`; the age authors' `age-encryption`, tested against the
+official age test vectors), read back by the bundle reader, with the scratch directory removed on
+every path. `ExportReceiptLog` and `closeInterruptedExport` record an export's transitions in the
+state directory and the environment's receipts; `takeExportScratch` holds the state directory's
+scratch space for one export at a time and removes what a killed one left. `rayspec export` and
+`rayspec resume` are built on them; see `docs/export.md` and `docs/runtime-operations.md`,
+"Snapshots of a fenced source".
+
 `applyBundle` applies a plan `prepare()` produced for a bundle staged into its version directory
 (`openStateDirectory(...).stageVersion`): it recomputes the plan digest before it writes anything
 and again under the lease, then runs the platform chain, the product change, the application record

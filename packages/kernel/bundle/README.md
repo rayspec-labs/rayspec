@@ -86,7 +86,29 @@ and then moved into place: linked, which fails if the destination exists, or ren
 `overwrite: true`. A bundle over the kind's archive limit is refused before anything is written
 (`archive-size`, or `migration-size` for a migration bundle), and so are payload files that add up
 to more than the kind's extracted byte limit (`extracted-size`). A limit the read-back reaches is
-reported as that limit; any other refusal of the read-back is `RAY_INTERNAL`.
+reported as that limit; any other refusal of the read-back is `RAY_INTERNAL`. `fileMode` sets the
+mode the archive is created with (default 0644); a migration bundle is written with 0600.
+
+## The inner snapshot archive
+
+A migration bundle encrypts one plaintext archive in the same strict profile, rooted at
+`snapshot.json` instead of `ray.json`, with the fixed inventory of the snapshot contract
+(`payload/application.ray`, `payload/database.dump`, `payload/workflow-system.dump` when that
+database exists, `payload/object-index.json`, `payload/objects.bin`) and the migration limits.
+
+- `writeSnapshotArchive(destination, { snapshot, files }, options?)` — takes `snapshot.json`
+  without its inventory and the payload files, computes the inventory, validates the document,
+  and refuses a snapshot above the migration extracted byte limit before writing
+  (`RAY_LIMIT_EXCEEDED` `migration-size`). The archive is written with mode 0600, read back
+  through `inspectSnapshotArchive` and linked into place; the destination must not exist
+  (`RAY_OUTPUT_EXISTS`). The same input gives the same bytes.
+- `inspectSnapshotArchive(archive, options?)` — the container checks with `snapshot.json` as the
+  root, then `snapshot.json` (size `snapshot-size`, canonical form, schema, inventory order), the
+  archive against the inventory, every entry streamed (size, cumulative bytes, CRC-32, SHA-256),
+  `applicationDigest` against `payload/application.ray` (`application-digest`), the object index
+  with its ranges covering `objects.bin` exactly (`object-range`), `objectCount`, and each
+  object's stored range and logical bytes against the index and the stored blob header
+  (`object-sha256`). It writes nothing.
 
 ## Signatures
 

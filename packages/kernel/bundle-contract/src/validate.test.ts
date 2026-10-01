@@ -19,6 +19,7 @@ import {
   checkRuntimeAdmission,
   type RuntimeProfile,
   validateManifest,
+  validateObjectIndex,
   validateReceipt,
   validateSnapshot,
 } from './validate.js';
@@ -588,6 +589,106 @@ describe('document size limits', () => {
     expect(outcome(validateReceipt(text, { limits: { receiptBytes: 1024 } }))).toMatchObject({
       code: 'RAY_LIMIT_EXCEEDED',
       reason: 'receipt-size',
+    });
+  });
+});
+
+describe('object index semantics', () => {
+  const TENANT_A = '00000000-0000-4000-8000-00000000000a';
+  const TENANT_B = '00000000-0000-4000-8000-00000000000b';
+  const sha = 'c'.repeat(64);
+  const entry = (tenantId: string, key: string, storedOffset: number, storedSize: number) => ({
+    tenantId,
+    key,
+    size: 1,
+    sha256: sha,
+    storedOffset,
+    storedSize,
+    storedSha256: sha,
+  });
+  const index = (objects: ReturnType<typeof entry>[]) =>
+    canonicalJsonFile({ objectIndexFormatVersion: 1, objects });
+
+  it('accepts the good document case, with and without the objects.bin size', () => {
+    const good = expectations.documentCases.find((d) => d.id === 'object-index-good')!.document;
+    expect(outcome(validateObjectIndex(canonicalJsonFile(good)))).toBe('ok');
+    expect(outcome(validateObjectIndex(canonicalJsonFile(good), { objectsSize: 60 }))).toBe('ok');
+  });
+
+  it('accepts entries sorted by tenant, then key by byte value, with consecutive ranges', () => {
+    // 'Z' (0x5a) sorts before 'a' (0x61), and an ASCII key before one starting with U+00E9.
+    const doc = index([
+      entry(TENANT_A, 'Z', 0, 10),
+      entry(TENANT_A, 'a', 10, 5),
+      entry(TENANT_A, '\u00e9', 15, 7),
+      entry(TENANT_B, 'a', 22, 8),
+    ]);
+    const result = validateObjectIndex(doc, { objectsSize: 30 });
+    expect(outcome(result)).toBe('ok');
+    expect(result.ok && result.value.objects).toHaveLength(4);
+  });
+
+  it('refuses a pair listed twice, and entries out of order', () => {
+    expect(
+      outcome(validateObjectIndex(index([entry(TENANT_A, 'k', 0, 5), entry(TENANT_A, 'k', 5, 5)]))),
+    ).toEqual({
+      code: 'RAY_MANIFEST_INVALID',
+      reason: 'inventory-duplicate',
+      path: '/objects/1/key',
+    });
+    expect(
+      outcome(validateObjectIndex(index([entry(TENANT_B, 'a', 0, 5), entry(TENANT_A, 'z', 5, 5)]))),
+    ).toEqual({
+      code: 'RAY_MANIFEST_INVALID',
+      reason: 'inventory-unsorted',
+      path: '/objects/1/key',
+    });
+    expect(
+      outcome(validateObjectIndex(index([entry(TENANT_A, 'b', 0, 5), entry(TENANT_A, 'a', 5, 5)]))),
+    ).toMatchObject({ reason: 'inventory-unsorted' });
+  });
+
+  it('refuses a gap, an overlap, a first range past 0 and a short or long cover of objects.bin', () => {
+    const at = (objects: ReturnType<typeof entry>[], objectsSize?: number) =>
+      outcome(
+        validateObjectIndex(index(objects), objectsSize === undefined ? {} : { objectsSize }),
+      );
+    const range = { code: 'RAY_DIGEST_MISMATCH', reason: 'object-range' };
+    expect(at([entry(TENANT_A, 'a', 1, 5)])).toEqual({ ...range, path: '/objects/0/storedOffset' });
+    expect(at([entry(TENANT_A, 'a', 0, 5), entry(TENANT_A, 'b', 6, 5)])).toEqual({
+      ...range,
+      path: '/objects/1/storedOffset',
+    });
+    expect(at([entry(TENANT_A, 'a', 0, 5), entry(TENANT_A, 'b', 4, 5)])).toMatchObject(range);
+    expect(at([entry(TENANT_A, 'a', 0, 5)], 6)).toEqual({ ...range, path: '/objects' });
+    expect(at([entry(TENANT_A, 'a', 0, 5)], 4)).toMatchObject(range);
+    expect(at([], 0)).toBe('ok');
+    expect(at([], 1)).toMatchObject(range);
+  });
+
+  it('refuses the missing stored digest of the document case, and a non-canonical index', () => {
+    const missing = expectations.documentCases.find(
+      (d) => d.id === 'object-index-missing-stored-digest',
+    )!.document;
+    expect(outcome(validateObjectIndex(canonicalJsonFile(missing)))).toMatchObject({
+      code: 'RAY_MANIFEST_INVALID',
+      reason: 'schema',
+      path: '/objects/0/storedSha256',
+    });
+    expect(
+      outcome(
+        validateObjectIndex(JSON.stringify({ objectIndexFormatVersion: 1, objects: [] }, null, 1)),
+      ),
+    ).toMatchObject({ reason: 'not-canonical' });
+  });
+
+  it('refuses an index above the extracted byte limit as object-index-size, and a bad size option', () => {
+    const doc = index([entry(TENANT_A, 'a', 0, 5)]);
+    expect(
+      outcome(validateObjectIndex(doc, { limits: { migrationExtractedBytes: 10 } })),
+    ).toMatchObject({ code: 'RAY_LIMIT_EXCEEDED', reason: 'object-index-size' });
+    expect(outcome(validateObjectIndex(doc, { objectsSize: -1 }))).toMatchObject({
+      code: 'RAY_USAGE',
     });
   });
 });
