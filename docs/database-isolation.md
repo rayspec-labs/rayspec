@@ -169,9 +169,10 @@ export dumps with.
 ## Turning it off
 
 Unset `RAYSPEC_MIGRATION_DATABASE_URL` and point `DATABASE_URL` at a role that owns the tables (the
-migration role). Row security stays enabled and forced; every query path sets its tenant, and the
-migration role bypasses row security, so the application keeps working, but the posture is no longer
-reported. To remove it completely, run `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` and
+migration role). Row security stays enabled and forced. A pool that is not serving as the runtime
+role no longer sets the tenant context on its statements, and the application keeps working only
+because the migration role bypasses row security; the posture is no longer reported, and the
+application-level tenant chokepoint is again the only isolation. To remove it completely, run `ALTER TABLE … NO FORCE ROW LEVEL SECURITY` and
 `ALTER TABLE … DISABLE ROW LEVEL SECURITY` on each tenant table as the owner.
 
 ## What it does not do
