@@ -4,15 +4,16 @@
 into a **new, empty** environment: the application database, the workflow system database and every
 stored blob. It checks everything before it restores anything, restores as the target's own
 migration role (never a superuser), verifies the result against the snapshot, and leaves the new
-environment **fenced**, so it serves nothing until you cut over. The source stays the authority
-until then.
+environment **fenced**, so it serves nothing until you cut over with the one-time cutover token
+the import gives you. The source stays the authority until then.
 
 The import never merges into a database that holds anything and never overwrites a file. It restores
 the one organization the snapshot carries, and nothing it was not given.
 
 This guide is for the operator. It walks the whole move: [prepare the target](#prepare-the-target),
 [check first](#check-first) with a dry run, [import](#import) (restore and verify),
-[test privately](#test-privately), [cut over](#cut-over), and keep the source through
+[release the target with its cutover token and test it privately](#release-the-target-and-test-it-privately),
+[point traffic at it](#point-traffic-at-the-target), and keep the source through
 [the recovery window](#the-recovery-window). The reference for the command is in the
 [CLI reference](./cli-reference.md#import).
 
@@ -101,8 +102,19 @@ Refused, before anything reaches the target (`RAY_POLICY_DENIED`):
 - a role, an event trigger, a view, a type, a language, a large object, a function in another
   language, a `SECURITY DEFINER` function (the platform's own two lookups excepted, unchanged), table
   data loaded by anything but `COPY … FROM stdin` (no `PROGRAM`), an expression the restore would
-  evaluate that calls a function of the dump or a server function, or any statement beside the ones
-  an entry may hold: `privileged-statement`.
+  evaluate that calls a function of the dump or a server function (one that runs SQL from text,
+  reads files, touches large objects, takes advisory locks or sends notifications), an entry in
+  another section than the one `pg_dump` puts its kind in, or any statement beside the ones an entry
+  may hold: `privileged-statement`.
+
+The restore runs the sections in `pg_dump`'s order whatever order the archive lists them in: every
+row is copied in before any trigger, index, constraint or policy of the dump exists. A function of the
+dump still runs whenever something calls it — a trigger on a table the import writes itself, for one —
+so after each restore, after the import's own writes and once more before the cutover, the import
+reads both catalogs and refuses a target that holds anything its restore plan does not create: an
+extension, schema or function beyond the plan, a view, type, rule, operator or text search object, a
+publication, a large object, a privilege for a role the target does not grant to, or changed default
+privileges or role settings (`RAY_POLICY_DENIED` `privileged-statement`; the target is marked failed).
 
 Privileges, comments and the dump's owner are not restored. The target's runtime role ends up with
 exactly the grants the roles setup gives it, the migration ledgers closed to it, and row-level
@@ -126,7 +138,10 @@ them again when you deploy at the cutover.
 
 The import mints the target's own deployment id, then:
 
-- **IMPORTING** — both databases restored with `pg_restore` as the migration role, the workflow
+- **IMPORTING** — first the migration role's default privileges that would give the runtime role
+  writes on new tables are withheld (and recorded in `import.json`, so a discard gives them back):
+  from here until the cutover the runtime role can connect and read, and write nothing the import
+  restores. Then both databases are restored with `pg_restore` as the migration role, the workflow
   system database first, each in one transaction, under the shared schema lock; then every stored
   blob file, unchanged.
 - **VERIFYING** — the bytes restored hash to the snapshot's digests; the tables and their row counts
@@ -137,16 +152,18 @@ The import mints the target's own deployment id, then:
 - **The identity policy** — each account's carried identity (its user id, and its password hash
   when it has one) is recorded in the target's security audit (`auth_audit`, event
   `identity_imported`, naming the import's operation id and the bundle's digest); the credential
-  tables are checked empty once more.
-- **READY_FOR_CUTOVER** — the target is fenced with its runtime role's writes revoked, so nothing can
-  serve or change it until you release it, and its own boot secrets are minted into `--secrets-out`:
+  tables are checked empty once more, and the row counts and both catalogs once more.
+- **READY_FOR_CUTOVER** — the import holds the target's fence: the writes the runtime role is owed
+  are recorded with the fence, never granted, so nothing can serve or change the target until the
+  cutover releases it; the default privileges are given back. Its own boot secrets are minted into
+  `--secrets-out`:
   `jwt-signing-key.pem` (RS256, PKCS#8), `api-key-pepper` and `media-signing-key` (48 random bytes
   each, base64), directory mode 0700, files 0600. No output prints them.
 
-Before it reports success the import also checks that the runtime role holds its grants on every
-restored table (reads everywhere, writes in schema `public` but the migration ledgers, writes on the
-whole workflow system database) and the isolated posture; a target whose roles were not prepared
-with the database roles setup is refused there (`RAY_POLICY_DENIED` `posture-refused`).
+Before it reports success the import also checks that the runtime role reads every restored table
+and is owed its writes (in schema `public` but the migration ledgers, and on the whole workflow
+system database) and holds the isolated posture; a target whose roles were not prepared with the
+database roles setup is refused there (`RAY_POLICY_DENIED` `posture-refused`).
 
 A dump that restores more than one organization is refused (`RAY_MULTI_TENANT_UNSUPPORTED`) and its
 restore removed at once.
@@ -170,10 +187,12 @@ The result:
 ```
 
 On stderr you also get the counts, **who must do what** (below), the target's fence, the cutover
-instruction with the secret files to deploy with, and the **cutover token**: the SHA-256 of the migration bundle's digest, the application's digest, the target's
+instruction with the secret files to deploy with, and the **cutover token**, shown only there. It is
+the SHA-256 of what it binds — the migration bundle's digest, the application's digest, the target's
 deployment id, the source's fence epoch (the one the snapshot was taken under), the target's fence
-epoch and revision, and a 15-minute validity. It is recorded in the receipts, so the cutover can be
-tied to exactly this import of exactly this snapshot.
+epoch and environment revision, the digest of the target's catalogs, the time it was issued and a
+random value — and it **works once, within 15 minutes**. The target's fence and the receipts keep
+only its SHA-256 and what it binds, so the token cannot be worked out from them.
 
 ## What carries over, and what is reset
 
@@ -254,11 +273,11 @@ replaced token is refused (`400`, the same answer for each). The command refuses
 password, an account that is not an active owner, and a fenced environment — so it can never write a
 credential into the fenced source, or into the target before its cutover.
 
-## Test privately
+## Release the target and test it privately
 
 The source is still fenced at the epoch the export reported; keep it so. In the **target's**
-environment, release the target's fence and deploy the application the source ran with the target's
-**own** boot secrets, on an address only you reach:
+environment, release the target's fence with the cutover token, then deploy the application the
+source ran with the target's **own** boot secrets, on an address only you reach:
 
 ```bash
 export RAYSPEC_JWT_SIGNING_KEY_FILE=/srv/app/secrets/jwt-signing-key.pem
@@ -266,15 +285,25 @@ export RAYSPEC_API_KEY_PEPPER_FILE=/srv/app/secrets/api-key-pepper
 # only when the application has a playback route:
 export RAYSPEC_MEDIA_SIGNING_KEY="$(cat /srv/app/secrets/media-signing-key)"
 
-rayspec resume --deployment 8c1f0a2b3c4d5e6f --fence-epoch 1 --state-dir /srv/app/.rayspec-state
+rayspec import --target /srv/app/.rayspec-state --cutover-token <token>
 rayspec deploy app.ray --dry-run --state-dir /srv/app/.rayspec-state --bindings-file bindings.json
 rayspec deploy app.ray --plan-digest <planDigest> --state-dir /srv/app/.rayspec-state --bindings-file bindings.json
 ```
 
-`resume` releases the fence the import took and gives the runtime role its writes back. `app.ray` is
-the application the source ran — its SHA-256 is the `applicationDigest` of the result. The plan shows
-the schema the import restored and no change to it. Move the secret files into your secret manager or
-mount them where the deployment reads them; they are the target's only copy.
+`--cutover-token` is the one step that lets the target serve. In one transaction on the target it
+refuses a token that is not the one the import issued, one already used, one past its 15 minutes, one
+whose binding no longer holds (another bundle, deployment or source fence than `import.json` records,
+or a target fence or environment revision that moved) — `RAY_POLICY_DENIED` — and a target whose
+catalogs are no longer what the import left (`RAY_RECONCILIATION_REQUIRED`); then it marks the token
+used (`CUTOVER`), releases the fence, grants the runtime role the writes the import recorded and
+records `COMPLETE`. A token works once, even when the release after it fails; `rayspec import
+--target <dir> --renew-cutover-token` replaces an expired or spent token with a new one of the same
+binding (the old one stops working), as long as the fence and the catalogs are still what the import
+left. `rayspec resume` never releases the fence an import holds (`RAY_USAGE`).
+
+`app.ray` is the application the source ran — its SHA-256 is the `applicationDigest` of the result.
+The plan shows the schema the import restored and no change to it. Move the secret files into your
+secret manager or mount them where the deployment reads them; they are the target's only copy.
 
 Then check it with synthetic requests, not with `/health` alone: sign in as a member with their
 password, read the rows and files you know, recover a key-only owner if there is one, mint a test API
@@ -282,7 +311,7 @@ key and call a route with it, and see your bindings and workers do what they did
 token, key or invite from the source must be refused. Nothing points at the target yet, so whatever
 you write while testing is yours to remove.
 
-## Cut over
+## Point traffic at the target
 
 When the target passes: point traffic (DNS, the load balancer) at the target, update any outbound
 callback URL or webhook you registered elsewhere, and tell your users to sign in again and to issue new
@@ -323,20 +352,22 @@ secrets it refuses all four while passwords sign in. See also
 | What happened | The target | What to do |
 | --- | --- | --- |
 | A refusal before the restore (the bundle, the identity, a dump, the target, the runtime) | unchanged | fix the cause and run it again |
-| A failure or refusal after the restore began (`RAY_RECONCILIATION_REQUIRED`, a verification) | marked failed: `import.json` says `BLOCKED`, and the target is fenced with its runtime role's writes revoked once its application database was restored | `rayspec import --target <dir> --discard-failed`, then import again |
+| A failure or refusal after the restore began (`RAY_RECONCILIATION_REQUIRED`, a verification, the catalog check) | marked failed: `import.json` says `BLOCKED`, and once its application database was restored the target is fenced as failed — that fence is never resumed | `rayspec import --target <dir> --discard-failed`, then import again |
 | Ctrl-C / SIGTERM (`RAY_INTERRUPTED`, exit 6) | `pg_restore` ended and rolled back; marked failed if anything was restored | as above |
 | The process was killed outright | possibly half restored; `import.json` says `IMPORTING`, the plaintext is in `<target>/scratch/` | run the import again: it removes the plaintext, closes the killed run's receipt and marks the target failed; then `--discard-failed` |
 | The restore verified but `--secrets-out` could not be written | marked failed and fenced | `--discard-failed`, then import again with a new `--secrets-out` |
 
 `--discard-failed` removes every object the migration role owns in both target databases (it owns
 everything the import restored), everything in the blob root, and the deployment and import records
-of the state directory; the receipts stay. It refuses a target that is ready for its cutover or holds
+of the state directory, and gives back the default privileges the import withheld; the receipts
+stay. It refuses a target that is ready for its cutover or holds
 a deployment, and touches no database that does not record the failed import's deployment id (or,
 when the restore failed before the application database, holds anything at all). The source is never touched by an import, whatever happens.
 
 ## Receipts
 
-Every transition — `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER`, or `BLOCKED` — is recorded with the
+Every transition — `IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER` (again when the token is renewed),
+`CUTOVER`, `COMPLETE`, or `BLOCKED` — is recorded with the
 operation id, the actor, both fence epochs, the time, the digests and the recovery action:
 
 - in `<target>/receipts/import-<operationId>.json` (mode 0600), written to be shared: no secret,

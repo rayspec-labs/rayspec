@@ -9,7 +9,7 @@ and `rayspec bundle verify`, the production-mutating `rayspec deploy` (a spec, o
 bundle planned with `--dry-run` and deployed by its reviewed plan digest), `rayspec export`
 (fence a self-hosted deployment and write its complete snapshot as one age-encrypted migration
 bundle) with `rayspec import` (restore such a bundle into a new, empty target, verify it, mint its
-own boot secrets and keep it fenced until the cutover), `rayspec tenant recover-owner` (a one-time
+own boot secrets and keep it fenced until its one-time cutover token releases it), `rayspec tenant recover-owner` (a one-time
 owner-recovery token for an owner who holds no password) and `rayspec resume` (release a fence), and a clearly
 separated, local-dev `dev` command group
 (scaffolding, secret minting). Every subcommand emits

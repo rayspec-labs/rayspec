@@ -661,27 +661,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshot (`RAY_DIGEST_MISMATCH` `inner-metadata`), the embedded application against this exact
   runtime, each dump against the restore allowlist, and the target — both databases and the blob root
   empty (`RAY_TARGET_NOT_EMPTY`), the snapshot's server major, the roles prepared. Without
-  `--dry-run` the import restores both databases with `pg_restore` as the target's migration role,
-  never a superuser, under the shared schema lock, in one transaction each, with no owner, privilege,
-  comment or tablespace from the dump; writes every stored blob file unchanged; verifies the bytes
-  restored, the row counts, the foreign keys, the schema head, the one organization, the empty
-  credential tables, the runtime role's posture and every object's digests; and fences the target
-  with its runtime role's writes revoked until the cutover, which `rayspec resume` performs. The
-  restore allowlist reads each dump's table of contents from its bytes and compares it with
-  `pg_restore --list`: it refuses an extension (only `uuid-ossp` in the workflow system database,
-  `unsupported-extension`), another owner or a grant to an unknown role (`unmapped-owner`), and a
-  role, an event trigger, a view, a type, an untrusted language, a `SECURITY DEFINER` function beyond
-  the platform's two, `COPY … PROGRAM`, a call into the dump from an expression the restore evaluates
-  or any statement beside the ones an entry may hold (`privileged-statement`). A dump that restores a
-  second organization is refused and its restore discarded (`RAY_MULTI_TENANT_UNSUPPORTED`). Every
-  transition (`IMPORTING`, `VERIFYING`, `READY_FOR_CUTOVER`, `BLOCKED`) is recorded in a shareable
-  local receipt and the target's receipts; the result gives the cutover instruction and a cutover
-  token binding the migration bundle, the target and both fence epochs. A failed import leaves the
-  target marked failed in `<target>/import.json`; `rayspec import --target <dir> --discard-failed`
-  removes what it restored. `RAYSPEC_PG_RESTORE` names an explicit `pg_restore`. New guide:
+  `--dry-run` the import withholds the migration role's default privileges that would give the
+  runtime role writes, so the runtime role writes nothing the import restores before the cutover;
+  restores both databases with `pg_restore` as the target's migration role, never a superuser, under
+  the shared schema lock, in one transaction each, with no owner, privilege, comment or tablespace
+  from the dump; writes every stored blob file unchanged; verifies the bytes restored, the row counts,
+  the foreign keys, the schema head, the one organization, the empty credential tables, the runtime
+  role's posture and every object's digests; and holds the target's fence, with the writes the
+  runtime role is owed recorded for the cutover. The restore allowlist reads each dump's table of
+  contents from its bytes and compares it with `pg_restore --list`: it refuses an extension (only
+  `uuid-ossp` in the workflow system database, `unsupported-extension`), another owner or a grant to
+  an unknown role (`unmapped-owner`), and a role, an event trigger, a view, a type, an untrusted
+  language, a `SECURITY DEFINER` function beyond the platform's two, `COPY … PROGRAM`, a call into
+  the dump or a server function (SQL from text, files, large objects, advisory locks, notifications)
+  from an expression the restore evaluates, an entry outside the section `pg_dump` puts its kind in,
+  or any statement beside the ones an entry may hold (`privileged-statement`). The restore runs
+  pre-data, data and post-data in that order whatever the archive's order, so no trigger of the dump
+  exists while rows are copied in; after each restore, after the import's own writes and before the
+  cutover, both catalogs must hold exactly what the restore plan creates (no extra extension,
+  schema, function, view, type, rule, publication, large object, foreign grant, or changed default
+  privileges or role settings). A dump that restores a second organization is refused and its
+  restore discarded (`RAY_MULTI_TENANT_UNSUPPORTED`). Every transition (`IMPORTING`, `VERIFYING`,
+  `READY_FOR_CUTOVER`, `CUTOVER`, `COMPLETE`, `BLOCKED`) is recorded in a shareable local receipt
+  and the target's receipts. The import prints a cutover token once: it binds the migration bundle,
+  the application, the target, both fence epochs, the target's environment revision and its
+  catalogs, works once and expires after 15 minutes; the target keeps only its SHA-256.
+  `rayspec import --target <dir> --cutover-token <token>` checks and consumes it and only then
+  releases the target's fence and grants the runtime role its writes; `--renew-cutover-token`
+  replaces an expired or spent token; `rayspec resume` never releases a fence an import holds. A
+  failed import leaves the target marked failed in `<target>/import.json` and its fence, which is
+  never resumed; `rayspec import --target <dir> --discard-failed` removes what it restored and gives
+  the withheld default privileges back. `RAYSPEC_PG_RESTORE` names an explicit `pg_restore`. New guide:
   [Importing a deployment](./docs/import.md).
 - **`@rayspec/server` exports the import's building blocks**: `openMigrationBundle`, `planDumps`,
-  `inspectImportTarget`, `restoreImport`, `discardImportTarget`, `ImportReceiptLog`, the custom-format
+  `inspectImportTarget`, `restoreImport`, `discardImportTarget`, `markImportFailed`,
+  `ImportReceiptLog`, the cutover (`issueCutoverToken`, `renewCutoverToken`, `consumeCutoverToken`),
+  the catalog check (`readCatalog`, `catalogDifference`, `catalogDigest`), the custom-format
   table-of-contents reader `readDumpToc`, the restore allowlist `planDumpRestore`, `decryptFile` and
   `parseAgeX25519Identity`, and `listDump`/`restoreDump` for `pg_restore`. The inner snapshot reader
   of `@rayspec/bundle` reports where each payload entry lies in the archive

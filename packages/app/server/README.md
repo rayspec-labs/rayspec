@@ -89,7 +89,10 @@ authenticated metadata, the embedded application against this runtime. `planDump
 table of contents from its bytes (`readDumpToc`), compares it with `pg_restore --list` (`listDump`)
 and judges it by the restore allowlist (`planDumpRestore`). `inspectImportTarget` checks the target
 is empty and prepared; `restoreImport` restores both databases with `pg_restore` as the target's
-migration role (`restoreDump`), writes the objects, verifies everything and fences the target;
+migration role (`restoreDump`) while the runtime role holds no write, checks each catalog holds
+exactly what the plan creates (`readCatalog`), writes the objects, verifies everything and holds
+the target's fence for its cutover; `issueCutoverToken`, `renewCutoverToken` and
+`consumeCutoverToken` are the one-time cutover token that alone lets `resume` release that fence;
 `discardImportTarget` empties a target a failed import left. `ImportReceiptLog` records the
 transitions. `applyIdentityPolicy` records each account's carried identity in the target's audit and
 reports who signs in again and which owner needs owner recovery; `mintBootSecrets` mints the target's
