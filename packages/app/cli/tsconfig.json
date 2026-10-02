@@ -24,6 +24,7 @@
     "node_modules",
     "**/*.test.ts",
     "src/**/__fixtures__/**",
-    "src/test-support/**"
+    "src/test-support/**",
+    "src/certification/**"
   ]
 }
