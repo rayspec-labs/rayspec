@@ -8,21 +8,30 @@
  * have no CI guard on the very files that most need it.
  *
  * Scans every YAML/JSON of those trees (their installed `node_modules` and build output excepted) for
- * the forbidden domain vocabulary (word-boundary, case-insensitive) and fails on any hit. The allowed vocabulary is the neutral note/session/track
+ * the forbidden domain vocabulary (word-boundary, case-insensitive) and fails on any hit. In the three
+ * reference applications every text file is scanned as well — seed documents, READMEs, the UI, the
+ * handlers and the scripts — since all of it ships as the example; the PDFs are generated from the
+ * seed script, which is scanned. The allowed vocabulary is the neutral note/session/track
  * vocabulary + the real, product-free STT structural words (mic/system/local/remote) + the real
  * open-core provider name (deepgram — a capability, not a product) and model/provider ids.
+ *
+ * Fail-closed on coverage: a root that does not exist, or in which nothing is scanned, fails the gate
+ * naming it, so a renamed or moved example cannot retire its own check.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
+/** Each root, and the file extensions scanned in it. */
+const DATA = ['.yaml', '.yml', '.json'];
+const TEXT = [...DATA, '.txt', '.md', '.html', '.css', '.js', '.mjs', '.ts'];
 const SCAN_ROOTS = [
-  'examples/acme-notes',
-  'examples/team-notes',
-  'examples/document-intake',
-  'examples/asset-catalog',
-].map((root) => join(repoRoot, root));
+  ['examples/acme-notes', DATA],
+  ['examples/team-notes', TEXT],
+  ['examples/document-intake', TEXT],
+  ['examples/asset-catalog', TEXT],
+];
 /** Installed dependencies and build output are not the fixture. */
 const SKIPPED_DIRS = new Set(['node_modules', 'dist']);
 
@@ -54,18 +63,35 @@ const FORBIDDEN_RE = new RegExp(
   'i',
 );
 
-function walk(dir) {
+function walk(dir, extensions) {
   const out = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) {
-      if (!SKIPPED_DIRS.has(entry)) out.push(...walk(full));
-    } else if (['.yaml', '.yml', '.json'].includes(extname(full))) out.push(full);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRS.has(entry.name)) out.push(...walk(full, extensions));
+    } else if (entry.isFile() && extensions.includes(extname(entry.name))) out.push(full);
   }
   return out;
 }
 
-const files = SCAN_ROOTS.flatMap((root) => walk(root));
+const files = [];
+const unscanned = [];
+for (const [root, extensions] of SCAN_ROOTS) {
+  let found = [];
+  try {
+    found = walk(join(repoRoot, root), extensions);
+  } catch (e) {
+    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') throw e;
+  }
+  if (found.length === 0) unscanned.push(root);
+  files.push(...found);
+}
+if (unscanned.length > 0) {
+  console.error(
+    `❌ fixture-neutrality: nothing scanned under ${unscanned.join(', ')} — the root is missing or holds no fixture file`,
+  );
+  process.exit(1);
+}
 const hits = [];
 for (const file of files) {
   const lines = readFileSync(file, 'utf8').split('\n');
