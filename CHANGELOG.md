@@ -739,6 +739,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that selects it is refused in live mode, and `RAYSPEC_HOSTING_POSTURE=managed` refuses it as
   test-only (`extraction-deterministic`). An injected executor still replaces it. See
   [Spec reference → the deterministic extraction provider](docs/spec-reference.md#the-deterministic-extraction-provider).
+- **Three reference applications under `examples/`, each packed and deployed from its bundle.**
+  `team-notes` is a CRUD notes store with keyset pagination and a static UI that shows the
+  application's own version (not the runtime's), in three releases: `1.0.0`, `1.1.0` (an optional
+  `label` column, an additive change that keeps every row) and `2.0.0` (dropping `content`, refused
+  by pack and by the deploy); it ships a 100-note seed for two users with an inventory digest and a
+  loader that pages it back. `document-intake` is a product-profile workflow — upload a plain-text
+  or text-layer PDF document, parse, extract, validate, persist, read — running on the
+  deterministic extraction provider with no credential, with a 50-document seed of hashes and
+  expected records and a live-model config beside it. `asset-catalog` is custom code: a compiled
+  TypeScript extension whose handler uses a third-party npm package (`mime-types`, with `mime-db`)
+  vendored into the bundle by the example's build, writes through the tenant-bound database facade
+  and calls one declared HTTPS host; a native-addon fixture beside it shows pack's refusal of a
+  macOS build. Each has a README; the repository tests build, pack, inspect, verify and deploy each
+  one with the real CLI. `gate:fixture-neutrality` now scans the three applications as well, and
+  the handler gates scan the asset catalog's extension.
 
 ### Changed
 
