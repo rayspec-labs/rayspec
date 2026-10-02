@@ -10,7 +10,9 @@
  *   1.1.0 (adds a column) keeps every row → 2.0.0 (drops one) refused at pack and at deploy → 1.1.1
  *   declares no host: the proxy, reprogrammed from it, refuses the call the deployment makes, the
  *   create answers 502 and writes nothing → 1.1.2 declares it again, and the boot records that no
- *   extension provides a blob backend → an encrypted export of the serving source, an import into
+ *   extension provides a blob backend → an encrypted export of the serving source while creates
+ *   keep arriving through the extension's handler (each one carried, or refused by the fence with
+ *   503), an import into
  *   an empty target that serves the extension and its dependency from the bundle, the same rows and
  *   a reset identity, a new write there, an exit export of that target and an import into a second
  *   empty one that carries the new write.
@@ -38,6 +40,7 @@ import {
   deployServing,
   Environment,
   exportDeployment,
+  exportDeploymentAsync,
   importInto,
   newPassword,
   privateFile,
@@ -52,6 +55,8 @@ import {
 } from './lib.mjs';
 
 const HOST = 'classifier.example.com';
+/** At most this many creates are sent while the source export runs, one every 100 ms. */
+const DURING_EXPORT_WRITES = 40;
 
 export async function assetCatalog(ctx, journey) {
   const app = join(ctx.repo, 'examples', 'asset-catalog');
@@ -427,14 +432,54 @@ export async function assetCatalog(ctx, journey) {
     await ctx.tools();
     const { identity, recipient } = await ctx.ageKeyPair();
     const identityFile = privateFile(join(ctx.work, 'asset-catalog-identity.txt'), `${identity}\n`);
-    const expected = await digestOf();
-    const expectedRows = (await rowsOf()).length;
     const migration = join(ctx.work, 'asset-catalog-source.migration.ray');
-    const exported = exportDeployment(ctx, source, recipient, migration);
+    // Creates through the extension's handler keep arriving while the export runs: each one is
+    // either taken before the fence and carried, or refused by the fence with 503.
+    let exporting = true;
+    const exportRun = exportDeploymentAsync(ctx, source, recipient, migration).finally(() => {
+      exporting = false;
+    });
+    const during = [];
+    for (let n = 0; exporting && n < DURING_EXPORT_WRITES; n += 1) {
+      const name = `Written during the export ${n}`;
+      const res = await call(`${base}/api/items`, {
+        method: 'POST',
+        token,
+        body: { name, file_name: `during-${n}.png` },
+      });
+      during.push({ name, status: res.status });
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const exported = await exportRun;
     journey.check(
       'the export of the application with its extension writes one encrypted bundle',
       exported.status === 0 && exported.envelope.data.sourceState === 'fenced',
       `${exported.status} ${JSON.stringify(exported.envelope.errors)} ${exported.stderr.slice(-1500)}`,
+    );
+    const taken = during.filter((w) => w.status === 201).map((w) => w.name);
+    const fencedOut = during.filter((w) => w.status === 503).map((w) => w.name);
+    journey.check(
+      'every write sent during the export was taken, or refused by the fence with 503',
+      taken.length + fencedOut.length === during.length,
+      JSON.stringify(during.filter((w) => w.status !== 201 && w.status !== 503)),
+    );
+    journey.check(
+      'writes reached the source both before and after the fence',
+      taken.length > 0 && fencedOut.length > 0,
+      `taken ${taken.length}, refused ${fencedOut.length}`,
+    );
+    journey.check(
+      'no write was taken after the fence refused one',
+      during.findIndex((w) => w.status === 503) === taken.length,
+      JSON.stringify(during.map((w) => w.status)),
+    );
+    const expected = await digestOf();
+    const sourceRows = await rowsOf();
+    const expectedRows = sourceRows.length;
+    const sourceNames = new Set(sourceRows.map((r) => r.name));
+    journey.check(
+      'the fenced source holds every write it took and none it refused',
+      taken.every((n) => sourceNames.has(n)) && !fencedOut.some((n) => sourceNames.has(n)),
     );
     checkEncryptedExport(journey, 'the source export', migration, [
       'handbook.pdf',
@@ -477,6 +522,16 @@ export async function assetCatalog(ctx, journey) {
       'every catalog row is carried byte for byte',
       JSON.stringify(await tableText(ctx.adminUrl, targetA.db, 'catalog_items')) ===
         JSON.stringify(await tableText(ctx.adminUrl, source.db, 'catalog_items')),
+    );
+    const namesA = new Set(
+      (await targetA.query('SELECT name FROM catalog_items')).map((r) => r.name),
+    );
+    journey.check(
+      'the first target holds every write the source took during the export, and none it refused',
+      namesA.size === expectedRows &&
+        taken.every((n) => namesA.has(n)) &&
+        !fencedOut.some((n) => namesA.has(n)),
+      `${namesA.size} of ${expectedRows}`,
     );
     for (const table of ['sessions', 'api_keys', 'invites']) {
       const [row] = await targetA.query(`SELECT count(*)::int AS n FROM ${table}`);
@@ -681,7 +736,7 @@ async function blobBackendRefusal(ctx, journey, { v1, packEnv, recipient, extra 
     run.status === 3 &&
       error?.code === 'RAY_EXTERNAL_STATE_UNSUPPORTED' &&
       error.reason === 'unsupported-blob-adapter' &&
-      error.message.includes("'vault_pack'"),
+      error.message.includes("the extension 'vault_pack' provides the blob backend"),
     `${run.status} ${JSON.stringify(run.envelope.errors)}`,
   );
   journey.check('nothing is written', !existsSync(refusedOutput));

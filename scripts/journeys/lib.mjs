@@ -415,6 +415,36 @@ export function rayspec(ctx, args, { env, cwd, timeout = 300_000 } = {}) {
   return { status: run.status, envelope, stdout: run.stdout ?? '', stderr: run.stderr ?? '' };
 }
 
+/** `rayspec` without blocking the journey: resolves to the same shape once the process exits. */
+export function rayspecAsync(ctx, args, { env, cwd, timeout = 300_000 } = {}) {
+  const child = spawn(process.execPath, [ctx.cli, ...args], {
+    cwd: cwd ?? ctx.work,
+    env: env ?? { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d) => {
+    stdout += String(d);
+  });
+  child.stderr.on('data', (d) => {
+    stderr += String(d);
+  });
+  const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+  return new Promise((resolve) => {
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      let envelope = {};
+      try {
+        envelope = JSON.parse(stdout);
+      } catch {
+        envelope = {};
+      }
+      resolve({ status, envelope, stdout, stderr });
+    });
+  });
+}
+
 /** Everything `secrets` holds must be absent from `text`. */
 export function leaks(text, secrets) {
   return secrets.filter((s) => s !== '' && text.includes(s)).length;
@@ -585,8 +615,16 @@ export async function signIn(base, email, password, orgId) {
  * run is returned for the caller to check (an export a journey expects to be refused, too).
  */
 export function exportDeployment(ctx, environment, recipient, output, extra = []) {
-  const run = rayspec(
-    ctx,
+  return rayspec(ctx, ...exportCommand(environment, recipient, output, extra));
+}
+
+/** `exportDeployment` without blocking the journey, for writes sent while the export runs. */
+export function exportDeploymentAsync(ctx, environment, recipient, output, extra = []) {
+  return rayspecAsync(ctx, ...exportCommand(environment, recipient, output, extra));
+}
+
+function exportCommand(environment, recipient, output, extra) {
+  return [
     [
       'export',
       '--deployment',
@@ -603,8 +641,7 @@ export function exportDeployment(ctx, environment, recipient, output, extra = []
       ...extra,
     ],
     { env: environment.env(), cwd: environment.dir },
-  );
-  return run;
+  ];
 }
 
 /**
