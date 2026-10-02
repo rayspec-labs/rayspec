@@ -642,8 +642,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epoch. SIGINT or SIGTERM stops at a safe point, ends `pg_dump`, removes the scratch data and reports
   `RAY_INTERRUPTED` (exit 6) with the resume command; the next export, or `rayspec resume`, removes
   the plaintext a killed one left in the scratch directory and closes its receipt. An application
-  that loads any extension is refused before the fence (`unsupported-blob-adapter`), even with
-  `RAYSPEC_BLOB_ROOT` set, since an extension's blob backend would be used in place of the fs store.
+  that loads extensions is exported when its blobs are in the platform's fs store, or it keeps none:
+  which backend holds them is a value of the extensions' code, so the export does not load them but
+  reads what the deployment's boot resolved, which the bundle deploy records with the application
+  digest in the new `runtime_control_state.blob_backend` (migration
+  `0017_runtime_control_blob_backend`). An application whose extension provides its own blob
+  backend is refused before the fence (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`),
+  naming that extension, and so is one whose active version has no record (deploy it once with this
+  runtime). `LoadedExtensions.capabilityProviders` in `@rayspec/platform` names the extension that
+  provided each capability.
   An upload being written during the precheck is normal operation: it is reported as in flight and
   left to the fence's drain; only a temporary upload file still there after the drain refuses, in the
   capture (`unreconciled-effects`), with the source fenced. `listFsBlobs` takes the phase (`live` or

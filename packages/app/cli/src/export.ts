@@ -10,8 +10,9 @@
  * THE SEQUENCE, each step a transition of the migration state machine recorded in the receipts
  * (`export-receipts.ts` in @rayspec/server):
  *
- *   PRECHECK   arguments, the state directory, the configuration, the blob source (an application
- *              that loads an extension is refused), the scratch lock, then the read-only preflight
+ *   PRECHECK   arguments, the state directory, the configuration, the blob source (for an
+ *              application that loads extensions, the backend its boot recorded: an extension's
+ *              own is refused), the scratch lock, then the read-only preflight
  *              of the source (`preflightSnapshot`), recorded with the application digest it
  *              established. A refusal here changes nothing at the source. An upload still being
  *              written is normal before the fence: it is reported as in flight and left to the
@@ -327,17 +328,31 @@ async function readFence(db: Db): Promise<{ epoch: number; state: 'open' | 'fenc
   }
 }
 
+const BLOB_ROOT_UNSET =
+  'the deployed application keeps blobs, and RAYSPEC_BLOB_ROOT is not set: set it to the blob ' +
+  'root the deployment serves from';
+
 /**
- * Where the blobs of the active version are, decided the way the runtime decides it: a blob backend
- * an extension provides comes before `RAYSPEC_BLOB_ROOT`, so an application that loads any extension
- * is `unsupported` whether or not the root is set (which extension provides one is known only by
- * running its code). Otherwise the fs store at `blobRoot`, or none.
+ * Where the blobs of the active version are, decided the way the runtime decides it, without loading
+ * any application code here.
+ *
+ * An application that loads extensions: a blob backend an extension provides comes before
+ * `RAYSPEC_BLOB_ROOT`, and whether one does is a value of the extension's module. The boot that
+ * loaded the extensions resolved it, and the bundle deploy that activated this version recorded it
+ * with the application digest (`readRecordedBlobBackend`). That record decides: an extension's
+ * backend is refused, naming the extension; the platform's fs store needs `RAYSPEC_BLOB_ROOT`; no
+ * blob backend leaves the root optional. No record for the active version is refused too, since
+ * nothing else can tell.
+ *
+ * An application without extensions: the fs store at `blobRoot`, or none — and an unset root is
+ * refused when the document keeps blobs.
  */
 async function blobSourceOf(
   server: Server,
   stateDir: StateDirectory,
   env: NodeJS.ProcessEnv,
   blobRoot: string | undefined,
+  control: Db,
 ): Promise<SnapshotBlobSource> {
   const fallback: SnapshotBlobSource =
     blobRoot !== undefined ? { kind: 'fs', root: resolve(blobRoot) } : { kind: 'none' };
@@ -355,16 +370,44 @@ async function blobSourceOf(
   const { parseSpec } = await import('@rayspec/spec');
   const parsed = parseSpec(specText);
   if (parsed.ok && parsed.value.extensions.length > 0) {
-    return { kind: 'unsupported', name: 'a blob backend an extension may provide' };
+    const loaded = parsed.value.extensions.map((e) => `'${e.id}'`).join(', ');
+    let recorded: Awaited<ReturnType<Server['readRecordedBlobBackend']>>;
+    try {
+      recorded = await server.readRecordedBlobBackend(control);
+    } catch {
+      refuse(
+        'RAY_INFRA_UNAVAILABLE',
+        'the environment database could not be read; check that it is reachable and retry',
+      );
+    }
+    const backend =
+      recorded.applicationDigest === active.bundleSha256 ? recorded.blobBackend : null;
+    if (backend === null) {
+      refuse(
+        'RAY_EXTERNAL_STATE_UNSUPPORTED',
+        `the deployed application loads the extension(s) ${loaded}, and the environment records ` +
+          'no blob backend for the active version: an extension may keep the blobs in a backend ' +
+          'of its own, which only the boot that loads it can tell. Deploy the active bundle once ' +
+          'with this runtime (`rayspec deploy <file.ray>`), which records it, and export again',
+        { reason: 'unsupported-blob-adapter' },
+      );
+    }
+    if (backend.kind === 'extension') {
+      refuse(
+        'RAY_EXTERNAL_STATE_UNSUPPORTED',
+        `the extension '${backend.extension}' provides the blob backend the deployment keeps its ` +
+          'blobs in, which the runtime uses in place of the fs blob store; an export reads the fs ' +
+          'blob store only',
+        { reason: 'unsupported-blob-adapter' },
+      );
+    }
+    if (backend.kind === 'fs' && blobRoot === undefined) refuse('RAY_USAGE', BLOB_ROOT_UNSET);
+    return fallback;
   }
   if (blobRoot !== undefined) return fallback;
   const report = await server.checkBootEnv(specPath, specText, { ...env, RAYSPEC_BLOB_ROOT: '' });
   if (report.required.some((r) => r.name === 'RAYSPEC_BLOB_ROOT')) {
-    refuse(
-      'RAY_USAGE',
-      'the deployed application keeps blobs, and RAYSPEC_BLOB_ROOT is not set: set it to the blob ' +
-        'root the deployment serves from',
-    );
+    refuse('RAY_USAGE', BLOB_ROOT_UNSET);
   }
   return fallback;
 }
@@ -576,16 +619,11 @@ export async function runExport(
     if (pgDump !== undefined && !pgDump.startsWith('/')) {
       refuse('RAY_USAGE', 'RAYSPEC_PG_DUMP must be an absolute path to pg_dump');
     }
-    const blob = await blobSourceOf(server, dir, env, config.blobRoot);
-    if (blob.kind === 'unsupported') {
-      refuse(
-        'RAY_EXTERNAL_STATE_UNSUPPORTED',
-        'the deployed application loads an extension, and an extension may keep the blobs in a ' +
-          'backend of its own, which the runtime prefers over RAYSPEC_BLOB_ROOT; an export reads ' +
-          'the fs blob store only',
-        { reason: 'unsupported-blob-adapter' },
-      );
-    }
+    const controlUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
+    const controlWorkflowUrl =
+      config.migrationDbosSystemDatabaseUrl ?? config.dbosSystemDatabaseUrl;
+    control = server.openControlDatabase(controlUrl);
+    const blob = await blobSourceOf(server, dir, env, config.blobRoot, control);
     safePoint();
 
     // The scratch space, held for this export alone; what a killed export left there is removed.
@@ -595,10 +633,6 @@ export async function runExport(
       if (err instanceof server.StateDirectoryError) throw new Refused([err.error]);
       throw err;
     }
-    const controlUrl = config.migrationDatabaseUrl ?? config.databaseUrl;
-    const controlWorkflowUrl =
-      config.migrationDbosSystemDatabaseUrl ?? config.dbosSystemDatabaseUrl;
-    control = server.openControlDatabase(controlUrl);
     receipts = server.ExportReceiptLog.start(dir, options.operationId, {
       deploymentId: p.deploymentId,
       recipient: p.recipient,

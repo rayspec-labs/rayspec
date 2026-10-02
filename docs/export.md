@@ -62,11 +62,10 @@ The export's result says which barrier held and which did not apply, and so does
   password is still refused (`RAY_OWNER_RECOVERY_REQUIRED`).
 - **`pg_dump` of the database server's major version** on `PATH`, or named by `RAYSPEC_PG_DUMP`
   (an absolute path). `pg_dump --version` must report the same major as the server.
-- **The blob root** in `RAYSPEC_BLOB_ROOT`, when the application keeps blobs. Only the fs blob store
-  is exported. An application that loads any extension is refused
-  (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`), whether or not `RAYSPEC_BLOB_ROOT`
-  is set: an extension may provide a blob backend of its own, which the runtime uses in place of the
-  fs store, and the export cannot tell without running the extension's code.
+- **The blob root** in `RAYSPEC_BLOB_ROOT`, when the application keeps blobs. Only the platform's fs
+  blob store is exported. An application that loads extensions is exported like any other as long as
+  no extension provides a blob backend of its own; one that does is refused
+  ([Applications with extensions](#applications-with-extensions)).
 - **Disk space** in the state directory for about twice the size of both databases, the blobs and
   the application. The plaintext snapshot is assembled there, in a private directory, and nowhere
   else.
@@ -74,6 +73,43 @@ The export's result says which barrier held and which did not apply, and so does
   tenant's rows and can write nothing. Without it the dumps read as the migration role (or the one
   role), and the result says `single-role`.
 - **An age key pair** for the recipient (below).
+
+## Applications with extensions
+
+An extension can contribute stores, routes, handlers, tools and agents, and one capability the
+platform knows: a **blob backend** of its own (`capabilities.blobFactory` in its `defineExtension`
+manifest). When an extension provides one and the application has a stream route, the runtime keeps
+the uploaded bytes there instead of in the fs store under `RAYSPEC_BLOB_ROOT`. The export reads the
+fs store only, so it must know which backend holds the blobs before it fences anything.
+
+Whether an extension provides a backend is a value of its module: it is known only by importing
+that code. The deployment's boot imports every extension anyway, and decides which blob backend it
+builds. The export never loads application code in its own process. So the boot states what it
+resolved — the platform's fs store, no blob backend, or the backend of the extension it names — and
+the bundle deploy that activates the application records it in the environment database
+(`runtime_control_state.blob_backend`) in the same transaction as the application's digest. Every
+bundle deploy writes it again, a restart included. The export reads that record for the active
+version:
+
+| What the deployment's boot recorded | The export |
+| --- | --- |
+| the platform's fs store | exports the blobs under `RAYSPEC_BLOB_ROOT`; without the variable it refuses (`RAY_USAGE`), even when the application's own spec declares no stream route (an extension may contribute it) |
+| no blob backend | exports the databases; a `RAYSPEC_BLOB_ROOT` that is set is read as usual |
+| a backend an extension provides | refuses before the fence: `RAY_EXTERNAL_STATE_UNSUPPORTED`, reason `unsupported-blob-adapter`, naming the extension. Its bytes are wherever that extension put them, which the export can neither inventory nor freeze |
+| nothing for the active version (deployed by an earlier runtime, or the record belongs to another version) | refuses the same way. Deploy the active bundle once with this runtime (`rayspec deploy <file.ray>`), which records it, and export again |
+
+Reading the record rather than the extension's code is deliberate: deciding it in the export would
+mean running the extensions' entry modules — application code, with its own imports and side effects
+— in the operator's export process, on a source that may be stopped, and the result could still
+differ from what the running deployment built (an extension can decide by its own configuration).
+The record is what the boot actually built, written with the version it belongs to.
+
+The extension itself, its compiled modules and the third-party packages it vendors travel inside the
+application bundle the snapshot carries, byte for byte; the import restores the application like any
+other, and the target serves the extension from that bundle. An extension's stores must be declared
+in the application's spec (as the reference application `examples/asset-catalog` does): a table only
+an extension's fragments create is neither a platform table nor a product store of the application,
+and the export refuses it (`unknown-table`).
 
 ## Create the recipient
 
@@ -169,7 +205,8 @@ the counts (tables, rows, objects) and the path of the receipt.
 | the tenant event bus | runtime-control state and receipts |
 | run history, when `--run-history included` | run history, when `--run-history excluded` |
 | the whole workflow system database, when it exists | external services (provider accounts, webhooks you registered elsewhere) |
-| every blob of the fs blob store, with both digests | blobs in any other backend (the export refuses) |
+| every blob of the fs blob store, with both digests | blobs in a backend an extension provides (the export refuses) |
+| the application's extensions and their vendored packages, inside the application bundle | |
 
 Tables whose rows stay behind are still in the dump, empty, so the target reaches the same schema.
 `excludedDataCategories` lists every category whose rows were not exported.
@@ -221,7 +258,7 @@ is fenced and nothing is released.
 
 | What happened | The source | What to do |
 | --- | --- | --- |
-| A precheck refusal (wrong deployment id, drift, a second organization, a database extension, an application that loads an extension, an unknown table, no `pg_dump` of the right major, …) | unchanged, not fenced | fix the cause and run the export again |
+| A precheck refusal (wrong deployment id, drift, a second organization, a database extension, an extension that provides its own blob backend, no recorded blob backend, an unknown table, no `pg_dump` of the right major, …) | unchanged, not fenced | fix the cause and run the export again |
 | You did not confirm the downtime | unchanged, not fenced | run it again and confirm, or pass `--confirm-quiesce` |
 | The drain did not finish before `--quiesce-deadline` (`RAY_SOURCE_NOT_QUIESCENT`) | fenced | wait for the runs to end and run the export again, or `rayspec resume` |
 | No database write barrier (`database-barrier-unavailable`) | fenced | enable role separation, or stop every runtime process and run it again with `--source-stopped`; or `rayspec resume` |
@@ -284,5 +321,5 @@ pinned `postgres` image `docker-compose.yml` runs, through `docker run`.
 - At most 500,000 objects, and a bundle of at most 2 GiB (`RAY_LIMIT_EXCEEDED`, `migration-size`).
 - No database extension in the application database; in the workflow system database only the one
   the durable engine's own migrations create (`uuid-ossp`).
-- Only the fs blob store.
+- Only the platform's fs blob store; an extension that provides its own blob backend is refused.
 - No passphrase encryption, no partial export, no redaction mode.

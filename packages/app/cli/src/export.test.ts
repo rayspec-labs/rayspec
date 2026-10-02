@@ -419,7 +419,8 @@ describe('the confirmation at the terminal', () => {
 
 /**
  * A state directory whose active version is a packed application, with or without an extension.
- * The extension provides nothing; that it is loaded at all is what the export cannot see past.
+ * Where an extension's application keeps its blobs is what its boot recorded in the database, so
+ * without a reachable database the export cannot tell.
  */
 async function deployedStateDir(withExtension: boolean): Promise<string> {
   const source = temp('rayspec-export-app-');
@@ -461,12 +462,13 @@ async function deployedStateDir(withExtension: boolean): Promise<string> {
 describe('the blob store an export reads', () => {
   const unreachable = { DATABASE_URL: 'postgresql://nobody@127.0.0.1:1/none' };
 
-  it('refuses an application that loads an extension even with RAYSPEC_BLOB_ROOT set, before the source is read', async () => {
+  it('reads the recorded blob backend of an application that loads an extension, before the scratch space is taken', async () => {
     const state = await deployedStateDir(true);
     for (const blobRoot of [{ RAYSPEC_BLOB_ROOT: temp('rayspec-blobs-') }, {}]) {
       const outcome = await run(args({}, state), { ...unreachable, ...blobRoot });
-      expect(first(outcome)).toBe('RAY_EXTERNAL_STATE_UNSUPPORTED/unsupported-blob-adapter');
-      // Refused before the scratch space was taken or the database was opened.
+      // Whatever the blob root, the record decides, and it cannot be read.
+      expect(first(outcome)).toBe('RAY_INFRA_UNAVAILABLE');
+      expect(outcome.envelope.errors[0]?.message).toContain('environment database');
       expect(existsSync(join(state, 'scratch'))).toBe(false);
     }
   }, 60_000);
