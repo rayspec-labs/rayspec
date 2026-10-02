@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { copyFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort } from './test-support/processes.js';
 import {
   call,
   cli,
@@ -39,7 +40,6 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let armsRan = 0;
 
 const APP = join(EXAMPLES, 'team-notes');
-const PORT = 24_000 + (process.pid % 300);
 
 interface SeedNote {
   key: string;
@@ -142,7 +142,7 @@ describe.skipIf(!baseUrl)('team notes — from bundle to served, updated and ref
     await db.create();
     pem = await signingKeyPem();
     deployDir = scratch('team-notes-deploy-');
-    deployment = new Deployment(deployDir, PORT, deployEnv);
+    deployment = new Deployment(deployDir, await freePort(), deployEnv);
     const v1 = packRelease('v1');
     expect(v1.status, v1.stderr).toBe(0);
   }, 180_000);

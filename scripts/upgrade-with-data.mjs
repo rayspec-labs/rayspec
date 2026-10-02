@@ -47,6 +47,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -187,7 +188,24 @@ if (APP === undefined) {
   fail(`--app ${flags.app} is not one of: ${Object.keys(APPS).join(', ')}`);
 }
 const logDir = flags['log-dir'];
-const port = Number(flags.port ?? 18_600 + (process.pid % 900));
+/**
+ * A TCP port on 127.0.0.1 that nothing listens on at the moment of the call. Never one derived from
+ * the process id: a server left over from an earlier run can hold such a port.
+ */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const assigned = typeof address === 'object' && address !== null ? address.port : 0;
+      probe.close(() =>
+        assigned > 0 ? resolve(assigned) : reject(new Error('no port was assigned')),
+      );
+    });
+  });
+}
+const port = flags.port !== undefined ? Number(flags.port) : await freePort();
 const suiteDb = `rayspec_upgrade_${process.pid}`;
 const appUrl = withDbName(baseUrl, suiteDb);
 const shadowUrl = process.env.SHADOW_DATABASE_URL ?? baseUrl;

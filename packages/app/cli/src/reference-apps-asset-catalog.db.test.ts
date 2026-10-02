@@ -19,6 +19,7 @@
 import { copyFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort } from './test-support/processes.js';
 import {
   call,
   Deployment,
@@ -44,7 +45,6 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let armsRan = 0;
 
 const APP = join(EXAMPLES, 'asset-catalog');
-const PORT = 24_600 + (process.pid % 300);
 const HOST = 'classifier.example.com';
 
 describe.skipIf(!baseUrl)(
@@ -116,7 +116,7 @@ describe.skipIf(!baseUrl)(
       caFile = certs.caFile;
       classifier = await startClassifier(certs);
       proxy = await startEgressProxy(classifier.port, () => policy);
-      deployment = new Deployment(scratch('asset-catalog-deploy-'), PORT, env);
+      deployment = new Deployment(scratch('asset-catalog-deploy-'), await freePort(), env);
       packApp('v1');
     }, 240_000);
 

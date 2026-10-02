@@ -14,15 +14,42 @@ import { createServer } from 'node:net';
 
 /** A TCP port on 127.0.0.1 that nothing listens on at the moment of the call. */
 export async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const address = probe.address();
-      const port = typeof address === 'object' && address !== null ? address.port : 0;
-      probe.close(() => (port > 0 ? resolve(port) : reject(new Error('no port was assigned'))));
-    });
-  });
+  const [port] = await freePorts(1);
+  return port as number;
+}
+
+/**
+ * `count` different TCP ports on 127.0.0.1 that nothing listens on at the moment of the call. All of
+ * them are held at once before any is released, so no two are the same port: two separate
+ * {@link freePort} calls may be handed the same one back.
+ */
+export async function freePorts(count: number): Promise<number[]> {
+  const probes = Array.from({ length: count }, () => createServer());
+  try {
+    return await Promise.all(
+      probes.map(
+        (probe) =>
+          new Promise<number>((resolve, reject) => {
+            probe.once('error', reject);
+            probe.listen(0, '127.0.0.1', () => {
+              const address = probe.address();
+              const port = typeof address === 'object' && address !== null ? address.port : 0;
+              if (port > 0) resolve(port);
+              else reject(new Error('no port was assigned'));
+            });
+          }),
+      ),
+    );
+  } finally {
+    await Promise.all(
+      probes.map(
+        (probe) =>
+          new Promise<void>((resolve) =>
+            probe.listening ? probe.close(() => resolve()) : resolve(),
+          ),
+      ),
+    );
+  }
 }
 
 function hasExited(child: ChildProcess): boolean {

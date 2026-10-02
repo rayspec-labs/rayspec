@@ -39,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort, SpawnedProcesses } from './test-support/processes.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../..');
@@ -86,9 +87,9 @@ const DEFAULT_CSP =
   "default-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
 const DEFAULT_PERMISSIONS_POLICY = 'camera=(), microphone=(), geolocation=()';
 
-// Two ports, one per booted arm (offset by the pid so parallel checkouts do not collide).
-const STATIC_PORT = 21000 + (process.pid % 900);
-const EMPTY_ENV_PORT = STATIC_PORT + 1000;
+// Every deploy this file starts, each on a port the operating system hands out; all of them are
+// stopped once the file is done, also when a test failed before it stopped its own.
+const processes = new SpawnedProcesses();
 
 /** A frontend-only document — the exact shape docs/getting-started.md documents as a static profile. */
 const FRONTEND_ONLY_SPEC = `version: '1.0'
@@ -130,7 +131,8 @@ beforeAll(() => {
   writeFileSync(join(root, 'delta.sql'), 'ALTER TABLE notes ADD COLUMN pinned boolean;\n', 'utf8');
 });
 
-afterAll(() => {
+afterAll(async () => {
+  await processes.stopAll();
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
@@ -163,10 +165,12 @@ interface Booted {
 
 /** Spawn `rayspec deploy <spec> --port <port>` from the fixture directory, collecting both streams. */
 function spawnDeploy(spec: string, port: number, env: NodeJS.ProcessEnv): Booted {
-  const child = spawn(process.execPath, [CLI_DIST, 'deploy', spec, '--port', String(port)], {
-    cwd: root,
-    env,
-  });
+  const child = processes.track(
+    spawn(process.execPath, [CLI_DIST, 'deploy', spec, '--port', String(port)], {
+      cwd: root,
+      env,
+    }),
+  );
   let out = '';
   let err = '';
   child.stdout?.on('data', (d) => {
@@ -216,17 +220,19 @@ maybeDescribe(
   'rayspec deploy — a frontend-only spec boots the STATIC profile even with ambient secrets set',
   () => {
     let booted: Booted | undefined;
+    let port = 0;
 
     beforeAll(async () => {
-      booted = spawnDeploy('./rayspec.yaml', STATIC_PORT, childEnv(AMBIENT_BOOT_SECRETS));
-      await waitForBoot(booted, STATIC_PORT, 30_000);
+      port = await freePort();
+      booted = spawnDeploy('./rayspec.yaml', port, childEnv(AMBIENT_BOOT_SECRETS));
+      await waitForBoot(booted, port, 30_000);
     }, 60_000);
 
     afterAll(async () => {
       await stop(booted);
     });
 
-    const base = (): string => `http://127.0.0.1:${STATIC_PORT}`;
+    const base = (): string => `http://127.0.0.1:${port}`;
 
     it('prints the static boot banner (no database, no auth surface)', () => {
       expect(booted?.out()).toContain('STATIC PROFILE (frontend-only)');
@@ -272,10 +278,12 @@ maybeDescribe(
   'rayspec deploy — a frontend-only spec boots with an EMPTY environment (no boot secrets)',
   () => {
     let booted: Booted | undefined;
+    let port = 0;
 
     beforeAll(async () => {
-      booted = spawnDeploy('./rayspec.yaml', EMPTY_ENV_PORT, childEnv());
-      await waitForBoot(booted, EMPTY_ENV_PORT, 30_000);
+      port = await freePort();
+      booted = spawnDeploy('./rayspec.yaml', port, childEnv());
+      await waitForBoot(booted, port, 30_000);
     }, 60_000);
 
     afterAll(async () => {
@@ -283,7 +291,7 @@ maybeDescribe(
     });
 
     it('serves the frontend without DATABASE_URL / signing key / pepper set', async () => {
-      const res = await fetch(`http://127.0.0.1:${EMPTY_ENV_PORT}/`);
+      const res = await fetch(`http://127.0.0.1:${port}/`);
       expect(res.status).toBe(200);
       expect(await res.text()).toContain(INDEX_SENTINEL);
     });
@@ -298,7 +306,7 @@ maybeDescribe(
   'rayspec deploy — a spec with stores/api ALONGSIDE a frontend is NOT static (stays fail-closed)',
   () => {
     it('fail-closes on the three missing boot secrets instead of serving the assets statically', async () => {
-      const booted = spawnDeploy('./with-api.yaml', EMPTY_ENV_PORT + 1000, childEnv());
+      const booted = spawnDeploy('./with-api.yaml', await freePort(), childEnv());
       try {
         const code = await new Promise<number | null>((r) => {
           booted.child.on('exit', (c) => r(c));
@@ -365,19 +373,21 @@ maybeDescribe(
      * is a USAGE error (exit 2), it happens BEFORE anything binds a port, and the message names the flag.
      */
     it('exits 2 naming the flag instead of booting the static profile', async () => {
-      const port = EMPTY_ENV_PORT + 2000;
-      const child = spawn(
-        process.execPath,
-        [
-          CLI_DIST,
-          'deploy',
-          './rayspec.yaml',
-          '--apply-migration',
-          './delta.sql',
-          '--port',
-          String(port),
-        ],
-        { cwd: root, env: childEnv() },
+      const port = await freePort();
+      const child = processes.track(
+        spawn(
+          process.execPath,
+          [
+            CLI_DIST,
+            'deploy',
+            './rayspec.yaml',
+            '--apply-migration',
+            './delta.sql',
+            '--port',
+            String(port),
+          ],
+          { cwd: root, env: childEnv() },
+        ),
       );
       let out = '';
       let err = '';

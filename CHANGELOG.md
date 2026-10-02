@@ -871,6 +871,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every suite that starts a deploy, and `pnpm test:upgrade-with-data`, listen on a port the
+  operating system hands out.** They no longer derive a port from the process id, which a server
+  left over from an earlier run could still hold; the upgrade script still takes `--port`. Suites
+  that spawn deploys directly stop every one of them when they finish, also after a failed test. A
+  test in `packages/app/cli` fails when a suite of the package or the upgrade script derives a port
+  from the process id again.
 - **`rayspec export` refuses a source no database barrier can protect before fencing it.** Without
   role separation and without `--source-stopped` no database write barrier can hold. The export
   used to take the fence, drain the source and only then refuse with `RAY_EXTERNAL_STATE_UNSUPPORTED`
