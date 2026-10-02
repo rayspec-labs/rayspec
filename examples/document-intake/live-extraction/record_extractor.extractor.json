@@ -2,7 +2,7 @@
   "agent_id": "record_extractor",
   "backend": "openai",
   "model": "gpt-5",
-  "prompt_file": "record_extractor.prompt.md",
+  "prompt_file": "../live-extraction/record_extractor.prompt.md",
   "schema_file": "../extraction/record_extractor.schema.json",
   "output_schema_name": "document_record",
   "structured_output_mode": "native",

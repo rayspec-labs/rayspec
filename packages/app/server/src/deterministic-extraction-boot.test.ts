@@ -170,6 +170,25 @@ describe('the deterministic extraction provider at boot', () => {
     expect(message).toContain('not for production extraction');
   });
 
+  it("resolves the example's live config for a live run, through the single-file override", () => {
+    const root = mkdtempSync(join(tmpdir(), 'live-extraction-'));
+    created.push(root);
+    cpSync(EXAMPLE, root, {
+      recursive: true,
+      filter: (src) => !src.slice(EXAMPLE.length).startsWith('/seed'),
+    });
+    const specPath = join(root, SPEC_NAME);
+    const spec = validateProductYamlSpec(readFileSync(specPath, 'utf8'), specPath);
+    // An inert key: constructing the adapter calls nothing; no run happens here.
+    const env = {
+      RAYSPEC_EXTRACTION_MODE: 'live',
+      RAYSPEC_EXTRACTION_CONFIG: join(root, 'live-extraction', 'record_extractor.extractor.json'),
+      OPENAI_API_KEY: ['inert', 'test', 'value'].join('-'),
+    };
+    const live = buildLiveAgent(env, specPath, spec);
+    expect(live.agentIds).toEqual(['record_extractor']);
+  });
+
   it('says at boot that no real extraction model runs', () => {
     const banner = nonRealProviderBanner({}, false, 'deterministic');
     expect(banner).toContain('RAYSPEC_EXTRACTION_MODE=deterministic');
