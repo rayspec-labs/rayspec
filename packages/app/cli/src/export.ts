@@ -25,7 +25,9 @@
  *              the operator attested with `--source-stopped`.
  *   FROZEN     the fence is held with both barriers. Without the database barrier the export refuses
  *              (`RAY_EXTERNAL_STATE_UNSUPPORTED` `database-barrier-unavailable`) and the source stays
- *              fenced.
+ *              fenced. Where no barrier CAN hold — no role separation, no `--source-stopped` and no
+ *              barrier an earlier quiesce of the fence holds — the export knows it before the fence
+ *              and refuses at the precheck instead, with nothing at the source changed.
  *   EXPORTING  both databases and the blobs captured under that one fence epoch, counts and digests
  *              verified, the inner archive encrypted in a private scratch directory under the state
  *              directory and the migration bundle written beside the output, read back and linked into
@@ -312,16 +314,27 @@ function downtimePlan(
 type Server = typeof import('@rayspec/server');
 
 /** The fence as the environment records it. */
-async function readFence(db: Db): Promise<{ epoch: number; state: 'open' | 'fenced' } | null> {
+async function readFence(
+  db: Db,
+): Promise<{ epoch: number; state: 'open' | 'fenced'; databaseBarrierHeld: boolean } | null> {
   try {
     const rows = (await db.$client.unsafe(
-      `SELECT fence_state, fence_epoch::text AS fence_epoch FROM runtime_control_state WHERE id = 1`,
-    )) as unknown as { fence_state: string; fence_epoch: string }[];
+      `SELECT fence_state, fence_epoch::text AS fence_epoch,
+              fence_barriers -> 'database' ->> 'state' AS database_barrier
+         FROM runtime_control_state WHERE id = 1`,
+    )) as unknown as {
+      fence_state: string;
+      fence_epoch: string;
+      database_barrier: string | null;
+    }[];
     const row = rows[0];
-    if (row === undefined) return { epoch: 0, state: 'open' };
+    if (row === undefined) return { epoch: 0, state: 'open', databaseBarrierHeld: false };
+    const fenced = row.fence_state === 'fenced';
     return {
       epoch: Number(row.fence_epoch),
-      state: row.fence_state === 'fenced' ? 'fenced' : 'open',
+      state: fenced ? 'fenced' : 'open',
+      // A database barrier an earlier quiesce of this fence holds, which a later one keeps.
+      databaseBarrierHeld: fenced && row.database_barrier === 'held',
     };
   } catch {
     return null;
@@ -715,14 +728,30 @@ export async function runExport(
     const facts = preflight.facts;
     safePoint();
 
+    // Without role separation the only database barrier is a stopped source the operator attests;
+    // without that attestation none can hold, and that is known now, before the fence. So refuse
+    // here, with nothing at the source changed, rather than fence it and then refuse. A source
+    // already fenced with a database barrier held (an earlier attested export) keeps that barrier.
+    if (!roleSeparated && !p.sourceStopped && !before.databaseBarrierHeld) {
+      return await blocked([
+        bundleError(
+          'RAY_EXTERNAL_STATE_UNSUPPORTED',
+          'no database write barrier can hold: without role separation the barrier is a stopped ' +
+            'source; stop every runtime process of the deployment and run the export again with ' +
+            '--source-stopped, or enable role separation. Nothing at the source changed',
+          { reason: 'database-barrier-unavailable' },
+        ),
+      ]);
+    }
+
     // The operator's confirmation of the downtime.
     if (!p.confirmQuiesce && terminal !== null) {
       const barrier = roleSeparated
         ? `the runtime role's writes are revoked (database-write-role)`
         : p.sourceStopped
           ? 'you attest that every runtime process is stopped (database-stopped-source)'
-          : 'none is available: without role separation, stop every runtime process and pass ' +
-            '--source-stopped, or the export will refuse after fencing';
+          : 'the stopped source an earlier export attested, which the fence still holds ' +
+            '(database-stopped-source)';
       let confirmed: boolean;
       try {
         confirmed = await askConfirmation(

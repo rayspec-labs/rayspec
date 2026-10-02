@@ -1472,8 +1472,11 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
   first `pg_dump` on `PATH`, which must be of the server's major). No output carries a value.
 - **Database barrier.** With role separation the runtime role's writes are revoked until `resume`
   (`database-write-role`); without it, only a stopped source attested with `--source-stopped`
-  (`database-stopped-source`). With neither the export fences, then refuses before any capture with
-  `RAY_EXTERNAL_STATE_UNSUPPORTED` / `database-barrier-unavailable`; the source stays fenced.
+  (`database-stopped-source`). With neither, no barrier can hold, and the export refuses at the
+  precheck, before the fence, with `RAY_EXTERNAL_STATE_UNSUPPORTED` / `database-barrier-unavailable`;
+  nothing at the source changes (see [Export → Compatibility notes](./export.md#compatibility-notes)).
+  A barrier that could hold and does not (the role's writes not revoked, a session still connected
+  to an attested stopped source) is refused after the fence, and the source stays fenced.
 - **Blobs.** The fs blob store under `RAYSPEC_BLOB_ROOT`. For an application that loads
   extensions, the blob backend its boot recorded decides, read from the database and never by
   loading the extensions: a backend an extension provides, or no record for the active version, is

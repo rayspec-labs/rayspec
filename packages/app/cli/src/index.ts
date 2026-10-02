@@ -357,8 +357,9 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 --quiesce-deadline (default 300) — with a database write barrier: the
                                 runtime role's writes revoked (role separation,
                                 RAYSPEC_MIGRATION_DATABASE_URL), or every runtime process stopped and
-                                attested with --source-stopped, else refused; then both databases and
-                                the blobs captured under that fence epoch, verified, encrypted in a
+                                attested with --source-stopped (with neither, refused at the precheck,
+                                before the fence); then both databases and the blobs captured under
+                                that fence epoch, verified, encrypted in a
                                 private scratch directory under the state directory, and the bundle
                                 written to --output (refused if it exists). Plaintext is never written
                                 anywhere else. --run-history has no default: excluded keeps runs, run

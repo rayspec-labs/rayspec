@@ -819,6 +819,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`rayspec export` refuses a source no database barrier can protect before fencing it.** Without
+  role separation and without `--source-stopped` no database write barrier can hold. The export
+  used to take the fence, drain the source and only then refuse with `RAY_EXTERNAL_STATE_UNSUPPORTED`
+  (`database-barrier-unavailable`), leaving it fenced until `rayspec resume`. It now refuses with the
+  same code and reason at the precheck, with nothing at the source changed: no fence, no downtime, no
+  receipt in the environment. A barrier that could hold and does not is still refused after the
+  fence. Recorded as a difference from the bundle contract in
+  [Export → Compatibility notes](./docs/export.md#compatibility-notes).
+
 - **`docs/ARCHITECTURE.md` on restores and the boot secrets.** It said a new API-key pepper breaks
   only the copied API keys; the pepper also keys refresh sessions, invite tokens and owner-recovery
   tokens, which a new pepper breaks just the same. The section now says what each boot secret keys,
