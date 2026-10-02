@@ -166,6 +166,18 @@ export interface RunOptions {
 export const CALL_SETTLE_MARGIN_MS = 1_000;
 
 /**
+ * How long run-core waits, once it has given up on a run (its wall-clock bound fired or it was
+ * cancelled) and the call has settled or the settle window has passed, for the run's event tail to
+ * drain and its terminal outcome to be written. The write waits at most the cancel lock wait
+ * (`RUN_CANCEL_LOCK_WAIT_MS`, 2 s) for the run header's row lock and needs a pooled connection, which a
+ * loaded pool may be slow to hand out; past this budget run-core stops waiting and rejects, so the
+ * caller learns the run ended no later than the bound plus the kill grace, {@link
+ * CALL_SETTLE_MARGIN_MS} and this budget. The write itself is not abandoned: it completes on its own
+ * connection when one comes free, and a failure is logged.
+ */
+export const RUN_END_RECORD_BUDGET_MS = 5_000;
+
+/**
  * What had happened to a provider call that run-core gave up on, observed rather than assumed: no call
  * was made; it settled with a failure (it was stopped) or with a completed result (it had finished)
  * within the window; or it did not settle at all within the window (unknown).
@@ -868,12 +880,16 @@ export async function runAgent(
     // Observe what the stop did: the call settles within the kill grace (stopped, or it had
     // finished), or it does not (unknown). This is what the run's record states — never assumed.
     const phase = await observeAbandonedCall(runCall, policy.killGraceMs + CALL_SETTLE_MARGIN_MS);
-    await pipeline.drain().catch(() => {});
     cancellation.dispose();
-    try {
-      if (abandoned === 'bound' && runMaxMs !== undefined) {
+    const ended = abandoned;
+    // The drain and the terminal record, under one budget (RUN_END_RECORD_BUDGET_MS): the caller
+    // learns the run ended at a bound the operator can state, however long the pool takes to hand out
+    // a connection. Past the budget the record keeps going on its own connection.
+    const recordEnd = (async () => {
+      await pipeline.drain().catch(() => {});
+      if (ended === 'bound' && runMaxMs !== undefined) {
         await recordRunTimedOut(endDb, runId, { boundMs: runMaxMs, phase });
-      } else if (abandoned === 'cancelled' && (await isRunCancelled(endDb, runId))) {
+      } else if (ended === 'cancelled' && (await isRunCancelled(endDb, runId))) {
         // A run ended through the cancel surface: record the cancellation if nobody has yet, and
         // state what happened to the call either way (the surface records a run it found executing
         // as `outcome-unknown`, the truth at that moment, which this side now knows better).
@@ -882,10 +898,30 @@ export async function runAgent(
           await recordRunCancellationPhase(endDb, runId, phase);
         }
       }
-    } catch (recordErr) {
-      // The record is best-effort here: the run is already ended and its caller must learn that, so a
-      // failing write must not replace the run's real reason. It is logged so an operator sees it.
+    })();
+    // The record is best-effort here: the run is already ended and its caller must learn that, so a
+    // failing write must not replace the run's real reason. It is logged so an operator sees it.
+    recordEnd.catch((recordErr: unknown) => {
       console.error(`[run-core] recording the end of run ${runId} failed`, recordErr);
+    });
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const overBudget = new Promise<'over-budget'>((resolve) => {
+      budgetTimer = setTimeout(() => resolve('over-budget'), RUN_END_RECORD_BUDGET_MS);
+      budgetTimer.unref?.();
+    });
+    const settled = await Promise.race([
+      recordEnd.then(
+        () => 'recorded' as const,
+        () => 'recorded' as const,
+      ),
+      overBudget,
+    ]);
+    if (budgetTimer !== undefined) clearTimeout(budgetTimer);
+    if (settled === 'over-budget') {
+      console.error(
+        `[run-core] the end of run ${runId} was not recorded within ${RUN_END_RECORD_BUDGET_MS} ms; ` +
+          'the write continues and the run reads as running until it lands',
+      );
     }
     throw runErr;
   }

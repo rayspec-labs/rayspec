@@ -274,6 +274,7 @@ export {
   CALL_SETTLE_MARGIN_MS,
   isSubscriptionBilling,
   makeJournalSink,
+  RUN_END_RECORD_BUDGET_MS,
   rollupRunCost,
   rollupTenantCost,
   runAgent,

@@ -922,6 +922,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A run that hits its wall time ends for its caller at a stated bound.** Once
+  `RAYSPEC_AGENT_RUN_MAX_MS` fired (or a run was cancelled), run-core waited for the run's event tail
+  and its terminal record without a limit, so on a loaded pool the caller could learn of the end
+  arbitrarily late. That tail now has a budget of 5 seconds (`RUN_END_RECORD_BUDGET_MS`): the caller
+  is answered no later than the wall time plus the kill grace plus 1 s plus 5 s, and a record that
+  has not landed by then still completes on its own connection, logged if it fails. See
+  [Bounded execution](./docs/hardened-posture.md#bounded-execution).
+
 - **A document whose bytes hold a NUL character no longer leaves its workflow running for ever.**
   `file_input.parse_text` passed text containing U+0000 — what an executable or an archive uploaded
   under a text or PDF type decodes to — to the next step; PostgreSQL refuses that character in a
