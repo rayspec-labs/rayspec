@@ -2510,6 +2510,10 @@ so:
   never stands in for a provider the application chose.
 - `RAYSPEC_HOSTING_POSTURE=managed` refuses it: its capability,
   `extraction-deterministic`, is test-only.
+- The runtime provides the capability, so a bundle cannot require it: the runtime-control
+  `inspect()` lists `extraction-deterministic` among the capabilities of every runtime that ships
+  the provider, and a bundle whose `requires` names it fails `rayspec bundle verify`
+  (`requires-mismatch`).
 - The boot prints the non-real-provider banner while it is selected.
 - A config that selects it names no agent backend, so `rayspec pack` derives no
   provider binding and no egress for it.

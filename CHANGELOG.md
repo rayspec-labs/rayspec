@@ -214,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `closureFiles` the input of the `@rayspec/bundle` writer.
 - **`@rayspec/bundle-contract`: the application bundle contract in code.** A new kernel package
   carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
-  managed hosting receipt, as a proposed contract version `1.0.0-draft.2`. It commits the contract's
+  managed hosting receipt, as contract version `1.0.0-rc.1`. It commits the contract's
   JSON Schemas and vocabularies byte for byte under `contract/`, with `CONTRACT-LOCK.json` recording
   the SHA-256 of every contract file and one digest over them. A test recomputes that digest over
   the recorded file map and the hash of every committed file; the contract's prose documents are
@@ -871,6 +871,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The bundle contract is revision `1.0.0-rc.1`, and it states what this release does.**
+  `@rayspec/bundle-contract` carries the revised contract files and their new lock digest, and every
+  envelope, runtime-control request, snapshot and receipt states `contractVersion` `1.0.0-rc.1`.
+  The verb map lists `pack --against` and `--allowlist` as they work, the `import` flags
+  `--secrets-out`, `--discard-failed`, `--cutover-token` and `--renew-cutover-token`, and
+  `tenant recover-owner`, which writes its own JSON object and refuses `--json`. Each verb's code
+  list is the set its source can report: `deploy` adds `RAY_CHECK_FAILED` (a boot that refuses the
+  version it applied) and `RAY_FENCE_MISMATCH`, `resume` adds `RAY_LOCK_TIMEOUT` (another operation
+  holds the environment's operation lease), and `export` and `import` add the codes of the reader
+  steps their prechecks run again; `EXPORT_ERROR_CODES` and `RESUME_ERROR_CODES` follow. The
+  snapshot categories name the runtime-control tables, the product migration ledger and the owner
+  recovery tokens, and the platform schema head is `0017_runtime_control_blob_backend`;
+  `PLATFORM_TABLES` lists every platform table and `CONTRACT_PLATFORM_TABLES` is gone. The corpus
+  gains three cases: a `ray.json` whose CRC-32 is wrong, a central directory with bytes after its
+  records, and a private-key header whose word holds digits. There is no `bundle sign` verb and no
+  `runtime.snapshot` operation, so neither is a result operation any more, and the
+  `RuntimeControl` type lists the five operations the adapter performs. The deterministic
+  extraction capability, `extraction-deterministic`, is available and provided by the runtime:
+  runtime-control `inspect()` lists it, and a bundle cannot require it.
 - **Every suite that starts a deploy, and `pnpm test:upgrade-with-data`, listen on a port the
   operating system hands out.** They no longer derive a port from the process id, which a server
   left over from an earlier run could still hold; the upgrade script still takes `--port`. Suites
