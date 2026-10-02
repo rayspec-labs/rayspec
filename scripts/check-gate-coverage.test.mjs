@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Regression test for the coverage guard on the two chokepoint-family gates.
+ * Regression test for the coverage guard on the two chokepoint-family gates, and on the
+ * fixture-neutrality gate.
  *
  * `check-tenant-chokepoint.mjs` and `check-adapter-no-handlers.mjs` walk a fixed list of source
  * roots. `walk()` returns silently when a directory does not exist ("root doesn't exist yet"), so a
@@ -201,6 +202,69 @@ try {
     assert.notEqual(r.code, 0, '(G/migrations) a missing migrations directory must fail CLOSED');
     assert.ok(r.err.includes('packages/kernel/db/drizzle'), '(G/migrations) it must be named');
     console.log(`ok (G/migrations) — a missing migrations directory fails closed (exit ${r.code})`);
+  }
+
+  // ── fixture-neutrality: every example root is scanned, the reference applications' text files
+  // included, and a root that reads nothing fails closed ────────────────────────────────────────
+  {
+    const NEUTRALITY_ROOTS = [
+      ['examples/acme-notes', 'spec.yaml'],
+      ['examples/team-notes', 'web/index.html'],
+      ['examples/document-intake', 'seed/documents/doc-001.txt'],
+      ['examples/asset-catalog', 'packs/catalog-pack/handlers/create-item.ts'],
+    ];
+    const clean = () =>
+      Object.fromEntries(
+        NEUTRALITY_ROOTS.map(([root, file]) => [`${root}/${file}`, 'Title: a note\n']),
+      );
+    {
+      const { ws, script: s } = throwawayRepo('check-fixture-neutrality.mjs', clean());
+      created.push(ws);
+      const r = runGate(s);
+      assert.equal(r.code, 0, `(C/fixture-neutrality) a clean tree must PASS; got: ${r.err}`);
+      assert.match(r.out, /4 neutral example fixture file\(s\)/, '(C/fixture-neutrality) count');
+      console.log('ok (C/fixture-neutrality) — a clean tree passes, every root read');
+    }
+    // A domain word in a text file of each reference application, and in a seed document, a
+    // README, the UI and a script: each fails, naming the file.
+    for (const planted of [
+      'examples/team-notes/web/index.html',
+      'examples/team-notes/README.md',
+      'examples/document-intake/seed/documents/doc-001.txt',
+      'examples/document-intake/seed/build-seed.mjs',
+      'examples/asset-catalog/packs/catalog-pack/handlers/create-item.ts',
+      'examples/asset-catalog/public/catalog.js',
+      'examples/acme-notes/spec.yaml',
+    ]) {
+      const files = clean();
+      files[planted] = 'Title: an invoice from the supplier\n';
+      const { ws, script: s } = throwawayRepo('check-fixture-neutrality.mjs', files);
+      created.push(ws);
+      const r = runGate(s);
+      assert.equal(r.code, 1, `(V/fixture-neutrality) a domain word in ${planted} must FAIL`);
+      assert.ok(r.err.includes(`${planted}:1  [invoice]`), `(V) ${planted} named; got: ${r.err}`);
+    }
+    // Under the build output and installed dependencies nothing is the fixture.
+    {
+      const files = clean();
+      files['examples/team-notes/dist/v1/web/dist/index.html'] = 'an invoice\n';
+      files['examples/asset-catalog/packs/catalog-pack/node_modules/x/index.js'] = 'an invoice\n';
+      const { ws, script: s } = throwawayRepo('check-fixture-neutrality.mjs', files);
+      created.push(ws);
+      assert.equal(runGate(s).code, 0, '(V/fixture-neutrality) dist and node_modules are skipped');
+    }
+    console.log('ok (V/fixture-neutrality) — a domain word in any scanned file fails, named');
+    for (const [missing] of NEUTRALITY_ROOTS) {
+      const files = clean();
+      for (const key of Object.keys(files)) if (key.startsWith(`${missing}/`)) delete files[key];
+      const { ws, script: s } = throwawayRepo('check-fixture-neutrality.mjs', files);
+      created.push(ws);
+      const r = runGate(s);
+      assert.equal(r.code, 1, `(G/fixture-neutrality) a missing ${missing} must fail CLOSED`);
+      assert.match(r.err, /nothing scanned under/, '(G/fixture-neutrality) the reason');
+      assert.ok(r.err.includes(missing), `(G/fixture-neutrality) ${missing} named; got: ${r.err}`);
+    }
+    console.log('ok (G/fixture-neutrality) — each root that reads nothing fails closed');
   }
 
   console.log('\ngate-coverage regression: ALL CASES PASSED');

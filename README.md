@@ -246,6 +246,8 @@ treats model and tool output as data, never as instructions. See
 
 ## Documentation
 
+- **[Quickstart](./docs/quickstart.md)** — `npm install` to a reference
+  application deployed from its bundle, with no build of RaySpec.
 - **[Getting started](./docs/getting-started.md)** — clone to first
   authenticated request.
 - **[Concepts](./docs/concepts.md)** — the mental model: specs, agents, stores,
@@ -257,6 +259,12 @@ treats model and tool output as data, never as instructions. See
 - **[The v1 posture](./docs/v1-posture.md)** — the closed capability / operation /
   trigger sets a product document may declare, and the shape guarantees the
   runtime enforces.
+- **Reference applications**, each packed into a bundle and deployed from it:
+  [team notes](./examples/team-notes/README.md) (CRUD, a static UI, three
+  releases), [document intake](./examples/document-intake/README.md) (a durable
+  workflow over uploaded files, on the deterministic extraction provider) and
+  [asset catalog](./examples/asset-catalog/README.md) (a compiled extension with
+  a third-party dependency and a declared egress host).
 
 The security policy and contributing guide are published with this release.
 

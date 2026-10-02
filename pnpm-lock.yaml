@@ -63,6 +63,18 @@ importers:
         specifier: workspace:*
         version: link:../../../../packages/kernel/platform
 
+  examples/asset-catalog/packs/catalog-pack:
+    dependencies:
+      '@rayspec/handler-sdk':
+        specifier: workspace:*
+        version: link:../../../../packages/kernel/handler-sdk
+      '@rayspec/platform':
+        specifier: workspace:*
+        version: link:../../../../packages/kernel/platform
+      mime-types:
+        specifier: 3.0.2
+        version: 3.0.2
+
   examples/local-boot:
     dependencies:
       '@hono/node-server':

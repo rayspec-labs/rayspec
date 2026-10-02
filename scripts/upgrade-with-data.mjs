@@ -12,8 +12,10 @@
  * WHAT IT DOES, against a throwaway database on the server DATABASE_URL names:
  *   1. Installs `rayspec@<previous>` from npm into a temporary directory (`--from <version>`,
  *      default: the version npm reports as latest), with install scripts disabled.
- *   2. Deploys the `examples/notes-ui` application with that release's `rayspec deploy`, registers a
- *      user, creates an organization, mints an API key and writes notes through the declared API.
+ *   2. Deploys an example application with that release's `rayspec deploy` (`--app`: `notes-ui`, the
+ *      default, or the `team-notes` reference application, release 1.0.0 as its build writes it),
+ *      registers a user, creates an organization, mints an API key and writes notes through the
+ *      declared API.
  *   3. Records the rows and the credential rows exactly as they are stored.
  *   4. Deploys the same spec with this working tree's `rayspec deploy`: the platform chain upgrades
  *      the database in place.
@@ -49,7 +51,40 @@ import postgres from 'postgres';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
-const EXAMPLE = join(REPO, 'examples', 'notes-ui');
+
+/**
+ * The applications the harness upgrades: where the source is, how it becomes a directory holding
+ * `rayspec.yaml`, the body of a note, and the stored note columns compared.
+ */
+const APPS = {
+  'notes-ui': {
+    prepare(app) {
+      cpSync(join(REPO, 'examples', 'notes-ui'), app, { recursive: true });
+    },
+    note: (title) => ({ title, body: `${title} body` }),
+    columns: 'id, tenant_id, title, body, created_at',
+  },
+  'team-notes': {
+    // The release spec less `metadata.id` and `metadata.version`, which a previous release does not
+    // know (it refuses them as unknown fields): the spec a deployment of that release runs. The
+    // bundle the harness packs names both with --id and --version instead.
+    prepare(app) {
+      execFileSync(
+        process.execPath,
+        [join(REPO, 'examples', 'team-notes', 'build.mjs'), '--release=v1', `--out=${app}`],
+        { stdio: ['ignore', 'ignore', 'inherit'] },
+      );
+      const spec = join(app, 'rayspec.yaml');
+      const lines = readFileSync(spec, 'utf8').split('\n');
+      const kept = lines.filter((l) => !/^ {2}(?:id|version): /.test(l));
+      if (lines.length - kept.length !== 2)
+        fail('the team-notes spec does not name its id and version');
+      writeFileSync(spec, kept.join('\n'));
+    },
+    note: (title) => ({ title, content: `${title} — Grüße, 東京` }),
+    columns: 'id, tenant_id, title, content, created_by, created_at, deleted_at',
+  },
+};
 
 const baseUrl = process.env.DATABASE_URL;
 if (!baseUrl)
@@ -58,8 +93,17 @@ if (!existsSync(CLI))
   fail(`the working tree is not built (${CLI} is missing): run pnpm build first`);
 
 const { values: flags } = parseArgs({
-  options: { from: { type: 'string' }, 'log-dir': { type: 'string' }, port: { type: 'string' } },
+  options: {
+    from: { type: 'string' },
+    app: { type: 'string', default: 'notes-ui' },
+    'log-dir': { type: 'string' },
+    port: { type: 'string' },
+  },
 });
+const APP = APPS[flags.app];
+if (APP === undefined) {
+  fail(`--app ${flags.app} is not one of: ${Object.keys(APPS).join(', ')}`);
+}
 const logDir = flags['log-dir'];
 const port = Number(flags.port ?? 18_600 + (process.pid % 900));
 const suiteDb = `rayspec_upgrade_${process.pid}`;
@@ -67,7 +111,7 @@ const appUrl = withDbName(baseUrl, suiteDb);
 const shadowUrl = process.env.SHADOW_DATABASE_URL ?? baseUrl;
 const work = mkdtempSync(join(tmpdir(), 'rayspec-upgrade-'));
 const children = new Set();
-const summary = { from: null, to: null, checks: [] };
+const summary = { app: flags.app, from: null, to: null, checks: [] };
 
 function fail(message) {
   process.stderr.write(`UPGRADE-WITH-DATA: FAIL — ${message}\n`);
@@ -175,7 +219,7 @@ async function api(method, path, { bearer, body } = {}) {
 /** Every row of the tables a user relies on, as stored: an ordered digest per table. */
 async function storedRows(sql) {
   const tables = {
-    notes: 'SELECT id, tenant_id, title, body, created_at FROM notes ORDER BY id',
+    notes: `SELECT ${APP.columns} FROM notes ORDER BY id`,
     users: 'SELECT id, email, password_hash FROM users ORDER BY id',
     orgs: 'SELECT id, name, slug FROM orgs ORDER BY id',
     memberships: 'SELECT org_id, user_id, role, status FROM memberships ORDER BY org_id, user_id',
@@ -222,7 +266,7 @@ async function main() {
   await admin.unsafe(`CREATE DATABASE "${suiteDb}"`);
   await admin.end();
   const app = join(work, 'app');
-  cpSync(EXAMPLE, app, { recursive: true });
+  APP.prepare(app);
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const secrets = {
     jwt: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
@@ -261,10 +305,7 @@ async function main() {
     const apiKey = minted.json.plaintext;
     const titles = ['first note', 'second note', 'third note'];
     for (const title of titles) {
-      const created = await api('POST', '/api/notes', {
-        bearer: token,
-        body: { title, body: `${title} body` },
-      });
+      const created = await api('POST', '/api/notes', { bearer: token, body: APP.note(title) });
       check(`write "${title}" on the previous release`, created.status === 201, created.text);
     }
     const stopped = await old.stop();
@@ -302,7 +343,7 @@ async function main() {
     });
     const added = await api('POST', '/api/notes', {
       bearer: (await login(email, password, org.json.id)).token,
-      body: { title: 'written after the upgrade', body: 'new' },
+      body: APP.note('written after the upgrade'),
     });
     check('write a note after the upgrade', added.status === 201, added.text);
     titles.push('written after the upgrade');
@@ -318,9 +359,9 @@ async function main() {
         '--spec',
         'rayspec.yaml',
         '--output',
-        'notes-ui.ray',
+        `${flags.app}.ray`,
         '--id',
-        'notes-ui',
+        flags.app,
         '--version',
         '1.0.0',
       ],
@@ -328,7 +369,7 @@ async function main() {
     );
     check('pack the application', JSON.parse(packed).ok === true);
     const planned = JSON.parse(
-      execFileSync(process.execPath, [CLI, 'deploy', 'notes-ui.ray', '--dry-run'], {
+      execFileSync(process.execPath, [CLI, 'deploy', `${flags.app}.ray`, '--dry-run'], {
         cwd: app,
         env,
         encoding: 'utf8',
@@ -344,7 +385,7 @@ async function main() {
     const bundled = await serve(
       'bundle',
       CLI,
-      ['deploy', 'notes-ui.ray', '--plan-digest', planned.data.planDigest],
+      ['deploy', `${flags.app}.ray`, '--plan-digest', planned.data.planDigest],
       app,
       env,
     );

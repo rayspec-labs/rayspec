@@ -1,21 +1,39 @@
 #!/usr/bin/env node
 /**
  * Fixture-neutrality gate — the forcing function that keeps the neutral open-core reference product
- * (`examples/acme-notes/**`) free of any product-domain MEANING. The neutral fixture is what the
- * platform gates/goldens/e2e are pinned against; if a domain word ever leaks into it, "reads as ONE
- * product, zero domain semantics" would have no CI guard on the very files that most need it.
+ * (`examples/acme-notes/**`) and the three reference applications (`examples/team-notes/**`,
+ * `examples/document-intake/**`, `examples/asset-catalog/**`) free of any product-domain MEANING.
+ * The neutral fixtures are what the platform gates/goldens/e2e and the consumer journeys are pinned
+ * against; if a domain word ever leaks into one, "reads as ONE product, zero domain semantics" would
+ * have no CI guard on the very files that most need it.
  *
- * Scans every acme-notes YAML/JSON for the forbidden domain vocabulary (word-boundary,
- * case-insensitive) and fails on any hit. The allowed vocabulary is the neutral note/session/track
+ * Scans every YAML/JSON of those trees (their installed `node_modules` and build output excepted) for
+ * the forbidden domain vocabulary (word-boundary, case-insensitive) and fails on any hit. In the three
+ * reference applications every text file is scanned as well — seed documents, READMEs, the UI, the
+ * handlers and the scripts — since all of it ships as the example; the PDFs are generated from the
+ * seed script, which is scanned. The allowed vocabulary is the neutral note/session/track
  * vocabulary + the real, product-free STT structural words (mic/system/local/remote) + the real
  * open-core provider name (deepgram — a capability, not a product) and model/provider ids.
+ *
+ * Fail-closed on coverage: a root that does not exist, or in which nothing is scanned, fails the gate
+ * naming it, so a renamed or moved example cannot retire its own check.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(fileURLToPath(new URL('.', import.meta.url)), '..');
-const SCAN_ROOT = join(repoRoot, 'examples/acme-notes');
+/** Each root, and the file extensions scanned in it. */
+const DATA = ['.yaml', '.yml', '.json'];
+const TEXT = [...DATA, '.txt', '.md', '.html', '.css', '.js', '.mjs', '.ts'];
+const SCAN_ROOTS = [
+  ['examples/acme-notes', DATA],
+  ['examples/team-notes', TEXT],
+  ['examples/document-intake', TEXT],
+  ['examples/asset-catalog', TEXT],
+];
+/** Installed dependencies and build output are not the fixture. */
+const SKIPPED_DIRS = new Set(['node_modules', 'dist']);
 
 // The forbidden domain-MEANING vocabulary — unambiguous product-domain words the neutral fixture
 // must NEVER carry (the meeting/decision/action/intelligence domain + adjacent product domains).
@@ -45,17 +63,35 @@ const FORBIDDEN_RE = new RegExp(
   'i',
 );
 
-function walk(dir) {
+function walk(dir, extensions) {
   const out = [];
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) out.push(...walk(full));
-    else if (['.yaml', '.yml', '.json'].includes(extname(full))) out.push(full);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (!SKIPPED_DIRS.has(entry.name)) out.push(...walk(full, extensions));
+    } else if (entry.isFile() && extensions.includes(extname(entry.name))) out.push(full);
   }
   return out;
 }
 
-const files = walk(SCAN_ROOT);
+const files = [];
+const unscanned = [];
+for (const [root, extensions] of SCAN_ROOTS) {
+  let found = [];
+  try {
+    found = walk(join(repoRoot, root), extensions);
+  } catch (e) {
+    if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') throw e;
+  }
+  if (found.length === 0) unscanned.push(root);
+  files.push(...found);
+}
+if (unscanned.length > 0) {
+  console.error(
+    `❌ fixture-neutrality: nothing scanned under ${unscanned.join(', ')} — the root is missing or holds no fixture file`,
+  );
+  process.exit(1);
+}
 const hits = [];
 for (const file of files) {
   const lines = readFileSync(file, 'utf8').split('\n');
@@ -67,13 +103,11 @@ for (const file of files) {
 }
 
 if (hits.length > 0) {
-  console.error(
-    '❌ fixture-neutrality: forbidden domain word(s) in the neutral acme-notes fixture:',
-  );
+  console.error('❌ fixture-neutrality: forbidden domain word(s) in a neutral example fixture:');
   for (const h of hits) console.error(`   ${h.file}:${h.line}  [${h.word}]  ${h.text}`);
   process.exit(1);
 }
 
 console.log(
-  `✅ fixture-neutrality: ${files.length} acme-notes fixture file(s) carry no forbidden domain vocabulary.`,
+  `✅ fixture-neutrality: ${files.length} neutral example fixture file(s) carry no forbidden domain vocabulary.`,
 );

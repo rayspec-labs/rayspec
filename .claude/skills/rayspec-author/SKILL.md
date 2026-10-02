@@ -1738,10 +1738,15 @@ media-signing key, no STT env), and a `conversation_input`-declaring product, wh
 The boot fail-closes with an actionable demand either way.
 
 **Primary — deterministic extraction (the CI-proven, actually-working path for a non-audio product).**
-The platform is product-free: it ships NO executor, so `RAYSPEC_EXTRACTION_MODE=deterministic`
-runs behind a thin WRAPPER that injects one via `assembleServer(config, { productDeterministicAgents })`
-(the `examples/dev-server` pattern). The merge-gated acceptance e2e IS exactly that wrapper and proves
-the whole loop end-to-end (boot → submit → `store_read → agent → validation → store_write` → the views):
+Under `RAYSPEC_EXTRACTION_MODE=deterministic` the platform runs its shipped deterministic extraction
+provider for every extractor whose config selects it (`"backend": "deterministic"`, with `agent_id` and
+`schema_file` and no other key): it reads labelled lines (`Title: …`) into the output schema and is for
+development and tests only — `RAYSPEC_HOSTING_POSTURE=managed` refuses it, and a config naming a real
+backend is refused in deterministic mode rather than answered by it
+(docs/spec-reference.md#the-deterministic-extraction-provider; `examples/document-intake` runs on it).
+An executor injected via `assembleServer(config, { productDeterministicAgents })` (the
+`examples/dev-server` pattern) replaces the provider. The merge-gated acceptance e2e below injects one
+and proves the whole loop end-to-end (boot → submit → `store_read → agent → validation → store_write` → the views):
 ```bash
 pnpm db:up   # Postgres :5433
 RAYSPEC_REQUIRE_DB_TESTS=true DATABASE_URL="postgres://…:5433/<db>" \

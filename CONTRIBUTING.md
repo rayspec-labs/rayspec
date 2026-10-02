@@ -228,6 +228,34 @@ The provider-backed live tests still skip: they need paid credentials and are
 opted into separately, as described above. Leave those credentials unset for a run
 that must not spend.
 
+### Reference journeys
+
+`scripts/reference-journeys.mjs` runs [the quickstart](./docs/quickstart.md) and the three
+reference applications end to end with the release a consumer installs: it packs the workspace,
+installs the tarballs into an empty directory with npm, and drives every step with that `rayspec`,
+never the workspace's. Each application goes from source to bundle, is deployed on fresh databases,
+written to, updated (one additive release, one destructive release that is refused), exported,
+imported into an empty target, written to again, exported and imported into a second target, and
+checked there by counts, digests and rows, along with the identity reset an import makes. The
+custom-code application stops at the export, which refuses an application that loads an extension.
+What each journey covers is in the application's README.
+
+```bash
+pnpm build
+DATABASE_URL=postgres://rayspec:rayspec@localhost:5433/rayspec pnpm test:journeys
+pnpm test:journeys --app document-intake   # one journey
+```
+
+`DATABASE_URL` names a superuser of a PostgreSQL 16 server: each environment gets databases and
+roles of its own, dropped at the end (`SHADOW_DATABASE_URL`, when set, is where schema changes are
+planned). The run needs npm and the registry for the dependencies the tarballs do not carry,
+`openssl`, and `pg_dump`/`pg_restore` of the server's major on `PATH`, or Docker to run them from
+the pinned image. It prints one JSON summary with every check and exits 1 on the first that fails.
+On a laptop with a warm npm cache the whole run takes under four minutes.
+
+CI runs it on every pull request and every push to `main`, in the `reference-journeys` job.
+`pnpm test:journeys-logic` (lane 1) checks the harness itself without a database.
+
 ---
 
 ## Certificate of origin

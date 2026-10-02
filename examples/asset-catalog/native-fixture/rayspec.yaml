@@ -1,0 +1,17 @@
+# A fixture, not an application: a handler whose dependency carries a compiled native addon built
+# for macOS. A bundle runs on linux/x64, so `rayspec pack` must refuse it with
+# RAY_CLOSURE_INVALID (reason native-module), naming the file, rather than carry a binary that cannot
+# load there. `node make-tree.mjs --out=<dir>` writes the fixture tree, its node_modules included.
+
+version: '1.0'
+
+metadata:
+  name: Native addon probe
+  id: native-addon-probe
+  version: '1.0.0'
+
+api:
+  - { method: GET, path: '/probe', action: { kind: handler, handler: probe } }
+
+handlers:
+  - { id: probe, module: handlers/probe.js, export: probe, kind: route, readonly: true, uses: [] }

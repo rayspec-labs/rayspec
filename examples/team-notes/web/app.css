@@ -1,0 +1,41 @@
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0 auto;
+  max-width: 40rem;
+  padding: 1rem;
+}
+
+header {
+  border-bottom: 1px solid #ccc;
+  margin-bottom: 1rem;
+}
+
+.version {
+  color: #555;
+  font-size: 0.9rem;
+}
+
+form label {
+  display: block;
+  margin-bottom: 0.5rem;
+}
+
+form input,
+form textarea {
+  display: block;
+  width: 100%;
+}
+
+#notes li {
+  border-bottom: 1px solid #eee;
+  list-style: none;
+  padding: 0.5rem 0;
+}
+
+#notes .label {
+  background: #eef;
+  border-radius: 0.25rem;
+  font-size: 0.8rem;
+  margin-left: 0.5rem;
+  padding: 0 0.25rem;
+}

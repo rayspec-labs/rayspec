@@ -1,0 +1,8 @@
+Reference: REF-0011
+Title: Shelf inventory 11
+Category: workshop
+Quantity: 46
+Received on: 2026-03-11
+Lines: folders | 38
+Lines: tape | 
+Lines: gloves | 4

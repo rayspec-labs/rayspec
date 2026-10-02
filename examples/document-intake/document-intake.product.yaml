@@ -1,0 +1,255 @@
+# Document Intake — a product-profile application that turns an uploaded document into a structured
+# record through a durable workflow:
+#
+#   upload (PUT /files/{file_id}, plain text or a text-layer PDF, within the file capability's limits)
+#   → submit (POST /files/{file_id}/submit) → parse_text → extract → validate → persist → read
+#
+# The extractor's config (extraction/record_extractor.extractor.json) selects the deterministic
+# extraction provider, so the application runs without a model credential. That provider reads
+# labelled lines (`Title: …`) and is not for production extraction; live-extraction/ holds the config
+# for a real model. Reads are two GET views over the persisted records.
+#
+# The client file name is not persisted: the optional `x-file-name` header is client-supplied data,
+# and the record is keyed by the file id and identified by its SHA-256.
+version: "1.0"
+
+product:
+  id: document_intake
+  name: Document Intake
+  description: >-
+    Accept an uploaded document (plain text or a text-layer PDF), parse it to text, extract a
+    structured record, validate it, persist one row per document, and serve record reads.
+  metadata:
+    id: document-intake
+    version: "1.0.0"
+
+requires:
+  capabilities:
+    - file_input
+    - validation
+
+capabilities:
+  # The file ingress: PUT /files/{file_id} + POST /files/{file_id}/submit, bounded by the capability's
+  # size cap and content-type allowlist.
+  - id: file_input
+    tier: B
+    status: available
+    contracts:
+      - file_input.file_submitted
+  # Declarative shape validation of the extracted record.
+  - id: validation
+    tier: B
+    status: available
+    contracts:
+      - validation.check
+      - validation.result
+
+contracts:
+  # The parse step's output — the document as bounded extracted text.
+  intake.extracted_text:
+    type: string
+
+  # The extractor's structured output.
+  intake.record:
+    type: object
+    additional_properties: false
+    properties:
+      reference: { type: string }
+      title: { type: string }
+      category: { type: [string, "null"] }
+      quantity: { type: integer }
+      received_on: { type: [string, "null"] }
+      lines:
+        type: array
+        items: { type: object }
+    required: [reference, title, quantity, lines]
+
+  # The store_write output row handle.
+  intake.record_row:
+    type: object
+
+  # The record-detail read DTO (single view).
+  intake.record_response:
+    type: object
+    additional_properties: false
+    properties:
+      document_ref: { type: string }
+      sha256: { type: [string, "null"] }
+      content_type: { type: [string, "null"] }
+      status: { type: [string, "null"] }
+      record: { type: [object, "null"] }
+    required: [document_ref, sha256, content_type, status, record]
+
+  # The record-list read DTO (paged list view).
+  intake.record_list_response:
+    type: object
+    additional_properties: false
+    properties:
+      records:
+        type: array
+        items:
+          type: object
+          additional_properties: false
+          properties:
+            document_ref: { type: string }
+            status: { type: string }
+            content_type: { type: string }
+          required: [document_ref, status, content_type]
+    required: [records]
+
+stores:
+  # One row per processed document — the workflow's UPSERT target (conflict key = document_ref).
+  - name: intake_records
+    description: One row per processed document, keyed by its file id.
+    columns:
+      - { name: document_ref, type: text }
+      - { name: sha256, type: text, nullable: true }
+      - { name: size_bytes, type: integer, nullable: true }
+      - { name: content_type, type: text, nullable: true }
+      - { name: record, type: jsonb, nullable: true }
+      - { name: status, type: text, nullable: true }
+    key: [document_ref]
+
+extractors:
+  - id: record_extractor
+    purpose: >-
+      Extract the document's reference, title, category, quantity, received date and lines from
+      the parsed document text.
+    extraction:
+      intent: document_record
+      input_artifacts:
+        - name: document_text
+          ref: intake.extracted_text
+          kind: extracted_text
+          required: true
+          source_step_id: parse
+      output_artifacts:
+        - name: record
+          ref: intake.record
+          kind: document_record
+          schema_ref: intake.record
+          materialization_target: typed_artifact_ref
+      required_output_shape:
+        schema_ref: intake.record
+        required_paths:
+          - reference
+          - title
+          - quantity
+          - lines
+      acceptance_boundary:
+        type: validation_node
+        requires:
+          - validation.check
+      materialization:
+        target: typed_artifact_ref
+    extraction_constraints:
+      - Extract the fields from the document text only; never invent a field the document does not
+        state.
+      - quantity is a whole number.
+
+workflows:
+  - id: process_document
+    trigger:
+      capability: file_input
+      event: file_submitted
+      scope: file
+    steps:
+      # The durable blob → text parse (magic-byte sniffed; text pass-through or PDF text layer).
+      - id: parse
+        type: capability
+        use: file_input.parse_text
+        outputs:
+          text: intake.extracted_text
+      # The extraction agent.
+      - id: extract
+        type: agent
+        use: agent.record_extractor
+        depends_on: [parse]
+        inputs:
+          document_text: intake.extracted_text
+        outputs:
+          record: intake.record
+        on_error: fail
+      # Declarative shape validation of the extracted record.
+      - id: validate
+        type: validation
+        use: validation.check
+        depends_on: [extract]
+        inputs:
+          record: intake.record
+        outputs:
+          validation_result: validation.result
+        on_error: fail
+      # UPSERT on the declared conflict key. The byte metadata comes from the server-derived
+      # trigger payload; the record is the extractor's validated output.
+      - id: persist
+        type: store_write
+        use: store.write
+        store: intake_records
+        depends_on: [validate]
+        values:
+          document_ref: { event: file_id }
+          sha256: { event: sha256 }
+          size_bytes: { event: size_bytes }
+          content_type: { event: content_type }
+          record: { artifact: intake.record }
+          status: { const: processed }
+        outputs:
+          row: intake.record_row
+
+views:
+  # One record (single row over intake_records).
+  - id: record_detail
+    route:
+      method: GET
+      path: "/records/{document_ref}"
+    auth: bearer_tenant
+    params:
+      document_ref: { in: path, shape: safe_id }
+    source: { kind: store, ref: intake_records }
+    read:
+      mode: single
+      filter:
+        document_ref: { param: document_ref }
+      shape:
+        fields:
+          document_ref: { kind: param, param: document_ref }
+          sha256: { kind: column, column: sha256, type: string, default: "" }
+          content_type: { kind: column, column: content_type, type: string, default: "" }
+          status: { kind: column, column: status, type: string, default: "" }
+          record: { kind: column, column: record, type: object }
+      absent:
+        fields:
+          document_ref: { kind: param, param: document_ref }
+          sha256: { kind: const, value: null }
+          content_type: { kind: const, value: null }
+          status: { kind: const, value: null }
+          record: { kind: const, value: null }
+    absent_state: empty_200
+    response_contract: intake.record_response
+  # The record list (paged, newest first).
+  - id: record_list
+    route:
+      method: GET
+      path: /records
+    auth: bearer_tenant
+    source: { kind: store, ref: intake_records }
+    pagination:
+      limit_param: limit
+      offset_param: offset
+      max_limit: 100
+      default_limit: 20
+    read:
+      mode: list
+      order_by: [{ column: created_at, dir: desc }]
+      shape:
+        fields:
+          records:
+            kind: page_items
+            shape:
+              fields:
+                document_ref: { kind: column, column: document_ref, type: string, default: "" }
+                status: { kind: column, column: status, type: string, default: "" }
+                content_type: { kind: column, column: content_type, type: string, default: "" }
+    absent_state: empty_200
+    response_contract: intake.record_list_response

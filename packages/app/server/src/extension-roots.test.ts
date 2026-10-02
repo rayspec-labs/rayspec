@@ -30,6 +30,8 @@ describe('manifest-derived extension handler-root discovery', () => {
     expect(escapes).toEqual([]); // no pack module escapes the repo jail.
     // The stream-backend deployment YAML references ./packs/stream-pack → its handlers/ dir is scanned.
     expect(roots).toContain('examples/stream-backend/packs/stream-pack/handlers');
+    // The asset-catalog reference application's extension handlers are scanned too.
+    expect(roots).toContain('examples/asset-catalog/packs/catalog-pack/handlers');
   });
 
   it('extractExtensionModules pulls module dirs from a BLOCK-form extensions[] (and ignores other sections)', () => {

@@ -60,6 +60,9 @@ const DEPLOYMENT_SPECS = [
   // handler root (examples/agent-pack-deployment/packs/agent-pack/handlers) is gate-scanned (the
   // scan-surface must equal the loader's accept-surface; a committed pack handler is never unscanned).
   'examples/agent-pack-deployment/rayspec.yaml',
+  // The asset-catalog reference application: its extension's handlers import a third-party package,
+  // which the gates allow, and must still import no platform internal.
+  'examples/asset-catalog/rayspec.yaml',
 ];
 
 /**

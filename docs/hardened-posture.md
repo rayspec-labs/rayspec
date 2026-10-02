@@ -162,6 +162,11 @@ same matrix.
 | `openai` | text-to-speech | allowed | every request, body included: `RAYSPEC_AGENT_REQUEST_TIMEOUT_MS` | none: no run signal reaches a synthesis | none | a cancelled run does not stop a synthesis in flight | `packages/adapters/openai-tts/src/hanging-provider.test.ts` |
 | `fake` | text-to-speech | test-only | not applicable | not applicable | none | staging and conformance only | — |
 
+The [deterministic extraction provider](./spec-reference.md#the-deterministic-extraction-provider)
+(`RAYSPEC_EXTRACTION_MODE=deterministic`) is test-only too: no model runs, so it is not a row of
+this matrix, and a boot under the posture that would run it is refused, naming its capability
+`extraction-deterministic`.
+
 ## Credentials and rotation
 
 ### Provider credentials

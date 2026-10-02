@@ -1,0 +1,5 @@
+Reference: REF-0018
+Title: Window cleaning kit 18
+Quantity: 40
+Lines: labels | 
+Lines: folders | 10

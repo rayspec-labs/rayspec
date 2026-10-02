@@ -1,0 +1,14 @@
+{
+  "name": "@spike/catalog-pack",
+  "version": "1.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "description": "The asset-catalog example's extension. A @spike/* workspace member only so pnpm installs its dependencies into its node_modules (the CI --filter='!@spike/*' skips it): mime-types for the handler and the workspace's @rayspec/platform for the entry. The workspace:* specifiers resolve nowhere else; build.mjs writes package.out-of-repo.json as the built extension's manifest and vendors the third-party dependencies next to it.",
+  "main": "./index.ts",
+  "dependencies": {
+    "@rayspec/handler-sdk": "workspace:*",
+    "@rayspec/platform": "workspace:*",
+    "mime-types": "3.0.2"
+  }
+}

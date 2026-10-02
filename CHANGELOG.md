@@ -727,6 +727,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `owner-recovery`): one transaction consumes it, sets the password and ends the account's sessions,
   and the owner is signed in (`owner_recovery_redeemed`); every token that does not redeem answers
   the same `400`. `owner_recovery_tokens` is a reserved store name.
+- **A deterministic extraction provider, for development and tests only.** Under
+  `RAYSPEC_EXTRACTION_MODE=deterministic` the runtime now runs a shipped provider instead of
+  refusing the boot when no executor is injected, so a product with extractors runs end to end
+  without a provider credential. It reads labelled lines (`Title: …`) of the step's input text into
+  the properties of the extractor's output JSON Schema, converting each to its declared type, and
+  is not an extraction model: it is documented as unsuitable for production extraction, and the
+  boot's non-real-provider banner says so. An extractor uses it only when its config selects it
+  (`"backend": "deterministic"`, with `agent_id` and `schema_file` and no other key); a config
+  that names a real backend is refused in deterministic mode rather than answered by it, a config
+  that selects it is refused in live mode, and `RAYSPEC_HOSTING_POSTURE=managed` refuses it as
+  test-only (`extraction-deterministic`). An injected executor still replaces it. A bundle does
+  not state that it selects the provider: `bundle inspect` lists no requirement for it. See
+  [Spec reference → the deterministic extraction provider](docs/spec-reference.md#the-deterministic-extraction-provider).
+- **Three reference applications under `examples/`, each packed and deployed from its bundle.**
+  `team-notes` is a CRUD notes store with keyset pagination, soft delete (a deleted note stays as a
+  tombstone that every read hides and an export carries) and a static UI that shows the
+  application's own version (not the runtime's), in three releases: `1.0.0`, `1.1.0` (an optional
+  `label`, a `bigint` counter and a `numeric(30, 6)` amount, an additive change that keeps every
+  row) and `2.0.0` (dropping `content`, refused by pack and by the deploy); it ships a 100-note seed
+  for two users with an inventory digest and a loader that pages it back. `document-intake` is a product-profile workflow — upload a plain-text
+  or text-layer PDF document, parse, extract, validate, persist, read — running on the
+  deterministic extraction provider with no credential, with a 50-document seed of hashes and
+  expected records and a live-model config beside it. `asset-catalog` is custom code: a compiled
+  TypeScript extension whose handler uses a third-party npm package (`mime-types`, with `mime-db`)
+  vendored into the bundle by the example's build, writes through the tenant-bound database facade
+  and calls one declared HTTPS host; a native-addon fixture beside it shows pack's refusal of a
+  macOS build. Each has a README; the repository tests build, pack, inspect, verify and deploy each
+  one with the real CLI. The build, seed and fixture scripts run also when started through a
+  symlinked directory. `gate:fixture-neutrality` now scans the three applications as well — every
+  text file in them, seed documents, READMEs, UI and scripts included — and fails closed when a
+  root it scans is missing or holds nothing; the handler gates scan the asset catalog's extension.
+- **Reference journeys, run in CI on every pull request.** `pnpm test:journeys`
+  (`scripts/reference-journeys.mjs`, one script per application under `scripts/journeys/`) packs
+  the workspace, installs the tarballs into an empty directory the way a consumer does
+  (`scripts/check-consumer-install.mjs`) and drives each reference application with that installed
+  `rayspec` only: build, pack, inspect and verify; a deploy on fresh databases with role separation;
+  data and file writes; an additive release that keeps every row and a destructive one refused at
+  pack and at deploy. For `team-notes` and `document-intake` it goes on: an encrypted export while
+  the source serves (writes `503`, reads `200`), holding only its manifest and the age payload with
+  no stored value readable in it, and refused to another identity (`RAY_DECRYPTION_FAILED`); an
+  import into an empty target, the cutover and a deploy with the target's own secrets; a new write;
+  a second export and an import into another empty target; and the state compared by counts,
+  digests and rows — the largest safe `bigint` and a `numeric` value past float precision
+  included — with the documented identity reset: passwords sign in, every access token and API key
+  of the earlier environment is refused, a key-only owner gets in through
+  `rayspec tenant recover-owner`, and `rayspec resume` releases the export fence at its epoch only.
+  The document intake journey also crashes the server before and after persistence and checks each
+  run ends, after a restart, with exactly one record; replays a retried upload; refuses an
+  unsupported type, a disguised executable and hostile markup; and compares every stored file of the
+  target with the source's. The custom-code journey (`asset-catalog`) deploys behind an egress proxy
+  the journey programs from the bundle's declared hosts, with npm offline, checks the dependency
+  resolves from the bundle's own tree, and sees that proxy refuse a call to a host the running
+  bundle does not declare — the refusal is the proxy's, as it is in a deployment, since the runtime
+  does not enforce egress; its export is refused, because `rayspec export` refuses an application
+  that loads an extension (`RAY_EXTERNAL_STATE_UNSUPPORTED`), so it is not exported or imported. A
+  source with two organizations is refused on export. A running document workflow cannot be
+  cancelled (the run cancel route answers `404` for it), and the imports are self-hosted only. The
+  new `reference-journeys` job of CI runs them; `pnpm test:journeys-logic` checks the harness in
+  lane 1.
+- **A consumer quickstart**, [`docs/quickstart.md`](docs/quickstart.md): from `npm install rayspec`
+  to the team-notes application deployed from its bundle, separate from the source-build
+  getting-started. The reference journeys run every command of its steps — the clone with its tag
+  and path, against a local repository tagged at the packed version — and the restart it names
+  after Ctrl-C.
+- **A live smoke of the document-intake application**
+  (`packages/app/server/src/document-intake-live.smoke.db.test.ts`): one seed document through the
+  application's live extraction config, one model call, the record checked against the fields the
+  document states. Gated like the other intake smokes: it runs only with `DATABASE_URL` and
+  `OPENAI_API_KEY` set.
 
 ### Changed
 
@@ -833,6 +902,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A document whose bytes hold a NUL character no longer leaves its workflow running for ever.**
+  `file_input.parse_text` passed text containing U+0000 — what an executable or an archive uploaded
+  under a text or PDF type decodes to — to the next step; PostgreSQL refuses that character in a
+  JSON value, so the step's journal write failed on every attempt and the run stayed `running`,
+  which also kept the deployment from being exported (`unreconciled-effects`). The parse now fails
+  such a document closed with the terminal `file_text_contains_nul`, on the text and the PDF path.
 - **A runtime refuses a database a newer runtime migrated.** An older runtime found a platform
   ledger with migrations it does not ship, applied nothing and served that schema silently. The
   boot (and `rayspec tenant ensure`) now refuses it, under the schema lock and before anything is

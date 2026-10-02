@@ -260,6 +260,35 @@ describe('file_input.parse_text — text pass-through', () => {
     expectFailure(result, 'file_text_not_utf8', false);
   });
 
+  it.each([
+    [
+      'an executable header',
+      new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, 0x00]),
+    ],
+    ['an archive header', new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00])],
+    ['text with one NUL', new TextEncoder().encode('Title: a\u0000b\n')],
+  ])('fails %s closed with the typed terminal file_text_contains_nul', async (_name, bytes) => {
+    // Precondition: the bytes are valid UTF-8 and hold a NUL, so only the NUL rule can refuse them.
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    expect(decoded.includes('\u0000')).toBe(true);
+    const result = await runNode({ bytes, declaredType: 'application/pdf' });
+    expectFailure(result, 'file_text_contains_nul', false);
+  });
+
+  it('fails a PDF text layer holding a NUL closed with file_text_contains_nul (via the injected seam)', async () => {
+    const nulPage: PdfTextExtractor = async () => ({
+      kind: 'extracted',
+      pageCount: 1,
+      pageTexts: ['Total\u000042'],
+    });
+    const result = await runNode({
+      bytes: TEXT_LAYER_PDF,
+      declaredType: 'application/pdf',
+      extractPdfText: nulPage,
+    });
+    expectFailure(result, 'file_text_contains_nul', false);
+  });
+
   it('notes a declared-pdf/sniffed-text mismatch as metadata DATA, never a failure', async () => {
     const body = 'plain text lying about being a pdf';
     const result = await runNode({ bytes: body, declaredType: 'application/pdf' });

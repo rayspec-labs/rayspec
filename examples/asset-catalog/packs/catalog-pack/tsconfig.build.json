@@ -1,0 +1,16 @@
+{
+  "//": "Build config for the asset-catalog extension: transpiles index.ts and handlers/*.ts to ESM .js (see ../../build.mjs). noCheck (transpile-only) needs no dependency resolution; the type-only imports are erased and the value imports (@rayspec/platform, @rayspec/handler-sdk, mime-types) are resolved when the extension is loaded.",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "removeComments": true,
+    "noCheck": true,
+    "types": [],
+    "rootDir": ".",
+    "outDir": "./dist"
+  },
+  "include": ["index.ts", "handlers/**/*.ts"]
+}

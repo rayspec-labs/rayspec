@@ -20,7 +20,8 @@
  * (`file_text_not_utf8`) — the residual (a pure-ASCII PDF behind non-whitespace junk passes
  * through as text) is accepted and documented. Anything not sniffed as PDF must be VALID UTF-8
  * (fail-closed `file_text_not_utf8`) and passes through as text (covers text/markdown/CSV/JSON —
- * no per-format parsing in v1). A sniff-vs-declared mismatch is noted in the artifact metadata
+ * no per-format parsing in v1). Text holding a NUL character fails closed on either path
+ * (`file_text_contains_nul`): no text column or JSON value can store it. A sniff-vs-declared mismatch is noted in the artifact metadata
  * (`content_type_mismatch` — DATA, not a failure): a lying declared type changes NOTHING about
  * how the bytes are parsed.
  *
@@ -367,6 +368,19 @@ export function makeFileParseNode(cfg: FileParseNodeConfig): CapabilityNodeHandl
             'to extract downstream (fail-closed; the PDF-path twin is scanned_pdf_no_text_layer).',
         );
       }
+    }
+
+    // A NUL character (U+0000) is valid UTF-8 but can be stored in no text column and no JSON
+    // value: PostgreSQL refuses it, so the journal write of this step would fail on every attempt
+    // and the run would never settle. On the text path it is also the mark of binary bytes (an
+    // executable, an archive) that happen to decode. Fail closed on either path.
+    if (text.includes('\u0000')) {
+      return fail(
+        'file_text_contains_nul',
+        `parse step '${ctx.step.id}': the ${sniffedKind === 'pdf' ? 'PDF text layer' : 'bytes'} ` +
+          'contain a NUL character (U+0000), which no text column or JSON value can hold — v1 ' +
+          'parses text/markdown/CSV/JSON (UTF-8) and PDF text layers only (fail-closed).',
+      );
     }
 
     if (text.length > limits.maxExtractedTextChars) {

@@ -1,0 +1,38 @@
+# Team notes, release 1.0.0 — one tenant's shared notes: a notes store, CRUD routes with keyset
+# pagination, and a static web UI served alongside the API.
+#
+# The application version (`metadata.version`) is this application's own; it is not the runtime
+# version the bundle pins. The UI shows it, read from the `app-version.json` the build writes next
+# to the UI from this file.
+
+version: '1.0'
+
+metadata:
+  name: Team notes
+  id: team-notes
+  version: '1.0.0'
+  description: A tenant's shared notes with a CRUD API and a static web UI.
+
+# Business columns only: the platform adds the tenancy columns (tenant_id, id, created_at,
+# deleted_at, retention_days, region) and the created_by actor stamp.
+stores:
+  - name: notes
+    # A delete keeps the note as a tombstone (deleted_at set), hidden from every read; an export
+    # carries it like any other row.
+    softDelete: true
+    columns:
+      - { name: title, type: text }
+      - { name: content, type: text }
+
+# Declarative store routes under /api, registered ahead of the static mount at `/`. `list` pages by
+# keyset: `?limit=` bounds a page and the X-Next-Cursor of a page is the `?after=` of the next.
+api:
+  - { method: GET, path: '/api/notes', action: { kind: store, store: notes, op: list } }
+  - { method: POST, path: '/api/notes', action: { kind: store, store: notes, op: create } }
+  - { method: GET, path: '/api/notes/{id}', action: { kind: store, store: notes, op: get } }
+  - { method: PATCH, path: '/api/notes/{id}', action: { kind: store, store: notes, op: update } }
+  - { method: DELETE, path: '/api/notes/{id}', action: { kind: store, store: notes, op: delete } }
+
+# The built UI. `spa: true` answers an unmatched deep link with index.html.
+frontend:
+  - { route: /, dir: web/dist, spa: true }

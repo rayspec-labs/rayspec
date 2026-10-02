@@ -1914,6 +1914,13 @@ An application bundle is different: [`rayspec pack`](./packing.md) leaves every
 the bundle provides them, and refuses the bundle when the range the extension's
 `package.json` declares for one excludes the runtime the bundle pins.
 
+A bundle deploy plans the product schema from the stores the deployment spec
+declares; the stores an extension's fragments contribute are not part of that plan.
+A table an extension contributed is therefore planned as dropped by the next bundle
+of the same application, and that update is refused as a destructive change. Declare
+the stores a bundled application's extension writes in the deployment spec, as
+[`examples/asset-catalog`](../examples/asset-catalog/rayspec.yaml) does.
+
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no
@@ -2471,6 +2478,65 @@ raw record the extractor reads stays untrusted data throughout.
 > stays fail-closed: `purpose`, `extraction_constraints`, the `instructions_ref`
 > filename and digest, and every banned key are all still scanned and rejected
 > exactly as before.
+
+### The deterministic extraction provider
+
+`RAYSPEC_EXTRACTION_MODE` selects how an extractor runs: `live` calls the model
+backend its config names; `deterministic` runs the **deterministic extraction
+provider** the runtime ships, so a product with extractors runs end to end without
+a provider credential — in development, in tests, in a demo. **It is not an
+extraction model and is unsuitable for production extraction**: it reads labelled
+lines and nothing else.
+
+An extractor uses it only when its config selects it, and both sides have to say
+so:
+
+```json
+{
+  "agent_id": "record_extractor",
+  "backend": "deterministic",
+  "schema_file": "record_extractor.schema.json"
+}
+```
+
+- The config carries exactly `agent_id`, `backend` and `schema_file` (the output
+  JSON Schema, relative to the config's directory and inside it). A `model`, a
+  prompt or any other key is refused at boot: it would describe a call that never
+  happens.
+- Under `RAYSPEC_EXTRACTION_MODE=live` a config that selects `deterministic` is
+  refused at boot: the provider never answers a run that asked for a model.
+- Under `RAYSPEC_EXTRACTION_MODE=deterministic` a config that names a real backend
+  (`openai`, …) is refused at boot rather than answered by the provider, so it
+  never stands in for a provider the application chose.
+- `RAYSPEC_HOSTING_POSTURE=managed` refuses it: its capability,
+  `extraction-deterministic`, is test-only.
+- The boot prints the non-real-provider banner while it is selected.
+- A config that selects it names no agent backend, so `rayspec pack` derives no
+  provider binding and no egress for it.
+
+What it reads: the text of the step's input artifacts (a string, or the
+`{ content }` envelope `file_input.parse_text` emits), in declared order. A line
+`<label>: <value>` is a labelled line; the label is compared in lowercase with
+every run of other characters than `a-z` and `0-9` turned into `_`, so
+`Received on:` matches the property `received_on`. For each property of the output
+schema, in declared order:
+
+| Property type | Value |
+| --- | --- |
+| `string`, `integer`, `number`, `boolean` | the first line with its label whose value converts; `null` when none does and the type admits `null`; otherwise left out |
+| array of scalars | every line with its label whose value converts, in document order |
+| array of objects with `properties` | one item per line with its label: the value split on `\|` into the item's properties in declared order; a missing or unconvertible part is `null` when its type admits `null`, and drops the line otherwise |
+| anything else | `null` when the type admits it; otherwise left out |
+
+`integer` takes an optional sign and decimal digits within the safe-integer range,
+`number` also one decimal fraction, `boolean` `true`, `false`, `yes` or `no`;
+nothing else converts (no thousands separators, no currency signs, no date
+parsing). A required field it leaves out is refused by the step's
+`required_output_shape`, as an incomplete model answer would be. The same input
+always gives the same record. A test or an embedder that injects its own
+deterministic executor (`assembleServer(config, { productDeterministicAgents })`)
+replaces the provider for every extractor.
+[`examples/document-intake`](../examples/document-intake/README.md) runs on it.
 
 ## `workflows`
 
