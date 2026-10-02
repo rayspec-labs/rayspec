@@ -6,7 +6,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type AddressClass,
   classifyAddress,
@@ -18,6 +18,9 @@ import {
 } from './outbound-guard.js';
 
 const servers: Server[] = [];
+
+/** The timer function as the module found it, for a guard a test sets while it watches timers. */
+const realTimeout = globalThis.setTimeout;
 
 afterEach(async () => {
   for (const s of servers) s.closeAllConnections();
@@ -351,8 +354,63 @@ describe('guardedFetch: a time limit on every request', () => {
     return { err, ms: Date.now() - started };
   }
 
+  /**
+   * Watch the timers guardedFetch sets: each one's delay and handle, whether it was cleared, and the
+   * default limit's timer shortened to `shortenTo` ms so a test need not wait 30 s for it.
+   */
+  function watchTimers(shortenTo: number) {
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const set: { delay: number | undefined; handle: ReturnType<typeof setTimeout> }[] = [];
+    const cleared = new Set<unknown>();
+    const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      delay?: number,
+    ) => {
+      const handle = realSetTimeout(fn, delay === DEFAULT_OUTBOUND_TIMEOUT_MS ? shortenTo : delay);
+      set.push({ delay, handle });
+      return handle;
+    }) as typeof setTimeout);
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((
+      handle?: ReturnType<typeof setTimeout>,
+    ) => {
+      cleared.add(handle);
+      realClearTimeout(handle);
+    }) as typeof clearTimeout);
+    return {
+      set,
+      cleared,
+      restore: () => {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      },
+    };
+  }
+
   it('has a default limit, so a request without one is still bounded', () => {
     expect(DEFAULT_OUTBOUND_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it('ends a request that sets no limit at the default limit', async () => {
+    const silent = await serve(() => {});
+    const timers = watchTimers(200);
+    try {
+      // A guard against a request that is never ended, so the test fails instead of hanging.
+      const never = new Promise((r) => realTimeout(() => r('not ended'), 5_000));
+      const { err } = await timed(
+        Promise.race([guardedFetch(silent.base, {}, { admits: testServerOnly }), never]).then(
+          (v) => {
+            throw new Error(String(v));
+          },
+        ),
+      );
+      expect(err).toBeInstanceOf(OutboundRequestTimedOut);
+      expect((err as OutboundRequestTimedOut).timeoutMs).toBe(DEFAULT_OUTBOUND_TIMEOUT_MS);
+      expect(timers.set.map((t) => t.delay)).toContain(DEFAULT_OUTBOUND_TIMEOUT_MS);
+      expect(silent.seen).toHaveLength(1);
+    } finally {
+      timers.restore();
+    }
   });
 
   it('ends a destination that accepts the request and never answers', async () => {
@@ -408,8 +466,18 @@ describe('guardedFetch: a time limit on every request', () => {
 
   it('a request that finishes inside the limit is unaffected, and leaves no timer behind', async () => {
     const target = await serve(ok);
-    const res = await guardedFetch(target.base, {}, { admits: testServerOnly, timeoutMs: 1_000 });
-    expect(await res.text()).toBe('reached');
+    const timers = watchTimers(DEFAULT_OUTBOUND_TIMEOUT_MS);
+    try {
+      const res = await guardedFetch(target.base, {}, { admits: testServerOnly, timeoutMs: 1_000 });
+      expect(await res.text()).toBe('reached');
+      // The body's end clears the limit's timer.
+      await new Promise((r) => setImmediate(r));
+      const limit = timers.set.filter((t) => t.delay === 1_000);
+      expect(limit).toHaveLength(1);
+      expect(timers.cleared.has(limit[0]?.handle)).toBe(true);
+    } finally {
+      timers.restore();
+    }
     // Past the limit, nothing fires on the finished request.
     await new Promise((r) => setTimeout(r, 1_100));
   });
