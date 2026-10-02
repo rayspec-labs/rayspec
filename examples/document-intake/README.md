@@ -140,6 +140,10 @@ target processes new documents.
   expected records and inventory, retried uploads and submits, validation failure, hostile text,
   `415`, `413`, `401` and another organization's reads.
 - `packages/compose/product-yaml/src/file-parse-node.test.ts` — the parse refusals, NUL included.
+- `packages/app/server/src/document-intake-live.smoke.db.test.ts` — one seed document through a real
+  model with the live config, bounded to one extraction call. It runs only with `DATABASE_URL` and
+  `OPENAI_API_KEY` set (like the other intake smokes; `RAYSPEC_REQUIRE_LIVE_TESTS=true` turns their
+  absence into a failure), never in the deterministic or database lanes of CI.
 - `scripts/journeys/document-intake.mjs` — the whole life of the application with the CLI installed
   from the packed release: the seed, retries, an unsupported type, a disguised executable, hostile
   markup, a crash before and one after persistence each recovered by a restart, an additive and a

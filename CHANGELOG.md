@@ -777,6 +777,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A consumer quickstart**, [`docs/quickstart.md`](docs/quickstart.md): from `npm install rayspec`
   to the team-notes application deployed from its bundle, separate from the source-build
   getting-started. The reference journeys run every command on the page.
+- **A live smoke of the document-intake application**
+  (`packages/app/server/src/document-intake-live.smoke.db.test.ts`): one seed document through the
+  application's live extraction config, one model call, the record checked against the fields the
+  document states. Gated like the other intake smokes: it runs only with `DATABASE_URL` and
+  `OPENAI_API_KEY` set.
 
 ### Changed
 
