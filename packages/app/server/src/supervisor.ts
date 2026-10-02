@@ -36,7 +36,10 @@ import {
   registerSecretValues,
 } from '@rayspec/core';
 import { type Db, generateProductSql, makeDb, scanMigrationSql } from '@rayspec/db';
-import { migrateWorkflowSystemDatabase } from '@rayspec/durable-dbos';
+import {
+  migrateWorkflowSystemDatabase,
+  preloadWorkflowSystemMigrations,
+} from '@rayspec/durable-dbos';
 import { detectSpecKind, parseProductSpec, parseSpec, type StoreSpec } from '@rayspec/spec';
 import { parseBlobBackendRecord } from './blob-backend-record.js';
 import { BootConfigError } from './boot-config-error.js';
@@ -288,6 +291,23 @@ export class SchemaSteps {
       throw new SupervisorProtocolError('no migration connection is configured');
     this.#migrationDb ??= makeDb(url, 2);
     return this.#migrationDb;
+  }
+
+  /**
+   * Read everything the schema steps will read or load from disk, before the application process
+   * exists: the document, and the workflow engine's migration module. Once the application runs
+   * as the same OS user it could change those files; the steps then use what was read here.
+   */
+  prepareBeforeApplication(): void {
+    this.#documentSource();
+    if (this.#options.config.migrationDbosSystemDatabaseUrl !== undefined) {
+      preloadWorkflowSystemMigrations();
+    }
+  }
+
+  /** The document as read before the application process started, if any. */
+  get documentSnapshot(): string | undefined {
+    return this.#specSource;
   }
 
   #documentSource(): string | undefined {
@@ -683,6 +703,13 @@ export async function superviseServing(options: SuperviseOptions): Promise<Super
       : {}),
     ...(updateMigrations !== undefined ? { updateMigrations } : {}),
   });
+  try {
+    steps.prepareBeforeApplication();
+  } catch (err) {
+    unguard();
+    await steps.close();
+    throw err;
+  }
   const execArgv = process.execArgv.filter((arg) => !/^--(inspect|debug)/.test(arg));
   let child: ChildProcess;
   try {

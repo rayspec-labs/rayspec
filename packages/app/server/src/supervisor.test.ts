@@ -217,6 +217,40 @@ describe('SchemaSteps', () => {
     ).rejects.toBeInstanceOf(SupervisorProtocolError);
   });
 
+  it('reads the document before the application process exists and keeps that copy', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'rayspec-supervisor-doc-'));
+    try {
+      const specPath = join(dir, 'rayspec.yaml');
+      writeFileSync(specPath, 'version: "1.0"\n', { flag: 'wx' });
+      const steps = new SchemaSteps({
+        config: { ...config, specPath } as ServerConfig,
+        warn: () => {},
+      });
+      expect(steps.documentSnapshot).toBeUndefined();
+      steps.prepareBeforeApplication();
+      expect(steps.documentSnapshot).toBe('version: "1.0"\n');
+      // A change after the application started is never seen by the privileged steps.
+      writeFileSync(specPath, 'version: "1.0"\nchanged: true\n');
+      steps.prepareBeforeApplication();
+      expect(steps.documentSnapshot).toBe('version: "1.0"\n');
+      await steps.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to prepare when the document cannot be read', async () => {
+    const steps = new SchemaSteps({
+      config: {
+        ...config,
+        specPath: join(tmpdir(), 'rayspec-no-such-dir', 'x.yaml'),
+      } as ServerConfig,
+      warn: () => {},
+    });
+    expect(() => steps.prepareBeforeApplication()).toThrow();
+    await steps.close();
+  });
+
   it('accepts nothing once closed', async () => {
     const steps = new SchemaSteps({ config, warn: () => {} });
     await steps.close();

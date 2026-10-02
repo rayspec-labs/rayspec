@@ -51,6 +51,15 @@ function loadEnsureSystemDatabase(): EnsureSystemDatabase {
 }
 
 /**
+ * Load the workflow engine's system-database migration module now, so a later migration runs code
+ * that was read before anything else could change the installation. Throws the same SDK-layout
+ * fault the migration itself would.
+ */
+export function preloadWorkflowSystemMigrations(): void {
+  loadEnsureSystemDatabase();
+}
+
+/**
  * Apply the workflow engine's system-database migrations over `migrationUrl`, a connection to the
  * workflow system database as the migration role. The database itself must exist: the migration
  * role may not create databases. SDK log lines go to `log` (default: dropped), never to stdout.

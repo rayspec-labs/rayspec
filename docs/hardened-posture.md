@@ -59,7 +59,11 @@ condition; every other posture warns. On the host:
   the boot refuses either until the setting is there;
 - on Linux, keep `/bin/sh` in the image (the entrypoint sets a zero hard core-file limit through
   it), or start the process with a hard core-file limit of 0 (`docker run --ulimit core=0`): a
-  distroless image has no `/bin/sh`.
+  distroless image has no `/bin/sh`;
+- keep the runtime installation (the RaySpec packages and their dependencies) and the deployment's
+  spec read-only to the application process's user. The supervisor reads the spec and loads the
+  workflow engine's migration code before it starts the child, so a later change to those files
+  does not reach the privileged steps of this boot, but it would reach the next one.
 
 A host that booted the managed posture before this release can be refused by these checks after
 the upgrade; they are prerequisites of the managed posture, not of the others.

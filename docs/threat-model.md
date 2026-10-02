@@ -149,7 +149,10 @@ word, with its owner: **RaySpec Core** where the runtime would have to change to
   the supervisor can be made to write and then read. The managed posture refuses to boot while any of
   these is open and names it; every other posture warns. Close them by giving the supervisor inline
   connections on a host with `ptrace_scope` of 1 or more and a zero hard core-file limit, or by
-  running the child as a different user.
+  running the child as a different user. The supervisor reads the spec and loads the workflow
+  engine's migration code before the child starts, so the child cannot change what the privileged
+  steps of that boot read; a runtime installation or spec directory the child can write would still
+  reach the next boot, so keep both read-only to the application's user.
 - **Hosting operator**: A deploy's boot rehearsal imports the bundle's handler modules before the
   platform's boot checks run, as every boot always has, so a bundle's top-level code runs on the host
   before a refusal can stop it.
