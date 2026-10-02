@@ -860,6 +860,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A document whose bytes hold a NUL character no longer leaves its workflow running for ever.**
+  `file_input.parse_text` passed text containing U+0000 — what an executable or an archive uploaded
+  under a text or PDF type decodes to — to the next step; PostgreSQL refuses that character in a
+  JSON value, so the step's journal write failed on every attempt and the run stayed `running`,
+  which also kept the deployment from being exported (`unreconciled-effects`). The parse now fails
+  such a document closed with the terminal `file_text_contains_nul`, on the text and the PDF path.
 - **A runtime refuses a database a newer runtime migrated.** An older runtime found a platform
   ledger with migrations it does not ship, applied nothing and served that schema silently. The
   boot (and `rayspec tenant ensure`) now refuses it, under the schema lock and before anything is
