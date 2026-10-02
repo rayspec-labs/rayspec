@@ -20,6 +20,11 @@ name: CI
 #                          as a consumer → the three reference applications and docs/quickstart.md
 #                          end to end with that install (scripts/reference-journeys.mjs). Runs on every pull request; not yet a required check.
 #
+#   certification        — ephemeral Postgres service with the database roles. install → build → the
+#                          hosting-posture certification lane (scripts/certification.mjs): one verdict
+#                          per mandatory public-hosting check and recovery case, a skipped test
+#                          failing its check. Runs on every pull request; not yet a required check.
+#
 #   lane3-live           — OPT-IN. Runs ONLY on a manual workflow_dispatch (never on push /
 #                          pull_request, and never automatically), so it is NOT a required merge
 #                          check and can never block a PR when live creds are absent. It exercises
@@ -307,6 +312,12 @@ jobs:
       - name: Reference-journey logic regression
         run: pnpm test:journeys-logic
 
+      # The logic of the certification lane (below) without a database: every suite a check names
+      # exists and every certification suite is named, a skipped or missing test fails its check, and
+      # the suites see no provider credential. DB-free / secret-free → lane 1.
+      - name: Certification-lane logic regression
+        run: pnpm test:certification-logic
+
       # The Tier-1 wire-golden / replay-parity gate (@rayspec/parity). Deterministic: its live-smoke
       # self-skips with no creds + no RAYSPEC_REQUIRE_LIVE_TESTS (that suite runs in lane 3). Run as
       # its own step here, so @rayspec/parity is EXCLUDED from the deterministic test filter below —
@@ -563,6 +574,87 @@ jobs:
       # the pinned postgres image through docker.
       - name: Reference journeys
         run: pnpm test:journeys
+
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  # CERTIFICATION — the hosting contract's mandatory public-hosting checks and its recovery cases,
+  # with the hardened posture on (scripts/certification.mjs). Runs on every pull request; not yet a
+  # required check.
+  # ══════════════════════════════════════════════════════════════════════════════════════════════
+  certification:
+    name: Hosting-posture certification
+    runs-on: ubuntu-latest
+    # The suites take about half an hour; the limit keeps a hung deploy from holding a runner.
+    timeout-minutes: 60
+    services:
+      postgres:
+        # The same digest docker-compose.yml pins for local runs; move both together.
+        image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
+        env:
+          POSTGRES_USER: rayspec
+          POSTGRES_PASSWORD: rayspec
+          POSTGRES_DB: rayspec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rayspec -d rayspec"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec
+      SHADOW_DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+      # DEV/TEST-ONLY, an explicit NON-secret placeholder, as in lane 2.
+      RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create shadow DB
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
+            -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
+
+      # The database roles of the isolated posture, from the setup SQL an operator runs, as in lane 2.
+      - name: Create database roles
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d rayspec -v ON_ERROR_STOP=1 \
+            -f packages/kernel/db/sql/database-roles.sql
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d rayspec -v ON_ERROR_STOP=1 \
+            -f scripts/init-dev-role-passwords.sql
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      # Boot-required secret for the suites that boot a server in-process, as in lane 2.
+      - name: Generate dev JWT signing key
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/jwt_dev.pem
+          while IFS= read -r key_line; do
+            echo "::add-mask::${key_line}"
+          done < /tmp/jwt_dev.pem
+          {
+            echo 'RAYSPEC_JWT_SIGNING_KEY<<RAYSPEC_KEY_EOF'
+            cat /tmp/jwt_dev.pem
+            echo 'RAYSPEC_KEY_EOF'
+          } >> "$GITHUB_ENV"
+          rm -f /tmp/jwt_dev.pem
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Every check of the lane with its suites, the database-backed ones as the runtime role under
+      # row-level security, the certification suites through the real CLI with the posture fully on.
+      # A skipped test fails its check. No provider credential exists here, and the lane sets every
+      # one empty for the suites besides. Prints one JSON summary with a verdict per check.
+      - name: Certification lane
+        run: pnpm test:certification --log-dir /tmp/certification-logs
 
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   # LANE 3 — live providers (OPT-IN, non-blocking). Runs ONLY on a manual workflow_dispatch, so it
