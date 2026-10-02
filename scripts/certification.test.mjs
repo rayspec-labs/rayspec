@@ -9,6 +9,8 @@
  *  - a check fails when any of its files failed or did not run;
  *  - the suites see no provider credential and no live-test switch, and run in the runtime-role
  *    lane with the database required;
+ *  - the lane records what it ran on: the commit, whether the tree was clean, the runtime version and
+ *    the platform, and claims no commit outside a checkout;
  *  - the arguments: an unknown check or a positional refuses; no DATABASE_URL refuses with exit 2
  *    before anything runs.
  *
@@ -16,7 +18,8 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -24,6 +27,7 @@ import {
   judgeChecks,
   judgeReport,
   laneEnvironment,
+  laneFacts,
   NOT_APPLICABLE,
   PROVIDER_VARIABLES,
   parseCertificationArgs,
@@ -207,6 +211,29 @@ check('the arguments: a subset by id; an unknown check or a positional refuses',
   );
   assert.match(parseCertificationArgs(['--check', 'nope']).error, /unknown check: nope/);
   assert.ok('error' in parseCertificationArgs(['stray']));
+});
+
+check('the lane records the commit, the tree state, the runtime version and the platform', () => {
+  const facts = laneFacts();
+  assert.match(facts.sourceCommit, /^[a-f0-9]{40}$/);
+  assert.equal(typeof facts.worktreeClean, 'boolean');
+  const server = JSON.parse(readFileSync(join(REPO, 'packages/app/server/package.json'), 'utf8'));
+  assert.equal(facts.runtimeVersion, server.version);
+  assert.deepEqual(facts.target, {
+    os: process.platform,
+    arch: process.arch,
+    nodeVersion: process.versions.node,
+  });
+  // Outside a checkout nothing is claimed: no commit, and the tree is not called clean.
+  const outside = mkdtempSync(join(tmpdir(), 'rayspec-lane-facts-'));
+  try {
+    const none = laneFacts(outside);
+    assert.equal(none.sourceCommit, null);
+    assert.equal(none.worktreeClean, false);
+    assert.equal(none.runtimeVersion, null);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
 });
 
 check('without DATABASE_URL the script refuses with exit 2 before running anything', () => {

@@ -98,6 +98,10 @@ Two kinds of suite run:
 | `sanitized-errors` | a handler's internal detail, malformed JSON, a bad id, an unknown route and a bad token each answer an error envelope with no stack, SQL or secret, and the server log carries no secret |
 | `outbound-guard` | the guard's own suites (no outbound path of this release takes a URL from a spec or a request) |
 | `recovery-scope` | `GET /recovery-scope` answers `404` under the managed posture |
+| `single-tenant-mode` | a second registration and a second organization are refused; the single-tenant suites, the boot over more than one organization, and export and import of more than one, in their own suites |
+| `agent-trace-export-off` | the trace-export suites, including the one that asks the agent SDK itself whether it would export |
+| `execution-levels` | the application every certification suite deploys is `in-process` code; the runtime-control and bundle deploy suites report exactly `none` and `in-process` and deploy a `none` bundle; the corpus refuses a bundle that asks for `sandboxed` |
+| `supported-backends` | the matrix suite (every other backend refused under the posture) and the hanging-provider suite of every allowed backend |
 | `hostile-archives` | every archive of the contract's corpus that the reader refuses is refused by `rayspec deploy <file.ray> --dry-run` against a serving deployment with the contract's code, and the state directory, the temporary directory and the database are unchanged |
 | `hostile-migration-bundles` | a wrong identity, a truncated ciphertext, a passphrase recipient, a traversal entry in the inner archive, an invalid snapshot document, outer and inner metadata that disagree, a wrong application digest, a wrong object digest, a gap in the object ranges and a target that is not empty are each refused by `rayspec import --dry-run` with the contract's code, and nothing reaches the target |
 | `cross-process-cancel` | the platform's and the workflow engine's own suites |
@@ -109,6 +113,11 @@ A skipped test fails its check: a test that did not run is not evidence. The sum
 what the posture asks for that Core has no surface for: support access (Core has no path by which an
 operator or vendor account reaches an organization's data). The lane sets every provider credential
 empty for the suites, so no run spends.
+
+The log directory holds the whole evidence of a run: each suite file's output and vitest JSON
+report, and `summary.json`, which names each report and records what the lane ran on — the commit,
+whether the working tree was clean, the runtime version, the platform, the architecture and the Node
+version.
 
 ## What the runtime checks on every request and job
 

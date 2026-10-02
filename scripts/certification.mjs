@@ -29,16 +29,23 @@
  * roles of `packages/kernel/db/sql/database-roles.sql` created (docker-compose.yml does on a new
  * volume; CI runs the file); SHADOW_DATABASE_URL (default DATABASE_URL); `pg_dump`/`pg_restore` of the
  * server's major on PATH or Docker. Prints one JSON summary on stdout (and to `--out`); each file's
- * vitest output goes to `--log-dir` (default a new temporary directory, which is kept and named).
+ * vitest output and JSON report go to `--log-dir` (default a new temporary directory, which is kept
+ * and named), and the summary, written there as `summary.json` too, names each report by its file
+ * name in that directory. The summary also records
+ * what the lane ran on (`laneFacts`): the commit, whether the tree was clean, the runtime version and
+ * the platform. `scripts/managed-receipt.mjs` makes the managed-posture receipt from that directory.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+/** The name of the summary the lane writes into its log directory. */
+export const SUMMARY_FILE = 'summary.json';
 
 /** The certification suites of the CLI package, with the config that includes them. */
 const CERT = (file) => ({
@@ -147,6 +154,52 @@ export const CHECKS = [
     suites: [
       CERT('hosting-checks.test.ts'),
       SUITE('packages/app/server', 'src/recovery-scope.test.ts'),
+    ],
+  },
+  {
+    id: 'single-tenant-mode',
+    check:
+      'the runtime holds one organization: a second one is refused on every path, a boot over more than one is refused, and export and import refuse more than one',
+    suites: [
+      CERT('hosting-checks.test.ts'),
+      SUITE('packages/compose/api-auth', 'src/routes/single-tenant.db.test.ts'),
+      SUITE('packages/app/server', 'src/hardened-posture.db.test.ts'),
+      SUITE('packages/app/server', 'src/snapshot-capture.db.test.ts'),
+      SUITE('packages/app/cli', 'src/import.db.test.ts'),
+    ],
+  },
+  {
+    id: 'agent-trace-export-off',
+    check:
+      'no agent trace is exported on the bundle deploy path or under the managed posture unless the operator asks for it, as the agent SDK itself reports',
+    suites: [
+      SUITE('packages/app/server', 'src/agent-tracing.test.ts'),
+      SUITE('packages/app/server', 'src/hosting-config.test.ts'),
+      SUITE('packages/app/cli', 'src/deploy-agent-tracing.test.ts'),
+      SUITE('packages/app/cli', 'src/deploy-agent-tracing.sdk.test.ts'),
+    ],
+  },
+  {
+    id: 'execution-levels',
+    check:
+      'the runtime reports exactly the execution levels none and in-process, deploys a bundle of each, and refuses a bundle that asks for a sandbox',
+    suites: [
+      CERT('hosting-checks.test.ts'),
+      SUITE('packages/app/server', 'src/runtime-control.db.test.ts'),
+      SUITE('packages/app/server', 'src/bundle-deploy.db.test.ts'),
+      SUITE('packages/kernel/bundle', 'src/corpus.test.ts'),
+    ],
+  },
+  {
+    id: 'supported-backends',
+    check:
+      'every backend the managed posture allows is bounded and stopped as the supported-backend matrix states, and a boot that would use any other backend is refused',
+    suites: [
+      SUITE('packages/app/server', 'src/supported-backends.test.ts'),
+      SUITE('packages/adapters/openai', 'src/hanging-provider.test.ts'),
+      SUITE('packages/kernel/platform', 'src/run-core-bound.db.test.ts'),
+      SUITE('packages/adapters/deepgram', 'src/hanging-provider.test.ts'),
+      SUITE('packages/adapters/openai-tts', 'src/hanging-provider.test.ts'),
     ],
   },
   {
@@ -365,19 +418,46 @@ function runFile(suite, env, logDir, index) {
     maxBuffer: 256 * 1024 * 1024,
   });
   writeFileSync(join(logDir, `${name}.log`), `${run.stdout ?? ''}\n${run.stderr ?? ''}`);
+  // One read: a report that is missing or not JSON is no report.
   let report = null;
-  if (existsSync(reportPath)) {
-    try {
-      report = JSON.parse(readFileSync(reportPath, 'utf8'));
-    } catch {
-      report = null;
-    }
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  } catch {
+    report = null;
   }
   return {
     ...judgeReport(report, suite.file, suite.notInThisLane ?? []),
     exit: run.status,
     seconds: Math.round((Date.now() - started) / 1000),
     log: join(logDir, `${name}.log`),
+    report: `${name}.json`,
+  };
+}
+
+/**
+ * What the lane ran on, recorded before the first suite runs: the commit checked out and whether the
+ * working tree matched it (tracked and untracked files alike), the version of the runtime package,
+ * and the platform, architecture and Node version. A receipt is made only from a lane whose tree was
+ * clean, so the commit names exactly the code that was tested.
+ */
+export function laneFacts(repo = REPO) {
+  const git = (args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
+  const head = git(['rev-parse', 'HEAD']);
+  const status = git(['status', '--porcelain']);
+  const sourceCommit = head.status === 0 ? head.stdout.trim() : null;
+  let runtimeVersion = null;
+  try {
+    runtimeVersion = JSON.parse(
+      readFileSync(join(repo, 'packages/app/server/package.json'), 'utf8'),
+    ).version;
+  } catch {
+    runtimeVersion = null;
+  }
+  return {
+    sourceCommit: /^[a-f0-9]{40}$/.test(sourceCommit ?? '') ? sourceCommit : null,
+    worktreeClean: status.status === 0 && status.stdout.trim() === '',
+    runtimeVersion,
+    target: { os: process.platform, arch: process.arch, nodeVersion: process.versions.node },
   };
 }
 
@@ -396,6 +476,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     : mkdtempSync(join(env.TMPDIR || tmpdir(), 'rayspec-certification-'));
   mkdirSync(logDir, { recursive: true });
   const laneEnv = laneEnvironment(env);
+  const facts = laneFacts();
   const suites = suitesOf(args.checks);
   log(`${args.checks.length} checks, ${suites.length} suite files; logs in ${logDir}`);
   const fileVerdicts = new Map();
@@ -411,6 +492,7 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   const checks = judgeChecks(args.checks, fileVerdicts);
   const summary = {
     ok: checks.every((c) => c.verdict === 'passed'),
+    ...facts,
     posture: {
       databaseIsolation: 'roles',
       certificationSuites:
@@ -422,6 +504,9 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   };
   const text = `${JSON.stringify(summary, null, 2)}\n`;
   process.stdout.write(text);
+  // The log directory holds the summary beside the reports it names, so it is the lane's whole
+  // evidence on its own.
+  writeFileSync(join(logDir, SUMMARY_FILE), text);
   if (args.out) writeFileSync(resolve(args.out), text);
   for (const c of checks.filter((x) => x.verdict !== 'passed')) {
     log(

@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import and restore round trip with the identity reset. The rest are the existing suites run as the
   runtime role. CI runs it in the `certification` job. See
   [Hosting in the hardened posture → Certifying the posture](./docs/hardened-posture.md#certifying-the-posture).
+  The lane also certifies single-tenant mode, the agent trace export staying off, the execution
+  levels and the supported-backend matrix, and its log directory now holds `summary.json`, which
+  names each suite's report and records the commit, whether the working tree was clean, the runtime
+  version and the platform the lane ran on.
 
 - **`rayspec deploy <file.ray>`: deploy an application bundle on a self-hosted target.** A file
   that starts with a ZIP signature or whose name ends in `.ray` takes the bundle path, decided on
