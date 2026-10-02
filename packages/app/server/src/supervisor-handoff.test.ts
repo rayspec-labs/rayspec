@@ -19,13 +19,35 @@ import {
 
 const MIGRATION = ['postgres://migrator:', 'not-a-real-secret', '@127.0.0.1:1/app'].join('');
 
+/** The handoff as the new image would find it, read while the fake execution runs. */
+interface HandoffSeen {
+  mode: number;
+  directoryMode: number;
+  content: string;
+}
+
+/**
+ * A fake execution: the real one replaces the image and never returns, this one throws. The throw
+ * ends the call the way a failed execution does, which removes the handoff, so what the new image
+ * would have found is read here first.
+ */
 class Executed extends Error {
+  readonly handoff: HandoffSeen | undefined;
   constructor(
     readonly file: string,
     readonly args: string[],
     readonly env: NodeJS.ProcessEnv,
   ) {
     super('executed');
+    const path = env[SUPERVISOR_HANDOFF_VAR];
+    this.handoff =
+      path === undefined
+        ? undefined
+        : {
+            mode: statSync(path).mode & 0o777,
+            directoryMode: statSync(dirname(path)).mode & 0o777,
+            content: readFileSync(path, 'utf8'),
+          };
   }
 }
 
@@ -40,6 +62,14 @@ function fakeProcess(env: NodeJS.ProcessEnv): ReexecProcess {
       throw new Executed(file, args, nextEnv);
     },
   };
+}
+
+/** A handoff file in a directory of the kind the re-execution makes. */
+function handoffFile(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'rayspec-handoff-'));
+  const file = join(dir, 'handoff.json');
+  writeFileSync(file, content, { mode: 0o600 });
+  return file;
 }
 
 function reexec(env: NodeJS.ProcessEnv): Executed | undefined {
@@ -60,7 +90,7 @@ describe('reexecWithoutPrivilegedConnections', () => {
       RAYSPEC_SNAPSHOT_DATABASE_URL_FILE: '/run/secrets/snapshot',
     });
     expect(executed).toBeDefined();
-    const { file, args, env } = executed as Executed;
+    const { file, args, env, handoff } = executed as Executed;
     // Through the shell that sets the hard core-file limit to 0, then the same node, same arguments.
     expect(file).toBe('/bin/sh');
     expect(args.slice(3)).toEqual([
@@ -73,10 +103,9 @@ describe('reexecWithoutPrivilegedConnections', () => {
     expect(args[2]).toContain('ulimit -H -c 0');
     expect(env.PATH).toBe('/usr/bin');
     expect(Object.keys(env).filter((name) => name.includes('DATABASE_URL'))).toEqual([]);
-    const handoff = env[SUPERVISOR_HANDOFF_VAR] as string;
-    expect(statSync(handoff).mode & 0o777).toBe(0o600);
-    expect(statSync(dirname(handoff)).mode & 0o777).toBe(0o700);
-    expect(JSON.parse(readFileSync(handoff, 'utf8'))).toEqual({
+    expect(handoff?.mode).toBe(0o600);
+    expect(handoff?.directoryMode).toBe(0o700);
+    expect(JSON.parse(handoff?.content ?? '')).toEqual({
       handoffFormatVersion: 1,
       values: {
         RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION,
@@ -84,11 +113,12 @@ describe('reexecWithoutPrivilegedConnections', () => {
       },
     });
     // The re-executed image takes it: the values stay in memory, the file and its directory go.
-    const next = { ...env };
+    const path = handoffFile(handoff?.content ?? '');
+    const next = { ...env, [SUPERVISOR_HANDOFF_VAR]: path };
     takeSupervisorHandoff({ serving: true }, next);
     expect(next[SUPERVISOR_HANDOFF_VAR]).toBeUndefined();
-    expect(existsSync(handoff)).toBe(false);
-    expect(existsSync(dirname(handoff))).toBe(false);
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(dirname(path))).toBe(false);
     expect(handedOffPrivilegedConnections()).toEqual({
       RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION,
       RAYSPEC_SNAPSHOT_DATABASE_URL_FILE: '/run/secrets/snapshot',
@@ -108,16 +138,39 @@ describe('reexecWithoutPrivilegedConnections', () => {
     delete withoutExecve.execve;
     expect(() => reexecWithoutPrivilegedConnections(withoutExecve)).not.toThrow();
   });
+
+  it('leaves single-role mode alone: a snapshot connection without a migration connection is not handed off', () => {
+    expect(reexec({ PATH: '/usr/bin', RAYSPEC_SNAPSHOT_DATABASE_URL: MIGRATION })).toBeUndefined();
+    expect(
+      reexec({ PATH: '/usr/bin', RAYSPEC_SNAPSHOT_DATABASE_URL_FILE: '/run/secrets/snapshot' }),
+    ).toBeUndefined();
+    // The migration connection's file form turns role separation on as the connection does.
+    expect(
+      reexec({ RAYSPEC_MIGRATION_DATABASE_URL_FILE: '/run/secrets/migration' })?.env[
+        SUPERVISOR_HANDOFF_VAR
+      ],
+    ).toBeDefined();
+  });
+
+  it('removes the handoff when the new image cannot be started, and says why', () => {
+    const handoffs: string[] = [];
+    const failing: ReexecProcess = {
+      ...fakeProcess({ RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION }),
+      execve: (_file, _args, nextEnv) => {
+        handoffs.push(nextEnv[SUPERVISOR_HANDOFF_VAR] as string);
+        throw new Error('execve failed: EACCES');
+      },
+    };
+    expect(() => reexecWithoutPrivilegedConnections(failing)).toThrow(/EACCES/);
+    expect(handoffs.length).toBeGreaterThan(0);
+    for (const handoff of handoffs) {
+      expect(existsSync(handoff)).toBe(false);
+      expect(existsSync(dirname(handoff))).toBe(false);
+    }
+  });
 });
 
 describe('takeSupervisorHandoff', () => {
-  function handoffFile(content: string): string {
-    const dir = mkdtempSync(join(tmpdir(), 'rayspec-handoff-'));
-    const file = join(dir, 'handoff.json');
-    writeFileSync(file, content, { mode: 0o600 });
-    return file;
-  }
-
   it('refuses a handoff that reaches a command that does not serve, and removes it', () => {
     const file = handoffFile(JSON.stringify({ handoffFormatVersion: 1, values: {} }));
     expect(() =>

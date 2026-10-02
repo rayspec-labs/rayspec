@@ -124,16 +124,20 @@ function handoffDirectory(platform: NodeJS.Platform): string {
 }
 
 /**
- * Re-execute this process with an environment block that holds no privileged connection, when the
- * block holds one. Returns when there is nothing to do (no privileged variable set, or this image is
- * already the re-executed one) and when the runtime cannot re-execute (`process.execve` is missing);
- * otherwise it does not return. A serving entrypoint calls it before it reads anything else.
+ * Re-execute this process with an environment block that holds no privileged connection, when role
+ * separation is on (the migration connection or its `_FILE` form is set) and the block holds one.
+ * Returns when there is nothing to do (single-role mode, which only deletes a snapshot connection
+ * from `process.env` as before, or this image is already the re-executed one) and when the runtime
+ * cannot re-execute (`process.execve` is missing); otherwise it does not return. When the execution
+ * fails the handoff is removed before the error is thrown. A serving entrypoint calls it before it
+ * reads anything else.
  */
 export function reexecWithoutPrivilegedConnections(proc: ReexecProcess = currentProcess()): void {
   const env = proc.env;
   if (env[SUPERVISOR_HANDOFF_VAR] !== undefined) return;
   const names = privilegedConnectionsIn(env);
-  if (names.length === 0 || proc.execve === undefined) return;
+  const roleSeparated = names.some((name) => name.startsWith(MIGRATION_CONNECTION_VAR));
+  if (!roleSeparated || proc.execve === undefined) return;
   const directory = handoffDirectory(proc.platform);
   const file = join(directory, HANDOFF_FILE);
   const values: Record<string, string> = {};
@@ -146,14 +150,21 @@ export function reexecWithoutPrivilegedConnections(proc: ReexecProcess = current
   for (const name of PRIVILEGED_CONNECTION_VARS) delete next[name];
   next[SUPERVISOR_HANDOFF_VAR] = file;
   const args = [...proc.execArgv, ...proc.argv.slice(1)];
-  if (executable('/bin/sh')) {
-    proc.execve(
-      '/bin/sh',
-      ['/bin/sh', '-c', 'ulimit -H -c 0 2>/dev/null; exec "$0" "$@"', proc.execPath, ...args],
-      next,
-    );
+  const execve = proc.execve;
+  try {
+    if (executable('/bin/sh')) {
+      execve(
+        '/bin/sh',
+        ['/bin/sh', '-c', 'ulimit -H -c 0 2>/dev/null; exec "$0" "$@"', proc.execPath, ...args],
+        next,
+      );
+    }
+    execve(proc.execPath, [proc.execPath, ...args], next);
+  } catch (err) {
+    // The new image did not start: the handoff holding the connections must not stay behind.
+    removeHandoff(file);
+    throw err;
   }
-  proc.execve(proc.execPath, [proc.execPath, ...args], next);
 }
 
 function removeHandoff(path: string): void {
