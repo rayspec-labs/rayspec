@@ -120,15 +120,20 @@ describe.skipIf(!baseUrl)(
     it('keeps the schedule, raises nothing unhandled, and fires again once it accepts connections', async () => {
       await eventually(() => fired.length >= 2, 15_000);
 
+      // A start the outage refused. The outage can reach the instant's recorded watermark first, which
+      // the schedule reports too ('recording the last fired instant … failed'); that is not this.
+      const startFailed = new RegExp(
+        `scheduled workflow '\\.${SYSTEM_CLEANUP_WORKFLOW_NAME}' failed`,
+      );
       await admin.unsafe(`ALTER DATABASE "${SYS_DB}" ALLOW_CONNECTIONS false`);
       try {
         await admin.unsafe(
           'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1',
           [SYS_DB],
         );
-        // Until an instant has met the outage, then long enough that several more do.
+        // Until an instant's start has met the outage, then long enough that several more do.
         await eventually(
-          () => unhandled.length > 0 || errors.some((m) => m.includes('[schedule]')),
+          () => unhandled.length > 0 || errors.some((m) => startFailed.test(m)),
           15_000,
         );
         await pause(2_000);
@@ -140,9 +145,7 @@ describe.skipIf(!baseUrl)(
       // 1. Nothing escaped.
       expect(unhandled.map(String)).toEqual([]);
       // 2. The outage reached a scheduled start, and the schedule said so.
-      expect(errors.find((m) => m.includes('[schedule]'))).toMatch(
-        new RegExp(`scheduled workflow '\\.${SYSTEM_CLEANUP_WORKFLOW_NAME}' failed`),
-      );
+      expect(errors.find((m) => startFailed.test(m))).toMatch(/^\[schedule\] /);
       // 3. It fires again, in the same process, once the database is back.
       await eventually(() => fired.some((t) => t > restored), 30_000);
 

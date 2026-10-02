@@ -57,6 +57,7 @@ export {
   SystemCleanupScheduler,
   type SystemCleanupSchedulerDeps,
 } from './system-cleanup-scheduler.js';
+export { DEFAULT_SYSTEM_DATABASE_CLOSE_TIMEOUT_MS } from './system-database-close.js';
 // The workflow system database's schema, applied by the migration role when the runtime connects as
 // its own role and so may not create the engine's tables at launch.
 export { migrateWorkflowSystemDatabase } from './system-database-migrations.js';
