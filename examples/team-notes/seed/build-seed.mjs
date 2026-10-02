@@ -14,7 +14,7 @@
  * Run: `node examples/team-notes/seed/build-seed.mjs` (or `--out=<file>`).
  */
 import { createHash } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -74,7 +74,9 @@ export function seedNotes() {
   return notes;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a symlinked path (macOS /tmp, /var/folders): the module's own path is
+// the real one, so the argument is compared as its real path too.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   const outArg = process.argv
     .slice(2)
     .find((a) => a.startsWith('--out='))

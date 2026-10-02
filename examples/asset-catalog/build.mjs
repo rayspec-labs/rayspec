@@ -105,7 +105,9 @@ export function buildAssetCatalog(outDir = join(here, 'dist')) {
   return outDir;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a symlinked path (macOS /tmp, /var/folders): the module's own path is
+// the real one, so the argument is compared as its real path too.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   const out = process.argv
     .slice(2)
     .find((a) => a.startsWith('--out='))

@@ -6,7 +6,15 @@
  * are in reference-apps.db.test.ts.
  */
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { parseAnySpec } from '@rayspec/spec';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -76,6 +84,21 @@ describe('team notes', () => {
         'index.html',
       ]);
     }
+  });
+
+  it('builds when the build script is run through a symlinked directory', () => {
+    // macOS reaches /tmp and the temporary directories through a symlink; a script that compared
+    // its argument with its own (real) path did nothing there, and said nothing.
+    const real = scratch('team-notes-real-');
+    cpSync(join(app, 'build.mjs'), join(real, 'build.mjs'));
+    cpSync(join(app, 'web'), join(real, 'web'), { recursive: true });
+    cpSync(join(app, 'releases'), join(real, 'releases'), { recursive: true });
+    const link = join(scratch('team-notes-link-'), 'via-link');
+    symlinkSync(real, link, 'dir');
+    expect(realpathSync(link)).not.toBe(link);
+    const out = join(real, 'o');
+    runNode(join(link, 'build.mjs'), ['--release=v1', `--out=${out}`]);
+    expect(existsSync(join(out, 'web', 'dist', 'app-version.json'))).toBe(true);
   });
 
   it('refuses to build a release whose spec names another version', () => {

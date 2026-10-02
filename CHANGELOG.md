@@ -890,6 +890,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The reference applications' scripts run when reached through a symlink.** Each build, seed
+  and fixture script of `examples/team-notes`, `examples/document-intake` and `examples/asset-catalog`
+  (and `scripts/reference-journeys.mjs`) compared the path it was started with to its own real path,
+  so through a symlinked directory — macOS reaches `/tmp` and its temporary directories through one
+  — it exited 0 having done nothing. They now compare real paths.
 - **A document whose bytes hold a NUL character no longer leaves its workflow running for ever.**
   `file_input.parse_text` passed text containing U+0000 — what an executable or an archive uploaded
   under a text or PDF type decodes to — to the next step; PostgreSQL refuses that character in a

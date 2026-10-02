@@ -9,7 +9,7 @@
  * replays the existing rows instead of adding new ones. Exit 0 when the store's inventory equals the
  * seed's, 1 otherwise. Needs Node only.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { inventoryOf } from './build-seed.mjs';
@@ -63,7 +63,9 @@ function arg(name) {
     ?.slice(name.length + 3);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a symlinked path (macOS /tmp, /var/folders): the module's own path is
+// the real one, so the argument is compared as its real path too.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   const base = arg('base');
   const firstFile = arg('first-token-file');
   const secondFile = arg('second-token-file');

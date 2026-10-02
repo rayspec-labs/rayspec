@@ -13,7 +13,7 @@
  * Run: `node examples/team-notes/build.mjs --release=v1` (default output `dist/v1` next to this
  * script; `--out=<dir>` writes elsewhere). Needs Node only.
  */
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -65,7 +65,9 @@ export function buildRelease(release, outDir = join(here, 'dist', release)) {
   return outDir;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a symlinked path (macOS /tmp, /var/folders): the module's own path is
+// the real one, so the argument is compared as its real path too.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   const release = arg('release');
   if (release === undefined) {
     console.error('usage: node build.mjs --release=<v1|v2|v3> [--out=<dir>]');

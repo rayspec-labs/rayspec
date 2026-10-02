@@ -11,7 +11,7 @@
  * Run: `node examples/document-intake/seed/build-seed.mjs` (or `--out=<dir>` to write elsewhere).
  */
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -157,7 +157,9 @@ export function writeSeed(dir) {
   return manifest;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a symlinked path (macOS /tmp, /var/folders): the module's own path is
+// the real one, so the argument is compared as its real path too.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   const manifest = writeSeed(outDir);
   console.log(
     `document-intake seed: ${manifest.inventory.documents} documents -> ${join(outDir, 'documents')}`,

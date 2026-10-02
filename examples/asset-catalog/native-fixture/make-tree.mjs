@@ -5,7 +5,7 @@
  * rather than committed. With `--os-field`, the package instead declares `"os": ["darwin"]` and
  * carries no binary, the other shape pack refuses.
  */
-import { cpSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -43,7 +43,9 @@ export function makeTree(outDir, { osField = false } = {}) {
   return outDir;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Run as a script, also through a symlinked path (macOS /tmp, /var/folders): the module's own path is
+// the real one, so the argument is compared as its real path too.
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === fileURLToPath(import.meta.url)) {
   const out = process.argv
     .slice(2)
     .find((a) => a.startsWith('--out='))
