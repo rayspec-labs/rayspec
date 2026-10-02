@@ -16,7 +16,9 @@ real authenticated request. You will:
 > bearer-guarded. The auth request/response JSON shapes are checked against the
 > source; the token/id values shown are illustrative — yours will differ.
 
-**Which guide is yours.** This walkthrough builds RaySpec **from source**: you clone
+**Which guide is yours.** To deploy a reference application from its bundle with the
+published CLI, in about ten commands, take the [Quickstart](./quickstart.md). This walkthrough
+builds RaySpec **from source**: you clone
 the repository, build it, and deploy a spec from the working tree — the path for
 developing RaySpec itself or an application next to it. To **run an application
 someone packed** as a `.ray` bundle, on a server with the published CLI and no

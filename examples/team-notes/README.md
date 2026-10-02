@@ -129,6 +129,16 @@ carries no reviewed delta; its dry-run reports the change as destructive with th
 notes.content`, leaving `1.1.0` active and every note as it was. See
 [A product schema change](../../docs/packing.md#a-product-schema-change).
 
+## Move it: export and import
+
+The deployment moves to a new environment with [`rayspec export`](../../docs/export.md) and
+[`rayspec import`](../../docs/import.md). The reference journey does it twice — from the source to
+a first target, and after a new write there from that target to a second one — and finds every note
+(tombstones included), user, password hash and membership carried, while every access token and
+API key of the earlier environment is refused and an owner who held only an API key gets in again
+through `rayspec tenant recover-owner`. An environment with two organizations is refused by the
+export (`RAY_MULTI_TENANT_UNSUPPORTED`).
+
 ## Where it is tested
 
 - `packages/app/cli/src/reference-apps.test.ts` — the builds, the versions the UI reads, pack,
@@ -136,3 +146,8 @@ notes.content`, leaving `1.1.0` active and every note as it was. See
 - `packages/app/cli/src/reference-apps-team-notes.db.test.ts` — the deployment from the bundle
   alone, the two users, the refusals, the seed and its inventory, the update to `1.1.0` and the
   refused `2.0.0`, with the real built CLI and a database.
+- `scripts/journeys/team-notes.mjs` — the whole life of the application with the CLI installed from
+  the packed release, never the workspace: the three releases, the two users, the seed, the
+  key-only owner, export while serving, two imports, the identity reset, owner recovery and
+  `rayspec resume`; and the refused export of a source with two organizations. Run with
+  `pnpm test:journeys --app team-notes` (see [Reference journeys](../../CONTRIBUTING.md#reference-journeys)).

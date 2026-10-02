@@ -754,6 +754,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   macOS build. Each has a README; the repository tests build, pack, inspect, verify and deploy each
   one with the real CLI. `gate:fixture-neutrality` now scans the three applications as well, and
   the handler gates scan the asset catalog's extension.
+- **Reference journeys, run in CI on every pull request.** `pnpm test:journeys`
+  (`scripts/reference-journeys.mjs`, one script per application under `scripts/journeys/`) packs
+  the workspace, installs the tarballs into an empty directory the way a consumer does
+  (`scripts/check-consumer-install.mjs`) and drives each reference application with that installed
+  `rayspec` only: build, pack, inspect and verify; a deploy on fresh databases with role separation;
+  data and file writes; an additive release that keeps every row and a destructive one refused at
+  pack and at deploy; an encrypted export while the source serves (writes `503`, reads `200`);
+  an import into an empty target, the cutover and a deploy with the target's own secrets; a new
+  write; a second export and an import into another empty target; and the state compared by
+  counts, digests and rows, with the documented identity reset — passwords sign in, every access
+  token and API key of the earlier environment is refused, a key-only owner gets in through
+  `rayspec tenant recover-owner` — and `rayspec resume` at the export's epoch only. The document
+  intake journey also crashes the server before and after persistence and checks each run ends,
+  after a restart, with exactly one record; replays a retried upload; refuses an unsupported type,
+  a disguised executable and hostile markup; and compares every stored file of the target with the
+  source's. The custom-code journey deploys behind an egress proxy programmed from the bundle with
+  npm offline, checks the dependency resolves from the bundle's own tree, and sees a call to a host
+  the running bundle does not declare refused. A source with two organizations is refused on
+  export. The new `reference-journeys` job of CI runs them; `pnpm test:journeys-logic` checks the
+  harness in lane 1.
+- **A consumer quickstart**, [`docs/quickstart.md`](docs/quickstart.md): from `npm install rayspec`
+  to the team-notes application deployed from its bundle, separate from the source-build
+  getting-started. The reference journeys run every command on the page.
 
 ### Changed
 

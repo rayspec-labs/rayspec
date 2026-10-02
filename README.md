@@ -246,6 +246,8 @@ treats model and tool output as data, never as instructions. See
 
 ## Documentation
 
+- **[Quickstart](./docs/quickstart.md)** — `npm install` to a reference
+  application deployed from its bundle, with no build of RaySpec.
 - **[Getting started](./docs/getting-started.md)** — clone to first
   authenticated request.
 - **[Concepts](./docs/concepts.md)** — the mental model: specs, agents, stores,

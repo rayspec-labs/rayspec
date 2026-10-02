@@ -82,7 +82,9 @@ Until the workflow has persisted the record, the detail view answers `200` with 
 Uploading the same bytes again answers `deduped: true`, different bytes under a submitted file id
 answer `409`, and submitting again answers `deduped: true` without a second workflow run. A
 document whose record misses a required field (`reference`, `title`, `quantity`, `lines`) fails at
-the extractor's declared output shape and persists nothing. Markup and instruction-like text in a
+the extractor's declared output shape and persists nothing. Bytes that decode as UTF-8 but hold a
+NUL character — an executable or an archive under a text or PDF type, for one — fail at the parse
+(`file_text_contains_nul`) and persist nothing. Markup and instruction-like text in a
 document are stored as JSON string data and never interpreted.
 
 ## The seed
@@ -109,6 +111,21 @@ rayspec deploy examples/document-intake/document-intake.product.yaml
 The deterministic config is refused in live mode, and the live config is refused in deterministic
 mode: neither provider ever stands in for the other.
 
+## Interruptions, cancellation and moving it
+
+Each document is one durable workflow run. A process that stops in the middle of one — before the
+record is written, or after it is written but before the run is closed — resumes it at its next
+start, and the run ends with exactly one record; a step that completed is not executed again.
+
+A running document workflow cannot be cancelled: the run cancel route
+([`POST /v1/runs/{id}/cancel`](../../docs/spec-reference.md#cancelling-a-run)) ends agent runs,
+and answers `404` for a workflow run's id.
+
+The deployment moves with [`rayspec export`](../../docs/export.md) and
+[`rayspec import`](../../docs/import.md): every record and every stored file — at its key, with its
+bytes and both digests — arrives in the target, the workflow system database with it, and the
+target processes new documents.
+
 ## Where it is tested
 
 - `packages/workflow/nodes/agent-runtime/src/deterministic-extraction.test.ts` — the provider's
@@ -122,3 +139,9 @@ mode: neither provider ever stands in for the other.
   bundle with the real built CLI and a database: all 50 seed documents processed into their
   expected records and inventory, retried uploads and submits, validation failure, hostile text,
   `415`, `413`, `401` and another organization's reads.
+- `packages/compose/product-yaml/src/file-parse-node.test.ts` — the parse refusals, NUL included.
+- `scripts/journeys/document-intake.mjs` — the whole life of the application with the CLI installed
+  from the packed release: the seed, retries, an unsupported type, a disguised executable, hostile
+  markup, a crash before and one after persistence each recovered by a restart, an additive and a
+  refused destructive release, export, and two imports whose records and stored files are compared
+  with the source's. Run with `pnpm test:journeys --app document-intake`.

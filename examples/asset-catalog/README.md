@@ -73,6 +73,13 @@ prints it as `egressHosts`) and deny everything else — see
 `NODE_USE_ENV_PROXY=1` for the deployment. The application's dependencies resolve from the bundle
 at run time; nothing is installed on the server.
 
+## Export
+
+An application that loads an extension cannot be exported in this release: `rayspec export`
+refuses it before it fences anything (`RAY_EXTERNAL_STATE_UNSUPPORTED`, reason
+`unsupported-blob-adapter`), because an extension may keep blobs in a backend of its own that the
+export cannot read. See [Exporting a deployment](../../docs/export.md#checklist).
+
 ## The native-addon fixture
 
 ```bash
@@ -98,3 +105,9 @@ linux/x64 and Node 22 (or Node-API) in an isolated Linux build. See
   isolation, `401` and `400`; and an update whose bundle declares no host, after which the proxy
   denies the call, the create answers `502` and the earlier rows are kept.
 - `pnpm gate:handler-imports` and `pnpm gate:extension-capability` scan the extension's handlers.
+- `scripts/journeys/asset-catalog.mjs` — the application with the CLI installed from the packed
+  release: build, pack, the native-addon refusal, the deployment behind an egress proxy programmed
+  from the bundle with npm offline, the dependency resolved from the bundle's own tree and nowhere
+  above it, an additive and a refused destructive release, a release that declares no host (the
+  call is refused by the proxy, the create answers `502`), and the refused export. Run with
+  `pnpm test:journeys --app asset-catalog`.
