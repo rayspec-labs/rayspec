@@ -57,12 +57,17 @@ describe('team notes', () => {
     runNode(join(app, 'build.mjs'), [`--release=${release}`, `--out=${builds[release]}`]);
   }
 
-  it("writes each release's own version and store fields where the UI reads them", () => {
+  it("writes each release's own version and text fields where the UI reads them", () => {
     const expected = {
       v1: { version: '1.0.0', fields: ['title', 'content'] },
       v2: { version: '1.1.0', fields: ['title', 'content', 'label'] },
       v3: { version: '2.0.0', fields: ['title', 'label'] },
     };
+    // 1.1.0 and 2.0.0 also carry a counter and an amount, through the API only.
+    const numbers = [
+      { name: 'counter', type: 'bigint', nullable: true, unique: false },
+      { name: 'amount', type: 'numeric', precision: 30, scale: 6, nullable: true, unique: false },
+    ];
     for (const [release, want] of Object.entries(expected)) {
       const dir = builds[release]!;
       const parsed = parseAnySpec(readFileSync(join(dir, 'rayspec.yaml'), 'utf8'));
@@ -74,9 +79,10 @@ describe('team notes', () => {
       );
       expect(appVersion).toEqual({ application: 'team-notes', ...want });
       expect(spec.metadata.version).toBe(want.version);
-      expect(spec.stores.find((s) => s.name === 'notes')?.columns.map((c) => c.name)).toEqual(
-        want.fields,
-      );
+      const columns = spec.stores.find((s) => s.name === 'notes')?.columns ?? [];
+      const text = columns.filter((c) => c.type === 'text');
+      expect(text.map((c) => c.name)).toEqual(want.fields);
+      expect(columns.filter((c) => c.type !== 'text')).toEqual(release === 'v1' ? [] : numbers);
       expect(tree(join(dir, 'web', 'dist'))).toEqual([
         'app-version.json',
         'app.css',

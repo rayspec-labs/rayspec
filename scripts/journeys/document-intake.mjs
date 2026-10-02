@@ -22,6 +22,7 @@ import postgres from 'postgres';
 import {
   call,
   canonical,
+  checkEncryptedExport,
   deployServing,
   Environment,
   exportDeployment,
@@ -145,10 +146,18 @@ export async function documentIntake(ctx, journey) {
   );
   await expectRecords(journey, base, token, manifest, 'source');
   const blobsAfterSeed = blobInventory(source.blobRoot);
+  const uploadedDigests = new Set(manifest.documents.map((d) => d.sha256));
   journey.check(
-    'every uploaded file is stored once, with the bytes uploaded',
-    manifest.documents.every((d) => blobsAfterSeed.digests.includes(d.sha256)),
-    `${blobsAfterSeed.files} files`,
+    'precondition: the 50 seed documents are 50 distinct files',
+    manifest.documents.length === 50 && uploadedDigests.size === 50,
+  );
+  journey.check(
+    'every uploaded file is stored once, with the bytes uploaded, and nothing else is stored',
+    blobsAfterSeed.files === uploadedDigests.size &&
+      [...uploadedDigests].every(
+        (digest) => blobsAfterSeed.digests.filter((d) => d === digest).length === 1,
+      ),
+    `${blobsAfterSeed.files} files for ${uploadedDigests.size} documents`,
   );
 
   // Retries: the same bytes replay, a second submit replays, different bytes are a conflict.
@@ -362,6 +371,11 @@ export async function documentIntake(ctx, journey) {
     exported.status === 0 && exported.envelope.data.sourceState === 'fenced',
     `${exported.status} ${JSON.stringify(exported.envelope.errors)} ${exported.stderr.slice(-1500)}`,
   );
+
+  checkEncryptedExport(journey, 'the source export', migration, [
+    ...manifest.documents.slice(0, 5).map((d) => d.expected.title),
+    readFileSync(join(app, 'seed', first.file), 'utf8').split('\n')[1],
+  ]);
 
   let previous = { environment: source, records: expected, blobs: expectedBlobs };
   const bundleRan = bundle2;

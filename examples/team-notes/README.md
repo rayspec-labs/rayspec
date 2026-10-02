@@ -9,7 +9,7 @@ It comes in three releases of one application (`metadata.id: team-notes`):
 | Release | Version | What changes |
 | --- | --- | --- |
 | [`releases/v1.yaml`](./releases/v1.yaml) | `1.0.0` | `notes` store (`title`, `content`, deleted softly), CRUD routes, the UI |
-| [`releases/v2.yaml`](./releases/v2.yaml) | `1.1.0` | adds an optional `label` column, which the UI edits — an additive change |
+| [`releases/v2.yaml`](./releases/v2.yaml) | `1.1.0` | adds an optional `label` column, which the UI edits, and an optional `bigint` counter and `numeric` amount — an additive change |
 | [`releases/v3.yaml`](./releases/v3.yaml) | `2.0.0` | drops the `content` column — a destructive change that is refused |
 
 The **application version** is the application's own (`metadata.version`); the UI shows it. It is
@@ -119,8 +119,11 @@ rayspec deploy team-notes-1.1.0.ray --dry-run
 rayspec deploy team-notes-1.1.0.ray --plan-digest <planDigest>
 ```
 
-The `label` column is nullable, so the delta is additive: every note keeps its data and reads back
-with `label: null`.
+The `label`, `counter` and `amount` columns are nullable, so the delta is additive: every note
+keeps its data and reads back with `label: null`. `counter` is a `bigint`, which the API carries as a
+JSON number up to `9007199254740991`, and `amount` a `numeric(30, 6)`, which it carries as a string
+so no digit is rounded; the UI edits only the label. See
+[the column types](../../docs/spec-reference.md#stores).
 
 `2.0.0` drops `content`. Packed against `1.1.0`, `rayspec pack` refuses it (`RAY_USAGE`, naming the
 dropped column) unless a reviewed `--allowlist` clears the drop. Packed on its own, the bundle

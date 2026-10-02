@@ -70,8 +70,12 @@ what the host's network policy is programmed from; **the runtime itself blocks n
 your egress firewall or proxy from the bundle's `permissions.egressHosts` (`rayspec bundle inspect`
 prints it as `egressHosts`) and deny everything else — see
 [Egress](../../docs/hardened-posture.md#egress). Behind an egress proxy, set `HTTPS_PROXY` and
-`NODE_USE_ENV_PROXY=1` for the deployment. The application's dependencies resolve from the bundle
-at run time; nothing is installed on the server.
+`NODE_USE_ENV_PROXY=1` for the deployment. A proxy reaches only the clients that use it (Node's
+`fetch` and `https` under `NODE_USE_ENV_PROXY=1`); code that opens a socket of its own goes around
+it, so deny direct outbound traffic at the firewall too. The reference journey shows a proxy
+programmed this way refusing an undeclared host; that refusal is the proxy's, not the runtime's.
+The application's dependencies resolve from the bundle at run time; nothing is installed on the
+server.
 
 ## Export
 

@@ -21,7 +21,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export const APPLICATION_ID = 'team-notes';
 
-/** Each release: its application version and the note fields its store declares, in order. */
+/**
+ * Each release: its application version and the text fields of its notes the UI edits, in their
+ * declared order. (1.1.0 also declares a counter and an amount, which only the API carries.)
+ */
 export const RELEASES = {
   v1: { version: '1.0.0', fields: ['title', 'content'] },
   v2: { version: '1.1.0', fields: ['title', 'content', 'label'] },

@@ -9,18 +9,28 @@ To build RaySpec from source and author your own spec instead, follow
 [Getting started](./getting-started.md). To run a bundle someone else packed, on a server, see
 [Deploying a bundle on your own server](./self-hosted-deployment.md).
 
-Every command on this page runs in the repository's reference journeys
+Every command in the numbered steps runs in the repository's reference journeys
 (`scripts/journeys/quickstart.mjs`), so the page and the CLI cannot drift apart. Two of them reach
 the network there in a local form: the install installs the release's packed tarballs, and the
-clone copies the application from the working tree.
+clone clones a local repository holding the application, tagged at the packed version.
 
 ## What you need
 
 - **Node** `>=22.21.0`, with `npm` and `npx`.
 - **PostgreSQL 16** you can reach: an empty database for the deployment, and a server where a
   throwaway database may be created and dropped while a change is planned (the same server is
-  fine). In a clone of the repository, `pnpm db:up` starts one on port `5433` with both.
-- **`git`, `openssl` and `curl`.**
+  fine). The commands below expect a user `rayspec` with the password `rayspec` on port `5433`,
+  with the databases `rayspec` and `rayspec_shadow`. With **Docker**, this starts one:
+
+  ```sh
+  docker run -d --name rayspec-pg -p 5433:5432 -e POSTGRES_USER=rayspec \
+    -e POSTGRES_PASSWORD=rayspec -e POSTGRES_DB=rayspec postgres:16
+  # once it accepts connections (a few seconds):
+  docker exec rayspec-pg createdb -U rayspec rayspec_shadow
+  ```
+
+  In a clone of the repository, `pnpm db:up` starts the same with Docker Compose.
+- **`git` and `curl`.**
 
 Run everything below in a new, empty directory.
 
@@ -62,15 +72,16 @@ A bundle deploy reads its configuration from the environment only, never from a 
 ```bash
 export DATABASE_URL=postgresql://rayspec:rayspec@localhost:5433/rayspec
 export SHADOW_DATABASE_URL=postgresql://rayspec:rayspec@localhost:5433/rayspec_shadow
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out jwt.pem
+node -e 'process.stdout.write(require("crypto").generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).trimEnd())' > jwt.pem
 node -e 'process.stdout.write(require("crypto").randomBytes(32).toString("base64"))' > pepper
 chmod 600 jwt.pem pepper
 export RAYSPEC_JWT_SIGNING_KEY_FILE=$PWD/jwt.pem
 export RAYSPEC_API_KEY_PEPPER_FILE=$PWD/pepper
 ```
 
-`jwt.pem` signs the access tokens and `pepper` keys the API-key hashes. Keep both: a deployment
-started with other values does not accept the tokens and keys issued under these.
+`jwt.pem` signs the access tokens and `pepper` keys the API-key hashes. Both files are written
+without a trailing newline, exactly as the deploy reads them. Keep both: a deployment started with
+other values does not accept the tokens and keys issued under these.
 
 ## 5. Deploy
 
@@ -104,8 +115,11 @@ curl -s "$BASE/api/notes?limit=10" -H "authorization: Bearer $TOKEN"
 `app-version.json` names the application version, `1.0.0` — the application's own, not the
 runtime's. The last call lists the note you wrote.
 
-Stop the deployment with Ctrl-C; its state stays in `.rayspec-state` and in the database, and the
-same deploy command serves it again.
+Stop the deployment with Ctrl-C; its state stays in `.rayspec-state` and in the database. To serve
+it again, run the deploy without a plan digest — `npx rayspec deploy team-notes-1.0.0.ray` — with
+the same environment: a reviewed plan is valid for 30 minutes, and a restart of the bundle that
+already runs needs none. See
+[Deploying a bundle on your own server → Update](./self-hosted-deployment.md#update).
 
 ## Next
 

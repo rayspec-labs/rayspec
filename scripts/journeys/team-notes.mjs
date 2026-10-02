@@ -4,12 +4,15 @@
  *
  *   build the three releases → pack 1.0.0 → inspect, verify → deploy on fresh databases (role
  *   separation) → two members and a key-only owner; create, read, update, soft-delete; the 100-note
- *   seed, loaded twice → 1.1.0 (additive, packed against 1.0.0) keeps every row → 2.0.0 (drops a
+ *   seed, loaded twice → 1.1.0 (additive, packed against 1.0.0) keeps every row; the largest safe
+ *   integers and a decimal past float precision written and read back exactly → 2.0.0 (drops a
  *   column) refused at pack and at deploy → export while serving (the source is fenced: writes 503,
- *   reads 200) → import into an empty target, cutover, deploy with the target's own secrets →
+ *   reads 200); the export holds only its manifest and the age payload, and no stored value reads
+ *   in it → another identity refused → import into an empty target, cutover, deploy with the
+ *   target's own secrets →
  *   identity reset: the source's access token and API key refused, passwords sign in → a new write →
  *   export of that target → import into a second empty target → every note (soft-deleted ones too),
- *   user and membership equal, by digest and by row → owner recovery for the key-only owner, once →
+ *   user and membership equal, by digest and by row, the counter and amount exactly → owner recovery for the key-only owner, once →
  *   resume of the first target's fence at its epoch, not at another.
  *
  * A separate source with two organizations is refused by the export (RAY_MULTI_TENANT_UNSUPPORTED)
@@ -20,6 +23,7 @@ import { copyFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   call,
+  checkEncryptedExport,
   deployServing,
   Environment,
   exportDeployment,
@@ -35,6 +39,15 @@ import {
 } from './lib.mjs';
 
 const NON_ASCII = 'Grüße aus Köln — 東京 ✓';
+/** The 1.1.0 counter and amount at the edges of what each column carries exactly. */
+const NUMBERS = [
+  {
+    title: 'Largest counter',
+    counter: 9007199254740991,
+    amount: '123456789012345678901234.567891',
+  },
+  { title: 'Smallest counter', counter: -9007199254740991, amount: '-0.000001' },
+];
 
 export async function teamNotes(ctx, journey) {
   const app = join(ctx.repo, 'examples', 'team-notes');
@@ -174,6 +187,14 @@ export async function teamNotes(ctx, journey) {
     body: { content: `${NON_ASCII} — edited` },
   });
   journey.check('the second user updates it', edited.status === 200, edited.text);
+  const reread = await call(`${base}/api/notes/${noteId}`, { token: tokens.first });
+  journey.check(
+    'the first user reads the edited content back',
+    reread.status === 200 &&
+      reread.body.content === `${NON_ASCII} — edited` &&
+      reread.body.title === 'Draft',
+    reread.text,
+  );
   journey.check('no token is refused', (await call(`${base}/api/notes`)).status === 401);
   const doomed = await call(`${base}/api/notes`, {
     method: 'POST',
@@ -250,6 +271,26 @@ export async function teamNotes(ctx, journey) {
     'the UI shows 1.1.0',
     (await call(`${base}/app-version.json`)).body.version === '1.1.0',
   );
+  // The largest safe integers and an exact decimal past float precision, written and read back.
+  for (const note of NUMBERS) {
+    const written = await call(`${base}/api/notes`, {
+      method: 'POST',
+      token: tokens.first,
+      body: { ...note, content: 'numbers' },
+    });
+    journey.check(`write "${note.title}"`, written.status === 201, written.text);
+    const back = await call(`${base}/api/notes/${written.body.id}`, { token: tokens.second });
+    journey.check(
+      `"${note.title}" reads back exactly`,
+      back.status === 200 && back.body.counter === note.counter && back.body.amount === note.amount,
+      back.text,
+    );
+  }
+  journey.check(
+    'the database holds the numbers exactly',
+    JSON.stringify(await numbersOf(source)) === JSON.stringify(expectedNumbers()),
+    JSON.stringify(await numbersOf(source)),
+  );
   await served.stop();
 
   // ── A destructive update: 2.0.0 drops content, and is refused ─────────────────────────────────
@@ -323,6 +364,12 @@ export async function teamNotes(ctx, journey) {
       ...Object.values(source.passwords),
     ]) === 0,
   );
+  checkEncryptedExport(journey, 'the source export', migration, [
+    `${NON_ASCII} — edited`,
+    ...seed.notes.slice(0, 5).map((n) => n.content),
+    people.first.email,
+    NUMBERS[0].amount,
+  ]);
   journey.note(
     'source export excludedDataCategories',
     exported.envelope.data.excludedDataCategories,
@@ -350,6 +397,31 @@ export async function teamNotes(ctx, journey) {
   // ── Import into an empty target, cutover, deploy with the target's own secrets ────────────────
   journey.step('importing into the first target');
   const targetA = await new Environment(ctx, 'team-notes-target-a').create();
+  // Only the identity the export was encrypted to opens it.
+  const stranger = await ctx.ageKeyPair();
+  const strangerFile = privateFile(
+    join(ctx.work, 'team-notes-other-identity.txt'),
+    `${stranger.identity}\n`,
+  );
+  const wrongIdentity = rayspec(
+    ctx,
+    [
+      'import',
+      migration,
+      '--target',
+      targetA.stateDir,
+      '--identity-file',
+      strangerFile,
+      '--dry-run',
+    ],
+    { env: targetA.env(), cwd: targetA.dir },
+  );
+  journey.check(
+    'an import with another identity is refused before anything is restored',
+    wrongIdentity.status === 2 &&
+      wrongIdentity.envelope.errors?.[0]?.code === 'RAY_DECRYPTION_FAILED',
+    `${wrongIdentity.status} ${JSON.stringify(wrongIdentity.envelope.errors)}`,
+  );
   const importedA = importInto(ctx, journey, targetA, migration, identityFile);
   journey.check(
     'the first import verifies checksums, counts, objects and references',
@@ -427,6 +499,11 @@ export async function teamNotes(ctx, journey) {
     exitExport.status === 0 && exitExport.envelope.data.sourceState === 'fenced',
     `${exitExport.status} ${JSON.stringify(exitExport.envelope.errors)} ${exitExport.stderr.slice(-1500)}`,
   );
+  checkEncryptedExport(journey, 'the exit export', exitBundle, [
+    `${NON_ASCII} (target)`,
+    NUMBERS[0].amount,
+    people.second.email,
+  ]);
   const targetAEpoch = exitExport.envelope.data.fenceEpoch;
   await served.stop();
   const targetB = await new Environment(ctx, 'team-notes-target-b').create();
@@ -460,6 +537,21 @@ export async function teamNotes(ctx, journey) {
         (n) => n.title === 'Written on the first target' && n.content === `${NON_ASCII} (target)`,
       ),
   );
+  journey.check(
+    'the counter and amount arrive exactly in both targets',
+    JSON.stringify(await numbersOf(targetA)) === JSON.stringify(expectedNumbers()) &&
+      JSON.stringify(await numbersOf(targetB)) === JSON.stringify(expectedNumbers()),
+    JSON.stringify(await numbersOf(targetB)),
+  );
+  for (const note of NUMBERS) {
+    const [row] = await targetB.query('SELECT id FROM notes WHERE title = $1', [note.title]);
+    const back = await call(`${targetB.base}/api/notes/${row?.id}`, { token: secondOnB.token });
+    journey.check(
+      `the second target serves "${note.title}" exactly`,
+      back.status === 200 && back.body.counter === note.counter && back.body.amount === note.amount,
+      back.text,
+    );
+  }
   journey.check(
     'the UI of the second target shows 1.1.0',
     (await call(`${targetB.base}/app-version.json`)).body.version === '1.1.0',
@@ -566,6 +658,22 @@ export function runNode(ctx, script, args) {
   return { status: run.status, stdout: run.stdout, stderr: run.stderr };
 }
 
+/** The counter and amount rows, as the database renders them, by title. */
+async function numbersOf(environment) {
+  return environment.query(
+    'SELECT title, counter::text AS counter, amount::text AS amount FROM notes WHERE counter IS NOT NULL ORDER BY title',
+  );
+}
+
+/** What numbersOf must read: the canonical rendering of NUMBERS, by title. */
+function expectedNumbers() {
+  return NUMBERS.map((n) => ({
+    title: n.title,
+    counter: String(n.counter),
+    amount: n.amount,
+  })).sort((a, b) => (a.title < b.title ? -1 : 1));
+}
+
 /** The live notes, as rows, for the seed inventory digest. */
 async function liveNotes(environment) {
   return environment.query('SELECT title, content, created_by FROM notes WHERE deleted_at IS NULL');
@@ -579,7 +687,9 @@ async function notesState(environment) {
 /** The state an import must carry: notes (soft-deleted ones too), users, organizations, members. */
 async function sourceState(environment) {
   const notes = await environment.query(
-    'SELECT id, tenant_id, title, content, label, created_by, created_at, deleted_at FROM notes',
+    `SELECT id, tenant_id, title, content, label, counter::text AS counter, amount::text AS amount,
+            created_by, created_at, deleted_at
+       FROM notes`,
   );
   const users = await environment.query('SELECT id, email, password_hash FROM users');
   const orgs = await environment.query('SELECT id, name, slug FROM orgs');
@@ -594,7 +704,18 @@ async function sourceState(environment) {
         created_at: n.created_at?.toISOString(),
         deleted_at: n.deleted_at?.toISOString() ?? null,
       })),
-      ['id', 'tenant_id', 'title', 'content', 'label', 'created_by', 'created_at', 'deleted_at'],
+      [
+        'id',
+        'tenant_id',
+        'title',
+        'content',
+        'label',
+        'counter',
+        'amount',
+        'created_by',
+        'created_at',
+        'deleted_at',
+      ],
     ),
     users: rowsDigest(users, ['id', 'email', 'password_hash']),
     orgs: rowsDigest(orgs, ['id', 'name', 'slug']),

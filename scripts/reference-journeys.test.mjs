@@ -3,11 +3,13 @@
  * Regression test for the reference journeys' own logic — the parts that decide what runs, not the
  * journeys themselves (those need a database and run as `pnpm test:journeys`).
  *
- *   (Q) the committed quickstart page plans: the install and the clone are done by the harness, every
- *       other command runs as written, the deploy that serves ends the first session and the second
- *       session uses it.
+ *   (Q) the committed quickstart page plans: the install is done by the harness, the clone keeps the
+ *       page's tag and path and reaches a local repository, every other command runs as written, the
+ *       deploy that serves ends the first session, the second session uses it, and the restart the
+ *       page names runs with the first session's exports and no plan digest.
  *   (M) a page that drops or repeats a substituted line refuses, naming it.
- *   (S) a page without a serving deploy, or with two, refuses; an unclosed block refuses.
+ *   (S) a page without a serving deploy, or with two, refuses; an unclosed block refuses; a page that
+ *       names no restart, or two, refuses.
  *   (A) the arguments: every journey by default, an unknown one or a positional refuses.
  *   (R) the script refuses usage errors and a missing DATABASE_URL with exit 2, before any work.
  *   (D) the digests compare values, not key order, and notice a changed value.
@@ -36,9 +38,21 @@ const check = (label, fn) => {
 };
 
 // (Q)
-check('(Q) the quickstart page plans with the harness doing the install and the clone', () => {
+check('(Q) the quickstart page plans with the harness doing the install', () => {
   const plan = quickstartPlan(PAGE);
-  assert.deepEqual(plan.harness, ['install', 'clone']);
+  assert.deepEqual(plan.harness, ['install']);
+  assert.ok(
+    plan.first.includes(
+      'git clone --depth 1 --branch "v$VERSION" "$QUICKSTART_REPOSITORY" rayspec-src',
+    ),
+    'the clone keeps the tag and the path, and reaches the local repository',
+  );
+  assert.ok(plan.first.includes('node rayspec-src/examples/team-notes/build.mjs --release=v1'));
+  const restart = plan.restart.split('\n');
+  assert.equal(restart.at(-1), 'npx rayspec deploy team-notes-1.0.0.ray');
+  assert.ok(restart.slice(0, -1).every((l) => l.startsWith('export ')));
+  assert.ok(restart.includes('export DATABASE_URL="$QUICKSTART_DATABASE_URL"'));
+  assert.ok(restart.some((l) => l.startsWith('export RAYSPEC_JWT_SIGNING_KEY_FILE=')));
   assert.ok(plan.blocks >= 5, `${plan.blocks} blocks`);
   const firstLines = plan.first.split('\n');
   assert.ok(
@@ -91,6 +105,16 @@ check('(S) no serving deploy, two of them, or an unclosed block refuse', () => {
   assert.notEqual(twice, PAGE);
   assert.throws(() => quickstartPlan(twice), /exactly one block, found 2/);
   assert.throws(() => bashBlocks('```bash\nls\n'), /not closed/);
+  const restart = '`npx rayspec deploy team-notes-1.0.0.ray`';
+  assert.ok(PAGE.includes(restart), 'precondition: the page names the restart');
+  assert.throws(
+    () => quickstartPlan(PAGE.replace(restart, 'the deploy')),
+    /one restart command, found 0/,
+  );
+  assert.throws(
+    () => quickstartPlan(PAGE.replace(restart, `${restart} or ${restart}`)),
+    /one restart command, found 2/,
+  );
 });
 
 // (A)

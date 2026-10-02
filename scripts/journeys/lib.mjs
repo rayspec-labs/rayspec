@@ -671,6 +671,62 @@ export function importInto(ctx, journey, target, bundle, identityFile, extra = [
   return { data: run.envelope.data, stderr: run.stderr, dry: dry.envelope.data };
 }
 
+/**
+ * The entry names of a ZIP archive (a `.ray` bundle), read from its central directory. Throws on a
+ * file that is not a single-disk ZIP; enough for a bundle, which is never a ZIP64 archive.
+ */
+export function zipEntryNames(bytes) {
+  const END = 0x06054b50;
+  const CENTRAL = 0x02014b50;
+  let end = -1;
+  for (let at = bytes.length - 22; at >= Math.max(0, bytes.length - 22 - 0xffff); at -= 1) {
+    if (bytes.readUInt32LE(at) === END) {
+      end = at;
+      break;
+    }
+  }
+  if (end < 0) throw new JourneyFailure('not a ZIP archive: no end of central directory');
+  const count = bytes.readUInt16LE(end + 10);
+  let at = bytes.readUInt32LE(end + 16);
+  const names = [];
+  for (let i = 0; i < count; i += 1) {
+    if (bytes.readUInt32LE(at) !== CENTRAL) {
+      throw new JourneyFailure(`not a ZIP archive: central entry ${i} is malformed`);
+    }
+    const nameLength = bytes.readUInt16LE(at + 28);
+    const extraLength = bytes.readUInt16LE(at + 30);
+    const commentLength = bytes.readUInt16LE(at + 32);
+    names.push(bytes.subarray(at + 46, at + 46 + nameLength).toString('utf8'));
+    at += 46 + nameLength + extraLength + commentLength;
+  }
+  return names;
+}
+
+/**
+ * Check that a migration bundle carries its data only encrypted: exactly the manifest and the age
+ * payload, the payload an age file, and none of `plaintexts` anywhere in the file's bytes.
+ */
+export function checkEncryptedExport(journey, label, bundle, plaintexts) {
+  const bytes = readFileSync(bundle);
+  const names = zipEntryNames(bytes).sort();
+  journey.check(
+    `${label}: the export holds only its manifest and the encrypted payload`,
+    JSON.stringify(names) === JSON.stringify(['payload/migration.age', 'ray.json']),
+    JSON.stringify(names),
+  );
+  journey.check(
+    `${label}: the payload is an age file`,
+    bytes.includes(Buffer.from('age-encryption.org/v1')),
+  );
+  if (plaintexts.length === 0) throw new JourneyFailure(`${label}: no plaintext to look for`);
+  const found = plaintexts.filter((text) => bytes.includes(Buffer.from(text, 'utf8')));
+  journey.check(
+    `${label}: no stored value is readable in the export (${plaintexts.length} looked for)`,
+    found.length === 0,
+    `${found.length} found`,
+  );
+}
+
 /** Every row of `table` of database `db`, in a stable text form, for comparing two environments. */
 export async function tableText(adminUrl, db, table, schema = 'public') {
   return asAdmin(adminUrl, db, async (sql) =>

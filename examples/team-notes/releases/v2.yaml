@@ -1,4 +1,5 @@
-# Team notes, release 1.1.0 — release 1.0.0 plus an optional label on each note, which the UI edits.
+# Team notes, release 1.1.0 — release 1.0.0 plus an optional label on each note, which the UI edits,
+# and an optional counter and amount, which the API carries.
 #
 # The application version (`metadata.version`) is this application's own; it is not the runtime
 # version the bundle pins. The UI shows it, read from the `app-version.json` the build writes next
@@ -25,6 +26,11 @@ stores:
       # Added in 1.1.0. Nullable, so the change is additive: rows written by 1.0.0 keep their data
       # and read back with no label.
       - { name: label, type: text, nullable: true }
+      # Also added in 1.1.0, both nullable: a whole-number counter, which travels as a JSON number
+      # up to 9007199254740991 (2^53 - 1), and an exact decimal amount, which travels as a string so
+      # no digit is rounded. The API reads and writes them; the UI does not edit them.
+      - { name: counter, type: bigint, nullable: true }
+      - { name: amount, type: numeric, precision: 30, scale: 6, nullable: true }
 
 # Declarative store routes under /api, registered ahead of the static mount at `/`. `list` pages by
 # keyset: `?limit=` bounds a page and the X-Next-Cursor of a page is the `?after=` of the next.
