@@ -44,7 +44,7 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let armsRan = 0;
 
 const APP = join(EXAMPLES, 'asset-catalog');
-const PORT = 20_300 + (process.pid % 300);
+const PORT = 24_600 + (process.pid % 300);
 const HOST = 'classifier.example.com';
 
 describe.skipIf(!baseUrl)(

@@ -39,7 +39,7 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let armsRan = 0;
 
 const APP = join(EXAMPLES, 'document-intake');
-const PORT = 20_000 + (process.pid % 300);
+const PORT = 24_300 + (process.pid % 300);
 const TENANT = randomUUID();
 
 interface SeedDocument {

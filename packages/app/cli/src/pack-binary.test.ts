@@ -215,11 +215,21 @@ function buildExpenseClaimCoder(): string {
   return join(root, 'dist', 'rayspec.yaml');
 }
 
+/** The asset-catalog example built by its own build script into a temporary directory. */
+function buildAssetCatalog(): string {
+  const out = join(temporaryDirectory('asset-catalog-'), 'app');
+  execFileSync(process.execPath, [join(EXAMPLES, 'asset-catalog', 'build.mjs'), `--out=${out}`], {
+    stdio: 'pipe',
+  });
+  return join(out, 'rayspec.yaml');
+}
+
 /** Every example that runs as it stands, with its spec. */
 const READY_EXAMPLES: readonly [string, string][] = [
   ['acme-notes', 'acme-notes.product.yaml'],
   ['agent-boot-backend', 'agent-boot.rayspec.yaml'],
   ['contract-intake', 'contract-intake.product.yaml'],
+  ['document-intake', 'document-intake.product.yaml'],
   ['expense-claim', 'expense-claim.product.yaml'],
   ['invoice-intake', 'invoice-intake.product.yaml'],
   ['lead-qualifier', 'lead-qualifier.rayspec.yaml'],
@@ -233,6 +243,7 @@ const READY_EXAMPLES: readonly [string, string][] = [
 const BUILT_EXAMPLES: readonly [string, () => string][] = [
   ['acme-notes-backend', () => join(buildAcmeNotesBackend(), 'rayspec.yaml')],
   ['agent-pack-deployment', buildAgentPackDeployment],
+  ['asset-catalog', buildAssetCatalog],
   ['expense-claim-coder', buildExpenseClaimCoder],
   ['stream-backend', () => join(buildStreamBackend(), 'rayspec.yaml')],
 ];

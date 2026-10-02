@@ -86,7 +86,7 @@ describe('team notes', () => {
     const spec = join(copy, 'releases', 'v2.yaml');
     const text = readFileSync(spec, 'utf8');
     expect(text).toContain("  version: '1.1.0'\n");
-    writeFileSync(spec, text.replace("  version: '1.1.0'\n", "  version: '1.1.1'\n"));
+    writeFileSync(spec, text.split("  version: '1.1.0'\n").join("  version: '1.1.1'\n"));
     expect(() =>
       runNode(join(copy, 'build.mjs'), ['--release=v2', `--out=${join(copy, 'o')}`]),
     ).toThrow(/does not declare metadata\.version '1\.1\.0'/);

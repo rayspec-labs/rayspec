@@ -38,7 +38,7 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let armsRan = 0;
 
 const APP = join(EXAMPLES, 'team-notes');
-const PORT = 19_700 + (process.pid % 300);
+const PORT = 24_000 + (process.pid % 300);
 
 interface SeedNote {
   key: string;
