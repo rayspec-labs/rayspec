@@ -104,6 +104,12 @@ mean running the extensions' entry modules — application code, with its own im
 differ from what the running deployment built (an extension can decide by its own configuration).
 The record is what the boot actually built, written with the version it belongs to.
 
+The decision belongs to the version it was read for. The precheck, and the capture again under the
+fence, check that the active version is still that one; a deploy that activated another version
+while the export ran (for example while the confirmation prompt waited) is refused with
+`RAY_SOURCE_NOT_QUIESCENT`, before the fence when the precheck sees it, else with the source fenced.
+Run the export again, which decides for the new version.
+
 The extension itself, its compiled modules and the third-party packages it vendors travel inside the
 application bundle the snapshot carries, byte for byte; the import restores the application like any
 other, and the target serves the extension from that bundle. An extension's stores must be declared

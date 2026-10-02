@@ -650,10 +650,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which backend holds them is a value of the extensions' code, so the export does not load them but
   reads what the deployment's boot resolved, which the bundle deploy records with the application
   digest in the new `runtime_control_state.blob_backend` (migration
-  `0017_runtime_control_blob_backend`). An application whose extension provides its own blob
-  backend is refused before the fence (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`),
-  naming that extension, and so is one whose active version has no record (deploy it once with this
-  runtime). `LoadedExtensions.capabilityProviders` in `@rayspec/platform` names the extension that
+  `0017_runtime_control_blob_backend`). An application whose blobs are in a backend an extension
+  provides (it does when an extension provides one and the application has a stream route, the only
+  case in which the runtime builds a blob backend) is refused before the fence
+  (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`), naming that extension, and so is
+  one whose active version has no record (deploy it once with this runtime). A deploy that activates
+  another version while the export runs is refused (`RAY_SOURCE_NOT_QUIESCENT`), before the fence or
+  under it, since the blob decision belongs to the version it was made for. `LoadedExtensions.capabilityProviders` in `@rayspec/platform` names the extension that
   provided each capability.
   An upload being written during the precheck is normal operation: it is reported as in flight and
   left to the fence's drain; only a temporary upload file still there after the drain refuses, in the

@@ -346,6 +346,9 @@ const BLOB_ROOT_UNSET =
  *
  * An application without extensions: the fs store at `blobRoot`, or none — and an unset root is
  * refused when the document keeps blobs.
+ *
+ * Returns the digest of the version the decision was made for, which the preflight before the
+ * fence and the one under it hold the deployed application to.
  */
 async function blobSourceOf(
   server: Server,
@@ -353,11 +356,12 @@ async function blobSourceOf(
   env: NodeJS.ProcessEnv,
   blobRoot: string | undefined,
   control: Db,
-): Promise<SnapshotBlobSource> {
-  const fallback: SnapshotBlobSource =
+): Promise<{ blob: SnapshotBlobSource; decidedFor: string | null }> {
+  const blob: SnapshotBlobSource =
     blobRoot !== undefined ? { kind: 'fs', root: resolve(blobRoot) } : { kind: 'none' };
   const active = await stateDir.readActive().catch(() => null);
-  if (active === null) return fallback;
+  if (active === null) return { blob, decidedFor: null };
+  const fallback = { blob, decidedFor: active.bundleSha256 };
   const root = stateDir.versionPath(active.bundleSha256);
   const manifestBytes = await readFile(join(root, 'ray.json')).catch(() => null);
   const validated = manifestBytes === null ? null : validateManifest(manifestBytes);
@@ -623,7 +627,7 @@ export async function runExport(
     const controlWorkflowUrl =
       config.migrationDbosSystemDatabaseUrl ?? config.dbosSystemDatabaseUrl;
     control = server.openControlDatabase(controlUrl);
-    const blob = await blobSourceOf(server, dir, env, config.blobRoot, control);
+    const { blob, decidedFor } = await blobSourceOf(server, dir, env, config.blobRoot, control);
     safePoint();
 
     // The scratch space, held for this export alone; what a killed export left there is removed.
@@ -678,6 +682,7 @@ export async function runExport(
       stateDir: dir,
       deploymentId: p.deploymentId,
       blob,
+      blobDecidedFor: decidedFor,
       ...(pgDump !== undefined ? { pgDump } : {}),
       scratchParent: scratch.dir,
       runHistoryPolicy: p.runHistoryPolicy,
