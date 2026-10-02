@@ -268,16 +268,16 @@ describe.skipIf(!baseUrl)('export, import and restore in the hardened posture', 
     );
     // The bundle is the operator's alone: mode 0600, judged on the handle that reads it.
     const fd = openSync(bundle, 'r');
+    let bundleBytes: Buffer;
     try {
       expect(fstatSync(fd).mode & 0o777).toBe(0o600);
-      const head = Buffer.alloc(4);
-      readFileSync(fd).copy(head, 0, 0, 4);
-      expect(head.readUInt32LE(0)).toBe(0x04034b50);
+      bundleBytes = readFileSync(fd);
     } finally {
       closeSync(fd);
     }
+    expect(bundleBytes.readUInt32LE(0)).toBe(0x04034b50);
     // No plaintext of a row is in it.
-    expect(readFileSync(bundle).includes(Buffer.from('Grüße'))).toBe(false);
+    expect(bundleBytes.includes(Buffer.from('Grüße'))).toBe(false);
     sourceFiles = filesOf(source.blobRoot);
     expect(sourceFiles.length).toBeGreaterThanOrEqual(2);
     // The source is fenced now: writes are refused.

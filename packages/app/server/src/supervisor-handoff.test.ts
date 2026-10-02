@@ -3,7 +3,16 @@
  * block: what the re-executed image is started with, the handoff it reads and removes, and the
  * refusals of a handoff that is not one.
  */
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -40,14 +49,21 @@ class Executed extends Error {
   ) {
     super('executed');
     const path = env[SUPERVISOR_HANDOFF_VAR];
-    this.handoff =
-      path === undefined
-        ? undefined
-        : {
-            mode: statSync(path).mode & 0o777,
-            directoryMode: statSync(dirname(path)).mode & 0o777,
-            content: readFileSync(path, 'utf8'),
-          };
+    this.handoff = path === undefined ? undefined : readHandoff(path);
+  }
+}
+
+/** The handoff file's mode and content, judged and read through one descriptor. */
+function readHandoff(path: string): { mode: number; directoryMode: number; content: string } {
+  const fd = openSync(path, 'r');
+  try {
+    return {
+      mode: fstatSync(fd).mode & 0o777,
+      directoryMode: statSync(dirname(path)).mode & 0o777,
+      content: readFileSync(fd, 'utf8'),
+    };
+  } finally {
+    closeSync(fd);
   }
 }
 
