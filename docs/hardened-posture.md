@@ -93,11 +93,11 @@ Two kinds of suite run:
 
 | Check | What the certification suites show |
 | --- | --- |
-| `runtime-role-evidence` | every session the served process holds is the runtime role, which is no superuser, has no `BYPASSRLS` and owns nothing; the application's tables have their row policy enabled and forced |
+| `runtime-role-evidence` | every session the served process holds after its boot is the runtime role, which is no superuser, has no `BYPASSRLS` and owns nothing; the application's tables have their row policy enabled and forced. The process still holds the migration role's connection in its environment, which the application's code can read ([Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks)) |
 | `object-authorization` | a member reaches every store operation, an upload part, a playback stream and the event stream; nothing is reached without a credential; once the member is removed, every write, upload part, run start and the playback token minted before are refused at once, and the run they had queued is ended by the worker without calling the provider. The event stream keeps serving the removed member's unexpired token, as stated above for every read. No route serves an export: the snapshot is written by the operator's CLI |
 | `trusted-proxies` | a forwarded-for header from an address that is not pinned is not believed: the audit records the socket peer and the rate limit is the peer's; the port listens on loopback |
 | `cors-and-csrf` | a preflight from another origin gets no `access-control-allow-origin`; a refresh authenticated by the session cookie is refused cross-site |
-| `upload-limits` | a body over 1 MiB is refused with `413` before it is stored; an upload key that climbs out of the blob space is refused and writes nothing |
+| `upload-limits` | a JSON body over 1 MiB is refused with `413` before it is stored; the file capability's suites refuse a file over its per-file limit; an upload key that climbs out of the blob space is refused and writes nothing. A stream ingest route's body has no cap of its own and is not bounded by this check: cap request bodies at the reverse proxy ([Threat model → What the host must enforce](./threat-model.md#what-the-host-must-enforce)) |
 | `sanitized-errors` | a handler's internal detail, malformed JSON, a bad id, an unknown route and a bad token each answer an error envelope with no stack, SQL or secret, and the server log carries no secret |
 | `outbound-guard` | the guard's own suites (no outbound path of this release takes a URL from a spec or a request) |
 | `recovery-scope` | `GET /recovery-scope` answers `404` under the managed posture |
@@ -112,13 +112,17 @@ Two kinds of suite run:
 | `resource-bounds` | with a provider that never answers: in-request runs past `RAYSPEC_AGENT_SYNC_RUNS_MAX` and queued runs past `RAYSPEC_AGENT_QUEUE_MAX` are refused with `429` `queue-full`; store traffic beside them is served; every admitted run ends (`timeout`, or `cancelled` for the one cancelled), none is left running; the runtime role's sessions never exceed the serving pool (4), the worker's pool (its concurrency plus one) and the event bus's listener; resident memory returns near its baseline; the provider is left with no open request |
 | `export-import-round-trip` | a deployment in this posture is exported while it serves, imported into an empty target, cut over and served there in the same posture: every row and file is equal, every access token, refresh session, API key and invite of the source is refused, every password signs in, and the source stays fenced |
 
-A skipped test fails its check: a test that did not run is not evidence. The summary also names
+A skipped test fails its check: a test that did not run is not evidence. So does a file whose vitest
+run did not exit 0 — an unhandled rejection or a crash outside every test — even when its report
+lists every test as passed, and a file that wrote no report: a report an earlier run left in the log
+directory is removed before the file runs. The summary also names
 what the posture asks for that Core has no surface for: support access (Core has no path by which an
 operator or vendor account reaches an organization's data). The lane sets every provider credential
 empty for the suites, so no run spends.
 
 The log directory holds the whole evidence of a run: each suite file's output and vitest JSON
-report, and `summary.json`, which names each report and records what the lane ran on — the commit,
+report, and `summary.json`, which names each report and the exit status of the vitest run that
+wrote it, and records what the lane ran on — the commit,
 whether the working tree was clean, the runtime version, the platform, the architecture and the Node
 version.
 
@@ -141,8 +145,10 @@ stderr; that digest is what the runtime-control adapter is given as `managedRece
 refuses (exit 1, nothing written), naming the reason, when:
 
 - the lane did not pass, a check of this checkout's lane is missing or ran other suite files, or any
-  report — each is read and judged again, not taken from the summary — shows a failed or skipped
-  test, or cannot be read;
+  report — each is read and judged again against the one suite file it is named for, not taken from
+  the summary — shows a failed or skipped test, is of another file, or cannot be read;
+- one report is named for two suite files, or the summary records a file whose vitest run did not
+  exit 0;
 - the lane did not run as the runtime role, ran on a working tree with changes, or at another commit
   than the checkout running the generator;
 - the lane did not run on linux x64 with Node 22.21 or a later 22 release, the only targets a
@@ -166,12 +172,16 @@ Each fixed protection of the receipt is claimed through the checks that establis
 | `egressEnforcement` | `host-network-policy` | `outbound-guard` (the runtime guards only its own requests; the host enforces egress) |
 
 `supportedBackends` lists an agent backend of the [matrix](#supported-backends) that the posture
-allows only when every test its row names passed in the lane, and `capabilities` leaves out a
-provider capability whose row was not proven the same way. `evidence` names every report, by its
+allows only when every test its row names passed in the lane. `capabilities` is not a tested claim:
+as the contract defines it, it lists the capability vocabulary's available ids that the managed
+posture allows, and the generator leaves out a provider capability whose row was not proven the same
+way. Only the provider capabilities rest on lane evidence; the others are what the posture permits
+an application to use, not protections the lane certifies. `evidence` names every report, by its
 file name in the lane directory with its SHA-256, under the check it proves, and the summary
 itself. `residualRisks` is the list in [Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks).
-The CI `certification` job runs the lane on linux x64; a lane run on a developer machine of another
-platform is not evidence for a receipt.
+The CI `certification` job runs the lane on linux x64 and keeps its log directory as the workflow
+artifact `certification-lane`; download it and pass it as `--lane`, from a checkout of the commit the
+job ran at. A lane run on a developer machine of another platform is not evidence for a receipt.
 
 ## What the runtime checks on every request and job
 

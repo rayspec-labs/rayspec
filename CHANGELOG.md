@@ -17,33 +17,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   security, single-tenant mode, the managed posture and pinned trusted proxies, and prove: object
   authorization for two users and a removed member on every store route, upload part, playback and
   event stream and queued run; trusted-proxy headers believed only from the pinned address; CORS and
-  CSRF where the session cookie authenticates; body and upload-path limits; sanitized error
-  envelopes; every hostile archive of the contract corpus refused by the deploy and every hostile
-  migration bundle by the import, with nothing extracted or restored; bounded sessions, memory and
+  CSRF where the session cookie authenticates; the JSON body limit and upload-path limits; sanitized
+  error envelopes; every hostile archive of the contract corpus that the reader refuses at its default
+  limits refused by the deploy, and every hostile migration bundle except the inner size bomb refused
+  by the import, with nothing extracted or restored (the archives that need a lowered reader limit,
+  and the size bomb, are covered by the reader's own corpus suite, which the lane runs); bounded sessions, memory and
   queue admission under a parallel workload against a provider that never answers; and an export,
   import and restore round trip with the identity reset. The rest are the existing suites run as the
   runtime role. CI runs it in the `certification` job. See
   [Hosting in the hardened posture → Certifying the posture](./docs/hardened-posture.md#certifying-the-posture).
   The lane also certifies single-tenant mode, the agent trace export staying off, the execution
   levels and the supported-backend matrix, and its log directory now holds `summary.json`, which
-  names each suite's report and records the commit, whether the working tree was clean, the runtime
-  version and the platform the lane ran on.
+  names each suite's report and the exit status of its vitest run, and records the commit, whether
+  the working tree was clean, the runtime version and the platform the lane ran on. A suite file
+  whose vitest run does not exit 0 (an unhandled rejection or a crash outside every test) fails its
+  check even when its report lists every test as passed; a report left by an earlier run into the
+  same log directory is removed before the file runs; a report counts only for the file at its full
+  path in the repository. The CI job keeps the log directory as the workflow artifact
+  `certification-lane`, and the log directory, summary and receipt the docs write into the
+  repository root are ignored by git, so a second run still records a clean tree.
 
 - **The managed-posture receipt generator.** `pnpm receipt:managed` (`scripts/managed-receipt.mjs`)
   makes a release's managed-posture receipt from one certification lane directory and the release
   manifest, as canonical JSON that `validateReceipt` accepts. Each protection it states is claimed
-  through the lane checks that establish it; every report is judged again rather than taken from the
-  summary; a backend is listed only when every test of its matrix row passed. It refuses, naming why
-  and writing nothing, when a check failed, was skipped or is missing, when the lane did not run as
+  through the lane checks that establish it; every report is judged again, against the one suite
+  file it is named for, rather than taken from the summary; a backend is listed only when every test
+  of its matrix row passed. `capabilities` lists what the managed posture allows, as the contract
+  defines the field; only its provider capabilities rest on lane evidence. It refuses, naming why
+  and writing nothing, when a check failed, was skipped or is missing, a suite file's vitest run did
+  not exit 0, one report is named for two suite files, when the lane did not run as
   the runtime role on linux x64 with Node 22.21 or later from a clean tree at the checkout's commit,
-  or when the release manifest is for another version, commit or target. See
+  or when the release manifest is for another version, commit or target, or carries a package of
+  another version. See
   [Hosting in the hardened posture → The managed-posture receipt](./docs/hardened-posture.md#the-managed-posture-receipt).
 
 - **A threat model for operators.** [docs/threat-model.md](./docs/threat-model.md) states the
   boundaries, the adversaries, what the runtime enforces (each with the lane check that proves it),
   what the host must enforce — the process sandbox, the egress firewall, encrypted volumes, backups,
   the request edge — the supported-backend matrix, and every residual risk this release accepts, with
-  its owner, word for word as the receipt carries them.
+  its owner, word for word as the receipt carries them. It states that the serving process keeps the
+  migration role's connection, so the application's own code can bypass row-level security and lift
+  an export's fence, and that a stream ingest route's body is capped only by the reverse proxy;
+  docs/export.md and docs/hardened-posture.md say the same where they describe the barrier and the
+  body limits.
 
 - **`rayspec deploy <file.ray>`: deploy an application bundle on a self-hosted target.** A file
   that starts with a ZIP signature or whose name ends in `.ray` takes the bundle path, decided on

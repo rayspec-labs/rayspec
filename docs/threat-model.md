@@ -29,11 +29,11 @@ not make an environment immune to a compromise of the provider or to every side 
 
 | Adversary | What the runtime does |
 | --- | --- |
-| An anonymous client on the internet | Every store, run, upload, stream and event route needs a credential; `GET /recovery-scope` is not served under the managed posture; every error answer is a sanitized envelope; request bodies are bounded; registration only creates the first organization, and after it accounts are made by invite. |
+| An anonymous client on the internet | Every store, run, upload, stream and event route needs a credential; `GET /recovery-scope` is not served under the managed posture; every error answer is a sanitized envelope; JSON request bodies are capped at 1 MiB and file uploads at their per-file limit (a stream ingest route's body is capped only by the reverse proxy: see the host's request edge); registration only creates the first organization, and after it accounts are made by invite. |
 | A signed-in user, or a stolen ordinary credential | Authentication is not authorization: every object, upload part, stream, event subscription and queued run is checked against the caller's organization, and every write, run start and administrative action rereads the live membership. A stolen credential works until it expires or is revoked (see the residual risks). |
-| A customer who uploads an executable bundle | The bundle reader refuses a hostile archive before anything is extracted or run; a bundle declares its execution level (`none` or `in-process`; `sandboxed` is refused), its bindings, its egress hosts and its capabilities, and the plan reports each before anything is applied. Once deployed, its code runs **inside** the runtime process with the process's rights: only the host contains it. |
+| A customer who uploads an executable bundle | The bundle reader refuses a hostile archive before anything is extracted or run; a bundle declares its execution level (`none` or `in-process`; `sandboxed` is refused), its bindings, its egress hosts and its capabilities, and the plan reports each before anything is applied. Once deployed, its code runs **inside** the runtime process with the process's rights, which include the migration role's connection: only the host contains it. |
 | One compromised application | Holds whatever its environment holds and nothing else, as long as the host keeps environments apart: its own VM or container, databases, credentials, volume and egress rules. |
-| A malicious file or model output | Uploads are bounded and kept in the organization's blob space; a model output reaches tools only through the agent's declared tool list; outbound requests the platform makes itself pass the outbound guard. |
+| A malicious file or model output | File uploads are bounded, a stream ingest body only by the reverse proxy, and every upload is kept in the organization's blob space; a model output reaches tools only through the agent's declared tool list; outbound requests the platform makes itself pass the outbound guard. |
 | A hostile migration bundle or dump | `rayspec import` refuses a wrong identity, a broken ciphertext, a traversal entry, an invalid snapshot document, mismatched digests and a privileged dump before anything reaches the target. |
 | A compromised dependency | Nothing inside the process contains it; the pinned versions and the dependency SBOM record what ships. |
 | An operator mistake | Configuration refusals come before the first database write; a typo in a posture switch refuses the boot instead of leaving it off; a plan expires and is recomputed; an interrupted operation is recorded and recovered as [Runtime operations](./runtime-operations.md) describes. |
@@ -45,12 +45,12 @@ that proves it on a real database, as the ordinary runtime role.
 
 | Protection | Check |
 | --- | --- |
-| The serving process holds only the runtime role; every tenant table has a forced row policy | `runtime-role-evidence` |
+| The serving process's requests, jobs and streams run as the runtime role, and every tenant table has a forced row policy; the migration role's pool is closed once the boot's schema work is done. This binds the platform's own queries, not the application's code: the process keeps the migration role's connection in its environment (see the residual risks) | `runtime-role-evidence` |
 | Object authorization on every store route, upload part, playback stream, event stream and queued run, for a member and a removed member | `object-authorization` |
 | One organization per environment, on every path, in export and in import | `single-tenant-mode` |
 | Forwarding headers believed only from the pinned proxies | `trusted-proxies` |
 | CORS origins and CSRF where a cookie authenticates | `cors-and-csrf` |
-| Body and upload limits; an upload cannot leave its organization's blob space | `upload-limits` |
+| JSON bodies capped at 1 MiB and file uploads at their per-file limit; an upload cannot leave its organization's blob space. A stream ingest route's body has no cap of its own: the reverse proxy caps it | `upload-limits` |
 | Sanitized error envelopes and one redaction path for every output | `sanitized-errors` |
 | Outbound requests the platform makes refuse loopback, private, link-local and metadata addresses, after resolution and on every redirect, within a time limit | `outbound-guard` |
 | `GET /recovery-scope` is not served | `recovery-scope` |
@@ -86,10 +86,14 @@ of the runtime closes.
   ([Export](./export.md), [Import](./import.md)); they are not a backup schedule.
 - **The request edge.** Terminate TLS at a reverse proxy, pin its addresses in
   `RAYSPEC_TRUSTED_PROXIES`, keep the application port unreachable except through it, and cap
-  request bodies there.
+  request bodies there: the runtime caps JSON bodies and file uploads, but a stream ingest route's
+  body reaches its handler uncapped.
 - **Secrets.** Keep boot secrets and bindings files encrypted at rest and readable only by the user
   the runtime runs as; rotate them as [Credentials and rotation](./hardened-posture.md#credentials-and-rotation)
-  describes.
+  describes. The serving process holds the migration role's connection, so the application's code
+  can read it: deploy only code you trust with it, and before exporting an application whose code
+  you do not trust, stop every runtime process of the source and keep it stopped until the target
+  has taken over ([Export](./export.md#the-database-write-barrier)).
 - **Management access.** Multi-factor authentication for whoever can deploy, export or read an
   environment's secrets; short-lived credentials for automation; audit every support access you add.
 - **Quotas.** VM, network and provider budgets per environment. The runtime bounds each run, queue
@@ -126,9 +130,17 @@ word, with its owner: **RaySpec Core** where the runtime would have to change to
 
 - **Hosting operator**: The runtime is not a sandbox. Handlers and extensions run inside the
   runtime process: they can read its environment and files, open their own database connection as
-  the runtime role and claim any tenant id in it, and read a migration credential that is given to
-  that process. Only a boundary outside the process contains code that is not trusted: a dedicated
-  VM or container, its own databases, and host egress rules.
+  the runtime role and claim any tenant id in it, and read every credential the process holds, the
+  migration role's included. Only a boundary outside the process contains code that is not trusted:
+  a dedicated VM or container, its own databases, and host egress rules.
+- **RaySpec Core**: With role separation the serving process is given the migration role's
+  connection (`RAYSPEC_MIGRATION_DATABASE_URL`, which a role-separated deploy requires, or its
+  `_FILE` mount) and, when one is configured, the snapshot role's, and keeps them after the boot's
+  schema work. The application's code in that process can read them; with the migration role it
+  bypasses row-level security, writes while an export has fenced the source, gives the runtime role
+  its writes back and opens the fence. Row-level security and the export's database barrier hold
+  against requests and the platform's own queries, not against the application's own code: stop the
+  source before exporting an application whose code is not trusted.
 - **Hosting operator**: A deploy's boot rehearsal imports the bundle's handler modules before the
   platform's boot checks run, as every boot always has, so a bundle's top-level code runs on the host
   before a refusal can stop it.
@@ -194,8 +206,12 @@ tested, on which target, with the evidence and the residual risks above. `inspec
 managed posture as supported only when the runtime is given that receipt's SHA-256 and the posture
 is fully on ([Checking it](./hardened-posture.md#checking-it)).
 
+Its `capabilities` field is the vocabulary's list of what the managed posture allows an application
+to use; apart from the provider capabilities, whose backends the lane tests, it is not a tested
+claim.
+
 `pnpm receipt:managed` makes it from one run of the certification lane, and refuses when any check
-did not pass, a test was skipped, the lane did not run on linux x64 with Node 22.21 or later, its
+did not pass, a test was skipped, a suite file's run did not exit 0, the lane did not run on linux x64 with Node 22.21 or later, its
 working tree was not clean, or the release manifest is for another version, commit or target. How to
 run it, and which check each claim rests on, is in
 [Hosting in the hardened posture → The managed-posture receipt](./hardened-posture.md#the-managed-posture-receipt).

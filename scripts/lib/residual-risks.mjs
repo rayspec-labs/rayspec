@@ -18,7 +18,11 @@ export const HOST = 'Hosting operator';
 export const RESIDUAL_RISKS = [
   {
     owner: HOST,
-    risk: 'The runtime is not a sandbox. Handlers and extensions run inside the runtime process: they can read its environment and files, open their own database connection as the runtime role and claim any tenant id in it, and read a migration credential that is given to that process. Only a boundary outside the process contains code that is not trusted: a dedicated VM or container, its own databases, and host egress rules.',
+    risk: "The runtime is not a sandbox. Handlers and extensions run inside the runtime process: they can read its environment and files, open their own database connection as the runtime role and claim any tenant id in it, and read every credential the process holds, the migration role's included. Only a boundary outside the process contains code that is not trusted: a dedicated VM or container, its own databases, and host egress rules.",
+  },
+  {
+    owner: CORE,
+    risk: "With role separation the serving process is given the migration role's connection (RAYSPEC_MIGRATION_DATABASE_URL, which a role-separated deploy requires, or its _FILE mount) and, when one is configured, the snapshot role's, and keeps them after the boot's schema work. The application's code in that process can read them; with the migration role it bypasses row-level security, writes while an export has fenced the source, gives the runtime role its writes back and opens the fence. Row-level security and the export's database barrier hold against requests and the platform's own queries, not against the application's own code: stop the source before exporting an application whose code is not trusted.",
   },
   {
     owner: HOST,

@@ -27,7 +27,7 @@ read-only:
 | Cron and webhook triggers, the on-demand trigger, the run queue, the tenant event bus | stopped (paused, not shut down) |
 | Event streams | closed |
 | Runs in flight | drained, up to `--quiesce-deadline` (default 300 seconds) |
-| The database | a write barrier the application cannot bypass (below) |
+| The database | a write barrier the platform's requests and jobs cannot pass (below) |
 | Blob writes | refused |
 
 The export itself takes about as long as `pg_dump` of both databases plus one read of every blob
@@ -49,6 +49,11 @@ refusal comes after the fence and leaves the source fenced:
   With `RAYSPEC_MIGRATION_DATABASE_URL` set, the export connects as the migration role and revokes
   the runtime role's `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` on every table of both databases
   until resume (barrier `database-write-role`). The deployment can keep running while you export.
+  The barrier binds the runtime role, not the application's own code: the serving process also holds
+  the migration role's connection, and code of the application can use it to write past the fence
+  or open it. Before exporting an application whose code you do not trust, stop every runtime
+  process of the source and keep it stopped until the target has taken over
+  ([Threat model](./threat-model.md#accepted-residual-risks)).
 - **A stopped source.** Without role separation, stop every runtime process of the deployment and
   pass `--source-stopped`. The export checks that no other session is connected to either database
   (barrier `database-stopped-source`).
