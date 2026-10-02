@@ -5,14 +5,18 @@
  * when it stops: `ok: true` after a signal-driven shutdown, `ok: false` with the refusal as
  * `RAY_CHECK_FAILED` when the boot is refused. Its exit codes are the ones it has without the flag:
  * 0 after a shutdown, 1 for a refusal. Without the flag the banner stays on stdout.
+ *
+ * Each deploy listens on a port the operating system hands out, and every one is stopped after its
+ * test, also when the test fails before it sends the signal.
  */
 import { type ChildProcess, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { schemaValidator } from '@rayspec/bundle-contract';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { CLI_DIST } from './test-support/bundles.js';
+import { freePort, SpawnedProcesses } from './test-support/processes.js';
 
 const distBuilt = existsSync(CLI_DIST);
 if (process.env.CI && !distBuilt) {
@@ -26,7 +30,8 @@ if (!distBuilt) {
 const maybeDescribe = distBuilt ? describe : describe.skip;
 
 const valid = schemaValidator('resultEnvelope');
-const PORT = 23000 + (process.pid % 900);
+// Every deploy this suite starts, stopped after each test whatever its outcome.
+const processes = new SpawnedProcesses();
 
 const FRONTEND_ONLY_SPEC = `version: '1.0'
 metadata:
@@ -52,7 +57,9 @@ beforeAll(() => {
   writeFileSync(join(root, 'static.yaml'), FRONTEND_ONLY_SPEC);
   writeFileSync(join(root, 'store.yaml'), STORE_SPEC);
 });
+afterEach(() => processes.stopAll());
 afterAll(() => {
+  expect(processes.running).toBe(0);
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
@@ -64,11 +71,13 @@ interface Run {
 }
 
 function deploy(args: string[]): Run {
-  const child = spawn(process.execPath, [CLI_DIST, 'deploy', ...args], {
-    cwd: root,
-    // Built explicitly so no ambient database URL or boot secret reaches the child.
-    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', RAYSPEC_SKIP_DOTENV: '1' },
-  });
+  const child = processes.track(
+    spawn(process.execPath, [CLI_DIST, 'deploy', ...args], {
+      cwd: root,
+      // Built explicitly so no ambient database URL or boot secret reaches the child.
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', RAYSPEC_SKIP_DOTENV: '1' },
+    }),
+  );
   let out = '';
   let err = '';
   child.stdout?.on('data', (d) => {
@@ -93,7 +102,7 @@ async function waitFor(run: Run, predicate: () => boolean, ms = 30_000): Promise
 
 maybeDescribe('rayspec deploy --json (serving)', () => {
   it('a refused boot writes one ok:false envelope and exits 1', async () => {
-    const run = deploy(['store.yaml', '--json', '--port', String(PORT)]);
+    const run = deploy(['store.yaml', '--json', '--port', String(await freePort())]);
     expect(await run.exited).toBe(1);
     const env = JSON.parse(run.out());
     expect(valid(env)).toBe(true);
@@ -105,8 +114,9 @@ maybeDescribe('rayspec deploy --json (serving)', () => {
   });
 
   it('a served deployment stopped by SIGTERM writes one ok:true envelope; banners go to stderr', async () => {
-    const run = deploy(['static.yaml', '--json', '--port', String(PORT + 1)]);
-    await waitFor(run, () => run.err().includes(`:${PORT + 1}`));
+    const port = await freePort();
+    const run = deploy(['static.yaml', '--json', '--port', String(port)]);
+    await waitFor(run, () => run.err().includes(`:${port}`));
     expect(run.out()).toBe('');
     run.child.kill('SIGTERM');
     expect(await run.exited).toBe(0);
@@ -121,8 +131,9 @@ maybeDescribe('rayspec deploy --json (serving)', () => {
   });
 
   it('without --json the banner stays on stdout and no envelope is written', async () => {
-    const run = deploy(['static.yaml', '--port', String(PORT + 2)]);
-    await waitFor(run, () => run.out().includes(`:${PORT + 2}`));
+    const port = await freePort();
+    const run = deploy(['static.yaml', '--port', String(port)]);
+    await waitFor(run, () => run.out().includes(`:${port}`));
     run.child.kill('SIGTERM');
     expect(await run.exited).toBe(0);
     expect(run.out()).not.toContain('contractVersion');
