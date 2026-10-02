@@ -41,11 +41,11 @@ import {
 import { provisionTenant, type TenantProvisionSecrets } from './tenant-provision.js';
 
 /**
- * Undo the newest platform migration (the owner recovery tokens table), so the database is one
- * migration behind this runtime, as a database left by the previous release is.
+ * Undo the newest platform migration (the blob backend column of the runtime-control state), so
+ * the database is one migration behind this runtime, as a database left by the previous release is.
  */
 const UNDO_NEWEST_MIGRATION = `
-DROP TABLE owner_recovery_tokens;
+ALTER TABLE runtime_control_state DROP COLUMN blob_backend;
 `;
 
 const baseUrl = process.env.DATABASE_URL;
