@@ -388,6 +388,11 @@ export {
   RESTORE_OPTIONS,
   restoreDump,
 } from './pg-restore.js';
+// The privileged connections each entrypoint takes out of the environment before it serves.
+export {
+  PRIVILEGED_CONNECTION_VARS,
+  withholdPrivilegedConnections,
+} from './privileged-connections.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so

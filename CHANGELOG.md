@@ -1087,6 +1087,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A serving process takes the migration and snapshot connections out of its environment.**
+  `rayspec deploy` and `rayspec-serve` remove `RAYSPEC_MIGRATION_DATABASE_URL`,
+  `RAYSPEC_SNAPSHOT_DATABASE_URL` and their `_FILE` forms from `process.env` before they read the
+  configuration and before any application module is imported; the boot reads them from a copy. A
+  handler, at import or while it serves, and every child process the server spawns no longer find
+  either connection in their environment. `@rayspec/server` exports the step as
+  `withholdPrivilegedConnections` and the variable list as `PRIVILEGED_CONNECTION_VARS`. Code inside
+  the process can still reach the migration role's connection through the process's original
+  environment block, a readable `_FILE` mount, or the boot's own connection; the residual risk in
+  [Threat model](./docs/threat-model.md#accepted-residual-risks) says what remains.
 - **In the hardened posture a stream handler no longer receives the caller's credential.** With
   role separation or single-tenant mode turned on, the Web `Request` a `stream` route handler is
   handed (`init.request`) no longer carries `authorization`, `proxy-authorization` or `cookie`, and

@@ -117,6 +117,12 @@ describe.skipIf(!baseUrl)('the mandatory public-hosting checks, in the hardened 
         sql.unsafe('SELECT count(*)::int AS n FROM orgs') as unknown as Promise<{ n: number }[]>,
     );
     expect(orgs?.n).toBe(1);
+    // The deploy was started with the migration and snapshot connections (role separation is what
+    // forced the row policy above), yet application code reads neither: not when its module was
+    // imported, not while it serves. It does see the environment it was started with otherwise.
+    const environment = await request(d.base, '/environment', { token: ownerToken });
+    expect(environment.status, environment.text).toBe(200);
+    expect(environment.body).toEqual({ atImport: [], atRequest: [], database: true });
     armsRan += 1;
   });
 

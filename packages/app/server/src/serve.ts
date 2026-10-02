@@ -38,6 +38,7 @@ import {
   loadStaticServerConfig,
   parseShutdownDrainMs,
 } from './composition-root.js';
+import { withholdPrivilegedConnections } from './privileged-connections.js';
 import { ProductBootError } from './product-boot.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
@@ -114,7 +115,9 @@ async function main(): Promise<void> {
   console.log(
     '[rayspec-serve] booting — loading config, connecting to the database, applying migrations…',
   );
-  const config = loadServerConfig();
+  // The migration and snapshot connections leave the environment before any application module is
+  // imported; the boot reads them from the copy (privileged-connections.ts).
+  const config = loadServerConfig(withholdPrivilegedConnections());
   // Guard the assemble step (DB connect → migration chain → product boot) with a boot timeout so a hung
   // boot is DIAGNOSED (see boot-timeout.ts) rather than hanging forever. The happy path is unchanged: a
   // normal boot completes well under the timeout and the timer is cleared.

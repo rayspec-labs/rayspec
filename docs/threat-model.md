@@ -45,7 +45,7 @@ that proves it on a real database, as the ordinary runtime role.
 
 | Protection | Check |
 | --- | --- |
-| The serving process's requests, jobs and streams run as the runtime role, and every tenant table has a forced row policy; the migration role's pool is closed once the boot's schema work is done. This binds the platform's own queries, not the application's code: the process keeps the migration role's connection in its environment (see the residual risks) | `runtime-role-evidence` |
+| The serving process's requests, jobs and streams run as the runtime role, and every tenant table has a forced row policy; the migration role's pool is closed once the boot's schema work is done. This binds the platform's own queries, not the application's code: the process takes the migration and snapshot connections out of the environment a handler or a child reads, but code inside it can still reach the migration role's (see the residual risks) | `runtime-role-evidence` |
 | Object authorization on every store route, upload part, playback stream, event stream and queued run, for a member and a removed member | `object-authorization` |
 | One organization per environment, on every path, in export and in import | `single-tenant-mode` |
 | Forwarding headers believed only from the pinned proxies | `trusted-proxies` |
@@ -90,10 +90,12 @@ of the runtime closes.
   body reaches its handler uncapped.
 - **Secrets.** Keep boot secrets and bindings files encrypted at rest and readable only by the user
   the runtime runs as; rotate them as [Credentials and rotation](./hardened-posture.md#credentials-and-rotation)
-  describes. The serving process holds the migration role's connection, so the application's code
-  can read it: deploy only code you trust with it, and before exporting an application whose code
-  you do not trust, stop every runtime process of the source and keep it stopped until the target
-  has taken over ([Export](./export.md#the-database-write-barrier)).
+  describes. The serving process takes the migration and snapshot connections out of its
+  environment before it imports the application, but code inside the process can still reach the
+  migration role's connection (see the residual risks): deploy only code you trust with it, and
+  before exporting an application whose code you do not trust, stop every runtime process of the
+  source and keep it stopped until the target has taken over
+  ([Export](./export.md#the-database-write-barrier)).
 - **Management access.** Multi-factor authentication for whoever can deploy, export or read an
   environment's secrets; short-lived credentials for automation; audit every support access you add.
 - **Quotas.** VM, network and provider budgets per environment. The runtime bounds each run, queue
@@ -133,14 +135,18 @@ word, with its owner: **RaySpec Core** where the runtime would have to change to
   the runtime role and claim any tenant id in it, and read every credential the process holds, the
   migration role's included. Only a boundary outside the process contains code that is not trusted:
   a dedicated VM or container, its own databases, and host egress rules.
-- **RaySpec Core**: With role separation the serving process is given the migration role's
-  connection (`RAYSPEC_MIGRATION_DATABASE_URL`, which a role-separated deploy requires, or its
-  `_FILE` mount) and, when one is configured, the snapshot role's, and keeps them after the boot's
-  schema work. The application's code in that process can read them; with the migration role it
-  bypasses row-level security, writes while an export has fenced the source, gives the runtime role
-  its writes back and opens the fence. Row-level security and the export's database barrier hold
-  against requests and the platform's own queries, not against the application's own code: stop the
-  source before exporting an application whose code is not trusted.
+- **RaySpec Core**: With role separation the boot needs the migration role's connection for its
+  schema work, so the serving process is started with it (`RAYSPEC_MIGRATION_DATABASE_URL`, which a
+  role-separated deploy requires, or its `_FILE` mount). Both entrypoints take it, and the snapshot
+  role's, out of the process environment before any application module is imported, and the
+  migration role's pool is closed once the schema work is done, so a handler and a child process
+  find neither in their environment. The process's original environment block, which the operating
+  system still shows to code inside the process, and a `_FILE` mount the runtime's user can read
+  still hold it, and code imported before the schema work can intercept the connection the boot
+  opens. Code that does any of this gets the migration role, which bypasses row-level security,
+  writes while an export has fenced the source, gives the runtime role its writes back and opens the
+  fence. Only running the schema work in a separate process removes it: until then, stop the source
+  before exporting an application whose code is not trusted.
 - **Hosting operator**: A deploy's boot rehearsal imports the bundle's handler modules before the
   platform's boot checks run, as every boot always has, so a bundle's top-level code runs on the host
   before a refusal can stop it.

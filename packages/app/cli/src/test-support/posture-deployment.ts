@@ -74,6 +74,7 @@ export const POSTURE_SPEC = backendSpec(
     "  - { method: GET, path: '/media/{id}', action: { kind: stream, handler: play, mode: playback } }\n" +
     "  - { method: POST, path: '/announce', action: { kind: handler, handler: announce } }\n" +
     "  - { method: POST, path: '/boom', action: { kind: handler, handler: boom } }\n" +
+    "  - { method: GET, path: '/environment', action: { kind: handler, handler: environment } }\n" +
     'agents:\n' +
     '  - { id: echo, name: echo, backend: openai, model: gpt-4o-mini, instructions: Echo the input., maxTurns: 1 }\n' +
     'handlers:\n' +
@@ -81,10 +82,21 @@ export const POSTURE_SPEC = backendSpec(
     '  - { id: mint, module: handlers/h.js, export: mint, kind: route, uses: [mintPlayToken] }\n' +
     '  - { id: play, module: handlers/h.js, export: play, kind: route, uses: [blob] }\n' +
     '  - { id: announce, module: handlers/h.js, export: announce, kind: route, uses: [emit] }\n' +
-    '  - { id: boom, module: handlers/h.js, export: boom, kind: route, uses: [] }\n',
+    '  - { id: boom, module: handlers/h.js, export: boom, kind: route, uses: [] }\n' +
+    '  - { id: environment, module: handlers/h.js, export: environment, kind: route, uses: [] }\n',
 );
 
+/** The privileged connection variables a handler must find in neither its import nor its request. */
+export const PRIVILEGED_VARIABLES = [
+  'RAYSPEC_MIGRATION_DATABASE_URL',
+  'RAYSPEC_MIGRATION_DATABASE_URL_FILE',
+  'RAYSPEC_SNAPSHOT_DATABASE_URL',
+  'RAYSPEC_SNAPSHOT_DATABASE_URL_FILE',
+];
+
 export const POSTURE_HANDLERS = `
+const PRIVILEGED = ${JSON.stringify(PRIVILEGED_VARIABLES)};
+const seenAtImport = PRIVILEGED.filter((name) => name in process.env);
 export async function ingest(init) {
   const bytes = new Uint8Array(await init.request.arrayBuffer());
   await init.blob.put('uploads/' + init.params.upload_id, bytes, {});
@@ -107,6 +119,13 @@ export async function announce(init) {
 }
 export async function boom() {
   throw new Error(${JSON.stringify(INTERNAL_DETAIL)});
+}
+export async function environment() {
+  return {
+    atImport: seenAtImport,
+    atRequest: PRIVILEGED.filter((name) => name in process.env),
+    database: 'DATABASE_URL' in process.env,
+  };
 }
 `;
 

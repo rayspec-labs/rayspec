@@ -699,6 +699,7 @@ export async function serveDeployment(
     ProductBootError,
     shutdownHttpServer,
     staticBootBanner,
+    withholdPrivilegedConnections,
   } = await import('@rayspec/server');
   const { sealProductStores } = await import('@rayspec/db/composition');
 
@@ -751,7 +752,10 @@ export async function serveDeployment(
       return;
     }
 
-    const config = loadServerConfig();
+    // The migration and snapshot connections leave the environment before any application module is
+    // imported, so no handler and no child process this server spawns reads them; the boot reads
+    // them from the copy.
+    const config = loadServerConfig(withholdPrivilegedConnections());
     // Build the deployer-seam opts from the SAME shared builder rayspec-serve uses: the sanctioned
     // validating registrar (registerProductStores) for ANY spec, PLUS an env-driven agentBackendsFactory
     // when the spec is a backend-profile doc WITH agents — so `rayspec deploy <backend-spec-with-agents>`
