@@ -313,6 +313,21 @@ license file; its manifest offers 0BSD, CC0-1.0 or the Unlicense, and RaySpec
 uses it under the 0BSD terms, which require no attribution. It is named here so
 the inventory is complete.
 
+## Reference application dependency
+
+### mime-types and mime-db — MIT
+
+- `mime-types` 3.0.2 and its dependency `mime-db` 1.54.0 (the jshttp project)
+
+Both are licensed under the MIT License; their license texts travel in their own
+`node_modules` packages. They are a dependency of the `examples/asset-catalog`
+reference application's extension, not of any RaySpec package: the example's
+handler derives a content type from a file name with them, and `rayspec pack`
+carries them, with their notices in the bundle's `THIRD-PARTY-NOTICES.txt`, into
+that application's bundle. Both were already in the lockfile as transitive
+dependencies (of `accepts`, `send` and `type-is`), so the inventory counts below
+are unchanged.
+
 ## Weak-copyleft build-time dependency
 
 ### lightningcss — MPL-2.0

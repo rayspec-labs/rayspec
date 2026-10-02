@@ -1,0 +1,41 @@
+# Asset catalog — a backend-profile application whose behaviour is custom code: a compiled TypeScript
+# extension (packs/catalog-pack) with two route handlers and one third-party npm dependency, a store
+# the handlers reach only through the injected tenant-bound database facade, an outbound HTTPS call
+# to one declared host, and static assets served at `/`.
+#
+# This file references the extension's SOURCE directory, which is what the repository's handler
+# gates scan. The runtime loads compiled JavaScript only: `node build.mjs` writes the deployable tree
+# (the same layout, the extension compiled and its dependencies vendored) to dist/, and dist/rayspec.yaml
+# is the spec to pack.
+
+version: '1.0'
+
+metadata:
+  name: Asset catalog
+  id: asset-catalog
+  version: '1.0.0'
+  description: A tenant's catalog of files, each classified by an external service on create.
+
+# The store the extension's handlers write, declared here so that every deploy plan sees it.
+# Business columns only: the platform adds the tenancy columns and the created_by stamp.
+stores:
+  - name: catalog_items
+    columns:
+      - { name: name, type: text }
+      - { name: file_name, type: text }
+      - { name: content_type, type: text }
+      - { name: category, type: text }
+
+extensions:
+  - id: catalog_pack
+    module: ./packs/catalog-pack
+    version: 1.0.0
+
+deployment:
+  # The one host the handlers call. Declarative: the bundle carries it as permissions.egressHosts,
+  # every plan reports it, and the host's network policy (an egress firewall or proxy) admits it
+  # and denies every other host. The runtime itself blocks nothing.
+  egressHosts: [classifier.example.com]
+
+frontend:
+  - { route: /, dir: public, spa: false }

@@ -1914,6 +1914,13 @@ An application bundle is different: [`rayspec pack`](./packing.md) leaves every
 the bundle provides them, and refuses the bundle when the range the extension's
 `package.json` declares for one excludes the runtime the bundle pins.
 
+A bundle deploy plans the product schema from the stores the deployment spec
+declares; the stores an extension's fragments contribute are not part of that plan.
+A table an extension contributed is therefore planned as dropped by the next bundle
+of the same application, and that update is refused as a destructive change. Declare
+the stores a bundled application's extension writes in the deployment spec, as
+[`examples/asset-catalog`](../examples/asset-catalog/rayspec.yaml) does.
+
 ## `deployment`
 
 Optional deployment-level properties (an object, not a list). Absent means no

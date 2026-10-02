@@ -25,6 +25,9 @@ packages:
   # typecheck/test SCRIPTS, excluded from CI by `--filter='!@spike/*'`, and built for deploy by the
   # example's own build.mjs.
   - "examples/agent-pack-deployment/packs/*"
+  # The asset-catalog extension: a @spike/* workspace member so pnpm installs its third-party
+  # dependency (mime-types) into its node_modules, where the example's build.mjs vendors it from.
+  - "examples/asset-catalog/packs/*"
 
 onlyBuiltDependencies:
   - "@biomejs/biome"

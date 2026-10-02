@@ -1,0 +1,14 @@
+{
+  "//": "The manifest of the BUILT extension: build.mjs writes it (without this note) as the package.json of the compiled extension, and it is the manifest to use when this extension ships from its own repository. @rayspec/platform and @rayspec/handler-sdk are provided by the runtime that deploys the bundle; their range must include that runtime. mime-types is the extension's own third-party dependency, carried in the bundle with its dependency mime-db.",
+  "name": "catalog-pack",
+  "version": "1.0.0",
+  "private": true,
+  "license": "FSL-1.1-ALv2",
+  "type": "module",
+  "main": "./index.js",
+  "dependencies": {
+    "@rayspec/handler-sdk": "^1.8.0",
+    "@rayspec/platform": "^1.8.0",
+    "mime-types": "3.0.2"
+  }
+}
