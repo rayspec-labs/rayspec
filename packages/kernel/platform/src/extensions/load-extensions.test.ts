@@ -391,4 +391,67 @@ describe('loadExtensions — fail-closed resolution + merge', () => {
     expect((modA.run as () => string)()).toBe('real-A');
     expect((modB.run as () => string)()).toBe('real-B');
   });
+
+  // ── Which extension provided a capability ──────────────────────────────────────────────────────
+  describe('capability providers', () => {
+    const blobFactory = (() => {
+      throw new Error('never called');
+    }) as unknown as NonNullable<ExtensionManifest['capabilities']>['blobFactory'];
+    const plain = (): ExtensionManifest => ({ version: '1.0.0', fragments: {} });
+    const withBlob = (): ExtensionManifest => ({
+      version: '1.0.0',
+      fragments: {},
+      capabilities: { blobFactory },
+    });
+
+    it('names the extension that provided the blob backend, not the one before it', async () => {
+      const importer = fakeImporter(
+        new Map<string, Record<string, unknown>>([
+          [resolve(root, 'plain', 'index.ts'), { default: defineExtension(plain()) }],
+          [resolve(root, 'blob', 'index.ts'), { default: defineExtension(withBlob()) }],
+        ]),
+      );
+      const out = await loadExtensions(
+        [
+          { id: 'plain_pack', module: './plain', version: '1.0.0' },
+          { id: 'blob_pack', module: './blob', version: '1.0.0' },
+        ],
+        { packsRoot: root, deploymentRoot: root, importer },
+      );
+      expect(out.capabilities.blobFactory).toBe(blobFactory);
+      expect(out.capabilityProviders).toEqual({ blobFactory: 'blob_pack' });
+    });
+
+    it('names no provider when no extension provides a blob backend', async () => {
+      const importer = fakeImporter(
+        new Map<string, Record<string, unknown>>([
+          [resolve(root, 'plain', 'index.ts'), { default: defineExtension(plain()) }],
+        ]),
+      );
+      const out = await loadExtensions(
+        [{ id: 'plain_pack', module: './plain', version: '1.0.0' }],
+        { packsRoot: root, deploymentRoot: root, importer },
+      );
+      expect(out.capabilities.blobFactory).toBeUndefined();
+      expect(out.capabilityProviders).toEqual({});
+    });
+
+    it('a second extension providing a blob backend is refused, naming it', async () => {
+      const importer = fakeImporter(
+        new Map<string, Record<string, unknown>>([
+          [resolve(root, 'blob', 'index.ts'), { default: defineExtension(withBlob()) }],
+          [resolve(root, 'blob2', 'index.ts'), { default: defineExtension(withBlob()) }],
+        ]),
+      );
+      await expect(
+        loadExtensions(
+          [
+            { id: 'blob_pack', module: './blob', version: '1.0.0' },
+            { id: 'other_blob_pack', module: './blob2', version: '1.0.0' },
+          ],
+          { packsRoot: root, deploymentRoot: root, importer },
+        ),
+      ).rejects.toThrow(/extension 'other_blob_pack': provides a blobFactory capability/);
+    });
+  });
 });
