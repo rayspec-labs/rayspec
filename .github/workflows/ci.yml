@@ -450,6 +450,11 @@ jobs:
       - name: Upgrade with data from the previous release
         run: pnpm test:upgrade-with-data
 
+      # The same upgrade with the team-notes reference application (its 1.0.0 spec, less the
+      # metadata.id and metadata.version the previous release does not know).
+      - name: Upgrade with data from the previous release, team-notes
+        run: pnpm test:upgrade-with-data --app team-notes
+
       # ── DB test subset — the 9 Postgres-backed packages (8 platform + the local-boot example) ─────
       # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run
       # concurrently against one Postgres they deadlock / race on CREATE/DROP DATABASE. The two
