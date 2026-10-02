@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Team notes</title>
+    <!-- Files, not inline elements: the default Content-Security-Policy a served frontend carries
+         (`default-src 'self'`) blocks inline script and style, and allows same-origin files. -->
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <h1>Team notes</h1>
+      <p class="version">Application version <span id="app-version">…</span></p>
+    </header>
+    <main>
+      <form id="login">
+        <label>Email <input name="email" type="email" autocomplete="username" required /></label>
+        <label
+          >Password
+          <input name="password" type="password" autocomplete="current-password" required
+        /></label>
+        <button type="submit">Sign in</button>
+      </form>
+      <section id="notes-view" hidden>
+        <form id="note-form">
+          <input name="id" type="hidden" />
+          <div id="note-fields"></div>
+          <button type="submit" id="save">Add note</button>
+          <button type="button" id="cancel" hidden>Cancel</button>
+        </form>
+        <ul id="notes"></ul>
+        <button type="button" id="more" hidden>More</button>
+      </section>
+      <p id="status" role="status"></p>
+    </main>
+  </body>
+</html>
