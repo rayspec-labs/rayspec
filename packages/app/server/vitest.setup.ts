@@ -11,7 +11,10 @@
  * passed through unchanged, and so is one whose database cannot be reached (it is meant to fail).
  * `provisionTenant` (`rayspec tenant ensure`) is wrapped the same way.
  *
- * Without the lane nothing is wrapped. The roles are dropped when the file ends.
+ * Without the lane only one thing is wrapped: every in-process boot names itself a test harness
+ * (`unsupervisedPrivilege`), the one way a boot under the managed posture may hold the migration
+ * connection in the process that imports application code — the suites boot in their own process,
+ * where `rayspec deploy` and `rayspec-serve` supervise. The roles are dropped when the file ends.
  */
 import { createRuntimeRoleLane, testDatabaseIsolation } from '@rayspec/db/testing';
 import { afterAll, vi } from 'vitest';
@@ -22,9 +25,11 @@ const lane = testDatabaseIsolation() ? createRuntimeRoleLane() : undefined;
 
 vi.mock('./src/composition-root.js', async (importOriginal) => {
   const real = await importOriginal<typeof CompositionRoot>();
-  if (lane === undefined) return real;
-  const assembleServer: typeof real.assembleServer = async (config, opts) => {
-    if (config.migrationDatabaseUrl !== undefined) return real.assembleServer(config, opts);
+  const assembleServer: typeof real.assembleServer = async (config, given) => {
+    const opts = { ...given, unsupervisedPrivilege: 'test-harness' as const };
+    if (lane === undefined || config.migrationDatabaseUrl !== undefined) {
+      return real.assembleServer(config, opts);
+    }
     const urls = await lane.bootUrls(config.databaseUrl, config.dbosSystemDatabaseUrl);
     if (urls === undefined) return real.assembleServer(config, opts);
     const booted = await real.assembleServer({ ...config, ...urls }, opts);

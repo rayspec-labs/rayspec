@@ -162,7 +162,7 @@ import {
   PROVISION_BOOT_SECRETS,
   SERVER_BOOT_SECRETS,
 } from './boot-env-demands.js';
-import { DeployApply, RuntimeApplyError } from './deploy-apply.js';
+import { DeployApply, type ProductMigrationApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import {
   bindingsProbe,
@@ -411,7 +411,7 @@ export const SINGLE_ROLE_ISOLATION: DatabaseIsolationStatus = Object.freeze({
 });
 
 /** The role `db` connects as. */
-async function currentRole(db: Db): Promise<string> {
+export async function currentRole(db: Db): Promise<string> {
   const rows = (await db.$client.unsafe('SELECT current_user::text AS role')) as unknown as {
     role: string;
   }[];
@@ -454,7 +454,52 @@ export interface BootFacts {
 export interface BeforeSchemaChangeResult {
   /** The product schema change the hook applied, named by its product migration ledger row. */
   productChange?: { ledgerRow: number };
+  /** The environment revision the hook's apply left, when it recorded one (the bundle deploy). */
+  environmentRevision?: number;
 }
+
+/**
+ * The schema work of a boot whose process never holds the migration role: each step runs in the
+ * supervisor that started the process (supervisor.ts), which derives every statement it runs itself
+ * and never executes SQL this process sends. The steps are the ones an in-process boot runs over its
+ * migration pool, in the same order.
+ */
+export interface SupervisedSchemaWork {
+  /** The supervisor's own step before any schema change (the bundle apply), given the boot's facts. */
+  beforeSchemaChange(facts: BootFacts): Promise<BeforeSchemaChangeResult | undefined>;
+  /** The platform migration chain, as an apply. */
+  platformChain(): Promise<void>;
+  /** Row-level isolation of every tenant table for the runtime role. */
+  tenantIsolation(): Promise<void>;
+  /**
+   * One product migration, named as the deployer planned it: the supervisor generates the stores'
+   * DDL from the document itself, or takes a reviewed delta the operator named. `specSource` is the
+   * backend document merged with its extensions, which the supervisor cannot load itself.
+   */
+  productMigration(name: string, specSource: string | undefined): Promise<void>;
+  /** The workflow engine's own schema in the workflow system database. */
+  workflowSystemSchema(): Promise<void>;
+  /** The schema work is over: the supervisor closes its migration connection. */
+  done(): Promise<void>;
+}
+
+/** The refusal of a managed-posture boot that would hold the migration role in-process. */
+export const UNSUPERVISED_MANAGED_MESSAGE =
+  'Boot aborted — the managed hosting posture serves only under the supervisor (`rayspec deploy`, ' +
+  '`rayspec-serve`): this boot was handed the migration connection in the process that imports the ' +
+  "application's code, so that code could reach the migration role. Start the deployment with " +
+  '`rayspec deploy` or `rayspec-serve`.';
+
+/**
+ * The warning of an in-process boot (a wrapper that calls `assembleServer` itself, such as
+ * examples/local-boot) handed the migration connection outside the managed posture.
+ */
+export const UNSUPERVISED_ROLE_SEPARATION_WARNING =
+  '[rayspec] WARNING — this boot holds the migration connection in the process that imports the ' +
+  "application's code, so that code can reach the migration role and lift the export fence. Only " +
+  '`rayspec deploy` and `rayspec-serve` keep it in a supervisor that never imports the application; ' +
+  'run a wrapper that boots in process with a single role (no RAYSPEC_MIGRATION_DATABASE_URL), or ' +
+  'only with code you trust with that role.';
 
 /** A built app + the metadata the entrypoint logs in its boot banner. */
 export interface BootedServer {
@@ -701,6 +746,13 @@ export interface ServerConfig {
    * apply the workflow engine's own migrations before the durable worker starts as the runtime role.
    */
   migrationDbosSystemDatabaseUrl?: string;
+  /**
+   * `supervised` when this process serves under a supervisor that holds the migration role in its
+   * place (supervisor.ts): role separation is on, but no migration connection ever reaches this
+   * process, so `migrationDatabaseUrl` stays unset. Set by the supervised entrypoint from its
+   * supervisor channel, never from the environment.
+   */
+  roleSeparation?: 'supervised';
   /**
    * The tenant (org id) the deployment's CRON triggers fire under (single-deployment
    * LOCAL posture — multi-tenant cron fan-out is RESERVED, out of scope). Set via
@@ -1693,9 +1745,19 @@ function withDatabaseOf(connection: string, other: string): string {
  * deployment that turns neither on behaves as it did before either existed.
  */
 export function hardenedPosture(
-  config: Pick<ServerConfig, 'migrationDatabaseUrl' | 'singleTenant'>,
+  config: Pick<ServerConfig, 'migrationDatabaseUrl' | 'roleSeparation' | 'singleTenant'>,
 ): boolean {
-  return config.migrationDatabaseUrl !== undefined || config.singleTenant === true;
+  return roleSeparated(config) || config.singleTenant === true;
+}
+
+/**
+ * Whether role separation is on: this process holds the migration connection, or it serves under a
+ * supervisor that holds it in its place.
+ */
+export function roleSeparated(
+  config: Pick<ServerConfig, 'migrationDatabaseUrl' | 'roleSeparation'>,
+): boolean {
+  return config.migrationDatabaseUrl !== undefined || config.roleSeparation === 'supervised';
 }
 
 /**
@@ -1704,10 +1766,10 @@ export function hardenedPosture(
  * context (`requireTenantContext`). Without, it is returned as it is.
  */
 export function servingPool<D extends Db>(
-  config: Pick<ServerConfig, 'migrationDatabaseUrl'>,
+  config: Pick<ServerConfig, 'migrationDatabaseUrl' | 'roleSeparation'>,
   pool: D,
 ): D {
-  return config.migrationDatabaseUrl !== undefined ? requireTenantContext(pool) : pool;
+  return roleSeparated(config) ? requireTenantContext(pool) : pool;
 }
 
 /**
@@ -1748,9 +1810,10 @@ export function deriveDbosSystemUrl(databaseUrl: string): string {
  * Resolve the system cleanup knobs from env (always returns a complete, safe-default object).
  *
  *  - RAYSPEC_CLEANUP_SCHEDULE — the daily crontab (default `0 3 * * *` = 3am daily). Blank ⇒ default.
- *    Fail-closed: an expression the scheduler cannot parse ABORTS the boot here, naming the variable
- *    and the value — validated through the scheduler's OWN parser (the `crontabParseError` seam), so
- *    an unparseable value never reaches the worker launch, where the parser's bare error names neither.
+ *    Fail-closed: an expression the scheduler cannot parse ABORTS the boot here, naming the variable,
+ *    the value and the field the scheduler refuses — validated through the scheduler's OWN parser (the
+ *    `crontabParseError` seam), so an unparseable value never reaches the worker launch, where the
+ *    parser's bare error names none of them.
  *  - RAYSPEC_GDPR_PURGE_ENABLED — the OPERATOR gate, fail-closed: `true` ONLY for the exact string
  *    "true". Any other value (unset, "1", "yes", "TRUE", " true ") ⇒ DISABLED. This is deliberately
  *    strict (no truthy-coercion) so an ambiguous/typo'd value never silently enables irreversible
@@ -1767,8 +1830,8 @@ export function parseCleanupSettings(env: NodeJS.ProcessEnv): CleanupSettings {
   const scheduleError = crontabParseError(schedule);
   if (scheduleError !== undefined) {
     throw new BootConfigError(
-      `Boot aborted — RAYSPEC_CLEANUP_SCHEDULE='${schedule}' is not a crontab the scheduler can ` +
-        `parse (${scheduleError}). It is the crontab the daily system cleanup fires on: a standard ` +
+      `Boot aborted — RAYSPEC_CLEANUP_SCHEDULE='${schedule}' is not a schedule the scheduler ` +
+        `accepts: ${scheduleError}. It is the crontab the daily system cleanup fires on: a standard ` +
         `5-field expression or the 6-field form with a leading seconds field (default '0 3 * * *' ` +
         `= 3am daily); shorthand such as '@daily' is not supported. Fail-closed (an unparseable ` +
         `schedule must never reach the worker launch — it would abort there with the parser's ` +
@@ -2611,9 +2674,42 @@ async function assembleServerWith(
       tenantIsolation: { runtimeRole: string } | undefined,
       facts: BootFacts,
     ) => Promise<BeforeSchemaChangeResult | undefined>;
+    /**
+     * Set when this process serves under the supervisor that holds the migration role in its place
+     * (`config.roleSeparation === 'supervised'`): every schema change of the boot runs there, step by
+     * step and in the same order, instead of over a migration pool here, and the supervisor's own
+     * step before them replaces `beforeSchemaChange`.
+     */
+    schemaWork?: SupervisedSchemaWork;
+    /**
+     * Test suites only. Under the managed posture a boot that holds the migration connection in this
+     * process is refused (`UNSUPERVISED_MANAGED_MESSAGE`), and under any other it warns
+     * (`UNSUPERVISED_ROLE_SEPARATION_WARNING`); a suite that boots in process names itself here to be
+     * let through without either.
+     */
+    unsupervisedPrivilege?: 'test-harness';
   },
   started: { fence?: RuntimeFence; migrationDb?: Db },
 ): Promise<BootedServer> {
+  // The managed posture never imports application code into a process that holds the migration
+  // role: its entrypoints supervise. A library caller handing this process the migration connection
+  // under that posture is refused before anything is built.
+  if (
+    config.migrationDatabaseUrl !== undefined &&
+    config.hostingPosture === 'managed' &&
+    opts.unsupervisedPrivilege !== 'test-harness'
+  ) {
+    throw new BootConfigError(UNSUPERVISED_MANAGED_MESSAGE);
+  }
+  // Under any other posture such a boot proceeds as it always did, and says what it holds.
+  if (
+    config.migrationDatabaseUrl !== undefined &&
+    opts.schemaWork === undefined &&
+    opts.unsupervisedPrivilege !== 'test-harness'
+  ) {
+    (opts.bootWarn ?? consoleWarn)(UNSUPERVISED_ROLE_SEPARATION_WARNING);
+  }
+
   // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
   // Importing this boot closure pulls in undici v8, whose module-import-time side effect overwrites the
   // global-dispatcher slot Node's built-in `fetch` reads — including the `EnvHttpProxyAgent` that
@@ -2717,9 +2813,13 @@ async function assembleServerWith(
   const db = servingPool(config, makeDb(config.databaseUrl));
   //    With role separation, the migration role's own small pool: every schema change of this boot
   //    runs over it, and it is closed once the boot's schema work is done, so a serving process holds
-  //    no connection that could change the schema. Without, the one pool does both, as always.
+  //    no connection that could change the schema. Without, the one pool does both, as always. Under
+  //    a supervisor there is none here: the supervisor runs each schema change.
+  const schemaWork = opts.schemaWork;
   const migrationDb =
-    config.migrationDatabaseUrl !== undefined ? makeDb(config.migrationDatabaseUrl, 2) : undefined;
+    schemaWork === undefined && config.migrationDatabaseUrl !== undefined
+      ? makeDb(config.migrationDatabaseUrl, 2)
+      : undefined;
   started.migrationDb = migrationDb;
   const schemaDb = migrationDb ?? db;
 
@@ -2859,29 +2959,42 @@ async function assembleServerWith(
   //    own transaction). The runtime role's name is what the migration role revokes the ledger writes
   //    from and what the posture check below checks.
   let bundleProductChange: BootedServer['bundleProductChange'];
-  let deployApply: DeployApply;
+  let deployApply: ProductMigrationApply;
   let databaseIsolation: DatabaseIsolationStatus = SINGLE_ROLE_ISOLATION;
   try {
-    const tenantIsolation =
-      migrationDb === undefined ? undefined : { runtimeRole: await currentRole(db) };
-    deployApply = new DeployApply({
-      db: schemaDb,
-      migratePlatform: () =>
-        applyMigrations(schemaDb, { lockTimeoutMs: config.schemaLockTimeoutMs }),
-      ...(config.specPath ? { specSource: readFileSync(config.specPath, 'utf8') } : {}),
-      lockTimeoutMs: config.schemaLockTimeoutMs,
-      warn: opts.bootWarn ?? consoleWarn,
-      ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
-    });
-    if (opts.beforeSchemaChange !== undefined) {
-      const facts: BootFacts =
-        preflight !== undefined ? { blobBackend: preflight.blobBackend } : {};
-      bundleProductChange = (await opts.beforeSchemaChange(schemaDb, tenantIsolation, facts))
-        ?.productChange;
+    const facts: BootFacts = preflight !== undefined ? { blobBackend: preflight.blobBackend } : {};
+    if (schemaWork !== undefined) {
+      // Under the supervisor: the same steps, run there. A product migration is named, never sent:
+      // the supervisor generates its DDL from the document (merged with the extensions this process
+      // loaded, for a backend document) or takes the reviewed delta the operator named.
+      bundleProductChange = (await schemaWork.beforeSchemaChange(facts))?.productChange;
+      await schemaWork.platformChain();
+      await schemaWork.tenantIsolation();
+      const mergedSource = preflight?.merged.specSource;
+      deployApply = {
+        productMigration: (migration) => schemaWork.productMigration(migration.name, mergedSource),
+      };
+    } else {
+      const tenantIsolation =
+        migrationDb === undefined ? undefined : { runtimeRole: await currentRole(db) };
+      const apply = new DeployApply({
+        db: schemaDb,
+        migratePlatform: () =>
+          applyMigrations(schemaDb, { lockTimeoutMs: config.schemaLockTimeoutMs }),
+        ...(config.specPath ? { specSource: readFileSync(config.specPath, 'utf8') } : {}),
+        lockTimeoutMs: config.schemaLockTimeoutMs,
+        warn: opts.bootWarn ?? consoleWarn,
+        ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
+      });
+      deployApply = apply;
+      if (opts.beforeSchemaChange !== undefined) {
+        bundleProductChange = (await opts.beforeSchemaChange(schemaDb, tenantIsolation, facts))
+          ?.productChange;
+      }
+      await apply.platformChain();
+      if (tenantIsolation !== undefined) await apply.tenantIsolation();
     }
-    await deployApply.platformChain();
-    if (tenantIsolation !== undefined) {
-      await deployApply.tenantIsolation();
+    if (migrationDb !== undefined || schemaWork !== undefined) {
       databaseIsolation = await checkDatabaseIsolation(db);
       if (!databaseIsolation.active) {
         (opts.bootWarn ?? consoleWarn)(databaseIsolationWarning(databaseIsolation));
@@ -2940,6 +3053,15 @@ async function assembleServerWith(
     ? parseAnySpec(readFileSync(config.specPath, 'utf8'))
     : undefined;
   const specDispatchKind = specParse?.kind;
+  // The workflow engine's own schema, brought up to date before a durable worker launches as the
+  // runtime role, which may create nothing: by the supervisor, or here over the migration role.
+  const migrationSystemUrl = config.migrationDbosSystemDatabaseUrl;
+  const workflowSystemSchema =
+    schemaWork !== undefined
+      ? () => schemaWork.workflowSystemSchema()
+      : migrationSystemUrl !== undefined
+        ? () => migrateWorkflowSystemDatabase(migrationSystemUrl)
+        : undefined;
 
   if (config.specPath && specDispatchKind === 'product') {
     // 6a. A Product-YAML document composes the product deploy END-TO-END
@@ -2949,6 +3071,7 @@ async function assembleServerWith(
     const deployed = await deployProductYamlSpec(db, config, baseDeps, {
       ...productOpts,
       deployApply,
+      ...(workflowSystemSchema !== undefined ? { workflowSystemSchema } : {}),
       ...(preparedProduct ? { prepared: preparedProduct } : {}),
     });
     app = deployed.app;
@@ -2974,6 +3097,7 @@ async function assembleServerWith(
     const deployed = await deployDeclaredSpec(db, config, baseDeps, {
       fence,
       deployApply,
+      ...(workflowSystemSchema !== undefined ? { workflowSystemSchema } : {}),
       ...(preflight ? { preflight } : {}),
       agentBackendsFactory: opts.agentBackendsFactory,
       registerProductTables: opts.registerProductTables,
@@ -3074,6 +3198,7 @@ async function assembleServerWith(
     await migrationDb.$client.end();
     started.migrationDb = undefined;
   }
+  if (schemaWork !== undefined) await schemaWork.done();
 
   // 10. Start watching the source fence (and heartbeating), now that every producer is attached.
   await fence.start();
@@ -3731,8 +3856,8 @@ async function preflightDeclaredSpec(
       if (scheduleError !== undefined) {
         throw new BootConfigError(
           `Boot aborted — cron trigger '${trigger.name}' has the schedule '${trigger.schedule}', ` +
-            `which the scheduler cannot parse (${scheduleError}). A schedule is a standard 5-field ` +
-            'crontab or the 6-field form with a leading seconds field; shorthand such as ' +
+            `which the scheduler does not accept: ${scheduleError}. A schedule is a standard ` +
+            '5-field crontab or the 6-field form with a leading seconds field; shorthand such as ' +
             "'@daily' is not supported. Fail-closed.",
         );
       }
@@ -3817,7 +3942,13 @@ async function deployDeclaredSpec(
     /** This process's source fence: every producer this deploy wires is attached to it. */
     fence: RuntimeFence;
     /** Runs each product migration as a `runtime.apply` operation, with its receipts. */
-    deployApply?: DeployApply;
+    deployApply?: ProductMigrationApply;
+    /**
+     * Brings the workflow engine's own schema up to date before the durable worker launches, when
+     * the runtime role may create nothing (role separation). Omitted ⇒ the engine creates its schema
+     * as it launches.
+     */
+    workflowSystemSchema?: () => Promise<void>;
     /**
      * What `preflightDeclaredSpec` already resolved before the boot changed anything: the parsed
      * document and its merged extensions. Absent, this deployer resolves them itself.
@@ -4273,12 +4404,11 @@ async function deployDeclaredSpec(
     };
     // The /recovery-scope probe reads the LIVE executor identity off this same wired executor.
     durableExecutorIdentity = () => executor.identity();
+    const workflowSystemSchema = opts.workflowSystemSchema;
     pendingExecutorStart = async () => {
       // With role separation the runtime role may create nothing, so the workflow engine's own schema
       // is migrated as the migration role first; the engine then launches as the runtime role.
-      if (config.migrationDbosSystemDatabaseUrl !== undefined) {
-        await migrateWorkflowSystemDatabase(config.migrationDbosSystemDatabaseUrl);
-      }
+      if (workflowSystemSchema !== undefined) await workflowSystemSchema();
       await executor.start();
     };
     // The run queue stops dequeuing under a source fence and starts again on resume, without the

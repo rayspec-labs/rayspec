@@ -33,6 +33,7 @@ import { applyMigrations } from '@rayspec/server';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort, SpawnedProcesses } from './test-support/processes.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -46,7 +47,10 @@ let acceptanceRan = 0;
 const SUITE_DB = `rayspec_cli_deploy_${process.pid}`;
 const DBOS_SYS_DB = `${SUITE_DB}_dbos_sys`;
 const TENANT = '00000000-0000-4000-8000-0000000000e4';
-const PORT = 18080 + (process.pid % 2000);
+// The port the deploy listens on, handed out by the operating system once the suite starts.
+let servePort = 0;
+// The deploy this suite starts, stopped after it whatever its outcome.
+const processes = new SpawnedProcesses();
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -119,30 +123,33 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
     // Boot via the REAL CLI subprocess. LIVE extraction + an INERT OpenAI key (boot makes no provider
     // call); STT_PROVIDER=fake. The deployment tenant is the product tenant. RAYSPEC_SKIP_DOTENV=1 so
     // no stray repo-root .env leaks into the child.
-    child = spawn(process.execPath, [CLI_DIST, 'deploy', ACME_REL, '--port', String(PORT)], {
-      cwd: repoRoot,
-      env: {
-        ...process.env,
-        RAYSPEC_SKIP_DOTENV: '1',
-        ...roles.env,
-        RAYSPEC_JWT_SIGNING_KEY: pem,
-        RAYSPEC_API_KEY_PEPPER: 'cli-deploy-pepper-only',
-        RAYSPEC_PRODUCT_TENANT_ID: TENANT,
-        RAYSPEC_BLOB_ROOT: blobDir,
-        RAYSPEC_MEDIA_SIGNING_KEY: 'cli-deploy-media-secret-at-least-32-bytes-xx',
-        STT_PROVIDER: 'fake',
-        RAYSPEC_EXTRACTION_MODE: 'live',
-        OPENAI_API_KEY: 'sk-inert-boot-only-never-called',
-        ALLOWED_ORIGINS: '',
-      },
-    });
+    servePort = await freePort();
+    child = processes.track(
+      spawn(process.execPath, [CLI_DIST, 'deploy', ACME_REL, '--port', String(servePort)], {
+        cwd: repoRoot,
+        env: {
+          ...process.env,
+          RAYSPEC_SKIP_DOTENV: '1',
+          ...roles.env,
+          RAYSPEC_JWT_SIGNING_KEY: pem,
+          RAYSPEC_API_KEY_PEPPER: 'cli-deploy-pepper-only',
+          RAYSPEC_PRODUCT_TENANT_ID: TENANT,
+          RAYSPEC_BLOB_ROOT: blobDir,
+          RAYSPEC_MEDIA_SIGNING_KEY: 'cli-deploy-media-secret-at-least-32-bytes-xx',
+          STT_PROVIDER: 'fake',
+          RAYSPEC_EXTRACTION_MODE: 'live',
+          OPENAI_API_KEY: 'sk-inert-boot-only-never-called',
+          ALLOWED_ORIGINS: '',
+        },
+      }),
+    );
     child.stderr?.on('data', (d) => {
       childErr += String(d);
     });
     child.stdout?.on('data', () => {});
 
     try {
-      await waitForBoot(PORT, 120_000, child);
+      await waitForBoot(servePort, 120_000, child);
     } catch (e) {
       throw new Error(
         `${e instanceof Error ? e.message : String(e)}\n--- child stderr ---\n${childErr}`,
@@ -151,11 +158,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
   }, 180_000);
 
   afterAll(async () => {
-    if (child && child.exitCode === null) {
-      child.kill('SIGTERM');
-      await new Promise((r) => setTimeout(r, 500));
-      if (child.exitCode === null) child.kill('SIGKILL');
-    }
+    await processes.stopAll();
     if (blobDir) rmSync(blobDir, { recursive: true, force: true });
     if (baseUrl) {
       const admin = postgres(adminUrl(baseUrl), { max: 1 });
@@ -176,7 +179,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
 
   /** Mint an org-scoped bearer for the product tenant (register → membership → switch), over real HTTP. */
   async function orgToken(): Promise<string> {
-    const base = `http://127.0.0.1:${PORT}`;
+    const base = `http://127.0.0.1:${servePort}`;
     const email = `cli-deploy-${Date.now()}@example.com`;
     const reg = await fetch(`${base}/v1/auth/register`, {
       method: 'POST',
@@ -216,7 +219,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
     async () => {
       acceptanceRan += 1;
       const token = await orgToken();
-      const res = await fetch(`http://127.0.0.1:${PORT}/sessions`, {
+      const res = await fetch(`http://127.0.0.1:${servePort}/sessions`, {
         headers: { authorization: `Bearer ${token}` },
       });
       expect(res.status).toBe(200);
@@ -237,7 +240,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — acme-notes served on a fresh DB (r
   maybe(
     'a DECLARED bearer_tenant route without auth is 401 (mounted + guarded, not 404)',
     async () => {
-      const res = await fetch(`http://127.0.0.1:${PORT}/sessions`);
+      const res = await fetch(`http://127.0.0.1:${servePort}/sessions`);
       // 401 (not 404) proves the declared route is really mounted behind the auth guard.
       expect(res.status).toBe(401);
     },

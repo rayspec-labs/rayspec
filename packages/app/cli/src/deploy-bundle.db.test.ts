@@ -51,13 +51,15 @@ import {
 } from '../../../kernel/bundle-closure/src/test-support/app.js';
 import { runPack } from './pack.js';
 import { CLI_DIST, type ParsedJson } from './test-support/bundles.js';
+import { freePort } from './test-support/processes.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let armsRan = 0;
 
 const SUITE_DB = `rayspec_bundle_deploy_${process.pid}`;
-const PORT = 19_100 + (process.pid % 1500);
+// The port every deploy of this suite listens on, one at a time; handed out by the operating system.
+let servePort = 0;
 const TENANT = '00000000-0000-4000-8000-0000000000b7';
 const valid = schemaValidator('resultEnvelope');
 /** The provider key the bindings file carries; it must never appear in any output. */
@@ -185,7 +187,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
   async function serve(args: string[]): Promise<Served> {
     const child = spawn(
       process.execPath,
-      [CLI_DIST, 'deploy', ...args, '--port', String(PORT), '--bindings-file', bindings],
+      [CLI_DIST, 'deploy', ...args, '--port', String(servePort), '--bindings-file', bindings],
       { cwd: deployDir, env: childEnv() },
     );
     children.push(child);
@@ -207,7 +209,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
         throw new Error(`deploy exited ${out.code}\n${out.stdout}\n${out.stderr}`);
       }
       try {
-        if ((await fetch(`http://127.0.0.1:${PORT}/health`)).status === 200) break;
+        if ((await fetch(`http://127.0.0.1:${servePort}/health`)).status === 200) break;
       } catch {
         // not listening yet
       }
@@ -250,7 +252,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
   let token = '';
   async function orgToken(): Promise<string> {
     if (token !== '') return token;
-    const base = `http://127.0.0.1:${PORT}`;
+    const base = `http://127.0.0.1:${servePort}`;
     const email = `bundle-deploy-${Date.now()}@example.com`;
     const reg = await fetch(`${base}/v1/auth/register`, {
       method: 'POST',
@@ -275,7 +277,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
   }
 
   async function get(path: string, bearer: string): Promise<{ status: number; text: string }> {
-    const res = await fetch(`http://127.0.0.1:${PORT}${path}`, {
+    const res = await fetch(`http://127.0.0.1:${servePort}${path}`, {
       headers: { authorization: `Bearer ${bearer}` },
     });
     return { status: res.status, text: await res.text() };
@@ -283,6 +285,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
 
   beforeAll(async () => {
     if (!baseUrl) return;
+    servePort = await freePort();
     appUrl = withDbName(baseUrl, SUITE_DB);
     shadowUrl = process.env.SHADOW_DATABASE_URL ?? baseUrl;
     const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1 });
@@ -345,7 +348,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     const legacy = spawnSync(process.execPath, [CLI_DIST, 'deploy', 'invalid.yaml'], {
       cwd: deployDir,
       encoding: 'utf8',
-      env: childEnv({ RAYSPEC_SKIP_DOTENV: '1', PORT: String(PORT) }),
+      env: childEnv({ RAYSPEC_SKIP_DOTENV: '1', servePort: String(servePort) }),
       timeout: 120_000,
     });
     expect(legacy.status, legacy.stderr).toBe(1);
@@ -421,7 +424,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     const plan = dryRun(bundles.v1!.path);
     const served = await serve([bundles.v1!.path, '--plan-digest', plan.planDigest]);
     const bearer = await orgToken();
-    const created = await fetch(`http://127.0.0.1:${PORT}/notes`, {
+    const created = await fetch(`http://127.0.0.1:${servePort}/notes`, {
       method: 'POST',
       headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json' },
       body: JSON.stringify({ body: 'kept' }),
@@ -647,7 +650,7 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
     await held.unsafe('LOCK TABLE bundle_notes IN ACCESS SHARE MODE');
     const child = spawn(
       process.execPath,
-      [CLI_DIST, 'deploy', ...args, '--port', String(PORT), '--bindings-file', bindings],
+      [CLI_DIST, 'deploy', ...args, '--port', String(servePort), '--bindings-file', bindings],
       { cwd: deployDir, env: childEnv() },
     );
     children.push(child);

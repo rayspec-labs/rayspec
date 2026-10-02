@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A certification lane for the hardened hosting posture.** `pnpm test:certification`
+  (`scripts/certification.mjs`) runs the suites that prove each check a public host must hold, on a
+  real database, and prints one JSON verdict per check; a skipped test fails its check, and no
+  provider credential reaches a suite. New suites in `packages/app/cli/src/certification/` deploy an
+  application through the real `rayspec deploy <file.ray>` with role separation and forced row-level
+  security, single-tenant mode, the managed posture and pinned trusted proxies, and prove: object
+  authorization for two users and a removed member on every store route, upload part, playback and
+  event stream and queued run; trusted-proxy headers believed only from the pinned address; CORS and
+  CSRF where the session cookie authenticates; the JSON body limit and upload-path limits; sanitized
+  error envelopes; every hostile archive of the contract corpus that the reader refuses at its default
+  limits refused by the deploy, and every hostile migration bundle except the inner size bomb refused
+  by the import, with nothing extracted or restored (the archives that need a lowered reader limit,
+  and the size bomb, are covered by the reader's own corpus suite, which the lane runs); bounded sessions, memory and
+  queue admission under a parallel workload against a provider that never answers; and an export,
+  import and restore round trip with the identity reset. The rest are the existing suites run as the
+  runtime role. CI runs it in the `certification` job. See
+  [Hosting in the hardened posture → Certifying the posture](./docs/hardened-posture.md#certifying-the-posture).
+  The lane also certifies single-tenant mode, the agent trace export staying off, the execution
+  levels and the supported-backend matrix, and its log directory now holds `summary.json`, which
+  names each suite's report and the exit status of its vitest run, and records the commit, whether
+  the working tree was clean, the runtime version and the platform the lane ran on. A suite file
+  whose vitest run does not exit 0 (an unhandled rejection or a crash outside every test) fails its
+  check even when its report lists every test as passed; a report left by an earlier run into the
+  same log directory is removed before the file runs; a report counts only for the file at its full
+  path in the repository. The CI job keeps the log directory as the workflow artifact
+  `certification-lane`, and the log directory, summary and receipt the docs write into the
+  repository root are ignored by git, so a second run still records a clean tree.
+
+- **The managed-posture receipt generator.** `pnpm receipt:managed` (`scripts/managed-receipt.mjs`)
+  makes a release's managed-posture receipt from one certification lane directory and the release
+  manifest, as canonical JSON that `validateReceipt` accepts. Each protection it states is claimed
+  through the lane checks that establish it; every report is judged again, against the one suite
+  file it is named for, rather than taken from the summary; a backend is listed only when every test
+  of its matrix row passed. `capabilities` lists what the managed posture allows, as the contract
+  defines the field; only its provider capabilities rest on lane evidence. It refuses, naming why
+  and writing nothing, when a check failed, was skipped or is missing, a suite file's vitest run did
+  not exit 0, one report is named for two suite files, when the lane did not run as
+  the runtime role on linux x64 with Node 22.21 or later from a clean tree at the checkout's commit,
+  or when the release manifest is for another version, commit or target, or carries a package of
+  another version. See
+  [Hosting in the hardened posture → The managed-posture receipt](./docs/hardened-posture.md#the-managed-posture-receipt).
+
+- **A threat model for operators.** [docs/threat-model.md](./docs/threat-model.md) states the
+  boundaries, the adversaries, what the runtime enforces (each with the lane check that proves it),
+  what the host must enforce — the process sandbox, the egress firewall, encrypted volumes, backups,
+  the request edge — the supported-backend matrix, and every residual risk this release accepts, with
+  its owner, word for word as the receipt carries them. It states that the serving process keeps the
+  migration role's connection, so the application's own code can bypass row-level security and lift
+  an export's fence, and that a stream ingest route's body is capped only by the reverse proxy;
+  docs/export.md and docs/hardened-posture.md say the same where they describe the barrier and the
+  body limits.
+
 - **`rayspec deploy <file.ray>`: deploy an application bundle on a self-hosted target.** A file
   that starts with a ZIP signature or whose name ends in `.ray` takes the bundle path, decided on
   at most four bytes before any configuration is read; every other file takes the YAML deploy,
@@ -532,7 +584,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback, private, link-local, metadata, unspecified, multicast or reserved destination (an IPv4
   address embedded in IPv6 judged by that address, any IPv6 address outside `2000::/3` refused) — judged
   on the address the connection uses after DNS resolution, so a name that resolves to `127.0.0.1` or
-  rebinds is refused — and checks every redirect hop the same way. No outbound path of this release
+  rebinds is refused — and checks every redirect hop the same way. Every guarded request has a time
+  limit, 30 seconds unless the caller sets `timeoutMs`, covering the resolution, every redirect hop
+  and the response body; a request past it is ended with `OutboundRequestTimedOut`. No outbound path of this release
   takes a URL from a spec or a request; a test holds the list of every outbound call site in the
   shipped source so that a new one goes through the guard or is reviewed. Handlers are not bound by
   it: they run in-process, and the host network policy contains them. See
@@ -817,6 +871,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every suite that starts a deploy, and `pnpm test:upgrade-with-data`, listen on a port the
+  operating system hands out.** They no longer derive a port from the process id, which a server
+  left over from an earlier run could still hold; the upgrade script still takes `--port`. Suites
+  that spawn deploys directly stop every one of them when they finish, also after a failed test. A
+  test in `packages/app/cli` fails when a suite of the package or the upgrade script derives a port
+  from the process id again.
+- **`rayspec export` refuses a source no database barrier can protect before fencing it.** Without
+  role separation and without `--source-stopped` no database write barrier can hold. The export
+  used to take the fence, drain the source and only then refuse with `RAY_EXTERNAL_STATE_UNSUPPORTED`
+  (`database-barrier-unavailable`), leaving it fenced until `rayspec resume`. It now refuses with the
+  same code and reason at the precheck, with nothing at the source changed: no fence, no downtime, no
+  receipt in the environment. A barrier that could hold and does not is still refused after the
+  fence. Recorded as a difference from the bundle contract in
+  [Export → Compatibility notes](./docs/export.md#compatibility-notes).
+
 - **`docs/ARCHITECTURE.md` on restores and the boot secrets.** It said a new API-key pepper breaks
   only the copied API keys; the pepper also keys refresh sessions, invite tokens and owner-recovery
   tokens, which a new pepper breaks just the same. The section now says what each boot secret keys,
@@ -920,6 +989,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A schedule the scheduler refuses is refused in the operator's terms.** The boot refusal of a cron
+  trigger's `schedule` and of `RAYSPEC_CLEANUP_SCHEDULE` quoted the scheduler's own parser text — for
+  a shorthand such as `@daily` or a short expression a bare `Cannot read properties of undefined
+  (reading 'replace')`. It now names the trigger or the variable, the value, and either how many
+  fields the value has (a schedule has five, or six with a leading second) or the field the
+  scheduler refuses and its value: `its hour field '25' is not a value the scheduler accepts`. The
+  check still goes through the scheduler's own parser, field by field.
+
+- **A registration whose organization is refused leaves no account behind.** `POST /v1/auth/register`
+  with an `orgName` and the operator's `POST /v1/auth/bootstrap-tenant` created the user first and
+  the organization in a second transaction, so a refused organization — in single-tenant mode, a
+  registration that lost the race for the one organization; on the bootstrap route, a chosen id
+  already in use — left a user row with no organization, and its email taken. The account, the
+  organization and the owner membership are now written in one transaction
+  (`OrgStore.createUserWithFirstOrg`); `AuthService.register` takes `createUserWithFirstOrg` in place
+  of `createFirstOrg`.
+
+- **A run that hits its wall time ends for its caller at a stated bound.** Once
+  `RAYSPEC_AGENT_RUN_MAX_MS` fired (or a run was cancelled), run-core waited for the run's event tail
+  and its terminal record without a limit, so on a loaded pool the caller could learn of the end
+  arbitrarily late. That tail now has a budget of 5 seconds (`RUN_END_RECORD_BUDGET_MS`): the caller
+  is answered no later than the wall time plus the kill grace plus 1 s plus 5 s, and a record that
+  has not landed by then still completes on its own connection, logged if it fails. See
+  [Bounded execution](./docs/hardened-posture.md#bounded-execution).
+
 - **A document whose bytes hold a NUL character no longer leaves its workflow running for ever.**
   `file_input.parse_text` passed text containing U+0000 — what an executable or an archive uploaded
   under a text or PDF type decodes to — to the next step; PostgreSQL refuses that character in a
@@ -999,6 +1093,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **With role separation, no process that runs application code holds the migration or snapshot
+  connection.** `rayspec deploy` and `rayspec-serve` now act as a supervisor: the process the
+  operator starts re-executes itself (`process.execve`) to clear the privileged connections from its
+  own environment block, reads them from a one-time handoff file it removes before any child exists,
+  never imports application code (a module-resolve guard enforces it), and serves the application in a
+  child process started with an environment that never held them. Every schema change of the boot —
+  the platform migration chain, row-level isolation, each product migration, the workflow system
+  database, a bundle apply — runs in the supervisor, which generates the product DDL from the
+  document itself and re-gates a reviewed delta rather than running SQL the child sent. The serving
+  child holds the runtime role alone and learns the export fence from the database as before. So
+  application code can no longer reach the migration role's connection through the process's
+  environment block, through interception of the database driver before the schema work, or over the
+  channel to the supervisor — it cannot bypass row-level security or lift the export fence. Runtime
+  control that needs privilege (`rayspec export`'s write barrier and snapshot, `resume`, `import`)
+  runs in the operator's CLI, which imports no application code either. Signals, readiness, graceful
+  drain, exit codes and the one `--json` envelope are unchanged; a crash of the serving child makes the
+  supervisor exit non-zero and say so; a serving child whose supervisor is killed (an OOM kill,
+  `kill -9`) stops at once, without a drain, as the single process did, so a restarted deployment
+  never runs beside it; single-role mode (no migration URL, even with a snapshot URL) runs one process
+  exactly as before. A wrapper that calls `assembleServer` in process with the migration connection
+  (examples/local-boot, deployments/acme-notes) boots as before and warns that the application code
+  it imports can reach the migration role. One gap depends on the operating-system user: when the supervisor and the child run as
+  the same user, a `_FILE`/`.env` the supervisor can read, its memory on a kernel without Yama
+  `ptrace_scope` ≥ 1, and a core file it can be made to write are readable by the child; the managed
+  posture refuses to boot while any is open and names it, and every other posture warns (the
+  entrypoint sets a zero hard core-file limit through `/bin/sh` where one exists). `@rayspec/server`
+  exports the supervisor (`superviseServing`, `sameUserConditions`), the child's channel
+  (`connectToSupervisor`) and the re-execution (`reexecWithoutPrivilegedConnections`,
+  `takeSupervisorHandoff`, the `@rayspec/server/supervisor-handoff` subpath);
+  `withholdPrivilegedConnections` and `PRIVILEGED_CONNECTION_VARS` keep their names. The certification
+  lane proves it through the real CLI under the `privileged-credentials` check. Closes the contract's
+  release-blocking "unprotected privileged credentials" and "bypassable migration fence".
 - **In the hardened posture a stream handler no longer receives the caller's credential.** With
   role separation or single-tenant mode turned on, the Web `Request` a `stream` route handler is
   handed (`init.request`) no longer carries `authorization`, `proxy-authorization` or `cookie`, and
@@ -1132,6 +1258,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started the ledger.
 - **Version directories are read-only.** Remove one that is no longer active with
   `chmod -R u+w <dir> && rm -rf <dir>`.
+- **With role separation, `rayspec deploy` and `rayspec-serve` run as two processes.** The process
+  you start supervises and holds the migration role; the application runs in a child under it. A
+  process manager still starts, signals and watches the one process it started. Under
+  `RAYSPEC_HOSTING_POSTURE=managed` on Linux the boot now also refuses a host where the child could
+  read the supervisor's memory or make it write a core file, which booted with 1.8.0: set
+  `kernel.yama.ptrace_scope` to 1 or more (Docker Desktop's VM kernel has no Yama at all, and
+  RHEL/Fedora-style kernels default to 0), and keep `/bin/sh` in the image or start with a hard
+  core-file limit of 0 (`docker run --ulimit core=0`; a distroless image has no `/bin/sh`). Pass the
+  migration and snapshot connections in the environment, not as `_FILE` or in a `.env` file. Every
+  other posture boots and warns instead. See
+  [Hosting in the hardened posture → Turning it on](./docs/hardened-posture.md#turning-it-on).
 
 ## [1.8.0] - 2026-08-15
 

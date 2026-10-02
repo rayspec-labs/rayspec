@@ -57,14 +57,25 @@ describe('parseCleanupSettings — the fail-closed GDPR gate', () => {
     }
   });
 
-  it("REFUSES an out-of-range field the same way, carrying the parser's own detail", () => {
-    // This form used to at least get the scheduler's own `Error: 99 is a invalid expression for
-    // minute` — but still without the variable name. Now it gets the naming refusal AND keeps the
-    // parser's field-level detail inside it.
-    const bad = () => parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '99 99 99 99 99' });
+  it('REFUSES an out-of-range field the same way, naming the field and its value', () => {
+    // The parser's own text (`99 is a invalid expression for minute`) is not passed on: the refusal
+    // names the variable, the value and the field in the operator's terms.
+    const bad = () => parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '0 99 * * *' });
     expect(bad).toThrow(BootConfigError);
-    expect(bad).toThrow("RAYSPEC_CLEANUP_SCHEDULE='99 99 99 99 99'");
-    expect(bad).toThrow('99 is a invalid expression for minute');
+    expect(bad).toThrow(
+      "RAYSPEC_CLEANUP_SCHEDULE='0 99 * * *' is not a schedule the scheduler accepts: its hour " +
+        "field '99' is not a value the scheduler accepts.",
+    );
+    expect(bad).not.toThrow('invalid expression');
+  });
+
+  it('REFUSES a shorthand naming the field count, never the parser text', () => {
+    const bad = () => parseCleanupSettings({ RAYSPEC_CLEANUP_SCHEDULE: '@daily' });
+    expect(bad).toThrow(
+      "RAYSPEC_CLEANUP_SCHEDULE='@daily' is not a schedule the scheduler accepts",
+    );
+    expect(bad).toThrow('it has 1 field;');
+    expect(bad).not.toThrow(/replace|undefined/);
   });
 
   it('ACCEPT CONTROL: valid 5-field and 6-field expressions still resolve VERBATIM (the guard is not refusing everything)', () => {

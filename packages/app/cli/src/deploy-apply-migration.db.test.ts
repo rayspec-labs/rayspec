@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort } from './test-support/processes.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -42,7 +43,6 @@ const TENANT = '00000000-0000-4000-8000-0000000000ad';
 const ADD_DB = `rayspec_cli_applymig_add_${process.pid}`;
 const DROP_DB = `rayspec_cli_applymig_drop_${process.pid}`;
 const REBOOT_DB = `rayspec_cli_applymig_reboot_${process.pid}`;
-const PORT_BASE = 19000 + (process.pid % 900);
 
 // A minimal AGENT-FREE backend: one store + one declarative read route (no agents, no durable worker,
 // so the boot launches no off-request machinery). v2 adds a nullable column matching the additive delta.
@@ -87,9 +87,12 @@ let workDir = '';
 let pem = '';
 const children: ChildProcess[] = [];
 const stderrByPid = new Map<number, string>();
+// The port each deploy listens on, one the operating system handed out just before the spawn.
+const portOf = new WeakMap<ChildProcess, number>();
 
 /** Spawn `rayspec deploy <args>` against `appDbUrl`, capturing stderr. cwd = workDir (the jail root). */
-function spawnDeploy(args: string[], appDbUrl: string, port: number): ChildProcess {
+async function spawnDeploy(args: string[], appDbUrl: string): Promise<ChildProcess> {
+  const port = await freePort();
   const child = spawn(process.execPath, [CLI_DIST, 'deploy', ...args, '--port', String(port)], {
     cwd: workDir,
     env: {
@@ -102,6 +105,7 @@ function spawnDeploy(args: string[], appDbUrl: string, port: number): ChildProce
     },
   });
   children.push(child);
+  portOf.set(child, port);
   stderrByPid.set(child.pid ?? -1, '');
   child.stderr?.on('data', (d) => {
     stderrByPid.set(child.pid ?? -1, (stderrByPid.get(child.pid ?? -1) ?? '') + String(d));
@@ -114,7 +118,8 @@ function stderrOf(child: ChildProcess): string {
 }
 
 /** Poll GET /health until 200 (booted + DB reachable), or throw (surfacing the child's stderr). */
-async function waitForBoot(port: number, deadlineMs: number, child: ChildProcess): Promise<void> {
+async function waitForBoot(child: ChildProcess, deadlineMs: number): Promise<void> {
+  const port = portOf.get(child);
   const deadline = Date.now() + deadlineMs;
   for (;;) {
     if (child.exitCode !== null) {
@@ -222,8 +227,8 @@ describe.skipIf(!baseUrl)(
         const appDb = withDbName(baseUrl as string, ADD_DB);
 
         // Boot 1 — materialize the v1 backend, then SEED three rows through the raw DB.
-        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE);
-        await waitForBoot(PORT_BASE, 120_000, boot1);
+        const boot1 = await spawnDeploy(['v1.rayspec.yaml'], appDb);
+        await waitForBoot(boot1, 120_000);
         const seed = postgres(appDb, { max: 1 });
         try {
           await seed.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Org', 'org')`, [
@@ -239,12 +244,11 @@ describe.skipIf(!baseUrl)(
         await shutdown(boot1);
 
         // Boot 2 — apply the reviewed ADDITIVE delta via the CLI flag (spec v2 declares the new column).
-        const boot2 = spawnDeploy(
+        const boot2 = await spawnDeploy(
           ['v2.rayspec.yaml', '--apply-migration', '0001_add_note.sql'],
           appDb,
-          PORT_BASE + 1,
         );
-        await waitForBoot(PORT_BASE + 1, 120_000, boot2);
+        await waitForBoot(boot2, 120_000);
 
         const check = postgres(appDb, { max: 1 });
         try {
@@ -271,8 +275,8 @@ describe.skipIf(!baseUrl)(
         const appDb = withDbName(baseUrl as string, DROP_DB);
 
         // Boot 1 — materialize + seed one row.
-        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 2);
-        await waitForBoot(PORT_BASE + 2, 120_000, boot1);
+        const boot1 = await spawnDeploy(['v1.rayspec.yaml'], appDb);
+        await waitForBoot(boot1, 120_000);
         const seed = postgres(appDb, { max: 1 });
         try {
           await seed.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Org', 'org')`, [
@@ -287,10 +291,9 @@ describe.skipIf(!baseUrl)(
         // Boot 2 — a DESTRUCTIVE delta with NO reviewed allowlist → the EXISTING deploy() gate BLOCKS the
         // boot (the subprocess exits non-zero; "roll-out refused" is printed only for that gate's
         // DeployError). No new engine — the identical fail-closed behavior the wrapper path already has.
-        const boot2 = spawnDeploy(
+        const boot2 = await spawnDeploy(
           ['v1.rayspec.yaml', '--apply-migration', '0001_drop_label.sql'],
           appDb,
-          PORT_BASE + 3,
         );
         const code = await waitForExit(boot2, 120_000);
         expect(code).not.toBe(0);
@@ -321,8 +324,8 @@ describe.skipIf(!baseUrl)(
         const appDb = withDbName(baseUrl as string, REBOOT_DB);
 
         // Boot 1 — materialize the v1 backend, then SEED three rows.
-        const boot1 = spawnDeploy(['v1.rayspec.yaml'], appDb, PORT_BASE + 4);
-        await waitForBoot(PORT_BASE + 4, 120_000, boot1);
+        const boot1 = await spawnDeploy(['v1.rayspec.yaml'], appDb);
+        await waitForBoot(boot1, 120_000);
         const seed = postgres(appDb, { max: 1 });
         try {
           await seed.unsafe(`INSERT INTO orgs (id, name, slug) VALUES ($1, 'Org', 'org')`, [
@@ -338,12 +341,11 @@ describe.skipIf(!baseUrl)(
         await shutdown(boot1);
 
         // Boot 2 — APPLY the reviewed additive delta via --apply-migration (the FIRST, legitimate update).
-        const boot2 = spawnDeploy(
+        const boot2 = await spawnDeploy(
           ['v2.rayspec.yaml', '--apply-migration', '0001_add_note.sql'],
           appDb,
-          PORT_BASE + 5,
         );
-        await waitForBoot(PORT_BASE + 5, 120_000, boot2);
+        await waitForBoot(boot2, 120_000);
         await shutdown(boot2);
 
         // Boot 3 — the LEFTOVER-ENV REBOOT: the EXACT SAME --apply-migration command against the NOW-
@@ -351,12 +353,11 @@ describe.skipIf(!baseUrl)(
         // unit). Re-applying the non-idempotent `ADD COLUMN note` would raise duplicate_column (42701) and
         // CRASH the boot (exit 1) — an earlier backend-path behavior. The boot CLASSIFIES the live schema
         // FIRST: it now present-matches v2, so the boot MOUNTS (zero migrations) and SERVES cleanly.
-        const boot3 = spawnDeploy(
+        const boot3 = await spawnDeploy(
           ['v2.rayspec.yaml', '--apply-migration', '0001_add_note.sql'],
           appDb,
-          PORT_BASE + 6,
         );
-        await waitForBoot(PORT_BASE + 6, 120_000, boot3); // becomes ready ⇒ NO 42701 crash-loop
+        await waitForBoot(boot3, 120_000); // becomes ready ⇒ NO 42701 crash-loop
 
         const check = postgres(appDb, { max: 1 });
         try {

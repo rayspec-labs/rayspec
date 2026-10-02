@@ -144,6 +144,14 @@ switches the answer to the **result envelope**, one JSON object on stdout:
   writes its one envelope when it stops: `ok: true` after a SIGINT/SIGTERM
   shutdown (exit `0`), `ok: false` with the refusal as `RAY_CHECK_FAILED` when
   the boot is refused (exit `1`).
+- With role separation on (`RAYSPEC_MIGRATION_DATABASE_URL` set), a serving
+  `deploy` or `rayspec-serve` keeps the migration role in the process you started
+  — which never imports the application — and serves the application in a child
+  process started without it, so two Node processes appear under the deploy. A
+  SIGINT or SIGTERM to the process you started drains and stops both; a crash of
+  the child makes it exit non-zero and say so. Signals, exit codes, readiness and
+  the `--json` envelope are otherwise unchanged, and single-role mode (no
+  migration URL) runs one process exactly as before.
 - Without `--json`, every existing command's output is what it has always been.
 - The bundle verbs and `pack` always answer with the envelope; for them the
   flag only silences the short description (for `pack`, the inclusion summary)
@@ -1472,8 +1480,11 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
   first `pg_dump` on `PATH`, which must be of the server's major). No output carries a value.
 - **Database barrier.** With role separation the runtime role's writes are revoked until `resume`
   (`database-write-role`); without it, only a stopped source attested with `--source-stopped`
-  (`database-stopped-source`). With neither the export fences, then refuses before any capture with
-  `RAY_EXTERNAL_STATE_UNSUPPORTED` / `database-barrier-unavailable`; the source stays fenced.
+  (`database-stopped-source`). With neither, no barrier can hold, and the export refuses at the
+  precheck, before the fence, with `RAY_EXTERNAL_STATE_UNSUPPORTED` / `database-barrier-unavailable`;
+  nothing at the source changes (see [Export → Compatibility notes](./export.md#compatibility-notes)).
+  A barrier that could hold and does not (the role's writes not revoked, a session still connected
+  to an attested stopped source) is refused after the fence, and the source stays fenced.
 - **Blobs.** The fs blob store under `RAYSPEC_BLOB_ROOT`. For an application that loads
   extensions, the blob backend its boot recorded decides, read from the database and never by
   loading the extensions: a backend an extension provides, or no record for the active version, is

@@ -29,7 +29,7 @@ import { classifyUpstreamError } from '@rayspec/core';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { RunAbandonedError, RunBoundTimeoutError } from './agent-bounds.js';
 import { resolveExecutionPolicy } from './execution-policy.js';
-import { runAgent } from './run-core.js';
+import { CALL_SETTLE_MARGIN_MS, RUN_END_RECORD_BUDGET_MS, runAgent } from './run-core.js';
 import { insertEnqueuedRunHeader } from './run-header.js';
 import { isRunTainted } from './run-taint.js';
 import {
@@ -485,6 +485,35 @@ describe('per-run wall-clock bound', () => {
     ).rejects.toBeInstanceOf(RunBoundTimeoutError);
     expect(await runHeaderStatus('bound-durable-no-header')).toBe('error');
   });
+
+  it('the caller learns of the timeout within the bound, the kill grace, the settle margin and the record budget, even when the terminal record cannot be written', async () => {
+    setBound('120');
+    const backend = new SilentBackend();
+    open.push(backend);
+    // The handle the terminal outcome is recorded through hands out no connection: its transaction
+    // never starts, as on a pool every connection of which is held by other runs.
+    const real = forTenant(appDb, TENANT_A);
+    const stalled = new Proxy(real, {
+      get(target, prop, receiver) {
+        if (prop === 'transaction') return () => new Promise<never>(() => {});
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const started = Date.now();
+    await expect(
+      runAgent(forTenant(appDb, TENANT_A), backend, spec, {
+        runId: 'bound-record-stalled',
+        taintDb: stalled,
+      }),
+    ).rejects.toBeInstanceOf(RunBoundTimeoutError);
+    const elapsed = Date.now() - started;
+    const stated = 120 + 50 + CALL_SETTLE_MARGIN_MS + RUN_END_RECORD_BUDGET_MS;
+    // It waited for the record up to its budget, and not longer.
+    expect(elapsed).toBeGreaterThanOrEqual(stated - 100);
+    expect(elapsed).toBeLessThan(stated + 2_000);
+    // The record never landed, so the run reads as running: what the operator docs state.
+    expect(await runHeaderStatus('bound-record-stalled')).toBe('running');
+  }, 30_000);
 
   it('an auth preflight that never answers is refused at the provider-call timeout, before anything is written', async () => {
     const backend = {

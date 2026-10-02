@@ -10,6 +10,9 @@ database role migrates and serves, any number of organizations can be created an
 open. The posture is turned on by explicit configuration, and the runtime reports the managed
 hosting posture as supported only when all of it is on.
 
+Who the posture defends against, what the host around the runtime must enforce itself, and every
+residual risk this release accepts are in the [Threat model](./threat-model.md).
+
 ## What turns it on
 
 | Setting | What it does | Without it |
@@ -44,6 +47,27 @@ typo never leaves the limit off by accident.
    (soft-deleted ones included) is refused with a message naming the count; nothing is picked or
    hidden. Decide what happens to the others first.
 
+With role separation, `rayspec deploy` and `rayspec-serve` hold the migration and snapshot
+connections in a supervisor and run the application in a child process of the same operating-system
+user. The managed posture refuses to boot while that child could still reach them, and names each
+condition; every other posture warns. On the host:
+
+- pass `RAYSPEC_MIGRATION_DATABASE_URL` and `RAYSPEC_SNAPSHOT_DATABASE_URL` in the environment, not
+  as `_FILE` and not in a `.env` file (the child could read the file);
+- on Linux, set `kernel.yama.ptrace_scope` to 1 or more, so the child cannot read the supervisor's
+  memory. Docker Desktop's VM kernel has no Yama at all, and RHEL/Fedora-style kernels default to 0;
+  the boot refuses either until the setting is there;
+- on Linux, keep `/bin/sh` in the image (the entrypoint sets a zero hard core-file limit through
+  it), or start the process with a hard core-file limit of 0 (`docker run --ulimit core=0`): a
+  distroless image has no `/bin/sh`;
+- keep the runtime installation (the RaySpec packages and their dependencies) and the deployment's
+  spec read-only to the application process's user. The supervisor reads the spec and loads the
+  workflow engine's migration code before it starts the child, so a later change to those files
+  does not reach the privileged steps of this boot, but it would reach the next one.
+
+A host that booted the managed posture before this release can be refused by these checks after
+the upgrade; they are prerequisites of the managed posture, not of the others.
+
 ## Checking it
 
 - `BootedServer.singleTenant` is `true` and `BootedServer.databaseIsolation` reports
@@ -56,6 +80,130 @@ typo never leaves the limit off by accident.
   single-tenant mode is on, **and** no agent trace is exported (`inspectHosting().agentTraceExport`
   is `off`) ([Runtime operations](./runtime-operations.md)).
 - From outside: a second `POST /v1/auth/register` answers `403`, and `POST /v1/orgs` answers `403`.
+
+## Certifying the posture
+
+`pnpm test:certification` (`scripts/certification.mjs`) runs, on a real PostgreSQL, the suites that
+prove each check a public host must hold, and prints one JSON verdict per check. CI runs it in the
+`certification` job on every pull request.
+
+```bash
+pnpm build
+DATABASE_URL=postgres://rayspec:rayspec@localhost:5433/rayspec pnpm test:certification \
+  --out certification.json --log-dir certification-logs
+pnpm test:certification --check object-authorization    # one check
+```
+
+`DATABASE_URL` names a superuser of a PostgreSQL 16 server on which the roles of
+`packages/kernel/db/sql/database-roles.sql` exist (`pnpm db:up` creates them on a new volume); each
+suite creates databases and roles of its own and drops them. `pg_dump` and `pg_restore` of the
+server's major come from `PATH` or from Docker. The run takes about half an hour.
+
+Two kinds of suite run:
+
+- **The certification suites** (`packages/app/cli/src/certification/`) pack an application, deploy
+  it with the real `rayspec deploy <file.ray>` with every part of this posture on — role separation
+  with forced row-level security, `RAYSPEC_SINGLE_TENANT=true`, `RAYSPEC_HOSTING_POSTURE=managed`,
+  `RAYSPEC_TRUSTED_PROXIES` pinned to an address the test client is not, one allowed origin — and
+  drive it over HTTP, reading every outcome from the database as the superuser. The model provider
+  is a local stand-in on `OPENAI_BASE_URL`; nothing leaves the machine.
+- **The existing suites** of the packages that hold each protection, in the runtime-role lane
+  (`RAYSPEC_TEST_DATABASE_ISOLATION=roles`): every server boot migrates as a migration role and
+  serves as a runtime role. These suites set single-tenant mode and the managed posture where their
+  case needs it, not throughout.
+
+| Check | What the certification suites show |
+| --- | --- |
+| `runtime-role-evidence` | every session the served process holds after its boot is the runtime role, which is no superuser, has no `BYPASSRLS` and owns nothing; the application's tables have their row policy enabled and forced. The process that imports the application holds only the runtime role |
+| `privileged-credentials` | with role separation the migration and snapshot connections are held only by the supervisor — the process the operator starts, which never imports application code and serves the application in a child process started without them. The process that runs handler and extension code never holds a privileged connection in its environment block, through the database driver or over its channel to the supervisor, so in-process code can neither bypass row security nor lift the export fence; boot, readiness, graceful drain, the supervisor's non-zero exit when the child crashes, and single-role mode all behave as before ([Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks) covers the same-user conditions the managed posture refuses to boot with) |
+| `object-authorization` | a member reaches every store operation, an upload part, a playback stream and the event stream; nothing is reached without a credential; once the member is removed, every write, upload part, run start and the playback token minted before are refused at once, and the run they had queued is ended by the worker without calling the provider. The event stream keeps serving the removed member's unexpired token, as stated above for every read. No route serves an export: the snapshot is written by the operator's CLI |
+| `trusted-proxies` | a forwarded-for header from an address that is not pinned is not believed: the audit records the socket peer and the rate limit is the peer's; the port listens on loopback |
+| `cors-and-csrf` | a preflight from another origin gets no `access-control-allow-origin`; a refresh authenticated by the session cookie is refused cross-site |
+| `upload-limits` | a JSON body over 1 MiB is refused with `413` before it is stored; the file capability's suites refuse a file over its per-file limit; an upload key that climbs out of the blob space is refused and writes nothing. A stream ingest route's body has no cap of its own and is not bounded by this check: cap request bodies at the reverse proxy ([Threat model → What the host must enforce](./threat-model.md#what-the-host-must-enforce)) |
+| `sanitized-errors` | a handler's internal detail, malformed JSON, a bad id, an unknown route and a bad token each answer an error envelope with no stack, SQL or secret, and the server log carries no secret |
+| `outbound-guard` | the guard's own suites (no outbound path of this release takes a URL from a spec or a request) |
+| `recovery-scope` | `GET /recovery-scope` answers `404` under the managed posture |
+| `single-tenant-mode` | a second registration and a second organization are refused; the single-tenant suites, the boot over more than one organization, and export and import of more than one, in their own suites |
+| `agent-trace-export-off` | the trace-export suites, including the one that asks the agent SDK itself whether it would export |
+| `execution-levels` | the application every certification suite deploys is `in-process` code; the runtime-control and bundle deploy suites report exactly `none` and `in-process` and deploy a `none` bundle; the corpus refuses a bundle that asks for `sandboxed` |
+| `supported-backends` | the matrix suite (every other backend refused under the posture) and the hanging-provider suite of every allowed backend |
+| `hostile-archives` | every archive of the contract's corpus that the reader refuses is refused by `rayspec deploy <file.ray> --dry-run` against a serving deployment with the contract's code, and the state directory, the temporary directory and the database are unchanged |
+| `hostile-migration-bundles` | a wrong identity, a truncated ciphertext, a passphrase recipient, a traversal entry in the inner archive, an invalid snapshot document, outer and inner metadata that disagree, a wrong application digest, a wrong object digest, a gap in the object ranges and a target that is not empty are each refused by `rayspec import --dry-run` with the contract's code, and nothing reaches the target |
+| `cross-process-cancel` | the platform's and the workflow engine's own suites |
+| `crash-recovery` | the apply, deploy, export and import suites, which kill the process at named points and run the recovery |
+| `resource-bounds` | with a provider that never answers: in-request runs past `RAYSPEC_AGENT_SYNC_RUNS_MAX` and queued runs past `RAYSPEC_AGENT_QUEUE_MAX` are refused with `429` `queue-full`; store traffic beside them is served; every admitted run ends (`timeout`, or `cancelled` for the one cancelled), none is left running; the runtime role's sessions never exceed the serving pool (4), the worker's pool (its concurrency plus one) and the event bus's listener; resident memory returns near its baseline; the provider is left with no open request |
+| `export-import-round-trip` | a deployment in this posture is exported while it serves, imported into an empty target, cut over and served there in the same posture: every row and file is equal, every access token, refresh session, API key and invite of the source is refused, every password signs in, and the source stays fenced |
+
+A skipped test fails its check: a test that did not run is not evidence. So does a file whose vitest
+run did not exit 0 — an unhandled rejection or a crash outside every test — even when its report
+lists every test as passed, and a file that wrote no report: a report an earlier run left in the log
+directory is removed before the file runs. The summary also names
+what the posture asks for that Core has no surface for: support access (Core has no path by which an
+operator or vendor account reaches an organization's data). The lane sets every provider credential
+empty for the suites, so no run spends.
+
+The log directory holds the whole evidence of a run: each suite file's output and vitest JSON
+report, and `summary.json`, which names each report and the exit status of the vitest run that
+wrote it, and records what the lane ran on — the commit,
+whether the working tree was clean, the runtime version, the platform, the architecture and the Node
+version.
+
+### The managed-posture receipt
+
+A release's managed-posture receipt states which public-hosting protections were tested for it
+(`managed-receipt.schema.json` in `@rayspec/bundle-contract`). `pnpm receipt:managed`
+(`scripts/managed-receipt.mjs`) makes it from one lane directory:
+
+```bash
+pnpm build
+pnpm test:certification --log-dir certification-logs
+pnpm receipt:managed --lane certification-logs \
+  --release-manifest rayspec-release-manifest.json \
+  --artifact-sha256 <sha256 of the runtime artifact> --out managed-receipt.json
+```
+
+It writes the receipt as canonical JSON, validated with `validateReceipt`, and prints its SHA-256 on
+stderr; that digest is what the runtime-control adapter is given as `managedReceiptSha256`. It
+refuses (exit 1, nothing written), naming the reason, when:
+
+- the lane did not pass, a check of this checkout's lane is missing or ran other suite files, or any
+  report — each is read and judged again against the one suite file it is named for, not taken from
+  the summary — shows a failed or skipped test, is of another file, or cannot be read;
+- one report is named for two suite files, or the summary records a file whose vitest run did not
+  exit 0;
+- the lane did not run as the runtime role, ran on a working tree with changes, or at another commit
+  than the checkout running the generator;
+- the lane did not run on linux x64 with Node 22.21 or a later 22 release, the only targets a
+  receipt names;
+- the release manifest is not canonical JSON its schema admits, or is for another version, commit
+  or target than the lane.
+
+Each fixed protection of the receipt is claimed through the checks that establish it:
+
+| Receipt field | Value | Checks |
+| --- | --- | --- |
+| `maxApplicationTenants`, `singleTenantModeEnforced` | `1`, `true` | `single-tenant-mode` |
+| `publicHostingPosture` | `isolated-environment-v1` | every mandatory public-hosting check and recovery case: `runtime-role-evidence`, `object-authorization`, `trusted-proxies`, `cors-and-csrf`, `upload-limits`, `sanitized-errors`, `outbound-guard`, `recovery-scope`, `hostile-archives`, `hostile-migration-bundles`, `crash-recovery`, `resource-bounds`, `export-import-round-trip` |
+| `executionLevels` | `none`, `in-process` | `execution-levels` |
+| `databaseIsolation` | `dedicated-db-and-rls` | `runtime-role-evidence`, `object-authorization` |
+| `databaseRoleSeparation` | `true` | `runtime-role-evidence`, `privileged-credentials` |
+| `crossProcessCancellation` | `true` | `cross-process-cancel` |
+| `agentTraceExport` | `off` | `agent-trace-export-off` |
+| `recoveryScopeEndpoint` | `disabled` | `recovery-scope` |
+| `trustedProxiesPinned` | `true` | `trusted-proxies` |
+| `egressEnforcement` | `host-network-policy` | `outbound-guard` (the runtime guards only its own requests; the host enforces egress) |
+
+`supportedBackends` lists an agent backend of the [matrix](#supported-backends) that the posture
+allows only when every test its row names passed in the lane. `capabilities` is not a tested claim:
+as the contract defines it, it lists the capability vocabulary's available ids that the managed
+posture allows, and the generator leaves out a provider capability whose row was not proven the same
+way. Only the provider capabilities rest on lane evidence; the others are what the posture permits
+an application to use, not protections the lane certifies. `evidence` names every report, by its
+file name in the lane directory with its SHA-256, under the check it proves, and the summary
+itself. `residualRisks` is the list in [Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks).
+The CI `certification` job runs the lane on linux x64 and keeps its log directory as the workflow
+artifact `certification-lane`; download it and pass it as `--lane`, from a checkout of the commit the
+job ran at. A lane run on a developer machine of another platform is not evidence for a receipt.
 
 ## What the runtime checks on every request and job
 
@@ -109,14 +257,21 @@ in every posture.
 | `RAYSPEC_AGENT_SYNC_RUNS_MAX` | in-request runs one process holds at once: synchronous `POST /v1/agents/{id}/runs`, conversation reply runs and record normalize runs together | 32 | no bound |
 | `RAYSPEC_RUN_CANCEL_POLL_MS` | how soon a cancellation reaches a run in another worker process | 2000 | off |
 
-`RAYSPEC_AGENT_RUN_MAX_MS` bounds the provider call, not the end of the run as the caller sees it.
-At expiry the call is told to stop and run-core waits up to the kill grace plus one second for it to
-settle. It then writes the terminal record, which needs a database connection from the pool. Under
-heavy parallel load that wait for a connection is not bounded by the policy, so the request can end
-later than the wall time plus the grace. A probe with 60 parallel runs on a pool of 4, a 400 ms wall
-time and a 200 ms grace saw runs end up to 1730 ms after they started. The provider call itself had
-stopped at the bound. Where the end matters, keep `RAYSPEC_AGENT_SYNC_RUNS_MAX` and
-`RAYSPEC_AGENT_WORKER_CONCURRENCY` in proportion to the connections the database pool holds.
+`RAYSPEC_AGENT_RUN_MAX_MS` bounds the provider call; the end of the run as the caller sees it comes
+at most a fixed time later. At expiry the call is told to stop and run-core waits up to the kill
+grace plus one second for it to settle. It then drains the run's events and writes the terminal
+record, which needs a database connection from the pool and waits at most 2 seconds for the run's
+header row; run-core gives that tail 5 seconds. So a run that hits its wall time ends for its caller
+no later than
+
+    RAYSPEC_AGENT_RUN_MAX_MS + RAYSPEC_AGENT_KILL_GRACE_MS + 1 s + 5 s
+
+after it started (the managed defaults: 900 s + 5 s + 1 s + 5 s). A record that has not landed by
+then is not abandoned: it completes when the pool hands out a connection, and until it does the run
+reads as `running`; a record that fails is logged. Under heavy parallel load that wait for a
+connection is what the 5 seconds cover, so keep `RAYSPEC_AGENT_SYNC_RUNS_MAX` and
+`RAYSPEC_AGENT_WORKER_CONCURRENCY` in proportion to the connections the database pool holds. A
+cancelled run ends under the same tail.
 
 A run past a queue or in-request bound is refused with `429 RATE_LIMITED`, a `Retry-After`, and
 `error.details` `{ reason: "queue-full", scope, limit }`, before anything is recorded for it. A
@@ -353,6 +508,11 @@ or a request — to a URL it did not choose — it goes through one guard (`guar
 A guarded request connects directly, never through `HTTP_PROXY`/`HTTPS_PROXY`, because behind a proxy
 the guard would see the proxy's address instead of the destination's.
 
+Every guarded request has a time limit: 30 seconds unless the caller sets `timeoutMs`. It covers the
+name resolution, every redirect hop and the response body, so a destination that accepts the
+connection and never answers, or sends its body a byte at a time, is ended at the limit
+(`OutboundRequestTimedOut`) instead of holding the request open.
+
 This release has **no** such outbound path: no grammar field, node or request field makes the
 platform fetch a URL. The provider adapters call the endpoints the operator configures
 (`OPENAI_BASE_URL` and `DEEPGRAM_BASE_URL` are reserved operator settings a bundle cannot set). A test
@@ -423,6 +583,9 @@ detail; the detail goes to the server log.
   one can use it until it expires or is revoked.
 - Egress is not enforced by the runtime; the host's network policy does that ([Egress](#egress)).
 
+The [Threat model](./threat-model.md) lists every residual risk this release accepts, with its
+owner, and what the host must enforce.
+
 ## Upgrading
 
 Nothing about the posture changes unless you turn it on: without `RAYSPEC_SINGLE_TENANT` the number
@@ -443,3 +606,7 @@ With either setting on, the runtime also:
 
 Each check refuses only a principal that no longer has access, or removes internal detail from an
 answer.
+
+With role separation the deploy runs as a supervisor and a child process; under the managed posture
+on Linux the host must keep the supervisor private from that child, as [Turning it on](#turning-it-on)
+lists, or the boot is refused.

@@ -67,6 +67,8 @@ vi.mock('@rayspec/server', () => {
     ProductBootError,
     shutdownHttpServer: vi.fn(async () => ({ forcedConnections: false, appClosed: true })),
     staticBootBanner: () => 'static banner',
+    // The environment copy the configuration is read from; the hosting checks prove the removal.
+    withholdPrivilegedConnections: () => ({ ...process.env }),
   };
 });
 

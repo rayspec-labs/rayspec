@@ -27,7 +27,7 @@ read-only:
 | Cron and webhook triggers, the on-demand trigger, the run queue, the tenant event bus | stopped (paused, not shut down) |
 | Event streams | closed |
 | Runs in flight | drained, up to `--quiesce-deadline` (default 300 seconds) |
-| The database | a write barrier the application cannot bypass (below) |
+| The database | a write barrier the platform's requests and jobs cannot pass (below) |
 | Blob writes | refused |
 
 The export itself takes about as long as `pg_dump` of both databases plus one read of every blob
@@ -39,12 +39,21 @@ source back with `rayspec resume`).
 
 A fence that only the application respects is not enough: the database must refuse writes too. An
 export holds one of two barriers, and refuses without one (`RAY_EXTERNAL_STATE_UNSUPPORTED`,
-reason `database-barrier-unavailable`), leaving the source fenced:
+reason `database-barrier-unavailable`). Without role separation and without `--source-stopped` no
+barrier can hold, and the export knows that before it fences: it refuses at the precheck and the
+source stays as it was, unfenced. When a barrier could hold but does not (the runtime role's writes
+could not be revoked, or a session is still connected to a source attested as stopped), the
+refusal comes after the fence and leaves the source fenced:
 
 - **Role separation** (recommended; [Database roles and row-level security](./database-isolation.md)).
   With `RAYSPEC_MIGRATION_DATABASE_URL` set, the export connects as the migration role and revokes
   the runtime role's `INSERT`, `UPDATE`, `DELETE` and `TRUNCATE` on every table of both databases
   until resume (barrier `database-write-role`). The deployment can keep running while you export.
+  The barrier binds the runtime role, not the application's own code: the serving process also holds
+  the migration role's connection, and code of the application can use it to write past the fence
+  or open it. Before exporting an application whose code you do not trust, stop every runtime
+  process of the source and keep it stopped until the target has taken over
+  ([Threat model](./threat-model.md#accepted-residual-risks)).
 - **A stopped source.** Without role separation, stop every runtime process of the deployment and
   pass `--source-stopped`. The export checks that no other session is connected to either database
   (barrier `database-stopped-source`).
@@ -267,7 +276,8 @@ is fenced and nothing is released.
 | A precheck refusal (wrong deployment id, drift, a second organization, a database extension, an extension that provides its own blob backend, no recorded blob backend, an unknown table, no `pg_dump` of the right major, …) | unchanged, not fenced | fix the cause and run the export again |
 | You did not confirm the downtime | unchanged, not fenced | run it again and confirm, or pass `--confirm-quiesce` |
 | The drain did not finish before `--quiesce-deadline` (`RAY_SOURCE_NOT_QUIESCENT`) | fenced | wait for the runs to end and run the export again, or `rayspec resume` |
-| No database write barrier (`database-barrier-unavailable`) | fenced | enable role separation, or stop every runtime process and run it again with `--source-stopped`; or `rayspec resume` |
+| No role separation and no `--source-stopped`, so no database write barrier can hold (`database-barrier-unavailable`, at the precheck) | unchanged, not fenced | enable role separation, or stop every runtime process and run it again with `--source-stopped` |
+| A database write barrier that could hold did not: the runtime role's writes could not be revoked, or a session is still connected to a source attested as stopped (`database-barrier-unavailable`, after the fence) | fenced | fix the cause (or stop the remaining process) and run it again; or `rayspec resume` |
 | A session that could write is connected (`uncontrolled-writer`), or a run is still marked running (`unreconciled-effects`) | fenced | disconnect it or reconcile the run, then run the export again |
 | The blob root still holds the temporary file of an upload after the drain (`unreconciled-effects`): an upload that never finished, such as one whose process was killed | fenced | with the source fenced no upload is running, so delete the leftover `<key>.tmp-<pid>-<ms>-<uuid>` file under the blob root (`find "$RAYSPEC_BLOB_ROOT" -name '*.tmp-*'`), then run the export again |
 | Ctrl-C / SIGTERM (`RAY_INTERRUPTED`, exit 6) | fenced | the export stopped at a safe point, ended `pg_dump` and removed its scratch data; run it again, or `rayspec resume` |
@@ -329,3 +339,18 @@ pinned `postgres` image `docker-compose.yml` runs, through `docker run`.
   the durable engine's own migrations create (`uuid-ossp`).
 - Only the platform's fs blob store; an extension that provides its own blob backend is refused.
 - No passphrase encryption, no partial export, no redaction mode.
+
+## Compatibility notes
+
+Where `rayspec export` differs from the bundle contract it implements (`1.0.0-draft.2`), recorded
+here as an amendment for the contract's next revision:
+
+- **A barrier that cannot hold is refused before the fence.** The contract's `quiesce` takes the
+  fence and then reports the database barrier `unavailable`, and its `snapshot` refuses with
+  `RAY_EXTERNAL_STATE_UNSUPPORTED` (`database-barrier-unavailable`) with the fence still held. Without
+  role separation and without `--source-stopped`, `export` knows before quiescing that no database
+  barrier can hold, so it refuses with the same code and reason at the precheck and does not fence
+  the source at all: no downtime, no `QUIESCING` receipt, nothing to resume. A source already fenced
+  with a database barrier an earlier attested export holds keeps that barrier and is exported as
+  before. `quiesce()` and `captureSnapshot()` of the runtime operations behave as the contract
+  states.

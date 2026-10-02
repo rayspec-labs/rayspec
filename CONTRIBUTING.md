@@ -256,6 +256,26 @@ On a laptop with a warm npm cache the whole run takes under four minutes.
 CI runs it on every pull request and every push to `main`, in the `reference-journeys` job.
 `pnpm test:journeys-logic` (lane 1) checks the harness itself without a database.
 
+### Hosting-posture certification
+
+`scripts/certification.mjs` runs the suites that prove each check a public host must hold — object
+authorization, trusted proxies, CORS and CSRF, upload limits, sanitized errors, the outbound guard,
+hostile archives and migration bundles, cross-process cancellation, crash recovery, bounded
+execution under load and the export/import round trip — and prints one verdict per check. Its own
+suites (`packages/app/cli/src/certification/`, excluded from the package's ordinary run) deploy
+through the real CLI with the hardened posture fully on; the rest run in the runtime-role lane. A
+skipped test fails its check. See
+[Hosting in the hardened posture → Certifying the posture](./docs/hardened-posture.md#certifying-the-posture).
+
+```bash
+pnpm build
+DATABASE_URL=postgres://rayspec:rayspec@localhost:5433/rayspec pnpm test:certification
+pnpm test:certification --check resource-bounds   # one check
+```
+
+It needs the database roles `pnpm db:up` creates, and takes about half an hour. CI runs it in the
+`certification` job; `pnpm test:certification-logic` (lane 1) checks the runner without a database.
+
 ---
 
 ## Certificate of origin

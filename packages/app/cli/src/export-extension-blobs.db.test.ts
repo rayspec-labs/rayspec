@@ -48,6 +48,7 @@ import { writeTree } from '../../../kernel/bundle-closure/src/test-support/app.j
 import { runExport } from './export.js';
 import { asAdmin, type LaneRoles, prepareRoleDatabases } from './test-support/migration-source.js';
 import { pgToolPath } from './test-support/pg-tools.js';
+import { freePorts } from './test-support/processes.js';
 import {
   call,
   cli,
@@ -74,7 +75,6 @@ let armsRan = 0;
 const ARMS = 5;
 /** The variable only the export processes get; an extension module loaded with it writes a marker. */
 const MARKER = 'RAYSPEC_EXPORT_SUITE_MARKER';
-const PORT = 24_900 + (process.pid % 90);
 
 /**
  * An extension that contributes an upload route and its handler; `capabilities` is added as is. Its
@@ -286,9 +286,11 @@ describe.skipIf(!baseUrl)('rayspec export — applications that load extensions'
     identity = await generateX25519Identity();
     recipient = await identityToRecipient(identity);
     marker = join(scratch('export-ext-marker-'), 'loaded');
-    files = new App('files_pack', '', PORT);
-    vault = new App('vault_pack', '  capabilities: { blobFactory: memoryBlobs },\n', PORT + 100);
-    swap = new App('swap_pack', '', PORT + 200);
+    // Three deployments, each on its own port the operating system handed out.
+    const [filesPort, vaultPort, swapPort] = (await freePorts(3)) as [number, number, number];
+    files = new App('files_pack', '', filesPort);
+    vault = new App('vault_pack', '  capabilities: { blobFactory: memoryBlobs },\n', vaultPort);
+    swap = new App('swap_pack', '', swapPort);
     await files.create();
     await vault.create();
     await swap.create();

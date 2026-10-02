@@ -17,6 +17,7 @@ import { copyFileSync, readFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort } from './test-support/processes.js';
 import {
   call,
   cli,
@@ -39,7 +40,6 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let armsRan = 0;
 
 const APP = join(EXAMPLES, 'document-intake');
-const PORT = 24_300 + (process.pid % 300);
 const TENANT = randomUUID();
 
 interface SeedDocument {
@@ -123,7 +123,7 @@ describe.skipIf(!baseUrl)('document intake — deterministic extraction from the
     pem = await signingKeyPem();
     const dir = scratch('document-intake-deploy-');
     blobRoot = scratch('document-intake-blobs-');
-    deployment = new Deployment(dir, PORT, env);
+    deployment = new Deployment(dir, await freePort(), env);
     // The organization and its owner's one-time invite, settled before anything is deployed.
     const inviteFile = join(scratch('document-intake-invite-'), 'owner.token');
     const ensured = cli(

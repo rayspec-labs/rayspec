@@ -6,10 +6,10 @@
  *
  * In order, on one environment:
  *  1. Refusals that never touch the fence: a deployment id of another state directory.
- *  2. Without role separation and without `--source-stopped`, export fences the source, finds no
- *     database write barrier and refuses before any capture (`database-barrier-unavailable`); the
- *     source stays fenced and mutations answer 503. `resume` refuses another epoch
- *     (`RAY_FENCE_MISMATCH`) and releases the matching one.
+ *  2. Without role separation and without `--source-stopped`, no database write barrier can hold,
+ *     and export knows it before the fence: it refuses at the precheck
+ *     (`database-barrier-unavailable`) with nothing at the source changed — no fence, no receipt in
+ *     the environment, writes still accepted.
  *  3. A writer, an uploader and the cron trigger run against the server while an export runs. They
  *     are blocked once the fence holds (503, no new tick), and the snapshot is consistent: every
  *     acknowledged note and upload is in it, the restored dumps hold exactly the counted rows, which
@@ -23,7 +23,8 @@
  *     the next export removes it, closes the killed export's receipt and succeeds at the same epoch.
  *  6. SIGINT during the capture ends `pg_dump`, removes the scratch directory, keeps the fence and
  *     reports `RAY_INTERRUPTED` with the resume instruction (exit 6).
- *  7. `resume` releases the fence; writes are accepted again.
+ *  7. `resume` refuses another epoch (`RAY_FENCE_MISMATCH`) and releases the matching one; writes
+ *     are accepted again.
  *  8. An export killed during the capture, then `resume` instead of another export: resume removes
  *     the plaintext the killed export left in the scratch directory, closes its receipt with the
  *     fence it left, and releases that fence.
@@ -578,7 +579,7 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     armsRan += 1;
   }, 60_000);
 
-  it('without a database barrier, fences, refuses before any capture and stays fenced; resume releases only the matching epoch', async () => {
+  it('without role separation or an attested stopped source, refuses before the fence and changes nothing at the source', async () => {
     const before = await fence();
     expect(before.state).toBe('open');
     const run = await cli(exportArgs(join(deployDir, 'no-barrier.ray')), cliEnv(singleRoleEnv()));
@@ -587,36 +588,28 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
       code: 'RAY_EXTERNAL_STATE_UNSUPPORTED',
       reason: 'database-barrier-unavailable',
     });
-    const epoch = before.epoch + 1;
-    expect(await fence()).toEqual({ state: 'fenced', epoch });
-    expect(run.envelope.errors[0].message).toContain(
-      `rayspec resume --deployment ${deploymentId()} --fence-epoch ${epoch}`,
-    );
+    expect(run.envelope.errors[0].message).toContain('Nothing at the source changed');
+    // No fence was taken, so there is nothing to resume and the message names no resume command.
+    expect(run.envelope.errors[0].message).not.toContain('rayspec resume');
+    expect(await fence()).toEqual(before);
     expect(existsSync(join(deployDir, 'no-barrier.ray'))).toBe(false);
-    expect((await postNote('during the fence')).status).toBe(503);
     expect(readdirSync(join(state(), 'scratch'))).toEqual([]);
-    // Every receipt the environment took carries the application digest the precheck established,
-    // the refusal included.
-    const blockedRows = await exportReceipts(run.envelope.operationId as string);
-    expect(blockedRows.map((r) => r.step)).toEqual(['PRECHECK', 'QUIESCING', 'BLOCKED']);
-    const applicationDigest = blockedRows[0]?.digest;
-    expect(applicationDigest).toMatch(/^[a-f0-9]{64}$/);
-    expect(blockedRows.every((r) => r.digest === applicationDigest)).toBe(true);
-
-    const wrong = await cli(
-      ['resume', '--deployment', deploymentId(), '--fence-epoch', String(epoch - 1)],
-      cliEnv(singleRoleEnv()),
-    );
-    expect(wrong.code).toBe(4);
-    expect(wrong.envelope.errors[0].code).toBe('RAY_FENCE_MISMATCH');
-    const resumed = await cli(
-      ['resume', '--deployment', deploymentId(), '--fence-epoch', String(epoch)],
-      cliEnv(singleRoleEnv()),
-    );
-    expect(resumed.code, resumed.stderr).toBe(0);
-    expect(resumed.envelope.data).toMatchObject({ fenceEpoch: epoch, released: true });
-    // Every runtime process sees the fence open within a second.
-    expect(await noteUntilAccepted('after resume')).toBe(201);
+    // The environment took no receipt; the local one ends blocked at the precheck, unfenced.
+    expect(await exportReceipts(run.envelope.operationId as string)).toEqual([]);
+    const receipt = JSON.parse(
+      readFileSync(join(state(), 'receipts', `export-${run.envelope.operationId}.json`), 'utf8'),
+    ) as ParsedJson;
+    expect(receipt.outcome).toBe('blocked');
+    expect((receipt.transitions as ParsedJson[]).map((t) => t.state)).toEqual([
+      'PRECHECK',
+      'BLOCKED',
+    ]);
+    expect((receipt.transitions as ParsedJson[]).at(-1)).toMatchObject({
+      fenceEpoch: before.epoch,
+      fenceState: 'open',
+    });
+    // Writes go on: the source was never fenced.
+    expect((await postNote('no fence was taken')).status).toBe(201);
     armsRan += 1;
   }, 180_000);
 
@@ -1018,8 +1011,16 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     armsRan += 1;
   }, 300_000);
 
-  it('resume releases the fence the exports held, and writes are accepted again', async () => {
+  it('resume refuses another epoch, releases the fence the exports held, and writes are accepted again', async () => {
     const before = await fence();
+    expect(before.state).toBe('fenced');
+    const wrong = await cli(
+      ['resume', '--deployment', deploymentId(), '--fence-epoch', String(before.epoch - 1)],
+      cliEnv(roleEnv()),
+    );
+    expect(wrong.code).toBe(4);
+    expect(wrong.envelope.errors[0].code).toBe('RAY_FENCE_MISMATCH');
+    expect(await fence()).toEqual(before);
     const run = await cli(
       ['resume', '--deployment', deploymentId(), '--fence-epoch', String(before.epoch)],
       cliEnv(roleEnv()),

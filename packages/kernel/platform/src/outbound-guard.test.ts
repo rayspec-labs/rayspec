@@ -6,18 +6,24 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type AddressClass,
   classifyAddress,
+  DEFAULT_OUTBOUND_TIMEOUT_MS,
   guardedFetch,
   type HostResolver,
   OutboundRequestRefused,
+  OutboundRequestTimedOut,
 } from './outbound-guard.js';
 
 const servers: Server[] = [];
 
+/** The timer function as the module found it, for a guard a test sets while it watches timers. */
+const realTimeout = globalThis.setTimeout;
+
 afterEach(async () => {
+  for (const s of servers) s.closeAllConnections();
   await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(() => r(null)))));
 });
 
@@ -334,5 +340,168 @@ describe('guardedFetch: redirects', () => {
     );
     expect(err.reason).toBe('redirect-limit');
     expect(loop.seen).toHaveLength(3);
+  });
+});
+
+describe('guardedFetch: a time limit on every request', () => {
+  /** How long the request took to reject, and what it rejected with. */
+  async function timed(promise: Promise<unknown>): Promise<{ err: unknown; ms: number }> {
+    const started = Date.now();
+    const err = await promise.then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    return { err, ms: Date.now() - started };
+  }
+
+  /**
+   * Watch the timers guardedFetch sets: each one's delay and handle, whether it was cleared, and the
+   * default limit's timer shortened to `shortenTo` ms so a test need not wait 30 s for it.
+   */
+  function watchTimers(shortenTo: number) {
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const set: { delay: number | undefined; handle: ReturnType<typeof setTimeout> }[] = [];
+    const cleared = new Set<unknown>();
+    const setSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      fn: () => void,
+      delay?: number,
+    ) => {
+      const handle = realSetTimeout(fn, delay === DEFAULT_OUTBOUND_TIMEOUT_MS ? shortenTo : delay);
+      set.push({ delay, handle });
+      return handle;
+    }) as typeof setTimeout);
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((
+      handle?: ReturnType<typeof setTimeout>,
+    ) => {
+      cleared.add(handle);
+      realClearTimeout(handle);
+    }) as typeof clearTimeout);
+    return {
+      set,
+      cleared,
+      restore: () => {
+        setSpy.mockRestore();
+        clearSpy.mockRestore();
+      },
+    };
+  }
+
+  it('has a default limit, so a request without one is still bounded', () => {
+    expect(DEFAULT_OUTBOUND_TIMEOUT_MS).toBe(30_000);
+  });
+
+  it('ends a request that sets no limit at the default limit', async () => {
+    const silent = await serve(() => {});
+    const timers = watchTimers(200);
+    try {
+      // A guard against a request that is never ended, so the test fails instead of hanging.
+      const never = new Promise((r) => realTimeout(() => r('not ended'), 5_000));
+      const { err } = await timed(
+        Promise.race([guardedFetch(silent.base, {}, { admits: testServerOnly }), never]).then(
+          (v) => {
+            throw new Error(String(v));
+          },
+        ),
+      );
+      expect(err).toBeInstanceOf(OutboundRequestTimedOut);
+      expect((err as OutboundRequestTimedOut).timeoutMs).toBe(DEFAULT_OUTBOUND_TIMEOUT_MS);
+      expect(timers.set.map((t) => t.delay)).toContain(DEFAULT_OUTBOUND_TIMEOUT_MS);
+      expect(silent.seen).toHaveLength(1);
+    } finally {
+      timers.restore();
+    }
+  });
+
+  it('ends a destination that accepts the request and never answers', async () => {
+    const silent = await serve(() => {});
+    const { err, ms } = await timed(
+      guardedFetch(silent.base, {}, { admits: testServerOnly, timeoutMs: 300 }),
+    );
+    expect(err).toBeInstanceOf(OutboundRequestTimedOut);
+    expect((err as OutboundRequestTimedOut).timeoutMs).toBe(300);
+    expect(ms).toBeGreaterThanOrEqual(280);
+    expect(ms).toBeLessThan(3_000);
+    expect(silent.seen).toHaveLength(1);
+  });
+
+  it('ends a body that trickles past the limit, with the same error', async () => {
+    const trickle = await serve((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.write('a');
+      const tick = setInterval(() => res.write('b'), 50);
+      res.on('close', () => clearInterval(tick));
+    });
+    const res = await guardedFetch(trickle.base, {}, { admits: testServerOnly, timeoutMs: 400 });
+    expect(res.status).toBe(200);
+    const { err, ms } = await timed(res.text());
+    expect(err).toBeInstanceOf(OutboundRequestTimedOut);
+    expect(ms).toBeLessThan(3_000);
+  });
+
+  it('counts every redirect hop against one limit', async () => {
+    const silent = await serve(() => {});
+    const hop = await serve((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(302, { location: `${silent.base}/end` });
+        res.end();
+      }, 200);
+    });
+    const { err, ms } = await timed(
+      guardedFetch(hop.base, {}, { admits: testServerOnly, timeoutMs: 500 }),
+    );
+    expect(err).toBeInstanceOf(OutboundRequestTimedOut);
+    // One limit across both hops, not 500 ms per hop.
+    expect(ms).toBeLessThan(900);
+    expect(silent.seen).toHaveLength(1);
+  });
+
+  it('ends a resolution that never answers', async () => {
+    const resolve: HostResolver = () => new Promise(() => {});
+    const { err } = await timed(
+      guardedFetch('http://slow-dns.example/', {}, { resolve, timeoutMs: 200 }),
+    );
+    expect(err).toBeInstanceOf(OutboundRequestTimedOut);
+  });
+
+  it('a request that finishes inside the limit is unaffected, and leaves no timer behind', async () => {
+    const target = await serve(ok);
+    const timers = watchTimers(DEFAULT_OUTBOUND_TIMEOUT_MS);
+    try {
+      const res = await guardedFetch(target.base, {}, { admits: testServerOnly, timeoutMs: 1_000 });
+      expect(await res.text()).toBe('reached');
+      // The body's end clears the limit's timer.
+      await new Promise((r) => setImmediate(r));
+      const limit = timers.set.filter((t) => t.delay === 1_000);
+      expect(limit).toHaveLength(1);
+      expect(timers.cleared.has(limit[0]?.handle)).toBe(true);
+    } finally {
+      timers.restore();
+    }
+    // Past the limit, nothing fires on the finished request.
+    await new Promise((r) => setTimeout(r, 1_100));
+  });
+
+  it("the caller's own signal still ends the request with its own reason", async () => {
+    const silent = await serve(() => {});
+    const controller = new AbortController();
+    const reason = new Error('the caller stopped');
+    setTimeout(() => controller.abort(reason), 100);
+    const { err } = await timed(
+      guardedFetch(
+        silent.base,
+        {},
+        { admits: testServerOnly, timeoutMs: 5_000, signal: controller.signal },
+      ),
+    );
+    expect(err).toBe(reason);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, 2 ** 31])('refuses the limit %s before sending', async (ms) => {
+    const target = await serve(ok);
+    await expect(
+      guardedFetch(target.base, {}, { admits: testServerOnly, timeoutMs: ms }),
+    ).rejects.toBeInstanceOf(RangeError);
+    expect(target.seen).toEqual([]);
   });
 });

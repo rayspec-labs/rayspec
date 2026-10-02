@@ -34,10 +34,12 @@
  */
 
 import { writeSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { type ParseArgsConfig, parseArgs } from 'node:util';
 import type { Db } from '@rayspec/db';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
-import type { BeforeSchemaChangeResult, BootFacts } from '@rayspec/server';
+import type { BeforeSchemaChangeResult, BootFacts, SupervisorConnection } from '@rayspec/server';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
 // FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
 // it — and every other subcommand — loads none of @rayspec/server.
@@ -682,6 +684,7 @@ export async function serveDeployment(
 
   // Dynamic imports: keep DBOS/Hono/the adapters + product-yaml OUT of `rayspec doctor`'s load path.
   const { serve } = await import('@hono/node-server');
+  const runtime = await import('@rayspec/server');
   const {
     assembleOptsFromEnv,
     assembleServer,
@@ -699,7 +702,8 @@ export async function serveDeployment(
     ProductBootError,
     shutdownHttpServer,
     staticBootBanner,
-  } = await import('@rayspec/server');
+    withholdPrivilegedConnections,
+  } = runtime;
   const { sealProductStores } = await import('@rayspec/db/composition');
 
   let server: Awaited<ReturnType<typeof assembleServer>>;
@@ -751,17 +755,64 @@ export async function serveDeployment(
       return;
     }
 
-    const config = loadServerConfig();
+    // The migration and snapshot connections leave the environment before any application module is
+    // imported, so no handler and no child process this server spawns reads them; the boot reads
+    // them from the copy. Under a supervisor that copy holds neither, and the supervisor read the
+    // same configuration and reported its warnings already.
+    const environment = withholdPrivilegedConnections();
+    const supervisor = extra.supervisor;
+    const loaded =
+      supervisor === undefined
+        ? loadServerConfig(environment)
+        : loadServerConfig(environment, () => {});
+    if (supervisor === undefined && loaded.migrationDatabaseUrl !== undefined) {
+      // Role separation: this process holds the migration role and never imports the application.
+      // It serves through a child process that never holds the role, runs the boot's schema work
+      // for it, and ends as that process ends (supervisor.ts in @rayspec/server).
+      const exit = await runtime.superviseServing({
+        config: loaded,
+        entry: SUPERVISED_CHILD_ENTRY,
+        instruction: extra.childInstruction ?? {
+          kind: 'deploy',
+          specPath,
+          ...(portOverride !== undefined ? { port: portOverride } : {}),
+          ...(hostOverride !== undefined ? { host: hostOverride } : {}),
+          ...(migrationPath !== undefined ? { migrationPath } : {}),
+          ...(allowlistPath !== undefined ? { allowlistPath } : {}),
+          reporting,
+        },
+        prefix: '[rayspec deploy]',
+        ...(extra.beforeSchemaChange !== undefined
+          ? { beforeSchemaChange: extra.beforeSchemaChange }
+          : {}),
+        privileged: environment,
+        applicationDirectories: [
+          dirname(specPath),
+          ...(loaded.escapeHatchRoot !== undefined ? [loaded.escapeHatchRoot] : []),
+          ...(extra.applicationDirectories ?? []),
+        ],
+        drainMs: loaded.shutdownDrainMs ?? runtime.DEFAULT_SHUTDOWN_DRAIN_MS,
+      });
+      // The application process wrote its own report as it left, unless it could not.
+      report.handedOver();
+      runtime.endSupervisor(exit, '[rayspec deploy]', (reason) => report.refused(reason));
+      return;
+    }
+    const config =
+      supervisor === undefined ? loaded : { ...loaded, roleSeparation: 'supervised' as const };
     // Build the deployer-seam opts from the SAME shared builder rayspec-serve uses: the sanctioned
     // validating registrar (registerProductStores) for ANY spec, PLUS an env-driven agentBackendsFactory
     // when the spec is a backend-profile doc WITH agents — so `rayspec deploy <backend-spec-with-agents>`
     // boots the declared agents directly (parity with rayspec-serve), not just the bare registrar. A
     // missing agent credential surfaces as a fail-closed BootConfigError the catch below clean-prints.
+    // Under a supervisor every schema change of the boot runs there.
     server = await assembleServer(config, {
       ...assembleOptsFromEnv(config),
-      ...(extra.beforeSchemaChange !== undefined
-        ? { beforeSchemaChange: extra.beforeSchemaChange }
-        : {}),
+      ...(supervisor !== undefined
+        ? { schemaWork: supervisor.schemaWork }
+        : extra.beforeSchemaChange !== undefined
+          ? { beforeSchemaChange: extra.beforeSchemaChange }
+          : {}),
     });
     // Shut the sanctioned door after the ONE boot registration (deploy owns its process, boots once).
     sealProductStores();
@@ -772,6 +823,7 @@ export async function serveDeployment(
         // Log the ACTUAL bound address (info.address), never a hard-coded loopback (parity with
         // rayspec-serve) — a non-loopback --host/RAYSPEC_HOST bind must show in the banner.
         report.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
+        supervisor?.serving();
       },
     );
     // The same bind refusal the static branch above attaches: a taken port refuses the boot instead
@@ -782,7 +834,12 @@ export async function serveDeployment(
       prefix: '[rayspec deploy]',
     });
 
+    // One shutdown: a second signal (a terminal's Ctrl-C reaches the supervisor and this process both,
+    // and the supervisor forwards it) does not start another.
+    let stopping = false;
     const shutdown = (signal: string): void => {
+      if (stopping) return;
+      stopping = true;
       report.log(`\n[rayspec deploy] ${signal} received — shutting down…`);
       report.stopped(signal);
       // Bounded: in-flight requests get the drain (RAYSPEC_SHUTDOWN_DRAIN_MS), then any connection
@@ -849,11 +906,31 @@ export interface ServeReport {
   refused(message: string, cause?: unknown): void;
   /** Record the signal that stopped a served deployment. */
   stopped(signal: string): void;
+  /**
+   * The supervised application process reports from here on: this process writes no report as it
+   * leaves, unless `refused` records a reason afterwards (the application process could not report).
+   */
+  handedOver(): void;
 }
 
-/** What a bundle deploy adds to a serving deploy: its own report and the apply it runs in the boot. */
+/** The module a supervising deploy starts its application process with. */
+const SUPERVISED_CHILD_ENTRY = fileURLToPath(new URL('./supervised-child.js', import.meta.url));
+
+/**
+ * What a bundle deploy adds to a serving deploy: its own report and the apply it runs in the boot;
+ * and, under role separation, what supervising adds.
+ */
 export interface ServeExtras {
   report?: ServeReport;
+  /** In the application process of a supervised deploy: its channel to the supervisor. */
+  supervisor?: SupervisorConnection;
+  /**
+   * In a supervising deploy: what the application process is told to serve. Absent, the deploy's
+   * own arguments (`supervised-child.ts`).
+   */
+  childInstruction?: unknown;
+  /** In a supervising deploy: application directories beside the spec's, never loaded from. */
+  applicationDirectories?: readonly string[];
   /**
    * Run by the boot after it validated everything and before it changes any schema, with what the
    * boot resolved by then; it reports the product change it applied, which the boot banner names.
@@ -874,13 +951,19 @@ export interface ServeExtras {
  */
 function serveReport(reporting: DeployReporting): ServeReport {
   if (!reporting.json) {
-    return { log: (line) => console.log(line), refused: () => {}, stopped: () => {} };
+    return {
+      log: (line) => console.log(line),
+      refused: () => {},
+      stopped: () => {},
+      handedOver: () => {},
+    };
   }
   let refusal: string | undefined;
   let stoppedBy: string | undefined;
   let written = false;
+  let delegated = false;
   process.on('exit', (code) => {
-    if (written) return;
+    if (written || delegated) return;
     written = true;
     const ok = code === 0 && refusal === undefined;
     const result = ok
@@ -897,9 +980,13 @@ function serveReport(reporting: DeployReporting): ServeReport {
     log: (line) => console.error(line),
     refused: (message) => {
       refusal = message;
+      delegated = false;
     },
     stopped: (signal) => {
       stoppedBy = signal;
+    },
+    handedOver: () => {
+      delegated = true;
     },
   };
 }

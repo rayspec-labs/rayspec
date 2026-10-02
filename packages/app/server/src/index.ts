@@ -187,12 +187,16 @@ export {
   parseSchemaLockTimeoutMs,
   parseShutdownDrainMs,
   parseSingleTenantMode,
+  roleSeparated,
   SchemaNewerThanRuntimeError,
   type ServerConfig,
   SINGLE_ROLE_ISOLATION,
   SNAPSHOT_DATABASE_URL_VAR,
   type StaticBootedServer,
   type StaticServerConfig,
+  type SupervisedSchemaWork,
+  UNSUPERVISED_MANAGED_MESSAGE,
+  UNSUPERVISED_ROLE_SEPARATION_WARNING,
   validateInjectedSpec,
 } from './composition-root.js';
 // The legacy YAML deploy's schema changes, each run as an apply.
@@ -388,6 +392,11 @@ export {
   RESTORE_OPTIONS,
   restoreDump,
 } from './pg-restore.js';
+// The privileged connections each entrypoint takes out of the environment before it serves.
+export {
+  PRIVILEGED_CONNECTION_VARS,
+  withholdPrivilegedConnections,
+} from './privileged-connections.js';
 // The Product-YAML boot composition + its extraction-config helpers (deployment wiring).
 // The per-agent / multi-backend extraction seam — the boot-side backend factory,
 // the per-agent config-path resolver, and the fork-4 structured-output policy resolver are exported so
@@ -563,6 +572,23 @@ export {
   type SnapshotSourceOptions,
   type UnsupportedSourceState,
 } from './snapshot-source.js';
+// The application process's side of a supervised deploy: its channel to the supervisor.
+export {
+  connectToSupervisor,
+  NO_SUPERVISOR_EXIT_CODE,
+  NoSupervisorError,
+  type SupervisorConnection,
+} from './supervised-channel.js';
+// The supervisor: with role separation the process the operator starts holds the migration role,
+// never imports application code, and serves through a child process that never holds it.
+export {
+  endSupervisor,
+  type SupervisedExit,
+  type SuperviseOptions,
+  sameUserConditions,
+  superviseServing,
+  supervisorEnding,
+} from './supervisor.js';
 // The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
 // handoff that leaves no platform user behind. It lives in the composition root because it is the only
 // package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach

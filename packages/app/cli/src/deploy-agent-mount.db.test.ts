@@ -25,6 +25,7 @@ import { type RuntimeRoleEnv, runtimeRoleEnv } from '@rayspec/db/testing';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { freePort, SpawnedProcesses } from './test-support/processes.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -36,7 +37,10 @@ const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TES
 let acceptanceRan = 0;
 
 const SUITE_DB = `rayspec_cli_agent_mount_${process.pid}`;
-const PORT = 18080 + ((process.pid + 733) % 2000);
+// The port the deploy listens on, handed out by the operating system once the suite starts.
+let servePort = 0;
+// The deploy this suite starts, stopped after it whatever its outcome.
+const processes = new SpawnedProcesses();
 
 function adminUrl(url: string): string {
   const u = new URL(url);
@@ -94,25 +98,28 @@ describe.skipIf(!baseUrl)(
       // is built from an INERT key (boot makes no provider call). RAYSPEC_SKIP_DOTENV=1 so no stray
       // repo-root .env leaks a real key into the child. A backend profile needs no product tenant / blob /
       // media / STT env (no stream, playback, or product-yaml surface here).
-      child = spawn(process.execPath, [CLI_DIST, 'deploy', SPEC_REL, '--port', String(PORT)], {
-        cwd: repoRoot,
-        env: {
-          ...process.env,
-          RAYSPEC_SKIP_DOTENV: '1',
-          ...roles.env,
-          RAYSPEC_JWT_SIGNING_KEY: pem,
-          RAYSPEC_API_KEY_PEPPER: 'cli-agent-mount-pepper-only',
-          OPENAI_API_KEY: 'sk-inert-boot-only-never-called',
-          ALLOWED_ORIGINS: '',
-        },
-      });
+      servePort = await freePort();
+      child = processes.track(
+        spawn(process.execPath, [CLI_DIST, 'deploy', SPEC_REL, '--port', String(servePort)], {
+          cwd: repoRoot,
+          env: {
+            ...process.env,
+            RAYSPEC_SKIP_DOTENV: '1',
+            ...roles.env,
+            RAYSPEC_JWT_SIGNING_KEY: pem,
+            RAYSPEC_API_KEY_PEPPER: 'cli-agent-mount-pepper-only',
+            OPENAI_API_KEY: 'sk-inert-boot-only-never-called',
+            ALLOWED_ORIGINS: '',
+          },
+        }),
+      );
       child.stderr?.on('data', (d) => {
         childErr += String(d);
       });
       child.stdout?.on('data', () => {});
 
       try {
-        await waitForBoot(PORT, 120_000, child);
+        await waitForBoot(servePort, 120_000, child);
       } catch (e) {
         throw new Error(
           `${e instanceof Error ? e.message : String(e)}\n--- child stderr ---\n${childErr}`,
@@ -121,11 +128,7 @@ describe.skipIf(!baseUrl)(
     }, 180_000);
 
     afterAll(async () => {
-      if (child && child.exitCode === null) {
-        child.kill('SIGTERM');
-        await new Promise((r) => setTimeout(r, 500));
-        if (child.exitCode === null) child.kill('SIGKILL');
-      }
+      await processes.stopAll();
       if (baseUrl) {
         const admin = postgres(adminUrl(baseUrl), { max: 1 });
         try {
@@ -143,7 +146,7 @@ describe.skipIf(!baseUrl)(
       'the declared {kind: agent} route is MOUNTED behind the auth guard (unauth ⇒ 401, not 404)',
       async () => {
         acceptanceRan += 1;
-        const res = await fetch(`http://127.0.0.1:${PORT}/notes/write`, {
+        const res = await fetch(`http://127.0.0.1:${servePort}/notes/write`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ input: 'a note' }),
@@ -159,7 +162,7 @@ describe.skipIf(!baseUrl)(
     maybe(
       'a NON-declared route is 404 (the 401 above is route-specific mounting, not a global auth wall)',
       async () => {
-        const res = await fetch(`http://127.0.0.1:${PORT}/no-such-declared-route`, {
+        const res = await fetch(`http://127.0.0.1:${servePort}/no-such-declared-route`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ input: 'a note' }),

@@ -4,12 +4,14 @@
  *  - open registration creates the first organization and then closes: a second account (with or
  *    without an organization name) is refused, and no account row is left behind;
  *  - an authenticated user cannot create a second organization;
- *  - two registrations racing for the first organization produce exactly one;
+ *  - two registrations racing for the first organization produce exactly one, and the ones that lose
+ *    leave no account row — including one that passed the route's own check before the winner
+ *    committed, so only the store's check under its lock refused it;
  *  - an invite still brings a new account into the one organization;
  *  - the org store refuses a second organization on the operator path too, while resolving the one
  *    that exists stays idempotent;
  *  - the operator bootstrap route creates the first organization and then refuses, before any
- *    account row is written;
+ *    account row is written; a taken chosen id leaves no account row either;
  *  - with the mode off, nothing changes: a second organization is created as before.
  */
 import { randomUUID } from 'node:crypto';
@@ -106,6 +108,26 @@ describe('single-tenant mode', () => {
     expect(statuses.filter((s) => s === 201)).toHaveLength(1);
     expect(statuses.filter((s) => s === 403)).toHaveLength(3);
     expect(await orgCount(h)).toBe(1);
+    // The losers leave no account: exactly one user row, the winner's.
+    for (const [i, res] of results.entries()) {
+      expect(await userExists(h, `racer${i}@example.com`)).toBe(res.status === 201);
+    }
+  });
+
+  it('a registration that lost the race after the route admitted it leaves no account row', async () => {
+    await registerFirstOwner();
+    // The route's own check read no organization (the winner had not committed yet); only the org
+    // store's check under its lock sees the one that exists.
+    const lateStore = new OrgStore(h.db, { singleTenant: true });
+    lateStore.orgCount = async () => 0;
+    const late = createAuthApp({ ...h.deps, orgStore: lateStore });
+    const res = await jsonRequest(late, 'POST', '/v1/auth/register', {
+      body: { email: 'late@example.com', password: PASSWORD, orgName: 'Late' },
+    });
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { error: { message: string } }).error.message).toBe(REFUSAL);
+    expect(await userExists(h, 'late@example.com')).toBe(false);
+    expect(await orgCount(h)).toBe(1);
   });
 
   it('an invite still brings a new account into the one organization', async () => {
@@ -154,6 +176,24 @@ describe('single-tenant mode', () => {
     expect(second.status).toBe(403);
     expect(((await second.json()) as { error: { message: string } }).error.message).toBe(REFUSAL);
     expect(await userExists(h, 'second-operator@example.com')).toBe(false);
+    expect(await orgCount(h)).toBe(1);
+  });
+
+  it('a bootstrap that loses the race after the route admitted it leaves no account row', async () => {
+    await registerFirstOwner();
+    const lateStore = new OrgStore(h.db, { tenantBootstrapEnabled: true, singleTenant: true });
+    lateStore.orgCount = async () => 0;
+    const gated = createAuthApp({ ...h.deps, orgStore: lateStore });
+    const res = await jsonRequest(gated, 'POST', '/v1/auth/bootstrap-tenant', {
+      body: {
+        email: 'late-operator@example.com',
+        password: PASSWORD,
+        orgName: 'Late',
+        orgId: randomUUID(),
+      },
+    });
+    expect(res.status).toBe(403);
+    expect(await userExists(h, 'late-operator@example.com')).toBe(false);
     expect(await orgCount(h)).toBe(1);
   });
 
@@ -215,5 +255,33 @@ describe('without single-tenant mode', () => {
     });
     expect(created.status).toBe(201);
     expect(await orgCount(h)).toBe(3);
+  });
+
+  it('a bootstrap whose chosen id is taken answers 409 and leaves no account row', async () => {
+    await h.reset();
+    const gated = createAuthApp({
+      ...h.deps,
+      orgStore: new OrgStore(h.db, { tenantBootstrapEnabled: true }),
+    });
+    const orgId = randomUUID();
+    const first = await jsonRequest(gated, 'POST', '/v1/auth/bootstrap-tenant', {
+      body: { email: 'first-op@example.com', password: PASSWORD, orgName: 'First', orgId },
+    });
+    expect(first.status).toBe(201);
+    const taken = await jsonRequest(gated, 'POST', '/v1/auth/bootstrap-tenant', {
+      body: { email: 'taken-op@example.com', password: PASSWORD, orgName: 'Taken', orgId },
+    });
+    expect(taken.status).toBe(409);
+    expect(await userExists(h, 'taken-op@example.com')).toBe(false);
+    // The account was not burned: the same email registers once the id question is settled.
+    const retried = await jsonRequest(gated, 'POST', '/v1/auth/bootstrap-tenant', {
+      body: {
+        email: 'taken-op@example.com',
+        password: PASSWORD,
+        orgName: 'Taken',
+        orgId: randomUUID(),
+      },
+    });
+    expect(retried.status).toBe(201);
   });
 });
