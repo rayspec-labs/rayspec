@@ -15,7 +15,7 @@ posture as supported.
 
 | | One role (default) | Role separation |
 | --- | --- | --- |
-| Who runs the platform migrations, product DDL and ledger writes | the role in `DATABASE_URL` | the migration role, over `RAYSPEC_MIGRATION_DATABASE_URL`; the pool is closed once the boot's schema work is done |
+| Who runs the platform migrations, product DDL and ledger writes | the role in `DATABASE_URL` | the migration role, over `RAYSPEC_MIGRATION_DATABASE_URL`, in the supervisor — the process the operator started (`rayspec deploy`, `rayspec-serve`), which never imports application code; the serving process is its child and never holds the connection |
 | Who serves requests, jobs and streams | the role in `DATABASE_URL` | the runtime role in `DATABASE_URL`: no superuser, no `BYPASSRLS`, owns nothing, may create nothing |
 | Row-level security on tenant tables | policies exist but are not enabled | enabled and forced on every tenant table, product stores included |
 | A foreign key from one tenant's row to another tenant's row | accepted by the database | refused (`23503`, reported like a missing parent) |

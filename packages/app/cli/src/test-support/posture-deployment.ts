@@ -75,6 +75,8 @@ export const POSTURE_SPEC = backendSpec(
     "  - { method: POST, path: '/announce', action: { kind: handler, handler: announce } }\n" +
     "  - { method: POST, path: '/boom', action: { kind: handler, handler: boom } }\n" +
     "  - { method: GET, path: '/environment', action: { kind: handler, handler: environment } }\n" +
+    "  - { method: GET, path: '/driver-users', action: { kind: handler, handler: driverUsers } }\n" +
+    "  - { method: POST, path: '/escalate', action: { kind: handler, handler: escalate } }\n" +
     'agents:\n' +
     '  - { id: echo, name: echo, backend: openai, model: gpt-4o-mini, instructions: Echo the input., maxTurns: 1 }\n' +
     'handlers:\n' +
@@ -83,7 +85,9 @@ export const POSTURE_SPEC = backendSpec(
     '  - { id: play, module: handlers/h.js, export: play, kind: route, uses: [blob] }\n' +
     '  - { id: announce, module: handlers/h.js, export: announce, kind: route, uses: [emit] }\n' +
     '  - { id: boom, module: handlers/h.js, export: boom, kind: route, uses: [] }\n' +
-    '  - { id: environment, module: handlers/h.js, export: environment, kind: route, uses: [] }\n',
+    '  - { id: environment, module: handlers/h.js, export: environment, kind: route, uses: [] }\n' +
+    '  - { id: driverUsers, module: handlers/h.js, export: driverUsers, kind: route, uses: [] }\n' +
+    '  - { id: escalate, module: handlers/h.js, export: escalate, kind: route, uses: [] }\n',
 );
 
 /** The privileged connection variables a handler must find in neither its import nor its request. */
@@ -97,6 +101,28 @@ export const PRIVILEGED_VARIABLES = [
 export const POSTURE_HANDLERS = `
 const PRIVILEGED = ${JSON.stringify(PRIVILEGED_VARIABLES)};
 const seenAtImport = PRIVILEGED.filter((name) => name in process.env);
+// At import, before the migration pool could connect: watch every PostgreSQL connection this
+// process opens and record the user its startup message names, and record every IPC message.
+globalThis.__RAYSPEC_PROBE_DRIVER_USERS__ = new Set();
+globalThis.__RAYSPEC_PROBE_MESSAGES__ = [];
+try {
+  const net = await import('node:net');
+  const realWrite = net.Socket.prototype.write;
+  net.Socket.prototype.write = function (chunk, ...rest) {
+    try {
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      const text = Buffer.isBuffer(buf) ? buf.toString('latin1') : '';
+      const m = text.match(/user\0([^\0]+)\0/);
+      if (m) globalThis.__RAYSPEC_PROBE_DRIVER_USERS__.add(m[1]);
+    } catch {}
+    return realWrite.call(this, chunk, ...rest);
+  };
+} catch {}
+if (typeof process.on === 'function') {
+  process.on('message', (m) => {
+    try { globalThis.__RAYSPEC_PROBE_MESSAGES__.push(JSON.stringify(m)); } catch {}
+  });
+}
 export async function ingest(init) {
   const bytes = new Uint8Array(await init.request.arrayBuffer());
   await init.blob.put('uploads/' + init.params.upload_id, bytes, {});
@@ -121,13 +147,92 @@ export async function boom() {
   throw new Error(${JSON.stringify(INTERNAL_DETAIL)});
 }
 export async function environment() {
+  const { execSync } = await import('node:child_process');
+  const block = (pid) => {
+    try { return execSync(\`ps -E -ww -o command= -p \${pid}\`).toString(); }
+    catch { return ''; }
+  };
+  const environ = (pid) => {
+    try { return require('node:fs').readFileSync(\`/proc/\${pid}/environ\`, 'utf8'); }
+    catch { return ''; }
+  };
+  // Every ancestor up to the first that is not this runtime, its own pid first.
+  const pids = [];
+  let pid = process.pid;
+  for (let hop = 0; hop < 8 && pid > 1; hop++) {
+    pids.push(pid);
+    const text = block(pid);
+    if (!text.includes('node') && !text.includes('/bin/sh')) break;
+    try { pid = Number(execSync(\`ps -o ppid= -p \${pid}\`).toString().trim()); }
+    catch { break; }
+    if (!Number.isInteger(pid) || pid <= 1) break;
+  }
+  const names = [...PRIVILEGED, 'RAYSPEC_SUPERVISOR_HANDOFF'];
+  const seenInAny = new Set();
+  let privilegedUrl = false;
+  for (const p of pids) {
+    const text = \`\${block(p)}\n\${environ(p)}\`;
+    for (const name of names) if (text.includes(name)) seenInAny.add(name);
+    // A connection string naming the migration or snapshot role carries the password too; found by
+    // its shape, so the probe never has to hold the password itself.
+    if (/postgres(ql)?:\\/\\/[^\\s]*(migrator|snapshot)/.test(text)) privilegedUrl = true;
+  }
   return {
     atImport: seenAtImport,
     atRequest: PRIVILEGED.filter((name) => name in process.env),
     database: 'DATABASE_URL' in process.env,
+    // Across this process and every ancestor up to the launch: the variable names found in any
+    // environment block, and whether a migration/snapshot connection string appears in one.
+    // The four privileged variable names (the handoff variable is internal and names a file removed
+    // before any child existed; reported separately so the test can prove that file is gone).
+    envBlockNames: [...seenInAny].filter((n) => n !== 'RAYSPEC_SUPERVISOR_HANDOFF').sort(),
+    envBlockPrivilegedUrl: privilegedUrl,
+    handoffPath: process.env.RAYSPEC_SUPERVISOR_HANDOFF ?? null,
+    handoffFileExists: (() => {
+      const path = process.env.RAYSPEC_SUPERVISOR_HANDOFF;
+      try { return path !== undefined && require('node:fs').existsSync(path); }
+      catch { return false; }
+    })(),
+    pids,
+    ipcMessages: (globalThis.__RAYSPEC_PROBE_MESSAGES__ ?? []),
   };
 }
-`;
+export async function driverUsers() {
+  return { users: [...(globalThis.__RAYSPEC_PROBE_DRIVER_USERS__ ?? [])].sort() };
+}
+export async function escalate(init) {
+  const body = init.body ?? {};
+  const { readFileSync } = await import('node:fs');
+  const { execSync } = await import('node:child_process');
+  // Every place in-process code could find a privileged connection: this process's environment and
+  // every ancestor's environment block, and any _FILE path it can guess or was given.
+  const sources = [];
+  for (const [name, value] of Object.entries(process.env)) {
+    if (/MIGRATION|SNAPSHOT/.test(name) && typeof value === 'string') sources.push(value);
+  }
+  let pid = process.pid;
+  for (let hop = 0; pid > 1 && hop < 8; hop++) {
+    try { sources.push(readFileSync(\`/proc/\${pid}/environ\`, 'utf8')); } catch {}
+    try { pid = Number(execSync(\`ps -o ppid= -p \${pid}\`).toString().trim()); } catch { break; }
+  }
+  for (const path of (body.filePaths ?? [])) {
+    try { sources.push(readFileSync(path, 'utf8')); } catch {}
+  }
+  const credentialFound = sources.some((c) =>
+    /postgres(ql)?:\\/\\/[^\\s]*(migrator|snapshot)/.test(String(c)),
+  );
+  // Its only database access is the tenant-scoped runtime handle: a store write it attempts here is
+  // what the fence and row security answer. (A fence answers 503; row security is proven by the
+  // external runtime-role probes.)
+  let storeWrite;
+  try {
+    const row = await init.db.insert('posture_notes', { body: 'escalation attempt' });
+    storeWrite = row && row.id ? 'written' : 'no-row';
+  } catch (err) {
+    storeWrite = String((err && err.code) || (err && err.message) || err).slice(0, 40);
+  }
+  return { credentialFound, sourcesSearched: sources.length, storeWrite };
+}`;
 
 /** One request the stand-in provider received. */
 export interface ProviderRequest {
@@ -239,8 +344,13 @@ export interface PostureDeployment {
   bindings: string;
   /** What the served process wrote to stdout and stderr so far. */
   output(): string;
-  /** The served process; `undefined` once stopped. */
+  /** The process the operator started (the supervisor under role separation); `undefined` once stopped. */
   child(): ChildProcess | undefined;
+  /**
+   * The pid of the process that serves: the supervisor's application child under role separation, or
+   * the one process otherwise. `undefined` before it serves or once stopped.
+   */
+  servingPid(): number | undefined;
   /** Stop the served process with SIGTERM (SIGKILL after a grace). */
   stop(): Promise<void>;
   /** Serve the active version again (after `stop`). */
@@ -258,6 +368,22 @@ export interface PostureOptions {
   env?: Record<string, string>;
   spec?: string;
   handlers?: string;
+}
+
+/**
+ * The pid of the process that serves: a supervisor's one application child (its only Node child),
+ * or the supervisor itself in single-role mode. Found through `pgrep -P`, so a test reads the serving
+ * process whether or not role separation split it off.
+ */
+function servingChildPid(served: ChildProcess | undefined): number | undefined {
+  const pid = served?.pid;
+  if (pid === undefined || served?.exitCode !== null) return undefined;
+  const run = spawnSync('pgrep', ['-P', String(pid)], { encoding: 'utf8' });
+  const children = run.stdout
+    .split('\n')
+    .map((line) => Number(line.trim()))
+    .filter((n) => Number.isInteger(n) && n > 0);
+  return children.length === 1 ? children[0] : pid;
 }
 
 async function waitUntilServing(
@@ -429,6 +555,7 @@ export async function startPostureDeployment(
       bindings,
       output: () => out,
       child: () => served,
+      servingPid: () => servingChildPid(served),
       stop: async () => {
         await processes.stopAll(10_000);
         served = undefined;

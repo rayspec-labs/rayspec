@@ -8,12 +8,14 @@
  * Skips without DATABASE_URL; a required run (CI, RAYSPEC_REQUIRE_DB_TESTS) fails instead, and the
  * ran-guard fails a required run whose arms did not all run.
  */
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { removeTemporaryDirectories } from '../../../../kernel/bundle-closure/src/test-support/app.js';
 import { CLI_DIST } from '../test-support/bundles.js';
+import { pgToolPath } from '../test-support/pg-tools.js';
 import {
   ALLOWED_ORIGIN,
   INTERNAL_DETAIL,
@@ -34,7 +36,7 @@ if (dbRequired && !existsSync(CLI_DIST)) {
   throw new Error(`hosting-checks: the built CLI is required at ${CLI_DIST}; run pnpm build`);
 }
 
-const ARMS = 8;
+const ARMS = 9;
 let armsRan = 0;
 
 const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -45,6 +47,7 @@ describe.skipIf(!baseUrl)('the mandatory public-hosting checks, in the hardened 
   let ownerToken = '';
   let memberToken = '';
   let memberUserId = '';
+  let pgMajor = 16;
 
   beforeAll(async () => {
     d = await startPostureDeployment(baseUrl as string, `rayspec_cert_checks_${process.pid}`, {
@@ -55,6 +58,13 @@ describe.skipIf(!baseUrl)('the mandatory public-hosting checks, in the hardened 
         RAYSPEC_AGENT_KILL_GRACE_MS: '200',
       },
     });
+    const [{ major }] = (await d.admin(
+      (sql) =>
+        sql.unsafe(
+          "SELECT current_setting('server_version_num')::int / 10000 AS major",
+        ) as unknown as Promise<{ major: number }[]>,
+    )) as unknown as [{ major: number }];
+    pgMajor = major;
   }, 600_000);
 
   afterAll(async () => {
@@ -122,7 +132,7 @@ describe.skipIf(!baseUrl)('the mandatory public-hosting checks, in the hardened 
     // imported, not while it serves. It does see the environment it was started with otherwise.
     const environment = await request(d.base, '/environment', { token: ownerToken });
     expect(environment.status, environment.text).toBe(200);
-    expect(environment.body).toEqual({ atImport: [], atRequest: [], database: true });
+    expect(environment.body).toMatchObject({ atImport: [], atRequest: [], database: true });
     armsRan += 1;
   });
 
@@ -421,4 +431,103 @@ describe.skipIf(!baseUrl)('the mandatory public-hosting checks, in the hardened 
     expect(d.output()).toMatch(/127\.0\.0\.1:\d+/);
     armsRan += 1;
   });
+  it('keeps the migration and snapshot connections out of the serving process, its ancestors, the database driver and the IPC channel, and gives in-process code no way past row security or the export fence', async () => {
+    // (1) The environment block of the serving process and of every ancestor up to the launch —
+    // read the way the validator's probe did, with `ps -E` and `/proc/<pid>/environ` — names no
+    // privileged connection variable, carries no migration/snapshot connection string, and the
+    // serving pid is a child of the operator's process (the supervisor), not the process itself.
+    const env = await request(d.base, '/environment', { token: ownerToken });
+    expect(env.status, env.text).toBe(200);
+    expect(env.body.atImport).toEqual([]);
+    expect(env.body.atRequest).toEqual([]);
+    expect(env.body.database).toBe(true);
+    expect(env.body.envBlockNames, env.text).toEqual([]);
+    expect(env.body.envBlockPrivilegedUrl).toBe(false);
+    // The only internal variable the supervisor's re-execution leaves in a block names the handoff
+    // file, which was removed before this process existed: the path holds nothing.
+    expect(env.body.handoffFileExists, env.text).toBe(false);
+    // (4) No message on the IPC channel to the serving process carries a privileged connection.
+    for (const message of env.body.ipcMessages as string[]) {
+      expect(/postgres(ql)?:\/\/[^\s"]*(migrator|snapshot)/.test(message), message).toBe(false);
+    }
+    const servingPid = d.servingPid();
+    expect((env.body.pids as number[])[0]).toBe(servingPid);
+    expect(servingPid).not.toBe(d.child()?.pid);
+
+    // (2) A handler that patched the PostgreSQL driver at import time saw only the runtime roles of
+    // the application and the system database open — never the migration or snapshot role.
+    const drivers = await request(d.base, '/driver-users', { token: ownerToken });
+    expect(drivers.status, drivers.text).toBe(200);
+    const runtimeRole = decodeURIComponent(new URL(d.roles.app.runtime).username);
+    const sysRole = decodeURIComponent(new URL(d.roles.sys.runtime).username);
+    for (const user of drivers.body.users as string[]) {
+      expect([runtimeRole, sysRole], `the driver opened a connection as ${user}`).toContain(user);
+    }
+
+    // (3) In-process code finds no privileged connection in any source it can read, and its only
+    // database handle is the tenant-scoped runtime role, so it has nothing to bypass row security or
+    // lift the fence with. The store write it does manage stays inside its own tenant (row security).
+    const before = await request(d.base, '/escalate', {
+      token: ownerToken,
+      body: { tenantId: orgId, filePaths: ['/run/secrets/migration', '/run/secrets/snapshot'] },
+    });
+    expect(before.status, before.text).toBe(200);
+    expect(before.body.credentialFound, before.text).toBe(false);
+
+    // Fence the source with `rayspec export`, as an operator does, then in-process code still finds
+    // no credential and the fence holds: its store write is refused while the runtime stays fenced.
+    const recipient = await import('age-encryption').then(async (age) =>
+      age.identityToRecipient(await age.generateX25519Identity()),
+    );
+    const bundle = join(d.deployDir, 'fence-probe.ray');
+    const exportRun = spawnSync(
+      process.execPath,
+      [
+        CLI_DIST,
+        'export',
+        '--deployment',
+        d.deploymentId,
+        '--recipient',
+        recipient,
+        '--output',
+        bundle,
+        '--run-history',
+        'excluded',
+        '--confirm-quiesce',
+      ],
+      {
+        cwd: d.deployDir,
+        env: {
+          ...d.env,
+          RAYSPEC_PG_DUMP: pgToolPath('pg_dump', pgMajor, d.deployDir).path,
+        },
+        encoding: 'utf8',
+        timeout: 300_000,
+      },
+    );
+    expect(exportRun.status, `${exportRun.stdout}\n${exportRun.stderr}`).toBe(0);
+    const [fenced] = await d.admin(
+      (sql) =>
+        sql.unsafe(
+          'SELECT fence_state FROM runtime_control_state WHERE id = 1',
+        ) as unknown as Promise<{ fence_state: string }[]>,
+    );
+    expect(fenced?.fence_state).toBe('fenced');
+    // The mutating route is refused at the fence before the handler runs: in-process code cannot even
+    // reach a write, let alone bypass it. (That it holds no privileged connection to escalate with is
+    // the before-fence probe above.)
+    const during = await request(d.base, '/escalate', {
+      token: ownerToken,
+      body: { tenantId: orgId, filePaths: ['/run/secrets/migration'] },
+    });
+    expect(during.status, during.text).toBe(503);
+    const [after] = await d.admin(
+      (sql) =>
+        sql.unsafe(
+          'SELECT fence_state FROM runtime_control_state WHERE id = 1',
+        ) as unknown as Promise<{ fence_state: string }[]>,
+    );
+    expect(after?.fence_state).toBe('fenced');
+    armsRan += 1;
+  }, 180_000);
 });

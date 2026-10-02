@@ -56,10 +56,10 @@ import {
   planDigestInput,
 } from '@rayspec/bundle-contract';
 import type { Db } from '@rayspec/db';
-import type { ReadApplicationBundle } from '@rayspec/server';
+import type { ReadApplicationBundle, SupervisorConnection } from '@rayspec/server';
 import { MAX_BINDINGS_FILE_BYTES, parseBindingsFile } from './bindings-file.js';
 import type { ServeReport } from './deploy.js';
-import { type Envelope, type EnvelopeSink, envelope } from './envelope.js';
+import { type Envelope, type EnvelopeSink, envelope, reserveStdout } from './envelope.js';
 
 /** Bytes a ZIP archive starts with: a local file header, or the end record of an empty archive. */
 const ZIP_SIGNATURES: readonly (readonly number[])[] = [
@@ -810,6 +810,22 @@ async function deploy(
   );
   const { serveDeployment } = await import('./deploy.js');
   const stateDirectory = await server.openStateDirectory(stateRoot, { create: false });
+  // Under role separation the application is served by a child process (supervised-child.ts): what
+  // it is told to serve, while the apply below runs here.
+  const childInstruction: BundleServeInstruction = {
+    kind: 'bundle',
+    operationId: options.operationId,
+    specPath,
+    versionRoot,
+    ...(parsed.port !== undefined ? { port: parsed.port } : {}),
+    ...(parsed.host !== undefined ? { host: parsed.host } : {}),
+    deploy: deployData('stopped', data.environmentRevision),
+    bindings: {
+      declared: bundle.manifest.bindings.map((b) => b.name),
+      values: [...values],
+    },
+    providerCredentials: [...fileValues].filter(([name]) => server.isProviderCredentialName(name)),
+  };
   await serveDeployment(
     specPath,
     parsed.port,
@@ -819,6 +835,8 @@ async function deploy(
     { json: false },
     {
       report,
+      childInstruction,
+      applicationDirectories: [versionRoot],
       beforeSchemaChange: async (bootDb, tenantIsolation, facts) => {
         hooks.applying();
         const applied = await server.applyBundle({
@@ -849,13 +867,106 @@ async function deploy(
             ),
           ]);
         }
-        return applied.productLedgerRow === undefined
-          ? undefined
-          : { productChange: { ledgerRow: applied.productLedgerRow } };
+        return {
+          environmentRevision: state.environmentRevision,
+          ...(applied.productLedgerRow === undefined
+            ? {}
+            : { productChange: { ledgerRow: applied.productLedgerRow } }),
+        };
       },
     },
   );
   return { kind: 'served' };
+}
+
+/**
+ * What the application process of a supervised bundle deploy serves: the version the supervisor
+ * staged, the bindings it granted, and what its envelope reports. The bundle apply runs in the
+ * supervisor; nothing here is a privileged connection.
+ */
+export interface BundleServeInstruction {
+  kind: 'bundle';
+  operationId: string;
+  specPath: string;
+  versionRoot: string;
+  port?: string;
+  host?: string;
+  deploy: DeployData;
+  bindings: { declared: string[]; values: [string, string][] };
+  providerCredentials: [string, string][];
+}
+
+/**
+ * Serve a staged bundle version in the application process of a supervised deploy, as the single
+ * process serves it after its apply: the bindings and provider credentials granted, `@rayspec/*`
+ * imports of the version answered by this runtime, banners on stderr and the one envelope on stdout.
+ * The supervisor runs the apply; a signal that arrived before it finished stops the deploy after it,
+ * as in the single process.
+ */
+export async function serveStagedBundle(
+  instruction: BundleServeInstruction,
+  supervisor: SupervisorConnection,
+): Promise<void> {
+  const server = await import('@rayspec/server');
+  const stdout = reserveStdout();
+  server.installOutputRedaction();
+  const values = new Map(instruction.bindings.values);
+  server.registerSecretValues(values.values());
+  server.grantProviderCredentials(new Map(instruction.providerCredentials));
+  server.setApplicationBindings({
+    declared: instruction.bindings.declared,
+    providerCredentials: server.PROVIDER_CREDENTIAL_NAMES,
+    values,
+  });
+  server.installBundleModuleResolution(instruction.versionRoot);
+  let interrupted = false;
+  const onSignal = () => {
+    interrupted = true;
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  const state = { environmentRevision: instruction.deploy.environmentRevision };
+  const report = bundleServeReport(instruction.operationId, stdout.sink, () => ({
+    ...instruction.deploy,
+    environmentRevision: state.environmentRevision,
+  }));
+  const schemaWork = supervisor.schemaWork;
+  const { serveDeployment } = await import('./deploy.js');
+  await serveDeployment(
+    instruction.specPath,
+    instruction.port,
+    undefined,
+    undefined,
+    instruction.host,
+    { json: false },
+    {
+      report,
+      supervisor: {
+        ...supervisor,
+        schemaWork: {
+          ...schemaWork,
+          beforeSchemaChange: async (facts) => {
+            const applied = await schemaWork.beforeSchemaChange(facts);
+            if (applied?.environmentRevision !== undefined) {
+              state.environmentRevision = applied.environmentRevision;
+            }
+            process.off('SIGINT', onSignal);
+            process.off('SIGTERM', onSignal);
+            if (interrupted) {
+              throw new server.RuntimeApplyError([
+                bundleError(
+                  'RAY_INTERRUPTED',
+                  'interrupted after the deploy was applied; nothing is served. The new version is ' +
+                    'active: start it with `rayspec deploy <file.ray>`',
+                ),
+              ]);
+            }
+            return applied;
+          },
+        },
+      },
+    },
+  );
 }
 
 /**
@@ -991,8 +1102,9 @@ function bundleServeReport(
 ): ServeReport {
   let refusal: { message: string; cause: unknown } | undefined;
   let written = false;
+  let delegated = false;
   process.on('exit', (code) => {
-    if (written) return;
+    if (written || delegated) return;
     written = true;
     const typed = (refusal?.cause as { errors?: unknown } | undefined)?.errors;
     const errors: BundleError[] =
@@ -1019,7 +1131,11 @@ function bundleServeReport(
     log: (line) => console.error(line),
     refused: (message, cause) => {
       refusal = { message, cause };
+      delegated = false;
     },
     stopped: () => {},
+    handedOver: () => {
+      delegated = true;
+    },
   };
 }

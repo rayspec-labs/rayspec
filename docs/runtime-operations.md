@@ -26,7 +26,11 @@ ledger row holds a secret, a binding value or a connection string.
 
 The operations are a typed library in `@rayspec/server` (`createRuntimeControl`, `runApply`). They
 add no HTTP route: a caller holds the environment's database connection. `rayspec deploy` and
-`rayspec-serve` use them for every schema change a boot makes.
+`rayspec-serve` use them for every schema change a boot makes. With role separation that caller is
+the supervisor — the process the operator starts, which holds the migration connection and never
+imports application code — or the operator's own CLI (`rayspec export`, `rayspec resume`,
+`rayspec import`); the serving child, which imports the application, never runs them and learns the
+fence from the database as it polls it.
 
 | Operation | Changes the environment | What it does |
 | --- | --- | --- |

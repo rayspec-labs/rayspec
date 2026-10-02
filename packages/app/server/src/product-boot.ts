@@ -133,6 +133,7 @@ import {
   parseProductSpec,
   STORE_READ_DEFAULT_LIMIT,
   STORE_READ_MAX_LIMIT,
+  type StoreSpec,
 } from '@rayspec/spec';
 import {
   FakeSttAdapter,
@@ -167,7 +168,7 @@ import {
   resolveLiveTenantOrgId,
   type ServerConfig,
 } from './composition-root.js';
-import { type DeployApply, RuntimeApplyError } from './deploy-apply.js';
+import { type ProductMigrationApply, RuntimeApplyError } from './deploy-apply.js';
 import { deriveDbosApplicationVersion } from './durable-app-version.js';
 import { durableWorkerReadiness, type ReadinessProbe } from './health.js';
 import {
@@ -231,7 +232,13 @@ export interface DeployProductYamlOpts {
    * Runs each product migration as a `runtime.apply` operation, with its receipts. Omitted ⇒ the DDL
    * runs directly under the shared schema lock (a direct test caller).
    */
-  deployApply?: DeployApply;
+  deployApply?: ProductMigrationApply;
+  /**
+   * Brings the workflow engine's own schema up to date before the durable worker launches, when the
+   * runtime role may create nothing (role separation). Omitted ⇒ the configuration's migration
+   * connection does it when there is one, else the engine creates its schema as it launches.
+   */
+  workflowSystemSchema?: () => Promise<void>;
   /** LOCAL table-registration stand-in: register the built product tables before deploy()'s identity-keyed verify. */
   registerProductTables?: (tables: ReadonlyMap<string, PgTable>) => void;
   /** Env source (default process.env) — injectable for tests. */
@@ -2400,6 +2407,30 @@ export function buildRecordNormalizer(
 }
 
 /**
+ * The stores a Product-YAML document's product schema implements, and the conflict keys their DDL is
+ * generated with. Pure: the boot generates its first materialization from them, and a supervisor
+ * (supervisor.ts) derives the same DDL from the document without loading anything.
+ *
+ * The capability-owned half comes from the SHARED spec-aware helper (composeCapabilityStores —
+ * audio doc-conditional; record_submissions iff the doc declares record_input), the SAME source
+ * `composeProductDeploy` mounts from, so boot DDL and composed engineSpec can never drift on which
+ * capability stores exist (the lockstep hazard, killed structurally). The durable `ON CONFLICT`
+ * target columns (declared `key` + the capability/collection/transcript `*_ref` idiom) keep a
+ * SINGLE-column unique index; any other author `unique: true` column is TENANT-SCOPED compound.
+ */
+export function productSchemaOf(spec: ProductSpec): {
+  stores: StoreSpec[];
+  conflictKeys: Map<string, ReadonlySet<string>>;
+  /** The document-derived half of `stores`, with the collections and transcripts it implies. */
+  derived: ReturnType<typeof deriveProductStores>;
+} {
+  const capabilityStores = composeCapabilityStores(spec);
+  const derived = deriveProductStores(spec, capabilityStores.names);
+  const stores = [...capabilityStores.stores, ...derived.stores];
+  return { stores, conflictKeys: deriveConflictKeys(spec, stores), derived };
+}
+
+/**
  * The pure checks of a Product-YAML document that its deploy path runs before anything else: it must
  * parse, and it must pass the fail-closed BOOT-SCOPE GATE. Returns the parsed spec; throws a
  * `ProductBootError`. `assembleServer` runs it before the boot migrates anything, so an invalid
@@ -2821,18 +2852,8 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   const usesStt = declaresSttStep(spec);
   const hasAgents = spec.extractors.length > 0;
 
-  // ── 1. derive the Tier-A store bindings from the YAML (product-free) ──────────────────────────
-  // The capability-owned half comes from the SHARED spec-aware helper (composeCapabilityStores
-  // — audio formerly unconditional, now doc-conditional; record_submissions iff the doc declares record_input), the
-  // SAME source `composeProductDeploy` mounts from, so boot DDL and composed engineSpec can never
-  // drift on which capability stores exist (the lockstep hazard, killed structurally).
-  const capabilityStores = composeCapabilityStores(spec);
-  const derived = deriveProductStores(spec, capabilityStores.names);
-  const composedStores = [...capabilityStores.stores, ...derived.stores];
-  // The durable `ON CONFLICT` target columns (declared `key` + the capability/collection/
-  // transcript `*_ref` idiom) keep a SINGLE-column unique index; any other author `unique: true` column
-  // is TENANT-SCOPED compound. Threaded to every product-store materializer below.
-  const conflictKeys = deriveConflictKeys(spec, composedStores);
+  // ── 1. derive the Tier-A store bindings from the YAML (product-free, productSchemaOf) ──────────
+  const { stores: composedStores, conflictKeys, derived } = productSchemaOf(spec);
   const productTables = buildProductTables(composedStores, conflictKeys);
   opts.registerProductTables?.(productTables);
 
@@ -3445,7 +3466,9 @@ export async function deployProductYamlSpec(
 
   // With role separation the runtime role may create nothing, so the workflow engine's own schema is
   // migrated as the migration role first; the engine then launches as the runtime role.
-  if (config.migrationDbosSystemDatabaseUrl !== undefined) {
+  if (opts.workflowSystemSchema !== undefined) {
+    await opts.workflowSystemSchema();
+  } else if (config.migrationDbosSystemDatabaseUrl !== undefined) {
     await migrateWorkflowSystemDatabase(config.migrationDbosSystemDatabaseUrl);
   }
   await executor.start();

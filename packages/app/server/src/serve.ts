@@ -20,7 +20,7 @@
 // convenience (fresh DROP+CREATE dev-DB provisioning + the RAYSPEC_BOOT_UPDATE redeploy flow), NOT a
 // requirement for agents.
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serve } from '@hono/node-server';
 import { DeployError } from '@rayspec/api-auth';
@@ -33,16 +33,21 @@ import {
   assembleServer,
   assembleStaticServer,
   BootConfigError,
+  DEFAULT_SHUTDOWN_DRAIN_MS,
   detectStaticProfile,
   loadServerConfig,
   loadStaticServerConfig,
   parseShutdownDrainMs,
+  type ServerConfig,
 } from './composition-root.js';
 import { withholdPrivilegedConnections } from './privileged-connections.js';
 import { ProductBootError } from './product-boot.js';
 import { loadLocalDotenvIfPresent } from './read-env.js';
 import { assembleOptsFromEnv } from './serve-opts.js';
 import { shutdownHttpServer } from './shutdown.js';
+import type { SupervisorConnection } from './supervised-channel.js';
+import { endSupervisor, superviseServing } from './supervisor.js';
+import { reexecWithoutPrivilegedConnections, takeSupervisorHandoff } from './supervisor-handoff.js';
 
 /**
  * If RAYSPEC_SPEC_PATH names a STATIC-PROFILE (frontend-only) backend spec, return its resolved path +
@@ -58,6 +63,11 @@ function detectStaticBoot(): { specPath: string; frontend: readonly FrontendSpec
 }
 
 async function main(): Promise<void> {
+  // With a privileged connection in its environment this process re-executes itself without it
+  // before anything else (and does not return here); the re-executed image takes the connections
+  // from its handoff (supervisor-handoff.ts).
+  reexecWithoutPrivilegedConnections();
+  takeSupervisorHandoff({ serving: true });
   loadLocalDotenvIfPresent();
 
   // Consult RAYSPEC_AGENT_TRACING, and refuse a value this boot cannot act on. Here, ahead of BOTH
@@ -117,12 +127,47 @@ async function main(): Promise<void> {
   );
   // The migration and snapshot connections leave the environment before any application module is
   // imported; the boot reads them from the copy (privileged-connections.ts).
-  const config = loadServerConfig(withholdPrivilegedConnections());
+  const environment = withholdPrivilegedConnections();
+  const config = loadServerConfig(environment);
+  if (config.migrationDatabaseUrl !== undefined) {
+    // Role separation: this process holds the migration role and never imports the application. It
+    // serves through a child process that never holds the role, and runs the boot's schema work for
+    // it (supervisor.ts).
+    const exit = await superviseServing({
+      config,
+      entry: fileURLToPath(new URL('./supervised-serve.js', import.meta.url)),
+      instruction: { kind: 'serve' },
+      prefix: '[rayspec-serve]',
+      privileged: environment,
+      applicationDirectories: [
+        ...(config.specPath !== undefined ? [dirname(config.specPath)] : []),
+        ...(config.escapeHatchRoot !== undefined ? [config.escapeHatchRoot] : []),
+      ],
+      drainMs: config.shutdownDrainMs ?? DEFAULT_SHUTDOWN_DRAIN_MS,
+    });
+    endSupervisor(exit, '[rayspec-serve]');
+    return;
+  }
+  await serveConfigured(config);
+}
+
+/**
+ * Assemble the server for `config` and serve it until SIGINT or SIGTERM: the boot of a single-role
+ * `rayspec-serve`, and of its application process under a supervisor (`supervisor`, whose schema
+ * work the boot then hands to it).
+ */
+export async function serveConfigured(
+  config: ServerConfig,
+  supervisor?: SupervisorConnection,
+): Promise<void> {
   // Guard the assemble step (DB connect → migration chain → product boot) with a boot timeout so a hung
   // boot is DIAGNOSED (see boot-timeout.ts) rather than hanging forever. The happy path is unchanged: a
   // normal boot completes well under the timeout and the timer is cleared.
   const server = await withBootTimeout(
-    assembleServer(config, assembleOptsFromEnv(config)),
+    assembleServer(config, {
+      ...assembleOptsFromEnv(config),
+      ...(supervisor !== undefined ? { schemaWork: supervisor.schemaWork } : {}),
+    }),
     resolveBootTimeoutMs(),
   );
 
@@ -132,6 +177,7 @@ async function main(): Promise<void> {
       // Log the ACTUAL bound address (info.address), never a hard-coded loopback — a non-loopback
       // RAYSPEC_HOST bind must be visible in the banner rather than masked behind a false 127.0.0.1.
       console.log(bootBanner(server, bootBaseUrl(info.address, info.port)));
+      supervisor?.serving();
     },
   );
   // The same bind refusal the static branch above attaches: a taken port refuses the boot instead of
@@ -145,7 +191,12 @@ async function main(): Promise<void> {
   // Graceful shutdown: stop accepting connections, let in-flight requests finish for the configured
   // drain (RAYSPEC_SHUTDOWN_DRAIN_MS), close whatever is still open, end the worker and the DB pool,
   // exit. Wired to SIGINT/SIGTERM. Bounded, so one connection that never ends cannot hold the process.
+  // One shutdown: a second signal (a terminal's Ctrl-C reaches the supervisor and this process both,
+  // and the supervisor forwards it) does not start another.
+  let stopping = false;
   const shutdown = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
     console.log(`\n[rayspec-serve] ${signal} received — shutting down…`);
     void shutdownHttpServer(httpServer, () => server.close(), {
       drainMs: server.shutdownDrainMs,
@@ -172,21 +223,27 @@ function isProcessEntrypoint(): boolean {
   }
 }
 
+/**
+ * Report a boot that failed and exit 1: an operator-actionable refusal by its message alone, anything
+ * else with its stack. The supervised application process ends through the same report.
+ */
+export function exitOnBootFailure(err: unknown): never {
+  if (
+    err instanceof BootConfigError ||
+    err instanceof DeployError ||
+    err instanceof ProductBootError ||
+    err instanceof BootTimeoutError
+  ) {
+    // A fail-closed CONFIG abort (a missing secret / a gated destructive delta / a missing agent
+    // credential) or a boot timeout — an operator-actionable message, not an unexpected crash. Print
+    // the message only, no stack. Anything else is genuinely unexpected: keep the stack.
+    console.error(`[rayspec-serve] ${err.message}`);
+  } else {
+    console.error('[rayspec-serve] boot failed:', err instanceof Error ? err.stack : err);
+  }
+  process.exit(1);
+}
+
 if (isProcessEntrypoint()) {
-  main().catch((err) => {
-    if (
-      err instanceof BootConfigError ||
-      err instanceof DeployError ||
-      err instanceof ProductBootError ||
-      err instanceof BootTimeoutError
-    ) {
-      // A fail-closed CONFIG abort (a missing secret / a gated destructive delta / a missing agent
-      // credential) or a boot timeout — an operator-actionable message, not an unexpected crash. Print
-      // the message only, no stack. Anything else is genuinely unexpected: keep the stack.
-      console.error(`[rayspec-serve] ${err.message}`);
-    } else {
-      console.error('[rayspec-serve] boot failed:', err instanceof Error ? err.stack : err);
-    }
-    process.exit(1);
-  });
+  main().catch(exitOnBootFailure);
 }

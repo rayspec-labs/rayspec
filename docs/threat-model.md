@@ -16,7 +16,8 @@ of a release names exactly which protections were tested for that release, and n
 | --- | --- | --- |
 | The environment | One application with its own VM or container, application database, workflow system database, blob volume, credentials and deployment state directory. Nothing is shared between environments. | the host: one environment per application, its own databases, its own keys |
 | The application tenant | The one organization inside the runtime. Single-tenant mode (`RAYSPEC_SINGLE_TENANT=true`) refuses a second one on every path, export refuses a source with more than one and import a snapshot with more than one. An organization in the runtime is not an account, project or customer of the host, and the runtime never maps one to the other. | the runtime |
-| The serving process | The platform, the application's handlers and its extensions run in one process and trust each other. The process is the unit the host contains. | the host |
+| The serving process | The platform, the application's handlers and its extensions run in one process and trust each other. The process is the unit the host contains. With role separation it is a child of the supervisor the operator started, holds the runtime role alone, and never receives the migration or snapshot connection. | the host |
+| The supervisor | With role separation the process the operator starts (`rayspec deploy`, `rayspec-serve`) holds the migration and snapshot connections, runs the boot's schema work and the privileged runtime-control steps, and never imports application code; it serves the application in the child process above. | the runtime |
 | The database roles | A migration role changes the schema; the serving process connects as a runtime role that is no superuser, has no `BYPASSRLS`, owns nothing and is held to a forced row policy on every tenant table. See [Database roles and row-level security](./database-isolation.md). | the runtime, with roles the host creates |
 | The request edge | Requests reach the runtime through the host's reverse proxy; forwarding headers are believed only from the addresses in `RAYSPEC_TRUSTED_PROXIES`, and only the allowed browser origins pass CORS. | the host's proxy, with the runtime's pinning |
 | The network edge | Outbound connections from the process. The application declares the hosts it calls; the host's network policy admits them and nothing else. | the host |
@@ -31,7 +32,7 @@ not make an environment immune to a compromise of the provider or to every side 
 | --- | --- |
 | An anonymous client on the internet | Every store, run, upload, stream and event route needs a credential; `GET /recovery-scope` is not served under the managed posture; every error answer is a sanitized envelope; JSON request bodies are capped at 1 MiB and file uploads at their per-file limit (a stream ingest route's body is capped only by the reverse proxy: see the host's request edge); registration only creates the first organization, and after it accounts are made by invite. |
 | A signed-in user, or a stolen ordinary credential | Authentication is not authorization: every object, upload part, stream, event subscription and queued run is checked against the caller's organization, and every write, run start and administrative action rereads the live membership. A stolen credential works until it expires or is revoked (see the residual risks). |
-| A customer who uploads an executable bundle | The bundle reader refuses a hostile archive before anything is extracted or run; a bundle declares its execution level (`none` or `in-process`; `sandboxed` is refused), its bindings, its egress hosts and its capabilities, and the plan reports each before anything is applied. Once deployed, its code runs **inside** the runtime process with the process's rights, which include the migration role's connection: only the host contains it. |
+| A customer who uploads an executable bundle | The bundle reader refuses a hostile archive before anything is extracted or run; a bundle declares its execution level (`none` or `in-process`; `sandboxed` is refused), its bindings, its egress hosts and its capabilities, and the plan reports each before anything is applied. Once deployed, its code runs **inside** the serving process with that process's rights — the runtime role, not the migration or snapshot connection, which only the supervisor holds: only the host contains it. |
 | One compromised application | Holds whatever its environment holds and nothing else, as long as the host keeps environments apart: its own VM or container, databases, credentials, volume and egress rules. |
 | A malicious file or model output | File uploads are bounded, a stream ingest body only by the reverse proxy, and every upload is kept in the organization's blob space; a model output reaches tools only through the agent's declared tool list; outbound requests the platform makes itself pass the outbound guard. |
 | A hostile migration bundle or dump | `rayspec import` refuses a wrong identity, a broken ciphertext, a traversal entry, an invalid snapshot document, mismatched digests and a privileged dump before anything reaches the target. |
@@ -45,7 +46,7 @@ that proves it on a real database, as the ordinary runtime role.
 
 | Protection | Check |
 | --- | --- |
-| The serving process's requests, jobs and streams run as the runtime role, and every tenant table has a forced row policy; the migration role's pool is closed once the boot's schema work is done. This binds the platform's own queries, not the application's code: the process takes the migration and snapshot connections out of the environment a handler or a child reads, but code inside it can still reach the migration role's (see the residual risks) | `runtime-role-evidence` |
+| The serving process's requests, jobs and streams run as the runtime role, and every tenant table has a forced row policy. With role separation the process that imports the application never holds the migration or snapshot connection — not in its environment block, not through the database driver, not over its channel to the supervisor — so in-process code can neither bypass row security nor lift the export fence | `runtime-role-evidence`, `privileged-credentials` |
 | Object authorization on every store route, upload part, playback stream, event stream and queued run, for a member and a removed member | `object-authorization` |
 | One organization per environment, on every path, in export and in import | `single-tenant-mode` |
 | Forwarding headers believed only from the pinned proxies | `trusted-proxies` |
@@ -90,12 +91,13 @@ of the runtime closes.
   body reaches its handler uncapped.
 - **Secrets.** Keep boot secrets and bindings files encrypted at rest and readable only by the user
   the runtime runs as; rotate them as [Credentials and rotation](./hardened-posture.md#credentials-and-rotation)
-  describes. The serving process takes the migration and snapshot connections out of its
-  environment before it imports the application, but code inside the process can still reach the
-  migration role's connection (see the residual risks): deploy only code you trust with it, and
-  before exporting an application whose code you do not trust, stop every runtime process of the
-  source and keep it stopped until the target has taken over
-  ([Export](./export.md#the-database-write-barrier)).
+  describes. With role separation the migration and snapshot connections are held only by the
+  supervisor the operator starts, which never imports the application and serves it in a child
+  process started without them, so in-process code holds neither. When the supervisor and that child
+  run as the same operating-system user, give a `_FILE` mount a mode the child's user cannot read and
+  set `ptrace_scope` to 1 or more and a zero hard core-file limit, or run the child as a different
+  user; the managed posture refuses to boot while any of these is open and names it, and every other
+  posture warns (see the residual risks).
 - **Management access.** Multi-factor authentication for whoever can deploy, export or read an
   environment's secrets; short-lived credentials for automation; audit every support access you add.
 - **Quotas.** VM, network and provider budgets per environment. The runtime bounds each run, queue
@@ -131,22 +133,23 @@ word, with its owner: **RaySpec Core** where the runtime would have to change to
 **Hosting operator** where only the environment around the runtime can contain it.
 
 - **Hosting operator**: The runtime is not a sandbox. Handlers and extensions run inside the
-  runtime process: they can read its environment and files, open their own database connection as
-  the runtime role and claim any tenant id in it, and read every credential the process holds, the
-  migration role's included. Only a boundary outside the process contains code that is not trusted:
-  a dedicated VM or container, its own databases, and host egress rules.
-- **RaySpec Core**: With role separation the boot needs the migration role's connection for its
-  schema work, so the serving process is started with it (`RAYSPEC_MIGRATION_DATABASE_URL`, which a
-  role-separated deploy requires, or its `_FILE` mount). Both entrypoints take it, and the snapshot
-  role's, out of the process environment before any application module is imported, and the
-  migration role's pool is closed once the schema work is done, so a handler and a child process
-  find neither in their environment. The process's original environment block, which the operating
-  system still shows to code inside the process, and a `_FILE` mount the runtime's user can read
-  still hold it, and code imported before the schema work can intercept the connection the boot
-  opens. Code that does any of this gets the migration role, which bypasses row-level security,
-  writes while an export has fenced the source, gives the runtime role its writes back and opens the
-  fence. Only running the schema work in a separate process removes it: until then, stop the source
-  before exporting an application whose code is not trusted.
+  serving process: they can read its environment and files, open their own database connection as
+  the runtime role and claim any tenant id in it, and read every credential that process holds — its
+  JWT signing key, its API-key pepper, its runtime-role connection and the application's bindings.
+  They do not hold the migration or snapshot connection: with role separation only the supervisor
+  does, and it runs no application code. Only a boundary outside the process contains code that is
+  not trusted: a dedicated VM or container, its own databases, and host egress rules.
+- **Hosting operator**: With role separation the migration and snapshot connections are held only by
+  the supervisor — the process the operator starts (`rayspec deploy`, `rayspec-serve`), which
+  re-executes itself to clear them from its environment block, never imports application code, and
+  serves the application in a child process started without them. When the supervisor and that child
+  run as the same operating-system user, three paths the runtime cannot close by itself remain open:
+  a `_FILE` mount or a `.env` file the supervisor can read is readable by the child; the child can
+  read the supervisor's memory on a kernel without Yama `ptrace_scope` of 1 or more; and a core file
+  the supervisor can be made to write and then read. The managed posture refuses to boot while any of
+  these is open and names it; every other posture warns. Close them by giving the supervisor inline
+  connections on a host with `ptrace_scope` of 1 or more and a zero hard core-file limit, or by
+  running the child as a different user.
 - **Hosting operator**: A deploy's boot rehearsal imports the bundle's handler modules before the
   platform's boot checks run, as every boot always has, so a bundle's top-level code runs on the host
   before a refusal can stop it.

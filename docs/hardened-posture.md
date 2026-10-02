@@ -93,7 +93,8 @@ Two kinds of suite run:
 
 | Check | What the certification suites show |
 | --- | --- |
-| `runtime-role-evidence` | every session the served process holds after its boot is the runtime role, which is no superuser, has no `BYPASSRLS` and owns nothing; the application's tables have their row policy enabled and forced. A handler finds neither the migration nor the snapshot connection in its environment, at import or while it serves; code inside the process can still reach the migration role's connection by other means ([Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks)) |
+| `runtime-role-evidence` | every session the served process holds after its boot is the runtime role, which is no superuser, has no `BYPASSRLS` and owns nothing; the application's tables have their row policy enabled and forced. The process that imports the application holds only the runtime role |
+| `privileged-credentials` | with role separation the migration and snapshot connections are held only by the supervisor — the process the operator starts, which never imports application code and serves the application in a child process started without them. The process that runs handler and extension code never holds a privileged connection in its environment block, through the database driver or over its channel to the supervisor, so in-process code can neither bypass row security nor lift the export fence; boot, readiness, graceful drain, the supervisor's non-zero exit when the child crashes, and single-role mode all behave as before ([Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks) covers the same-user conditions the managed posture refuses to boot with) |
 | `object-authorization` | a member reaches every store operation, an upload part, a playback stream and the event stream; nothing is reached without a credential; once the member is removed, every write, upload part, run start and the playback token minted before are refused at once, and the run they had queued is ended by the worker without calling the provider. The event stream keeps serving the removed member's unexpired token, as stated above for every read. No route serves an export: the snapshot is written by the operator's CLI |
 | `trusted-proxies` | a forwarded-for header from an address that is not pinned is not believed: the audit records the socket peer and the rate limit is the peer's; the port listens on loopback |
 | `cors-and-csrf` | a preflight from another origin gets no `access-control-allow-origin`; a refresh authenticated by the session cookie is refused cross-site |
@@ -164,7 +165,7 @@ Each fixed protection of the receipt is claimed through the checks that establis
 | `publicHostingPosture` | `isolated-environment-v1` | every mandatory public-hosting check and recovery case: `runtime-role-evidence`, `object-authorization`, `trusted-proxies`, `cors-and-csrf`, `upload-limits`, `sanitized-errors`, `outbound-guard`, `recovery-scope`, `hostile-archives`, `hostile-migration-bundles`, `crash-recovery`, `resource-bounds`, `export-import-round-trip` |
 | `executionLevels` | `none`, `in-process` | `execution-levels` |
 | `databaseIsolation` | `dedicated-db-and-rls` | `runtime-role-evidence`, `object-authorization` |
-| `databaseRoleSeparation` | `true` | `runtime-role-evidence` |
+| `databaseRoleSeparation` | `true` | `runtime-role-evidence`, `privileged-credentials` |
 | `crossProcessCancellation` | `true` | `cross-process-cancel` |
 | `agentTraceExport` | `off` | `agent-trace-export-off` |
 | `recoveryScopeEndpoint` | `disabled` | `recovery-scope` |

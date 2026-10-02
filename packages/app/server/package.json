@@ -20,6 +20,10 @@
     "./boot-env": {
       "types": "./dist/boot-env-demands.d.ts",
       "default": "./dist/boot-env-demands.js"
+    },
+    "./supervisor-handoff": {
+      "types": "./dist/supervisor-handoff.d.ts",
+      "default": "./dist/supervisor-handoff.js"
     }
   },
   "main": "./dist/index.js",

@@ -187,12 +187,15 @@ export {
   parseSchemaLockTimeoutMs,
   parseShutdownDrainMs,
   parseSingleTenantMode,
+  roleSeparated,
   SchemaNewerThanRuntimeError,
   type ServerConfig,
   SINGLE_ROLE_ISOLATION,
   SNAPSHOT_DATABASE_URL_VAR,
   type StaticBootedServer,
   type StaticServerConfig,
+  type SupervisedSchemaWork,
+  UNSUPERVISED_MANAGED_MESSAGE,
   validateInjectedSpec,
 } from './composition-root.js';
 // The legacy YAML deploy's schema changes, each run as an apply.
@@ -568,6 +571,23 @@ export {
   type SnapshotSourceOptions,
   type UnsupportedSourceState,
 } from './snapshot-source.js';
+// The application process's side of a supervised deploy: its channel to the supervisor.
+export {
+  connectToSupervisor,
+  NO_SUPERVISOR_EXIT_CODE,
+  NoSupervisorError,
+  type SupervisorConnection,
+} from './supervised-channel.js';
+// The supervisor: with role separation the process the operator starts holds the migration role,
+// never imports application code, and serves through a child process that never holds it.
+export {
+  endSupervisor,
+  type SupervisedExit,
+  type SuperviseOptions,
+  sameUserConditions,
+  superviseServing,
+  supervisorEnding,
+} from './supervisor.js';
 // The OPERATOR tenant-provisioning path — create-or-resolve one org under a chosen id, with an owner
 // handoff that leaves no platform user behind. It lives in the composition root because it is the only
 // package permitted to name `makeDb`, and it is exported so the `rayspec tenant ensure` CLI can reach

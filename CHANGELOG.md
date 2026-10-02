@@ -1093,16 +1093,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **A serving process takes the migration and snapshot connections out of its environment.**
-  `rayspec deploy` and `rayspec-serve` remove `RAYSPEC_MIGRATION_DATABASE_URL`,
-  `RAYSPEC_SNAPSHOT_DATABASE_URL` and their `_FILE` forms from `process.env` before they read the
-  configuration and before any application module is imported; the boot reads them from a copy. A
-  handler, at import or while it serves, and every child process the server spawns no longer find
-  either connection in their environment. `@rayspec/server` exports the step as
-  `withholdPrivilegedConnections` and the variable list as `PRIVILEGED_CONNECTION_VARS`. Code inside
-  the process can still reach the migration role's connection through the process's original
-  environment block, a readable `_FILE` mount, or the boot's own connection; the residual risk in
-  [Threat model](./docs/threat-model.md#accepted-residual-risks) says what remains.
+- **With role separation, no process that runs application code holds the migration or snapshot
+  connection.** `rayspec deploy` and `rayspec-serve` now act as a supervisor: the process the
+  operator starts re-executes itself (`process.execve`) to clear the privileged connections from its
+  own environment block, reads them from a one-time handoff file it removes before any child exists,
+  never imports application code (a module-resolve guard enforces it), and serves the application in a
+  child process started with an environment that never held them. Every schema change of the boot —
+  the platform migration chain, row-level isolation, each product migration, the workflow system
+  database, a bundle apply — runs in the supervisor, which generates the product DDL from the
+  document itself and re-gates a reviewed delta rather than running SQL the child sent. The serving
+  child holds the runtime role alone and learns the export fence from the database as before. So
+  application code can no longer reach the migration role's connection through the process's
+  environment block, through interception of the database driver before the schema work, or over the
+  channel to the supervisor — it cannot bypass row-level security or lift the export fence. Runtime
+  control that needs privilege (`rayspec export`'s write barrier and snapshot, `resume`, `import`)
+  runs in the operator's CLI, which imports no application code either. Signals, readiness, graceful
+  drain, exit codes and the `--json` envelope are unchanged; a crash of the serving child makes the
+  supervisor exit non-zero and say so; single-role mode (no migration URL) runs one process exactly
+  as before. One gap depends on the operating-system user: when the supervisor and the child run as
+  the same user, a `_FILE`/`.env` the supervisor can read, its memory on a kernel without Yama
+  `ptrace_scope` ≥ 1, and a core file it can be made to write are readable by the child; the managed
+  posture refuses to boot while any is open and names it, and every other posture warns (the
+  entrypoint sets a zero hard core-file limit through `/bin/sh` where one exists). `@rayspec/server`
+  exports the supervisor (`superviseServing`, `sameUserConditions`), the child's channel
+  (`connectToSupervisor`) and the re-execution (`reexecWithoutPrivilegedConnections`,
+  `takeSupervisorHandoff`, the `@rayspec/server/supervisor-handoff` subpath);
+  `withholdPrivilegedConnections` and `PRIVILEGED_CONNECTION_VARS` keep their names. The certification
+  lane proves it through the real CLI under the `privileged-credentials` check. Closes the contract's
+  release-blocking "unprotected privileged credentials" and "bypassable migration fence".
 - **In the hardened posture a stream handler no longer receives the caller's credential.** With
   role separation or single-tenant mode turned on, the Web `Request` a `stream` route handler is
   handed (`init.request`) no longer carries `authorization`, `proxy-authorization` or `cookie`, and

@@ -93,7 +93,7 @@ describe.skipIf(!baseUrl)(
       });
       expect(owner.status, owner.text).toBe(201);
       const token = owner.body.accessToken as string;
-      const pid = d.child()?.pid as number;
+      const pid = d.servingPid() as number;
       expect(pid).toBeGreaterThan(0);
       const runtimeRole = decodeURIComponent(new URL(d.roles.app.runtime).username);
       const sysRuntimeRole = decodeURIComponent(new URL(d.roles.sys.runtime).username);

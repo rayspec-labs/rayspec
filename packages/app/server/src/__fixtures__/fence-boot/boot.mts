@@ -67,6 +67,10 @@ const server = await assembleServer(config, {
   agentBackendsFactory: (): ReadonlyMap<BackendId, Backend> =>
     new Map<BackendId, Backend>([['openai', new HoldingBackend()]]),
   registerProductTables: (tables) => registerScopedTables([...tables.values()]),
+  // This fixture boots the server in process to test the real fence and shutdown; `rayspec deploy`
+  // and `rayspec-serve` supervise instead. The managed posture refuses an in-process privileged boot
+  // unless the caller acknowledges it is a test harness.
+  unsupervisedPrivilege: 'test-harness',
 });
 
 const routesFile = process.env.FENCE_ROUTES_FILE;

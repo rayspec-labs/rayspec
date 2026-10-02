@@ -1218,6 +1218,19 @@ function parsePlanArgs(args: readonly string[]): {
 }
 
 /**
+ * Whether the command line serves: `deploy` without `--dry-run`, `--check-env` or a help request,
+ * for a spec document or a bundle alike.
+ */
+export function isServingInvocation(args: readonly string[]): boolean {
+  const { vector } = takeJsonFlag(args);
+  if (vector[0] !== 'deploy') return false;
+  const rest = vector.slice(1);
+  return !rest.some(
+    (token) => isHelpFlag(token) || token === '--dry-run' || token === '--check-env',
+  );
+}
+
+/**
  * Top-level runner: invoke `main`, set `process.exitCode` (NOT `process.exit` — let the event loop
  * drain stdout), and route CLI/unexpected errors to stderr. A `CliError` is a clean usage error
  * (prints the message + USAGE, exit 2); any other throw is an UNEXPECTED failure (secret-free message
@@ -1229,6 +1242,30 @@ function parsePlanArgs(args: readonly string[]): {
  * vector so the production call site (`run()`) is unchanged.
  */
 export async function run(args?: readonly string[]): Promise<void> {
+  // The process the operator started, before it reads anything: a serving deploy with a privileged
+  // connection in its environment re-executes itself without it (and does not return here), and the
+  // re-executed image takes the connections from its handoff (supervisor-handoff.ts). Only for the
+  // real command line: a test driving `run([...])` in process is never re-executed.
+  // Only the real command line, and only a serving deploy (or a stray handoff variable, which is
+  // refused): a non-serving verb never loads the supervisor module, so `bundle`/`pack` stay free of
+  // the server. The module imports only Node built-ins; it is dynamic here so the gate that proves
+  // those verbs load no server module keeps holding.
+  if (args === undefined) {
+    const serving = isServingInvocation(process.argv.slice(2));
+    if (serving || process.env.RAYSPEC_SUPERVISOR_HANDOFF !== undefined) {
+      const { reexecWithoutPrivilegedConnections, SupervisorHandoffError, takeSupervisorHandoff } =
+        await import('@rayspec/server/supervisor-handoff');
+      try {
+        if (serving) reexecWithoutPrivilegedConnections();
+        takeSupervisorHandoff({ serving });
+      } catch (err) {
+        if (!(err instanceof SupervisorHandoffError)) throw err;
+        await writeDrained(process.stderr, `[rayspec] ${err.message}\n`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+  }
   try {
     process.exitCode = args === undefined ? await main() : await main(args);
   } catch (err) {

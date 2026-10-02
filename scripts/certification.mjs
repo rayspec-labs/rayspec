@@ -87,6 +87,18 @@ export const CHECKS = [
     ],
   },
   {
+    id: 'privileged-credentials',
+    check:
+      'no process that imports application code holds the migration or snapshot connection — not in its environment block, not through the database driver, not over the IPC channel — and in-process code can neither find a privileged connection nor pass row security or the export fence; boot, drain, crash and single-role mode behave as before',
+    suites: [
+      CERT('hosting-checks.test.ts'),
+      SUITE('packages/app/cli', 'src/supervised-boot.db.test.ts'),
+      SUITE('packages/app/server', 'src/supervisor.test.ts'),
+      SUITE('packages/app/server', 'src/supervisor-handoff.test.ts'),
+      SUITE('packages/app/server', 'src/schema-work.db.test.ts'),
+    ],
+  },
+  {
     id: 'object-authorization',
     check:
       'authentication is not object authorization: every object, upload part, stream, export download and background job is checked, for two users and a removed member',

@@ -99,7 +99,7 @@ export const ATTESTATIONS = [
   {
     field: 'databaseRoleSeparation',
     value: true,
-    checks: ['runtime-role-evidence'],
+    checks: ['runtime-role-evidence', 'privileged-credentials'],
   },
   {
     field: 'crossProcessCancellation',

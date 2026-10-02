@@ -370,6 +370,12 @@ export class DeployApply {
 }
 
 /**
+ * What a deployer needs of the boot's applies: one product migration, run with its receipts.
+ * `DeployApply` is one; a boot under a supervisor hands the supervisor's (`SupervisedSchemaWork`).
+ */
+export type ProductMigrationApply = Pick<DeployApply, 'productMigration'>;
+
+/**
  * The observers the schema-changing steps name: the platform head and the product schema digest,
  * read through `query`. An apply that runs `productDdlStep` passes them.
  */

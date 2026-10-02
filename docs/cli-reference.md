@@ -144,6 +144,14 @@ switches the answer to the **result envelope**, one JSON object on stdout:
   writes its one envelope when it stops: `ok: true` after a SIGINT/SIGTERM
   shutdown (exit `0`), `ok: false` with the refusal as `RAY_CHECK_FAILED` when
   the boot is refused (exit `1`).
+- With role separation on (`RAYSPEC_MIGRATION_DATABASE_URL` set), a serving
+  `deploy` or `rayspec-serve` keeps the migration role in the process you started
+  — which never imports the application — and serves the application in a child
+  process started without it, so two Node processes appear under the deploy. A
+  SIGINT or SIGTERM to the process you started drains and stops both; a crash of
+  the child makes it exit non-zero and say so. Signals, exit codes, readiness and
+  the `--json` envelope are otherwise unchanged, and single-role mode (no
+  migration URL) runs one process exactly as before.
 - Without `--json`, every existing command's output is what it has always been.
 - The bundle verbs and `pack` always answer with the envelope; for them the
   flag only silences the short description (for `pack`, the inclusion summary)

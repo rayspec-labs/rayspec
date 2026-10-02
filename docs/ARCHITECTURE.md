@@ -189,8 +189,13 @@ server-derived tenant first. With **role separation** turned on
 (`RAYSPEC_MIGRATION_DATABASE_URL`, opt-in) every statement the chokepoint issues
 runs in such a transaction and the database enforces that policy on its own: the server serves as a runtime role that
 owns nothing and cannot bypass row security, the migration role owns the schema,
-and a statement that lost or never had its tenant reaches no tenant row. Without it
-the policies exist but are not enabled, and one role migrates and serves as before.
+and a statement that lost or never had its tenant reaches no tenant row. The
+migration role's connection is held only by the supervisor — the process the
+operator starts (`rayspec deploy`, `rayspec-serve`), which runs the boot's schema
+work and never imports application code — and the application is served by a child
+process that holds the runtime role alone, so code that runs inside it has no
+privileged connection to bypass row security or the export fence with. Without it
+the policies exist but are not enabled, and one process migrates and serves as before.
 See [Database roles and row-level security](./database-isolation.md).
 
 ### 3. The tool-dispatch trust boundary
