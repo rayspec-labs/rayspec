@@ -922,6 +922,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A registration whose organization is refused leaves no account behind.** `POST /v1/auth/register`
+  with an `orgName` and the operator's `POST /v1/auth/bootstrap-tenant` created the user first and
+  the organization in a second transaction, so a refused organization — in single-tenant mode, a
+  registration that lost the race for the one organization; on the bootstrap route, a chosen id
+  already in use — left a user row with no organization, and its email taken. The account, the
+  organization and the owner membership are now written in one transaction
+  (`OrgStore.createUserWithFirstOrg`); `AuthService.register` takes `createUserWithFirstOrg` in place
+  of `createFirstOrg`.
+
 - **A run that hits its wall time ends for its caller at a stated bound.** Once
   `RAYSPEC_AGENT_RUN_MAX_MS` fired (or a run was cancelled), run-core waited for the run's event tail
   and its terminal record without a limit, so on a loaded pool the caller could learn of the end

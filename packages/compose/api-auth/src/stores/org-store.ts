@@ -129,6 +129,39 @@ export class OrgStore {
     ownerUserId: string;
     id?: string;
   }): Promise<OrgRow> {
+    return this.#createOrg(input, async () => input.ownerUserId);
+  }
+
+  /**
+   * Register a NEW user and create their first org, with the user as its owner, in ONE transaction:
+   * the registration routes' path. The user row is inserted after every check the org creation makes
+   * — the single-tenant limit under its lock included — so a refused creation (a registration that
+   * lost the race for the one organization, a taken chosen id) leaves no user row behind. The user
+   * insert is the same one `IdentityStore.createUser` makes; a taken email throws as it does there.
+   */
+  async createUserWithFirstOrg(input: {
+    email: string;
+    passwordHash: string;
+    name: string;
+    slug: string;
+    id?: string;
+  }): Promise<{ org: OrgRow; userId: string }> {
+    let userId = '';
+    const org = await this.#createOrg(input, async (tx) => {
+      const rows = await tx
+        .insert(schema.users)
+        .values({ email: input.email, passwordHash: input.passwordHash })
+        .returning({ id: schema.users.id });
+      userId = (rows[0] as { id: string }).id;
+      return userId;
+    });
+    return { org, userId };
+  }
+
+  async #createOrg(
+    input: { name: string; slug: string; id?: string },
+    owner: (tx: Parameters<Parameters<Db['transaction']>[0]>[0]) => Promise<string>,
+  ): Promise<OrgRow> {
     const chosenId = input.id;
     if (chosenId !== undefined && !this.tenantBootstrapEnabled) {
       throw new Error(
@@ -163,9 +196,10 @@ export class OrgStore {
       // Only reachable on the chosen-id path: DO NOTHING swallowed the insert because the id is taken.
       // The no-id INSERT always returns its row (or throws on the slug index, as it always has).
       if (!org) throw new OrgIdInUseError(chosenId as string);
+      const ownerUserId = await owner(tx);
       await tx
         .insert(schema.memberships)
-        .values({ orgId: org.id, userId: input.ownerUserId, role: 'owner', status: 'active' });
+        .values({ orgId: org.id, userId: ownerUserId, role: 'owner', status: 'active' });
       return org;
     });
   }

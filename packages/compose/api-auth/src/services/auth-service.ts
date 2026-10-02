@@ -174,13 +174,18 @@ export class AuthService {
     ctx: LoginContext,
     opts: {
       /**
-       * Create the new user's first org, if the caller asked for one. It runs AFTER the user exists
-       * (it needs an owner) and BEFORE the session is issued, which is the whole point: the session
+       * Create the new user TOGETHER with their first org, if the caller asked for one: the user row
+       * and the org are written in one transaction, so an org creation that is refused (single-tenant
+       * mode's one organization taken by a concurrent registration, a chosen id in use) leaves no
+       * account behind. It runs BEFORE the session is issued, which is the other point: the session
        * row, the minted token and the reported `activeOrgId` then say the same thing. Issuing first
        * and creating the org afterwards reported an org the session did not carry, so the very next
        * refresh answered `null` — the same defect the org-switch write fixes, one endpoint over.
        */
-      readonly createFirstOrg?: (userId: string) => Promise<{ orgId: string; role: string }>;
+      readonly createUserWithFirstOrg?: (
+        normalizedEmail: string,
+        passwordHash: string,
+      ) => Promise<{ userId: string; orgId: string; role: string }>;
     } = {},
   ): Promise<{
     userId: string;
@@ -196,26 +201,33 @@ export class AuthService {
       throw new ApiError('CONFLICT', 'Registration could not be completed.');
     }
     const passwordHash = await hashPassword(password);
-    const user = await this.store.createUser(normalizedEmail, passwordHash);
-    const org = await opts.createFirstOrg?.(user.id);
+    let userId: string;
+    let org: { orgId: string; role: string } | undefined;
+    if (opts.createUserWithFirstOrg) {
+      const created = await opts.createUserWithFirstOrg(normalizedEmail, passwordHash);
+      userId = created.userId;
+      org = { orgId: created.orgId, role: created.role };
+    } else {
+      userId = (await this.store.createUser(normalizedEmail, passwordHash)).id;
+    }
     const { accessToken, refreshSecret } = await this.issueSession(
-      user.id,
+      userId,
       org?.orgId ?? null,
       org?.role,
       ctx,
     );
     return {
-      userId: user.id,
+      userId,
       accessToken,
       refreshSecret,
       activeOrgId: org?.orgId ?? null,
       audit: [
-        { event: 'register', actorUserId: user.id, actorOrgId: null },
+        { event: 'register', actorUserId: userId, actorOrgId: null },
         ...(org
           ? [
               {
                 event: 'org_create' as const,
-                actorUserId: user.id,
+                actorUserId: userId,
                 actorOrgId: org.orgId,
               },
             ]

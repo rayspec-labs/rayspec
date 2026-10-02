@@ -58,7 +58,8 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
     const orgName = body.orgName;
     // Single-tenant mode: open registration only creates the ONE organization, while none exists.
     // After that an account is made by redeeming an invite (POST /v1/invites/accept). Checked before
-    // any account is created; the org store re-checks under its lock for two racing registrations.
+    // any work; the org store re-checks under its lock for two racing registrations, and writes the
+    // account in the same transaction as the organization, so the one that loses leaves no account.
     if (deps.orgStore?.singleTenant && (!orgName || (await deps.orgStore.orgCount()) > 0)) {
       throw singleTenantRefusal();
     }
@@ -68,15 +69,16 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       { ua: c.req.header('user-agent') ?? null, ip },
       orgName
         ? {
-            createFirstOrg: async (userId: string) => {
+            createUserWithFirstOrg: async (normalizedEmail: string, passwordHash: string) => {
               const slug = await deps.orgStore.deriveUniqueSlug(orgName);
               try {
-                const org = await deps.orgStore.createOrgWithOwner({
+                const created = await deps.orgStore.createUserWithFirstOrg({
+                  email: normalizedEmail,
+                  passwordHash,
                   name: orgName,
                   slug,
-                  ownerUserId: userId,
                 });
-                return { orgId: org.id, role: 'owner' };
+                return { userId: created.userId, orgId: created.org.id, role: 'owner' };
               } catch (e) {
                 // A concurrent registration created the one organization first.
                 if (e instanceof SingleTenantLimitError) throw singleTenantRefusal();
@@ -125,25 +127,26 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AppDeps): voi
       if (deps.orgStore.singleTenant && (await deps.orgStore.orgCount()) > 0) {
         throw singleTenantRefusal();
       }
-      // Same seam as `register` above: the org is created INSIDE the registration, so the session
-      // this operator call hands back is already bound to the tenant it just made. A taken id still
-      // aborts before a session exists — it leaves the freshly created user behind, which an operator
-      // resolves by retrying with the same email once the id question is settled.
+      // Same seam as `register` above: the account and the org are created in one transaction, so the
+      // session this operator call hands back is already bound to the tenant it just made, and a taken
+      // id (or the one organization taken meanwhile) aborts with no account written: the operator
+      // retries with the same email once the id question is settled.
       const reg = await deps.authService.register(
         email,
         body.password,
         { ua: c.req.header('user-agent') ?? null, ip },
         {
-          createFirstOrg: async (userId: string) => {
+          createUserWithFirstOrg: async (normalizedEmail: string, passwordHash: string) => {
             const slug = await deps.orgStore.deriveUniqueSlug(body.orgName);
             try {
-              const created = await deps.orgStore.createOrgWithOwner({
+              const created = await deps.orgStore.createUserWithFirstOrg({
+                email: normalizedEmail,
+                passwordHash,
                 name: body.orgName,
                 slug,
-                ownerUserId: userId,
                 id: body.orgId,
               });
-              return { orgId: created.id, role: 'owner' };
+              return { userId: created.userId, orgId: created.org.id, role: 'owner' };
             } catch (e) {
               // A taken id is the operator's problem to resolve, not a server fault: say so as a 409
               // rather than succeeding under a different id they would then deploy against.
