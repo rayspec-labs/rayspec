@@ -13,14 +13,15 @@
  *   1. Installs `rayspec@<previous>` from npm into a temporary directory (`--from <version>`,
  *      default: the version npm reports as latest), with install scripts disabled.
  *   2. Deploys an example application with that release's `rayspec deploy` (`--app`: `notes-ui`, the
- *      default, or the `team-notes` reference application, release 1.0.0 as its build writes it),
- *      registers a user, creates an organization, mints an API key and writes notes through the
- *      declared API.
+ *      default; the `team-notes` reference application, release 1.0.0 as its build writes it; or the
+ *      `asset-catalog` reference application, a compiled extension with a vendored dependency that
+ *      calls one HTTPS host), registers a user, creates an organization, mints an API key and writes
+ *      rows through the declared API.
  *   3. Records the rows and the credential rows exactly as they are stored.
  *   4. Deploys the same spec with this working tree's `rayspec deploy`: the platform chain upgrades
  *      the database in place.
  *   5. Checks that every recorded row is byte-identical, that the user logs in with the same
- *      password, that the API key still reads the notes, and that a new note can be written.
+ *      password, that the API key still reads the rows, and that a new row can be written.
  *   6. Packs the application with this working tree and deploys it as a bundle onto the upgraded
  *      environment — a dry-run, then the reviewed plan — and checks rows and credentials again.
  *
@@ -30,7 +31,9 @@
  *
  * Needs: DATABASE_URL (a server where a database may be created and dropped), the working tree
  * built (`pnpm build`), npm with access to the registry. SHADOW_DATABASE_URL is used for the plan
- * of the bundle deploy when set, and DATABASE_URL's server otherwise.
+ * of the bundle deploy when set, and DATABASE_URL's server otherwise. `asset-catalog` also needs the
+ * openssl command line: its classification service runs here, over HTTPS with a test certificate,
+ * reached through an egress proxy that admits the one host the application declares.
  */
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
@@ -41,6 +44,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,19 +52,26 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
+import { startClassifier, startEgressProxy, testCertificates } from './journeys/lib.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
 
 /**
  * The applications the harness upgrades: where the source is, how it becomes a directory holding
- * `rayspec.yaml`, the body of a note, and the stored note columns compared.
+ * `rayspec.yaml`, the store and route its rows are written through, the body of a row, and the
+ * stored columns compared. Optional: `release(app)` puts back what `prepare` took out for the
+ * previous release before the working tree packs the application, `runtime(app, which)` makes the
+ * `@rayspec` packages an extension imports resolvable from the application directory for the
+ * runtime about to boot it, and `egress` names the one HTTPS host its handlers call.
  */
 const APPS = {
   'notes-ui': {
     prepare(app) {
       cpSync(join(REPO, 'examples', 'notes-ui'), app, { recursive: true });
     },
+    table: 'notes',
+    path: '/api/notes',
     note: (title) => ({ title, body: `${title} body` }),
     columns: 'id, tenant_id, title, body, created_at',
   },
@@ -81,10 +92,81 @@ const APPS = {
         fail('the team-notes spec does not name its id and version');
       writeFileSync(spec, kept.join('\n'));
     },
+    table: 'notes',
+    path: '/api/notes',
     note: (title) => ({ title, content: `${title} — Grüße, 東京` }),
     columns: 'id, tenant_id, title, content, created_by, created_at, deleted_at',
   },
+  'asset-catalog': {
+    // The release build less what a previous release does not know: `metadata.id`,
+    // `metadata.version` and `deployment.egressHosts` in the spec (it refuses unknown fields), and
+    // the `uses` right list on the extension's handler fragments (its handler grammar is strict).
+    // The compiled extension and its vendored dependencies are otherwise the release's.
+    prepare(app) {
+      buildAssetCatalog(app);
+      const spec = join(app, 'rayspec.yaml');
+      const lines = readFileSync(spec, 'utf8').split('\n');
+      const kept = lines.filter(
+        (l) => !/^ {2}(?:id|version): /.test(l) && !/^ {2}egressHosts: /.test(l),
+      );
+      if (lines.length - kept.length !== 3) {
+        fail('the asset-catalog spec does not name its id, version and egress hosts');
+      }
+      const deployment = kept.indexOf('deployment:');
+      if (deployment < 0) fail('the asset-catalog spec has no deployment section');
+      // The section held only the egress hosts and their comment: drop it whole.
+      let end = deployment + 1;
+      while (end < kept.length && /^ {2}#/.test(kept[end] ?? '')) end += 1;
+      kept.splice(deployment, end - deployment);
+      writeFileSync(spec, kept.join('\n'));
+      const entry = join(app, 'packs', 'catalog-pack', 'index.js');
+      const source = readFileSync(entry, 'utf8');
+      const stripped = source.replace(/\s*uses: \[\],?/g, '');
+      if ((source.match(/uses: \[\]/g) ?? []).length !== 2 || /uses:/.test(stripped)) {
+        fail('the compiled asset-catalog extension does not declare uses on its two handlers');
+      }
+      writeFileSync(entry, stripped);
+    },
+    release(app) {
+      const fresh = join(work, 'asset-catalog-release');
+      buildAssetCatalog(fresh);
+      for (const file of ['rayspec.yaml', join('packs', 'catalog-pack', 'index.js')]) {
+        cpSync(join(fresh, file), join(app, file));
+      }
+    },
+    runtime(app, which) {
+      const modules = join(app, 'node_modules', '@rayspec');
+      rmSync(join(app, 'node_modules'), { recursive: true, force: true });
+      if (which === 'none') return;
+      mkdirSync(modules, { recursive: true });
+      for (const [name, dir] of [
+        ['platform', join('kernel', 'platform')],
+        ['handler-sdk', join('kernel', 'handler-sdk')],
+      ]) {
+        symlinkSync(
+          which === 'previous'
+            ? join(work, 'previous', 'node_modules', '@rayspec', name)
+            : join(REPO, 'packages', dir),
+          join(modules, name),
+        );
+      }
+    },
+    egress: 'classifier.example.com',
+    table: 'catalog_items',
+    path: '/api/items',
+    note: (title) => ({ name: title, file_name: `${title.split(' ').join('-')}.pdf` }),
+    columns: 'id, tenant_id, name, file_name, content_type, category, created_by, created_at',
+  },
 };
+
+/** The asset-catalog release build, written to `out`. */
+function buildAssetCatalog(out) {
+  execFileSync(
+    process.execPath,
+    [join(REPO, 'examples', 'asset-catalog', 'build.mjs'), `--out=${out}`],
+    { stdio: ['ignore', 'ignore', 'inherit'] },
+  );
+}
 
 const baseUrl = process.env.DATABASE_URL;
 if (!baseUrl)
@@ -111,6 +193,8 @@ const appUrl = withDbName(baseUrl, suiteDb);
 const shadowUrl = process.env.SHADOW_DATABASE_URL ?? baseUrl;
 const work = mkdtempSync(join(tmpdir(), 'rayspec-upgrade-'));
 const children = new Set();
+/** The local services an application calls (its HTTPS host and the egress proxy), closed at the end. */
+const services = [];
 const summary = { app: flags.app, from: null, to: null, checks: [] };
 
 function fail(message) {
@@ -134,8 +218,11 @@ function log(line) {
   process.stderr.write(`[upgrade-with-data] ${line}\n`);
 }
 
-/** The environment every boot gets: the explicit configuration and nothing from this process. */
-function bootEnv(secrets) {
+/**
+ * The environment every boot gets: the explicit configuration and nothing from this process, and
+ * for an application that calls a host, the proxy and the certificate authority it reaches it by.
+ */
+function bootEnv(secrets, egress) {
   return {
     PATH: process.env.PATH ?? '',
     HOME: process.env.HOME ?? '',
@@ -145,6 +232,14 @@ function bootEnv(secrets) {
     RAYSPEC_API_KEY_PEPPER: secrets.pepper,
     RAYSPEC_SKIP_DOTENV: '1',
     ALLOWED_ORIGINS: '',
+    ...(egress === null
+      ? {}
+      : {
+          NODE_USE_ENV_PROXY: '1',
+          HTTPS_PROXY: `http://127.0.0.1:${egress.proxy.port}`,
+          NO_PROXY: '127.0.0.1,localhost',
+          NODE_EXTRA_CA_CERTS: egress.caFile,
+        }),
   };
 }
 
@@ -219,7 +314,7 @@ async function api(method, path, { bearer, body } = {}) {
 /** Every row of the tables a user relies on, as stored: an ordered digest per table. */
 async function storedRows(sql) {
   const tables = {
-    notes: `SELECT ${APP.columns} FROM notes ORDER BY id`,
+    [APP.table]: `SELECT ${APP.columns} FROM ${APP.table} ORDER BY id`,
     users: 'SELECT id, email, password_hash FROM users ORDER BY id',
     orgs: 'SELECT id, name, slug FROM orgs ORDER BY id',
     memberships: 'SELECT org_id, user_id, role, status FROM memberships ORDER BY org_id, user_id',
@@ -272,12 +367,22 @@ async function main() {
     jwt: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
     pepper: randomBytes(32).toString('hex'),
   };
-  const env = bootEnv(secrets);
+  let egress = null;
+  if (APP.egress !== undefined) {
+    const certs = testCertificates(join(work, 'tls'), APP.egress);
+    const classifier = await startClassifier(certs);
+    services.push(classifier);
+    const proxy = await startEgressProxy(classifier.port, () => [APP.egress]);
+    services.push(proxy);
+    egress = { proxy, caFile: certs.caFile };
+  }
+  const env = bootEnv(secrets, egress);
   const sql = postgres(appUrl, { max: 2, onnotice: () => {} });
 
   try {
     // 2. The previous release deploys the example; a user writes data through it.
     log(`deploying with rayspec ${from}`);
+    APP.runtime?.(app, 'previous');
     const old = await serve('previous', previousCli, ['deploy', 'rayspec.yaml'], app, env);
     const email = `upgrade-${randomBytes(4).toString('hex')}@example.com`;
     const password = randomBytes(18).toString('base64url');
@@ -305,7 +410,7 @@ async function main() {
     const apiKey = minted.json.plaintext;
     const titles = ['first note', 'second note', 'third note'];
     for (const title of titles) {
-      const created = await api('POST', '/api/notes', { bearer: token, body: APP.note(title) });
+      const created = await api('POST', APP.path, { bearer: token, body: APP.note(title) });
       check(`write "${title}" on the previous release`, created.status === 201, created.text);
     }
     const stopped = await old.stop();
@@ -319,6 +424,7 @@ async function main() {
 
     // 4. The working tree boots the same spec on that database.
     log('deploying the same spec with the working tree');
+    APP.runtime?.(app, 'working-tree');
     const upgraded = await serve('upgraded', CLI, ['deploy', 'rayspec.yaml'], app, env);
     const headAfter = await sql.unsafe(
       'SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations',
@@ -341,7 +447,7 @@ async function main() {
       apiKey,
       titles,
     });
-    const added = await api('POST', '/api/notes', {
+    const added = await api('POST', APP.path, {
       bearer: (await login(email, password, org.json.id)).token,
       body: APP.note('written after the upgrade'),
     });
@@ -351,6 +457,8 @@ async function main() {
 
     // 6. The same application as a bundle, deployed onto the upgraded environment.
     log('packing the application and deploying it as a bundle');
+    APP.runtime?.(app, 'none');
+    APP.release?.(app);
     const packed = execFileSync(
       process.execPath,
       [
@@ -431,13 +539,13 @@ async function login(email, password, orgId) {
 
 async function verifyServing(when, { email, password, orgId, apiKey, titles }) {
   const { token } = await login(email, password, orgId);
-  const byUser = await api('GET', '/api/notes', { bearer: token });
+  const byUser = await api('GET', APP.path, { bearer: token });
   check(
     `the user reads every note ${when}`,
     byUser.status === 200 && titles.every((t) => byUser.text.includes(t)),
     byUser.text,
   );
-  const byKey = await api('GET', '/api/notes', { bearer: apiKey });
+  const byKey = await api('GET', APP.path, { bearer: apiKey });
   check(
     `the API key reads every note ${when}`,
     byKey.status === 200 && titles.every((t) => byKey.text.includes(t)),
@@ -449,6 +557,7 @@ async function verifyServing(when, { email, password, orgId, apiKey, titles }) {
 
 async function cleanup() {
   for (const child of children) child.kill('SIGKILL');
+  for (const service of services.splice(0)) await service.close().catch(() => {});
   try {
     const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
     await admin.unsafe(`DROP DATABASE IF EXISTS "${suiteDb}" WITH (FORCE)`);

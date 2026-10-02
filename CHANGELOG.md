@@ -54,7 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memberships and API keys is byte-identical, that the user logs in with the same password, that
   the API key reads the notes and that a new note can be written; finally it packs the example and
   deploys it as a bundle onto the upgraded environment and checks the same again. It runs in about a
-  minute and is a required step of the database lane.
+  minute and is a required step of the database lane. `--app team-notes` and `--app asset-catalog`
+  run the same check with those reference applications; the previous release gets each spec without
+  the fields it does not know (`metadata.id`, `metadata.version`, and for the asset catalog
+  `deployment.egressHosts` and the `uses` lists of its extension's handlers), and its extension
+  imports the `@rayspec` packages of whichever runtime boots it. Both run in CI.
 - **`@rayspec/server` exports the bundle deploy's building blocks**: `readApplicationBundle` (reader
   steps 1 to 17 without a database), `preparePlan` (`prepare()` at a given `preparedAt`),
   `applyBundle`, `bindingRevisions`, `initialBindingRevisionKey`, `planNeedsReview`, the
