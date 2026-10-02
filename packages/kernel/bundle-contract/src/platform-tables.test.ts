@@ -1,11 +1,10 @@
 /**
- * The platform table list restates the committed snapshot categories and adds only the
- * runtime-control tables and the product migration ledger, under the categories the contract
- * reserves for them, and the owner recovery tokens under the category of the other credentials.
+ * The platform table list restates the committed snapshot categories, and files the runtime-control
+ * tables, the product migration ledger and the owner recovery tokens under the categories a snapshot
+ * treats them by.
  */
 import { describe, expect, it } from 'vitest';
 import {
-  CONTRACT_PLATFORM_TABLES,
   IDENTITY_RECOVERY_TABLES,
   PLATFORM_TABLES,
   PRODUCT_LEDGER_TABLES,
@@ -17,14 +16,13 @@ import { DATA_CATEGORIES } from './vocabulary.js';
 
 interface Categories {
   tables: { database: string; schema: string; table: string; category: string }[];
-  proposedTables: { purpose: string; category: string }[];
 }
 
 const categories = readContractJson<Categories>('snapshot-categories.json');
 
 describe('platform tables', () => {
   it('restate the tables of snapshot-categories.json, in order', () => {
-    expect(CONTRACT_PLATFORM_TABLES).toEqual(
+    expect(PLATFORM_TABLES).toEqual(
       categories.tables.map(({ database, schema, table, category }) => ({
         database,
         schema,
@@ -34,28 +32,18 @@ describe('platform tables', () => {
     );
   });
 
-  it('add the runtime-control tables under the category the contract reserves for them', () => {
-    const reserved = categories.proposedTables
-      .filter((p) => p.purpose.includes('runtime control'))
-      .map((p) => p.category);
-    expect(reserved.length).toBeGreaterThan(0);
-    expect(new Set(reserved)).toEqual(new Set(['runtime-control-state']));
+  it('file the runtime-control tables as runtime-control state, whose rows no snapshot carries', () => {
+    expect(RUNTIME_CONTROL_TABLES.map((p) => p.table)).toEqual([
+      'runtime_control_processes',
+      'runtime_control_receipts',
+      'runtime_control_state',
+    ]);
     for (const table of RUNTIME_CONTROL_TABLES) {
       expect(table).toMatchObject({ schema: 'public', category: 'runtime-control-state' });
     }
-    expect(PLATFORM_TABLES).toEqual([
-      ...CONTRACT_PLATFORM_TABLES,
-      ...RUNTIME_CONTROL_TABLES,
-      ...PRODUCT_LEDGER_TABLES,
-      ...IDENTITY_RECOVERY_TABLES,
-    ]);
   });
 
-  it('add the product migration ledger under the category the contract reserves for it', () => {
-    const reserved = categories.proposedTables
-      .filter((p) => p.purpose.includes('product migration ledger'))
-      .map((p) => p.category);
-    expect(reserved).toEqual(['platform-migration-ledger']);
+  it('file the product migration ledger with the migration ledgers', () => {
     expect(PRODUCT_LEDGER_TABLES).toEqual([
       {
         database: 'application',
@@ -66,7 +54,7 @@ describe('platform tables', () => {
     ]);
   });
 
-  it('add the owner recovery tokens as credential state, whose rows no snapshot carries', () => {
+  it('file the owner recovery tokens as credential state, whose rows no snapshot carries', () => {
     expect(IDENTITY_RECOVERY_TABLES).toEqual([
       {
         database: 'application',
@@ -75,8 +63,6 @@ describe('platform tables', () => {
         category: 'credential-state',
       },
     ]);
-    const credentialTables = categories.tables.filter((t) => t.category === 'credential-state');
-    expect(credentialTables.map((t) => t.table)).toContain('sessions');
   });
 
   it('name each table once, each under a known category', () => {

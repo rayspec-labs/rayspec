@@ -90,9 +90,9 @@ export const EXPORT_ARG_OPTIONS = {
 } as const satisfies NonNullable<ParseArgsConfig['options']>;
 
 /**
- * Every code the export can report. The preflight it runs adds codes the contract's verb list does
- * not name (an extension, a digest, a runtime or target, a fence epoch); they are the contract's own
- * codes for those findings.
+ * Every code the export can report: the contract's list for the verb. The precheck reads the deployed
+ * bundle again through the deploy pipeline of this runtime, so the codes of reader steps 1 to 16 are
+ * among them; an extension, a server major, a lost lease and the fence epoch add the rest.
  */
 export const EXPORT_ERROR_CODES: ReadonlySet<BundleErrorCode> = new Set<BundleErrorCode>([
   'RAY_USAGE',
@@ -107,12 +107,18 @@ export const EXPORT_ERROR_CODES: ReadonlySet<BundleErrorCode> = new Set<BundleEr
   'RAY_LOCK_TIMEOUT',
   'RAY_INFRA_UNAVAILABLE',
   'RAY_INTERRUPTED',
-  'RAY_INTERNAL',
-  'RAY_POLICY_DENIED',
+  'RAY_INVALID_ARCHIVE',
+  'RAY_MANIFEST_INVALID',
   'RAY_DIGEST_MISMATCH',
+  'RAY_SPEC_INVALID',
   'RAY_RUNTIME_UNSUPPORTED',
   'RAY_TARGET_UNSUPPORTED',
+  'RAY_CAPABILITY_UNSUPPORTED',
+  'RAY_BINDING_RESERVED',
+  'RAY_SECRET_DETECTED',
+  'RAY_POLICY_DENIED',
   'RAY_FENCE_MISMATCH',
+  'RAY_INTERNAL',
 ]);
 
 /** The default and the bounds of `--quiesce-deadline`, in seconds. */

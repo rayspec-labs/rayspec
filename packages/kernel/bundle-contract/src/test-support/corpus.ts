@@ -111,6 +111,8 @@ interface EndOverrides {
 interface Layout {
   prefix: Buffer;
   suffix: Buffer;
+  /** Bytes after the last central record, counted in the end record's directory size. */
+  directoryPadding: Buffer;
   end: EndOverrides;
   zip64: boolean;
 }
@@ -235,7 +237,7 @@ function serialize(entries: Entry[], layout: Layout): Buffer {
       e.comment,
     );
   });
-  const directoryBytes = Buffer.concat(directory);
+  const directoryBytes = Buffer.concat([...directory, layout.directoryPadding]);
   out.push(directoryBytes);
   size += directoryBytes.length;
   const end = {
@@ -287,6 +289,7 @@ function serialize(entries: Entry[], layout: Layout): Buffer {
 const SECOND_ARCHIVE = serialize([entry('ray.json', Buffer.from('{}\n'))], {
   prefix: Buffer.alloc(0),
   suffix: Buffer.alloc(0),
+  directoryPadding: Buffer.alloc(0),
   end: {},
   zip64: false,
 });
@@ -454,6 +457,7 @@ export function buildCase(expectations: Expectations, construction: Construction
   const layout: Layout = {
     prefix: Buffer.alloc(0),
     suffix: Buffer.alloc(0),
+    directoryPadding: Buffer.alloc(0),
     end: {},
     zip64: false,
   };
@@ -512,6 +516,9 @@ function applyArchiveOperation(
       return;
     case 'append':
       layout.suffix = typeof op.hex === 'string' ? Buffer.from(op.hex, 'hex') : SECOND_ARCHIVE;
+      return;
+    case 'directoryPadding':
+      layout.directoryPadding = Buffer.from(op.hex as string, 'hex');
       return;
     case 'eocd': {
       const fields = op.fields as Record<string, string | number>;

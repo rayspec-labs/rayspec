@@ -1,7 +1,7 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Every platform table mapped to a snapshot data category.",
-  "contractVersion": "1.0.0-draft.2",
-  "platformSchemaHead": "0011_tenant_event_bus",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Every platform table mapped to a snapshot data category.",
+  "contractVersion": "1.0.0-rc.1",
+  "platformSchemaHead": "0017_runtime_control_blob_backend",
   "categories": [
     {
       "id": "identity-and-tenancy",
@@ -147,6 +147,24 @@
     {
       "database": "application",
       "schema": "public",
+      "table": "owner_recovery_tokens",
+      "category": "credential-state",
+      "createdAt": "packages/kernel/db/drizzle/0016_owner_recovery.sql:16",
+      "schemaSource": "packages/kernel/db/src/schema.ts:317",
+      "note": "One-time owner-recovery credentials, stored as an HMAC under the pepper; reset like sessions, API keys and invites."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "product_migration_ledger",
+      "category": "platform-migration-ledger",
+      "createdAt": "packages/kernel/db/drizzle/0014_product_migration_ledger.sql:18",
+      "schemaSource": "packages/kernel/db/src/schema.ts:934",
+      "note": "Every product schema change the environment applied, in order; it defines the product half of the schema head."
+    },
+    {
+      "database": "application",
+      "schema": "public",
       "table": "run_events",
       "category": "run-history",
       "createdAt": "packages/kernel/db/drizzle/0004_run_events.sql:24",
@@ -159,6 +177,33 @@
       "category": "run-history",
       "createdAt": "packages/kernel/db/drizzle/0000_identity_and_run_retrofit.sql:70",
       "schemaSource": "packages/kernel/db/src/schema.ts:538"
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "runtime_control_processes",
+      "category": "runtime-control-state",
+      "createdAt": "packages/kernel/db/drizzle/0013_runtime_control_processes.sql:15",
+      "schemaSource": "packages/kernel/db/src/schema.ts:892",
+      "note": "The runtime processes of the environment and the fence state each one observed."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "runtime_control_receipts",
+      "category": "runtime-control-state",
+      "createdAt": "packages/kernel/db/drizzle/0012_runtime_control.sql:23",
+      "schemaSource": "packages/kernel/db/src/schema.ts:844",
+      "note": "Append-only receipts of every runtime-control operation and step."
+    },
+    {
+      "database": "application",
+      "schema": "public",
+      "table": "runtime_control_state",
+      "category": "runtime-control-state",
+      "createdAt": "packages/kernel/db/drizzle/0012_runtime_control.sql:41",
+      "schemaSource": "packages/kernel/db/src/schema.ts:779",
+      "note": "The one state row: fence, environment revision, operation lease, binding revision key and the active application."
     },
     {
       "database": "application",
@@ -232,22 +277,5 @@
     "category": "workflow-system-state",
     "dumpPath": "payload/workflow-system.dump",
     "policy": "included whole when the database exists at capture time"
-  },
-  "proposedTables": [
-    {
-      "purpose": "product migration ledger",
-      "category": "platform-migration-ledger",
-      "status": "proposed; name fixed by the change that adds it"
-    },
-    {
-      "purpose": "runtime control state: fence epoch, environment revision",
-      "category": "runtime-control-state",
-      "status": "proposed; name fixed by the change that adds it"
-    },
-    {
-      "purpose": "apply receipts and idempotency keys of runtime control",
-      "category": "runtime-control-state",
-      "status": "proposed; name fixed by the change that adds it"
-    }
-  ]
+  }
 }

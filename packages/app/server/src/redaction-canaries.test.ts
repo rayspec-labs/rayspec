@@ -127,7 +127,7 @@ describe('canary secrets of every binding kind', () => {
 
   it('never reach a runtime-control result envelope', async () => {
     const leaky = (value: string): ResultEnvelope<null> => ({
-      contractVersion: '1.0.0-draft.2',
+      contractVersion: '1.0.0-rc.1',
       ok: false,
       operation: 'runtime.prepare',
       operationId: randomUUID(),

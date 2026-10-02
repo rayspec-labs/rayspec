@@ -43,6 +43,7 @@ export const RESUME_ERROR_CODES: ReadonlySet<BundleErrorCode> = new Set<BundleEr
   'RAY_USAGE',
   'RAY_BINDINGS_FILE_INSECURE',
   'RAY_FENCE_MISMATCH',
+  'RAY_LOCK_TIMEOUT',
   'RAY_INFRA_UNAVAILABLE',
   'RAY_INTERNAL',
 ]);

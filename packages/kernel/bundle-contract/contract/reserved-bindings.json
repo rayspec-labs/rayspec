@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Reserved operator binding names and the rule for application-grantable names.",
-  "contractVersion": "1.0.0-draft.2",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Reserved operator binding names and the rule for application-grantable names.",
+  "contractVersion": "1.0.0-rc.1",
   "namePattern": "^[A-Z][A-Z0-9_]{0,127}$",
   "reservedExact": [
     {

@@ -33,7 +33,7 @@ const built = new Map(
 
 describe('corpus regeneration', () => {
   it('builds every case to the size and SHA-256 its expectation records', () => {
-    expect(expectations.cases).toHaveLength(133);
+    expect(expectations.cases).toHaveLength(136);
     for (const c of expectations.cases) {
       const bytes = built.get(c.id)!;
       expect({ id: c.id, size: bytes.length, sha256: sha256(bytes) }).toEqual({
@@ -66,6 +66,12 @@ describe('corpus regeneration', () => {
     expect(
       built.get('app-good-minimal')!.equals(readContractFile('fixtures/inspect-only.ray')),
     ).toBe(true);
+  });
+
+  it('pins exactly the deflate streams the contract records', () => {
+    expect(Object.fromEntries(PINNED_DEFLATE_STREAMS)).toEqual(
+      expectations.construction.pinnedDeflateStreams,
+    );
   });
 
   it('the pinned deflate stream inflates back to the entry it stands for', () => {

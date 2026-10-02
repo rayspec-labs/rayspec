@@ -10,7 +10,7 @@
  */
 
 /** The contract version every artifact, envelope and request states. */
-export const CONTRACT_VERSION = '1.0.0-draft.2';
+export const CONTRACT_VERSION = '1.0.0-rc.1';
 
 // ─── capabilities ──────────────────────────────────────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ export type ManagedPosture = 'allowed' | 'self-host-only' | 'test-only';
 
 export interface Capability {
   id: string;
-  /** `available` at the source the vocabulary was taken from, or `planned` for this release. */
+  /** `available` in the runtime of this release, or `planned` for a later one. */
   status: CapabilityStatus;
   /** Whether a bundle may list the id in `requires`; runtime-provided ids cannot be required. */
   requirableByBundle: boolean;
@@ -135,8 +135,8 @@ export const CAPABILITIES: readonly Capability[] = [
   },
   {
     id: 'extraction-deterministic',
-    status: 'planned',
-    requirableByBundle: true,
+    status: 'available',
+    requirableByBundle: false,
     managedPosture: 'test-only',
   },
 ];
@@ -328,7 +328,6 @@ export const RESULT_OPERATIONS = [
   'pack',
   'bundle.inspect',
   'bundle.verify',
-  'bundle.sign',
   'deploy.dry-run',
   'deploy',
   'export',
@@ -338,7 +337,6 @@ export const RESULT_OPERATIONS = [
   'runtime.inspect',
   'runtime.prepare',
   'runtime.quiesce',
-  'runtime.snapshot',
   'runtime.apply',
   'runtime.health',
   'runtime.resume',

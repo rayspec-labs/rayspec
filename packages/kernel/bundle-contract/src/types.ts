@@ -179,7 +179,7 @@ export interface ObjectIndex {
 /** The protections one runtime release was tested for under the managed hosting posture. */
 export interface ManagedReceipt {
   receiptFormatVersion: 1;
-  contractVersion: '1.0.0-draft.2';
+  contractVersion: '1.0.0-rc.1';
   runtimeVersion: string;
   sourceCommit: string;
   releaseManifestSha256: Sha256;
@@ -235,7 +235,7 @@ export interface ReleaseSignatureFile {
 // ─── result envelope ───────────────────────────────────────────────────────────────────────────
 
 interface ResultEnvelopeBase<T> {
-  contractVersion: '1.0.0-draft.2';
+  contractVersion: '1.0.0-rc.1';
   operation: ResultOperation;
   /** UUID v4: fresh per CLI invocation; echoed from the request by a runtime operation. */
   operationId: string;
@@ -256,7 +256,7 @@ export type ResultEnvelope<T> =
 
 /** Every runtime-control request carries these. */
 export interface RequestBase {
-  contractVersion: '1.0.0-draft.2';
+  contractVersion: '1.0.0-rc.1';
   /** UUID v4 chosen by the caller and reused on retry. */
   operationId: string;
   /** Opaque, at most 256 characters, recorded in receipts; never a credential. */
@@ -275,7 +275,7 @@ export interface InspectData {
   runtimeVersion: string;
   target: Target;
   nodeVersion: string;
-  contractVersion: '1.0.0-draft.2';
+  contractVersion: '1.0.0-rc.1';
   capabilityVocabularyVersion: 1;
   /** Every id this runtime provides. */
   capabilities: string[];
@@ -357,28 +357,11 @@ export interface QuiesceData {
   unfencedExternal: string[];
 }
 
-export interface SnapshotRequest extends RequestBase {
-  fenceEpoch: number;
-  /** An age X25519 recipient (`age1…`). */
-  recipient: string;
-  runHistoryPolicy: 'included' | 'excluded';
-  output: string;
-}
-
-export interface SnapshotData {
-  migrationBundleSha256: Sha256;
-  ciphertextSha256: Sha256;
-  ciphertextSize: number;
-  sourceLedger: {
-    fenceEpoch: number;
-    schemaHead: SchemaHead;
-    applicationDigest: Sha256;
-    tableCounts: TableCount[];
-    objectCount: number;
-    excludedDataCategories: string[];
-  };
-}
-
+/**
+ * The request a supervisor sends to apply a prepared plan, checked by `checkApplyRequest`. The
+ * runtime of this release runs apply as a library operation over the steps its deploy paths supply;
+ * no adapter method takes this request, and the grant is not recorded.
+ */
 export interface ApplyRequest extends RequestBase {
   planDigest: Sha256;
   bundleSha256: Sha256;
@@ -427,13 +410,15 @@ export interface ResumeData {
   environmentRevision: number;
 }
 
-/** The runtime-control operations, as a caller-side interface. Every result is an envelope. */
+/**
+ * The runtime-control operations of the adapter, as a caller-side interface. Every result is an
+ * envelope. Apply is a library operation with its own request (`runtime.apply`), and there is no
+ * snapshot operation: the export verb captures under the fence its quiesce took.
+ */
 export interface RuntimeControl {
   inspect(request: InspectRequest): Promise<ResultEnvelope<InspectData>>;
   prepare(request: PrepareRequest): Promise<ResultEnvelope<PrepareData>>;
   quiesce(request: QuiesceRequest): Promise<ResultEnvelope<QuiesceData>>;
-  snapshot(request: SnapshotRequest): Promise<ResultEnvelope<SnapshotData>>;
-  apply(request: ApplyRequest): Promise<ResultEnvelope<ApplyData>>;
   health(request: HealthRequest): Promise<ResultEnvelope<HealthData>>;
   resume(request: ResumeRequest): Promise<ResultEnvelope<ResumeData>>;
 }

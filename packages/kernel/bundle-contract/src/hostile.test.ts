@@ -143,7 +143,7 @@ describe('hostile member names', () => {
     expect(outcome(r)).toEqual({ code: 'RAY_MANIFEST_INVALID', reason: 'schema' });
     if (r.ok) return;
     const envelope = {
-      contractVersion: '1.0.0-draft.2',
+      contractVersion: '1.0.0-rc.1',
       ok: false,
       operation: 'bundle.verify',
       operationId: '00000000-0000-4000-8000-000000000000',

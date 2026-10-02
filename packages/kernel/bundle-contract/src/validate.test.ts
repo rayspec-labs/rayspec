@@ -187,6 +187,7 @@ describe('checkRuntimeAdmission over the corpus', () => {
       'spec-invalid:RAY_SPEC_INVALID',
       'secret-dotenv-file:RAY_SECRET_DETECTED',
       'secret-private-key-pem:RAY_SECRET_DETECTED',
+      'secret-private-key-pem-digit-word:RAY_SECRET_DETECTED',
       'signature-untrusted:RAY_SIGNATURE_INVALID',
       'signature-mismatch:RAY_SIGNATURE_INVALID',
       'signature-flipped-bit:RAY_SIGNATURE_INVALID',
@@ -354,11 +355,16 @@ describe('runtime admission', () => {
     ).toEqual({ code: 'RAY_CAPABILITY_UNSUPPORTED', reason: 'unknown-id', path: '/requires/1' });
   });
 
-  it('refuses a planned capability the runtime does not list', () => {
+  it('refuses a capability the runtime does not list', () => {
+    const without = {
+      ...fixture,
+      capabilities: fixture.capabilities.filter((id) => id !== 'extraction-deterministic'),
+    };
+    expect(without.capabilities).not.toEqual(fixture.capabilities);
     expect(
       admit((m) => {
         m.requires = ['extraction-deterministic'];
-      }),
+      }, without),
     ).toEqual({ code: 'RAY_CAPABILITY_UNSUPPORTED', reason: 'not-provided', path: '/requires/0' });
   });
 

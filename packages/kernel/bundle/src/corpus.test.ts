@@ -62,7 +62,7 @@ const verifyCases = expectations.cases.filter((c) =>
 
 describe('the corpus', () => {
   it('is complete: every case has an expectation this suite runs', () => {
-    expect(expectations.cases).toHaveLength(133);
+    expect(expectations.cases).toHaveLength(136);
     const covered = new Set([...inspectCases, ...verifyCases].map((c) => c.id));
     expect(covered.size).toBe(expectations.cases.length);
   });

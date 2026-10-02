@@ -1,10 +1,10 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Capability id vocabulary. An id never changes meaning; a changed meaning gets a new id. The vocabulary version increments when ids are added.",
-  "contractVersion": "1.0.0-draft.2",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Capability id vocabulary. An id never changes meaning; a changed meaning gets a new id. The vocabulary version increments when ids are added.",
+  "contractVersion": "1.0.0-rc.1",
   "vocabularyVersion": 1,
   "idPattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
   "statusValues": {
-    "available": "provided by the runtime at the baseline commit",
+    "available": "provided by the runtime of this release",
     "planned": "added by this release; not provided until the runtime that ships it lists it in inspect()"
   },
   "managedPostureValues": {
@@ -283,12 +283,12 @@
     {
       "id": "extraction-deterministic",
       "since": 1,
-      "status": "planned",
-      "requirableByBundle": true,
-      "derivedFrom": "product extractors run in deterministic mode",
+      "status": "available",
+      "requirableByBundle": false,
+      "derivedFrom": "runtime-provided; selected by the operator with RAYSPEC_EXTRACTION_MODE=deterministic and by an extractor config with backend deterministic",
       "managedPosture": "test-only",
-      "source": "packages/app/server/src/composition-root.ts:1833 (today: host-injected only, the platform ships none)",
-      "meaning": "A shipped deterministic extraction provider, labelled not for production extraction."
+      "source": "packages/workflow/nodes/agent-runtime/src/deterministic-extraction.ts; packages/app/server/src/product-boot.ts",
+      "meaning": "The shipped deterministic extraction provider: reads labelled lines of the input into the extractor's output schema. Not an extraction model; for development and tests only."
     }
   ]
 }

@@ -44,7 +44,6 @@ export {
   WARNING_CODES,
 } from './errors.js';
 export {
-  CONTRACT_PLATFORM_TABLES,
   IDENTITY_RECOVERY_TABLES,
   PLATFORM_TABLES,
   type PlatformTable,
