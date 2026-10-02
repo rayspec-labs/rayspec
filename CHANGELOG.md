@@ -532,7 +532,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   loopback, private, link-local, metadata, unspecified, multicast or reserved destination (an IPv4
   address embedded in IPv6 judged by that address, any IPv6 address outside `2000::/3` refused) — judged
   on the address the connection uses after DNS resolution, so a name that resolves to `127.0.0.1` or
-  rebinds is refused — and checks every redirect hop the same way. No outbound path of this release
+  rebinds is refused — and checks every redirect hop the same way. Every guarded request has a time
+  limit, 30 seconds unless the caller sets `timeoutMs`, covering the resolution, every redirect hop
+  and the response body; a request past it is ended with `OutboundRequestTimedOut`. No outbound path of this release
   takes a URL from a spec or a request; a test holds the list of every outbound call site in the
   shipped source so that a new one goes through the guard or is reviewed. Handlers are not bound by
   it: they run in-process, and the host network policy contains them. See

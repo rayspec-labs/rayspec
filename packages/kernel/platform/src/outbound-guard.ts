@@ -25,6 +25,12 @@
  * NO PROXY. A guarded request connects directly, never through an environment proxy: behind a proxy
  * the guard would judge the proxy's address instead of the destination's.
  *
+ * A TIME LIMIT, ALWAYS. The whole request — resolution, every redirect hop and the response body — is
+ * ended after `timeoutMs` ({@link DEFAULT_OUTBOUND_TIMEOUT_MS} unless the caller sets another), so a
+ * destination that accepts the connection and never answers, or answers one byte a minute, cannot hold
+ * the request for ever. Expiry rejects with {@link OutboundRequestTimedOut}, and a body still being
+ * read errors with it.
+ *
  * WHAT IT DOES NOT COVER. Handlers and extensions run in the runtime process and can open any
  * connection they like; this guard binds only the requests the platform itself makes through it.
  * Containing custom code is the host network policy's job.
@@ -51,6 +57,20 @@ export class OutboundRequestRefused extends Error {
     super(message);
     this.name = 'OutboundRequestRefused';
     this.reason = reason;
+  }
+}
+
+/** How long a guarded request may take when the caller sets no `timeoutMs`: 30 seconds. */
+export const DEFAULT_OUTBOUND_TIMEOUT_MS = 30_000;
+
+/** A guarded request that did not finish, its response body included, within its time limit. */
+export class OutboundRequestTimedOut extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(`the outbound request did not finish within ${timeoutMs} ms and was ended`);
+    this.name = 'OutboundRequestTimedOut';
+    this.timeoutMs = timeoutMs;
   }
 }
 
@@ -193,6 +213,12 @@ export interface OutboundGuardOptions {
   maxRedirects?: number;
   /** Ends the request, the redirects included, when it fires. */
   signal?: AbortSignal;
+  /**
+   * How long the whole request may take, every redirect hop and the response body included, in
+   * milliseconds. Default {@link DEFAULT_OUTBOUND_TIMEOUT_MS}; a value that is not a positive whole
+   * number up to the largest timer delay is refused before anything is sent.
+   */
+  timeoutMs?: number;
   /** The resolver; the operating system's by default. A test seam. */
   resolve?: HostResolver;
   /**
@@ -307,13 +333,31 @@ export interface GuardedRequestInit {
   body?: string | Uint8Array;
 }
 
-/** Send one hop; resolves on the response head. */
+/** The largest delay a timer can hold. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** The error an aborted signal stands for: its reason when that is an error. */
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('the outbound request was aborted');
+}
+
+/**
+ * Send one hop; resolves on the response head. The signal ends the hop with its own reason (so a time
+ * limit reads as one, not as a reset socket); once the head has arrived the caller owns the response.
+ */
 function sendOnce(
   url: URL,
   init: GuardedRequestInit,
-  options: Required<Pick<OutboundGuardOptions, 'resolve' | 'admits'>> & { signal?: AbortSignal },
+  options: Required<Pick<OutboundGuardOptions, 'resolve' | 'admits'>> & { signal: AbortSignal },
 ): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
+    const { signal } = options;
+    if (signal.aborted) {
+      reject(abortReason(signal));
+      return;
+    }
     let refusal: OutboundRequestRefused | undefined;
     const lookup = guardedLookup(options.resolve, options.admits, (err) => {
       refusal = err;
@@ -329,10 +373,15 @@ function sendOnce(
       headers: init.headers ?? {},
       agent,
       lookup: lookup as never,
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
-    req.on('response', resolve);
+    const onAbort = () => req.destroy(abortReason(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+    req.on('response', (response) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(response);
+    });
     req.on('error', (err) => {
+      signal.removeEventListener('abort', onAbort);
       agent.destroy();
       reject(refusal ?? err);
     });
@@ -344,7 +393,9 @@ function sendOnce(
 /**
  * Make an outbound request to a URL the platform did not choose, through the guard. Resolves with a
  * standard `Response` of the final hop; rejects with {@link OutboundRequestRefused} when a hop's
- * scheme, user information or address is refused, before anything is sent to it.
+ * scheme, user information or address is refused, before anything is sent to it, and with
+ * {@link OutboundRequestTimedOut} when the request outlives its time limit (a body still being read
+ * then errors with it).
  */
 export async function guardedFetch(
   input: string | URL,
@@ -354,66 +405,111 @@ export async function guardedFetch(
   const maxRedirects = options.maxRedirects ?? 5;
   const resolve = options.resolve ?? systemResolver;
   const admits = options.admits ?? defaultAdmits;
-  let url = checkUrl(input);
-  let current: GuardedRequestInit = { ...init, headers: { ...(init.headers ?? {}) } };
-  for (let hop = 0; ; hop++) {
-    // An IP literal is never looked up, so it is judged here.
-    const host = bareHost(url);
-    if (isIP(host) !== 0) {
-      const kind = classifyAddress(host);
-      if (!admits(host, kind)) throw refusedAddress(host, host, kind);
-    }
-    const response = await sendOnce(url, current, {
-      resolve,
-      admits,
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
-    });
-    const status = response.statusCode ?? 0;
-    const location = response.headers.location;
-    if (!REDIRECT_STATUSES.has(status) || location === undefined) {
-      const headers = new Headers();
-      for (const [name, value] of Object.entries(response.headers)) {
-        if (value === undefined) continue;
-        for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v);
-      }
-      const head = (current.method ?? 'GET').toUpperCase() === 'HEAD';
-      const nullBody = status === 204 || status === 304 || head;
-      if (nullBody) response.resume();
-      return new Response(
-        nullBody ? null : (Readable.toWeb(response) as ReadableStream<Uint8Array>),
-        { status, statusText: response.statusMessage ?? '', headers },
-      );
-    }
-    response.resume();
-    if (hop >= maxRedirects) {
-      throw new OutboundRequestRefused(
-        'redirect-limit',
-        `the outbound request was refused: more than ${maxRedirects} redirects`,
-      );
-    }
-    const next = checkUrl(new URL(location, url));
-    const method = (current.method ?? 'GET').toUpperCase();
-    let nextInit: GuardedRequestInit;
-    if (status === 307 || status === 308) {
-      nextInit = { ...current };
-    } else {
-      // 301, 302 and 303 turn a request with a body into a GET without one, as fetch does.
-      const keep = method === 'GET' || method === 'HEAD';
-      const headers = { ...(current.headers ?? {}) };
-      for (const name of Object.keys(headers)) {
-        const lower = name.toLowerCase();
-        if (lower === 'content-type' || lower === 'content-length') delete headers[name];
-      }
-      nextInit = { method: keep ? method : 'GET', headers };
-    }
-    if (next.origin !== url.origin) {
-      const headers = { ...(nextInit.headers ?? {}) };
-      for (const name of Object.keys(headers)) {
-        if (CROSS_ORIGIN_DROPPED_HEADERS.includes(name.toLowerCase())) delete headers[name];
-      }
-      nextInit = { ...nextInit, headers };
-    }
-    url = next;
-    current = nextInit;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_OUTBOUND_TIMEOUT_MS;
+  if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_TIMER_DELAY_MS) {
+    throw new RangeError(
+      `guardedFetch: timeoutMs must be a whole number of milliseconds from 1 to ${MAX_TIMER_DELAY_MS}`,
+    );
   }
+  let url = checkUrl(input);
+  // One limit for the whole request: every hop, and the body of the last one.
+  const timedOut = new OutboundRequestTimedOut(timeoutMs);
+  const limit = new AbortController();
+  const timer = setTimeout(() => limit.abort(timedOut), timeoutMs);
+  const signal =
+    options.signal === undefined ? limit.signal : AbortSignal.any([options.signal, limit.signal]);
+  let current: GuardedRequestInit = { ...init, headers: { ...(init.headers ?? {}) } };
+  try {
+    for (let hop = 0; ; hop++) {
+      // An IP literal is never looked up, so it is judged here.
+      const host = bareHost(url);
+      if (isIP(host) !== 0) {
+        const kind = classifyAddress(host);
+        if (!admits(host, kind)) throw refusedAddress(host, host, kind);
+      }
+      const response = await sendOnce(url, current, { resolve, admits, signal });
+      const status = response.statusCode ?? 0;
+      const location = response.headers.location;
+      if (!REDIRECT_STATUSES.has(status) || location === undefined) {
+        return toResponse(response, current, signal, () => clearTimeout(timer));
+      }
+      response.resume();
+      if (hop >= maxRedirects) {
+        throw new OutboundRequestRefused(
+          'redirect-limit',
+          `the outbound request was refused: more than ${maxRedirects} redirects`,
+        );
+      }
+      const next = checkUrl(new URL(location, url));
+      current = nextHop(current, status, url, next);
+      url = next;
+    }
+  } catch (err) {
+    clearTimeout(timer);
+    if (limit.signal.aborted) throw timedOut;
+    throw err;
+  }
+}
+
+/**
+ * The final hop as a `Response`. Its body is read under the request's signal: an abort (the time
+ * limit, or the caller's own signal) ends it with that reason, and the body's end calls `done`.
+ */
+function toResponse(
+  response: IncomingMessage,
+  init: GuardedRequestInit,
+  signal: AbortSignal,
+  done: () => void,
+): Response {
+  const status = response.statusCode ?? 0;
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(response.headers)) {
+    if (value === undefined) continue;
+    for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v);
+  }
+  const onAbort = () => response.destroy(abortReason(signal));
+  signal.addEventListener('abort', onAbort, { once: true });
+  response.once('close', () => {
+    signal.removeEventListener('abort', onAbort);
+    done();
+  });
+  const head = (init.method ?? 'GET').toUpperCase() === 'HEAD';
+  const nullBody = status === 204 || status === 304 || head;
+  if (nullBody) response.resume();
+  return new Response(nullBody ? null : (Readable.toWeb(response) as ReadableStream<Uint8Array>), {
+    status,
+    statusText: response.statusMessage ?? '',
+    headers,
+  });
+}
+
+/** The request of the next hop of a redirect from `from` to `to` with `status`. */
+function nextHop(
+  current: GuardedRequestInit,
+  status: number,
+  from: URL,
+  to: URL,
+): GuardedRequestInit {
+  const method = (current.method ?? 'GET').toUpperCase();
+  let nextInit: GuardedRequestInit;
+  if (status === 307 || status === 308) {
+    nextInit = { ...current };
+  } else {
+    // 301, 302 and 303 turn a request with a body into a GET without one, as fetch does.
+    const keep = method === 'GET' || method === 'HEAD';
+    const headers = { ...(current.headers ?? {}) };
+    for (const name of Object.keys(headers)) {
+      const lower = name.toLowerCase();
+      if (lower === 'content-type' || lower === 'content-length') delete headers[name];
+    }
+    nextInit = { method: keep ? method : 'GET', headers };
+  }
+  if (to.origin !== from.origin) {
+    const headers = { ...(nextInit.headers ?? {}) };
+    for (const name of Object.keys(headers)) {
+      if (CROSS_ORIGIN_DROPPED_HEADERS.includes(name.toLowerCase())) delete headers[name];
+    }
+    nextInit = { ...nextInit, headers };
+  }
+  return nextInit;
 }

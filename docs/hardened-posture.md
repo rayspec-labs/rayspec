@@ -353,6 +353,11 @@ or a request — to a URL it did not choose — it goes through one guard (`guar
 A guarded request connects directly, never through `HTTP_PROXY`/`HTTPS_PROXY`, because behind a proxy
 the guard would see the proxy's address instead of the destination's.
 
+Every guarded request has a time limit: 30 seconds unless the caller sets `timeoutMs`. It covers the
+name resolution, every redirect hop and the response body, so a destination that accepts the
+connection and never answers, or sends its body a byte at a time, is ended at the limit
+(`OutboundRequestTimedOut`) instead of holding the request open.
+
 This release has **no** such outbound path: no grammar field, node or request field makes the
 platform fetch a URL. The provider adapters call the endpoints the operator configures
 (`OPENAI_BASE_URL` and `DEEPGRAM_BASE_URL` are reserved operator settings a bundle cannot set). A test

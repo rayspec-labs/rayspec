@@ -211,16 +211,19 @@ export {
 // The run/job observability read-path (SAFE half): surfaces a run's status + taint /
 // quarantine state derived ENTIRELY from the already-persisted journal/run_events/markers (no new store).
 // The guard on an outbound request the platform makes to a URL it did not choose: refuses loopback,
-// private, link-local and metadata destinations, after DNS resolution and on every redirect.
+// private, link-local and metadata destinations, after DNS resolution and on every redirect, and
+// ends a request that outlives its time limit.
 export {
   type AddressClass,
   classifyAddress,
+  DEFAULT_OUTBOUND_TIMEOUT_MS,
   type GuardedRequestInit,
   guardedFetch,
   type HostResolver,
   type OutboundGuardOptions,
   type OutboundRefusalReason,
   OutboundRequestRefused,
+  OutboundRequestTimedOut,
 } from './outbound-guard.js';
 export { rehydrateConversation } from './rehydrate.js';
 export {
