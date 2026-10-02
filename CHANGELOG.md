@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A certification lane for the hardened hosting posture.** `pnpm test:certification`
+  (`scripts/certification.mjs`) runs the suites that prove each check a public host must hold, on a
+  real database, and prints one JSON verdict per check; a skipped test fails its check, and no
+  provider credential reaches a suite. New suites in `packages/app/cli/src/certification/` deploy an
+  application through the real `rayspec deploy <file.ray>` with role separation and forced row-level
+  security, single-tenant mode, the managed posture and pinned trusted proxies, and prove: object
+  authorization for two users and a removed member on every store route, upload part, playback and
+  event stream and queued run; trusted-proxy headers believed only from the pinned address; CORS and
+  CSRF where the session cookie authenticates; body and upload-path limits; sanitized error
+  envelopes; every hostile archive of the contract corpus refused by the deploy and every hostile
+  migration bundle by the import, with nothing extracted or restored; bounded sessions, memory and
+  queue admission under a parallel workload against a provider that never answers; and an export,
+  import and restore round trip with the identity reset. The rest are the existing suites run as the
+  runtime role. CI runs it in the `certification` job. See
+  [Hosting in the hardened posture → Certifying the posture](./docs/hardened-posture.md#certifying-the-posture).
+
 - **`rayspec deploy <file.ray>`: deploy an application bundle on a self-hosted target.** A file
   that starts with a ZIP signature or whose name ends in `.ray` takes the bundle path, decided on
   at most four bytes before any configuration is read; every other file takes the YAML deploy,

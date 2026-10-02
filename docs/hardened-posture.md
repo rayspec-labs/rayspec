@@ -57,6 +57,59 @@ typo never leaves the limit off by accident.
   is `off`) ([Runtime operations](./runtime-operations.md)).
 - From outside: a second `POST /v1/auth/register` answers `403`, and `POST /v1/orgs` answers `403`.
 
+## Certifying the posture
+
+`pnpm test:certification` (`scripts/certification.mjs`) runs, on a real PostgreSQL, the suites that
+prove each check a public host must hold, and prints one JSON verdict per check. CI runs it in the
+`certification` job on every pull request.
+
+```bash
+pnpm build
+DATABASE_URL=postgres://rayspec:rayspec@localhost:5433/rayspec pnpm test:certification \
+  --out certification.json --log-dir certification-logs
+pnpm test:certification --check object-authorization    # one check
+```
+
+`DATABASE_URL` names a superuser of a PostgreSQL 16 server on which the roles of
+`packages/kernel/db/sql/database-roles.sql` exist (`pnpm db:up` creates them on a new volume); each
+suite creates databases and roles of its own and drops them. `pg_dump` and `pg_restore` of the
+server's major come from `PATH` or from Docker. The run takes about half an hour.
+
+Two kinds of suite run:
+
+- **The certification suites** (`packages/app/cli/src/certification/`) pack an application, deploy
+  it with the real `rayspec deploy <file.ray>` with every part of this posture on — role separation
+  with forced row-level security, `RAYSPEC_SINGLE_TENANT=true`, `RAYSPEC_HOSTING_POSTURE=managed`,
+  `RAYSPEC_TRUSTED_PROXIES` pinned to an address the test client is not, one allowed origin — and
+  drive it over HTTP, reading every outcome from the database as the superuser. The model provider
+  is a local stand-in on `OPENAI_BASE_URL`; nothing leaves the machine.
+- **The existing suites** of the packages that hold each protection, in the runtime-role lane
+  (`RAYSPEC_TEST_DATABASE_ISOLATION=roles`): every server boot migrates as a migration role and
+  serves as a runtime role. These suites set single-tenant mode and the managed posture where their
+  case needs it, not throughout.
+
+| Check | What the certification suites show |
+| --- | --- |
+| `runtime-role-evidence` | every session the served process holds is the runtime role, which is no superuser, has no `BYPASSRLS` and owns nothing; the application's tables have their row policy enabled and forced |
+| `object-authorization` | a member reaches every store operation, an upload part, a playback stream and the event stream; nothing is reached without a credential; once the member is removed, every write, upload part, run start and the playback token minted before are refused at once, and the run they had queued is ended by the worker without calling the provider. The event stream keeps serving the removed member's unexpired token, as stated above for every read. No route serves an export: the snapshot is written by the operator's CLI |
+| `trusted-proxies` | a forwarded-for header from an address that is not pinned is not believed: the audit records the socket peer and the rate limit is the peer's; the port listens on loopback |
+| `cors-and-csrf` | a preflight from another origin gets no `access-control-allow-origin`; a refresh authenticated by the session cookie is refused cross-site |
+| `upload-limits` | a body over 1 MiB is refused with `413` before it is stored; an upload key that climbs out of the blob space is refused and writes nothing |
+| `sanitized-errors` | a handler's internal detail, malformed JSON, a bad id, an unknown route and a bad token each answer an error envelope with no stack, SQL or secret, and the server log carries no secret |
+| `outbound-guard` | the guard's own suites (no outbound path of this release takes a URL from a spec or a request) |
+| `recovery-scope` | `GET /recovery-scope` answers `404` under the managed posture |
+| `hostile-archives` | every archive of the contract's corpus that the reader refuses is refused by `rayspec deploy <file.ray> --dry-run` against a serving deployment with the contract's code, and the state directory, the temporary directory and the database are unchanged |
+| `hostile-migration-bundles` | a wrong identity, a truncated ciphertext, a passphrase recipient, a traversal entry in the inner archive, an invalid snapshot document, outer and inner metadata that disagree, a wrong application digest, a wrong object digest, a gap in the object ranges and a target that is not empty are each refused by `rayspec import --dry-run` with the contract's code, and nothing reaches the target |
+| `cross-process-cancel` | the platform's and the workflow engine's own suites |
+| `crash-recovery` | the apply, deploy, export and import suites, which kill the process at named points and run the recovery |
+| `resource-bounds` | with a provider that never answers: in-request runs past `RAYSPEC_AGENT_SYNC_RUNS_MAX` and queued runs past `RAYSPEC_AGENT_QUEUE_MAX` are refused with `429` `queue-full`; store traffic beside them is served; every admitted run ends (`timeout`, or `cancelled` for the one cancelled), none is left running; the runtime role's sessions never exceed the serving pool (4), the worker's pool (its concurrency plus one) and the event bus's listener; resident memory returns near its baseline; the provider is left with no open request |
+| `export-import-round-trip` | a deployment in this posture is exported while it serves, imported into an empty target, cut over and served there in the same posture: every row and file is equal, every access token, refresh session, API key and invite of the source is refused, every password signs in, and the source stays fenced |
+
+A skipped test fails its check: a test that did not run is not evidence. The summary also names
+what the posture asks for that Core has no surface for: support access (Core has no path by which an
+operator or vendor account reaches an organization's data). The lane sets every provider credential
+empty for the suites, so no run spends.
+
 ## What the runtime checks on every request and job
 
 Authentication comes first; then every surface decides whether **this** principal may perform
