@@ -42,6 +42,8 @@
     "test:journeys-logic": "node scripts/reference-journeys.test.mjs",
     "test:certification": "node scripts/certification.mjs",
     "test:certification-logic": "node scripts/certification.test.mjs",
+    "receipt:managed": "node scripts/managed-receipt.mjs",
+    "test:managed-receipt": "node scripts/managed-receipt.test.mjs",
     "check:consumer-install": "node scripts/check-consumer-install.mjs",
     "gate:migrations": "pnpm --filter @rayspec/db gate:migrations",
     "gate:shadow-dryrun": "pnpm --filter @rayspec/db gate:shadow-dryrun",

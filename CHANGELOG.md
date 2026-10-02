@@ -29,6 +29,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names each suite's report and records the commit, whether the working tree was clean, the runtime
   version and the platform the lane ran on.
 
+- **The managed-posture receipt generator.** `pnpm receipt:managed` (`scripts/managed-receipt.mjs`)
+  makes a release's managed-posture receipt from one certification lane directory and the release
+  manifest, as canonical JSON that `validateReceipt` accepts. Each protection it states is claimed
+  through the lane checks that establish it; every report is judged again rather than taken from the
+  summary; a backend is listed only when every test of its matrix row passed. It refuses, naming why
+  and writing nothing, when a check failed, was skipped or is missing, when the lane did not run as
+  the runtime role on linux x64 with Node 22.21 or later from a clean tree at the checkout's commit,
+  or when the release manifest is for another version, commit or target. See
+  [Hosting in the hardened posture → The managed-posture receipt](./docs/hardened-posture.md#the-managed-posture-receipt).
+
+- **A threat model for operators.** [docs/threat-model.md](./docs/threat-model.md) states the
+  boundaries, the adversaries, what the runtime enforces (each with the lane check that proves it),
+  what the host must enforce — the process sandbox, the egress firewall, encrypted volumes, backups,
+  the request edge — the supported-backend matrix, and every residual risk this release accepts, with
+  its owner, word for word as the receipt carries them.
+
 - **`rayspec deploy <file.ray>`: deploy an application bundle on a self-hosted target.** A file
   that starts with a ZIP signature or whose name ends in `.ray` takes the bundle path, decided on
   at most four bytes before any configuration is read; every other file takes the YAML deploy,

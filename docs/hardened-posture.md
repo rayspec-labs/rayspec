@@ -10,6 +10,9 @@ database role migrates and serves, any number of organizations can be created an
 open. The posture is turned on by explicit configuration, and the runtime reports the managed
 hosting posture as supported only when all of it is on.
 
+Who the posture defends against, what the host around the runtime must enforce itself, and every
+residual risk this release accepts are in the [Threat model](./threat-model.md).
+
 ## What turns it on
 
 | Setting | What it does | Without it |
@@ -118,6 +121,57 @@ The log directory holds the whole evidence of a run: each suite file's output an
 report, and `summary.json`, which names each report and records what the lane ran on — the commit,
 whether the working tree was clean, the runtime version, the platform, the architecture and the Node
 version.
+
+### The managed-posture receipt
+
+A release's managed-posture receipt states which public-hosting protections were tested for it
+(`managed-receipt.schema.json` in `@rayspec/bundle-contract`). `pnpm receipt:managed`
+(`scripts/managed-receipt.mjs`) makes it from one lane directory:
+
+```bash
+pnpm build
+pnpm test:certification --log-dir certification-logs
+pnpm receipt:managed --lane certification-logs \
+  --release-manifest rayspec-release-manifest.json \
+  --artifact-sha256 <sha256 of the runtime artifact> --out managed-receipt.json
+```
+
+It writes the receipt as canonical JSON, validated with `validateReceipt`, and prints its SHA-256 on
+stderr; that digest is what the runtime-control adapter is given as `managedReceiptSha256`. It
+refuses (exit 1, nothing written), naming the reason, when:
+
+- the lane did not pass, a check of this checkout's lane is missing or ran other suite files, or any
+  report — each is read and judged again, not taken from the summary — shows a failed or skipped
+  test, or cannot be read;
+- the lane did not run as the runtime role, ran on a working tree with changes, or at another commit
+  than the checkout running the generator;
+- the lane did not run on linux x64 with Node 22.21 or a later 22 release, the only targets a
+  receipt names;
+- the release manifest is not canonical JSON its schema admits, or is for another version, commit
+  or target than the lane.
+
+Each fixed protection of the receipt is claimed through the checks that establish it:
+
+| Receipt field | Value | Checks |
+| --- | --- | --- |
+| `maxApplicationTenants`, `singleTenantModeEnforced` | `1`, `true` | `single-tenant-mode` |
+| `publicHostingPosture` | `isolated-environment-v1` | every mandatory public-hosting check and recovery case: `runtime-role-evidence`, `object-authorization`, `trusted-proxies`, `cors-and-csrf`, `upload-limits`, `sanitized-errors`, `outbound-guard`, `recovery-scope`, `hostile-archives`, `hostile-migration-bundles`, `crash-recovery`, `resource-bounds`, `export-import-round-trip` |
+| `executionLevels` | `none`, `in-process` | `execution-levels` |
+| `databaseIsolation` | `dedicated-db-and-rls` | `runtime-role-evidence`, `object-authorization` |
+| `databaseRoleSeparation` | `true` | `runtime-role-evidence` |
+| `crossProcessCancellation` | `true` | `cross-process-cancel` |
+| `agentTraceExport` | `off` | `agent-trace-export-off` |
+| `recoveryScopeEndpoint` | `disabled` | `recovery-scope` |
+| `trustedProxiesPinned` | `true` | `trusted-proxies` |
+| `egressEnforcement` | `host-network-policy` | `outbound-guard` (the runtime guards only its own requests; the host enforces egress) |
+
+`supportedBackends` lists an agent backend of the [matrix](#supported-backends) that the posture
+allows only when every test its row names passed in the lane, and `capabilities` leaves out a
+provider capability whose row was not proven the same way. `evidence` names every report, by its
+file name in the lane directory with its SHA-256, under the check it proves, and the summary
+itself. `residualRisks` is the list in [Threat model → Accepted residual risks](./threat-model.md#accepted-residual-risks).
+The CI `certification` job runs the lane on linux x64; a lane run on a developer machine of another
+platform is not evidence for a receipt.
 
 ## What the runtime checks on every request and job
 
@@ -496,6 +550,9 @@ detail; the detail goes to the server log.
 - Bearer credentials (access tokens, API keys, media tokens) are not bound to a client: whoever holds
   one can use it until it expires or is revoked.
 - Egress is not enforced by the runtime; the host's network policy does that ([Egress](#egress)).
+
+The [Threat model](./threat-model.md) lists every residual risk this release accepts, with its
+owner, and what the host must enforce.
 
 ## Upgrading
 

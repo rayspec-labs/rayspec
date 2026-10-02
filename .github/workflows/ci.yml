@@ -318,6 +318,13 @@ jobs:
       - name: Certification-lane logic regression
         run: pnpm test:certification-logic
 
+      # The managed-posture receipt generator against lane directories it builds: a receipt only from
+      # a passing lane on linux x64 at a clean commit, validated against the contract, and refused,
+      # naming why, for every check, report, target or release manifest that does not hold. Reads the
+      # built contract and matrix, so it runs after Build. DB-free / secret-free → lane 1.
+      - name: Managed-posture receipt regression
+        run: pnpm test:managed-receipt
+
       # The Tier-1 wire-golden / replay-parity gate (@rayspec/parity). Deterministic: its live-smoke
       # self-skips with no creds + no RAYSPEC_REQUIRE_LIVE_TESTS (that suite runs in lane 3). Run as
       # its own step here, so @rayspec/parity is EXCLUDED from the deterministic test filter below —

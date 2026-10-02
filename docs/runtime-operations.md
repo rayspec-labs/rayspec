@@ -4,6 +4,9 @@ This page is for the operator of a RaySpec environment: what the runtime records
 changes the environment, how the lifecycle operations fit together, and what to do when one of
 them was interrupted. The design behind it is in
 [Architecture → Runtime control](./ARCHITECTURE.md#runtime-control).
+What the runtime enforces when it hosts code and users you do not fully trust, what the host around
+it must enforce (the process sandbox, the egress firewall, encrypted volumes, backups), and the
+residual risks this release accepts are in the [Threat model](./threat-model.md).
 
 An **environment** is one application database (with its workflow system database and blob root)
 and every runtime process that serves it. Its runtime-control state lives in platform tables of
@@ -402,5 +405,3 @@ against a second, real worker process.
 
 - Receipts are never pruned; the table grows by a few rows per schema change.
 - There is no CLI verb for `resolveInterruptedStep` yet; call it as above.
-- `rayspec import` is not available yet: a migration bundle is written and verified, and restoring
-  it into a new environment is the importer's part.
