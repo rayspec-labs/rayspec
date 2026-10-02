@@ -18,7 +18,7 @@ name: CI
 #
 #   reference-journeys   — ephemeral Postgres service. install → build → pack → install the tarballs
 #                          as a consumer → the three reference applications and docs/quickstart.md
-#                          end to end with that install (scripts/reference-journeys.mjs). REQUIRED.
+#                          end to end with that install (scripts/reference-journeys.mjs). Runs on every pull request; not yet a required check.
 #
 #   lane3-live           — OPT-IN. Runs ONLY on a manual workflow_dispatch (never on push /
 #                          pull_request, and never automatically), so it is NOT a required merge
@@ -498,7 +498,7 @@ jobs:
 
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   # REFERENCE JOURNEYS — the three reference applications and docs/quickstart.md, run end to end
-  # through the release a consumer installs. REQUIRED on pull requests.
+  # through the release a consumer installs. Runs on every pull request; not yet a required check.
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   reference-journeys:
     name: Reference journeys
