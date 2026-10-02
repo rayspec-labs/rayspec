@@ -789,12 +789,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the journey programs from the bundle's declared hosts, with npm offline, checks the dependency
   resolves from the bundle's own tree, and sees that proxy refuse a call to a host the running
   bundle does not declare — the refusal is the proxy's, as it is in a deployment, since the runtime
-  does not enforce egress; its export is refused, because `rayspec export` refuses an application
-  that loads an extension (`RAY_EXTERNAL_STATE_UNSUPPORTED`), so it is not exported or imported. A
-  source with two organizations is refused on export. A running document workflow cannot be
-  cancelled (the run cancel route answers `404` for it), and the imports are self-hosted only. The
-  new `reference-journeys` job of CI runs them; `pnpm test:journeys-logic` checks the harness in
-  lane 1.
+  does not enforce egress; it then goes through the same export, import, new write, second export and
+  import as the others, and each target serves the extension and its dependency from the bundle it
+  carries. A separate case adds an extension that provides its own blob backend, whose export is
+  refused naming it (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`), with the source
+  left unfenced. A source with two organizations is refused on export. A running document workflow
+  cannot be cancelled (the run cancel route answers `404` for it), and the imports are self-hosted
+  only. The new `reference-journeys` job of CI runs them; `pnpm test:journeys-logic` checks the
+  harness in lane 1.
 - **A consumer quickstart**, [`docs/quickstart.md`](docs/quickstart.md): from `npm install rayspec`
   to the team-notes application deployed from its bundle, separate from the source-build
   getting-started. The reference journeys run every command of its steps — the clone with its tag
