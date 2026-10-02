@@ -16,6 +16,9 @@ metadata:
 # deleted_at, retention_days, region) and the created_by actor stamp.
 stores:
   - name: notes
+    # A delete keeps the note as a tombstone (deleted_at set), hidden from every read; an export
+    # carries it like any other row.
+    softDelete: true
     columns:
       - { name: title, type: text }
       - { name: content, type: text }

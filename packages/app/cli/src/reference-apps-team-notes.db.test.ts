@@ -3,7 +3,8 @@
  * database of its own, and driven over HTTP the way its UI drives it:
  *  - release 1.0.0 deploys from a directory that holds only the bundle; the UI is served with the
  *    application version, which is not the runtime version;
- *  - two users of one organization create, read, update and delete notes; a request without a token,
+ *  - two users of one organization create, read, update and delete notes (a delete leaves a
+ *    tombstone); a request without a token,
  *    a user of another organization and a note of another organization are refused;
  *  - the 100-note seed loads as the two users (a second load replays and adds nothing), and keyset
  *    pages read back exactly the seed's inventory;
@@ -245,6 +246,9 @@ describe.skipIf(!baseUrl)('team notes — from bundle to served, updated and ref
       expect([200, 204]).toContain(removed.status);
       expect((await call(`${base}/api/notes/${id}`, { token: tokens.first })).status).toBe(404);
       expect(await notesRows()).toEqual([]);
+      // The store deletes softly: the note stays as a tombstone, hidden from every read.
+      const tombstones = await db.sql.unsafe('SELECT id FROM notes WHERE deleted_at IS NOT NULL');
+      expect(tombstones.map((r) => r.id)).toEqual([id]);
     } finally {
       await deployment.stop(served);
     }

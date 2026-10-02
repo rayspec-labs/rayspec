@@ -8,7 +8,7 @@ It comes in three releases of one application (`metadata.id: team-notes`):
 
 | Release | Version | What changes |
 | --- | --- | --- |
-| [`releases/v1.yaml`](./releases/v1.yaml) | `1.0.0` | `notes` store (`title`, `content`), CRUD routes, the UI |
+| [`releases/v1.yaml`](./releases/v1.yaml) | `1.0.0` | `notes` store (`title`, `content`, deleted softly), CRUD routes, the UI |
 | [`releases/v2.yaml`](./releases/v2.yaml) | `1.1.0` | adds an optional `label` column, which the UI edits — an additive change |
 | [`releases/v3.yaml`](./releases/v3.yaml) | `2.0.0` | drops the `content` column — a destructive change that is refused |
 
@@ -32,6 +32,9 @@ GET    /api/notes/{id}      read one
 PATCH  /api/notes/{id}      update fields of one
 DELETE /api/notes/{id}      delete one
 ```
+
+A `DELETE` keeps the note as a tombstone (`deleted_at` set, `softDelete: true` on the store):
+every read hides it, and an export carries it like any other row.
 
 Every `/api` route needs an organization-scoped bearer token, and every read and write is held to
 the caller's organization: a member of another organization sees an empty list and a `404` for a

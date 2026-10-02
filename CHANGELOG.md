@@ -757,6 +757,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The team-notes example deletes softly.** Its `notes` store sets `softDelete: true`, so a deleted
+  note stays as a tombstone that every read hides and an export carries.
 - **`docs/ARCHITECTURE.md` on restores and the boot secrets.** It said a new API-key pepper breaks
   only the copied API keys; the pepper also keys refresh sessions, invite tokens and owner-recovery
   tokens, which a new pepper breaks just the same. The section now says what each boot secret keys,
