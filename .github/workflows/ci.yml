@@ -480,6 +480,13 @@ jobs:
       - name: Upgrade with data from the previous release, asset-catalog
         run: pnpm test:upgrade-with-data --app asset-catalog
 
+      # The same upgrade turning role separation on: after the previous release stopped, the
+      # database roles setup prepares the database, and this tree deploys with the runtime role and
+      # holds the migration role in its supervisor, which must serve through one application process
+      # while only the runtime role is connected.
+      - name: Upgrade with data from the previous release, onto role-separated databases
+        run: pnpm test:upgrade-with-data --roles
+
       # ── DB test subset — the 9 Postgres-backed packages (8 platform + the local-boot example) ─────
       # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run
       # concurrently against one Postgres they deadlock / race on CREATE/DROP DATABASE. The two

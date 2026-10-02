@@ -234,7 +234,10 @@ digest: nothing changes, so nothing needs review.
 
 A new RaySpec release runs its platform migration chain on the existing database the first time it
 deploys; rows, users, password hashes and API keys are kept (the repository's upgrade-with-data
-check deploys an example with the previous release, writes data, upgrades and compares every row).
+check deploys an example with the previous release, writes data, upgrades and compares every row;
+with `--roles` it turns role separation on with the upgrade, as [database isolation](database-isolation.md)
+describes, and checks that the new release serves under its supervisor with only the runtime role
+connected).
 A bundle pins its runtime, so after upgrading the CLI, repack the application for the new release
 (the same source, the new `rayspec pack`) and deploy that bundle. An older runtime refuses a
 database a newer one has migrated.

@@ -25,6 +25,14 @@
  *   6. Packs the application with this working tree and deploys it as a bundle onto the upgraded
  *      environment — a dry-run, then the reviewed plan — and checks rows and credentials again.
  *
+ * With `--roles` the upgrade also turns role separation on, as docs/database-isolation.md has an
+ * operator do it: after the previous release stopped, the working tree's database roles setup
+ * (`packages/kernel/db/sql/database-roles.sql`) prepares the database with roles of its own, and
+ * steps 4 and 6 deploy with the runtime role in DATABASE_URL and the migration and snapshot roles
+ * beside it. Each of those deploys must then serve through its supervisor: one application process
+ * under the process the harness started, and only the runtime role connected to the database while
+ * it serves. The roles are dropped at the end.
+ *
  * It prints one JSON summary on stdout and exits 1 on the first failed check. The server logs of
  * each boot go to `--log-dir <dir>` when it is given; `--port <n>` picks the listen port. No password, API key, signing key or pepper
  * is printed: they are generated here and stay in this process and its children.
@@ -181,6 +189,7 @@ const { values: flags } = parseArgs({
     app: { type: 'string', default: 'notes-ui' },
     'log-dir': { type: 'string' },
     port: { type: 'string' },
+    roles: { type: 'boolean', default: false },
   },
 });
 const APP = APPS[flags.app];
@@ -213,7 +222,19 @@ const work = mkdtempSync(join(tmpdir(), 'rayspec-upgrade-'));
 const children = new Set();
 /** The local services an application calls (its HTTPS host and the egress proxy), closed at the end. */
 const services = [];
-const summary = { app: flags.app, from: null, to: null, checks: [] };
+const summary = { app: flags.app, roles: flags.roles, from: null, to: null, checks: [] };
+/** With `--roles`: the roles the database is prepared with, named for this run, and their passwords. */
+const roleSuffix = randomBytes(4).toString('hex');
+const roles = {
+  migration: `rsu_${roleSuffix}_migrator`,
+  runtime: `rsu_${roleSuffix}_runtime`,
+  snapshot: `rsu_${roleSuffix}_snapshot`,
+};
+const rolePasswords = {
+  migration: randomBytes(16).toString('hex'),
+  runtime: randomBytes(16).toString('hex'),
+  snapshot: randomBytes(16).toString('hex'),
+};
 
 function fail(message) {
   process.stderr.write(`UPGRADE-WITH-DATA: FAIL — ${message}\n`);
@@ -261,6 +282,93 @@ function bootEnv(secrets, egress) {
   };
 }
 
+/** `db`'s connection as one of the prepared roles. */
+function roleUrl(db, role) {
+  const u = new URL(withDbName(baseUrl, db));
+  u.username = roles[role];
+  u.password = rolePasswords[role];
+  return u.toString();
+}
+
+/**
+ * Turn role separation on for the database the previous release wrote, as an operator does: run the
+ * working tree's database roles setup in it (and in its workflow system database, when the previous
+ * release made one) and give each role a password. Returns what the boots add to their environment.
+ */
+async function prepareRoles() {
+  const setup = readFileSync(
+    join(REPO, 'packages', 'kernel', 'db', 'sql', 'database-roles.sql'),
+    'utf8',
+  );
+  const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
+  const sysDb = `${suiteDb}_dbos_sys`;
+  let databases;
+  try {
+    const found = await admin.unsafe('SELECT 1 FROM pg_database WHERE datname = $1', [sysDb]);
+    databases = [
+      [suiteDb, 'application'],
+      ...(found.length > 0 ? [[sysDb, 'workflow-system']] : []),
+    ];
+  } finally {
+    await admin.end();
+  }
+  for (const [db, kind] of databases) {
+    const sql = postgres(withDbName(baseUrl, db), { max: 1, onnotice: () => {} });
+    try {
+      await sql.begin(async (tx) => {
+        await tx.unsafe(
+          `SELECT set_config('rayspec.migration_role', $1, true), set_config('rayspec.runtime_role', $2, true),
+                  set_config('rayspec.snapshot_role', $3, true), set_config('rayspec.database_kind', $4, true)`,
+          [roles.migration, roles.runtime, roles.snapshot, kind],
+        );
+        await tx.unsafe(setup);
+      });
+      if (kind === 'application') {
+        for (const key of ['migration', 'runtime', 'snapshot']) {
+          const [statement] = await sql.unsafe(
+            "SELECT format('ALTER ROLE %I PASSWORD %L', $1::text, $2::text) AS stmt",
+            [roles[key], rolePasswords[key]],
+          );
+          await sql.unsafe(statement.stmt);
+        }
+      }
+    } finally {
+      await sql.end();
+    }
+  }
+  return {
+    DATABASE_URL: roleUrl(suiteDb, 'runtime'),
+    RAYSPEC_MIGRATION_DATABASE_URL: roleUrl(suiteDb, 'migration'),
+    RAYSPEC_SNAPSHOT_DATABASE_URL: roleUrl(suiteDb, 'snapshot'),
+    ...(databases.length > 1 ? { DBOS_SYSTEM_DATABASE_URL: roleUrl(sysDb, 'runtime') } : {}),
+  };
+}
+
+/**
+ * With `--roles`, that the deploy `served` holds the migration role in a supervisor: exactly one
+ * application process runs under it, and the database sees only the runtime role while it serves.
+ */
+async function checkSupervised(when, served, sql) {
+  let children = [];
+  try {
+    children = execFileSync('pgrep', ['-P', String(served.pid)], { encoding: 'utf8' })
+      .split('\n')
+      .filter((line) => line.trim() !== '');
+  } catch {
+    children = [];
+  }
+  check(`${when}: the deploy serves through one application process`, children.length === 1);
+  const users = await sql.unsafe(
+    `SELECT DISTINCT usename FROM pg_stat_activity
+      WHERE datname = current_database() AND usename IS NOT NULL AND usename <> current_user`,
+  );
+  check(
+    `${when}: only the runtime role is connected while it serves`,
+    JSON.stringify(users.map((u) => u.usename)) === JSON.stringify([roles.runtime]),
+    JSON.stringify(users.map((u) => u.usename)),
+  );
+}
+
 /** Start a deploy that serves, and wait until /health answers 200. */
 async function serve(label, command, args, cwd, env) {
   const child = spawn(process.execPath, [command, ...args, '--port', String(port)], { cwd, env });
@@ -294,6 +402,7 @@ async function serve(label, command, args, cwd, env) {
     await new Promise((r) => setTimeout(r, 250));
   }
   return {
+    pid: child.pid,
     async stop() {
       child.kill('SIGTERM');
       const code = await exited;
@@ -439,11 +548,18 @@ async function main() {
     const headBefore = await sql.unsafe(
       'SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations',
     );
+    // With --roles, the operator turns role separation on with the upgrade.
+    let upgradeEnv = env;
+    if (flags.roles) {
+      log('preparing the database roles');
+      upgradeEnv = { ...env, ...(await prepareRoles()) };
+    }
 
     // 4. The working tree boots the same spec on that database.
     log('deploying the same spec with the working tree');
     APP.runtime?.(app, 'working-tree');
-    const upgraded = await serve('upgraded', CLI, ['deploy', 'rayspec.yaml'], app, env);
+    const upgraded = await serve('upgraded', CLI, ['deploy', 'rayspec.yaml'], app, upgradeEnv);
+    if (flags.roles) await checkSupervised('after the upgrade', upgraded, sql);
     const headAfter = await sql.unsafe(
       'SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations',
     );
@@ -497,7 +613,7 @@ async function main() {
     const planned = JSON.parse(
       execFileSync(process.execPath, [CLI, 'deploy', `${flags.app}.ray`, '--dry-run'], {
         cwd: app,
-        env,
+        env: upgradeEnv,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       }),
@@ -513,8 +629,9 @@ async function main() {
       CLI,
       ['deploy', `${flags.app}.ray`, '--plan-digest', planned.data.planDigest],
       app,
-      env,
+      upgradeEnv,
     );
+    if (flags.roles) await checkSupervised('after the bundle deploy', bundled, sql);
     await verifyServing('after the bundle deploy', {
       email,
       password,
@@ -578,7 +695,12 @@ async function cleanup() {
   for (const service of services.splice(0)) await service.close().catch(() => {});
   try {
     const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
-    await admin.unsafe(`DROP DATABASE IF EXISTS "${suiteDb}" WITH (FORCE)`);
+    for (const db of [suiteDb, `${suiteDb}_dbos_sys`]) {
+      await admin.unsafe(`DROP DATABASE IF EXISTS "${db}" WITH (FORCE)`);
+    }
+    if (flags.roles) {
+      for (const role of Object.values(roles)) await admin.unsafe(`DROP ROLE IF EXISTS "${role}"`);
+    }
     await admin.end();
   } catch {
     // the database server is gone; nothing left to drop
