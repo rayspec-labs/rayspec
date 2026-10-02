@@ -120,6 +120,14 @@ export interface SnapshotSourceOptions {
   /** The deployment id the operator named; it must be the state directory's and the database's. */
   deploymentId: string;
   blob: SnapshotBlobSource;
+  /**
+   * The digest of the active version `blob` was decided for, or null when there was none. When it
+   * is given, a deployed application that is another version is refused with
+   * `RAY_SOURCE_NOT_QUIESCENT`: a deploy since the decision may have activated a version that keeps
+   * its blobs elsewhere. The capture holds its application to the preflight it runs under the fence,
+   * so the snapshot is of the version the blob source belongs to.
+   */
+  blobDecidedFor?: string | null;
   /** The `pg_dump` to run (an absolute path or a tool); default the first on `PATH`. */
   pgDump?: string | PgDumpTool;
   /** The directory the private scratch directory is created in. */
@@ -561,6 +569,19 @@ async function preflight(
           'RAY_DIGEST_MISMATCH',
           'the application the database records is not the active version of the state directory',
           { reason: 'bundle-sha256' },
+        ),
+      );
+    }
+    if (
+      options.blobDecidedFor !== undefined &&
+      application !== null &&
+      application.sha256 !== options.blobDecidedFor
+    ) {
+      blockers.push(
+        bundleError(
+          'RAY_SOURCE_NOT_QUIESCENT',
+          'the active version changed after the export decided where its blobs are: a deploy ran ' +
+            'during the export; export again',
         ),
       );
     }

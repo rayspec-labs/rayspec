@@ -77,12 +77,20 @@ programmed this way refusing an undeclared host; that refusal is the proxy's, no
 The application's dependencies resolve from the bundle at run time; nothing is installed on the
 server.
 
-## Export
+## Export and import
 
-An application that loads an extension cannot be exported in this release: `rayspec export`
-refuses it before it fences anything (`RAY_EXTERNAL_STATE_UNSUPPORTED`, reason
-`unsupported-blob-adapter`), because an extension may keep blobs in a backend of its own that the
-export cannot read. See [Exporting a deployment](../../docs/export.md#checklist).
+The application is exported and imported like any other
+([Exporting a deployment](../../docs/export.md), [Importing a deployment](../../docs/import.md)).
+Its extension provides no blob backend of its own and the application keeps no blobs: its boot
+records that, and `rayspec export` reads the record instead of loading the extension. The migration
+bundle carries the application bundle, so the target serves the compiled extension and its
+vendored `mime-types` and `mime-db` from it, as the source did. Program the target's egress policy
+from the same bundle before you deploy it there.
+
+An extension that kept the blobs in a backend of its own would make the export refuse the
+application before it fences anything (`RAY_EXTERNAL_STATE_UNSUPPORTED`, reason
+`unsupported-blob-adapter`, naming the extension); see
+[Applications with extensions](../../docs/export.md#applications-with-extensions).
 
 ## The native-addon fixture
 
@@ -113,5 +121,13 @@ linux/x64 and Node 22 (or Node-API) in an isolated Linux build. See
   release: build, pack, the native-addon refusal, the deployment behind an egress proxy programmed
   from the bundle with npm offline, the dependency resolved from the bundle's own tree and nowhere
   above it, an additive and a refused destructive release, a release that declares no host (the
-  call is refused by the proxy, the create answers `502`), and the refused export. Run with
-  `pnpm test:journeys --app asset-catalog`.
+  call is refused by the proxy, the create answers `502`), a release that declares the host again,
+  then the encrypted export of the serving source, an import into an empty target, a new write
+  there, an exit export and an import into a second empty target — rows compared byte for byte, the
+  extension and its dependency served from each target's version directory, the owner signing in
+  with the same password and every earlier token and API key refused. A separate case adds an
+  extension that provides its own blob backend and sees the export refuse it, naming it, with the
+  source left unfenced. Run with `pnpm test:journeys --app asset-catalog`.
+- `scripts/upgrade-with-data.mjs --app asset-catalog` — the application deployed with the previous
+  published release and written to, then booted and deployed as a bundle by this release, every row
+  and credential kept.

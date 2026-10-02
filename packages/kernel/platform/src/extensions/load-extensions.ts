@@ -102,6 +102,11 @@ export interface LoadedExtensions {
   /** The capability instances packs provided (the LAST pack to set a field wins; a collision throws). */
   readonly capabilities: ExtensionCapabilities;
   /**
+   * The id of the extension that provided each capability instance in `capabilities`, so a caller
+   * can name it (the runtime records which extension owns the blob backend; an export reads that).
+   */
+  readonly capabilityProviders: { readonly blobFactory?: string };
+  /**
    * The multi-root importer the caller passes as `rollout.importer`: it maps a rewritten virtual pack
    * handler path → the REAL pack file (pre-jailed against the pack root), and falls through to the
    * default importer for a deployment's own (non-pack) handler. KEEPS `deploy()` byte-unchanged.
@@ -145,6 +150,7 @@ export async function loadExtensions(
   const api: ApiRouteSpec[] = [];
   const agents: AgentSpecConfig[] = [];
   const capabilities: { blobFactory?: ExtensionCapabilities['blobFactory'] } = {};
+  const capabilityProviders: { blobFactory?: string } = {};
   const packHandlerRoots: string[] = [];
 
   // virtual rewritten absolute path → real pre-jailed pack-file absolute path (the importer's map).
@@ -298,6 +304,7 @@ export async function loadExtensions(
         );
       }
       capabilities.blobFactory = caps.blobFactory;
+      capabilityProviders.blobFactory = ref.id;
     }
   }
 
@@ -315,6 +322,7 @@ export async function loadExtensions(
     api,
     agents,
     capabilities,
+    capabilityProviders,
     importer: mergedImporter,
     packHandlerRoots,
   };

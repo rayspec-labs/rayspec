@@ -147,6 +147,7 @@ import {
   installRedactedTraceExport,
   observedAgentTracing,
 } from './agent-tracing.js';
+import type { BlobBackendRecord } from './blob-backend-record.js';
 import { BootConfigError } from './boot-config-error.js';
 // The boot's ENVIRONMENT DEMANDS, from the one module that states them. The refusals below are
 // COMPOSED from these records rather than restating them, and the deploy guards ask their conditions
@@ -438,6 +439,15 @@ export function databaseIsolationWarning(status: DatabaseIsolationStatus): strin
     'it does not report the posture as active until every check passes. See ' +
     'docs/database-isolation.md.'
   );
+}
+
+/** What the boot hands the `beforeSchemaChange` hook: what it resolved before changing anything. */
+export interface BootFacts {
+  /**
+   * The blob backend this boot builds, for a backend-profile document; undefined for any other boot
+   * (a Product-YAML document, no document). Resolved with the document's extensions loaded.
+   */
+  blobBackend?: BlobBackendRecord;
 }
 
 /** What the `beforeSchemaChange` hook reports back to the boot. */
@@ -2593,11 +2603,13 @@ async function assembleServerWith(
     /**
      * Run once the signing key, the spec and the preflight have validated and before this boot
      * changes any schema: the bundle deploy applies its plan here, so a boot that is going to refuse
-     * refuses before the apply writes anything. A throw refuses the boot.
+     * refuses before the apply writes anything. A throw refuses the boot. `facts` is what the boot
+     * resolved by then, for the apply to record.
      */
     beforeSchemaChange?: (
       db: Db,
-      tenantIsolation?: { runtimeRole: string },
+      tenantIsolation: { runtimeRole: string } | undefined,
+      facts: BootFacts,
     ) => Promise<BeforeSchemaChangeResult | undefined>;
   },
   started: { fence?: RuntimeFence; migrationDb?: Db },
@@ -2862,7 +2874,9 @@ async function assembleServerWith(
       ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
     });
     if (opts.beforeSchemaChange !== undefined) {
-      bundleProductChange = (await opts.beforeSchemaChange(schemaDb, tenantIsolation))
+      const facts: BootFacts =
+        preflight !== undefined ? { blobBackend: preflight.blobBackend } : {};
+      bundleProductChange = (await opts.beforeSchemaChange(schemaDb, tenantIsolation, facts))
         ?.productChange;
     }
     await deployApply.platformChain();
@@ -3112,6 +3126,8 @@ interface MergedExtensions {
   readonly extensionImporter?: ModuleImporter;
   /** A pack-provided blob backend (undefined when no pack provided one — the default fs is used). */
   readonly packBlobFactory?: BlobStoreFactory;
+  /** The id of the extension that provided `packBlobFactory`. */
+  readonly packBlobFactoryProvider?: string;
 }
 
 /**
@@ -3207,7 +3223,12 @@ async function mergeExtensions(
     specSource: mergedSource,
     extensionImporter: loaded.importer,
     ...(loaded.capabilities.blobFactory
-      ? { packBlobFactory: loaded.capabilities.blobFactory }
+      ? {
+          packBlobFactory: loaded.capabilities.blobFactory,
+          ...(loaded.capabilityProviders.blobFactory !== undefined
+            ? { packBlobFactoryProvider: loaded.capabilityProviders.blobFactory }
+            : {}),
+        }
       : {}),
   };
 }
@@ -3289,6 +3310,8 @@ export function validateInjectedSpec(specPath: string): void {
 export interface PreflightedSpec {
   readonly parsedSpec: RaySpec;
   readonly merged: MergedExtensions;
+  /** The blob backend this boot resolved, as the bundle deploy records it (blob-backend-record.ts). */
+  readonly blobBackend: BlobBackendRecord;
   readonly productTables: ReturnType<typeof buildProductTables>;
   readonly agentBackends?: ReadonlyMap<BackendId, Backend>;
 }
@@ -3319,6 +3342,24 @@ function streamBlobFactory(
       'writable directory (the fs blob backend writes one subdir per tenant under it), or load a ' +
       'pack that provides a blobFactory. Fail-closed (a stream route requires a blob backend).',
   );
+}
+
+/**
+ * The blob backend `streamBlobFactory` builds for this document, as the record a bundle deploy writes
+ * (blob-backend-record.ts): the same questions in the same order, asked after `streamBlobFactory` has
+ * refused a stream route with no backend. An extension's backend is named by the extension's id; a
+ * provider the loader did not name records an empty id, which no reader accepts.
+ */
+function blobBackendRecordOf(
+  effectiveSpec: RaySpec,
+  config: ServerConfig,
+  merged: MergedExtensions,
+): BlobBackendRecord {
+  if (!declaresStreamRoute(effectiveSpec.api)) return { kind: 'none' };
+  if (merged.packBlobFactory) {
+    return { kind: 'extension', extension: merged.packBlobFactoryProvider ?? '' };
+  }
+  return config.blobRoot ? { kind: 'fs' } : { kind: 'none' };
 }
 
 /**
@@ -3657,6 +3698,7 @@ async function preflightDeclaredSpec(
   );
   const spec = merged.spec;
   const blobFactory = streamBlobFactory(spec, config, merged.packBlobFactory, specPath);
+  const blobBackend = blobBackendRecordOf(spec, config, merged);
   const fsSourceFactory = fsSourceFactoryFor(config);
   const mediaTokenService = mediaTokenServiceFor(spec, config, specPath);
   const sttCapability = buildSttCapability(config);
@@ -3744,7 +3786,13 @@ async function preflightDeclaredSpec(
       },
     },
   });
-  return { parsedSpec, merged, productTables, ...(agentBackends ? { agentBackends } : {}) };
+  return {
+    parsedSpec,
+    merged,
+    blobBackend,
+    productTables,
+    ...(agentBackends ? { agentBackends } : {}),
+  };
 }
 
 /**

@@ -455,6 +455,13 @@ jobs:
       - name: Upgrade with data from the previous release, team-notes
         run: pnpm test:upgrade-with-data --app team-notes
 
+      # The same upgrade with the asset-catalog reference application: a compiled extension with a
+      # vendored dependency, its handlers calling one HTTPS host through an egress proxy. The previous
+      # release gets its spec without metadata.id, metadata.version and deployment.egressHosts, and
+      # its extension without the handlers' `uses` lists; the bundle is packed from the release build.
+      - name: Upgrade with data from the previous release, asset-catalog
+        run: pnpm test:upgrade-with-data --app asset-catalog
+
       # ── DB test subset — the 9 Postgres-backed packages (8 platform + the local-boot example) ─────
       # --concurrency=1: @rayspec/durable-dbos + @rayspec/server both boot a REAL DBOS engine; run
       # concurrently against one Postgres they deadlock / race on CREATE/DROP DATABASE. The two

@@ -11,7 +11,7 @@ the application database:
 
 | Table | Holds |
 | --- | --- |
-| `runtime_control_state` | one row: the environment revision, the source fence and its epoch, the operation lease (holder, fencing epoch, expiry), the binding revision key, the product schema digest the last apply left |
+| `runtime_control_state` | one row: the environment revision, the source fence and its epoch, the operation lease (holder, fencing epoch, expiry), the binding revision key, the product schema digest the last apply left, the active application and the blob backend its boot resolved |
 | `runtime_control_receipts` | append-only receipts of every operation that changed the environment: who, what, each step's start and finish, the outcome |
 | `product_migration_ledger` | append-only, one row per applied product schema change: the DDL and its SHA-256, the product schema digest before and after, the schema description after, the declared stores, the operation that applied it |
 
@@ -105,7 +105,7 @@ deploy. Its steps, in order:
 | `stage-bundle` | verifies the version directory the bundle was extracted into against the manifest's inventory | re-runnable |
 | `platform-migrations` | the platform migration chain, when the database is behind this runtime | read from the platform ledger |
 | `product-ddl` | the product change regenerated from the ledger and the bundled spec, its ledger row and the finish receipt in one transaction | rolled back with its transaction unless its finish receipt committed |
-| `record-application` | the deployment id, the application, its digest and its grants in `runtime_control_state` | committed with its finish receipt |
+| `record-application` | the deployment id, the application, its digest, its grants and the blob backend the boot resolved for it (the platform's fs store, none, or the extension that provides one) in `runtime_control_state` | committed with its finish receipt |
 | `activate` | replaces `active.json` in the state directory in one rename | re-runnable |
 
 The active version switches last, so a deploy that stops before it leaves the previous version
@@ -255,7 +255,7 @@ order:
 | The platform head is one this runtime ships; the product schema is the one the product ledger recorded | `RAY_SCHEMA_DRIFT` (warning `RAY_W_PRODUCT_SCHEMA_UNLEDGERED` without ledger rows) |
 | The server major is 14 or later, and the `pg_dump` found has the same major | `RAY_TARGET_UNSUPPORTED`, `RAY_USAGE` |
 | The role the dumps read as can read every table of both databases past row-level security | `RAY_USAGE` |
-| The blobs are in the fs blob store, and its root holds nothing the store would not have written: no stray entry, link, malformed file or key a snapshot cannot carry. `rayspec export` passes an application that loads any extension as an unsupported blob source, with or without `RAYSPEC_BLOB_ROOT`, because an extension's blob backend comes before the fs store | `RAY_EXTERNAL_STATE_UNSUPPORTED` (`unsupported-blob-adapter`); an unreadable root: `RAY_INFRA_UNAVAILABLE`. The temporary file of an upload depends on the phase: before the fence (`live`, `preflightSnapshot`'s default) it is an upload in flight, counted in `uploadsInFlight` and in the budgets, not a blocker; under the fence (`quiesced`, the capture's preflight, after the drain) it is an upload that never finished: `unreconciled-effects`, and the fence stays |
+| The blobs are in the fs blob store, and its root holds nothing the store would not have written: no stray entry, link, malformed file or key a snapshot cannot carry. `rayspec export` decides the blob source of an application that loads extensions from the blob backend its boot recorded (`runtime_control_state.blob_backend`, written by the bundle deploy with the application digest): an extension's own backend, or no record for the active version, is refused before the fence ([Applications with extensions](./export.md#applications-with-extensions)) | `RAY_EXTERNAL_STATE_UNSUPPORTED` (`unsupported-blob-adapter`); an unreadable root: `RAY_INFRA_UNAVAILABLE`. The temporary file of an upload depends on the phase: before the fence (`live`, `preflightSnapshot`'s default) it is an upload in flight, counted in `uploadsInFlight` and in the budgets, not a blocker; under the fence (`quiesced`, the capture's preflight, after the drain) it is an upload that never finished: `unreconciled-effects`, and the fence stays |
 | At most 500,000 objects, and the objects and the application within the migration archive limit (2 GiB); free space in the scratch directory for about twice the databases, objects and application | `RAY_LIMIT_EXCEEDED` (`object-index-size`, `migration-size`); `RAY_INFRA_UNAVAILABLE` |
 | No database extension other than `plpgsql` in the application database, and none but `uuid-ossp` (which the durable engine's own migrations create) in the workflow system database | `RAY_POLICY_DENIED` (`unsupported-extension`) |
 | Exactly one organization, and no blob of another tenant | `RAY_MULTI_TENANT_UNSUPPORTED` |

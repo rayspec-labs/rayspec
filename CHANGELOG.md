@@ -54,15 +54,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   memberships and API keys is byte-identical, that the user logs in with the same password, that
   the API key reads the notes and that a new note can be written; finally it packs the example and
   deploys it as a bundle onto the upgraded environment and checks the same again. It runs in about a
-  minute and is a required step of the database lane.
+  minute and is a required step of the database lane. `--app team-notes` and `--app asset-catalog`
+  run the same check with those reference applications; the previous release gets each spec without
+  the fields it does not know (`metadata.id`, `metadata.version`, and for the asset catalog
+  `deployment.egressHosts` and the `uses` lists of its extension's handlers), and its extension
+  imports the `@rayspec` packages of whichever runtime boots it. Both run in CI.
 - **`@rayspec/server` exports the bundle deploy's building blocks**: `readApplicationBundle` (reader
   steps 1 to 17 without a database), `preparePlan` (`prepare()` at a given `preparedAt`),
   `applyBundle`, `bindingRevisions`, `initialBindingRevisionKey`, `planNeedsReview`, the
   deployment state directory (`openStateDirectory`, `StateDirectory`, `readProtectedFile`) and
   `installBundleModuleResolution`. `assembleServer` accepts `beforeSchemaChange`, run after the
   boot validated everything and before it changes any schema, which may report the product change
-  it applied (`BeforeSchemaChangeResult`, shown on the boot banner), and `ensureRuntimeControlState`
-  accepts the binding revision key a first apply stores.
+  it applied (`BeforeSchemaChangeResult`, shown on the boot banner) and is handed what the boot
+  resolved (`BootFacts`: the blob backend), and `ensureRuntimeControlState` accepts the binding
+  revision key a first apply stores. `applyBundle` takes that blob backend and records it with the
+  application it activates; `readRecordedBlobBackend` and `parseBlobBackendRecord` read it back.
 
 - **`rayspec pack`: an application bundle from an application that is already built.**
   `rayspec pack --spec <path> --output <file.ray>` writes one `.ray` application bundle: the
@@ -640,8 +646,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   epoch. SIGINT or SIGTERM stops at a safe point, ends `pg_dump`, removes the scratch data and reports
   `RAY_INTERRUPTED` (exit 6) with the resume command; the next export, or `rayspec resume`, removes
   the plaintext a killed one left in the scratch directory and closes its receipt. An application
-  that loads any extension is refused before the fence (`unsupported-blob-adapter`), even with
-  `RAYSPEC_BLOB_ROOT` set, since an extension's blob backend would be used in place of the fs store.
+  that loads extensions is exported when its blobs are in the platform's fs store, or it keeps none:
+  which backend holds them is a value of the extensions' code, so the export does not load them but
+  reads what the deployment's boot resolved, which the bundle deploy records with the application
+  digest in the new `runtime_control_state.blob_backend` (migration
+  `0017_runtime_control_blob_backend`). An application whose blobs are in a backend an extension
+  provides (it does when an extension provides one and the application has a stream route, the only
+  case in which the runtime builds a blob backend) is refused before the fence
+  (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`), naming that extension, and so is
+  one whose active version has no record (deploy it once with this runtime). A deploy that activates
+  another version while the export runs is refused (`RAY_SOURCE_NOT_QUIESCENT`), before the fence or
+  under it, since the blob decision belongs to the version it was made for. `LoadedExtensions.capabilityProviders` in `@rayspec/platform` names the extension that
+  provided each capability.
   An upload being written during the precheck is normal operation: it is reported as in flight and
   left to the fence's drain; only a temporary upload file still there after the drain refuses, in the
   capture (`unreconciled-effects`), with the source fenced. `listFsBlobs` takes the phase (`live` or
@@ -780,12 +796,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the journey programs from the bundle's declared hosts, with npm offline, checks the dependency
   resolves from the bundle's own tree, and sees that proxy refuse a call to a host the running
   bundle does not declare — the refusal is the proxy's, as it is in a deployment, since the runtime
-  does not enforce egress; its export is refused, because `rayspec export` refuses an application
-  that loads an extension (`RAY_EXTERNAL_STATE_UNSUPPORTED`), so it is not exported or imported. A
-  source with two organizations is refused on export. A running document workflow cannot be
-  cancelled (the run cancel route answers `404` for it), and the imports are self-hosted only. The
-  new `reference-journeys` job of CI runs them; `pnpm test:journeys-logic` checks the harness in
-  lane 1.
+  does not enforce egress; it then goes through the same export, import, new write, second export and
+  import as the others, and each target serves the extension and its dependency from the bundle it
+  carries. A separate case adds an extension that provides its own blob backend, whose export is
+  refused naming it (`RAY_EXTERNAL_STATE_UNSUPPORTED`, `unsupported-blob-adapter`), with the source
+  left unfenced. A source with two organizations is refused on export. A running document workflow
+  cannot be cancelled (the run cancel route answers `404` for it), and the imports are self-hosted
+  only. The new `reference-journeys` job of CI runs them; `pnpm test:journeys-logic` checks the
+  harness in lane 1.
 - **A consumer quickstart**, [`docs/quickstart.md`](docs/quickstart.md): from `npm install rayspec`
   to the team-notes application deployed from its bundle, separate from the source-build
   getting-started. The reference journeys run every command of its steps — the clone with its tag
@@ -1099,6 +1117,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,
   `SHADOW_DATABASE_URL` in the process environment. A YAML spec deploys exactly as before.
+- **The platform chain gains `0017_runtime_control_blob_backend`**, one nullable column on the
+  runtime-control state row. Every bundle deploy fills it for the application it activates; until
+  the first one with this release it is empty, and `rayspec export` of an application that loads
+  extensions is refused (`unsupported-blob-adapter`) until the deployment has been deployed once with
+  this release.
 - **A bundle pins its runtime.** After upgrading the CLI, repack the application with the new
   release before deploying it; a bundle packed for another runtime version is refused with
   `RAY_RUNTIME_UNSUPPORTED`.

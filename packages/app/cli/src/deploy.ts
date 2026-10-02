@@ -37,7 +37,7 @@ import { writeSync } from 'node:fs';
 import { type ParseArgsConfig, parseArgs } from 'node:util';
 import type { Db } from '@rayspec/db';
 import type { ProductYamlRollout } from '@rayspec/product-yaml';
-import type { BeforeSchemaChangeResult } from '@rayspec/server';
+import type { BeforeSchemaChangeResult, BootFacts } from '@rayspec/server';
 // TYPE-ONLY (erased at runtime): the shape of the boot-environment report `--check-env` emits. The
 // FUNCTION that produces it is imported dynamically, on that flag's path alone, so a `deploy` without
 // it — and every other subcommand — loads none of @rayspec/server.
@@ -855,12 +855,13 @@ export interface ServeReport {
 export interface ServeExtras {
   report?: ServeReport;
   /**
-   * Run by the boot after it validated everything and before it changes any schema; it reports the
-   * product change it applied, which the boot banner names.
+   * Run by the boot after it validated everything and before it changes any schema, with what the
+   * boot resolved by then; it reports the product change it applied, which the boot banner names.
    */
   beforeSchemaChange?: (
     db: Db,
-    tenantIsolation?: { runtimeRole: string },
+    tenantIsolation: { runtimeRole: string } | undefined,
+    facts: BootFacts,
   ) => Promise<BeforeSchemaChangeResult | undefined>;
 }
 

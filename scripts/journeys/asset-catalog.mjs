@@ -9,8 +9,16 @@
  *   page → the dependency resolves from the bundle's own tree, and nothing above it holds a copy →
  *   1.1.0 (adds a column) keeps every row → 2.0.0 (drops one) refused at pack and at deploy → 1.1.1
  *   declares no host: the proxy, reprogrammed from it, refuses the call the deployment makes, the
- *   create answers 502 and writes nothing → the export refuses the application, which loads an
- *   extension, and leaves it unfenced.
+ *   create answers 502 and writes nothing → 1.1.2 declares it again, and the boot records that no
+ *   extension provides a blob backend → an encrypted export of the serving source while creates
+ *   keep arriving through the extension's handler (each one carried, or refused by the fence with
+ *   503), an import into
+ *   an empty target that serves the extension and its dependency from the bundle, the same rows and
+ *   a reset identity, a new write there, an exit export of that target and an import into a second
+ *   empty one that carries the new write.
+ *
+ * A separate case adds a second extension that provides its own blob backend: the boot records it,
+ * and the export refuses the application, naming that extension, and leaves it unfenced.
  *
  * The runtime does not enforce egress; the host network policy does (docs/hardened-posture.md
  * "Egress"). The proxy here plays that policy.
@@ -20,6 +28,7 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   realpathSync,
   writeFileSync,
@@ -27,20 +36,27 @@ import {
 import { dirname, join } from 'node:path';
 import {
   call,
+  checkEncryptedExport,
   deployServing,
   Environment,
   exportDeployment,
+  exportDeploymentAsync,
+  importInto,
   newPassword,
+  privateFile,
   rayspec,
   register,
   rowsDigest,
   signIn,
   startClassifier,
   startEgressProxy,
+  tableText,
   testCertificates,
 } from './lib.mjs';
 
 const HOST = 'classifier.example.com';
+/** At most this many creates are sent while the source export runs, one every 100 ms. */
+const DURING_EXPORT_WRITES = 40;
 
 export async function assetCatalog(ctx, journey) {
   const app = join(ctx.repo, 'examples', 'asset-catalog');
@@ -94,6 +110,7 @@ export async function assetCatalog(ctx, journey) {
       withNotes(spec).split(egress).join('').split('\ndeployment:\n').join('\n'),
     ),
     '2.0.0': release('2.0.0', (spec) => withNotes(spec).split(column).join('')),
+    '1.1.2': release('1.1.2', withNotes),
   };
   const bundles = {};
   const pack = (version, against) => {
@@ -156,13 +173,14 @@ export async function assetCatalog(ctx, journey) {
       NODE_EXTRA_CA_CERTS: certs.caFile,
       npm_config_offline: 'true',
     };
-    const deploy = async (version) => {
-      const local = join(source.dir, `asset-catalog-${version}.ray`);
+    const deployOn = async (environment, version) => {
+      const local = join(environment.dir, `asset-catalog-${version}.ray`);
       copyFileSync(bundles[version], local);
       // The host network policy is programmed from the bundle about to run.
       policy = inspect(local).egressHosts;
-      return deployServing(ctx, journey, source, local, { env: source.env(extra) });
+      return deployServing(ctx, journey, environment, local, { env: environment.env(extra) });
     };
+    const deploy = (version) => deployOn(source, version);
     let { plan, served } = await deploy('1.0.0');
     journey.check(
       'the plan reports the declared host as an added permission',
@@ -364,30 +382,420 @@ export async function assetCatalog(ctx, journey) {
     journey.check('the rows written before are kept', (await digestOf()) === kept);
     await served.stop();
 
-    // ── Export: an application that loads an extension is refused ───────────────────────────────
-    journey.step('exporting');
+    // ── The declared host again; the boot records the blob backend ──────────────────────────────
+    journey.step('declaring the host again');
+    const packed12 = pack('1.1.2', '1.1.1');
+    journey.check(
+      'pack 1.1.2 against 1.1.1 (the host declared again)',
+      packed12.status === 0,
+      JSON.stringify(packed12.envelope.errors),
+    );
+    ({ plan, served } = await deploy('1.1.2'));
+    journey.check(
+      'the plan reports the host as an added permission again',
+      JSON.stringify(plan.plan.permissionChanges.egressAdded) === JSON.stringify([HOST]),
+    );
+    ({ token } = await signIn(base, 'owner@example.test', password, org.body.id));
+    const poster = await call(`${base}/api/items`, {
+      method: 'POST',
+      token,
+      body: { name: 'Poster', file_name: 'poster.webp' },
+    });
+    journey.check(
+      'a create through the declared host again',
+      poster.status === 201 && poster.body.content_type === 'image/webp',
+      poster.text,
+    );
+    const [recorded] = await source.query(
+      'SELECT blob_backend FROM runtime_control_state WHERE id = 1',
+    );
+    journey.check(
+      'the boot recorded that no extension provides a blob backend',
+      JSON.stringify(recorded?.blob_backend) === JSON.stringify({ kind: 'none' }),
+      JSON.stringify(recorded),
+    );
+    const minted = await call(`${base}/v1/orgs/${org.body.id}/api-keys`, {
+      method: 'POST',
+      token,
+      body: { name: 'reader', scopes: ['store:read'] },
+    });
+    journey.check('the owner mints an API key on the source', minted.status === 201, minted.text);
+    const apiKey = minted.body.plaintext;
+    journey.check(
+      'the API key reads the catalog on the source',
+      (await call(`${base}/api/items?limit=1`, { token: apiKey })).status === 200,
+    );
+    const sourceToken = token;
+
+    // ── A frozen encrypted export while the source serves ───────────────────────────────────────
+    journey.step('exporting the source');
     await ctx.tools();
-    const { recipient } = await ctx.ageKeyPair();
-    const output = join(ctx.work, 'asset-catalog.migration.ray');
-    const exported = exportDeployment(ctx, source, recipient, output);
+    const { identity, recipient } = await ctx.ageKeyPair();
+    const identityFile = privateFile(join(ctx.work, 'asset-catalog-identity.txt'), `${identity}\n`);
+    const migration = join(ctx.work, 'asset-catalog-source.migration.ray');
+    // Creates through the extension's handler keep arriving while the export runs: each one is
+    // either taken before the fence and carried, or refused by the fence with 503.
+    let exporting = true;
+    const exportRun = exportDeploymentAsync(ctx, source, recipient, migration).finally(() => {
+      exporting = false;
+    });
+    const during = [];
+    for (let n = 0; exporting && n < DURING_EXPORT_WRITES; n += 1) {
+      const name = `Written during the export ${n}`;
+      const res = await call(`${base}/api/items`, {
+        method: 'POST',
+        token,
+        body: { name, file_name: `during-${n}.png` },
+      });
+      during.push({ name, status: res.status });
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const exported = await exportRun;
     journey.check(
-      'the export refuses an application that loads an extension',
-      exported.status === 3 &&
-        exported.envelope.errors?.[0]?.code === 'RAY_EXTERNAL_STATE_UNSUPPORTED' &&
-        exported.envelope.errors[0].reason === 'unsupported-blob-adapter',
-      `${exported.status} ${JSON.stringify(exported.envelope.errors)}`,
+      'the export of the application with its extension writes one encrypted bundle',
+      exported.status === 0 && exported.envelope.data.sourceState === 'fenced',
+      `${exported.status} ${JSON.stringify(exported.envelope.errors)} ${exported.stderr.slice(-1500)}`,
     );
-    journey.check('nothing is written', !existsSync(output));
-    const fence = await source.fence();
+    const taken = during.filter((w) => w.status === 201).map((w) => w.name);
+    const fencedOut = during.filter((w) => w.status === 503).map((w) => w.name);
     journey.check(
-      'the source is not fenced',
-      fence === null || fence.state !== 'fenced',
-      JSON.stringify(fence),
+      'every write sent during the export was taken, or refused by the fence with 503',
+      taken.length + fencedOut.length === during.length,
+      JSON.stringify(during.filter((w) => w.status !== 201 && w.status !== 503)),
     );
-    journey.note('export', 'refused: RAY_EXTERNAL_STATE_UNSUPPORTED (unsupported-blob-adapter)');
-    journey.note('rows', (await rowsOf()).length);
+    journey.check(
+      'writes reached the source both before and after the fence',
+      taken.length > 0 && fencedOut.length > 0,
+      `taken ${taken.length}, refused ${fencedOut.length}`,
+    );
+    journey.check(
+      'no write was taken after the fence refused one',
+      during.findIndex((w) => w.status === 503) === taken.length,
+      JSON.stringify(during.map((w) => w.status)),
+    );
+    const expected = await digestOf();
+    const sourceRows = await rowsOf();
+    const expectedRows = sourceRows.length;
+    const sourceNames = new Set(sourceRows.map((r) => r.name));
+    journey.check(
+      'the fenced source holds every write it took and none it refused',
+      taken.every((n) => sourceNames.has(n)) && !fencedOut.some((n) => sourceNames.has(n)),
+    );
+    checkEncryptedExport(journey, 'the source export', migration, [
+      'handbook.pdf',
+      'data.unknownext',
+      'owner@example.test',
+    ]);
+    const fencedWrite = await call(`${base}/api/items`, {
+      method: 'POST',
+      token,
+      body: { name: 'Fenced', file_name: 'fenced.png' },
+    });
+    journey.check(
+      'a write to the fenced source answers 503',
+      fencedWrite.status === 503,
+      fencedWrite.text,
+    );
+    journey.check('the fenced source is unchanged', (await digestOf()) === expected);
+    await served.stop();
+
+    // ── Import into an empty target, cutover, deploy with the target's own secrets ──────────────
+    journey.step('importing into the first target');
+    const targetA = await new Environment(ctx, 'asset-catalog-target-a').create();
+    const importedA = importInto(ctx, journey, targetA, migration, identityFile);
+    journey.check(
+      'the first import verifies checksums, counts, objects and references',
+      JSON.stringify(importedA.data.verification) ===
+        JSON.stringify({
+          checksums: 'match',
+          tableCounts: 'match',
+          objects: 'match',
+          referenceIntegrity: 'match',
+        }),
+      JSON.stringify(importedA.data.verification),
+    );
+    journey.check(
+      'the first import carries the application the source ran',
+      importedA.data.applicationDigest === inspect(bundles['1.1.2']).sha256,
+    );
+    journey.check(
+      'every catalog row is carried byte for byte',
+      JSON.stringify(await tableText(ctx.adminUrl, targetA.db, 'catalog_items')) ===
+        JSON.stringify(await tableText(ctx.adminUrl, source.db, 'catalog_items')),
+    );
+    const namesA = new Set(
+      (await targetA.query('SELECT name FROM catalog_items')).map((r) => r.name),
+    );
+    journey.check(
+      'the first target holds every write the source took during the export, and none it refused',
+      namesA.size === expectedRows &&
+        taken.every((n) => namesA.has(n)) &&
+        !fencedOut.some((n) => namesA.has(n)),
+      `${namesA.size} of ${expectedRows}`,
+    );
+    for (const table of ['sessions', 'api_keys', 'invites']) {
+      const [row] = await targetA.query(`SELECT count(*)::int AS n FROM ${table}`);
+      journey.check(`the first target carries no ${table}`, row.n === 0);
+    }
+    ({ served } = await deployOn(targetA, '1.1.2'));
+    await carried(journey, targetA, bundles['1.1.2'], inspect);
+    await identityReset(journey, targetA.base, {
+      orgId: org.body.id,
+      password,
+      oldTokens: [sourceToken],
+      oldKeys: [apiKey],
+    });
+    const onA = await signIn(targetA.base, 'owner@example.test', password, org.body.id);
+    const listedA = await call(`${targetA.base}/api/items?limit=100`, { token: onA.token });
+    journey.check(
+      'the first target serves every catalog item',
+      listedA.status === 200 && listedA.body.items?.length === expectedRows,
+      listedA.text.slice(0, 500),
+    );
+    const newWrite = await call(`${targetA.base}/api/items`, {
+      method: 'POST',
+      token: onA.token,
+      body: { name: 'Written on the first target', file_name: 'target.svg' },
+    });
+    journey.check(
+      'a new write on the first target, classified through the declared host',
+      newWrite.status === 201 &&
+        newWrite.body.content_type === 'image/svg+xml' &&
+        newWrite.body.category === 'image',
+      newWrite.text,
+    );
+    journey.check('the source stays fenced', (await source.fence())?.state === 'fenced');
+
+    // ── Exit export of the first target, import into a second empty target ──────────────────────
+    journey.step('exporting the first target and importing into the second');
+    const rowsA = await tableText(ctx.adminUrl, targetA.db, 'catalog_items');
+    journey.check('the new write is in the first target', rowsA.length === expectedRows + 1);
+    const exitBundle = join(ctx.work, 'asset-catalog-target-a.migration.ray');
+    const exitExport = exportDeployment(ctx, targetA, recipient, exitBundle);
+    journey.check(
+      'the exit export of the first target',
+      exitExport.status === 0 && exitExport.envelope.data.sourceState === 'fenced',
+      `${exitExport.status} ${JSON.stringify(exitExport.envelope.errors)} ${exitExport.stderr.slice(-1500)}`,
+    );
+    checkEncryptedExport(journey, 'the exit export', exitBundle, [
+      'Written on the first target',
+      'target.svg',
+    ]);
+    await served.stop();
+    const targetB = await new Environment(ctx, 'asset-catalog-target-b').create();
+    importInto(ctx, journey, targetB, exitBundle, identityFile);
+    journey.check(
+      'the second target holds the first target rows, the new write included',
+      JSON.stringify(await tableText(ctx.adminUrl, targetB.db, 'catalog_items')) ===
+        JSON.stringify(rowsA),
+    );
+    ({ served } = await deployOn(targetB, '1.1.2'));
+    await carried(journey, targetB, bundles['1.1.2'], inspect);
+    await identityReset(journey, targetB.base, {
+      orgId: org.body.id,
+      password,
+      oldTokens: [sourceToken, onA.token],
+      oldKeys: [apiKey],
+    });
+    const onB = await signIn(targetB.base, 'owner@example.test', password, org.body.id);
+    const listedB = await call(`${targetB.base}/api/items?limit=100`, { token: onB.token });
+    journey.check(
+      'the second target serves every item, the new write included',
+      listedB.status === 200 &&
+        listedB.body.items?.length === expectedRows + 1 &&
+        listedB.body.items.some(
+          (i) => i.name === 'Written on the first target' && i.content_type === 'image/svg+xml',
+        ),
+      listedB.text.slice(0, 500),
+    );
+    const onTargetB = await call(`${targetB.base}/api/items`, {
+      method: 'POST',
+      token: onB.token,
+      body: { name: 'Written on the second target', file_name: 'second.pdf' },
+    });
+    journey.check(
+      'the second target writes through the declared host',
+      onTargetB.status === 201 && onTargetB.body.category === 'document',
+      onTargetB.text,
+    );
+    await served.stop();
+    journey.note('rows', { source: expectedRows, targets: expectedRows + 1 });
+    journey.note('export', 'exported and imported twice; the boot recorded no blob backend');
+
+    // ── An extension that keeps the blobs itself: the export refuses it ─────────────────────────
+    journey.step('refusing an extension that provides its own blob backend');
+    await blobBackendRefusal(ctx, journey, { v1, packEnv, recipient, extra });
   } finally {
     await classifier.close();
     await proxy.close();
   }
 }
+
+/**
+ * What the bundle carries arrives with it: the target serves the static page, and its version
+ * directory holds the compiled extension and its vendored dependency.
+ */
+async function carried(journey, target, bundle, inspect) {
+  journey.check(
+    `${target.label}: the static page is served`,
+    (await call(`${target.base}/`)).text.includes('<h1>Asset catalog</h1>'),
+  );
+  const pack = join(
+    target.stateDir,
+    'versions',
+    inspect(bundle).sha256,
+    'payload',
+    'packs',
+    'catalog-pack',
+  );
+  journey.check(
+    `${target.label}: the version directory holds the extension and its dependency`,
+    existsSync(join(pack, 'index.js')) &&
+      existsSync(join(pack, 'node_modules', 'mime-types', 'package.json')) &&
+      existsSync(join(pack, 'node_modules', 'mime-db', 'package.json')),
+    pack,
+  );
+}
+
+/** The owner signs in with the password they had; tokens and keys of earlier environments are refused. */
+async function identityReset(journey, base, { orgId, password, oldTokens, oldKeys }) {
+  const signed = await signIn(base, 'owner@example.test', password, orgId);
+  journey.check('the owner signs in with the password they had', signed.status === 200);
+  for (const [i, token] of oldTokens.entries()) {
+    const res = await call(`${base}/api/items?limit=1`, { token });
+    journey.check(
+      `an access token of an earlier environment is refused (${i + 1})`,
+      res.status === 401,
+      String(res.status),
+    );
+  }
+  for (const key of oldKeys) {
+    const res = await call(`${base}/api/items?limit=1`, { token: key });
+    journey.check('an API key of the source is refused', res.status === 401, String(res.status));
+  }
+}
+
+/**
+ * The application with a second extension that provides its own blob backend and an upload route:
+ * the boot records that extension as the blob backend, and the export refuses the application,
+ * naming it, before it fences anything.
+ */
+async function blobBackendRefusal(ctx, journey, { v1, packEnv, recipient, extra }) {
+  const dir = join(dirname(v1), 'blob-backend');
+  cpSync(v1, dir, { recursive: true });
+  const vault = join(dir, 'packs', 'vault-pack');
+  mkdirSync(join(vault, 'handlers'), { recursive: true });
+  writeFileSync(
+    join(vault, 'package.json'),
+    JSON.stringify({
+      name: 'vault-pack',
+      version: '1.0.0',
+      private: true,
+      type: 'module',
+      main: './index.js',
+      dependencies: { '@rayspec/platform': `^${ctx.version}` },
+    }),
+  );
+  writeFileSync(join(vault, 'index.js'), VAULT_EXTENSION);
+  writeFileSync(join(vault, 'handlers', 'ingest.js'), VAULT_INGEST);
+  const specPath = join(dir, 'rayspec.yaml');
+  const anchor = '    module: ./packs/catalog-pack\n    version: 1.0.0\n';
+  const spec = readFileSync(specPath, 'utf8');
+  journey.check('the built spec names the catalog extension once', spec.split(anchor).length === 2);
+  writeFileSync(
+    specPath,
+    spec
+      .split(anchor)
+      .join(`${anchor}  - id: vault_pack\n    module: ./packs/vault-pack\n    version: 1.0.0\n`),
+  );
+  const output = join(ctx.work, 'asset-catalog-blob-backend.ray');
+  const packed = rayspec(ctx, ['pack', '--spec', specPath, '--output', output], { env: packEnv });
+  journey.check(
+    'pack the application with an extension that provides a blob backend',
+    packed.status === 0,
+    JSON.stringify(packed.envelope.errors),
+  );
+  const env = await new Environment(ctx, 'asset-catalog-blob-backend').create();
+  env.mintSecrets();
+  const local = join(env.dir, 'asset-catalog-blob-backend.ray');
+  copyFileSync(output, local);
+  const { served } = await deployServing(ctx, journey, env, local, { env: env.env(extra) });
+  await served.stop();
+  const [recorded] = await env.query('SELECT blob_backend FROM runtime_control_state WHERE id = 1');
+  journey.check(
+    'the boot recorded the extension that provides the blob backend',
+    JSON.stringify(recorded?.blob_backend) ===
+      JSON.stringify({ kind: 'extension', extension: 'vault_pack' }),
+    JSON.stringify(recorded),
+  );
+  const refusedOutput = join(env.dir, 'refused.migration.ray');
+  const run = exportDeployment(ctx, env, recipient, refusedOutput);
+  const error = run.envelope.errors?.[0];
+  journey.check(
+    'the export refuses it, naming the extension',
+    run.status === 3 &&
+      error?.code === 'RAY_EXTERNAL_STATE_UNSUPPORTED' &&
+      error.reason === 'unsupported-blob-adapter' &&
+      error.message.includes("the extension 'vault_pack' provides the blob backend"),
+    `${run.status} ${JSON.stringify(run.envelope.errors)}`,
+  );
+  journey.check('nothing is written', !existsSync(refusedOutput));
+  const fence = await env.fence();
+  journey.check(
+    'the refused source is not fenced',
+    fence === null || fence.state !== 'fenced',
+    JSON.stringify(fence),
+  );
+  journey.note('blob backend refusal', 'RAY_EXTERNAL_STATE_UNSUPPORTED (unsupported-blob-adapter)');
+  await env.drop();
+}
+
+/** An extension that keeps uploads in a backend of its own (in memory) behind an upload route. */
+const VAULT_EXTENSION = `import { defineExtension } from '@rayspec/platform';
+
+const objects = new Map();
+function vault(tenantId) {
+  const at = (key) => tenantId + '/' + key;
+  const missing = (key) => ({ notFound: true, key });
+  return {
+    async put(key, body) {
+      objects.set(at(key), body instanceof Uint8Array ? body : new Uint8Array(await new Response(body).arrayBuffer()));
+    },
+    async get(key) {
+      const b = objects.get(at(key));
+      return b === undefined ? missing(key) : { body: new Response(b).body, contentLength: b.length };
+    },
+    async createReadStream(key) {
+      const b = objects.get(at(key));
+      return b === undefined ? missing(key) : new Response(b).body;
+    },
+    async stat(key) {
+      const b = objects.get(at(key));
+      return b === undefined ? missing(key) : { len: b.length, etagSource: String(b.length) };
+    },
+    async delete(key) {
+      objects.delete(at(key));
+    },
+    async deleteTenant(id) {
+      if (id !== tenantId) throw new Error('another tenant');
+      for (const key of [...objects.keys()]) if (key.startsWith(tenantId + '/')) objects.delete(key);
+    },
+  };
+}
+
+export default defineExtension({
+  version: '1.0.0',
+  fragments: {
+    handlers: [{ id: 'vault_ingest', module: 'handlers/ingest.js', export: 'ingest', kind: 'route', uses: ['blob'] }],
+    api: [{ method: 'POST', path: '/api/uploads/{upload_id}', action: { kind: 'stream', handler: 'vault_ingest', mode: 'ingest' } }],
+  },
+  capabilities: { blobFactory: vault },
+});
+`;
+
+const VAULT_INGEST = `export async function ingest(init) {
+  const bytes = new Uint8Array(await init.request.arrayBuffer());
+  await init.blob.put('uploads/' + init.params.upload_id, bytes);
+  return new Response(JSON.stringify({ stored: bytes.length }), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+`;

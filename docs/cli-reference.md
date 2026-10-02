@@ -1474,6 +1474,11 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
   (`database-write-role`); without it, only a stopped source attested with `--source-stopped`
   (`database-stopped-source`). With neither the export fences, then refuses before any capture with
   `RAY_EXTERNAL_STATE_UNSUPPORTED` / `database-barrier-unavailable`; the source stays fenced.
+- **Blobs.** The fs blob store under `RAYSPEC_BLOB_ROOT`. For an application that loads
+  extensions, the blob backend its boot recorded decides, read from the database and never by
+  loading the extensions: a backend an extension provides, or no record for the active version, is
+  refused before the fence (`RAY_EXTERNAL_STATE_UNSUPPORTED` / `unsupported-blob-adapter`, naming
+  the extension); see [Applications with extensions](./export.md#applications-with-extensions).
 - **A second export while fenced** reuses the fence at its epoch.
 - **Output:** the result envelope on stdout (operation `export`), with or without `--json`:
 

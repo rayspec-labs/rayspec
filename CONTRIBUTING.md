@@ -237,8 +237,8 @@ never the workspace's. Each application goes from source to bundle, is deployed 
 written to, updated (one additive release, one destructive release that is refused), exported,
 imported into an empty target, written to again, exported and imported into a second target, and
 checked there by counts, digests and rows, along with the identity reset an import makes. The
-custom-code application stops at the export, which refuses an application that loads an extension.
-What each journey covers is in the application's README.
+custom-code application also shows the export refusing an extension that provides its own blob
+backend. What each journey covers is in the application's README.
 
 ```bash
 pnpm build
