@@ -47,6 +47,23 @@ typo never leaves the limit off by accident.
    (soft-deleted ones included) is refused with a message naming the count; nothing is picked or
    hidden. Decide what happens to the others first.
 
+With role separation, `rayspec deploy` and `rayspec-serve` hold the migration and snapshot
+connections in a supervisor and run the application in a child process of the same operating-system
+user. The managed posture refuses to boot while that child could still reach them, and names each
+condition; every other posture warns. On the host:
+
+- pass `RAYSPEC_MIGRATION_DATABASE_URL` and `RAYSPEC_SNAPSHOT_DATABASE_URL` in the environment, not
+  as `_FILE` and not in a `.env` file (the child could read the file);
+- on Linux, set `kernel.yama.ptrace_scope` to 1 or more, so the child cannot read the supervisor's
+  memory. Docker Desktop's VM kernel has no Yama at all, and RHEL/Fedora-style kernels default to 0;
+  the boot refuses either until the setting is there;
+- on Linux, keep `/bin/sh` in the image (the entrypoint sets a zero hard core-file limit through
+  it), or start the process with a hard core-file limit of 0 (`docker run --ulimit core=0`): a
+  distroless image has no `/bin/sh`.
+
+A host that booted the managed posture before this release can be refused by these checks after
+the upgrade; they are prerequisites of the managed posture, not of the others.
+
 ## Checking it
 
 - `BootedServer.singleTenant` is `true` and `BootedServer.databaseIsolation` reports
@@ -585,3 +602,7 @@ With either setting on, the runtime also:
 
 Each check refuses only a principal that no longer has access, or removes internal detail from an
 answer.
+
+With role separation the deploy runs as a supervisor and a child process; under the managed posture
+on Linux the host must keep the supervisor private from that child, as [Turning it on](#turning-it-on)
+lists, or the boot is refused.

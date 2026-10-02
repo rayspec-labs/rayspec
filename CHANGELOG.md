@@ -1108,9 +1108,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel to the supervisor — it cannot bypass row-level security or lift the export fence. Runtime
   control that needs privilege (`rayspec export`'s write barrier and snapshot, `resume`, `import`)
   runs in the operator's CLI, which imports no application code either. Signals, readiness, graceful
-  drain, exit codes and the `--json` envelope are unchanged; a crash of the serving child makes the
-  supervisor exit non-zero and say so; single-role mode (no migration URL) runs one process exactly
-  as before. One gap depends on the operating-system user: when the supervisor and the child run as
+  drain, exit codes and the one `--json` envelope are unchanged; a crash of the serving child makes the
+  supervisor exit non-zero and say so; a serving child whose supervisor is killed (an OOM kill,
+  `kill -9`) stops at once, without a drain, as the single process did, so a restarted deployment
+  never runs beside it; single-role mode (no migration URL, even with a snapshot URL) runs one process
+  exactly as before. A wrapper that calls `assembleServer` in process with the migration connection
+  (examples/local-boot, deployments/acme-notes) boots as before and warns that the application code
+  it imports can reach the migration role. One gap depends on the operating-system user: when the supervisor and the child run as
   the same user, a `_FILE`/`.env` the supervisor can read, its memory on a kernel without Yama
   `ptrace_scope` ≥ 1, and a core file it can be made to write are readable by the child; the managed
   posture refuses to boot while any is open and names it, and every other posture warns (the
@@ -1254,6 +1258,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   started the ledger.
 - **Version directories are read-only.** Remove one that is no longer active with
   `chmod -R u+w <dir> && rm -rf <dir>`.
+- **With role separation, `rayspec deploy` and `rayspec-serve` run as two processes.** The process
+  you start supervises and holds the migration role; the application runs in a child under it. A
+  process manager still starts, signals and watches the one process it started. Under
+  `RAYSPEC_HOSTING_POSTURE=managed` on Linux the boot now also refuses a host where the child could
+  read the supervisor's memory or make it write a core file, which booted with 1.8.0: set
+  `kernel.yama.ptrace_scope` to 1 or more (Docker Desktop's VM kernel has no Yama at all, and
+  RHEL/Fedora-style kernels default to 0), and keep `/bin/sh` in the image or start with a hard
+  core-file limit of 0 (`docker run --ulimit core=0`; a distroless image has no `/bin/sh`). Pass the
+  migration and snapshot connections in the environment, not as `_FILE` or in a `.env` file. Every
+  other posture boots and warns instead. See
+  [Hosting in the hardened posture → Turning it on](./docs/hardened-posture.md#turning-it-on).
 
 ## [1.8.0] - 2026-08-15
 
