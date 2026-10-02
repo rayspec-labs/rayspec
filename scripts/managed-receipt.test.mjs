@@ -10,9 +10,11 @@
  *    same bytes every time;
  *  - the receipt is refused (exit 1, nothing written) when the lane did not pass, a check failed or is
  *    missing, a report shows a skipped or failed test the summary called passed, a report is missing
- *    or named by a path, the tree was not clean, the commit is not the checkout's, the lane ran on
+ *    or named by a path, one report is named for two suite files, a report is of a file of the same
+ *    name in another package, a file's vitest run did not exit 0, the tree was not clean, the commit is not the checkout's, the lane ran on
  *    another platform or an older Node, the lane did not run as the runtime role, or the release
- *    manifest is for another version, another commit or another target, or is not canonical;
+ *    manifest is for another version, another commit or another target, carries a package of
+ *    another version, or is not canonical;
  *  - a backend is claimed only when every evidence file of its matrix row passed;
  *  - every fixed protection of the receipt schema is claimed through a named check, and every check
  *    named exists;
@@ -102,6 +104,7 @@ function laneDir(change = {}) {
       files: c.suites.map((s) => ({
         file: `${s.dir}/${s.file}`,
         verdict: 'passed',
+        exit: 0,
         report: reports.get(`${s.dir}/${s.file}`),
       })),
     })),
@@ -302,6 +305,80 @@ try {
     }
   });
 
+  await check('one suite file’s report never stands in for another’s', async () => {
+    // The summary names one passing report for every cross-process cancel file, whose own reports
+    // failed.
+    const cancel = CHECKS.find((c) => c.id === 'cross-process-cancel');
+    const hosting = 'packages/app/cli/src/certification/hosting-checks.test.ts';
+    const failing = (suite) => ({
+      testResults: [
+        {
+          name: `/repo/${suite.dir}/${suite.file}`,
+          status: 'failed',
+          assertionResults: [{ title: 'proves it', status: 'failed' }],
+        },
+      ],
+    });
+    const forged = laneDir({
+      report: (suite) =>
+        cancel.suites.some((x) => x.dir === suite.dir && x.file === suite.file)
+          ? failing(suite)
+          : undefined,
+      summary: (s) => {
+        const reportOfHosting = s.checks
+          .flatMap((c) => c.files)
+          .find((f) => f.file === hosting).report;
+        return {
+          ...s,
+          checks: s.checks.map((c) =>
+            c.id === 'cross-process-cancel'
+              ? { ...c, files: c.files.map((f) => ({ ...f, report: reportOfHosting })) }
+              : c,
+          ),
+        };
+      },
+    });
+    await refused({ lane: forged }, /is named for both .*hosting-checks.test.ts and /);
+    // A report of the file of the same name in another package is not that file's report.
+    const deepgram = 'packages/adapters/deepgram/src/hanging-provider.test.ts';
+    const openai = 'packages/adapters/openai/src/hanging-provider.test.ts';
+    await refused(
+      {
+        lane: laneDir({
+          report: (suite) =>
+            `${suite.dir}/${suite.file}` === deepgram
+              ? passingReport({ ...suite, dir: 'packages/adapters/openai' })
+              : undefined,
+        }),
+      },
+      new RegExp(`${deepgram} did not pass in its own report \\(the file was not run\\)`),
+    );
+    assert.notEqual(deepgram, openai);
+  });
+
+  await check('a file whose vitest run did not exit 0 refuses', async () => {
+    for (const exit of [1, null, undefined]) {
+      await refused(
+        {
+          lane: laneDir({
+            summary: (s) => ({
+              ...s,
+              checks: s.checks.map((c) => ({
+                ...c,
+                files: c.files.map((f) =>
+                  f.file === 'packages/kernel/platform/src/outbound-guard.test.ts'
+                    ? { ...f, exit }
+                    : f,
+                ),
+              })),
+            }),
+          }),
+        },
+        /outbound-guard.test.ts ended with vitest exit status (1|unknown), an error outside its tests/,
+      );
+    }
+  });
+
   await check('a missing report, or one named by a path, refuses', async () => {
     await refused(
       {
@@ -393,6 +470,15 @@ try {
           })),
         },
         /does not list the target the lane ran on/,
+      );
+      await refused(
+        {
+          manifest: releaseManifest((m) => ({
+            ...m,
+            packages: m.packages.map((p, i) => (i === 0 ? { ...p, version: '9.9.9' } : p)),
+          })),
+        },
+        /a package of the release manifest has another version than the release/,
       );
       await refused(
         { manifest: releaseManifest((m) => `${JSON.stringify(m, null, 2)}\n`) },

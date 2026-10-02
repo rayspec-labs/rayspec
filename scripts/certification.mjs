@@ -16,8 +16,10 @@
  * workflow engines never share the database at once.
  *
  * THE VERDICT. A check passes only when every one of its suite files ran, every test in it passed,
- * and none was skipped: a skipped test is not evidence, so it fails the check (and the lane) by name.
- * A file that reports no test at all fails too. The lane exits 1 when any check failed.
+ * none was skipped, and vitest itself exited 0: a skipped test is not evidence, so it fails the check
+ * (and the lane) by name, and so does a file whose run ended with an error outside its tests (an
+ * unhandled rejection, a crash) even when its report lists every test as passed. A file that reports
+ * no test at all fails too. The lane exits 1 when any check failed.
  *
  * NO PAID PROVIDER. Every provider credential and the live-test switches are set empty in the
  * environment the suites see, so neither the environment nor a repository `.env` can make a suite
@@ -31,12 +33,12 @@
  * server's major on PATH or Docker. Prints one JSON summary on stdout (and to `--out`); each file's
  * vitest output and JSON report go to `--log-dir` (default a new temporary directory, which is kept
  * and named), and the summary, written there as `summary.json` too, names each report by its file
- * name in that directory. The summary also records
+ * name in that directory and records the exit status of the vitest run that wrote it. The summary also records
  * what the lane ran on (`laneFacts`): the commit, whether the tree was clean, the runtime version and
  * the platform. `scripts/managed-receipt.mjs` makes the managed-posture receipt from that directory.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -121,7 +123,7 @@ export const CHECKS = [
   {
     id: 'upload-limits',
     check:
-      'request bodies and uploads are bounded in size, and an upload cannot leave its tenant’s blob space',
+      'JSON request bodies and file uploads are bounded in size, and an upload cannot leave its tenant’s blob space; a stream ingest body is capped by the host’s reverse proxy',
     suites: [
       CERT('hosting-checks.test.ts'),
       SUITE('packages/compose/api-auth', 'src/http/bounded-body.test.ts'),
@@ -309,14 +311,16 @@ export function suitesOf(checks) {
 
 /**
  * The verdict on one file from vitest's JSON report: `passed` only when the file ran at least one test
- * and every test passed. A skipped, pending or todo test is not evidence.
+ * and every test passed. A skipped, pending or todo test is not evidence. `path` is the file's path in
+ * the repository (`<dir>/<file>`): a report entry counts only when it names that path, so a report of
+ * a file of the same name in another package is never taken for it.
  */
-export function judgeReport(report, file, notInThisLane = []) {
+export function judgeReport(report, path, notInThisLane = []) {
   if (report === null || typeof report !== 'object' || !Array.isArray(report.testResults)) {
     return { verdict: 'failed', passed: 0, failed: 0, skipped: 0, reason: 'no test report' };
   }
   const results = report.testResults.filter(
-    (r) => typeof r.name === 'string' && r.name.endsWith(file),
+    (r) => typeof r.name === 'string' && (r.name === path || r.name.endsWith(`/${path}`)),
   );
   const all = results.flatMap((r) => r.assertionResults ?? []);
   // A test skipped by design in this lane, named by exact title, is left out of the count; it must
@@ -346,6 +350,30 @@ export function judgeReport(report, file, notInThisLane = []) {
     skipped,
     reason,
     ...(declared.size === 0 ? {} : { notInThisLane }),
+  };
+}
+
+/**
+ * The verdict on one file from its report and how its vitest process ended. vitest exits 1 for an
+ * error outside every test (an unhandled rejection or exception, a crash in a worker) while its JSON
+ * report still lists each test as passed, so a report that passed counts only when the process exited
+ * 0, by itself, and could be started at all.
+ */
+export function judgeRun(verdict, run) {
+  const exit = typeof run.status === 'number' ? run.status : null;
+  const signal = run.signal ?? null;
+  let reason = null;
+  if (run.error) reason = `vitest could not be run (${run.error.code ?? run.error.message})`;
+  else if (signal !== null) reason = `vitest was ended by ${signal}`;
+  else if (exit !== 0) {
+    reason = `vitest exited with status ${exit}: an error outside the tests, such as an unhandled rejection`;
+  }
+  const failedRun = reason !== null && verdict.verdict === 'passed';
+  return {
+    ...verdict,
+    ...(failedRun ? { verdict: 'failed', reason } : {}),
+    exit,
+    ...(signal === null ? {} : { signal }),
   };
 }
 
@@ -396,10 +424,20 @@ export function parseCertificationArgs(argv) {
   };
 }
 
-function runFile(suite, env, logDir, index) {
-  const cwd = join(REPO, suite.dir);
-  const name = `${String(index).padStart(2, '0')}-${suite.dir.replaceAll('/', '_')}-${suite.file.replaceAll('/', '_')}`;
+/** The name a suite file's output and report carry in the log directory. */
+export function reportNameOf(suite, index) {
+  return `${String(index).padStart(2, '0')}-${suite.dir.replaceAll('/', '_')}-${suite.file.replaceAll('/', '_')}`;
+}
+
+/**
+ * Run one suite file and judge it. A report left in the log directory by an earlier run is removed
+ * first, so a run that writes none is judged as having no report, never by the old one.
+ */
+export function runFile(suite, env, logDir, index, repo = REPO) {
+  const cwd = join(repo, suite.dir);
+  const name = reportNameOf(suite, index);
   const reportPath = join(logDir, `${name}.json`);
+  rmSync(reportPath, { force: true });
   const args = [
     'exec',
     'vitest',
@@ -426,8 +464,7 @@ function runFile(suite, env, logDir, index) {
     report = null;
   }
   return {
-    ...judgeReport(report, suite.file, suite.notInThisLane ?? []),
-    exit: run.status,
+    ...judgeRun(judgeReport(report, `${suite.dir}/${suite.file}`, suite.notInThisLane ?? []), run),
     seconds: Math.round((Date.now() - started) / 1000),
     log: join(logDir, `${name}.log`),
     report: `${name}.json`,

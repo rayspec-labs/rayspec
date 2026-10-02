@@ -37,6 +37,13 @@ release/
 # specs — those live under `examples/` with their own names and are unaffected.
 /rayspec.yaml
 
+# The certification lane's log directory, summary and receipt as docs/hardened-posture.md writes
+# them in the repository root. The lane records whether the working tree was clean, so a second run
+# must not find the first run's output there as untracked files.
+/certification-logs/
+/certification.json
+/managed-receipt.json
+
 # Caches
 .turbo/
 .cache/

@@ -11,8 +11,10 @@
  *     `summary.json` and the vitest JSON report of every suite file. The summary must say the lane
  *     passed, and must hold every check this checkout's lane defines (`CHECKS`), each with exactly the
  *     suite files the check names. The summary's verdicts are not taken on trust: every report is read
- *     again and judged again by the lane's own rule (`judgeReport`): a failed, skipped or missing test
- *     refuses the receipt, naming the check and the file.
+ *     again and judged again by the lane's own rule (`judgeReport`), against the one suite file it is
+ *     named for: a failed, skipped or missing test refuses the receipt, naming the check and the file,
+ *     and so does one report named for two suite files. The report cannot show an error outside the
+ *     tests, so a file whose vitest run the summary records as not exiting 0 refuses it too.
  *   - THE CODE. The lane must have run on a clean working tree, at the commit this checkout is at, so
  *     the checks, the supported-backend matrix and the vocabulary read here are the ones it tested.
  *   - THE TARGET. A receipt names only linux x64 targets on Node 22.21 or later; a lane run anywhere
@@ -25,8 +27,9 @@
  * WHAT IT CLAIMS. Each fixed protection of the schema is claimed only through `ATTESTATIONS`, which
  * names the lane checks that establish it. `supportedBackends` lists the agent backends the
  * supported-backend matrix of `@rayspec/server` allows under the managed posture AND whose every
- * evidence file passed in the lane; `capabilities` lists the vocabulary's available ids that the
- * posture allows, leaving out a provider capability whose matrix row was not proven the same way.
+ * evidence file passed in the lane; `capabilities` is not a tested claim: it is the
+ * vocabulary's list of available ids that the managed posture allows (the contract's definition of
+ * the field), less any provider capability whose matrix row was not proven the same way.
  * `evidence` lists every report the claims rest on (by file name in the lane directory, with its
  * SHA-256) and the summary itself; `residualRisks` is `scripts/lib/residual-risks.mjs`, which
  * docs/threat-model.md states word for word. The receipt is written as canonical JSON and validated
@@ -258,7 +261,10 @@ export function establishLane(laneDir, repoHead) {
 
   const passedFiles = new Set();
   const evidence = [];
+  // One judgement per report and suite file, and one suite file per report: a report named for two
+  // files would let one file's run stand in for another's.
   const judged = new Map();
+  const reportOf = new Map();
   for (const c of CHECKS) {
     const ran = summary.checks.find((x) => x?.id === c.id);
     if (ran === undefined) refuse(`the lane did not run the check ${c.id}`);
@@ -277,7 +283,19 @@ export function establishLane(laneDir, repoHead) {
       if (typeof entry.report !== 'string' || !REPORT_NAME.test(entry.report)) {
         refuse(`${c.id}: ${path} names no report in the lane directory`);
       }
-      let digest = judged.get(entry.report);
+      const other = reportOf.get(entry.report);
+      if (other !== undefined && other !== path) {
+        refuse(`the report ${entry.report} is named for both ${other} and ${path}`);
+      }
+      reportOf.set(entry.report, path);
+      if (entry.exit !== 0) {
+        refuse(
+          `${c.id}: ${path} ended with vitest exit status ${entry.exit ?? 'unknown'}, an error ` +
+            'outside its tests',
+        );
+      }
+      const key = `${entry.report}\0${path}`;
+      let digest = judged.get(key);
       if (digest === undefined) {
         const bytes = readInput(join(laneDir, entry.report), `the report of ${path}`);
         let report = null;
@@ -286,12 +304,12 @@ export function establishLane(laneDir, repoHead) {
         } catch {
           report = null;
         }
-        const verdict = judgeReport(report, s.file, s.notInThisLane ?? []);
+        const verdict = judgeReport(report, path, s.notInThisLane ?? []);
         if (verdict.verdict !== 'passed') {
           refuse(`${c.id}: ${path} did not pass in its own report (${verdict.reason})`);
         }
         digest = sha256(bytes);
-        judged.set(entry.report, digest);
+        judged.set(key, digest);
       }
       passedFiles.add(path);
       evidence.push({ protection: c.id, reference: entry.report, sha256: digest });

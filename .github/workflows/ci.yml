@@ -663,6 +663,18 @@ jobs:
       - name: Certification lane
         run: pnpm test:certification --log-dir /tmp/certification-logs
 
+      # The lane directory is the whole evidence of the run: summary.json and every suite's report
+      # and output. Kept as a workflow artifact, passed or failed, so `pnpm receipt:managed` can be
+      # run on it for a linux x64 receipt, and a failure can be read without rerunning.
+      - name: Keep the certification lane directory
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: certification-lane
+          path: /tmp/certification-logs
+          if-no-files-found: error
+          retention-days: 30
+
   # ══════════════════════════════════════════════════════════════════════════════════════════════
   # LANE 3 — live providers (OPT-IN, non-blocking). Runs ONLY on a manual workflow_dispatch, so it
   # is never a required PR check and can never block a merge when live creds are absent. It calls
