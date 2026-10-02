@@ -189,8 +189,14 @@ async function main(argv) {
     await ctx?.dispose().catch(() => {});
     summary.seconds = Math.round((Date.now() - started) / 1000);
     if (!args.keep) {
+      // Deployment version directories are read-only; make them removable first. A directory that
+      // cannot be removed is reported, and does not hide the summary.
       spawnSync('chmod', ['-R', 'u+w', work]);
-      rmSync(work, { recursive: true, force: true });
+      try {
+        rmSync(work, { recursive: true, force: true, maxRetries: 3 });
+      } catch (err) {
+        summary.cleanup = `the work directory ${work} was not removed: ${err instanceof Error ? err.message : String(err)}`;
+      }
     }
   }
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
