@@ -38,13 +38,41 @@ describe("crontabParseError — the parse attempt through the scheduler's own pa
     expect(crontabParseError('0 3 * * * *')).toBeUndefined();
   });
 
-  it('reports a failure message for what the scheduler cannot parse (shorthand, 4-field, out-of-range)', () => {
-    // `@daily` / a 4-field expression die inside the parser with a bare TypeError; the seam turns
-    // that into a reported message instead of an unhandled throw.
-    expect(crontabParseError('@daily')).toBeTypeOf('string');
-    expect(crontabParseError('0 3 * *')).toBeTypeOf('string');
-    // An out-of-range field gets the parser's own field-level detail, passed through verbatim.
-    expect(crontabParseError('99 99 99 99 99')).toContain('99 is a invalid expression for minute');
+  it('names the field count when a shorthand or a short expression is all there is', () => {
+    // The parser dies on these with a bare TypeError about `replace`; none of that is passed on.
+    for (const [value, count] of [
+      ['@daily', '1 field;'],
+      ['0 3 * *', '4 fields;'],
+      ['every day', '2 fields;'],
+      ['', '0 fields;'],
+    ] as const) {
+      const detail = crontabParseError(value);
+      expect(detail).toContain(`it has ${count}`);
+      expect(detail).toContain('minute hour day-of-month month day-of-week');
+      expect(detail).not.toMatch(/replace|undefined|TypeError/);
+    }
+  });
+
+  it('names the field the scheduler refuses and its value, not the parser text', () => {
+    expect(crontabParseError('99 99 99 99 99')).toBe(
+      "its minute field '99' is not a value the scheduler accepts",
+    );
+    expect(crontabParseError('0 25 * * *')).toBe(
+      "its hour field '25' is not a value the scheduler accepts",
+    );
+    expect(crontabParseError('0 3 * * FOO')).toBe(
+      "its day-of-week field 'FOO' is not a value the scheduler accepts",
+    );
+    // The 6-field form starts with the second.
+    expect(crontabParseError('61 0 3 * * *')).toBe(
+      "its second field '61' is not a value the scheduler accepts",
+    );
+    expect(crontabParseError('0 0 3 32 * *')).toBe(
+      "its day-of-month field '32' is not a value the scheduler accepts",
+    );
+    for (const value of ['99 99 99 99 99', '0 3 * * FOO']) {
+      expect(crontabParseError(value)).not.toContain('invalid expression');
+    }
   });
 });
 

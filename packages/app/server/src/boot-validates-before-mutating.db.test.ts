@@ -451,7 +451,15 @@ ${handler}`,
         opts: withOpenAi,
         env: { RAYSPEC_CRON_TENANT_ID: '0d7e9a52-6c1b-4f0e-a7f3-2b9d8c4e5f60' },
         message:
-          /cron trigger 'every-minute' has the schedule 'every day', which the scheduler cannot parse/,
+          /cron trigger 'every-minute' has the schedule 'every day', which the scheduler does not accept: it has 2 fields;/,
+      },
+      {
+        name: 'bad-schedule-field.yaml',
+        spec: CRON_SPEC.replace("schedule: '* * * * *'", "schedule: '0 25 * * *'"),
+        opts: withOpenAi,
+        env: { RAYSPEC_CRON_TENANT_ID: '0d7e9a52-6c1b-4f0e-a7f3-2b9d8c4e5f60' },
+        message:
+          /cron trigger 'every-minute' has the schedule '0 25 \* \* \*', which the scheduler does not accept: its hour field '25' is not a value the scheduler accepts\./,
       },
       {
         name: 'other-backend.yaml',

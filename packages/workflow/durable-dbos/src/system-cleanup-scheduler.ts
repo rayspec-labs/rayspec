@@ -199,34 +199,63 @@ export class SystemCleanupScheduler {
   }
 }
 
+/** The fields of a crontab, in order, in the 5-field form and in the 6-field form. */
+const CRONTAB_FIELDS_5 = ['minute', 'hour', 'day-of-month', 'month', 'day-of-week'] as const;
+const CRONTAB_FIELDS_6 = ['second', ...CRONTAB_FIELDS_5] as const;
+
 /**
  * Attempt to parse a crontab through the scheduler's OWN parser, registering nothing — the boot-time
- * validation seam for `RAYSPEC_CLEANUP_SCHEDULE`. Returns `undefined` when the scheduler will accept
- * the expression, else the parser's own failure message (for the boot refusal to carry). DELIBERATELY
- * not a second cron grammar: at launch the DBOS scheduler runs the crontab through `TimeMatcher`'s
- * constructor, whose first act is this same `validateCrontab` — a parse ATTEMPT through that exact
- * function can never diverge from what the launch would do. Lives HERE because this package is BY
- * DESIGN the only one that imports `@dbos-inc/dbos-sdk` — the composition root calls this seam
- * instead of growing an SDK import.
+ * validation seam for `RAYSPEC_CLEANUP_SCHEDULE` and every cron trigger's schedule. Returns
+ * `undefined` when the scheduler will accept the expression, else a sentence that names what is
+ * wrong with it in the operator's terms: how many fields it has when that is the problem, otherwise
+ * the field the scheduler refuses and its value. The parser's own text is never passed on: for a
+ * shorthand or a short expression it is a bare `TypeError` about reading `replace` of `undefined`,
+ * and for a bad field it is the SDK's wording, which changes with the SDK.
+ *
+ * DELIBERATELY not a second cron grammar: at launch the DBOS scheduler runs the crontab through
+ * `TimeMatcher`'s constructor, whose first act is this same `validateCrontab`, so a parse ATTEMPT
+ * through that exact function can never diverge from what the launch would do. The field is found
+ * the same way: each field alone, every other field `*`, through the same parser; the first one it
+ * refuses is named. Lives HERE because this package is BY DESIGN the only one that imports
+ * `@dbos-inc/dbos-sdk` — the composition root calls this seam instead of growing an SDK import.
  *
  * THE LOAD IS OUTSIDE THE TRY, deliberately. Everything this function RETURNS is attributed to the
- * caller's value: the composition root interpolates it into `RAYSPEC_CLEANUP_SCHEDULE='<value>' is
- * not a crontab the scheduler can parse (<detail>)`. Loading the parser inside the try would put an
- * SDK-layout failure — a moved `scheduler/crontab.js` after an upgrade — into that slot, refusing a
- * VALID crontab with text blaming the operator. So a load failure propagates as the loader's own
- * error instead (still fail-closed: the boot aborts either way, now naming the real fault), and only
- * the PARSER's verdict is ever returned. Pinned by `crontab-parser-load.unit.test.ts`, which stubs
- * the SDK resolve into a failure and asserts the shipped default crontab throws rather than
- * returning a detail.
+ * caller's value: the composition root interpolates it into its refusal of that value. Loading the
+ * parser inside the try would put an SDK-layout failure — a moved `scheduler/crontab.js` after an
+ * upgrade — into that slot, refusing a VALID crontab with text blaming the operator. So a load
+ * failure propagates as the loader's own error instead (still fail-closed: the boot aborts either
+ * way, now naming the real fault), and only the PARSER's verdict is ever returned. Pinned by
+ * `crontab-parser-load.unit.test.ts`, which stubs the SDK resolve into a failure and asserts the
+ * shipped default crontab throws rather than returning a detail.
  */
 export function crontabParseError(crontab: string): string | undefined {
   const { validateCrontab } = loadSchedulerInternals();
-  try {
-    validateCrontab(crontab);
-    return undefined;
-  } catch (e) {
-    return e instanceof Error ? e.message : String(e);
+  const parses = (expression: string): boolean => {
+    try {
+      validateCrontab(expression);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (parses(crontab)) return undefined;
+  const fields = crontab.trim() === '' ? [] : crontab.trim().split(/\s+/);
+  if (fields.length < CRONTAB_FIELDS_5.length) {
+    return (
+      `it has ${fields.length} field${fields.length === 1 ? '' : 's'}; a schedule has 5 ` +
+      `(${CRONTAB_FIELDS_5.join(' ')}), or 6 with a leading second`
+    );
   }
+  const names: readonly string[] =
+    fields.length === CRONTAB_FIELDS_5.length ? CRONTAB_FIELDS_5 : CRONTAB_FIELDS_6;
+  for (const [i, value] of fields.entries()) {
+    const alone = fields.map((f, j) => (j === i ? f : '*')).join(' ');
+    if (!parses(alone)) {
+      const name = names[i] ?? `field ${i + 1}`;
+      return `its ${name} field '${value}' is not a value the scheduler accepts`;
+    }
+  }
+  return 'each of its fields is accepted on its own, but the scheduler refuses them together';
 }
 
 /**

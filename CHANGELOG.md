@@ -922,6 +922,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A schedule the scheduler refuses is refused in the operator's terms.** The boot refusal of a cron
+  trigger's `schedule` and of `RAYSPEC_CLEANUP_SCHEDULE` quoted the scheduler's own parser text — for
+  a shorthand such as `@daily` or a short expression a bare `Cannot read properties of undefined
+  (reading 'replace')`. It now names the trigger or the variable, the value, and either how many
+  fields the value has (a schedule has five, or six with a leading second) or the field the
+  scheduler refuses and its value: `its hour field '25' is not a value the scheduler accepts`. The
+  check still goes through the scheduler's own parser, field by field.
+
 - **A registration whose organization is refused leaves no account behind.** `POST /v1/auth/register`
   with an `orgName` and the operator's `POST /v1/auth/bootstrap-tenant` created the user first and
   the organization in a second transaction, so a refused organization — in single-tenant mode, a

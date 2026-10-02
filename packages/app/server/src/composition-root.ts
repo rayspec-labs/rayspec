@@ -1748,9 +1748,10 @@ export function deriveDbosSystemUrl(databaseUrl: string): string {
  * Resolve the system cleanup knobs from env (always returns a complete, safe-default object).
  *
  *  - RAYSPEC_CLEANUP_SCHEDULE — the daily crontab (default `0 3 * * *` = 3am daily). Blank ⇒ default.
- *    Fail-closed: an expression the scheduler cannot parse ABORTS the boot here, naming the variable
- *    and the value — validated through the scheduler's OWN parser (the `crontabParseError` seam), so
- *    an unparseable value never reaches the worker launch, where the parser's bare error names neither.
+ *    Fail-closed: an expression the scheduler cannot parse ABORTS the boot here, naming the variable,
+ *    the value and the field the scheduler refuses — validated through the scheduler's OWN parser (the
+ *    `crontabParseError` seam), so an unparseable value never reaches the worker launch, where the
+ *    parser's bare error names none of them.
  *  - RAYSPEC_GDPR_PURGE_ENABLED — the OPERATOR gate, fail-closed: `true` ONLY for the exact string
  *    "true". Any other value (unset, "1", "yes", "TRUE", " true ") ⇒ DISABLED. This is deliberately
  *    strict (no truthy-coercion) so an ambiguous/typo'd value never silently enables irreversible
@@ -1767,8 +1768,8 @@ export function parseCleanupSettings(env: NodeJS.ProcessEnv): CleanupSettings {
   const scheduleError = crontabParseError(schedule);
   if (scheduleError !== undefined) {
     throw new BootConfigError(
-      `Boot aborted — RAYSPEC_CLEANUP_SCHEDULE='${schedule}' is not a crontab the scheduler can ` +
-        `parse (${scheduleError}). It is the crontab the daily system cleanup fires on: a standard ` +
+      `Boot aborted — RAYSPEC_CLEANUP_SCHEDULE='${schedule}' is not a schedule the scheduler ` +
+        `accepts: ${scheduleError}. It is the crontab the daily system cleanup fires on: a standard ` +
         `5-field expression or the 6-field form with a leading seconds field (default '0 3 * * *' ` +
         `= 3am daily); shorthand such as '@daily' is not supported. Fail-closed (an unparseable ` +
         `schedule must never reach the worker launch — it would abort there with the parser's ` +
@@ -3731,8 +3732,8 @@ async function preflightDeclaredSpec(
       if (scheduleError !== undefined) {
         throw new BootConfigError(
           `Boot aborted — cron trigger '${trigger.name}' has the schedule '${trigger.schedule}', ` +
-            `which the scheduler cannot parse (${scheduleError}). A schedule is a standard 5-field ` +
-            'crontab or the 6-field form with a leading seconds field; shorthand such as ' +
+            `which the scheduler does not accept: ${scheduleError}. A schedule is a standard ` +
+            '5-field crontab or the 6-field form with a leading seconds field; shorthand such as ' +
             "'@daily' is not supported. Fail-closed.",
         );
       }
