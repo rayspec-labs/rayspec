@@ -61,8 +61,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment state directory (`openStateDirectory`, `StateDirectory`, `readProtectedFile`) and
   `installBundleModuleResolution`. `assembleServer` accepts `beforeSchemaChange`, run after the
   boot validated everything and before it changes any schema, which may report the product change
-  it applied (`BeforeSchemaChangeResult`, shown on the boot banner), and `ensureRuntimeControlState`
-  accepts the binding revision key a first apply stores.
+  it applied (`BeforeSchemaChangeResult`, shown on the boot banner) and is handed what the boot
+  resolved (`BootFacts`: the blob backend), and `ensureRuntimeControlState` accepts the binding
+  revision key a first apply stores. `applyBundle` takes that blob backend and records it with the
+  application it activates; `readRecordedBlobBackend` and `parseBlobBackendRecord` read it back.
 
 - **`rayspec pack`: an application bundle from an application that is already built.**
   `rayspec pack --spec <path> --output <file.ray>` writes one `.ray` application bundle: the
@@ -1099,6 +1101,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,
   `SHADOW_DATABASE_URL` in the process environment. A YAML spec deploys exactly as before.
+- **The platform chain gains `0017_runtime_control_blob_backend`**, one nullable column on the
+  runtime-control state row. Every bundle deploy fills it for the application it activates; until
+  the first one with this release it is empty, and `rayspec export` of an application that loads
+  extensions is refused (`unsupported-blob-adapter`) until the deployment has been deployed once with
+  this release.
 - **A bundle pins its runtime.** After upgrading the CLI, repack the application with the new
   release before deploying it; a bundle packed for another runtime version is refused with
   `RAY_RUNTIME_UNSUPPORTED`.

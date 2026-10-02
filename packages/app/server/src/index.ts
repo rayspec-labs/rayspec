@@ -91,6 +91,12 @@ export {
   type BindRefusalPrefix,
   bindRefusalMessage,
 } from './bind-refusal.js';
+export {
+  type BlobBackendRecord,
+  parseBlobBackendRecord,
+  type RecordedBlobBackend,
+  readRecordedBlobBackend,
+} from './blob-backend-record.js';
 // The boot's ENVIRONMENT DEMANDS — the single source of truth the boot refusals are composed from and
 // the read-only `rayspec deploy --check-env` report is enumerated from. Re-exported here for embedders,
 // but the CLI imports `checkBootEnv` through the `@rayspec/server/boot-env` SUBPATH instead: that module
@@ -155,6 +161,7 @@ export {
   type BeforeSchemaChangeResult,
   BootConfigError,
   type BootedServer,
+  type BootFacts,
   checkDatabaseIsolation,
   type DatabaseIsolationStatus,
   DEFAULT_PORT,

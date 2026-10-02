@@ -819,7 +819,7 @@ async function deploy(
     { json: false },
     {
       report,
-      beforeSchemaChange: async (bootDb, tenantIsolation) => {
+      beforeSchemaChange: async (bootDb, tenantIsolation, facts) => {
         hooks.applying();
         const applied = await server.applyBundle({
           db: bootDb,
@@ -836,6 +836,7 @@ async function deploy(
           migratePlatform: () => server.applyMigrations(bootDb),
           operationId: options.operationId,
           ...(tenantIsolation !== undefined ? { tenantIsolation } : {}),
+          ...(facts.blobBackend !== undefined ? { blobBackend: facts.blobBackend } : {}),
         });
         if (!applied.envelope.ok) throw new server.RuntimeApplyError(applied.envelope.errors);
         state.environmentRevision = applied.envelope.data?.environmentRevision ?? 0;

@@ -60,6 +60,7 @@ import {
   runApply,
   type StateObservers,
 } from './apply-operation.js';
+import type { BlobBackendRecord } from './blob-backend-record.js';
 import { productDdlStep, schemaObservers } from './deploy-apply.js';
 import type { StateDirectory } from './deployment-state.js';
 import { StateDirectoryError, verifyVersion } from './deployment-state.js';
@@ -197,6 +198,11 @@ export interface ApplyBundleOptions {
    * transaction.
    */
   tenantIsolation?: { runtimeRole: string };
+  /**
+   * The blob backend the boot resolved for this application (blob-backend-record.ts), recorded with
+   * the application it belongs to. Absent: recorded as unknown (NULL).
+   */
+  blobBackend?: BlobBackendRecord;
 }
 
 export interface AppliedBundle {
@@ -402,7 +408,8 @@ export async function applyBundle(options: ApplyBundleOptions): Promise<AppliedB
         await tx.unsafe(
           `UPDATE runtime_control_state
               SET deployment_id = $1, application_id = $2, application_version = $3,
-                  application_digest = $4, active_grants = $5::jsonb, updated_at = now()
+                  application_digest = $4, active_grants = $5::jsonb,
+                  blob_backend = $6::jsonb, updated_at = now()
             WHERE id = 1`,
           [
             options.deploymentId,
@@ -410,6 +417,7 @@ export async function applyBundle(options: ApplyBundleOptions): Promise<AppliedB
             manifest.application.version,
             options.bundleSha256,
             JSON.stringify(grants),
+            options.blobBackend === undefined ? null : JSON.stringify(options.blobBackend),
           ],
         );
         return { digest: options.bundleSha256 };

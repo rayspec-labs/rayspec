@@ -11,7 +11,7 @@ the application database:
 
 | Table | Holds |
 | --- | --- |
-| `runtime_control_state` | one row: the environment revision, the source fence and its epoch, the operation lease (holder, fencing epoch, expiry), the binding revision key, the product schema digest the last apply left |
+| `runtime_control_state` | one row: the environment revision, the source fence and its epoch, the operation lease (holder, fencing epoch, expiry), the binding revision key, the product schema digest the last apply left, the active application and the blob backend its boot resolved |
 | `runtime_control_receipts` | append-only receipts of every operation that changed the environment: who, what, each step's start and finish, the outcome |
 | `product_migration_ledger` | append-only, one row per applied product schema change: the DDL and its SHA-256, the product schema digest before and after, the schema description after, the declared stores, the operation that applied it |
 
@@ -105,7 +105,7 @@ deploy. Its steps, in order:
 | `stage-bundle` | verifies the version directory the bundle was extracted into against the manifest's inventory | re-runnable |
 | `platform-migrations` | the platform migration chain, when the database is behind this runtime | read from the platform ledger |
 | `product-ddl` | the product change regenerated from the ledger and the bundled spec, its ledger row and the finish receipt in one transaction | rolled back with its transaction unless its finish receipt committed |
-| `record-application` | the deployment id, the application, its digest and its grants in `runtime_control_state` | committed with its finish receipt |
+| `record-application` | the deployment id, the application, its digest, its grants and the blob backend the boot resolved for it (the platform's fs store, none, or the extension that provides one) in `runtime_control_state` | committed with its finish receipt |
 | `activate` | replaces `active.json` in the state directory in one rename | re-runnable |
 
 The active version switches last, so a deploy that stops before it leaves the previous version
