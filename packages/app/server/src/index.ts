@@ -196,6 +196,7 @@ export {
   type StaticServerConfig,
   type SupervisedSchemaWork,
   UNSUPERVISED_MANAGED_MESSAGE,
+  UNSUPERVISED_ROLE_SEPARATION_WARNING,
   validateInjectedSpec,
 } from './composition-root.js';
 // The legacy YAML deploy's schema changes, each run as an apply.

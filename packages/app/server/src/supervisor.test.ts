@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DeployError } from '@rayspec/api-auth';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { BootConfigError } from './boot-config-error.js';
 import type { ServerConfig } from './composition-root.js';
 import { RuntimeApplyError } from './deploy-apply.js';
@@ -306,6 +306,39 @@ describe('guardSupervisorImports', () => {
     const out = JSON.parse(run.stdout) as { guarded: string; after: boolean };
     expect(out.guarded).toMatch(/does not load application code/);
     expect(out.after).toBe(true);
+  });
+});
+
+describe('an in-process boot handed the migration connection', () => {
+  // The real composition root: the suites' setup names every boot of theirs a test harness.
+  const boot = async () =>
+    (await vi.importActual<typeof import('./composition-root.js')>('./composition-root.js'))
+      .assembleServer;
+  const config = {
+    migrationDatabaseUrl: MIGRATION,
+    databaseUrl: 'postgres://runtime:r@127.0.0.1:1/app',
+    hostingPosture: 'local',
+  } as ServerConfig;
+
+  it('warns outside the managed posture that the application code can reach the migration role', async () => {
+    const assembleServer = await boot();
+    const { UNSUPERVISED_ROLE_SEPARATION_WARNING } = await import('./composition-root.js');
+    const warned: string[] = [];
+    // The configuration is not one that boots: only what the boot says before it refuses counts.
+    await assembleServer(config, { bootWarn: (line) => warned.push(line) }).catch(() => {});
+    expect(warned).toContain(UNSUPERVISED_ROLE_SEPARATION_WARNING);
+    expect(UNSUPERVISED_ROLE_SEPARATION_WARNING).toMatch(/rayspec deploy.*rayspec-serve/);
+
+    const quiet: string[] = [];
+    await assembleServer(
+      { ...config, migrationDatabaseUrl: undefined },
+      { bootWarn: (line) => quiet.push(line) },
+    ).catch(() => {});
+    await assembleServer(config, {
+      bootWarn: (line) => quiet.push(line),
+      unsupervisedPrivilege: 'test-harness',
+    }).catch(() => {});
+    expect(quiet).not.toContain(UNSUPERVISED_ROLE_SEPARATION_WARNING);
   });
 });
 

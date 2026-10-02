@@ -490,6 +490,17 @@ export const UNSUPERVISED_MANAGED_MESSAGE =
   "application's code, so that code could reach the migration role. Start the deployment with " +
   '`rayspec deploy` or `rayspec-serve`.';
 
+/**
+ * The warning of an in-process boot (a wrapper that calls `assembleServer` itself, such as
+ * examples/local-boot) handed the migration connection outside the managed posture.
+ */
+export const UNSUPERVISED_ROLE_SEPARATION_WARNING =
+  '[rayspec] WARNING — this boot holds the migration connection in the process that imports the ' +
+  "application's code, so that code can reach the migration role and lift the export fence. Only " +
+  '`rayspec deploy` and `rayspec-serve` keep it in a supervisor that never imports the application; ' +
+  'run a wrapper that boots in process with a single role (no RAYSPEC_MIGRATION_DATABASE_URL), or ' +
+  'only with code you trust with that role.';
+
 /** A built app + the metadata the entrypoint logs in its boot banner. */
 export interface BootedServer {
   /** The assembled Hono app (auth routes + OIDC mount + optional declared routes + /health). */
@@ -2672,8 +2683,9 @@ async function assembleServerWith(
     schemaWork?: SupervisedSchemaWork;
     /**
      * Test suites only. Under the managed posture a boot that holds the migration connection in this
-     * process is refused (`UNSUPERVISED_MANAGED_MESSAGE`); a suite that boots in process names itself
-     * here to be let through.
+     * process is refused (`UNSUPERVISED_MANAGED_MESSAGE`), and under any other it warns
+     * (`UNSUPERVISED_ROLE_SEPARATION_WARNING`); a suite that boots in process names itself here to be
+     * let through without either.
      */
     unsupervisedPrivilege?: 'test-harness';
   },
@@ -2688,6 +2700,14 @@ async function assembleServerWith(
     opts.unsupervisedPrivilege !== 'test-harness'
   ) {
     throw new BootConfigError(UNSUPERVISED_MANAGED_MESSAGE);
+  }
+  // Under any other posture such a boot proceeds as it always did, and says what it holds.
+  if (
+    config.migrationDatabaseUrl !== undefined &&
+    opts.schemaWork === undefined &&
+    opts.unsupervisedPrivilege !== 'test-harness'
+  ) {
+    (opts.bootWarn ?? consoleWarn)(UNSUPERVISED_ROLE_SEPARATION_WARNING);
   }
 
   // Put a proxy-aware global dispatcher back BEFORE anything in this process can issue a model call.
