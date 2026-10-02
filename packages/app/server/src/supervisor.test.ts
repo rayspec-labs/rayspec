@@ -5,12 +5,13 @@
  * speaks the channel by hand shows the protocol refusal and the ending of a real process.
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DeployError } from '@rayspec/api-auth';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { BootConfigError } from './boot-config-error.js';
 import type { ServerConfig } from './composition-root.js';
 import { RuntimeApplyError } from './deploy-apply.js';
@@ -21,18 +22,32 @@ import {
   privilegedSecretValues,
   refusalError,
   SchemaSteps,
+  type SuperviseOptions,
   SupervisorProtocolError,
   sameUserConditions,
   serializeRefusal,
   superviseServing,
   supervisorEnding,
 } from './supervisor.js';
-import { reexecWithoutPrivilegedConnections, takeSupervisorHandoff } from './supervisor-handoff.js';
+import { takeSupervisorHandoff } from './supervisor-handoff.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
 const PASSWORD = ['long', 'enough', 'password'].join('-');
 const MIGRATION = `postgres://migrator:${PASSWORD}@127.0.0.1:1/app`;
+const SNAPSHOT_PASSWORD = ['other', 'snapshot', 'password'].join('-');
+const SNAPSHOT = `postgres://snapshotter:${SNAPSHOT_PASSWORD}@127.0.0.1:1/app`;
+
+const temporary: string[] = [];
+/** A temporary directory, removed when the file ends. */
+function temporaryDirectory(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temporary.push(dir);
+  return dir;
+}
+afterAll(() => {
+  for (const dir of temporary) rmSync(dir, { recursive: true, force: true });
+});
 
 describe('parseChildMessage', () => {
   const request = (fields: Record<string, unknown>) => ({
@@ -78,7 +93,10 @@ describe('parseChildMessage', () => {
 });
 
 describe('childEnvironment', () => {
-  const secrets = privilegedSecretValues({ RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION });
+  const secrets = privilegedSecretValues({
+    RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION,
+    RAYSPEC_SNAPSHOT_DATABASE_URL: SNAPSHOT,
+  });
 
   it('drops the connections, their file forms and the handoff, and turns .env loading off', () => {
     const env = childEnvironment(
@@ -101,16 +119,22 @@ describe('childEnvironment', () => {
   });
 
   it('refuses a privileged connection or its password under another name, naming the variable only', () => {
-    for (const value of [MIGRATION, `prefix-${PASSWORD}`]) {
+    for (const value of [
+      MIGRATION,
+      `prefix-${PASSWORD}`,
+      SNAPSHOT,
+      `prefix-${SNAPSHOT_PASSWORD}`,
+    ]) {
       let thrown: unknown;
       try {
         childEnvironment({ APP_SETTING: value }, secrets);
       } catch (err) {
         thrown = err;
       }
-      expect(thrown).toBeInstanceOf(BootConfigError);
+      expect(thrown, value).toBeInstanceOf(BootConfigError);
       expect((thrown as Error).message).toContain('APP_SETTING');
       expect((thrown as Error).message).not.toContain(PASSWORD);
+      expect((thrown as Error).message).not.toContain(SNAPSHOT_PASSWORD);
     }
   });
 });
@@ -124,23 +148,16 @@ describe('sameUserConditions', () => {
     `Limit                     Soft Limit           Hard Limit           Units\nMax core file size        0                    ${hard}                bytes\n`;
 
   it('holds for a handed-off connection on a kernel that keeps the supervisor private', () => {
-    let handoff: NodeJS.ProcessEnv = {};
-    try {
-      reexecWithoutPrivilegedConnections({
-        env: { RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION },
-        execPath: '/usr/bin/node',
-        execArgv: [],
-        argv: ['/usr/bin/node', 'bin.js'],
-        platform: 'darwin',
-        execve: (_file, _args, env) => {
-          handoff = env;
-          throw new Error('executed');
-        },
-      });
-    } catch {
-      // The fake execve stops here, as the real one replaces the image.
-    }
-    takeSupervisorHandoff({ serving: true }, handoff);
+    const handoff = join(temporaryDirectory('rayspec-handoff-'), 'handoff.json');
+    writeFileSync(
+      handoff,
+      JSON.stringify({
+        handoffFormatVersion: 1,
+        values: { RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION },
+      }),
+      { mode: 0o600 },
+    );
+    takeSupervisorHandoff({ serving: true }, { RAYSPEC_SUPERVISOR_HANDOFF: handoff });
     expect(
       sameUserConditions(
         { RAYSPEC_MIGRATION_DATABASE_URL: MIGRATION },
@@ -232,35 +249,45 @@ describe('supervisorEnding', () => {
   const base = { code: null, signal: null, served: true } as const;
 
   it('ends with the application process: its code, the forwarded signal, or 1 with a reason', () => {
-    expect(supervisorEnding({ ...base, code: 0 })).toEqual({ code: 0 });
-    expect(supervisorEnding({ ...base, code: 4, served: false })).toEqual({ code: 4 });
-    expect(supervisorEnding({ ...base, code: 0, forwarded: 'SIGTERM' })).toEqual({ code: 0 });
+    expect(supervisorEnding({ ...base, code: 0 })).toEqual({ code: 0, unreported: false });
+    expect(supervisorEnding({ ...base, code: 4, served: false })).toEqual({
+      code: 4,
+      unreported: false,
+    });
+    expect(supervisorEnding({ ...base, code: 0, forwarded: 'SIGTERM' })).toEqual({
+      code: 0,
+      unreported: false,
+    });
     expect(supervisorEnding({ ...base, signal: 'SIGTERM', forwarded: 'SIGTERM' })).toEqual({
       code: 1,
       signal: 'SIGTERM',
+      unreported: false,
     });
     expect(supervisorEnding({ ...base, signal: 'SIGKILL' })).toEqual({
       code: 1,
       reason: 'the application process ended (signal SIGKILL)',
+      unreported: true,
     });
+    // An exit after serving: the reason is printed, but the application process reported itself.
     expect(supervisorEnding({ ...base, code: 7 })).toEqual({
       code: 7,
       reason: 'the application process exited with code 7',
+      unreported: false,
     });
-    expect(supervisorEnding({ ...base, signal: 'SIGKILL', violation: 'x' }).reason).toMatch(
-      /broke the supervisor protocol \(x\)/,
-    );
-    expect(
-      supervisorEnding({ ...base, signal: 'SIGKILL', timedOutAfterMs: 40_000 }).reason,
-    ).toMatch(/did not stop within 40000 ms/);
+    const violation = supervisorEnding({ ...base, signal: 'SIGKILL', violation: 'x' });
+    expect(violation.reason).toMatch(/broke the supervisor protocol \(x\)/);
+    expect(violation.unreported).toBe(true);
+    const timedOut = supervisorEnding({ ...base, signal: 'SIGKILL', timedOutAfterMs: 40_000 });
+    expect(timedOut.reason).toMatch(/did not stop within 40000 ms/);
+    expect(timedOut.unreported).toBe(true);
   });
 });
 
 describe('guardSupervisorImports', () => {
   it('refuses a module in an application directory, in a real Node process', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'supervisor-guard-'));
+    const dir = temporaryDirectory('supervisor-guard-');
     writeFileSync(join(dir, 'canary.mjs'), 'export const loaded = true;\n');
-    const probe = join(mkdtempSync(join(tmpdir(), 'supervisor-guard-probe-')), 'probe.mjs');
+    const probe = join(temporaryDirectory('supervisor-guard-probe-'), 'probe.mjs');
     writeFileSync(
       probe,
       `import { guardSupervisorImports } from ${JSON.stringify(pathToFileURL(join(here, 'supervisor-guard.ts')).href)};\n` +
@@ -290,13 +317,13 @@ describe('superviseServing with a child that speaks the channel by hand', () => 
   } as ServerConfig;
 
   function child(source: string): string {
-    const dir = mkdtempSync(join(tmpdir(), 'supervised-child-'));
+    const dir = temporaryDirectory('supervised-child-');
     const file = join(dir, 'child.mjs');
     writeFileSync(file, source);
     return file;
   }
 
-  const supervise = (entry: string) =>
+  const supervise = (entry: string, overrides: Partial<SuperviseOptions> = {}) =>
     superviseServing({
       config,
       entry,
@@ -307,7 +334,21 @@ describe('superviseServing with a child that speaks the channel by hand', () => 
       drainMs: 1_000,
       updateMigrations: [],
       warn: () => {},
+      ...overrides,
     });
+
+  /** The text of `path` once it exists, or undefined when it does not within `ms`. */
+  async function written(path: string, ms: number): Promise<string | undefined> {
+    const deadline = Date.now() + ms;
+    for (;;) {
+      try {
+        return readFileSync(path, 'utf8');
+      } catch {
+        if (Date.now() > deadline) return undefined;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+    }
+  }
 
   it('stops a child that asks for something the protocol does not have', async () => {
     const exit = await supervise(
@@ -333,5 +374,79 @@ describe('superviseServing with a child that speaks the channel by hand', () => 
       ),
     );
     expect(exit).toMatchObject({ code: 3, signal: null, served: true });
+  });
+
+  it('kills a child that does not stop within its drain and the grace after a forwarded SIGTERM', async () => {
+    const ready = join(temporaryDirectory('supervised-ready-'), 'pid');
+    const entry = child(
+      "import { writeFileSync } from 'node:fs';\n" +
+        "process.on('SIGTERM', () => {});\n" +
+        `process.on('message', () => writeFileSync(${JSON.stringify(ready)}, String(process.pid)));\n` +
+        'setInterval(() => {}, 1000);\n',
+    );
+    const before = new Set(process.listeners('SIGTERM'));
+    const exiting = supervise(entry, { drainMs: 100, shutdownGraceMs: 200 });
+    // The supervisor's own SIGTERM listener, called as the signal would call it.
+    const forward = process.listeners('SIGTERM').find((listener) => !before.has(listener));
+    expect(forward).toBeDefined();
+    const pid = Number(await written(ready, 10_000));
+    expect(pid).toBeGreaterThan(0);
+    (forward as () => void)();
+    const exit = await Promise.race([
+      exiting,
+      new Promise<undefined>((r) => setTimeout(() => r(undefined), 10_000)),
+    ]);
+    if (exit === undefined) {
+      // Never killed: end the child here, so the failure leaves no process behind.
+      process.kill(pid, 'SIGKILL');
+      await exiting;
+    }
+    expect(exit).toMatchObject({ signal: 'SIGKILL', forwarded: 'SIGTERM', timedOutAfterMs: 300 });
+    const ending = supervisorEnding(exit as NonNullable<typeof exit>);
+    expect(ending).toMatchObject({ code: 1, unreported: true });
+    expect(ending.reason).toMatch(/did not stop within 300 ms/);
+  });
+
+  it('refuses to load a module from the application directories while it supervises', async () => {
+    const app = temporaryDirectory('supervised-app-');
+    const canary = join(app, 'canary.cjs');
+    writeFileSync(canary, 'module.exports = { loaded: true };\n');
+    const load = (): string => {
+      try {
+        return createRequire(import.meta.url)(canary).loaded === true ? 'loaded' : 'empty';
+      } catch (err) {
+        return (err as Error).message;
+      }
+    };
+    const exiting = supervise(child("process.on('message', () => process.exit(0));\n"), {
+      applicationDirectories: [app],
+    });
+    const during = load();
+    expect((await exiting).code).toBe(0);
+    expect(during).toMatch(/the supervisor does not load application code/);
+    // The guard goes with the child.
+    expect(load()).toBe('loaded');
+  });
+
+  it('refuses a managed boot while a same-user condition is open, and only warns under another posture', async () => {
+    const probe = {
+      platform: 'linux' as const,
+      read: (path: string) => (path.endsWith('ptrace_scope') ? '0\n' : undefined),
+    };
+    const entry = child("process.on('message', () => process.exit(0));\n");
+    const managed = supervise(entry, {
+      config: { ...config, hostingPosture: 'managed' },
+      sameUserProbe: probe,
+    });
+    await expect(managed).rejects.toBeInstanceOf(BootConfigError);
+    await expect(managed).rejects.toThrow(/managed hosting posture.*ptrace_scope/s);
+
+    const warnings: string[] = [];
+    const exit = await supervise(entry, {
+      sameUserProbe: probe,
+      warn: (line) => warnings.push(line),
+    });
+    expect(exit.code).toBe(0);
+    expect(warnings.join('\n')).toMatch(/WARNING — the kernel lets a process read the memory/);
   });
 });

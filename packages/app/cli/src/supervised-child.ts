@@ -45,7 +45,7 @@ async function serveSupervised(): Promise<void> {
   const { connectToSupervisor, NoSupervisorError } = await import('@rayspec/server');
   let supervisor: SupervisorConnection;
   try {
-    supervisor = await connectToSupervisor();
+    supervisor = await connectToSupervisor(process.env, '[rayspec deploy]');
   } catch (err) {
     if (err instanceof NoSupervisorError) {
       console.error(`[rayspec deploy] ${err.message}`);

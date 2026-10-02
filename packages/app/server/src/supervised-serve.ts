@@ -10,7 +10,7 @@ import { exitOnBootFailure, serveConfigured } from './serve.js';
 import { connectToSupervisor, NoSupervisorError } from './supervised-channel.js';
 
 async function serveSupervised(): Promise<void> {
-  const supervisor = await connectToSupervisor();
+  const supervisor = await connectToSupervisor(process.env, '[rayspec-serve]');
   // The supervisor applied the same posture before it started this process; the agent SDK this
   // process loads snapshots it again.
   await applyServeAgentTracing();

@@ -5,11 +5,13 @@
  * It refuses to run otherwise: an entrypoint of the application process started by hand, without a
  * supervisor or with a privileged connection in its environment, exits 70. It takes its instruction
  * from the supervisor's first message, asks the supervisor for each schema step of its boot, and
- * stops (as on SIGTERM) when the supervisor goes away, so it never serves without one.
+ * stops at once, without a drain, when the supervisor goes away without stopping it first, so it never
+ * serves without one.
  *
  * Everything this process sends is data the supervisor validates, and the supervisor sends it
  * nothing it does not hold already: the channel carries no privileged value.
  */
+import { writeSync } from 'node:fs';
 import type {
   BeforeSchemaChangeResult,
   BootFacts,
@@ -59,10 +61,12 @@ type RequestFields =
 /**
  * Connect to the supervisor that started this process and wait for its instruction. Throws
  * `NoSupervisorError` when there is none, or when this process's environment holds a privileged
- * connection (a supervisor never starts it so).
+ * connection (a supervisor never starts it so). `prefix` starts the line this process prints when its
+ * supervisor goes away (`[rayspec deploy]`).
  */
 export function connectToSupervisor(
   env: NodeJS.ProcessEnv = process.env,
+  prefix = '[rayspec]',
 ): Promise<SupervisorConnection> {
   const send = process.send?.bind(process);
   if (send === undefined || !process.connected) {
@@ -179,8 +183,21 @@ export function connectToSupervisor(
         reject(new NoSupervisorError('the supervisor ended before it sent an instruction'));
         return;
       }
-      // Never serve without a supervisor: stop as on SIGTERM (a graceful drain once serving).
-      process.kill(process.pid, 'SIGTERM');
+      // The supervisor ended without stopping this process first: it was killed or crashed, and the
+      // deployment may already be starting again beside this process. A drain would keep serving and
+      // keep running the durable workflow executor next to the new one, so this process ends at once,
+      // as the single process ended when it was killed. The line is written synchronously: nothing
+      // after the kill runs.
+      try {
+        writeSync(
+          2,
+          `${prefix} the supervisor ended without stopping the application process; it stops at ` +
+            'once, without a drain\n',
+        );
+      } catch {
+        // No stderr left to write to: the process stops all the same.
+      }
+      process.kill(process.pid, 'SIGKILL');
     });
   });
 }

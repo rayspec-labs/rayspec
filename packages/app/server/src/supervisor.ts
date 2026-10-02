@@ -625,6 +625,13 @@ export interface SuperviseOptions extends Omit<SchemaStepsOptions, 'warn'> {
   applicationDirectories: readonly string[];
   /** The drain the application process is given after a forwarded signal. */
   drainMs: number;
+  /**
+   * How long past its drain the application process may take to stop after a forwarded signal
+   * before it is killed; `SHUTDOWN_GRACE_MS` by default. A test shortens it.
+   */
+  shutdownGraceMs?: number;
+  /** What the same-user conditions are read from; this host by default. A test passes its own. */
+  sameUserProbe?: SameUserProbe;
   /** Where a warning goes; `console.warn` by default. */
   warn?: (line: string) => void;
 }
@@ -641,7 +648,7 @@ export async function superviseServing(options: SuperviseOptions): Promise<Super
   registerSecretValues(secrets);
   installOutputRedaction();
 
-  const open = sameUserConditions(options.privileged);
+  const open = sameUserConditions(options.privileged, options.sameUserProbe);
   if (open.length > 0 && options.config.hostingPosture === 'managed') {
     throw new BootConfigError(
       'Boot aborted — the managed hosting posture keeps the migration and snapshot connections ' +
@@ -706,7 +713,7 @@ export async function superviseServing(options: SuperviseOptions): Promise<Super
     const forward = (signal: NodeJS.Signals) => {
       exit.forwarded ??= signal;
       if (child.exitCode === null && child.signalCode === null) child.kill(signal);
-      const limit = options.drainMs + SHUTDOWN_GRACE_MS;
+      const limit = options.drainMs + (options.shutdownGraceMs ?? SHUTDOWN_GRACE_MS);
       bound ??= setTimeout(() => {
         exit.timedOutAfterMs = limit;
         child.kill('SIGKILL');
@@ -780,11 +787,18 @@ export interface SupervisorEnding {
   /** The exit code. */
   code: number;
   /**
-   * Why, when the application process could not say it itself: the supervisor prints it (after the
-   * entrypoint's prefix) and records it as the refusal. Absent when the application process
-   * reported its own ending.
+   * Why, when the application process ended in a way it did not explain itself (a crash, a kill, a
+   * protocol violation): the supervisor prints it after the entrypoint's prefix. Absent when the
+   * application process reported its own ending.
    */
   reason?: string;
+  /**
+   * Whether the application process could not write its own report: a signal it was not sent by the
+   * supervisor ended it, or the supervisor killed it. Only then does the supervisor record the
+   * reason as the refusal its report carries; an application process that exited wrote its report
+   * as it left, and a second one would break the one-envelope contract of `--json`.
+   */
+  unreported: boolean;
   /** The signal to end by instead, when a forwarded signal ended the application process. */
   signal?: NodeJS.Signals;
 }
@@ -799,6 +813,7 @@ export function supervisorEnding(exit: SupervisedExit): SupervisorEnding {
     return {
       code: 1,
       reason: `the application process broke the supervisor protocol (${exit.violation}); it was stopped`,
+      unreported: true,
     };
   }
   if (exit.timedOutAfterMs !== undefined) {
@@ -806,23 +821,30 @@ export function supervisorEnding(exit: SupervisedExit): SupervisorEnding {
       code: 1,
       reason:
         `the application process did not stop within ${exit.timedOutAfterMs} ms of the signal ` +
-        '(its drain and 30 s more); it was killed',
+        '(its drain and the grace after it); it was killed',
+      unreported: true,
     };
   }
   if (exit.signal !== null) {
-    if (exit.forwarded === exit.signal) return { code: 1, signal: exit.signal };
-    return { code: 1, reason: `the application process ended (signal ${exit.signal})` };
+    // Ended by the signal the supervisor forwarded, as the single process was: neither reports.
+    if (exit.forwarded === exit.signal) return { code: 1, signal: exit.signal, unreported: false };
+    return {
+      code: 1,
+      reason: `the application process ended (signal ${exit.signal})`,
+      unreported: true,
+    };
   }
   const code = exit.code ?? 1;
   if (code !== 0 && exit.served && exit.forwarded === undefined) {
-    return { code, reason: `the application process exited with code ${code}` };
+    return { code, reason: `the application process exited with code ${code}`, unreported: false };
   }
-  return { code };
+  return { code, unreported: false };
 }
 
 /**
- * End the supervisor as `supervisorEnding` decided, after `report` recorded the reason: by the
- * forwarded signal, or with the exit code. `report` is called only when there is a reason.
+ * End the supervisor as `supervisorEnding` decided: print the reason, if any, then end by the
+ * forwarded signal or with the exit code. `report` records the reason as the refusal, and is called
+ * only when the application process could not write its own report.
  */
 export function endSupervisor(
   exit: SupervisedExit,
@@ -832,7 +854,7 @@ export function endSupervisor(
   const ending = supervisorEnding(exit);
   if (ending.reason !== undefined) {
     console.error(`${prefix} ${ending.reason}`);
-    report(ending.reason);
+    if (ending.unreported) report(ending.reason);
   }
   if (ending.signal !== undefined) {
     // As the single process did: the signal ends it, unhandled.
