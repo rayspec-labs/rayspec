@@ -808,6 +808,13 @@ export const runtimeControlState = pgTable(
     activeGrants: jsonb('active_grants'),
     /** The product schema digest the last apply left behind; null until one did. */
     appliedProductSchema: text('applied_product_schema'),
+    /**
+     * The blob backend the active application's boot resolved, recorded by the bundle deploy that
+     * activated it: `{kind: 'fs'}` (the platform's fs store over RAYSPEC_BLOB_ROOT), `{kind: 'none'}`
+     * or `{kind: 'extension', extension: <id>}` (a backend an extension provides). Null when the
+     * activating deploy recorded none. An export reads it instead of loading extension code.
+     */
+    blobBackend: jsonb('blob_backend'),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
