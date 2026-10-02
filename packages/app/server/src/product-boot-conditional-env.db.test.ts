@@ -27,6 +27,11 @@
  *      that a doc NOT declaring file_input mounts ZERO file surface (404 on the file routes over HTTP)
  *      — and ZERO conversation surface likewise (404 on both conversation routes).
  *
+ *   E. THE MANAGED POSTURE AND THE DETERMINISTIC PROVIDER: the document-intake example, booted
+ *      under RAYSPEC_HOSTING_POSTURE=managed with RAYSPEC_EXTRACTION_MODE=deterministic and nothing
+ *      injected, is refused naming the test-only capability 'extraction-deterministic' — the posture
+ *      has to travel from the configuration to the provider for that refusal to happen.
+ *
  * DBOS-SINGLETON: exactly ONE full launch (arm B, LAST). The four acme-notes arms + the agent-only + the stt-only arm THROW at the env
  * demands (steps 3–5 of deployProductYamlSpec), which run BEFORE the DBOS executor is even constructed —
  * so they never launch. Skips without DATABASE_URL; the un-skippable ran-guard hard-fails a REQUIRED run
@@ -49,6 +54,7 @@ import {
   type BootedServer,
   loadServerConfig,
 } from './composition-root.js';
+import { ProductBootError } from './product-boot.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +66,11 @@ const NON_AUDIO_AGENT_YAML = resolve(here, '__fixtures__/non-audio-agent.product
 const STT_NO_AUDIO_YAML = resolve(here, '__fixtures__/stt-no-audio.product.yaml');
 // a FILE-only doc (file_input, no audio/record/stt/agents) — the generalized blob demand.
 const FILE_ONLY_YAML = resolve(here, '__fixtures__/file-ingest.product.yaml');
+// The document-intake example: an extractor whose config selects the shipped deterministic provider.
+const DOCUMENT_INTAKE_YAML = resolve(
+  here,
+  '../../../../examples/document-intake/document-intake.product.yaml',
+);
 
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
 let armsRan = 0;
@@ -105,6 +116,7 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     'RAYSPEC_EXTRACTION_MODE',
     'RAYSPEC_BLOB_ROOT',
     'RAYSPEC_MEDIA_SIGNING_KEY',
+    'RAYSPEC_HOSTING_POSTURE',
   ] as const;
 
   /** Set the FOUR doc-driven env vars to valid values (each arm then deletes the one under test). */
@@ -317,6 +329,27 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
     armsRan += 1;
   }, 120_000);
 
+  // ── The managed posture refuses the shipped deterministic provider, through the real boot ───────
+  // The posture reaches the provider only through the composition root's configuration, so this arm
+  // boots the document-intake example with nothing injected: a boot that dropped the posture on the
+  // way would build the provider and go on to launch instead of refusing here.
+  it('the managed posture refuses the deterministic provider the document-intake example selects', async () => {
+    clearAllFour();
+    process.env.RAYSPEC_EXTRACTION_MODE = 'deterministic';
+    process.env.RAYSPEC_BLOB_ROOT = blobDir;
+    process.env.RAYSPEC_HOSTING_POSTURE = 'managed';
+    try {
+      const refused = boot(DOCUMENT_INTAKE_YAML, demandDbUrl, { stt: false, agents: false });
+      await expect(refused).rejects.toBeInstanceOf(ProductBootError);
+      await expect(refused).rejects.toThrow(
+        /RAYSPEC_HOSTING_POSTURE=managed does not support the deterministic extraction provider[\s\S]*'extraction-deterministic' is test-only/,
+      );
+    } finally {
+      delete process.env.RAYSPEC_HOSTING_POSTURE;
+    }
+    armsRan += 1;
+  }, 120_000);
+
   // ── Arm B: a NON-audio, zero-agent, no-stt doc boots demanding NONE of the four (the ONE launch) ─
 
   it('a non-audio zero-agent doc BOOTS demanding NONE of the four, composes + serves (RED-first)', async () => {
@@ -383,8 +416,9 @@ describe.skipIf(!baseUrl)('Product-YAML boot — doc-driven env demands', () => 
 describe('boot-demand ran-guard', () => {
   it('the doc-driven env-demand arms ran under a required DB run', () => {
     // 4 acme-notes demands + the product-tenant demand + the agent-only arm (non-audio agent) + the
-    // stt-only arm (stt-without-audio) + the file-only blob demand + Arm B (the intake launch).
-    if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(9);
+    // stt-only arm (stt-without-audio) + the file-only blob demand + the managed refusal of the
+    // deterministic provider + Arm B (the intake launch).
+    if (dbRequired) expect(armsRan).toBeGreaterThanOrEqual(10);
     else expect(true).toBe(true);
   });
 });

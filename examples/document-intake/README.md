@@ -51,6 +51,12 @@ rayspec bundle verify  document-intake-1.0.0.ray
 The bundle carries the document, the deterministic config and the schema, and declares no binding
 and no egress host.
 
+Nothing in the bundle or in the `inspect` output says that the application runs on the
+deterministic provider: its `requires` lists `declarative-stores`, `durable-workflow` and
+`file_input`, and not the provider's capability, `extraction-deterministic`. Read the
+extraction config in `extraction/` to see it. A deployment under
+`RAYSPEC_HOSTING_POSTURE=managed` refuses the provider when it boots.
+
 A product deployment binds to one organization, which exists before the deploy. With the
 [environment a bundle deploy reads](../../docs/self-hosted-deployment.md#what-you-need):
 

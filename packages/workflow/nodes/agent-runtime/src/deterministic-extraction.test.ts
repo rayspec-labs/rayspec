@@ -109,6 +109,45 @@ describe('the deterministic extraction provider', () => {
     }
   });
 
+  it('takes the first of several values that convert, for every scalar type', () => {
+    const text = [
+      'Title: first title',
+      'Title: second title',
+      'Quantity: 7',
+      'Quantity: 9',
+      'Weight: 1.5',
+      'Weight: 2.5',
+      'Urgent: no',
+      'Urgent: yes',
+    ].join('\n');
+    expect(extractLabelledRecord(text, SCHEMA)).toMatchObject({
+      title: 'first title',
+      quantity: 7,
+      weight: 1.5,
+      urgent: false,
+    });
+  });
+
+  it('accepts no exponent and no bare fraction for a number', () => {
+    for (const raw of ['1e3', '1.5e2', '2E-1', '.5', '5.', '+.5']) {
+      // Number() would read each of these; the provider must not.
+      expect(Number.isFinite(Number(raw)), raw).toBe(true);
+      expect(extractLabelledRecord(`Weight: ${raw}`, SCHEMA).weight, raw).toBeNull();
+    }
+    expect(extractLabelledRecord('Weight: -0.25', SCHEMA).weight).toBe(-0.25);
+    expect(extractLabelledRecord('Weight: 3', SCHEMA).weight).toBe(3);
+  });
+
+  it('accepts only true, false, yes and no for a boolean, in any letter case', () => {
+    for (const raw of ['1', '0', 'y', 'n', 'on', 'off', 'ja', 'truthy']) {
+      expect(extractLabelledRecord(`Urgent: ${raw}`, SCHEMA).urgent, raw).toBeNull();
+    }
+    expect(extractLabelledRecord('Urgent: TRUE', SCHEMA).urgent).toBe(true);
+    expect(extractLabelledRecord('Urgent: Yes', SCHEMA).urgent).toBe(true);
+    expect(extractLabelledRecord('Urgent: False', SCHEMA).urgent).toBe(false);
+    expect(extractLabelledRecord('Urgent: NO', SCHEMA).urgent).toBe(false);
+  });
+
   it('drops an object line whose required part is missing or does not convert', () => {
     const record = extractLabelledRecord('Lines:  | 3\nLines: bolts | x\nLines: nuts | 7', SCHEMA);
     expect(record.lines).toEqual([

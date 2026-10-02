@@ -4,7 +4,9 @@
  * `RAYSPEC_SPEC_PATH` pointing at a Product-YAML document composes the product deploy END-TO-END and
  * serves it (instead of an earlier hard-abort): the deployment's Tier-A store bindings are DERIVED
  * from the YAML (product-free), the STT adapter is selected by `STT_PROVIDER`, the extraction executor
- * is the LIVE `runAgent` path (env `live`) or an injected deterministic executor (dev/CI), media-prep
+ * is the LIVE `runAgent` path (env `live`) or, under `deterministic` (dev/CI only), an injected
+ * executor or else the shipped deterministic extraction provider for the extractors whose config
+ * selects it (refused under the managed posture), media-prep
  * runs off-request, and the durable workflow path is the REAL `DbosWorkflowExecutor` +
  * `resolveWorkflowRun` over the composed `buildNodeRegistry`. Fail-closed with NAMED errors on any
  * missing env/config. The classic `rayspec.yaml` boot (deployDeclaredSpec) is untouched.

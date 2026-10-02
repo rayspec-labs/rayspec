@@ -86,6 +86,13 @@ files and bytes, what it left out and why, warnings, and the SHA-256 of the
 written file. `--preview` also lists every file with its size, SHA-256 and
 source. Stdout carries one JSON result envelope, with or without `--json`.
 
+The capabilities a bundle requires do not include the extraction provider its extractors
+select. A product whose extraction config selects the
+[deterministic extraction provider](./spec-reference.md#the-deterministic-extraction-provider)
+(`"backend": "deterministic"`, for development and tests only) packs with no requirement that
+says so, and `inspect` does not show it; the deployment's boot refuses that provider under
+`RAYSPEC_HOSTING_POSTURE=managed`.
+
 ## What goes in
 
 Pack starts from the spec and follows what it names; it never zips the

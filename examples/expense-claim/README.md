@@ -23,10 +23,14 @@ has one agent**, the doc-driven boot demands ONLY the extraction env — NO blob
 
 ### Drive it end-to-end — deterministic (the CI-proven, actually-working path)
 
-The extraction executor is `RAYSPEC_EXTRACTION_MODE=deterministic`. The platform is **product-free**:
-it ships NO executor, so deterministic mode runs behind a thin WRAPPER that injects one via
-`assembleServer(config, { productDeterministicAgents })`. The **merge-gated acceptance e2e is exactly
-that wrapper** and proves the whole loop end-to-end — boot →
+The extraction executor is `RAYSPEC_EXTRACTION_MODE=deterministic`. The platform ships a
+[deterministic extraction provider](../../docs/spec-reference.md#the-deterministic-extraction-provider)
+for development and tests, which runs for an extractor whose config selects it
+(`"backend": "deterministic"`) and which `RAYSPEC_HOSTING_POSTURE=managed` refuses. This example's
+config names a real backend, so deterministic mode needs an injected executor instead: a thin
+WRAPPER passes one via `assembleServer(config, { productDeterministicAgents })`, and an injected
+executor replaces the provider. The **merge-gated acceptance e2e is exactly that wrapper** and proves
+the whole loop end-to-end — boot →
 `POST /records/{id}/submit` → `store_read → agent → validation → store_write` → the `GET /claims` views:
 
 ```bash
