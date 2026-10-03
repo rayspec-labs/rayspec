@@ -250,8 +250,10 @@ jobs:
       # manifest and evidence (contract rules, OCI archive, placeholders, signing with the release
       # key, refusals), the candidate builder (pre-release versions only, the tree restored after
       # stamping), the contract corpus through a built CLI, the judgements of the runtime-image
-      # check, and the command half of the skill-drift gate. Built dist and the installed tsx are
-      # the only inputs. DB-free / secret-free / network-free → lane 1.
+      # check, the command half of the skill-drift gate, the runtime the upgrade harness upgrades a
+      # candidate to, and the shape of the release workflow (dispatch only, the reviewer check before
+      # any secret, no signing key in CI). Built dist and the installed tsx are the only inputs.
+      # DB-free / secret-free / network-free → lane 1.
       - name: Release candidate tooling regression
         run: |
           pnpm test:closure-sbom
@@ -260,6 +262,8 @@ jobs:
           pnpm test:corpus-conformance
           pnpm test:image-conformance-logic
           pnpm test:skill-drift
+          pnpm test:upgrade-target
+          pnpm test:release-workflow
 
       # The neutral reference product (examples/acme-notes/**) must carry ZERO product-domain meaning —
       # a forcing function on the fixtures the platform gates/goldens/e2e are pinned against.

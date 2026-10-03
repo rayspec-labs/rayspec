@@ -47,6 +47,8 @@
     "conformance:image": "node scripts/image-conformance.mjs",
     "test:consumer-install": "node scripts/check-consumer-install.test.mjs",
     "test:upgrade-with-data": "node scripts/upgrade-with-data.mjs",
+    "test:upgrade-target": "node scripts/upgrade-target.test.mjs",
+    "test:release-workflow": "node scripts/release-workflow.test.mjs",
     "test:journeys": "node scripts/reference-journeys.mjs",
     "test:journeys-logic": "node scripts/reference-journeys.test.mjs",
     "test:certification": "node scripts/certification.mjs",
