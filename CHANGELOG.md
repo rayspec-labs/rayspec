@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file beside its destination, reads it back and verifies it against the public half of the key,
   and only then moves it into place: to `<file.ray>.sig`, the file `bundle verify` and `deploy` read,
   or to `--output`. An existing file is refused with `RAY_OUTPUT_EXISTS` unless `--force`, which
-  replaces a file or a link without writing through it. The key file is opened once without
+  replaces a file or a link without writing through it; a signature path that reaches the bundle
+  or the key file through another path (a linked directory, a second hard link) is refused with
+  `RAY_USAGE`, with or without `--force`, and so is a file system without hard links when
+  `--force` is not given. The signature file is mode 0644 whatever the umask. The key file is opened once without
   following a link and judged through that handle: a link, a file that is not regular, one owned by
   another user or one group or others can read or write is `RAY_BINDINGS_FILE_INSECURE` (exit 4);
   a missing file, a public key, an RSA, EC or encrypted key, or more than one key is `RAY_USAGE`.

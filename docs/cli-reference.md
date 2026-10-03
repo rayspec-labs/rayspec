@@ -773,11 +773,15 @@ In order, stopping at the first failure:
 
 1. **Arguments.** One archive path; `--key-file` is required. The signature
    path is `--output`, else `<file.ray>.sig`; it may not name the bundle or the
-   key file, and is at most 4,096 characters. `RAY_USAGE`.
+   key file — through another path either, such as a linked directory or a
+   second hard link, which is checked again just before placement — and is at
+   most 4,096 characters. `RAY_USAGE`.
 2. **Key file.** Opened once, without following a link, and judged through
    that open file: a symbolic link, a file that is not regular, one not owned
    by you, or one group or others can read or write (`chmod 600`; `0400` also
-   passes) is `RAY_BINDINGS_FILE_INSECURE`. A path with no file is `RAY_USAGE`.
+   passes) is `RAY_BINDINGS_FILE_INSECURE`; when such a file holds a public key,
+   the message says so. A FIFO or other special file is refused at once, never
+   waited on. A path with no file is `RAY_USAGE`.
 3. **Key.** At most 16 KiB holding exactly one unencrypted Ed25519 private key
    in PEM form (`openssl genpkey -algorithm ed25519`). A public key, an RSA, EC
    or other key, or an encrypted key is `RAY_USAGE`. A message names the flag and
@@ -794,12 +798,17 @@ In order, stopping at the first failure:
    not verify is never placed (`RAY_INTERNAL`). A missing directory, or one you
    cannot write, is `RAY_USAGE`.
 6. **Placement.** Moved into place in one step: without `--force` it is refused
-   when anything is at the signature path (`RAY_OUTPUT_EXISTS`); with `--force` it
-   replaces the file, or a link without writing through it. The temporary file is
-   removed whatever happens.
+   when anything is at the signature path (`RAY_OUTPUT_EXISTS`; a directory there
+   is named as one, and `--force` does not replace a directory); with `--force` it
+   replaces the file, or a link without writing through it. Placement without
+   `--force` makes a hard link, so on a file system without hard links (FAT,
+   exFAT, some network mounts) it is `RAY_USAGE`: write the signature on another
+   file system, or pass `--force`. A name too long for the file system is
+   `RAY_USAGE`. The temporary file is removed whatever happens.
 
 - **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
-- **Writes:** the signature file (mode `0644`) and nothing else.
+- **Writes:** the signature file (mode `0644`, whatever the umask) and nothing
+  else.
 - **Flags:** `--key-file <ed25519-private-key.pem>` (required);
   `--output <file.ray.sig>` (default `<file.ray>.sig`); `--force`; `--json`.
 - **Output:** the result envelope (operation `bundle.sign`):
@@ -824,7 +833,8 @@ In order, stopping at the first failure:
   verified with that key. On a refusal `data` is `null`. On stderr: the
   operation id and, without `--json`, a short description — the bundle, the
   signature path, the public key's SHA-256 and the `bundle verify` command that
-  checks it. No output carries key material. A signature establishes who signed
+  checks it, with `--signature` when the signature is not at `<file.ray>.sig`
+  (`deploy` reads only that name). No output carries key material. A signature establishes who signed
   the archive for whoever trusts that key; it does not vouch for the code the
   bundle carries.
 - **Exit:** `0` signed and verified, `2` a usage error, a refused archive or an

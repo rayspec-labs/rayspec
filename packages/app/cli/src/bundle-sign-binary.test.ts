@@ -13,9 +13,11 @@ import { generateKeyPairSync, type KeyObject, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
+  constants,
   copyFileSync,
   existsSync,
   fstatSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -71,11 +73,16 @@ beforeEach(() => {
 type Json = Record<string, any>;
 
 /** Run the built CLI in `work` with a minimal environment; the envelope is parsed from stdout. */
-function cli(args: string[]): { status: number | null; stdout: string; stderr: string; env: Json } {
+function cli(
+  args: string[],
+  timeout = 60_000,
+): { status: number | null; signal: string | null; stdout: string; stderr: string; env: Json } {
   const r = spawnSync(process.execPath, [CLI_DIST, ...args], {
     cwd: work,
     encoding: 'utf8',
-    timeout: 60_000,
+    timeout,
+    // The CLI answers SIGTERM itself; a command stuck in a system call is ended for certain.
+    killSignal: 'SIGKILL',
     env: { PATH: process.env.PATH, HOME: process.env.HOME, RAYSPEC_SKIP_DOTENV: '1' },
   });
   let env: Json = {};
@@ -84,7 +91,7 @@ function cli(args: string[]): { status: number | null; stdout: string; stderr: s
   } catch {
     env = {};
   }
-  return { status: r.status, stdout: r.stdout, stderr: r.stderr, env };
+  return { status: r.status, signal: r.signal, stdout: r.stdout, stderr: r.stderr, env };
 }
 
 /** A copy of a corpus bundle in `work`, so a signature can be written next to it. */
@@ -298,6 +305,43 @@ maybeDescribe('bundle sign refuses a key file that is not a protected Ed25519 pr
     expect(leftovers()).toEqual([]);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'a FIFO, refused at once instead of waiting for a writer',
+    () => {
+      const app = bundle();
+      const fifo = join(work, 'fifo.pem');
+      const made = spawnSync('mkfifo', ['-m', '600', fifo]);
+      expect(made.status, String(made.stderr)).toBe(0);
+      const fd = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        expect(fstatSync(fd).isFIFO()).toBe(true);
+      } finally {
+        closeSync(fd);
+      }
+      const r = cli(['bundle', 'sign', app, '--key-file', fifo], 10_000);
+      expect(r.signal, 'the command waited on the FIFO until it was killed').toBeNull();
+      expectRefused(r, 'RAY_BINDINGS_FILE_INSECURE', 4);
+      expect(r.env.errors[0].message).toContain('not a regular file');
+      expect(leftovers()).toEqual([]);
+    },
+  );
+
+  it('a public key that group or others can read is named as a public key', () => {
+    const app = bundle();
+    const pub = publicKeyFile('publisher.pub.pem', ed25519().publicKey);
+    expect(modeOf(pub)).toBe(0o644);
+    const r = cli(['bundle', 'sign', app, '--key-file', pub]);
+    expectRefused(r, 'RAY_BINDINGS_FILE_INSECURE', 4);
+    expect(r.env.errors[0].message).toContain('holds a public key');
+    expect(r.env.errors[0].message).toContain('give the private key');
+    // A private key with the same mode is refused with the ordinary advice.
+    const loose = keyFile('loose.pem', ed25519().privateKey, 0o644);
+    const p = cli(['bundle', 'sign', app, '--key-file', loose]);
+    expectRefused(p, 'RAY_BINDINGS_FILE_INSECURE', 4);
+    expect(p.env.errors[0].message).not.toContain('public key');
+    expect(p.env.errors[0].message).toContain('chmod 600');
+  });
+
   it('a directory, which is not a regular file', () => {
     const app = bundle();
     const dir = join(work, 'keydir');
@@ -386,6 +430,9 @@ maybeDescribe('bundle sign output', () => {
     expect(r.status, r.stdout).toBe(0);
     expect(r.env.data.signaturePath).toBe(out);
     expect(existsSync(`${app}.sig`)).toBe(false);
+    // The suggested verify command names the signature, and says deploy reads only <file.ray>.sig.
+    expect(r.stderr).toContain(`--require-signature --signature ${out}`);
+    expect(r.stderr).toContain(`deploy reads only ${app}.sig`);
     const v = cli([
       'bundle',
       'verify',
@@ -442,6 +489,90 @@ maybeDescribe('bundle sign output', () => {
     expect(cli(['bundle', 'sign', app, '--key-file', k, '--force']).status).toBe(0);
     expect(readFileSync(target, 'utf8')).toBe('untouched');
     expect(JSON.parse(readFileSync(`${app}.sig`, 'utf8')).algorithm).toBe('ed25519');
+  });
+
+  it('suggests the plain verify command when the signature is at <file.ray>.sig', () => {
+    const app = bundle();
+    const r = cli(['bundle', 'sign', app, '--key-file', keyFile('k.pem', ed25519().privateKey)]);
+    expect(r.status, r.stdout).toBe(0);
+    expect(r.stderr).toContain(
+      `rayspec bundle verify ${app} --trusted-key <public-key.pem> --require-signature\n`,
+    );
+    expect(r.stderr).not.toContain('--signature');
+  });
+
+  it('a directory at the signature path is refused without suggesting --force', () => {
+    const app = bundle();
+    const k = keyFile('k.pem', ed25519().privateKey);
+    const dir = join(work, 'build');
+    mkdirSync(dir);
+    const r = cli(['bundle', 'sign', app, '--key-file', k, '--output', dir]);
+    expectRefused(r, 'RAY_OUTPUT_EXISTS', 2);
+    expect(r.env.errors[0].message).toContain('is a directory');
+    expect(r.env.errors[0].message).not.toContain('--force');
+    expectRefused(
+      cli(['bundle', 'sign', app, '--key-file', k, '--output', dir, '--force']),
+      'RAY_USAGE',
+      2,
+    );
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('a signature name near the file system limit is written, and one over it is RAY_USAGE', () => {
+    const app = bundle();
+    const k = keyFile('k.pem', ed25519().privateKey);
+    // The precondition: the file system holds a 240-character name and refuses a 300-character one.
+    const near = join(work, `${'n'.repeat(236)}.sig`);
+    const over = join(work, `${'o'.repeat(296)}.sig`);
+    writeFileSync(near, '');
+    rmSync(near);
+    expect(() => writeFileSync(over, '')).toThrow(/ENAMETOOLONG/);
+
+    const ok = cli(['bundle', 'sign', app, '--key-file', k, '--output', near]);
+    expect(ok.status, ok.stdout + ok.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(near, 'utf8')).algorithm).toBe('ed25519');
+    rmSync(near);
+
+    const r = cli(['bundle', 'sign', app, '--key-file', k, '--output', over]);
+    expectRefused(r, 'RAY_USAGE', 2);
+    expect(r.env.errors[0].message).toContain('name too long');
+    expect(leftovers()).toEqual([]);
+  });
+
+  it('refuses, even with --force, a signature path that reaches the key or the bundle by another path', () => {
+    const real = join(work, 'real');
+    mkdirSync(real);
+    const app = join(real, 'app.ray');
+    copyFileSync(caseFile('app-good-minimal'), app);
+    const appBytes = readFileSync(app);
+    const { privateKey } = ed25519();
+    const k = join(real, 'key.pem');
+    writeFileSync(k, privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 });
+    chmodSync(k, 0o600);
+    const keyBytes = readFileSync(k);
+    symlinkSync(real, join(work, 'alias'));
+    const hard = join(work, 'hard.pem');
+    linkSync(k, hard);
+    const hardApp = join(work, 'hard.ray');
+    linkSync(app, hardApp);
+
+    const aliases: [string, string][] = [
+      [join(work, 'alias', 'key.pem'), 'key file'],
+      [hard, 'key file'],
+      [join(work, 'alias', 'app.ray'), 'bundle'],
+      [hardApp, 'bundle'],
+    ];
+    for (const [out, what] of aliases) {
+      for (const force of [['--force'], []]) {
+        const r = cli(['bundle', 'sign', app, '--key-file', k, '--output', out, ...force]);
+        expectRefused(r, 'RAY_USAGE', 2);
+        expect(r.env.errors[0].message).toContain(`reaches the ${what}`);
+      }
+    }
+    expect(readFileSync(k).equals(keyBytes)).toBe(true);
+    expect(readFileSync(app).equals(appBytes)).toBe(true);
+    expect(readdirSync(real).sort()).toEqual(['app.ray', 'key.pem']);
+    expect(leftovers()).toEqual([]);
   });
 
   it('refuses a signature path that names the bundle or the key file, or a missing directory', () => {

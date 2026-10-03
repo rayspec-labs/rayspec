@@ -263,7 +263,9 @@ openssl pkey -in publisher.pem -pubout -out publisher.pub.pem
 `publisher.pem` is the private key. `bundle sign` refuses it unless it is a
 regular file (not a link), owned by you, and readable by nobody else (mode
 `0600` or `0400`), and unless it holds one unencrypted Ed25519 private key in
-PEM form; a public key, an RSA or EC key, or an encrypted key is refused.
+PEM form; a public key, an RSA or EC key, or an encrypted key is refused. If
+you pass `publisher.pub.pem` by mistake, the refusal says it holds a public
+key, whatever its mode.
 Store it like any other credential: never in the repository, never in the
 application directory you pack.
 
@@ -282,7 +284,9 @@ too. It verifies the signature it wrote against the public half of your key
 before it reports success, and prints the bundle's SHA-256, the signature path
 and your public key's SHA-256 — never the key. `--output` writes the
 signature elsewhere; an existing signature file is refused unless you pass
-`--force`.
+`--force`. `bundle verify` reads a signature written elsewhere only when you
+give it `--signature <path>`, and `deploy` reads only `<file.ray>.sig`, so a
+signature you hand out with a bundle goes next to it under that name.
 
 **3. Hand out the public key** — `publisher.pub.pem` — through a channel
 the deployer already trusts (your repository's release page, a key published
