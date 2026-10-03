@@ -49,6 +49,10 @@
  *       repository-relative destination and then hands the same string to the release-identity
  *       manifest and its verifier, which resolve it against the repository root — so a scattered
  *       pack leaves those two reading whatever that directory happened to already hold.
+ *   (F) THE TESTED TARBALLS ARE THE PUBLISHED ONES — `--from <dir>` publishes each packed tarball as
+ *       it is, in dependency order, stamping nothing; a directory that is not exactly one tarball per
+ *       publish target at the release version refuses before the first call, naming every problem,
+ *       and `--from` is refused with `--pack` and without a value.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -89,7 +93,8 @@ const FAKE_PNPM = `#!/usr/bin/env node
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 const argv = process.argv.slice(2);
-appendFileSync(process.env.FAKE_PNPM_LOG, JSON.stringify({ argv, cwd: process.cwd() }) + '\\n');
+const own = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
+appendFileSync(process.env.FAKE_PNPM_LOG, JSON.stringify({ argv, cwd: process.cwd(), private: own.private }) + '\\n');
 const destIdx = argv.indexOf('--pack-destination');
 if (argv[0] === 'pack' && destIdx !== -1) {
   const dest = resolve(process.cwd(), argv[destIdx + 1]);
@@ -552,6 +557,85 @@ try {
     console.log(
       'ok (P) — a coherent checkout packs the closure in dependency order and restores it',
     );
+  }
+
+  // ── (F) --from publishes the packed tarballs themselves, and refuses anything else ─────────────
+  {
+    /** One tarball per entry `[name, version]`, packed the way pnpm names them. */
+    const packDir = (fx, entries, dirName) => {
+      const dir = join(fx.root, dirName);
+      mkdirSync(dir);
+      for (const [name, version] of entries) {
+        const src = mkdtempSync(join(tmpdir(), 'rayspec-release-guard-pkg-'));
+        workspaces.push(src);
+        mkdirSync(join(src, 'package'));
+        writeFileSync(
+          join(src, 'package', 'package.json'),
+          `${JSON.stringify({ name, version })}\n`,
+        );
+        const file = `${name.replace('@', '').replace('/', '-')}-${version}.tgz`;
+        const tar = spawnSync('tar', ['-czf', join(dir, file), '-C', src, 'package']);
+        assert.equal(tar.status, 0, '(F) the fixture tarball must pack');
+      }
+      return dir;
+    };
+    const fx = fixture({ tags: [{ name: 'v1.6.2', annotated: true }] });
+    const good = packDir(
+      fx,
+      TARGETS.map((n) => [n, VERSION]),
+      'packed',
+    );
+    const r = run(fx, ['--publish', '--yes-really-publish', '--from', good, '--json'], {
+      allowPublish: true,
+    });
+    assert.equal(r.code, 0, `(F) a packed release must publish; got ${r.code}: ${r.err}`);
+    assert.equal(r.calls.length, TARGETS.length, '(F) one publish per target');
+    const order = packedOrder(r.calls, fx.root);
+    for (const m of MEMBERS.filter((x) => x.target)) {
+      for (const dep of m.deps) {
+        assert.ok(
+          order.indexOf(dep) < order.indexOf(m.name),
+          `(F) ${dep} before ${m.name}: ${order}`,
+        );
+      }
+    }
+    for (const c of r.calls) {
+      assert.equal(c.argv[0], 'publish', `(F) every call publishes: ${c.argv}`);
+      assert.match(c.argv[1], /\.tgz$/, `(F) every call names its tarball: ${c.argv}`);
+      assert.ok(c.argv[1].startsWith(good), `(F) the tarball comes from --from: ${c.argv}`);
+      assert.equal(c.private, true, '(F) nothing is stamped when the tarballs carry the version');
+    }
+    assert.equal(JSON.parse(r.out).from, good, '(F) the summary names the directory');
+
+    const missing = packDir(
+      fx,
+      TARGETS.slice(1).map((n) => [n, VERSION]),
+      'missing',
+    );
+    const drift = packDir(
+      fx,
+      TARGETS.map((n) => [n, n === '@rayspec/core' ? '1.6.1' : VERSION]),
+      'drift',
+    );
+    const foreign = packDir(
+      fx,
+      [...TARGETS.map((n) => [n, VERSION]), ['@rayspec/parity', VERSION]],
+      'foreign',
+    );
+    for (const [dir, pattern] of [
+      [missing, new RegExp(`no tarball of ${TARGETS[0].replace('/', '\\/')}`)],
+      [drift, /@rayspec\/core@1\.6\.1, the release is 1\.6\.2/],
+      [foreign, /is not a publish target/],
+    ]) {
+      const refused = run(fx, ['--publish', '--yes-really-publish', '--from', dir], {
+        allowPublish: true,
+      });
+      assertRefused(refused, '(F)', fx);
+      assert.match(refused.err, pattern, `(F) the problem must be named: ${refused.err}`);
+    }
+    assertRefused(run(fx, ['--pack', '--from', good]), '(F) --pack with --from', fx);
+    assertRefused(run(fx, ['--dry-run', '--from']), '(F) --from without a value', fx);
+    console.log('ok (F) — --from publishes the tested tarballs and refuses any other directory');
   }
 
   console.log('\nrelease guard: ALL CASES PASSED');

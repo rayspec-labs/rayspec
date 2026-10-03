@@ -7,8 +7,10 @@
  * ----------------------
  * Every RaySpec package is committed as `private: true` at the current release version — the
  * `private: true` flag (not the version) is the deliberate accidental-publish guard: a bare
- * `pnpm publish` / `npm publish` at the repo root or in any package refuses, and nothing in CI
- * publishes. This script is the ONLY place that lifts that guard, and it
+ * `pnpm publish` / `npm publish` at the repo root or in any package refuses, and no CI job
+ * publishes except the manually dispatched release workflow (`.github/workflows/release.yml`), which
+ * runs this script behind a protected environment and a typed confirmation. This script is the ONLY
+ * place that lifts that guard, and it
  * does so TRANSIENTLY and IN MEMORY of the working tree: for the duration of a pack/publish run it
  * rewrites each publish target's `package.json` to
  *   - `version`  → the release version DERIVED from the repo-root `package.json` (see below),
@@ -63,18 +65,28 @@
  *                  `RAYSPEC_ALLOW_PUBLISH=1`. Publishes in dependency order (deps before dependents).
  *                  Intended for the founder-run release window only.
  *
+ * PUBLISHING THE TESTED BYTES (--from <dir>)
+ * --------------------------------------------
+ * `--publish` and `--dry-run` repack each target by default, so the registry receives a tarball
+ * nobody tested (packing is not byte-reproducible). With `--from <dir>` — the output of an earlier
+ * `--pack` that the candidate conformance ran on — the run stamps nothing and hands each tarball to
+ * `pnpm publish <file>` instead, in dependency order. Before the first call it refuses unless the
+ * directory holds exactly one tarball per publish target, each declaring that target's name and the
+ * release version. The release manifest's integrities then match the registry's.
+ *
  * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination; a
  * relative path is resolved against the current working directory once, before anything is packed,
  * so every target lands in that ONE directory and the run prints the absolute path) ·
  * --json (machine output).
  *
  * This script performs no git WRITES — it only READS the workspace state (`git ls-files`, tag identity)
- * and never creates a commit, a tag or a release. No package lifecycle hook and no CI job runs it
- * against THIS repository — a release run happens only when a human invokes it. CI does execute a copy
- * of it against a throwaway fixture repo with the package manager stubbed (`scripts/publish.test.mjs`).
+ * and never creates a commit, a tag or a release. No package lifecycle hook runs it. CI runs it with
+ * `--pack` for the consumer-install audit and the release candidate; a `--publish` runs only in the
+ * release workflow, which a human dispatches. CI also executes a copy of it against a throwaway
+ * fixture repo with the package manager stubbed (`scripts/publish.test.mjs`).
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,6 +104,7 @@ function parseFlags(argv) {
     mode: 'dry-run',
     version: null,
     out: undefined,
+    from: undefined,
     json: false,
     really: false,
   };
@@ -104,6 +117,7 @@ function parseFlags(argv) {
     else if (a === '--json') flags.json = true;
     else if (a === '--version') flags.version = argv[++i];
     else if (a === '--out') flags.out = argv[++i];
+    else if (a === '--from') flags.from = argv[++i] ?? '';
     else {
       console.error(`unknown flag: ${a}`);
       process.exit(2);
@@ -392,8 +406,58 @@ function preflight(flags, version, engine, pkgs, publishSet) {
   return tag;
 }
 
+/**
+ * The packed tarball of every publish target in `dir`, keyed by name, read before anything is
+ * published: exactly one per target, each declaring its target's name and the release version.
+ */
+function tarballsFrom(dir, version, publishSet) {
+  let files;
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith('.tgz'));
+  } catch {
+    console.error(`--from ${dir} cannot be read. Nothing was published.`);
+    process.exit(2);
+  }
+  const byName = new Map();
+  const problems = [];
+  for (const file of files.sort()) {
+    let manifest;
+    try {
+      manifest = JSON.parse(
+        execFileSync('tar', ['-xzOf', join(dir, file), 'package/package.json'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }),
+      );
+    } catch {
+      problems.push(`${file} carries no readable package/package.json`);
+      continue;
+    }
+    if (byName.has(manifest.name)) problems.push(`${manifest.name} is packed twice (${file})`);
+    else if (!publishSet.includes(manifest.name)) problems.push(`${file} is not a publish target`);
+    else if (manifest.version !== version) {
+      problems.push(`${file} is ${manifest.name}@${manifest.version}, the release is ${version}`);
+    }
+    byName.set(manifest.name, join(dir, file));
+  }
+  for (const name of publishSet) if (!byName.has(name)) problems.push(`no tarball of ${name}`);
+  if (problems.length) {
+    console.error(`--from ${dir} is not the packed release ${version}:`);
+    for (const p of problems.sort()) console.error(`  ${p}`);
+    console.error('nothing was published.');
+    process.exit(2);
+  }
+  return byName;
+}
+
 function main() {
   const flags = parseFlags(process.argv.slice(2));
+  if (flags.from === '' || (flags.from !== undefined && flags.mode === 'pack')) {
+    console.error(
+      '--from <dir> names packed tarballs to --publish or --dry-run, and needs a value',
+    );
+    process.exit(2);
+  }
   if (flags.version === undefined || flags.version === '') {
     console.error('--version requires a value (e.g. --version <x.y.z>)');
     process.exit(2);
@@ -412,6 +476,8 @@ function main() {
   const publishSet = computePublishSet(pkgs);
   const tag = preflight(flags, version, nodeEngine, pkgs, publishSet);
   const order = topoOrder(publishSet, pkgs);
+  const packed =
+    flags.from === undefined ? null : tarballsFrom(resolve(flags.from), version, publishSet);
   // Resolved ONCE, here, so every target is handed the same absolute destination: each `pnpm pack`
   // child runs with its cwd set to the package directory, so a relative destination passed on
   // unresolved would resolve once PER TARGET and scatter the closure one tarball per package while
@@ -429,7 +495,10 @@ function main() {
   const results = [];
   try {
     // Phase 1 — stamp EVERY target first, so cross-package workspace:* refs all resolve to `version`.
-    for (const name of order) backups.set(name, stampManifest(pkgs.get(name).path, version));
+    // Packed tarballs already carry the version, so nothing is stamped for them.
+    if (packed === null) {
+      for (const name of order) backups.set(name, stampManifest(pkgs.get(name).path, version));
+    }
 
     // Phase 2 — run the requested command per target, in dependency order.
     for (const name of order) {
@@ -441,15 +510,22 @@ function main() {
           encoding: 'utf8',
         });
       } else if (flags.mode === 'dry-run') {
-        stdout = execFileSync('pnpm', ['publish', '--dry-run', '--no-git-checks'], {
-          cwd: pkgDir,
-          encoding: 'utf8',
-        });
+        stdout = execFileSync(
+          'pnpm',
+          [
+            'publish',
+            ...(packed === null ? [] : [packed.get(name)]),
+            '--dry-run',
+            '--no-git-checks',
+          ],
+          { cwd: pkgDir, encoding: 'utf8' },
+        );
       } else {
-        stdout = execFileSync('pnpm', ['publish', '--no-git-checks'], {
-          cwd: pkgDir,
-          encoding: 'utf8',
-        });
+        stdout = execFileSync(
+          'pnpm',
+          ['publish', ...(packed === null ? [] : [packed.get(name)]), '--no-git-checks'],
+          { cwd: pkgDir, encoding: 'utf8' },
+        );
       }
       results.push({ name, version, ok: true, stdout: stdout.trim() });
       if (!flags.json) console.log(`[${flags.mode}] ${name}@${version} ✓`);
@@ -467,6 +543,7 @@ function main() {
     count: order.length,
     order,
     outDir: outDir ?? null,
+    from: packed === null ? null : resolve(flags.from),
     results: results.map(({ name, version: v, ok }) => ({ name, version: v, ok })),
   };
   if (flags.json) console.log(JSON.stringify(summary, null, 2));
