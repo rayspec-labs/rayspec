@@ -583,10 +583,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator bootstrap route, and `rayspec tenant ensure` (which reads the same variable, keeps
   resolving the existing organization idempotently and reports `SINGLE_TENANT_LIMIT` for a second).
   Open registration only creates that first organization; after it an account is made by redeeming
-  an invite. A refusal is a `403` with one fixed message; the registration and bootstrap checks run
-  before an account is created, so only the loser of two registrations racing for the first
-  organization is left with an account and no organization. A boot of a database that already holds more than one organization is refused. Any value other than
-  `true` or `false` refuses the boot. `BootedServer.singleTenant` reports it, and the
+  an invite. A refusal is a `403` with one fixed message, and it creates no account: the loser of
+  two registrations racing for the first organization gets the `403` too. A boot of a database that
+  already holds more than one organization is refused. Any value other than `true` or `false`
+  refuses the boot. `BootedServer.singleTenant` reports it, and the
   runtime-control adapter's `inspectHosting()` reports the tenant limit as
   `applicationTenants: { singleTenantMode, maxApplicationTenants }`. Unset, nothing changes.
 - **In the hardened posture a durable agent run is re-checked against its requester when it
@@ -1145,7 +1145,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A runtime refuses a database a newer runtime migrated.** An older runtime found a platform
   ledger with migrations it does not ship, applied nothing and served that schema silently. The
   boot (and `rayspec tenant ensure`) now refuses it, under the schema lock and before anything is
-  applied, with a message that names the cause, and leaves the database unchanged.
+  applied, with a message that names the cause, and leaves the database unchanged. This protects
+  from 1.9.0 on: a 1.8.x runtime does not have the check and boots on a database 1.9.0 migrated.
+- **A durable worker's shutdown no longer hangs after an outage of the workflow database.** While
+  the workflow engine reconnected its notification listener, `executor.shutdown()` in
+  `@rayspec/durable-dbos` could wait for ever on the connection the reconnect held, retry the
+  reconnect every second for ever, or raise an uncaught "Release called on client which has already
+  been released" when the listener failed as it closed. Once the running workflows are drained, the
+  close of the system database now releases a listener a reconnect publishes, clears a reconnect it
+  arms and absorbs a late listener error, and it is bounded by the new optional
+  `systemDatabaseCloseTimeoutMs` (default 10 s, exported as
+  `DEFAULT_SYSTEM_DATABASE_CLOSE_TIMEOUT_MS`): past it, `shutdown()` rejects with the reason instead
+  of never returning.
 - **Shutdown no longer waits for ever on an open connection.** A request that never completed (a
   stalled upload, an event stream, half a request) kept a stopping server alive indefinitely; the
   drain above bounds it.
@@ -1287,23 +1298,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the Pi SDK's shrinkwrap, which no override reaches; the newest Pi SDK release checked,
   `0.99.1`, pins `5.0.9`, which they cover as well. The consumer scan lists them next to the
   entries below, with the same expiry.
-- **Still open for consumers: three advisories inside `@earendil-works/pi-coding-agent`.**
+- **Still open for consumers: advisories against three packages pinned by
+  `@earendil-works/pi-coding-agent`, 22 in all** (15 against `undici`, 6 against `brace-expansion`,
+  1 against `protobufjs`).
   `@rayspec/adapter-pi` depends on `@earendil-works/pi-coding-agent` `0.79.9`, which ships an
   `npm-shrinkwrap.json` pinning `undici` `8.5.0`, `brace-expansion` `5.0.6` and `protobufjs`
   `7.6.4`. npm installs a dependency's shrinkwrap as written, so neither a pin in a RaySpec manifest
-  nor the workspace overrides reach those copies. The first release whose shrinkwrap is clear of all
-  three is `0.86.0` (`undici` `8.10.2`, `brace-expansion` `5.0.9`, `protobufjs` `7.6.6`). Moving to
+  nor the workspace overrides reach those copies. `0.86.0` is the first release that moves all three
+  pins (`undici` `8.10.2`, `brace-expansion` `5.0.9`, `protobufjs` `7.6.6`); it clears every one of
+  these advisories except the three `brace-expansion` ones above, which cover `5.0.9` as well. Moving to
   it is a dependency bump of the Pi adapter across several breaking releases of the Pi SDK,
   including the removal of the `AuthStorage` export the adapter uses, and is left to its own
   change. Inside this repository pnpm ignores the shrinkwrap and the overrides already resolve
   fixed versions.
+- **The workspace audit is clear of the advisories published in early September.** The root
+  overrides moved `hono` from `4.12.34` to `4.13.5` and `fast-uri` from `3.1.5` to `3.1.6` (both
+  moved again by the entries around this one, to `4.13.9` and `3.1.8`), and a new override pins the
+  transitive `qs` at `6.16.0`. `vitest` moved from `4.1.9` to `4.1.11` in every manifest that
+  declares it. Workspace and lockfile only; what a consumer installs is the `hono` entry above.
 - **The workspace dependency audit passes again.** Advisories published since the last release
   cover `fast-uri` `3.1.6` (two, fixed in `3.1.7`) and `ip-address` `10.3.1` (two, fixed in
   `10.5.1`), the versions the root overrides pinned, so the osv-scanner audit of `pnpm-lock.yaml`
   failed. The overrides now name the first fixed versions. A consumer install was not affected: npm
   resolves `fast-uri` `3.1.8` and `ip-address` `10.7.2` there.
 - **CI now audits the release the way a consumer installs it.** The audit of `pnpm-lock.yaml` could
-  not see the three Pi SDK advisories above, because no consumer installs from that file and a
+  not see the Pi SDK advisories above, because no consumer installs from that file and a
   dependency's own shrinkwrap never enters it. A new CI step packs the release closure,
   installs it with npm into an empty directory (`scripts/check-consumer-install.mjs`), imports every
   package's entry point there, and scans the resulting `package-lock.json` with the same pinned
@@ -1333,8 +1352,10 @@ on, deploy a bundle, embed the packages or parse what the runtime writes.
   (`0017_runtime_control_blob_backend`), and `0015_tenant_row_security`, which only creates policies
   and functions and enables nothing, so a deployment that does not set
   `RAYSPEC_MIGRATION_DATABASE_URL` runs exactly as before. The chain runs as a `runtime.apply`
-  operation under the operation lease and writes receipts. A runtime refuses a database a newer
-  runtime migrated, so there is no downgrade after this boot: take a backup first.
+  operation under the operation lease and writes receipts. There is no downgrade after this boot:
+  a 1.8.x runtime does not detect a database 1.9.0 has migrated and boots on it, so going back must
+  start from the backup taken before the upgrade. Only 1.9.0 and later refuse a database a newer
+  runtime migrated.
 - **The legacy YAML deploy can refuse a schema change it used to make.** A schema change on a fenced
   environment (`RAY_POLICY_DENIED`, exit 4), a plan made stale by a concurrent change
   (`RAY_PLAN_STALE`, 3), another operation holding the lease past the wait (`RAY_LOCK_TIMEOUT`, 5)
