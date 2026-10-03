@@ -186,6 +186,7 @@ jobs:
       - name: Reference journeys through the installed release
         run: |
           node scripts/reference-journeys.mjs --consumer "${RUNNER_TEMP}/consumer" \
+            --tarballs "${RUNNER_TEMP}/candidate/tarballs" \
             --log-dir "${RUNNER_TEMP}/reports/journeys-install" > "${RUNNER_TEMP}/reports/journeys-install.json"
 
       - name: Load the image from its archive

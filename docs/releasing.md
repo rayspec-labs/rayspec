@@ -70,8 +70,9 @@ node scripts/corpus-conformance.mjs --cli ./consumer/node_modules/rayspec/dist/b
   --expectations ./consumer/node_modules/@rayspec/bundle-contract/contract/fixtures/EXPECTATIONS.json \
   --corpus packages/kernel/bundle-contract/corpus --generated ./generated
 
-# The three reference applications and the quickstart through the installed release.
-node scripts/reference-journeys.mjs --consumer ./consumer
+# The three reference applications and the quickstart through the installed release (the
+# quickstart installs the tarballs itself, as its page does).
+node scripts/reference-journeys.mjs --consumer ./consumer --tarballs ./candidate/tarballs
 
 # The image: loaded from the archive, checked, the corpus through its CLI, team-notes served.
 docker load -i ./candidate/image/rayspec-runtime.oci.tar
