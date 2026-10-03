@@ -9,8 +9,9 @@
  *    version line is missing or appears twice;
  *  - the stamped run restores every manifest to its committed bytes when the work succeeds and when
  *    it throws, inside a throwaway git workspace with real member manifests;
- *  - the command line refuses a release version and an incomplete argument list before it writes
- *    anything (exit 2, no output directory).
+ *  - a release build is the committed version with its annotated tag on HEAD, and nothing else;
+ *  - the command line refuses a release version, a release build without its tag, and an
+ *    incomplete argument list before it writes anything (exit 2, no output directory).
  *
  * Standalone: `node scripts/release-candidate.test.mjs`; exit 0 = pass.
  */
@@ -22,6 +23,7 @@ import { join } from 'node:path';
 import {
   CandidateRefused,
   checkCandidateVersion,
+  checkReleaseVersion,
   main,
   stampVersionLine,
   withStampedVersion,
@@ -57,6 +59,16 @@ await check('a candidate version is a pre-release above the committed version', 
   refusedWith(
     () => checkCandidateVersion('1.7.9-rc.0', '1.8.0'),
     /not above the committed version/,
+  );
+});
+
+await check('a release build is the committed version with its tag on HEAD', () => {
+  checkReleaseVersion('1.9.0', '1.9.0', 'v1.9.0');
+  refusedWith(() => checkReleaseVersion('1.9.0', '1.8.0', 'v1.9.0'), /commit the version first/);
+  refusedWith(() => checkReleaseVersion('1.9.0', '1.9.0', null), /annotated tag v1\.9\.0 on HEAD/);
+  refusedWith(
+    () => checkReleaseVersion('1.9.0', '1.9.0', 'v1.8.0'),
+    /annotated tag v1\.9\.0 on HEAD/,
   );
 });
 
@@ -152,6 +164,12 @@ await check('the command line refuses before it writes anything', async () => {
   assert.equal(await main(['--version', '1.9.0', '--out', out]), 2);
   assert.equal(existsSync(out), false);
   assert.equal(await main(['--version', '1.9.0-rc.0']), 2);
+  const committed = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'),
+  ).version;
+  assert.equal(await main(['--release', '--version', '9.9.9', '--out', out]), 2);
+  // This checkout's HEAD is a development commit: it carries no release tag of its own version.
+  assert.equal(await main(['--release', '--version', committed, '--out', out]), 2);
   assert.equal(await main(['--version', '1.9.0-rc.0', '--out', out, '--key-file', 'k.pem']), 2);
   assert.equal(existsSync(out), false);
 });

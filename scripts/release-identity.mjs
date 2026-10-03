@@ -66,12 +66,14 @@
  *
  * HONESTY ABOUT WHAT DOES NOT EXIST
  * ---------------------------------
- * There is no release workflow in `.github/workflows`, by design: a release happens when a human
- * invokes `scripts/publish.mjs` (see its docblock). So the build workflow run is recorded only from
- * a GitHub Actions environment and is otherwise an explicit `null` with a machine-readable reason —
- * never a fabricated value. The tag is recorded the same way: generating a manifest BEFORE the
- * release tag exists is normal, and it is written down as `state: "absent"` rather than guessed.
- * The manifest is also UNSIGNED, and says so in `signature`, with the reason.
+ * A release is built by `scripts/release-candidate.mjs --release` in the manually dispatched release
+ * workflow (`.github/workflows/release.yml`), and a candidate by the same script locally or in the
+ * candidate workflow. So the build workflow run is recorded when the manifest is generated in GitHub
+ * Actions and is otherwise an explicit `null` with a machine-readable reason — never a fabricated
+ * value. The tag is recorded the same way: generating a manifest BEFORE the release tag exists is
+ * normal (every candidate does), and it is written down as `state: "absent"` rather than guessed.
+ * This manifest is not signed itself, and says so in `signature`: the signed release manifest
+ * (`scripts/release-manifest.mjs`) records its SHA-256 as `identityManifestSha256`.
  *
  * DETERMINISM
  * -----------
@@ -763,9 +765,9 @@ function tagIdentity(version, head) {
 }
 
 /**
- * The build workflow run, from the GitHub Actions environment. There is no release workflow in this
- * repository — a release is human-invoked — so outside Actions this is an explicit null naming the
- * reason, never a value that looks like a run and is not one.
+ * The build workflow run, from the GitHub Actions environment. Outside Actions (a local candidate,
+ * a hand-run release) this is an explicit null naming the reason, never a value that looks like a
+ * run and is not one.
  */
 function workflowRun(env) {
   if (env.GITHUB_ACTIONS !== 'true') {
@@ -773,8 +775,8 @@ function workflowRun(env) {
       value: null,
       reason: 'no-github-actions-environment',
       note:
-        'generated outside GitHub Actions. This repository has no release workflow by design: the ' +
-        'release path is the human-invoked scripts/publish.mjs.',
+        'generated outside GitHub Actions. Releases are built in the release workflow ' +
+        '(.github/workflows/release.yml); this manifest was generated elsewhere.',
     };
   }
   const server = env.GITHUB_SERVER_URL || 'https://github.com';
@@ -861,8 +863,9 @@ function buildManifest(members, launcherName, root, env) {
       value: null,
       reason: 'unsigned',
       note:
-        'this manifest is not signed. Its authenticity rests on the GitHub release it is attached ' +
-        'to and on the commit it names; verify the closure with `--verify` against the tarballs.',
+        'this manifest is not signed itself. The signed release manifest (release-manifest.json) ' +
+        'records its SHA-256 as identityManifestSha256; verify the closure with `--verify` against ' +
+        'the tarballs.',
     },
     closure: members.map((m) => {
       const isLauncher = m.name === launcherName;

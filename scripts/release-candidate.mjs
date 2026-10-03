@@ -11,8 +11,9 @@
  *      is clean, no identity manifest is left in the launcher directory and `--out` is empty;
  *   2. stamps the version into the repo-root manifest and every RaySpec member manifest — the
  *      version line only — and, while stamped, packs the publish set (`scripts/publish.mjs --pack`),
- *      writes the release identity manifest (`scripts/release-identity.mjs`) and the CycloneDX SBOM
- *      of the closure (`scripts/gen-closure-sbom.mjs --tarballs`);
+ *      writes the release identity manifest (`scripts/release-identity.mjs`), packs the launcher
+ *      again with that manifest inside it, verifies the manifest against the tarballs, and writes
+ *      the CycloneDX SBOM of the closure (`scripts/gen-closure-sbom.mjs --tarballs`);
  *   3. restores every manifest to its committed bytes — also on an error or a signal — and refuses
  *      to go on unless the tracked tree is exactly what it was before;
  *   4. builds the runtime image for linux/amd64 from the tarballs into an OCI archive
@@ -22,6 +23,10 @@
  *      `--key-file`, signs and verifies it;
  *   6. writes `candidate.json`: the version, the commit, every artifact with its SHA-256 and the
  *      outcome of each step.
+ *
+ * With `--release` the same artifacts are built for the release itself: the version must be the
+ * committed one and HEAD must carry its annotated tag, and nothing is stamped (the release workflow,
+ * docs/releasing.md).
  *
  *   node scripts/release-candidate.mjs --version <x.y.z-pre> --out <dir> [--builder <buildx builder>]
  *        [--skip-image] [--repository ghcr.io/<owner>/<name>] [--key-file <pem> --trusted-key <pem>]
@@ -38,7 +43,16 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -84,6 +98,34 @@ export function checkCandidateVersion(version, committed) {
       `${version} is not above the committed version ${committed}: a candidate leads to the next release`,
     );
   }
+}
+
+/**
+ * A release build: the version is the committed one, and HEAD carries its annotated tag. A release
+ * is built from the commit that names it, never stamped.
+ */
+export function checkReleaseVersion(version, committed, tagOfHead) {
+  if (version !== committed) {
+    throw new CandidateRefused(
+      `--release builds the committed version ${committed}, not ${version}: commit the version first`,
+    );
+  }
+  if (tagOfHead !== `v${version}`) {
+    throw new CandidateRefused(`--release needs the annotated tag v${version} on HEAD`);
+  }
+}
+
+/** The annotated release tag on HEAD for `version`, or null. */
+function annotatedTagOnHead(version) {
+  const name = `v${version}`;
+  const type = spawnSync('git', ['cat-file', '-t', `refs/tags/${name}`], {
+    cwd: REPO,
+    encoding: 'utf8',
+  });
+  if (type.status !== 0 || type.stdout.trim() !== 'tag') return null;
+  const target = spawnSync('git', ['rev-list', '-n', '1', name], { cwd: REPO, encoding: 'utf8' });
+  const head = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' });
+  return target.stdout.trim() !== '' && target.stdout.trim() === head.stdout.trim() ? name : null;
 }
 
 /**
@@ -228,6 +270,7 @@ export async function main(argv = process.argv.slice(2)) {
         'key-file': { type: 'string' },
         'trusted-key': { type: 'string' },
         builder: { type: 'string' },
+        release: { type: 'boolean' },
       },
       strict: true,
       allowPositionals: false,
@@ -257,7 +300,10 @@ export async function main(argv = process.argv.slice(2)) {
   };
   try {
     const committed = JSON.parse(readFileSync(join(REPO, 'package.json'), 'utf8')).version;
-    checkCandidateVersion(values.version, committed);
+    const release = values.release === true;
+    if (release) checkReleaseVersion(values.version, committed, annotatedTagOnHead(values.version));
+    else checkCandidateVersion(values.version, committed);
+    summary.mode = release ? 'release' : 'candidate';
     if (trackedChanges() !== '') {
       throw new CandidateRefused(
         'the tracked tree has changes: a candidate is built from a commit',
@@ -279,7 +325,10 @@ export async function main(argv = process.argv.slice(2)) {
     const identity = join(out, 'rayspec-release-identity.json');
     const sbom = join(out, 'closure-sbom.cdx.json');
 
-    withStampedVersion(REPO, values.version, () => {
+    const build = release
+      ? (work) => work()
+      : (work) => withStampedVersion(REPO, values.version, work);
+    build(() => {
       const packLog = join(out, 'logs', 'pack.log');
       step(
         'pack the publish set',
@@ -297,6 +346,39 @@ export async function main(argv = process.argv.slice(2)) {
         'release identity manifest',
         runScript('release-identity.mjs', ['--tarballs', tarballs, '--out', identity], idLog) === 0,
         { log: idLog },
+      );
+      // The launcher ships the identity manifest: pack the closure again with the manifest in the
+      // launcher's directory and keep only the new launcher tarball. Its file-list digest leaves the
+      // manifest out, so the identity still holds, and the verifier checks the shipped copy.
+      const launcherLog = join(out, 'logs', 'launcher-repack.log');
+      const repack = join(out, 'logs', 'repack');
+      const shipped = join(REPO, IDENTITY_IN_LAUNCHER);
+      try {
+        copyFileSync(identity, shipped);
+        step(
+          'the launcher packed with its identity manifest',
+          runScript('publish.mjs', ['--pack', '--out', repack], launcherLog) === 0,
+          { log: launcherLog },
+        );
+        const launcher = readdirSync(repack).filter((f) => /^rayspec-\d.*\.tgz$/.test(f));
+        step('one launcher tarball', launcher.length === 1, { found: launcher });
+        renameSync(join(repack, launcher[0]), join(tarballs, launcher[0]));
+      } finally {
+        rmSync(shipped, { force: true });
+        rmSync(repack, { recursive: true, force: true });
+      }
+      const verifyLog = join(out, 'logs', 'release-identity-verify.log');
+      step(
+        'the identity manifest verifies against the tarballs it ships in',
+        runScript(
+          'release-identity.mjs',
+          ['--verify', '--tarballs', tarballs, '--manifest', identity],
+          verifyLog,
+        ) === 0 &&
+          readFileSync(verifyLog, 'utf8').includes(
+            'the tarball carries this rayspec-release-identity.json',
+          ),
+        { log: verifyLog },
       );
       const sbomLog = join(out, 'logs', 'closure-sbom.log');
       step(

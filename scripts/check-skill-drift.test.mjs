@@ -34,6 +34,7 @@ import {
   commandGroups,
   helpCommands,
   referenceHeadings,
+  SKILL,
   skillCommands,
 } from './check-skill-drift.mjs';
 
@@ -131,7 +132,7 @@ check('the gate passes on this repository and fails when the reference loses a s
   try {
     for (const rel of [
       'scripts/check-skill-drift.mjs',
-      '.claude/skills/rayspec-author/SKILL.md',
+      SKILL,
       'packages/kernel/spec/src/grammar.ts',
       'docs/cli-reference.md',
     ]) {

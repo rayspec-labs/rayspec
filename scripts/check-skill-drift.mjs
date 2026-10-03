@@ -103,13 +103,15 @@ export function commandDrift({ help, reference, skill }) {
   return { problems, commands: commands.size };
 }
 
+/** The authoring skill this gate guards, relative to the repository root. */
+export const SKILL = '.claude/skills/rayspec-author/SKILL.md';
+
 function main() {
   // Resolve the repo root from THIS file via fileURLToPath — a checkout path with a space (or any
   // other percent-encodable character) survives, where `new URL(import.meta.url).pathname` would leave
   // a literal `%20` in the path and break every join below.
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-  const SKILL = '.claude/skills/rayspec-author/SKILL.md';
   const CLI_REFERENCE = 'docs/cli-reference.md';
   const GRAMMAR = 'packages/kernel/spec/src/grammar.ts';
   // The retired backend version literal — it must never reappear in the skill once the language unified.
