@@ -676,6 +676,7 @@ the built output (a `.ts` handler is refused with `RAY_CLOSURE_INVALID` and the 
 rayspec pack --spec <built-dir>/rayspec.yaml --output <app-id>-<version>.ray --preview   # what goes in; writes nothing
 rayspec pack --spec <built-dir>/rayspec.yaml --output <app-id>-<version>.ray
 rayspec bundle verify <app-id>-<version>.ray                                              # deployable on this runtime?
+rayspec bundle sign <app-id>-<version>.ray --key-file <ed25519-private-key.pem>           # only when the user asks to sign
 ```
 
 - The bundle needs an application id and version: set `metadata.id` / `metadata.version` in the spec
@@ -685,6 +686,11 @@ rayspec bundle verify <app-id>-<version>.ray                                    
   The refusals and their fixes are in `docs/packing.md`. An existing output needs `--force` — only
   with the user's approval.
 - `--build`, `--against` and `--allowlist` are refused in this release; do not use them.
+- Signing needs the user's own Ed25519 private key file (mode 0600, owned by them); never generate,
+  read, print or move a key on their behalf. `bundle sign` writes `<file>.ray.sig`; the user hands out
+  the public key, and a deployer checks it with `bundle verify --trusted-key <public.pem>
+  --require-signature`. A signature shows who signed the file, not that its code is safe
+  (`docs/packing.md`, "Signing a bundle").
 
 ---
 
