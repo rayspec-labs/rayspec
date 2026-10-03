@@ -70,7 +70,7 @@ One flag stands outside the subcommand grammar. `rayspec --version` (or `-v`)
 reports the CLI's own version on **stdout** and exits `0`:
 
 ```json
-{ "ok": true, "version": "1.8.0" }
+{ "ok": true, "version": "1.9.0" }
 ```
 
 The value is read from the CLI package's own manifest at run time, so it names
@@ -557,7 +557,7 @@ It runs these steps in order and stops at the first failure:
       "size": 3874,
       "applicationId": "notes",
       "applicationVersion": "1.4.0",
-      "runtimeVersion": "1.8.0",
+      "runtimeVersion": "1.9.0",
       "target": { "os": "linux", "arch": "x64", "nodeMajor": 22 },
       "requires": ["declarative-api", "declarative-stores", "static-frontend"],
       "bindings": [],
