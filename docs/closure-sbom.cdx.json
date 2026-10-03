@@ -13,10 +13,10 @@
     },
     "component": {
       "type": "application",
-      "bom-ref": "pkg:npm/rayspec@1.8.0",
+      "bom-ref": "pkg:npm/rayspec@1.9.0",
       "name": "rayspec",
-      "version": "1.8.0",
-      "purl": "pkg:npm/rayspec@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/rayspec@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2089,10 +2089,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/adapter-anthropic@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/adapter-anthropic@1.9.0",
       "name": "@rayspec/adapter-anthropic",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/adapter-anthropic@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/adapter-anthropic@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2101,10 +2101,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/adapter-codex@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/adapter-codex@1.9.0",
       "name": "@rayspec/adapter-codex",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/adapter-codex@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/adapter-codex@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2113,10 +2113,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/adapter-deepgram@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/adapter-deepgram@1.9.0",
       "name": "@rayspec/adapter-deepgram",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/adapter-deepgram@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/adapter-deepgram@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2125,10 +2125,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/adapter-openai-tts@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/adapter-openai-tts@1.9.0",
       "name": "@rayspec/adapter-openai-tts",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/adapter-openai-tts@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/adapter-openai-tts@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2137,10 +2137,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/adapter-openai@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/adapter-openai@1.9.0",
       "name": "@rayspec/adapter-openai",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/adapter-openai@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/adapter-openai@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2149,10 +2149,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/adapter-pi@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/adapter-pi@1.9.0",
       "name": "@rayspec/adapter-pi",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/adapter-pi@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/adapter-pi@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2161,10 +2161,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/agent-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/agent-runtime@1.9.0",
       "name": "@rayspec/agent-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/agent-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/agent-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2173,10 +2173,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/api-auth@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/api-auth@1.9.0",
       "name": "@rayspec/api-auth",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/api-auth@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/api-auth@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2185,10 +2185,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/audio-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/audio-runtime@1.9.0",
       "name": "@rayspec/audio-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/audio-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/audio-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2197,10 +2197,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/auth-core@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/auth-core@1.9.0",
       "name": "@rayspec/auth-core",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/auth-core@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/auth-core@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2209,10 +2209,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/bundle-closure@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/bundle-closure@1.9.0",
       "name": "@rayspec/bundle-closure",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/bundle-closure@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/bundle-closure@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2221,10 +2221,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/bundle-contract@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/bundle-contract@1.9.0",
       "name": "@rayspec/bundle-contract",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/bundle-contract@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/bundle-contract@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2233,10 +2233,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/bundle@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/bundle@1.9.0",
       "name": "@rayspec/bundle",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/bundle@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/bundle@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2245,10 +2245,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/capability-bridges@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/capability-bridges@1.9.0",
       "name": "@rayspec/capability-bridges",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/capability-bridges@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/capability-bridges@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2257,10 +2257,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/cli@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/cli@1.9.0",
       "name": "@rayspec/cli",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/cli@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/cli@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2269,10 +2269,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/conversation-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/conversation-runtime@1.9.0",
       "name": "@rayspec/conversation-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/conversation-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/conversation-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2281,10 +2281,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/core@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/core@1.9.0",
       "name": "@rayspec/core",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/core@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/core@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2293,10 +2293,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/db@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/db@1.9.0",
       "name": "@rayspec/db",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/db@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/db@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2305,10 +2305,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/durable-dbos@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/durable-dbos@1.9.0",
       "name": "@rayspec/durable-dbos",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/durable-dbos@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/durable-dbos@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2317,10 +2317,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/file-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/file-runtime@1.9.0",
       "name": "@rayspec/file-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/file-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/file-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2329,10 +2329,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/foundation@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/foundation@1.9.0",
       "name": "@rayspec/foundation",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/foundation@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/foundation@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2341,10 +2341,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/grounding-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/grounding-runtime@1.9.0",
       "name": "@rayspec/grounding-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/grounding-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/grounding-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2353,10 +2353,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/handler-sdk@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/handler-sdk@1.9.0",
       "name": "@rayspec/handler-sdk",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/handler-sdk@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/handler-sdk@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2365,10 +2365,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/platform@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/platform@1.9.0",
       "name": "@rayspec/platform",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/platform@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/platform@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2377,10 +2377,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.9.0",
       "name": "@rayspec/product-yaml-workflow-bridge",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2389,10 +2389,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/product-yaml@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/product-yaml@1.9.0",
       "name": "@rayspec/product-yaml",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/product-yaml@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/product-yaml@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2401,10 +2401,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/record-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/record-runtime@1.9.0",
       "name": "@rayspec/record-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/record-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/record-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2413,10 +2413,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/server@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/server@1.9.0",
       "name": "@rayspec/server",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/server@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/server@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2425,10 +2425,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/spec@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/spec@1.9.0",
       "name": "@rayspec/spec",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/spec@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/spec@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2437,10 +2437,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/stt-port@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/stt-port@1.9.0",
       "name": "@rayspec/stt-port",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/stt-port@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/stt-port@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2449,10 +2449,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/tts-port@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/tts-port@1.9.0",
       "name": "@rayspec/tts-port",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/tts-port@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/tts-port@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2461,10 +2461,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/views-runtime@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/views-runtime@1.9.0",
       "name": "@rayspec/views-runtime",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/views-runtime@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/views-runtime@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -2473,10 +2473,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40rayspec/workflow-durable@1.8.0",
+      "bom-ref": "pkg:npm/%40rayspec/workflow-durable@1.9.0",
       "name": "@rayspec/workflow-durable",
-      "version": "1.8.0",
-      "purl": "pkg:npm/%40rayspec/workflow-durable@1.8.0",
+      "version": "1.9.0",
+      "purl": "pkg:npm/%40rayspec/workflow-durable@1.9.0",
       "licenses": [
         {
           "expression": "FSL-1.1-ALv2"
@@ -7452,65 +7452,65 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40rayspec/adapter-anthropic@1.8.0",
+      "ref": "pkg:npm/%40rayspec/adapter-anthropic@1.9.0",
       "dependsOn": [
         "pkg:npm/%40anthropic-ai/claude-agent-sdk@0.3.185",
         "pkg:npm/%40anthropic-ai/sdk@0.105.0",
-        "pkg:npm/%40rayspec/core@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/zod@4.4.3"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/adapter-codex@1.8.0",
+      "ref": "pkg:npm/%40rayspec/adapter-codex@1.9.0",
       "dependsOn": [
         "pkg:npm/%40modelcontextprotocol/sdk@1.29.0",
         "pkg:npm/%40openai/codex-sdk@0.142.2",
-        "pkg:npm/%40rayspec/core@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/zod@4.4.3"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/adapter-deepgram@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/stt-port@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/adapter-deepgram@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/stt-port@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/adapter-openai-tts@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/tts-port@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/adapter-openai-tts@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/tts-port@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/adapter-openai@1.8.0",
+      "ref": "pkg:npm/%40rayspec/adapter-openai@1.9.0",
       "dependsOn": [
         "pkg:npm/%40openai/agents@0.11.8",
-        "pkg:npm/%40rayspec/core@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/openai@6.44.0",
         "pkg:npm/zod@4.4.3"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/adapter-pi@1.8.0",
+      "ref": "pkg:npm/%40rayspec/adapter-pi@1.9.0",
       "dependsOn": [
         "pkg:npm/%40earendil-works/pi-ai@0.79.9",
         "pkg:npm/%40earendil-works/pi-coding-agent@0.79.9",
-        "pkg:npm/%40rayspec/core@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/typebox@1.1.38",
         "pkg:npm/zod@4.4.3"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/agent-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/foundation@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/agent-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/foundation@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/api-auth@1.8.0",
+      "ref": "pkg:npm/%40rayspec/api-auth@1.9.0",
       "dependsOn": [
         "pkg:npm/%40hono/node-server@2.0.10",
         "pkg:npm/%40hono/zod-openapi@1.4.0",
-        "pkg:npm/%40rayspec/auth-core@1.8.0",
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/platform@1.8.0",
-        "pkg:npm/%40rayspec/product-yaml@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
+        "pkg:npm/%40rayspec/auth-core@1.9.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/platform@1.9.0",
+        "pkg:npm/%40rayspec/product-yaml@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
         "pkg:npm/drizzle-orm@0.45.2",
         "pkg:npm/hono@4.13.9",
         "pkg:npm/jose@6.2.3",
@@ -7519,186 +7519,186 @@
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/audio-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.8.0", "pkg:npm/%40rayspec/spec@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/audio-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.9.0", "pkg:npm/%40rayspec/spec@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/auth-core@1.8.0",
+      "ref": "pkg:npm/%40rayspec/auth-core@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/core@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/argon2@0.44.0",
         "pkg:npm/jose@6.2.3",
         "pkg:npm/zod@4.4.3"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/bundle-closure@1.8.0",
+      "ref": "pkg:npm/%40rayspec/bundle-closure@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/bundle-contract@1.8.0",
-        "pkg:npm/%40rayspec/bundle@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
+        "pkg:npm/%40rayspec/bundle-contract@1.9.0",
+        "pkg:npm/%40rayspec/bundle@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
         "pkg:npm/es-module-lexer@2.1.0",
         "pkg:npm/semver@7.8.0"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/bundle-contract@1.8.0",
+      "ref": "pkg:npm/%40rayspec/bundle-contract@1.9.0",
       "dependsOn": ["pkg:npm/ajv@8.20.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/bundle@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/bundle-contract@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/bundle@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/bundle-contract@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/capability-bridges@1.8.0",
+      "ref": "pkg:npm/%40rayspec/capability-bridges@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/audio-runtime@1.8.0",
-        "pkg:npm/%40rayspec/conversation-runtime@1.8.0",
-        "pkg:npm/%40rayspec/file-runtime@1.8.0",
-        "pkg:npm/%40rayspec/foundation@1.8.0",
-        "pkg:npm/%40rayspec/record-runtime@1.8.0",
-        "pkg:npm/%40rayspec/workflow-durable@1.8.0"
+        "pkg:npm/%40rayspec/audio-runtime@1.9.0",
+        "pkg:npm/%40rayspec/conversation-runtime@1.9.0",
+        "pkg:npm/%40rayspec/file-runtime@1.9.0",
+        "pkg:npm/%40rayspec/foundation@1.9.0",
+        "pkg:npm/%40rayspec/record-runtime@1.9.0",
+        "pkg:npm/%40rayspec/workflow-durable@1.9.0"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/cli@1.8.0",
+      "ref": "pkg:npm/%40rayspec/cli@1.9.0",
       "dependsOn": [
         "pkg:npm/%40hono/node-server@2.0.10",
-        "pkg:npm/%40rayspec/bundle-closure@1.8.0",
-        "pkg:npm/%40rayspec/bundle-contract@1.8.0",
-        "pkg:npm/%40rayspec/bundle@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/product-yaml@1.8.0",
-        "pkg:npm/%40rayspec/server@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
-        "pkg:npm/%40rayspec/views-runtime@1.8.0",
+        "pkg:npm/%40rayspec/bundle-closure@1.9.0",
+        "pkg:npm/%40rayspec/bundle-contract@1.9.0",
+        "pkg:npm/%40rayspec/bundle@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/product-yaml@1.9.0",
+        "pkg:npm/%40rayspec/server@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
+        "pkg:npm/%40rayspec/views-runtime@1.9.0",
         "pkg:npm/postgres@3.4.9"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/conversation-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.8.0", "pkg:npm/%40rayspec/spec@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/conversation-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.9.0", "pkg:npm/%40rayspec/spec@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/core@1.8.0",
+      "ref": "pkg:npm/%40rayspec/core@1.9.0",
       "dependsOn": ["pkg:npm/zod@4.4.3"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/db@1.8.0",
+      "ref": "pkg:npm/%40rayspec/db@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/spec@1.8.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
         "pkg:npm/drizzle-orm@0.45.2",
         "pkg:npm/postgres@3.4.9"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/durable-dbos@1.8.0",
+      "ref": "pkg:npm/%40rayspec/durable-dbos@1.9.0",
       "dependsOn": [
         "pkg:npm/%40dbos-inc/dbos-sdk@4.21.6",
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/foundation@1.8.0",
-        "pkg:npm/%40rayspec/platform@1.8.0",
-        "pkg:npm/%40rayspec/workflow-durable@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/foundation@1.9.0",
+        "pkg:npm/%40rayspec/platform@1.9.0",
+        "pkg:npm/%40rayspec/workflow-durable@1.9.0",
         "pkg:npm/drizzle-orm@0.45.2"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/file-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.8.0", "pkg:npm/%40rayspec/spec@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/file-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.9.0", "pkg:npm/%40rayspec/spec@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/foundation@1.8.0",
+      "ref": "pkg:npm/%40rayspec/foundation@1.9.0",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40rayspec/grounding-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/core@1.8.0", "pkg:npm/%40rayspec/foundation@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/grounding-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/core@1.9.0", "pkg:npm/%40rayspec/foundation@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/handler-sdk@1.8.0",
+      "ref": "pkg:npm/%40rayspec/handler-sdk@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/stt-port@1.8.0",
-        "pkg:npm/%40rayspec/tts-port@1.8.0"
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/stt-port@1.9.0",
+        "pkg:npm/%40rayspec/tts-port@1.9.0"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/platform@1.8.0",
+      "ref": "pkg:npm/%40rayspec/platform@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/handler-sdk@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/handler-sdk@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
         "pkg:npm/ajv@8.20.0",
         "pkg:npm/drizzle-orm@0.45.2"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.8.0",
+      "ref": "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/foundation@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
+        "pkg:npm/%40rayspec/foundation@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
         "pkg:npm/yaml@2.9.0"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/product-yaml@1.8.0",
+      "ref": "pkg:npm/%40rayspec/product-yaml@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/adapter-deepgram@1.8.0",
-        "pkg:npm/%40rayspec/agent-runtime@1.8.0",
-        "pkg:npm/%40rayspec/audio-runtime@1.8.0",
-        "pkg:npm/%40rayspec/capability-bridges@1.8.0",
-        "pkg:npm/%40rayspec/conversation-runtime@1.8.0",
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/file-runtime@1.8.0",
-        "pkg:npm/%40rayspec/foundation@1.8.0",
-        "pkg:npm/%40rayspec/grounding-runtime@1.8.0",
-        "pkg:npm/%40rayspec/handler-sdk@1.8.0",
-        "pkg:npm/%40rayspec/platform@1.8.0",
-        "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.8.0",
-        "pkg:npm/%40rayspec/record-runtime@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
-        "pkg:npm/%40rayspec/stt-port@1.8.0",
-        "pkg:npm/%40rayspec/views-runtime@1.8.0",
-        "pkg:npm/%40rayspec/workflow-durable@1.8.0",
+        "pkg:npm/%40rayspec/adapter-deepgram@1.9.0",
+        "pkg:npm/%40rayspec/agent-runtime@1.9.0",
+        "pkg:npm/%40rayspec/audio-runtime@1.9.0",
+        "pkg:npm/%40rayspec/capability-bridges@1.9.0",
+        "pkg:npm/%40rayspec/conversation-runtime@1.9.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/file-runtime@1.9.0",
+        "pkg:npm/%40rayspec/foundation@1.9.0",
+        "pkg:npm/%40rayspec/grounding-runtime@1.9.0",
+        "pkg:npm/%40rayspec/handler-sdk@1.9.0",
+        "pkg:npm/%40rayspec/platform@1.9.0",
+        "pkg:npm/%40rayspec/product-yaml-workflow-bridge@1.9.0",
+        "pkg:npm/%40rayspec/record-runtime@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
+        "pkg:npm/%40rayspec/stt-port@1.9.0",
+        "pkg:npm/%40rayspec/views-runtime@1.9.0",
+        "pkg:npm/%40rayspec/workflow-durable@1.9.0",
         "pkg:npm/drizzle-orm@0.45.2",
         "pkg:npm/unpdf@1.6.2"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/record-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.8.0", "pkg:npm/%40rayspec/spec@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/record-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.9.0", "pkg:npm/%40rayspec/spec@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/server@1.8.0",
+      "ref": "pkg:npm/%40rayspec/server@1.9.0",
       "dependsOn": [
         "pkg:npm/%40hono/node-server@2.0.10",
         "pkg:npm/%40openai/agents@0.11.8",
-        "pkg:npm/%40rayspec/adapter-anthropic@1.8.0",
-        "pkg:npm/%40rayspec/adapter-codex@1.8.0",
-        "pkg:npm/%40rayspec/adapter-deepgram@1.8.0",
-        "pkg:npm/%40rayspec/adapter-openai-tts@1.8.0",
-        "pkg:npm/%40rayspec/adapter-openai@1.8.0",
-        "pkg:npm/%40rayspec/adapter-pi@1.8.0",
-        "pkg:npm/%40rayspec/agent-runtime@1.8.0",
-        "pkg:npm/%40rayspec/api-auth@1.8.0",
-        "pkg:npm/%40rayspec/audio-runtime@1.8.0",
-        "pkg:npm/%40rayspec/auth-core@1.8.0",
-        "pkg:npm/%40rayspec/bundle-closure@1.8.0",
-        "pkg:npm/%40rayspec/bundle-contract@1.8.0",
-        "pkg:npm/%40rayspec/bundle@1.8.0",
-        "pkg:npm/%40rayspec/capability-bridges@1.8.0",
-        "pkg:npm/%40rayspec/conversation-runtime@1.8.0",
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/durable-dbos@1.8.0",
-        "pkg:npm/%40rayspec/platform@1.8.0",
-        "pkg:npm/%40rayspec/product-yaml@1.8.0",
-        "pkg:npm/%40rayspec/spec@1.8.0",
-        "pkg:npm/%40rayspec/stt-port@1.8.0",
-        "pkg:npm/%40rayspec/tts-port@1.8.0",
+        "pkg:npm/%40rayspec/adapter-anthropic@1.9.0",
+        "pkg:npm/%40rayspec/adapter-codex@1.9.0",
+        "pkg:npm/%40rayspec/adapter-deepgram@1.9.0",
+        "pkg:npm/%40rayspec/adapter-openai-tts@1.9.0",
+        "pkg:npm/%40rayspec/adapter-openai@1.9.0",
+        "pkg:npm/%40rayspec/adapter-pi@1.9.0",
+        "pkg:npm/%40rayspec/agent-runtime@1.9.0",
+        "pkg:npm/%40rayspec/api-auth@1.9.0",
+        "pkg:npm/%40rayspec/audio-runtime@1.9.0",
+        "pkg:npm/%40rayspec/auth-core@1.9.0",
+        "pkg:npm/%40rayspec/bundle-closure@1.9.0",
+        "pkg:npm/%40rayspec/bundle-contract@1.9.0",
+        "pkg:npm/%40rayspec/bundle@1.9.0",
+        "pkg:npm/%40rayspec/capability-bridges@1.9.0",
+        "pkg:npm/%40rayspec/conversation-runtime@1.9.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/durable-dbos@1.9.0",
+        "pkg:npm/%40rayspec/platform@1.9.0",
+        "pkg:npm/%40rayspec/product-yaml@1.9.0",
+        "pkg:npm/%40rayspec/spec@1.9.0",
+        "pkg:npm/%40rayspec/stt-port@1.9.0",
+        "pkg:npm/%40rayspec/tts-port@1.9.0",
         "pkg:npm/age-encryption@0.3.1",
         "pkg:npm/drizzle-orm@0.45.2",
         "pkg:npm/hono@4.13.9",
@@ -7708,34 +7708,34 @@
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/spec@1.8.0",
+      "ref": "pkg:npm/%40rayspec/spec@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/core@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
         "pkg:npm/ajv@8.20.0",
         "pkg:npm/yaml@2.9.0",
         "pkg:npm/zod@4.4.3"
       ]
     },
     {
-      "ref": "pkg:npm/%40rayspec/stt-port@1.8.0",
+      "ref": "pkg:npm/%40rayspec/stt-port@1.9.0",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40rayspec/tts-port@1.8.0",
+      "ref": "pkg:npm/%40rayspec/tts-port@1.9.0",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40rayspec/views-runtime@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.8.0", "pkg:npm/%40rayspec/spec@1.8.0"]
+      "ref": "pkg:npm/%40rayspec/views-runtime@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/handler-sdk@1.9.0", "pkg:npm/%40rayspec/spec@1.9.0"]
     },
     {
-      "ref": "pkg:npm/%40rayspec/workflow-durable@1.8.0",
+      "ref": "pkg:npm/%40rayspec/workflow-durable@1.9.0",
       "dependsOn": [
-        "pkg:npm/%40rayspec/core@1.8.0",
-        "pkg:npm/%40rayspec/db@1.8.0",
-        "pkg:npm/%40rayspec/foundation@1.8.0",
-        "pkg:npm/%40rayspec/grounding-runtime@1.8.0",
-        "pkg:npm/%40rayspec/platform@1.8.0",
+        "pkg:npm/%40rayspec/core@1.9.0",
+        "pkg:npm/%40rayspec/db@1.9.0",
+        "pkg:npm/%40rayspec/foundation@1.9.0",
+        "pkg:npm/%40rayspec/grounding-runtime@1.9.0",
+        "pkg:npm/%40rayspec/platform@1.9.0",
         "pkg:npm/drizzle-orm@0.45.2"
       ]
     },
@@ -8677,8 +8677,8 @@
       ]
     },
     {
-      "ref": "pkg:npm/rayspec@1.8.0",
-      "dependsOn": ["pkg:npm/%40rayspec/cli@1.8.0"]
+      "ref": "pkg:npm/rayspec@1.9.0",
+      "dependsOn": ["pkg:npm/%40rayspec/cli@1.9.0"]
     },
     {
       "ref": "pkg:npm/require-from-string@2.0.2",
