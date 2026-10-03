@@ -6,12 +6,14 @@
  * (`docker load`); the run first proves the loaded image is that one. Then:
  *
  *   1. ITS CONFIGURATION. linux/amd64; a USER that is not root; a health check; the version and
- *      source-commit labels of the release.
- *   2. INSIDE IT. The process runs as a user other than root; /bin/sh is there (the supervisor of a
- *      role-separated deploy re-executes itself through it); not one file of the installation or of
- *      the PostgreSQL client tools is writable by that user; npm, npx, corepack and yarn are gone;
- *      `rayspec --version` names the release; `rayspec-serve` is on PATH; pg_dump and pg_restore are
- *      PostgreSQL 16.
+ *      source-commit labels of the release; Node at the patch the Dockerfile pins; the working
+ *      directory /var/lib/rayspec; port 8080 on every address.
+ *   2. INSIDE IT. The process runs as a user other than root, on Node at the pinned patch; /bin/sh
+ *      is there (the supervisor of a role-separated deploy re-executes itself through it); the
+ *      installation is owned by root and not one file of it or of the PostgreSQL client tools is
+ *      writable by that user; /var/lib/rayspec is that user's, mode 0700; npm, npx, corepack and
+ *      yarn are gone; `rayspec --version` names the release; `rayspec-serve` is on PATH; pg_dump and
+ *      pg_restore are PostgreSQL 16.
  *   3. THE CONTRACT CORPUS, through the image's own CLI (`scripts/corpus-conformance.mjs`, mounted
  *      read-only with the corpus).
  *   4. A REFERENCE APPLICATION SERVED BY IT. The team-notes application (release 1.0.0) is packed,
@@ -35,13 +37,32 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { POSTGRES_IMAGE } from './journeys/lib.mjs';
+import { isEntryPoint } from './lib/entry.mjs';
 import { readOciImage } from './release-manifest.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+export const DOCKERFILE = join(REPO, 'deployments', 'runtime-image', 'Dockerfile');
+/** The image's working directory, which holds the state directory and the blob root. */
+export const STATE_DIR = '/var/lib/rayspec';
+
+/** The Node patch the Dockerfile pins in its base image (`node:<x.y.z>-...@sha256:...`). */
+export function pinnedNodeVersion(dockerfile) {
+  const m = /^ARG NODE_IMAGE=node:(\d+\.\d+\.\d+)-[^@\s]+@sha256:[a-f0-9]{64}$/m.exec(dockerfile);
+  return m === null ? null : m[1];
+}
+
+/**
+ * The files the corpus run inside the image needs, mounted read-only at their path under
+ * /conformance: the runner and every module it imports.
+ */
+export const CORPUS_RUNNER_FILES = [
+  ['scripts/corpus-conformance.mjs', '/conformance/corpus-conformance.mjs'],
+  ['scripts/lib/entry.mjs', '/conformance/lib/entry.mjs'],
+];
 
 /** The script run inside the image for its own facts; it prints one JSON object. */
 export const INSIDE_PROBE = `
@@ -66,10 +87,15 @@ for (const root of ['/opt/rayspec', '/opt/pgtools']) {
 const onPath = (name) => (process.env.PATH || '').split(':').some((d) => { try { fs.accessSync(path.join(d, name), fs.constants.X_OK); return true; } catch { return false; } });
 let shell = false;
 try { fs.accessSync('/bin/sh', fs.constants.X_OK); shell = true; } catch {}
+const owner = (p) => { try { const st = fs.statSync(p); return { uid: st.uid, mode: st.mode & 0o7777 }; } catch { return null; } };
 const version = spawnSync('rayspec', ['--version'], { encoding: 'utf8' });
 const tool = (name) => spawnSync(name, ['--version'], { encoding: 'utf8' }).stdout.trim();
 console.log(JSON.stringify({
   uid: process.getuid(),
+  node: process.version,
+  cwd: process.cwd(),
+  stateDir: owner('/var/lib/rayspec'),
+  installation: owner('/opt/rayspec'),
   shell,
   walked,
   writable: writable.slice(0, 20),
@@ -82,13 +108,21 @@ console.log(JSON.stringify({
 }));
 `;
 
-/** The judgement of the inside probe's facts against the release version. */
-export function judgeInside(facts, version) {
+/** The judgement of the inside probe's facts against the release version and the pinned Node. */
+export function judgeInside(facts, version, nodeVersion) {
   return [
     ['the process runs as a user other than root', facts.uid !== 0],
+    [`Node is ${nodeVersion}, the pinned patch`, facts.node === `v${nodeVersion}`],
     ['/bin/sh is present for the supervisor', facts.shell === true],
     ['the installation was walked', facts.walked > 100],
+    ['the installation is owned by root', facts.installation?.uid === 0],
     ['no file of the installation is writable by the runtime user', facts.writableCount === 0],
+    [
+      `${STATE_DIR} is the working directory, the runtime user's, mode 0700`,
+      facts.cwd === STATE_DIR &&
+        facts.stateDir?.uid === facts.uid &&
+        facts.stateDir?.mode === 0o700,
+    ],
     ['npm, npx, corepack and yarn are removed', facts.packageManagers.length === 0],
     [`rayspec --version names ${version}`, facts.rayspecVersion === version],
     ['rayspec-serve is on PATH', facts.rayspecServe === true],
@@ -97,9 +131,15 @@ export function judgeInside(facts, version) {
   ];
 }
 
-/** The judgement of the loaded image's configuration against the archive it came from. */
-export function judgeConfig(inspect, archive) {
+/**
+ * The judgement of the loaded image's configuration against the archive it came from and the Node
+ * patch the Dockerfile pins.
+ */
+export function judgeConfig(inspect, archive, nodeVersion) {
   const config = inspect.Config ?? {};
+  const env = new Map(
+    (config.Env ?? []).map((e) => [e.slice(0, e.indexOf('=')), e.slice(e.indexOf('=') + 1)]),
+  );
   return [
     [
       'the loaded image is the one in the archive',
@@ -123,6 +163,19 @@ export function judgeConfig(inspect, archive) {
         archive.labels['org.opencontainers.image.version'] &&
         config.Labels?.['org.opencontainers.image.revision'] ===
           archive.labels['org.opencontainers.image.revision'],
+    ],
+    [
+      `Node ${nodeVersion}, the patch the Dockerfile pins`,
+      typeof nodeVersion === 'string' &&
+        env.get('NODE_VERSION') === nodeVersion &&
+        archive.nodeVersion === nodeVersion,
+    ],
+    [`the working directory is ${STATE_DIR}`, config.WorkingDir === STATE_DIR],
+    [
+      'port 8080 on every address of the container',
+      env.get('PORT') === '8080' &&
+        env.get('RAYSPEC_HOST') === '0.0.0.0' &&
+        Object.hasOwn(config.ExposedPorts ?? {}, '8080/tcp'),
     ],
   ];
 }
@@ -207,16 +260,21 @@ async function main(argv) {
     const archive = readOciImage(resolve(values.oci));
     report.digest = archive.digest;
     report.version = archive.labels['org.opencontainers.image.version'];
+    const nodeVersion = pinnedNodeVersion(readFileSync(DOCKERFILE, 'utf8'));
+    check('the Dockerfile pins a Node patch', nodeVersion !== null);
+    report.nodeVersion = nodeVersion;
     const inspected = docker(['image', 'inspect', image]);
     check('the image is loaded', inspected.status === 0, inspected.stderr.trim());
-    for (const [name, ok] of judgeConfig(JSON.parse(inspected.stdout)[0], archive)) check(name, ok);
+    for (const [name, ok] of judgeConfig(JSON.parse(inspected.stdout)[0], archive, nodeVersion)) {
+      check(name, ok);
+    }
 
     // 2. Inside it.
     const inside = docker(['run', '--rm', '--entrypoint', 'node', image, '-e', INSIDE_PROBE]);
     check('the inside probe runs', inside.status === 0, inside.stderr.trim().slice(0, 400));
     const facts = JSON.parse(inside.stdout.trim().split('\n').at(-1));
     report.inside = facts;
-    for (const [name, ok] of judgeInside(facts, report.version)) check(name, ok);
+    for (const [name, ok] of judgeInside(facts, report.version, nodeVersion)) check(name, ok);
 
     // 3. The contract corpus through the image's CLI.
     const corpusArgs = [
@@ -224,8 +282,7 @@ async function main(argv) {
       '--rm',
       '--entrypoint',
       'node',
-      '-v',
-      `${join(REPO, 'scripts', 'corpus-conformance.mjs')}:/conformance/corpus-conformance.mjs:ro`,
+      ...CORPUS_RUNNER_FILES.flatMap(([file, at]) => ['-v', `${join(REPO, file)}:${at}:ro`]),
       '-v',
       `${join(REPO, 'packages', 'kernel', 'bundle-contract', 'corpus')}:/conformance/corpus:ro`,
       ...(values.generated === undefined
@@ -519,6 +576,6 @@ async function main(argv) {
   return report.ok ? 0 : 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exitCode = await main(process.argv.slice(2));
 }

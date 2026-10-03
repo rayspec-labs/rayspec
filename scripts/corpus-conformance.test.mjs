@@ -7,6 +7,8 @@
  *   - a case file whose bytes are not the recorded ones fails its case instead of running;
  *   - a case generated at test time and not supplied fails its case;
  *   - a CLI that answers every command the same way fails, case by case;
+ *   - an outcome that differs from its expectation in one term only, the refusal reason or the exit
+ *     code, is a failure, both as a judgement and through a CLI that changes only that term;
  *   - the outcome of a run is read as the CLI suites read it: the verdict of an envelope without
  *     data follows the operation, and output that is not one JSON object is a failure.
  *
@@ -19,7 +21,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { notExpressible, outcomeOf, runCorpus } from './corpus-conformance.mjs';
+import { notExpressible, outcomeOf, runCorpus, sameOutcome } from './corpus-conformance.mjs';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CONTRACT = join(REPO, 'packages', 'kernel', 'bundle-contract');
@@ -123,6 +125,78 @@ await check('a CLI that answers every command the same way fails case by case', 
   assert.equal(report.ok, false);
   assert.ok(report.failed.length > 100, `${report.failed.length} failed`);
 });
+
+await check('an outcome that differs only in its reason or only in its exit code fails', () => {
+  const want = {
+    ok: false,
+    verdict: 'invalid',
+    code: 'RAY_INVALID_ARCHIVE',
+    reason: 'not-a-zip',
+    exit: 2,
+  };
+  assert.equal(sameOutcome({ ...want }, want), true);
+  for (const [term, value] of [
+    ['reason', 'unsafe-path'],
+    ['exit', 1],
+    ['code', 'RAY_LIMIT_EXCEEDED'],
+    ['verdict', 'not-deployable'],
+    ['ok', true],
+  ]) {
+    assert.notEqual(want[term], value);
+    assert.equal(sameOutcome({ ...want, [term]: value }, want), false, term);
+  }
+});
+
+/**
+ * A CLI that runs the built one and changes one term of its answer: `reason` rewrites the reason
+ * of every refusal, `exit` adds 10 to every non-zero exit code.
+ */
+function alteringCli(term) {
+  const path = join(scratch, `altering-${term}.cjs`);
+  writeFileSync(
+    path,
+    [
+      "const { spawnSync } = require('node:child_process');",
+      `const res = spawnSync(process.execPath, [${JSON.stringify(CLI)}, ...process.argv.slice(2)], { encoding: 'utf8' });`,
+      'let out = res.stdout;',
+      term === 'reason'
+        ? "try { const e = JSON.parse(out); for (const x of e.errors ?? []) if (x.reason) x.reason = 'another-reason'; out = JSON.stringify(e); } catch {}"
+        : '',
+      'process.stdout.write(out);',
+      term === 'exit'
+        ? 'process.exit(res.status === 0 ? 0 : res.status + 10);'
+        : 'process.exit(res.status);',
+      '',
+    ].join('\n'),
+  );
+  return path;
+}
+
+for (const term of ['reason', 'exit']) {
+  await check(`a CLI that changes only the ${term} fails the cases that state one`, async () => {
+    const work = join(scratch, `run-altered-${term}`);
+    mkdirSync(work, { recursive: true });
+    const report = await runCorpus({
+      cli: alteringCli(term),
+      expectations: EXPECTATIONS,
+      corpus: CORPUS,
+      generated,
+      work,
+    });
+    assert.equal(report.ok, false);
+    const stated = doc.cases.flatMap((c) =>
+      c.expect.filter((e) => (term === 'reason' ? e.reason !== undefined : e.exit !== 0)),
+    );
+    assert.ok(stated.length > 10, `${stated.length} expectations state a ${term}`);
+    assert.ok(report.failed.length > 10, `${report.failed.length} failed`);
+    for (const f of report.failed) {
+      assert.notEqual(f.got?.[term], f.expected?.[term], `${f.id} failed on another term`);
+      for (const other of ['ok', 'verdict', 'code', 'reason', 'exit'].filter((t) => t !== term)) {
+        assert.equal(f.got[other], f.expected[other], `${f.id}: ${other}`);
+      }
+    }
+  });
+}
 
 await check('outcomes are read as the CLI suites read them', () => {
   assert.deepEqual(

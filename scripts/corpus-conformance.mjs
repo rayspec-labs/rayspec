@@ -30,8 +30,8 @@ import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isEntryPoint } from './lib/entry.mjs';
 
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
@@ -94,7 +94,8 @@ export function expectedOf(e) {
   return { ok: e.ok, verdict: e.verdict, code: e.code, reason: e.reason, exit: e.exit };
 }
 
-const same = (a, b) =>
+/** An outcome holds its expectation when every term is the same: ok, verdict, code, reason, exit. */
+export const sameOutcome = (a, b) =>
   a.ok === b.ok &&
   a.verdict === b.verdict &&
   a.code === b.code &&
@@ -201,7 +202,7 @@ export async function runCorpus({
       const res = await run(cli, task.args, work);
       const got = outcomeOf(task.e.operation, res.stdout, res.status);
       const want = expectedOf(task.e);
-      if (same(got, want)) report.passed += 1;
+      if (sameOutcome(got, want)) report.passed += 1;
       else {
         report.failed.push({
           id: task.c.id,
@@ -275,6 +276,6 @@ async function main(argv) {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exitCode = await main(process.argv.slice(2));
 }
