@@ -635,6 +635,7 @@ async function signCommand(args) {
   const bytes = readInput(args.manifest, 'the release manifest');
   const checked = contract.validateReleaseManifest(bytes);
   if (!checked.ok) refuse(`the release manifest does not validate: ${checked.errors[0].message}`);
+  refusePlaceholders(checked.value, 'the release manifest');
   const key = readPrivateKey(resolve(args['key-file']));
   const digest = sha256(bytes);
   const made = bundle.createReleaseSignatureFile(digest, key);
@@ -669,6 +670,7 @@ async function verifyCommand(args) {
     );
   }
   const manifest = checked.value;
+  refusePlaceholders(manifest, 'the release manifest');
   const digest = sha256(bytes);
   if (args.signature !== undefined) {
     const trusted = (args['trusted-key'] ?? []).map((p) => readPublicKey(resolve(p)));

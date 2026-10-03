@@ -560,6 +560,19 @@ writeFileSync(
   generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }),
 );
 
+await check('sign and verify refuse a manifest that holds a placeholder value', async () => {
+  const text = readFileSync(manifestPath, 'utf8');
+  const parsed = JSON.parse(text);
+  const zeroed = join(work, 'placeholder-manifest.json');
+  writeFileSync(zeroed, text.replace(parsed.sourceCommit, '0'.repeat(40)));
+  assert.equal(
+    await main(['sign', '--manifest', zeroed, '--key-file', keyFile, '--out', join(work, 'z.sig')]),
+    1,
+  );
+  assert.equal(await main(['verify', '--manifest', zeroed]), 1);
+  assert.equal(await main(['verify', '--manifest', manifestPath]), 0);
+});
+
 await check(
   'sign refuses a key file other users can read, and a key that is not Ed25519',
   async () => {
