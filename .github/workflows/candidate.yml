@@ -1,0 +1,300 @@
+name: Release candidate
+
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+# The release candidate: the artifacts of a release, built from one commit under a pre-release
+# version stamped for the run only (scripts/release-candidate.mjs), and everything a consumer and an
+# operator will do with them, run on those exact artifacts. Nothing here publishes, pushes, tags or
+# commits; the results are workflow artifacts. docs/releasing.md describes each step.
+#
+#   build        the tarballs, the release identity manifest, the CycloneDX SBOM of the closure, the
+#                linux/amd64 runtime image as an OCI archive and the release manifest.
+#   conformance  the tarballs installed into an empty directory as a consumer; the contract corpus
+#                and the three reference application journeys (and the quickstart) through that
+#                install; the runtime image loaded from the archive, checked, the corpus run through
+#                its CLI, a reference application served from it, and the three journeys again with
+#                every rayspec command in a container of it.
+#   upgrade      the upgrade-with-data harness from 1.7.0 and from 1.8.0 onto the candidate install.
+#
+# On a push to main the version is the next minor of the committed one with `-main.<run number>`;
+# a manual dispatch names it. The release workflow (release.yml) calls this one with `release: true`
+# to build and test the release's own artifacts from its tag, unstamped.
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          The pre-release version to stamp, such as 1.9.0-rc.0. Never a release version: the
+          candidate builder refuses one.
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      release:
+        description: Build the committed version from its tag, unstamped.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Candidate artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The identity manifest records the release tag; the tags have to be there to be read.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      - name: Version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "${INPUT_VERSION}" ]; then
+            version="${INPUT_VERSION}"
+          else
+            version="$(node -p "const [a, b] = require('./package.json').version.split('.').map(Number); a + '.' + (b + 1) + '.0-main.' + process.env.GITHUB_RUN_NUMBER")"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Candidate version: ${version}"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # The image is exported as an OCI layout, which needs a builder of the docker-container driver.
+      - name: Set up buildx
+        id: buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the candidate
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE: ${{ inputs.release }}
+          BUILDER: ${{ steps.buildx.outputs.name }}
+        run: |
+          mode=()
+          if [ "${RELEASE}" = true ]; then mode=(--release); fi
+          node scripts/release-candidate.mjs "${mode[@]}" --version "${VERSION}" \
+            --out "${RUNNER_TEMP}/candidate" --builder "${BUILDER}"
+
+      - name: The committed tree is unchanged
+        run: git diff --exit-code
+
+      - name: Keep the candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  conformance:
+    name: Candidate conformance
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        # The same digest docker-compose.yml pins for local runs; move both together.
+        image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
+        env:
+          POSTGRES_USER: rayspec
+          POSTGRES_PASSWORD: rayspec
+          POSTGRES_DB: rayspec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rayspec -d rayspec"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec
+      SHADOW_DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create shadow DB
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
+            -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      # The harnesses and the example builds run from the repository; the release under test is the
+      # candidate's tarballs and image, never the workspace.
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+
+      - name: Install the tarballs as a consumer
+        run: |
+          mkdir -p "${RUNNER_TEMP}/reports"
+          node scripts/check-consumer-install.mjs --tarballs "${RUNNER_TEMP}/candidate/tarballs" \
+            --out "${RUNNER_TEMP}/consumer" | tee "${RUNNER_TEMP}/reports/consumer-install.log"
+
+      - name: The generated corpus case
+        run: |
+          pnpm --filter @rayspec/bundle-contract exec tsx scripts/gen-corpus.ts \
+            --uncommitted "${RUNNER_TEMP}/generated"
+
+      - name: Contract corpus through the installed CLI
+        run: |
+          node scripts/corpus-conformance.mjs \
+            --cli "${RUNNER_TEMP}/consumer/node_modules/rayspec/dist/bin.js" \
+            --expectations "${RUNNER_TEMP}/consumer/node_modules/@rayspec/bundle-contract/contract/fixtures/EXPECTATIONS.json" \
+            --corpus packages/kernel/bundle-contract/corpus --generated "${RUNNER_TEMP}/generated" \
+            --report "${RUNNER_TEMP}/reports/corpus-install.json" > /dev/null
+
+      - name: Reference journeys through the installed release
+        run: |
+          node scripts/reference-journeys.mjs --consumer "${RUNNER_TEMP}/consumer" \
+            --log-dir "${RUNNER_TEMP}/reports/journeys-install" > "${RUNNER_TEMP}/reports/journeys-install.json"
+
+      - name: Load the image from its archive
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: docker load -i "${RUNNER_TEMP}/candidate/image/rayspec-runtime.oci.tar"
+
+      - name: The runtime image
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          node scripts/image-conformance.mjs --oci "${RUNNER_TEMP}/candidate/image/rayspec-runtime.oci.tar" \
+            --image "rayspec-candidate:${VERSION}" --consumer "${RUNNER_TEMP}/consumer" \
+            --generated "${RUNNER_TEMP}/generated" --report "${RUNNER_TEMP}/reports/image.json" > /dev/null
+
+      # The host network puts the journey's servers, proxies and database on 127.0.0.1 for the
+      # containers too; it needs a Linux host, which is why this runs here.
+      - name: Reference journeys through the runtime image
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          node scripts/reference-journeys.mjs --consumer "${RUNNER_TEMP}/consumer" \
+            --image "rayspec-candidate:${VERSION}" --image-network host \
+            --log-dir "${RUNNER_TEMP}/reports/journeys-image" > "${RUNNER_TEMP}/reports/journeys-image.json"
+
+      - name: Keep the conformance reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-conformance
+          path: ${{ runner.temp }}/reports
+          if-no-files-found: error
+          retention-days: 30
+
+  upgrade:
+    name: Upgrade from ${{ matrix.from }} (${{ matrix.variant }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        from: ['1.7.0', '1.8.0']
+        variant: [notes-ui, team-notes, asset-catalog, roles]
+    services:
+      postgres:
+        image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
+        env:
+          POSTGRES_USER: rayspec
+          POSTGRES_PASSWORD: rayspec
+          POSTGRES_DB: rayspec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rayspec -d rayspec"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec
+      SHADOW_DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create shadow DB
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
+            -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/candidate
+
+      - name: Install the tarballs as a consumer
+        run: |
+          node scripts/check-consumer-install.mjs --tarballs "${RUNNER_TEMP}/candidate/tarballs" \
+            --out "${RUNNER_TEMP}/consumer"
+
+      - name: Upgrade with data
+        env:
+          FROM: ${{ matrix.from }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/reports"
+          if [ "${VARIANT}" = roles ]; then args=(--roles); else args=(--app "${VARIANT}"); fi
+          node scripts/upgrade-with-data.mjs --from "${FROM}" --candidate "${RUNNER_TEMP}/consumer" \
+            "${args[@]}" --log-dir "${RUNNER_TEMP}/reports/logs" \
+            > "${RUNNER_TEMP}/reports/upgrade-${FROM}-${VARIANT}.json"
+
+      - name: Keep the upgrade report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: upgrade-${{ matrix.from }}-${{ matrix.variant }}
+          path: ${{ runner.temp }}/reports
+          if-no-files-found: error
+          retention-days: 30

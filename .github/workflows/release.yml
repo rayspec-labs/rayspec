@@ -1,0 +1,365 @@
+name: Release
+
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+# Publishes one RaySpec release: the npm packages with provenance and the linux/amd64 runtime image
+# on GHCR, both the exact bytes the candidate jobs tested, and the signed release manifest with its
+# evidence. docs/releasing.md is the runbook; read it before dispatching this.
+#
+# It runs only when a maintainer dispatches it by hand from the release tag, and it refuses unless:
+#   - `confirm` is exactly `publish rayspec <version>`;
+#   - the dispatch ref is the annotated tag v<version>, pointing at the commit that carries
+#     <version> in package.json, and npm does not have <version> yet (a version is never reused);
+#   - the jobs that sign and publish run in the `release` environment, which must require a
+#     reviewer: the signing key, the npm token and the approver's public key live only there.
+# Nothing else in this repository publishes. A failed run never retries a publish: a version that
+# reached npm is not published again; the runbook says how to continue or move to the next version.
+# ────────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The release version, as package.json carries it on the tag (for example 1.9.0).
+        type: string
+        required: true
+      confirm:
+        description: Type exactly "publish rayspec <version>" to publish.
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Refuse anything but an explicit release from its tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the dispatch
+        env:
+          VERSION: ${{ inputs.version }}
+          CONFIRM: ${{ inputs.confirm }}
+          REF: ${{ github.ref }}
+        run: |
+          refuse() { echo "release refused: $1" >&2; exit 1; }
+          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || refuse "version ${VERSION} is not x.y.z"
+          [ "${CONFIRM}" = "publish rayspec ${VERSION}" ] || refuse "confirm must be exactly: publish rayspec ${VERSION}"
+          [ "${REF}" = "refs/tags/v${VERSION}" ] || refuse "dispatch this workflow from the tag v${VERSION}, not ${REF}"
+          [ "$(git cat-file -t "refs/tags/v${VERSION}")" = tag ] || refuse "v${VERSION} is not an annotated tag"
+          [ "$(git rev-list -n 1 "v${VERSION}")" = "${GITHUB_SHA}" ] || refuse "v${VERSION} does not point at this commit"
+          [ "$(node -p "require('./package.json').version")" = "${VERSION}" ] || refuse "package.json does not carry ${VERSION}"
+          if npm view "rayspec@${VERSION}" version >/dev/null 2>&1; then refuse "rayspec@${VERSION} is already on npm"; fi
+          echo "dispatch accepted: rayspec ${VERSION} at ${GITHUB_SHA}"
+
+  candidate:
+    name: Release artifacts
+    needs: guard
+    uses: ./.github/workflows/candidate.yml
+    with:
+      version: ${{ inputs.version }}
+      release: true
+
+  certification:
+    name: Hosting-posture certification at the tag
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16@sha256:17e67d7b9890c99b055ba1e0d5c5be4ec27c9d3a72bda32db24a5e5d8a85af0c
+        env:
+          POSTGRES_USER: rayspec
+          POSTGRES_PASSWORD: rayspec
+          POSTGRES_DB: rayspec
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rayspec -d rayspec"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec
+      SHADOW_DATABASE_URL: postgres://rayspec:rayspec@localhost:5433/rayspec_shadow
+      RAYSPEC_API_KEY_PEPPER: ci-dev-pepper-not-a-real-secret
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create shadow DB and the database roles
+        run: |
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d postgres \
+            -c "CREATE DATABASE rayspec_shadow OWNER rayspec;"
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d rayspec -v ON_ERROR_STOP=1 \
+            -f packages/kernel/db/sql/database-roles.sql
+          PGPASSWORD=rayspec psql -h localhost -p 5433 -U rayspec -d rayspec -v ON_ERROR_STOP=1 \
+            -f scripts/init-dev-role-passwords.sql
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      - name: Generate dev JWT signing key
+        run: |
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /tmp/jwt_dev.pem
+          while IFS= read -r key_line; do
+            echo "::add-mask::${key_line}"
+          done < /tmp/jwt_dev.pem
+          {
+            echo 'RAYSPEC_JWT_SIGNING_KEY<<RAYSPEC_KEY_EOF'
+            cat /tmp/jwt_dev.pem
+            echo 'RAYSPEC_KEY_EOF'
+          } >> "$GITHUB_ENV"
+          rm -f /tmp/jwt_dev.pem
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Certification lane
+        run: pnpm test:certification --log-dir /tmp/certification-logs
+
+      - name: Keep the certification lane directory
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: certification-lane
+          path: /tmp/certification-logs
+          if-no-files-found: error
+          retention-days: 90
+
+  sign:
+    name: Receipt, signature and evidence
+    needs: [candidate, certification]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: certification-lane
+          path: ${{ runner.temp }}/certification-lane
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: upgrade-*
+          path: ${{ runner.temp }}/upgrades
+          merge-multiple: true
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-conformance
+          path: ${{ runner.temp }}/conformance
+
+      # The key exists only in this job, in a file of mode 0600 that is removed before the job ends;
+      # every line of it is masked first. The approver's public key is the trust anchor the
+      # signature must verify against.
+      - name: Sign the release manifest
+        env:
+          SIGNING_KEY: ${{ secrets.RAYSPEC_RELEASE_SIGNING_KEY }}
+          PUBLIC_KEY: ${{ vars.RAYSPEC_RELEASE_PUBLIC_KEY }}
+        run: |
+          [ -n "${SIGNING_KEY}" ] || { echo "the release environment has no RAYSPEC_RELEASE_SIGNING_KEY" >&2; exit 1; }
+          [ -n "${PUBLIC_KEY}" ] || { echo "the release environment has no RAYSPEC_RELEASE_PUBLIC_KEY" >&2; exit 1; }
+          while IFS= read -r key_line; do echo "::add-mask::${key_line}"; done <<< "${SIGNING_KEY}"
+          umask 077
+          printf '%s\n' "${SIGNING_KEY}" > "${RUNNER_TEMP}/release-key.pem"
+          printf '%s\n' "${PUBLIC_KEY}" > "${RUNNER_TEMP}/release-key.pub.pem"
+          node scripts/release-manifest.mjs sign --manifest "${RUNNER_TEMP}/release/release-manifest.json" \
+            --key-file "${RUNNER_TEMP}/release-key.pem" --trusted-key "${RUNNER_TEMP}/release-key.pub.pem"
+          rm -f "${RUNNER_TEMP}/release-key.pem"
+
+      - name: Managed-posture receipt
+        env:
+          IMAGE: ${{ runner.temp }}/release/image/rayspec-runtime.oci.tar
+        run: |
+          digest="$(node --input-type=module -e "const { readOciImage } = await import('./scripts/release-manifest.mjs'); console.log(readOciImage(process.env.IMAGE).digest.slice(7))")"
+          node scripts/managed-receipt.mjs --lane "${RUNNER_TEMP}/certification-lane" \
+            --release-manifest "${RUNNER_TEMP}/release/release-manifest.json" \
+            --artifact-sha256 "${digest}" --out "${RUNNER_TEMP}/release/managed-receipt.json"
+
+      - name: Release evidence
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          reports=()
+          for f in "${RUNNER_TEMP}"/upgrades/upgrade-*.json; do reports+=(--upgrade-report "$f"); done
+          previous="$(node -p "const [a, b] = process.env.VERSION.split('.').map(Number); b > 0 ? a + '.' + (b - 1) + '.0' : ''")"
+          node scripts/release-manifest.mjs evidence \
+            --manifest "${RUNNER_TEMP}/release/release-manifest.json" \
+            --signature "${RUNNER_TEMP}/release/release-manifest.json.sig" \
+            --trusted-key "${RUNNER_TEMP}/release-key.pub.pem" \
+            --tarballs "${RUNNER_TEMP}/release/tarballs" \
+            --identity "${RUNNER_TEMP}/release/rayspec-release-identity.json" \
+            --image-oci "${RUNNER_TEMP}/release/image/rayspec-runtime.oci.tar" \
+            --sbom "${RUNNER_TEMP}/release/closure-sbom.cdx.json" \
+            --receipt "${RUNNER_TEMP}/release/managed-receipt.json" \
+            --previous "${previous}" "${reports[@]}" \
+            --evidence "corpus-install=${RUNNER_TEMP}/conformance/corpus-install.json" \
+            --evidence "image-conformance=${RUNNER_TEMP}/conformance/image.json" \
+            --evidence "journeys-install=${RUNNER_TEMP}/conformance/journeys-install.json" \
+            --evidence "journeys-image=${RUNNER_TEMP}/conformance/journeys-image.json" \
+            --out "${RUNNER_TEMP}/release/release-evidence.json"
+
+      - name: Keep the signed release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-release
+          path: |
+            ${{ runner.temp }}/release/release-manifest.json
+            ${{ runner.temp }}/release/release-manifest.json.sig
+            ${{ runner.temp }}/release/release-evidence.json
+            ${{ runner.temp }}/release/managed-receipt.json
+            ${{ runner.temp }}/release-key.pub.pem
+          if-no-files-found: error
+          retention-days: 90
+
+  publish:
+    name: Publish
+    needs: [sign]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # A release environment without a required reviewer would let this job run unattended.
+      - name: The release environment requires a reviewer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rules="$(gh api "repos/${GITHUB_REPOSITORY}/environments/release" --jq '[.protection_rules[] | select(.type == "required_reviewers")] | length')" \
+            || { echo "release refused: the release environment cannot be read" >&2; exit 1; }
+          [ "${rules}" -ge 1 ] || { echo "release refused: the release environment has no required reviewer" >&2; exit 1; }
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10.12.4
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - run: pnpm install --frozen-lockfile
+
+      # publish.mjs refuses an unbuilt target before anything is published.
+      - name: Build
+        run: pnpm build
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate
+          path: ${{ runner.temp }}/release
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-release
+          path: ${{ runner.temp }}/signed
+
+      - name: Verify what is about to be published
+        run: |
+          node scripts/release-manifest.mjs verify --manifest "${RUNNER_TEMP}/signed/release-manifest.json" \
+            --signature "${RUNNER_TEMP}/signed/release-manifest.json.sig" \
+            --trusted-key "${RUNNER_TEMP}/signed/release-key.pub.pem" \
+            --tarballs "${RUNNER_TEMP}/release/tarballs" \
+            --image-oci "${RUNNER_TEMP}/release/image/rayspec-runtime.oci.tar"
+
+      # The tested tarballs themselves, with npm provenance from this workflow run.
+      - name: Publish the npm packages
+        env:
+          VERSION: ${{ inputs.version }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'
+          RAYSPEC_ALLOW_PUBLISH: '1'
+        run: |
+          node scripts/publish.mjs --publish --yes-really-publish --version "${VERSION}" \
+            --from "${RUNNER_TEMP}/release/tarballs"
+
+      # The archived image, copied without conversion, so the registry serves the digest the signed
+      # manifest names.
+      - name: Push the runtime image
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          repository="$(node -p "require(process.env.RUNNER_TEMP + '/signed/release-manifest.json').images[0].repository")"
+          digest="$(node -p "require(process.env.RUNNER_TEMP + '/signed/release-manifest.json').images[0].digest")"
+          printf '%s' "${GH_TOKEN}" | skopeo login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          skopeo copy --preserve-digests \
+            "oci-archive:${RUNNER_TEMP}/release/image/rayspec-runtime.oci.tar" \
+            "docker://${repository}:${VERSION}"
+          served="sha256:$(skopeo inspect --raw "docker://${repository}@${digest}" | sha256sum | cut -d' ' -f1)"
+          [ "${served}" = "${digest}" ] || { echo "the registry serves ${served}, the manifest names ${digest}" >&2; exit 1; }
+
+      - name: The registry serves what the manifest names
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          node --input-type=module -e "
+            import { execFileSync } from 'node:child_process';
+            import { readFileSync } from 'node:fs';
+            const m = JSON.parse(readFileSync(process.env.RUNNER_TEMP + '/signed/release-manifest.json', 'utf8'));
+            let bad = 0;
+            for (const p of m.packages) {
+              const served = execFileSync('npm', ['view', p.name + '@' + p.version, 'dist.integrity'], { encoding: 'utf8' }).trim();
+              if (served !== p.integrity) { console.error(p.name + ': the registry serves ' + served); bad++; }
+            }
+            if (bad > 0) process.exit(1);
+            console.log(m.packages.length + ' packages resolve to the integrity the manifest names');
+          "
+
+      - name: GitHub release
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" --verify-tag --title "RaySpec ${VERSION}" \
+            --notes "See CHANGELOG.md and docs/releasing.md. The signed release manifest and its evidence are attached." \
+            "${RUNNER_TEMP}/signed/release-manifest.json" \
+            "${RUNNER_TEMP}/signed/release-manifest.json.sig" \
+            "${RUNNER_TEMP}/signed/release-evidence.json" \
+            "${RUNNER_TEMP}/signed/managed-receipt.json" \
+            "${RUNNER_TEMP}/release/rayspec-release-identity.json" \
+            "${RUNNER_TEMP}/release/closure-sbom.cdx.json" \
+            "${RUNNER_TEMP}"/release/tarballs/*.tgz
