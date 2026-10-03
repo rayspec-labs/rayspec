@@ -84,6 +84,17 @@
  * directory holds exactly one tarball per publish target, each declaring that target's name and the
  * release version. The release manifest's integrities then match the registry's.
  *
+ * CONTINUING A PUBLISH THAT STOPPED PART WAY
+ * ------------------------------------------
+ * A version on npm can never be published again, so a `--publish --from` run first asks the
+ * registry for each target's `dist.integrity` at the release version. A target the registry already
+ * serves with the integrity of its tarball here is skipped; one it serves with any other integrity
+ * refuses the whole run before the first call (those bytes are public, and the release must move to
+ * a new version); a lookup that fails for any reason other than "not found" refuses too. Running the
+ * same publish again over the same tarballs therefore publishes exactly the targets that are
+ * missing, from the release workflow, with provenance. The `rayspec` launcher always goes last, so
+ * the launcher being on npm means the whole closure is: the release workflow's guard reads that.
+ *
  * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination; a
  * relative path is resolved against the current working directory once, before anything is packed,
  * so every target lands in that ONE directory and the run prints the absolute path) ·
@@ -96,6 +107,7 @@
  * fixture repo with the package manager stubbed (`scripts/publish.test.mjs`).
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -232,6 +244,10 @@ function topoOrder(names, pkgs) {
     ordered.push(n);
   };
   for (const n of names) visit(n);
+  // The launcher last: nothing depends on it, and the release workflow's guard reads "the launcher
+  // is on npm" as "the whole closure is", which holds only if it is the final publish.
+  const launcher = ordered.indexOf('rayspec');
+  if (launcher !== -1) ordered.push(...ordered.splice(launcher, 1));
   return ordered;
 }
 
@@ -522,6 +538,49 @@ function tarballsFrom(dir, version, publishSet, repositoryUrl, pkgs) {
   return byName;
 }
 
+/** The npm integrity (`sha512-<base64>`) of a tarball's exact bytes, as `dist.integrity` records it. */
+function integrityOf(file) {
+  return `sha512-${createHash('sha512').update(readFileSync(file)).digest('base64')}`;
+}
+
+/**
+ * What the registry already serves of this release, read before anything is published: the set of
+ * targets it serves with exactly their tarball's integrity (skipped by the publish). Refuses, before
+ * the first call, when it serves a target with other bytes or a lookup fails other than "not found".
+ */
+function alreadyPublished(order, packed, version) {
+  const skip = new Set();
+  const problems = [];
+  for (const name of order) {
+    const spec = `${name}@${version}`;
+    let served;
+    try {
+      served = execFileSync('npm', ['view', spec, 'dist.integrity', '--prefer-online'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+    } catch (err) {
+      const said = `${err.stderr ?? ''}${err.stdout ?? ''}`;
+      if (/\bE404\b/.test(said)) continue; // no such package yet
+      problems.push(
+        `${spec}: the registry cannot be asked (${said.trim().split('\n')[0] || err.message})`,
+      );
+      continue;
+    }
+    if (served === '') continue; // the package exists, this version does not
+    const local = integrityOf(packed.get(name));
+    if (served === local) skip.add(name);
+    else problems.push(`${spec} is already on npm as ${served}, and its tarball here is ${local}`);
+  }
+  if (problems.length) {
+    console.error('refusing to publish: the registry does not allow continuing this release:');
+    for (const p of problems) console.error(`  ${p}`);
+    console.error('nothing was published by this run.');
+    process.exit(2);
+  }
+  return skip;
+}
+
 function main() {
   const flags = parseFlags(process.argv.slice(2));
   if (flags.from === '' || (flags.from !== undefined && flags.mode === 'pack')) {
@@ -553,6 +612,10 @@ function main() {
     flags.from === undefined
       ? null
       : tarballsFrom(resolve(flags.from), version, publishSet, repositoryUrl, pkgs);
+  const published =
+    flags.mode === 'publish' && packed !== null
+      ? alreadyPublished(order, packed, version)
+      : new Set();
   // Resolved ONCE, here, so every target is handed the same absolute destination: each `pnpm pack`
   // child runs with its cwd set to the package directory, so a relative destination passed on
   // unresolved would resolve once PER TARGET and scatter the closure one tarball per package while
@@ -577,6 +640,11 @@ function main() {
 
     // Phase 2 — run the requested command per target, in dependency order.
     for (const name of order) {
+      if (published.has(name)) {
+        results.push({ name, version, ok: true, skipped: true, stdout: '' });
+        if (!flags.json) console.log(`[${flags.mode}] ${name}@${version} already on npm, skipped`);
+        continue;
+      }
       const pkgDir = dirname(pkgs.get(name).path);
       let stdout = '';
       if (flags.mode === 'pack') {
@@ -619,7 +687,12 @@ function main() {
     order,
     outDir: outDir ?? null,
     from: packed === null ? null : resolve(flags.from),
-    results: results.map(({ name, version: v, ok }) => ({ name, version: v, ok })),
+    results: results.map(({ name, version: v, ok, skipped }) => ({
+      name,
+      version: v,
+      ok,
+      ...(skipped ? { skipped: true } : {}),
+    })),
   };
   if (flags.json) console.log(JSON.stringify(summary, null, 2));
   else {

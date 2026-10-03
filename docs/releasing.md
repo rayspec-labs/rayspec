@@ -158,9 +158,17 @@ never given to a workflow. Before the first release, once:
    `openssl genpkey -algorithm ed25519 -out release-key.pem && chmod 600 release-key.pem` and
    `openssl pkey -in release-key.pem -pubout -out release-key.pub.pem`.
 2. Create the GitHub environment `release` with at least one required reviewer, and give it the
-   secret `NPM_TOKEN` (an npm automation token for the `rayspec` packages) and the variable
-   `RAYSPEC_RELEASE_PUBLIC_KEY` (the approver's public key PEM). Publish the public key where
-   integrators read it. The workflow refuses to run while the environment has no required reviewer.
+   secret `NPM_TOKEN` and the variable `RAYSPEC_RELEASE_PUBLIC_KEY` (the approver's public key
+   PEM). Publish the public key where integrators read it. The workflow refuses to run while the
+   environment has no required reviewer.
+
+   `NPM_TOKEN` is an npm **granular access token** (npm no longer issues classic or automation
+   tokens): read and write on the package `rayspec` and on the `@rayspec` scope (the scope, not a
+   list of packages, so a package new in the release can be created), **Bypass 2FA** enabled (the
+   workflow cannot answer a one-time password), and an expiry later than the day of the publish. A
+   granular write token lasts 90 days at most, so create or renew it shortly before each release and
+   check it before the publish dispatch:
+   `npm whoami --//registry.npmjs.org/:_authToken="$TOKEN"` prints the publishing account.
 3. Allow the workflow to write the `ghcr.io/rayspec-labs/rayspec` package.
 
 For each release:
@@ -208,18 +216,22 @@ For each release:
 
 - **Before the publish step:** nothing reached a registry. Fix the cause, and dispatch again (a new
   commit means a new tag and, once anything was public, a new version).
-- **During the npm publish:** `publish.mjs` publishes in dependency order and stops at the first
-  failure; the packages before it are public. Never unpublish and never publish other bytes under a
-  published version. Publish the remaining tarballs of the same artifact with
-  `node scripts/publish.mjs --publish --yes-really-publish --from <tarballs>` only if every published
-  integrity matches the manifest; otherwise move to the next version.
+- **During the npm publish:** `publish.mjs` publishes in dependency order, the `rayspec` launcher
+  last, and stops at the first failure; the packages before it are public. Never unpublish and never
+  publish other bytes under a published version. Fix the cause (an expired token, for example) and
+  dispatch the publish again with the same `build_run` and `signature`: the guard admits it while
+  the launcher is not on npm, and `publish.mjs --from` skips every package npm already serves with
+  the integrity of its tarball, publishes the rest with provenance from the workflow, and refuses
+  before the first call when npm serves a package with other bytes (then move to the next version).
+  Do not publish the rest from a workstation: a publish outside the workflow carries no provenance.
 - **During the image push or the release creation:** the npm packages are public. The image archive
   and the signed documents are the workflow's artifacts: push the archive with
   `skopeo copy --preserve-digests oci-archive:rayspec-runtime.oci.tar docker://ghcr.io/rayspec-labs/rayspec:1.9.0`
   and check the digest, then create the GitHub release by hand with the same files.
 - **A defect found after the release:** stop recommending the version, say which versions are
-  affected and why, and release a fix. Never downgrade a database: a runtime refuses a platform schema
-  newer than its own chain.
+  affected and why, and release a fix. Never downgrade a database: a runtime from 1.9.0 on refuses a
+  platform schema newer than its own chain, and an older one does not notice, so going back starts
+  from the backup taken before the upgrade.
 
 ## Known limits
 

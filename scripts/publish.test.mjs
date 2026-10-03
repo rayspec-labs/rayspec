@@ -58,6 +58,10 @@
  *       it is, in dependency order, stamping nothing; a directory that is not exactly one tarball per
  *       publish target at the release version refuses before the first call, naming every problem,
  *       and `--from` is refused with `--pack` and without a value.
+ *   (N) A PUBLISH THAT STOPPED PART WAY CAN BE CONTINUED — npm never takes the same version twice, so
+ *       a `--publish --from` run skips a target the registry already serves with its tarball's exact
+ *       integrity and publishes the rest; a target served with other bytes, or a registry that cannot
+ *       be asked, refuses before the first call. The launcher is always published last.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -66,6 +70,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -111,6 +116,23 @@ if (argv[0] === 'pack' && destIdx !== -1) {
   writeFileSync(join(dest, pkg.name.replace('@', '').replace('/', '-') + '-' + pkg.version + '.tgz'), '');
 }
 process.stdout.write('fake pnpm: ' + argv.join(' ') + '\\n');
+`;
+
+// ── the `npm` test double ───────────────────────────────────────────────────────────────────────
+// Answers `npm view <name>@<version> dist.integrity` from FAKE_NPM_REGISTRY (a JSON map of spec to
+// integrity, or to "!down" for a registry that cannot be reached), and like the real one exits 1
+// with `E404` for a spec it does not hold. Every call is logged, so a case can show which targets
+// were looked up.
+const FAKE_NPM = `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const argv = process.argv.slice(2);
+appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ argv }) + '\\n');
+const registry = JSON.parse(process.env.FAKE_NPM_REGISTRY || '{}');
+if (argv[0] !== 'view') { process.stderr.write('fake npm: only view\\n'); process.exit(1); }
+const served = registry[argv[1]];
+if (served === '!down') { process.stderr.write('npm error code ECONNREFUSED\\n'); process.exit(1); }
+if (served === undefined) { process.stderr.write('npm error code E404\\nnpm error 404 Not Found\\n'); process.exit(1); }
+process.stdout.write(served + '\\n');
 `;
 
 /**
@@ -217,6 +239,8 @@ function fixture({
   mkdirSync(stubs);
   writeFileSync(join(stubs, 'pnpm'), FAKE_PNPM);
   chmodSync(join(stubs, 'pnpm'), 0o755);
+  writeFileSync(join(stubs, 'npm'), FAKE_NPM);
+  chmodSync(join(stubs, 'npm'), 0o755);
   return { root, stubs };
 }
 
@@ -225,9 +249,11 @@ function fixture({
  * publish gate for the cases that must reach the tag check; the unroutable registry is the second
  * belt behind the stub — nothing here can reach a real one.
  */
-function run(fx, args, { allowPublish = false } = {}) {
+function run(fx, args, { allowPublish = false, registry = {} } = {}) {
   const log = join(fx.root, 'pnpm-calls.log');
   writeFileSync(log, '');
+  const npmLog = join(fx.root, 'npm-calls.log');
+  writeFileSync(npmLog, '');
   const res = spawnSync('node', [join(fx.root, 'scripts', 'publish.mjs'), ...args], {
     cwd: fx.root,
     encoding: 'utf8',
@@ -235,12 +261,15 @@ function run(fx, args, { allowPublish = false } = {}) {
       ...process.env,
       PATH: `${fx.stubs}:${process.env.PATH}`,
       FAKE_PNPM_LOG: log,
+      FAKE_NPM_LOG: npmLog,
+      FAKE_NPM_REGISTRY: JSON.stringify(registry),
       npm_config_registry: 'http://127.0.0.1:1/',
       ...(allowPublish ? { RAYSPEC_ALLOW_PUBLISH: '1' } : {}),
     },
   });
   const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
-  return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls };
+  const lookups = readFileSync(npmLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls, lookups };
 }
 
 /** A refusal: nonzero exit, an explanation on stderr, and NOT ONE package manager invocation. */
@@ -663,6 +692,57 @@ try {
       assert.equal(c.private, true, '(F) nothing is stamped when the tarballs carry the version');
     }
     assert.equal(JSON.parse(r.out).from, good, '(F) the summary names the directory');
+    assert.equal(order.at(-1), 'rayspec', `(F) the launcher is published last: ${order}`);
+    assert.equal(r.lookups.length, TARGETS.length, '(F) the registry is asked once per target');
+
+    // (N) a publish that stopped after @rayspec/core: the next run skips it and publishes the rest.
+    const integrity = (name) =>
+      `sha512-${createHash('sha512')
+        .update(
+          readFileSync(join(good, `${name.replace('@', '').replace('/', '-')}-${VERSION}.tgz`)),
+        )
+        .digest('base64')}`;
+    const core = `@rayspec/core@${VERSION}`;
+    const resumed = run(fx, ['--publish', '--yes-really-publish', '--from', good, '--json'], {
+      allowPublish: true,
+      registry: { [core]: integrity('@rayspec/core') },
+    });
+    assert.equal(
+      resumed.code,
+      0,
+      `(N) a stopped publish continues; got ${resumed.code}: ${resumed.err}`,
+    );
+    const resumedOrder = packedOrder(resumed.calls, fx.root);
+    assert.deepEqual(
+      [...resumedOrder].sort(),
+      TARGETS.filter((n) => n !== '@rayspec/core').sort(),
+      `(N) only the missing targets are published: ${resumedOrder}`,
+    );
+    assert.equal(resumedOrder.at(-1), 'rayspec', '(N) the launcher still goes last');
+    assert.deepEqual(
+      JSON.parse(resumed.out).results.find((x) => x.name === '@rayspec/core'),
+      { name: '@rayspec/core', version: VERSION, ok: true, skipped: true },
+      '(N) the summary says the published target was skipped',
+    );
+    for (const [registry, pattern] of [
+      [{ [core]: 'sha512-other' }, /@rayspec\/core@1\.6\.2 is already on npm as sha512-other/],
+      [
+        { [`@rayspec/server@${VERSION}`]: '!down' },
+        /@rayspec\/server@1\.6\.2: the registry cannot be asked/,
+      ],
+    ]) {
+      const refused = run(fx, ['--publish', '--yes-really-publish', '--from', good], {
+        allowPublish: true,
+        registry,
+      });
+      assertRefused(refused, '(N)', fx);
+      assert.match(refused.err, pattern, `(N) the problem must be named: ${refused.err}`);
+    }
+    // Only a real publish asks the registry: a dry run over the same tarballs stays offline.
+    const dry = run(fx, ['--dry-run', '--from', good], { registry: { [core]: 'sha512-other' } });
+    assert.equal(dry.code, 0, `(N) a dry run does not ask the registry: ${dry.err}`);
+    assert.equal(dry.lookups.length, 0, '(N) no lookup in a dry run');
+    console.log('ok (N) — a stopped publish continues with the missing targets only');
 
     const missing = packDir(
       fx,
