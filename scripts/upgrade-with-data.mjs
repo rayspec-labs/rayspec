@@ -65,7 +65,12 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
-import { startClassifier, startEgressProxy, testCertificates } from './journeys/lib.mjs';
+import {
+  platformRangesForRuntime,
+  startClassifier,
+  startEgressProxy,
+  testCertificates,
+} from './journeys/lib.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORKING_TREE_CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
@@ -140,12 +145,19 @@ const APPS = {
       }
       writeFileSync(entry, stripped);
     },
-    release(app) {
+    release(app, toVersion) {
       const fresh = join(work, 'asset-catalog-release');
       buildAssetCatalog(fresh);
       for (const file of ['rayspec.yaml', join('packs', 'catalog-pack', 'index.js')]) {
         cpSync(join(fresh, file), join(app, file));
       }
+      // A candidate runtime is a pre-release, outside the extension's caret range under npm's
+      // rules; the bundle the upgraded runtime packs declares the candidate's own range.
+      const widened = platformRangesForRuntime(
+        join(app, 'packs', 'catalog-pack', 'package.json'),
+        toVersion,
+      );
+      if (widened.length > 0) summary.platformRanges = widened;
     },
     runtime(app, which) {
       const modules = join(app, 'node_modules', '@rayspec');
@@ -623,7 +635,7 @@ async function main() {
     // 6. The same application as a bundle, deployed onto the upgraded environment.
     log('packing the application and deploying it as a bundle');
     APP.runtime?.(app, 'none');
-    APP.release?.(app);
+    APP.release?.(app, to);
     const packed = execFileSync(
       process.execPath,
       [

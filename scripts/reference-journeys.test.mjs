@@ -14,6 +14,8 @@
  *   (R) the script refuses usage errors and a missing DATABASE_URL with exit 2, before any work.
  *   (D) the digests compare values, not key order, and notice a changed value.
  *   (J) a failed check ends a journey with its name.
+ *   (C) a pre-release runtime: the built extension's @rayspec ranges are set to the candidate's own
+ *       caret range and the change is returned; a release version changes nothing.
  *   (I) the image form: the three application journeys by default, the quickstart refused, a network
  *       only with an image; the stand-in CLI runs `docker run` with the journey's arguments, working
  *       directory and user, passes every variable by name and never its value, drops the ones the
@@ -33,6 +35,7 @@ import {
   imageCliSource,
   Journey,
   JourneyFailure,
+  platformRangesForRuntime,
   rowsDigest,
 } from './journeys/lib.mjs';
 import { bashBlocks, quickstartPlan, SUBSTITUTIONS } from './journeys/quickstart.mjs';
@@ -220,6 +223,36 @@ check('(I) the image form runs the application journeys and refuses the quicksta
   );
 });
 
+// (C)
+check('(C) a pre-release runtime gets the extension ranges it needs, and a release none', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rayspec-journeys-range-'));
+  try {
+    const path = join(dir, 'package.json');
+    const original = {
+      name: 'catalog-pack',
+      dependencies: {
+        '@rayspec/platform': '^1.8.0',
+        '@rayspec/handler-sdk': '^1.8.0',
+        'mime-types': '3.0.2',
+      },
+    };
+    writeFileSync(path, `${JSON.stringify(original, null, 2)}\n`);
+    assert.deepEqual(platformRangesForRuntime(path, '1.9.0'), []);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')), original);
+    assert.deepEqual(platformRangesForRuntime(path, '1.9.0-rc.0'), [
+      { name: '@rayspec/platform', from: '^1.8.0', to: '^1.9.0-rc.0' },
+      { name: '@rayspec/handler-sdk', from: '^1.8.0', to: '^1.9.0-rc.0' },
+    ]);
+    assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).dependencies, {
+      '@rayspec/platform': '^1.9.0-rc.0',
+      '@rayspec/handler-sdk': '^1.9.0-rc.0',
+      'mime-types': '3.0.2',
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 const scratch = mkdtempSync(join(tmpdir(), 'rayspec-journeys-image-'));
 try {
   // A `docker` stand-in: `run` records its arguments and the values of the variables it was asked
@@ -321,6 +354,9 @@ try {
         assert.deepEqual(kill.argv.slice(0, 3), ['kill', '--signal', 'TERM']);
         const run = entries().find((e) => e.argv[0] === 'run');
         assert.equal(kill.argv[3], run.argv[run.argv.indexOf('--name') + 1]);
+        // The container is named after the stand-in's process id, so a SIGKILL of the stand-in,
+        // which it cannot pass on, can still reach its container (Context.killContainer).
+        assert.equal(kill.argv[3], `rayspec-journey-${child.pid}`);
         child.kill('SIGKILL');
         passed += 1;
         console.log('ok   (I) SIGTERM reaches the container through docker kill');

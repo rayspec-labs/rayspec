@@ -144,6 +144,7 @@ export class Context {
           image: this.image.ref,
           network: this.image.network,
           label: this.image.label,
+          namePrefix: this.image.namePrefix,
           mounts: [...new Set([work, consumer, repo])],
           user: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
           home: work,
@@ -190,14 +191,50 @@ export class Context {
     writeFileSync(join(this.logDir, `${label}.log`), text);
   }
 
+  /**
+   * With an image, SIGKILL the container a stand-in child started: a SIGKILL ends the stand-in
+   * without a chance to pass it on, and the container would keep running. The container is named
+   * after the stand-in's process id (imageCliSource).
+   */
+  killContainer(child) {
+    if (this.image === null || child.pid === undefined) return;
+    spawnSync('docker', ['kill', '--signal', 'KILL', `${this.image.namePrefix}-${child.pid}`], {
+      stdio: 'ignore',
+    });
+  }
+
   /** Stop every child still running and drop every environment's databases and roles. */
   async dispose() {
     for (const served of [...this.serving]) await served.kill();
-    for (const child of this.children) if (child.exitCode === null) child.kill('SIGKILL');
+    for (const child of this.children) {
+      if (child.exitCode !== null) continue;
+      this.killContainer(child);
+      child.kill('SIGKILL');
+    }
     // A killed wrapper cannot stop its container; every container of this run carries the label.
     if (this.image !== null) removeLabelledContainers(this.image.label);
     for (const env of this.environments.splice(0).reverse()) await env.drop().catch(() => {});
   }
+}
+
+/**
+ * A pre-release runtime is outside every caret range of its release line under npm's rules
+ * (`^1.8.0` excludes `1.9.0-rc.0`), and pack refuses an extension whose `@rayspec` range excludes
+ * the runtime the bundle pins. For a release candidate, the built extension's `@rayspec` ranges are
+ * therefore set to `^<version>` of the candidate, and the change is returned so the run records it.
+ * A release version changes nothing.
+ */
+export function platformRangesForRuntime(packageJsonPath, version) {
+  if (!version.includes('-')) return [];
+  const manifest = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  const changed = [];
+  for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
+    if (!name.startsWith('@rayspec/')) continue;
+    manifest.dependencies[name] = `^${version}`;
+    changed.push({ name, from: range, to: `^${version}` });
+  }
+  writeFileSync(packageJsonPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return changed;
 }
 
 /** Environment variables a container of the image never takes from the journey. */
@@ -225,15 +262,31 @@ export const IMAGE_ENV_DROPPED = [
  *   - SIGTERM and SIGINT are passed to the container with `docker kill --signal`; every container
  *     carries `label`, so one left by a SIGKILL is removed by the run.
  */
-export function imageCliSource({ image, network, label, mounts, user, home }) {
-  const config = { image, network, label, mounts, user, home, dropped: IMAGE_ENV_DROPPED };
+export function imageCliSource({
+  image,
+  network,
+  label,
+  namePrefix = 'rayspec-journey',
+  mounts,
+  user,
+  home,
+}) {
+  const config = {
+    image,
+    network,
+    label,
+    namePrefix,
+    mounts,
+    user,
+    home,
+    dropped: IMAGE_ENV_DROPPED,
+  };
   return [
     `#!/usr/bin/env node`,
     "'use strict';",
     "const { spawn, spawnSync } = require('node:child_process');",
-    "const { randomBytes } = require('node:crypto');",
     `const config = ${JSON.stringify(config)};`,
-    "const name = 'rayspec-journey-' + randomBytes(6).toString('hex');",
+    "const name = config.namePrefix + '-' + process.pid;",
     'const env = { ...process.env };',
     'const names = Object.keys(env).filter((k) => !config.dropped.includes(k) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));',
     "const args = ['run', '--rm', '--name', name, '--label', config.label, '--network', config.network,",
@@ -508,7 +561,10 @@ export function rayspecAsync(ctx, args, { env, cwd, timeout = 300_000 } = {}) {
   child.stderr.on('data', (d) => {
     stderr += String(d);
   });
-  const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+  const timer = setTimeout(() => {
+    ctx.killContainer(child);
+    child.kill('SIGKILL');
+  }, timeout);
   return new Promise((resolve) => {
     child.on('close', (status) => {
       clearTimeout(timer);
@@ -574,6 +630,7 @@ export async function serve(ctx, environment, bundle, planDigest, { env, label, 
       // not listening yet
     }
     if (Date.now() > deadline) {
+      ctx.killContainer(child);
       child.kill('SIGKILL');
       ctx.saveLog(name, output);
       throw new JourneyFailure(`the deploy of ${environment.label} did not serve within 180 s`);
@@ -598,6 +655,7 @@ export async function serve(ctx, environment, bundle, planDigest, { env, label, 
       return { code, envelope };
     },
     async kill() {
+      ctx.killContainer(child);
       child.kill('SIGKILL');
       const result = await exited;
       ctx.children.delete(child);

@@ -188,7 +188,11 @@ async function main(argv) {
       image:
         args.image === undefined
           ? undefined
-          : { ...args.image, label: `rayspec-journey-run=${process.pid}-${started}` },
+          : {
+              ...args.image,
+              label: `rayspec-journey-run=${process.pid}-${started}`,
+              namePrefix: `rayspec-journey-${process.pid}-${started}`,
+            },
     });
     summary.release = ctx.version;
     if (args.image !== undefined) summary.image = args.image.ref;

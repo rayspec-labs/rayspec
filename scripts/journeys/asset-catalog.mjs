@@ -43,6 +43,7 @@ import {
   exportDeploymentAsync,
   importInto,
   newPassword,
+  platformRangesForRuntime,
   privateFile,
   rayspec,
   register,
@@ -84,6 +85,11 @@ export async function assetCatalog(ctx, journey) {
     existsSync(join(v1, 'packs', 'catalog-pack', 'node_modules', 'mime-types', 'package.json')) &&
       existsSync(join(v1, 'packs', 'catalog-pack', 'node_modules', 'mime-db', 'package.json')),
   );
+  const widened = platformRangesForRuntime(
+    join(v1, 'packs', 'catalog-pack', 'package.json'),
+    ctx.version,
+  );
+  if (widened.length > 0) journey.note('platform ranges set for the pre-release runtime', widened);
   const specV1 = readFileSync(join(v1, 'rayspec.yaml'), 'utf8');
   const column = '      - { name: category, type: text }\n';
   const egress = '  egressHosts: [classifier.example.com]\n';
