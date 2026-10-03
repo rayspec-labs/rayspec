@@ -32,9 +32,9 @@ separation on during the upgrade.
    but lacks `NODE_USE_ENV_PROXY`; the server checks for it at run time, as in 1.8.0.
 
 2. **Back up both databases**, the application database and, with a durable worker, its workflow
-   system database. The first boot of 1.9.0 migrates the platform schema, and a runtime refuses a
-   database that a newer runtime migrated, so going back to 1.8.x afterwards means restoring that
-   backup.
+   system database. The first boot of 1.9.0 migrates the platform schema. A 1.8.x runtime does not
+   detect a database that 1.9.0 has migrated and boots on it, so going back is unsupported and must
+   start from that backup.
 
 3. **Stop scripts from treating exit 2 as the only failure.** An unexpected internal error of the CLI
    now exits 7.
@@ -68,7 +68,7 @@ Each item applies to every deployment, hardened or not.
 | What changes | What you do |
 | --- | --- |
 | A YAML deploy changes the schema through apply, so it has four new refusals: a schema change on a fenced environment (`RAY_POLICY_DENIED`, exit 4), a plan made stale by a concurrent change (`RAY_PLAN_STALE`, 3), another operation holding the lease past the wait (`RAY_LOCK_TIMEOUT`, 5), and an interrupted apply that needs reconciling (`RAY_RECONCILIATION_REQUIRED`, 6). `rayspec-serve` keeps exit 1. | Nothing for a single deploy at a time. A script that runs deploys should handle 3 to 6; a `5` is retried when the other operation has finished, a `6` is resolved as [Runtime operations](./runtime-operations.md#recovering-from-an-interrupted-operation) describes. |
-| An unexpected internal failure of the CLI exits 7, not 2. | Treat 7 as a defect to report; 2 now always means a usage error. |
+| An unexpected internal failure of the CLI exits 7, not 2. | Treat 7 as a defect to report. On existing commands, 2 still means a usage error; the new bundle, pack, export and import verbs also use 2 for a refused input (see the [CLI reference](./cli-reference.md#conventions)). |
 | Every existing command accepts `--json`, which wraps its usual result object in the contract's envelope. Without the flag the output is byte-identical. | Nothing; use `--json` where a script parses output. |
 | Log lines, error envelopes, receipts and traces are redacted: a credential shape or a value the process holds as a secret is replaced by `[redacted]`. | A log parser that matched on such a value matches on the name around it instead. |
 | Messages say "extension" where they said "pack" (for example `deploy --check-env`: "no extension is loaded", "declares N extension(s)"; the extension loader's errors). | Update alerting rules that match the old wording. |
@@ -184,6 +184,8 @@ signature, now takes the bundle path. It used to read such a file as YAML. A bun
 
 ## Going back
 
-Downgrading a migrated database is not supported: a 1.8.x runtime refuses a database 1.9.0 has
-migrated. To go back, restore the backup you took before the upgrade, together with the boot secrets
-it was taken under, and start 1.8.x on it.
+Downgrading a migrated database is not supported. A 1.8.x runtime does **not** detect a database
+that 1.9.0 has migrated: it boots and serves on it without a warning, so nothing stops a rollback that
+skips the backup. Only 1.9.0 and later refuse a database that a newer runtime migrated. To go back,
+restore the backup you took before the upgrade, together with the boot secrets it was taken under,
+and start 1.8.x on it.
