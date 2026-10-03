@@ -14,15 +14,27 @@
  *   (R) the script refuses usage errors and a missing DATABASE_URL with exit 2, before any work.
  *   (D) the digests compare values, not key order, and notice a changed value.
  *   (J) a failed check ends a journey with its name.
+ *   (I) the image form: the three application journeys by default, the quickstart refused, a network
+ *       only with an image; the stand-in CLI runs `docker run` with the journey's arguments, working
+ *       directory and user, passes every variable by name and never its value, drops the ones the
+ *       image has its own of, returns the container's exit code and passes SIGTERM to the container.
  *
  * Standalone (no test framework is wired for the gate scripts): `node <thisfile>`; exit 0 = pass.
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { canonical, Journey, JourneyFailure, rowsDigest } from './journeys/lib.mjs';
+import {
+  canonical,
+  IMAGE_ENV_DROPPED,
+  imageCliSource,
+  Journey,
+  JourneyFailure,
+  rowsDigest,
+} from './journeys/lib.mjs';
 import { bashBlocks, quickstartPlan, SUBSTITUTIONS } from './journeys/quickstart.mjs';
 import { JOURNEYS, parseJourneyArgs } from './reference-journeys.mjs';
 
@@ -188,5 +200,139 @@ check('(J) a failed check ends the journey with its name and records it', () => 
     { name: 'second fails', ok: false },
   ]);
 });
+
+// (I)
+check('(I) the image form runs the application journeys and refuses the quickstart', () => {
+  const args = parseJourneyArgs(['--image', 'rayspec-candidate:1.9.0-rc.0']);
+  assert.deepEqual(args.apps, ['team-notes', 'document-intake', 'asset-catalog']);
+  assert.deepEqual(args.image, { ref: 'rayspec-candidate:1.9.0-rc.0', network: 'host' });
+  assert.match(
+    parseJourneyArgs(['--image', 'x', '--app', 'quickstart']).error,
+    /quickstart journey runs the installed tree/,
+  );
+  assert.match(
+    parseJourneyArgs(['--image-network', 'bridge']).error,
+    /--image-network needs --image/,
+  );
+  assert.equal(
+    parseJourneyArgs(['--image', 'x', '--image-network', 'container:h']).image.network,
+    'container:h',
+  );
+});
+
+const scratch = mkdtempSync(join(tmpdir(), 'rayspec-journeys-image-'));
+try {
+  // A `docker` stand-in: `run` records its arguments and the values of the variables it was asked
+  // to pass, then waits for a signal or exits with the code in FAKE_EXIT; `kill` records itself.
+  const bin = join(scratch, 'bin');
+  spawnSync('mkdir', ['-p', bin]);
+  const log = join(scratch, 'docker.log');
+  writeFileSync(
+    join(bin, 'docker'),
+    [
+      `#!${process.execPath}`,
+      "const { appendFileSync } = require('node:fs');",
+      'const argv = process.argv.slice(2);',
+      'const passed = [];',
+      "for (let i = 0; i < argv.length; i++) if (argv[i] === '-e' && !argv[i + 1].includes('=')) passed.push(argv[i + 1]);",
+      `appendFileSync(${JSON.stringify(log)}, JSON.stringify({ argv, values: Object.fromEntries(passed.map((k) => [k, process.env[k]])) }) + '\\n');`,
+      "if (argv[0] === 'run' && process.env.FAKE_WAIT === '1') setTimeout(() => {}, 60000);",
+      "else process.exit(Number(process.env.FAKE_EXIT ?? '0'));",
+      '',
+    ].join('\n'),
+  );
+  chmodSync(join(bin, 'docker'), 0o755);
+  const wrapper = join(scratch, 'rayspec-in-image.cjs');
+  writeFileSync(
+    wrapper,
+    imageCliSource({
+      image: 'rayspec-candidate:1.9.0-rc.0',
+      network: 'host',
+      label: 'rayspec-journey-run=test',
+      mounts: [scratch],
+      user: '1001:1001',
+      home: scratch,
+    }),
+  );
+  const baseEnv = { PATH: `${bin}:${process.env.PATH}`, HOME: '/home/someone' };
+  const entries = () =>
+    readFileSync(log, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+
+  check('(I) the stand-in passes arguments, directory, user and variables by name', () => {
+    const run = spawnSync(process.execPath, [wrapper, 'bundle', 'verify', 'a b.ray', '--json'], {
+      cwd: scratch,
+      env: {
+        ...baseEnv,
+        DATABASE_URL: 'postgres://u:secret-value@127.0.0.1/db',
+        RAYSPEC_PG_DUMP: '/usr/bin/pg_dump',
+        FAKE_EXIT: '3',
+      },
+      encoding: 'utf8',
+    });
+    assert.equal(run.status, 3, 'the container exit code is the exit code');
+    const [{ argv, values }] = entries();
+    assert.deepEqual(argv.slice(0, 2), ['run', '--rm']);
+    assert.deepEqual(argv.slice(-5), [
+      'rayspec-candidate:1.9.0-rc.0',
+      'bundle',
+      'verify',
+      'a b.ray',
+      '--json',
+    ]);
+    for (const [flag, value] of [
+      ['--network', 'host'],
+      ['--user', '1001:1001'],
+      ['-w', scratch],
+      ['--label', 'rayspec-journey-run=test'],
+      ['-v', `${scratch}:${scratch}`],
+      ['--ulimit', 'core=0'],
+    ]) {
+      assert.equal(argv[argv.indexOf(flag) + 1], value, flag);
+    }
+    assert.ok(!argv.some((a) => a.includes('secret-value')), 'no value on the command line');
+    assert.equal(values.DATABASE_URL, 'postgres://u:secret-value@127.0.0.1/db');
+    for (const name of IMAGE_ENV_DROPPED) assert.ok(!(name in values), `${name} is dropped`);
+    assert.ok(argv.includes(`HOME=${scratch}`));
+  });
+
+  await new Promise((resolveCheck, rejectCheck) => {
+    writeFileSync(log, '');
+    const child = spawn(process.execPath, [wrapper, 'deploy', 'x.ray'], {
+      cwd: scratch,
+      env: { ...baseEnv, FAKE_WAIT: '1' },
+      stdio: 'ignore',
+    });
+    setTimeout(() => child.kill('SIGTERM'), 500);
+    const guard = setTimeout(() => {
+      child.kill('SIGKILL');
+      rejectCheck(new Error('(I) the stand-in did not pass SIGTERM on'));
+    }, 10000);
+    // The fake `docker run` waits; the stand-in's `docker kill` is recorded. Ending the wait is the
+    // test's job here, as the real container's exit would be.
+    const poll = setInterval(() => {
+      const kill = entries().find((e) => e.argv[0] === 'kill');
+      if (kill === undefined) return;
+      clearInterval(poll);
+      clearTimeout(guard);
+      try {
+        assert.deepEqual(kill.argv.slice(0, 3), ['kill', '--signal', 'TERM']);
+        const run = entries().find((e) => e.argv[0] === 'run');
+        assert.equal(kill.argv[3], run.argv[run.argv.indexOf('--name') + 1]);
+        child.kill('SIGKILL');
+        passed += 1;
+        console.log('ok   (I) SIGTERM reaches the container through docker kill');
+        resolveCheck();
+      } catch (err) {
+        rejectCheck(err);
+      }
+    }, 100);
+  });
+} finally {
+  spawnSync('pkill', ['-f', join(scratch, 'bin', 'docker')]);
+  rmSync(scratch, { recursive: true, force: true });
+}
 
 console.log(`ALL CASES PASSED (${passed})`);

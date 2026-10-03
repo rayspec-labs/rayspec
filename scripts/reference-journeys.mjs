@@ -25,6 +25,13 @@
  *
  *   node scripts/reference-journeys.mjs [--app <name>] [--tarballs <dir>] [--work <dir>]
  *                                       [--consumer <dir>] [--log-dir <dir>] [--keep]
+ *                                       [--image <ref> [--image-network <network>]]
+ *
+ * `--image` runs every `rayspec` command of the three application journeys in a container of that
+ * runtime image instead of the installed tree (journeys/lib.mjs `imageCliSource`): same arguments,
+ * paths, environment and exit codes, as the journey's own user, on `--image-network` (default
+ * `host`, which needs a Linux host: the journey's servers, proxies and database are on 127.0.0.1).
+ * The quickstart journey has no image form.
  *
  * Needs: `pnpm build` (for the pack), npm, DATABASE_URL naming a superuser of a PostgreSQL server
  * where databases and roles may be created and dropped (each environment gets its own), and
@@ -73,6 +80,8 @@ export function parseJourneyArgs(argv) {
         work: { type: 'string' },
         'log-dir': { type: 'string' },
         keep: { type: 'boolean' },
+        image: { type: 'string' },
+        'image-network': { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -80,12 +89,22 @@ export function parseJourneyArgs(argv) {
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
-  const apps = values.app ?? Object.keys(JOURNEYS);
+  const image = values.image;
+  // The quickstart runs the commands of docs/quickstart.md as a shell runs them, through npx and the
+  // installed tree; it is not a journey of the image.
+  const apps =
+    values.app ?? Object.keys(JOURNEYS).filter((a) => image === undefined || a !== 'quickstart');
   const unknown = apps.filter((a) => !Object.hasOwn(JOURNEYS, a));
   if (unknown.length > 0) {
     return {
       error: `unknown --app ${unknown.join(', ')}; one of ${Object.keys(JOURNEYS).join(', ')}`,
     };
+  }
+  if (image !== undefined && apps.includes('quickstart')) {
+    return { error: 'the quickstart journey runs the installed tree; it has no --image form' };
+  }
+  if (image === undefined && values['image-network'] !== undefined) {
+    return { error: '--image-network needs --image' };
   }
   return {
     apps,
@@ -94,6 +113,8 @@ export function parseJourneyArgs(argv) {
     work: values.work,
     logDir: values['log-dir'],
     keep: values.keep === true,
+    image:
+      image === undefined ? undefined : { ref: image, network: values['image-network'] ?? 'host' },
   };
 }
 
@@ -164,8 +185,13 @@ async function main(argv) {
       shadowUrl: process.env.SHADOW_DATABASE_URL || adminUrl,
       logDir: args.logDir ? resolve(args.logDir) : undefined,
       log,
+      image:
+        args.image === undefined
+          ? undefined
+          : { ...args.image, label: `rayspec-journey-run=${process.pid}-${started}` },
     });
     summary.release = ctx.version;
+    if (args.image !== undefined) summary.image = args.image.ref;
     for (const app of args.apps) {
       const journey = new Journey(app, log);
       const t0 = Date.now();

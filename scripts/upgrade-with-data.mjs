@@ -25,6 +25,10 @@
  *   6. Packs the application with this working tree and deploys it as a bundle onto the upgraded
  *      environment — a dry-run, then the reviewed plan — and checks rows and credentials again.
  *
+ * With `--candidate <dir>` the release upgraded to is the one a consumer installed from release
+ * candidate tarballs into `<dir>` (`scripts/check-consumer-install.mjs`) instead of this working
+ * tree: steps 4 and 6 run its CLI, and its database roles setup and `@rayspec` packages are used.
+ *
  * With `--roles` the upgrade also turns role separation on, as docs/database-isolation.md has an
  * operator do it: after the previous release stopped, the working tree's database roles setup
  * (`packages/kernel/db/sql/database-roles.sql`) prepares the database with roles of its own, and
@@ -64,7 +68,7 @@ import postgres from 'postgres';
 import { startClassifier, startEgressProxy, testCertificates } from './journeys/lib.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
+const WORKING_TREE_CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
 
 /**
  * The applications the harness upgrades: where the source is, how it becomes a directory holding
@@ -155,7 +159,9 @@ const APPS = {
         symlinkSync(
           which === 'previous'
             ? join(work, 'previous', 'node_modules', '@rayspec', name)
-            : join(REPO, 'packages', dir),
+            : candidate !== null
+              ? join(candidate, 'node_modules', '@rayspec', name)
+              : join(REPO, 'packages', dir),
           join(modules, name),
         );
       }
@@ -180,9 +186,6 @@ function buildAssetCatalog(out) {
 const baseUrl = process.env.DATABASE_URL;
 if (!baseUrl)
   fail('DATABASE_URL is not set: it names the server the throwaway database is created on');
-if (!existsSync(CLI))
-  fail(`the working tree is not built (${CLI} is missing): run pnpm build first`);
-
 const { values: flags } = parseArgs({
   options: {
     from: { type: 'string' },
@@ -190,8 +193,29 @@ const { values: flags } = parseArgs({
     'log-dir': { type: 'string' },
     port: { type: 'string' },
     roles: { type: 'boolean', default: false },
+    candidate: { type: 'string' },
   },
 });
+/**
+ * With `--candidate <dir>`, the side upgraded to is the release a consumer installed from the
+ * candidate tarballs into `<dir>` (`scripts/check-consumer-install.mjs`), never the workspace: its
+ * CLI, its database roles setup and its `@rayspec` packages for an extension.
+ */
+const candidate = flags.candidate === undefined ? null : resolve(flags.candidate);
+function candidateCli(dir) {
+  const launcher = join(dir, 'node_modules', 'rayspec', 'package.json');
+  if (!existsSync(launcher)) fail(`--candidate ${dir} holds no installed rayspec`);
+  return join(
+    dir,
+    'node_modules',
+    'rayspec',
+    JSON.parse(readFileSync(launcher, 'utf8')).bin.rayspec,
+  );
+}
+const CLI = candidate === null ? WORKING_TREE_CLI : candidateCli(candidate);
+if (!existsSync(CLI)) {
+  fail(`the working tree is not built (${CLI} is missing): run pnpm build first`);
+}
 const APP = APPS[flags.app];
 if (APP === undefined) {
   fail(`--app ${flags.app} is not one of: ${Object.keys(APPS).join(', ')}`);
@@ -297,7 +321,9 @@ function roleUrl(db, role) {
  */
 async function prepareRoles() {
   const setup = readFileSync(
-    join(REPO, 'packages', 'kernel', 'db', 'sql', 'database-roles.sql'),
+    candidate === null
+      ? join(REPO, 'packages', 'kernel', 'db', 'sql', 'database-roles.sql')
+      : join(candidate, 'node_modules', '@rayspec', 'db', 'sql', 'database-roles.sql'),
     'utf8',
   );
   const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
@@ -463,10 +489,15 @@ async function main() {
   const from =
     flags.from ?? execFileSync('npm', ['view', 'rayspec', 'version'], { encoding: 'utf8' }).trim();
   const to = JSON.parse(
-    readFileSync(join(REPO, 'packages', 'app', 'cli', 'package.json'), 'utf8'),
+    readFileSync(
+      candidate === null
+        ? join(REPO, 'packages', 'app', 'cli', 'package.json')
+        : join(candidate, 'node_modules', 'rayspec', 'package.json'),
+      'utf8',
+    ),
   ).version;
   summary.from = from;
-  summary.to = `${to} (working tree)`;
+  summary.to = `${to} (${candidate === null ? 'working tree' : 'candidate install'})`;
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(from)) fail('--from is not a version');
 
   // 1. The previous release, from npm, with install scripts disabled.

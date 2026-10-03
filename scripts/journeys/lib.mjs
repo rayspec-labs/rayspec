@@ -119,7 +119,7 @@ export class Journey {
  * database server, the client tools and the age library of the installed tree.
  */
 export class Context {
-  constructor({ repo, consumer, tarballs, work, adminUrl, shadowUrl, logDir, log }) {
+  constructor({ repo, consumer, tarballs, work, adminUrl, shadowUrl, logDir, log, image }) {
     this.repo = repo;
     this.consumer = consumer;
     this.tarballs = tarballs;
@@ -133,6 +133,23 @@ export class Context {
     );
     this.cli = join(consumer, 'node_modules', 'rayspec', launcher.bin.rayspec);
     this.version = launcher.version;
+    // With a runtime image, every `rayspec` command of the journey runs in a container of that
+    // image instead (see imageCliSource); the installed tree still supplies the helpers above.
+    this.image = image ?? null;
+    if (this.image !== null) {
+      this.cli = join(work, 'rayspec-in-image.cjs');
+      writeFileSync(
+        this.cli,
+        imageCliSource({
+          image: this.image.ref,
+          network: this.image.network,
+          label: this.image.label,
+          mounts: [...new Set([work, consumer, repo])],
+          user: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+          home: work,
+        }),
+      );
+    }
     this.rolesSql = readFileSync(
       join(consumer, 'node_modules', '@rayspec', 'db', 'sql', 'database-roles.sql'),
       'utf8',
@@ -177,8 +194,69 @@ export class Context {
   async dispose() {
     for (const served of [...this.serving]) await served.kill();
     for (const child of this.children) if (child.exitCode === null) child.kill('SIGKILL');
+    // A killed wrapper cannot stop its container; every container of this run carries the label.
+    if (this.image !== null) removeLabelledContainers(this.image.label);
     for (const env of this.environments.splice(0).reverse()) await env.drop().catch(() => {});
   }
+}
+
+/** Environment variables a container of the image never takes from the journey. */
+export const IMAGE_ENV_DROPPED = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'RAYSPEC_PG_DUMP',
+  'RAYSPEC_PG_RESTORE',
+];
+
+/**
+ * The source of a Node script that runs `rayspec <args>` in a container of `image`, standing in
+ * for the installed CLI: the same arguments, working directory, environment and exit code.
+ *
+ *   - `mounts` are bind-mounted at their own paths, so every path a journey passes means the same
+ *     file inside the container;
+ *   - the container runs as `user` (the journey's own, never root), so it reads the journey's
+ *     private files and the installation stays read-only to it; `home` is its HOME;
+ *   - every variable of the environment it is given is passed by name (`-e NAME`), so no value
+ *     appears on a command line, except those in IMAGE_ENV_DROPPED: the image has its own PATH and
+ *     its own pg_dump and pg_restore;
+ *   - `network` is the container's network (`host` on Linux, where the journey's servers, proxies
+ *     and database are on 127.0.0.1);
+ *   - SIGTERM and SIGINT are passed to the container with `docker kill --signal`; every container
+ *     carries `label`, so one left by a SIGKILL is removed by the run.
+ */
+export function imageCliSource({ image, network, label, mounts, user, home }) {
+  const config = { image, network, label, mounts, user, home, dropped: IMAGE_ENV_DROPPED };
+  return [
+    `#!/usr/bin/env node`,
+    "'use strict';",
+    "const { spawn, spawnSync } = require('node:child_process');",
+    "const { randomBytes } = require('node:crypto');",
+    `const config = ${JSON.stringify(config)};`,
+    "const name = 'rayspec-journey-' + randomBytes(6).toString('hex');",
+    'const env = { ...process.env };',
+    'const names = Object.keys(env).filter((k) => !config.dropped.includes(k) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));',
+    "const args = ['run', '--rm', '--name', name, '--label', config.label, '--network', config.network,",
+    "  '--ulimit', 'core=0', '--user', config.user, '-w', process.cwd(), '-e', 'HOME=' + config.home,",
+    "  ...config.mounts.flatMap((m) => ['-v', m + ':' + m]), ...names.flatMap((k) => ['-e', k]),",
+    '  config.image, ...process.argv.slice(2)];',
+    "const child = spawn('docker', args, { env, stdio: ['ignore', 'inherit', 'inherit'] });",
+    "for (const signal of ['SIGTERM', 'SIGINT']) {",
+    "  process.on(signal, () => spawnSync('docker', ['kill', '--signal', signal.slice(3), name], { stdio: 'ignore' }));",
+    '}',
+    "child.on('exit', (code) => process.exit(code ?? 1));",
+    '',
+  ].join('\n');
+}
+
+/** Remove every container carrying `label`, running or not. */
+export function removeLabelledContainers(label) {
+  const listed = spawnSync('docker', ['ps', '-aq', '--filter', `label=${label}`], {
+    encoding: 'utf8',
+  });
+  const ids = (listed.stdout ?? '').split('\n').filter(Boolean);
+  if (ids.length > 0) spawnSync('docker', ['rm', '-f', ...ids], { stdio: 'ignore' });
+  return ids.length;
 }
 
 function hostTool(name) {
