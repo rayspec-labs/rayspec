@@ -250,8 +250,10 @@ export const IMAGE_ENV_DROPPED = [
  * The source of a Node script that runs `rayspec <args>` in a container of `image`, standing in
  * for the installed CLI: the same arguments, working directory, environment and exit code.
  *
- *   - `mounts` are bind-mounted at their own paths, so every path a journey passes means the same
- *     file inside the container;
+ *   - `mounts` are bind-mounted at their own real paths, so every path a journey passes means the
+ *     same file inside the container; the working directory is the real path too, so a directory
+ *     reached through a symbolic link (macOS keeps its temporary directories under /var, a link to
+ *     /private/var) is still inside a mount;
  *   - the container runs as `user` (the journey's own, never root), so it reads the journey's
  *     private files and the installation stays read-only to it; `home` is its HOME;
  *   - every variable of the environment it is given is passed by name (`-e NAME`), so no value
@@ -285,13 +287,15 @@ export function imageCliSource({
     `#!/usr/bin/env node`,
     "'use strict';",
     "const { spawn, spawnSync } = require('node:child_process');",
+    "const { realpathSync } = require('node:fs');",
     `const config = ${JSON.stringify(config)};`,
     "const name = config.namePrefix + '-' + process.pid;",
     'const env = { ...process.env };',
     'const names = Object.keys(env).filter((k) => !config.dropped.includes(k) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));',
     "const args = ['run', '--rm', '--name', name, '--label', config.label, '--network', config.network,",
     "  '--ulimit', 'core=0', '--user', config.user, '-w', process.cwd(), '-e', 'HOME=' + config.home,",
-    "  ...config.mounts.flatMap((m) => ['-v', m + ':' + m]), ...names.flatMap((k) => ['-e', k]),",
+    "  ...config.mounts.map((m) => realpathSync(m)).flatMap((m) => ['-v', m + ':' + m]),",
+    "  ...names.flatMap((k) => ['-e', k]),",
     '  config.image, ...process.argv.slice(2)];',
     "const child = spawn('docker', args, { env, stdio: ['ignore', 'inherit', 'inherit'] });",
     "for (const signal of ['SIGTERM', 'SIGINT']) {",

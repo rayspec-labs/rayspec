@@ -9,7 +9,8 @@
  *   - a command the skill names in code that the help does not print (a removed verb, a removed
  *     subcommand of a group) is a problem, naming it, while the same words in prose are not;
  *   - the gate passes on this repository's built help, reference and skill, and fails, naming the
- *     command, when the reference loses a section.
+ *     command, when the reference loses a section, also when it is started through a path that
+ *     holds a symbolic link.
  *
  * Needs `pnpm build` (the gate reads the built CLI's help). Standalone: `node <thisfile>`; exit 0 =
  * pass.
@@ -21,6 +22,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -132,6 +134,7 @@ check('the gate passes on this repository and fails when the reference loses a s
   try {
     for (const rel of [
       'scripts/check-skill-drift.mjs',
+      'scripts/lib/entry.mjs',
       SKILL,
       'packages/kernel/spec/src/grammar.ts',
       'docs/cli-reference.md',
@@ -150,6 +153,17 @@ check('the gate passes on this repository and fails when the reference loses a s
     const failed = gate(scratch);
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /`rayspec init` is in the CLI help but has no section/);
+    // Started through a path that holds a symbolic link, the gate still runs and still fails.
+    const link = join(mkdtempSync(join(tmpdir(), 'rayspec-skill-drift-link-')), 'repo');
+    symlinkSync(scratch, link);
+    try {
+      assert.notEqual(realpathSync(link), link);
+      const throughLink = gate(link);
+      assert.equal(throughLink.status, 1, throughLink.stdout);
+      assert.match(throughLink.stderr, /`rayspec init` is in the CLI help but has no section/);
+    } finally {
+      rmSync(dirname(link), { recursive: true, force: true });
+    }
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

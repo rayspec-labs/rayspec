@@ -26,7 +26,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { isEntryPoint } from './lib/entry.mjs';
 
 /**
  * The commands a help text prints: the word after `rayspec` on an indented usage line, with the
@@ -205,6 +206,6 @@ function main() {
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exitCode = main();
 }

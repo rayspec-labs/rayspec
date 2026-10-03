@@ -25,7 +25,16 @@
  */
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -254,6 +263,7 @@ check('(C) a pre-release runtime gets the extension ranges it needs, and a relea
 });
 
 const scratch = mkdtempSync(join(tmpdir(), 'rayspec-journeys-image-'));
+const realScratch = realpathSync(scratch);
 try {
   // A `docker` stand-in: `run` records its arguments and the values of the variables it was asked
   // to pass, then waits for a signal or exits with the code in FAKE_EXIT; `kill` records itself.
@@ -318,9 +328,10 @@ try {
     for (const [flag, value] of [
       ['--network', 'host'],
       ['--user', '1001:1001'],
-      ['-w', scratch],
+      // Real paths: on macOS the temporary directory is reached through the /var link.
+      ['-w', realScratch],
       ['--label', 'rayspec-journey-run=test'],
-      ['-v', `${scratch}:${scratch}`],
+      ['-v', `${realScratch}:${realScratch}`],
       ['--ulimit', 'core=0'],
     ]) {
       assert.equal(argv[argv.indexOf(flag) + 1], value, flag);
@@ -330,6 +341,39 @@ try {
     for (const name of IMAGE_ENV_DROPPED) assert.ok(!(name in values), `${name} is dropped`);
     assert.ok(argv.includes(`HOME=${scratch}`));
   });
+
+  check(
+    '(I) a mount and a working directory reached through a symbolic link are real paths',
+    () => {
+      writeFileSync(log, '');
+      const target = join(realScratch, 'linked-target');
+      mkdirSync(target, { recursive: true });
+      const link = join(scratch, 'linked');
+      symlinkSync(target, link);
+      const linked = join(scratch, 'rayspec-in-image-linked.cjs');
+      writeFileSync(
+        linked,
+        imageCliSource({
+          image: 'rayspec-candidate:1.9.0-rc.0',
+          network: 'host',
+          label: 'rayspec-journey-run=test',
+          mounts: [link],
+          user: '1001:1001',
+          home: link,
+        }),
+      );
+      const run = spawnSync(process.execPath, [linked, '--version'], {
+        cwd: link,
+        env: baseEnv,
+        encoding: 'utf8',
+      });
+      assert.equal(run.status, 0, run.stderr);
+      const [{ argv }] = entries();
+      assert.notEqual(link, target, 'the case needs a mount that is a link');
+      assert.equal(argv[argv.indexOf('-w') + 1], target);
+      assert.equal(argv[argv.indexOf('-v') + 1], `${target}:${target}`);
+    },
+  );
 
   await new Promise((resolveCheck, rejectCheck) => {
     writeFileSync(log, '');

@@ -357,6 +357,7 @@ check('the gate passes on the committed document and fails on one for another ve
       'docs/closure-sbom.cdx.json',
       'scripts/check-sbom-fresh.mjs',
       'scripts/gen-closure-sbom.mjs',
+      'scripts/lib/entry.mjs',
       'scripts/lib/release-closure.mjs',
     ]) {
       cpSync(join(REPO, file), join(copy, file));

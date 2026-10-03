@@ -35,7 +35,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { isEntryPoint } from './lib/entry.mjs';
 
 /** Read `--flag value` out of argv. */
 function flag(argv, name) {
@@ -164,6 +164,6 @@ function main(argv) {
   return 0;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exit(main(process.argv.slice(2)));
 }
