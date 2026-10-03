@@ -41,7 +41,7 @@ import {
   isBundleDeploy,
 } from './deploy-bundle.js';
 import { runPack } from './pack.js';
-import { CLI_DIST, type ParsedJson } from './test-support/bundles.js';
+import { CLI_DIST, CLI_VERSION, type ParsedJson } from './test-support/bundles.js';
 
 const distBuilt = existsSync(CLI_DIST);
 if (process.env.CI && !distBuilt) {
@@ -73,7 +73,7 @@ beforeAll(async () => {
   bundle = join(work, 'app.ray');
   const packed = await runPack(['--spec', join(app, 'rayspec.yaml'), '--output', bundle], {
     operationId: randomUUID(),
-    cliVersion: '1.8.0',
+    cliVersion: CLI_VERSION,
   });
   if (!packed.envelope.ok) throw new Error(JSON.stringify(packed.envelope.errors));
 }, 60_000);

@@ -79,7 +79,7 @@ import {
   writeTree,
 } from '../../../kernel/bundle-closure/src/test-support/app.js';
 import { runPack } from './pack.js';
-import { CLI_DIST, type ParsedJson } from './test-support/bundles.js';
+import { CLI_DIST, CLI_VERSION, type ParsedJson } from './test-support/bundles.js';
 import {
   finishingUploadPgDump,
   holdingPgDump,
@@ -453,7 +453,7 @@ describe.skipIf(!baseUrl)('rayspec export and rayspec resume — one environment
     });
     const packed = await runPack(
       ['--spec', join(source, 'rayspec.yaml'), '--output', join(source, 'app.ray')],
-      { operationId: randomUUID(), cliVersion: '1.8.0' },
+      { operationId: randomUUID(), cliVersion: CLI_VERSION },
     );
     expect(packed.envelope.ok, JSON.stringify(packed.envelope.errors)).toBe(true);
     bundle = join(deployDir, 'app.ray');

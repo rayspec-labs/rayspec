@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { exportPKCS8, generateKeyPair } from 'jose';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runPack } from './pack.js';
-import type { ParsedJson } from './test-support/bundles.js';
+import { CLI_VERSION, type ParsedJson } from './test-support/bundles.js';
 import { asAdmin, prepareRoleDatabases } from './test-support/migration-source.js';
 import { freePort, SpawnedProcesses } from './test-support/processes.js';
 
@@ -160,7 +160,7 @@ describe.skipIf(!baseUrl)('rayspec deploy — supervised by the process the oper
     bundleDir = mkdtempSync(join(tmpdir(), 'supervised-bundle-'));
     const packed = await runPack(
       ['--spec', join(dir, 'rayspec.yaml'), '--output', join(bundleDir, 'app.ray')],
-      { operationId: randomUUID(), cliVersion: '1.8.0' },
+      { operationId: randomUUID(), cliVersion: CLI_VERSION },
     );
     if (!packed.envelope.ok) throw new Error(JSON.stringify(packed.envelope.errors));
   }, 120_000);

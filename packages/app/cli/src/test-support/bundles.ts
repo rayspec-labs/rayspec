@@ -37,6 +37,14 @@ export const REPO_ROOT = join(
   '..',
 );
 export const CLI_DIST = join(REPO_ROOT, 'packages/app/cli/dist/index.js');
+/**
+ * The version the built CLI reports, read from its own manifest as the CLI reads it: the runtime a
+ * bundle must pin for that CLI to deploy it. A test that packs a bundle and deploys it through the
+ * built CLI packs for this version, so a version bump moves both together.
+ */
+export const CLI_VERSION: string = JSON.parse(
+  readFileSync(join(REPO_ROOT, 'packages/app/cli/package.json'), 'utf8'),
+).version;
 
 /** A parsed JSON document, read field by field in assertions. */
 // biome-ignore lint/suspicious/noExplicitAny: the shape is what the assertions check.
