@@ -8,7 +8,7 @@
 #   docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
 #     --build-context tarballs=<dir of the packed .tgz files> \
 #     --build-arg RAYSPEC_VERSION=<version> --build-arg SOURCE_COMMIT=<40-hex commit> \
-#     --output type=oci,dest=<image.oci.tar> deployments/runtime-image
+#     --output type=docker,oci-mediatypes=true,dest=<image.oci.tar> deployments/runtime-image
 #
 # What the image keeps, and why: /bin/sh, because the supervisor of a role-separated deploy
 # re-executes itself through it to set a zero hard core-file limit; pg_dump and pg_restore of
@@ -63,8 +63,9 @@ RUN set -eu; \
     pg_restore --version; \
     rm -rf /usr/local/lib/node_modules /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
       /usr/local/bin/yarn /usr/local/bin/yarnpkg /usr/local/bin/docker-entrypoint.sh /opt/yarn-*; \
-    groupadd --system --gid 10001 rayspec; \
-    useradd --system --uid 10001 --gid rayspec --home-dir /var/lib/rayspec --shell /usr/sbin/nologin rayspec; \
+    groupadd --gid 10001 rayspec; \
+    useradd --no-log-init --uid 10001 --gid rayspec --home-dir /var/lib/rayspec --no-create-home \
+      --shell /usr/sbin/nologin rayspec; \
     install -d -o rayspec -g rayspec -m 0700 /var/lib/rayspec; \
     chown -R root:root /opt/rayspec /opt/pgtools; \
     chmod -R go-w /opt/rayspec /opt/pgtools

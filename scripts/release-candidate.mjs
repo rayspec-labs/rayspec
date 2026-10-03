@@ -23,8 +23,12 @@
  *   6. writes `candidate.json`: the version, the commit, every artifact with its SHA-256 and the
  *      outcome of each step.
  *
- *   node scripts/release-candidate.mjs --version <x.y.z-pre> --out <dir>
+ *   node scripts/release-candidate.mjs --version <x.y.z-pre> --out <dir> [--builder <buildx builder>]
  *        [--skip-image] [--repository ghcr.io/<owner>/<name>] [--key-file <pem> --trusted-key <pem>]
+ *
+ * The image is exported as an OCI image layout that `docker load` also reads, which the buildx
+ * `docker` driver cannot write without the containerd image store: name a `docker-container`
+ * builder with `--builder` (or BUILDX_BUILDER).
  *
  * The conformance of the candidate — the consumer install, the reference journeys and the contract
  * corpus against that install and against the image, the upgrade matrix — runs on these artifacts
@@ -164,10 +168,11 @@ function runScript(script, args, logFile, extraEnv = {}) {
   return res.status ?? 1;
 }
 
-function buildImage({ tarballs, version, commit, out, logFile }) {
+function buildImage({ tarballs, version, commit, out, logFile, builder }) {
   const args = [
     'buildx',
     'build',
+    ...(builder === undefined ? [] : ['--builder', builder]),
     '--platform',
     'linux/amd64',
     '--provenance=false',
@@ -179,7 +184,9 @@ function buildImage({ tarballs, version, commit, out, logFile }) {
     '--build-arg',
     `SOURCE_COMMIT=${commit}`,
     '--output',
-    `type=oci,dest=${out},name=rayspec-candidate:${version}`,
+    // The docker exporter with OCI media types writes an OCI image layout that `docker load`
+    // also reads, so the archive the manifest names is the image the conformance runs.
+    `type=docker,oci-mediatypes=true,dest=${out},name=rayspec-candidate:${version}`,
     join(REPO, DOCKERFILE_DIR),
   ];
   const res = spawnSync('docker', args, {
@@ -220,6 +227,7 @@ export async function main(argv = process.argv.slice(2)) {
         repository: { type: 'string' },
         'key-file': { type: 'string' },
         'trusted-key': { type: 'string' },
+        builder: { type: 'string' },
       },
       strict: true,
       allowPositionals: false,
@@ -317,6 +325,7 @@ export async function main(argv = process.argv.slice(2)) {
           commit: summary.sourceCommit,
           out: image,
           logFile: imageLog,
+          builder: values.builder,
         }) === 0,
         { log: imageLog },
       );
