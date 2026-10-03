@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.9.0] - 2026-10-03
 
 ### Added
 
@@ -583,10 +583,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator bootstrap route, and `rayspec tenant ensure` (which reads the same variable, keeps
   resolving the existing organization idempotently and reports `SINGLE_TENANT_LIMIT` for a second).
   Open registration only creates that first organization; after it an account is made by redeeming
-  an invite. A refusal is a `403` with one fixed message; the registration and bootstrap checks run
-  before an account is created, so only the loser of two registrations racing for the first
-  organization is left with an account and no organization. A boot of a database that already holds more than one organization is refused. Any value other than
-  `true` or `false` refuses the boot. `BootedServer.singleTenant` reports it, and the
+  an invite. A refusal is a `403` with one fixed message, and it creates no account: the loser of
+  two registrations racing for the first organization gets the `403` too. A boot of a database that
+  already holds more than one organization is refused. Any value other than `true` or `false`
+  refuses the boot. `BootedServer.singleTenant` reports it, and the
   runtime-control adapter's `inspectHosting()` reports the tenant limit as
   `applicationTenants: { singleTenantMode, maxApplicationTenants }`. Unset, nothing changes.
 - **In the hardened posture a durable agent run is re-checked against its requester when it
@@ -1145,7 +1145,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A runtime refuses a database a newer runtime migrated.** An older runtime found a platform
   ledger with migrations it does not ship, applied nothing and served that schema silently. The
   boot (and `rayspec tenant ensure`) now refuses it, under the schema lock and before anything is
-  applied, with a message that names the cause, and leaves the database unchanged.
+  applied, with a message that names the cause, and leaves the database unchanged. This protects
+  from 1.9.0 on: a 1.8.x runtime does not have the check and boots on a database 1.9.0 migrated.
+- **A durable worker's shutdown no longer hangs after an outage of the workflow database.** While
+  the workflow engine reconnected its notification listener, `executor.shutdown()` in
+  `@rayspec/durable-dbos` could wait for ever on the connection the reconnect held, retry the
+  reconnect every second for ever, or raise an uncaught "Release called on client which has already
+  been released" when the listener failed as it closed. Once the running workflows are drained, the
+  close of the system database now releases a listener a reconnect publishes, clears a reconnect it
+  arms and absorbs a late listener error, and it is bounded by the new optional
+  `systemDatabaseCloseTimeoutMs` (default 10 s, exported as
+  `DEFAULT_SYSTEM_DATABASE_CLOSE_TIMEOUT_MS`): past it, `shutdown()` rejects with the reason instead
+  of never returning.
 - **Shutdown no longer waits for ever on an open connection.** A request that never completed (a
   stalled upload, an event stream, half a request) kept a stopping server alive indefinitely; the
   drain above bounds it.
@@ -1287,23 +1298,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inside the Pi SDK's shrinkwrap, which no override reaches; the newest Pi SDK release checked,
   `0.99.1`, pins `5.0.9`, which they cover as well. The consumer scan lists them next to the
   entries below, with the same expiry.
-- **Still open for consumers: three advisories inside `@earendil-works/pi-coding-agent`.**
+- **Still open for consumers: advisories against three packages pinned by
+  `@earendil-works/pi-coding-agent`, 22 in all** (15 against `undici`, 6 against `brace-expansion`,
+  1 against `protobufjs`).
   `@rayspec/adapter-pi` depends on `@earendil-works/pi-coding-agent` `0.79.9`, which ships an
   `npm-shrinkwrap.json` pinning `undici` `8.5.0`, `brace-expansion` `5.0.6` and `protobufjs`
   `7.6.4`. npm installs a dependency's shrinkwrap as written, so neither a pin in a RaySpec manifest
-  nor the workspace overrides reach those copies. The first release whose shrinkwrap is clear of all
-  three is `0.86.0` (`undici` `8.10.2`, `brace-expansion` `5.0.9`, `protobufjs` `7.6.6`). Moving to
+  nor the workspace overrides reach those copies. `0.86.0` is the first release that moves all three
+  pins (`undici` `8.10.2`, `brace-expansion` `5.0.9`, `protobufjs` `7.6.6`); it clears every one of
+  these advisories except the three `brace-expansion` ones above, which cover `5.0.9` as well. Moving to
   it is a dependency bump of the Pi adapter across several breaking releases of the Pi SDK,
   including the removal of the `AuthStorage` export the adapter uses, and is left to its own
   change. Inside this repository pnpm ignores the shrinkwrap and the overrides already resolve
   fixed versions.
+- **The workspace audit is clear of the advisories published in early September.** The root
+  overrides moved `hono` from `4.12.34` to `4.13.5` and `fast-uri` from `3.1.5` to `3.1.6` (both
+  moved again by the entries around this one, to `4.13.9` and `3.1.8`), and a new override pins the
+  transitive `qs` at `6.16.0`. `vitest` moved from `4.1.9` to `4.1.11` in every manifest that
+  declares it. Workspace and lockfile only; what a consumer installs is the `hono` entry above.
 - **The workspace dependency audit passes again.** Advisories published since the last release
   cover `fast-uri` `3.1.6` (two, fixed in `3.1.7`) and `ip-address` `10.3.1` (two, fixed in
   `10.5.1`), the versions the root overrides pinned, so the osv-scanner audit of `pnpm-lock.yaml`
   failed. The overrides now name the first fixed versions. A consumer install was not affected: npm
   resolves `fast-uri` `3.1.8` and `ip-address` `10.7.2` there.
 - **CI now audits the release the way a consumer installs it.** The audit of `pnpm-lock.yaml` could
-  not see the three Pi SDK advisories above, because no consumer installs from that file and a
+  not see the Pi SDK advisories above, because no consumer installs from that file and a
   dependency's own shrinkwrap never enters it. A new CI step packs the release closure,
   installs it with npm into an empty directory (`scripts/check-consumer-install.mjs`), imports every
   package's entry point there, and scans the resulting `package-lock.json` with the same pinned
@@ -1316,20 +1335,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrade notes
 
-- **Under `RAYSPEC_HOSTING_POSTURE=managed`, every handler declares `uses`.** A spec whose handlers
-  do not refuses the boot under the managed posture; add `uses` (an empty list for a handler that
-  uses no optional capability). Without the managed posture nothing changes.
+Everything below is documented in place above; this is the checklist, and
+[Upgrading to 1.9](./docs/upgrading-to-1.9.md) walks through it with the action for each item. A
+deployment that upgrades and sets nothing new keeps working as it did: role separation, row-level
+security, single-tenant mode, the managed posture and the execution bounds are all opt-in, a YAML
+deploy boots and prints as before, and every existing command keeps exit codes 0, 1 and 2 for the
+outcomes it had. The first items apply to every deployment; the rest only once you turn something
+on, deploy a bundle, embed the packages or parse what the runtime writes.
 
+- **Node `>=22.21.0`.** Every package's `engines.node` moved from `>=22`. A package manager only
+  warns on the mismatch unless it runs engine-strict, so check the Node a host runs before
+  upgrading; CI and the runtime image use `22.23.3`.
+- **The first boot runs six platform migrations, `0012` to `0017`.** Each is additive: five new
+  global tables (`runtime_control_state` and `runtime_control_receipts`, `runtime_control_processes`,
+  `product_migration_ledger`, `owner_recovery_tokens`), one nullable column
+  (`0017_runtime_control_blob_backend`), and `0015_tenant_row_security`, which only creates policies
+  and functions and enables nothing, so a deployment that does not set
+  `RAYSPEC_MIGRATION_DATABASE_URL` runs exactly as before. The chain runs as a `runtime.apply`
+  operation under the operation lease and writes receipts. There is no downgrade after this boot:
+  a 1.8.x runtime does not detect a database 1.9.0 has migrated and boots on it, so going back must
+  start from the backup taken before the upgrade. Only 1.9.0 and later refuse a database a newer
+  runtime migrated.
+- **The legacy YAML deploy can refuse a schema change it used to make.** A schema change on a fenced
+  environment (`RAY_POLICY_DENIED`, exit 4), a plan made stale by a concurrent change
+  (`RAY_PLAN_STALE`, 3), another operation holding the lease past the wait (`RAY_LOCK_TIMEOUT`, 5)
+  and an interrupted apply that needs manual reconciliation (`RAY_RECONCILIATION_REQUIRED`, 6) are
+  new outcomes of `rayspec deploy <spec.yaml>`; `rayspec-serve` keeps exit 1. A deploy that changes
+  nothing takes no lease and writes nothing.
+- **An unexpected internal failure of the CLI exits 7**, not 2. A script that treated 2 as "any
+  failure" also treats 7 that way.
 - **Log lines and error messages are redacted.** A line or message that carried a credential shape
   (a bearer token, a credential header, a URL password, a key) or a value the process holds as a
   secret now carries `[redacted]` in its place. A log parser that matched on such a value matches on
-  the name around it instead.
-
-- **A bundle deploy hands bindings over differently.** The bindings file may supply only names the
-  bundle declares (plus the selected speech provider's key); any other name is refused with
-  `RAY_USAGE`. A provider key it supplies is no longer written into the process environment: it goes
-  to its adapter alone. The application's own names are still written there, and are also available
-  to handlers as `init.bindings.get(name)`. A YAML deploy is unchanged.
+  the name around it instead. Messages also say "extension" where they said "pack" (for example
+  `deploy --check-env`'s "no extension is loaded").
+- **Agent runs report their state more exactly.** An async run reads `running` while it executes
+  rather than `enqueued`; a run that throws, or hits `RAYSPEC_AGENT_RUN_MAX_MS`, is recorded terminal
+  `error` with its class, so a same-key retry of a thrown tainted run replays that failure instead of
+  answering `409`; a cancelled run keeps the journal steps it wrote before it ended. A client that
+  polled for `enqueued` or retried on `409` follows the recorded state instead.
+- **Bounded execution: what changes without the managed posture.** Nothing is bounded that was
+  not before, with two exceptions that are unsafe for everyone: a codex child that ignores `SIGTERM`
+  is killed after `RAYSPEC_AGENT_KILL_GRACE_MS` (default 5000), and the durable worker no longer
+  holds a database transaction for the length of a run. `RAYSPEC_AGENT_RUN_MAX_MS`, when set, now
+  aborts the run's call and records a terminal outcome. An unusable value of a variable the
+  execution policy adds refuses the boot.
 - **The anthropic backend's child process no longer inherits the whole server environment.** It is
   started without the other providers' keys, every `_FILE` variant, the database URLs (`DATABASE_URL`,
   `SHADOW_DATABASE_URL`, `DBOS_…`, `PG…`) and every `RAYSPEC_…` and `CLOUD_…` setting, in every
@@ -1339,25 +1389,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default.** Each backend instance uses its own client, so two backends with different keys cannot
   send each other's. Code outside RaySpec that relied on the default being set by RaySpec must set
   it itself.
-
-- **Changing the API-key pepper also invalidates refresh sessions and invites,** as it always did;
-  the architecture guide said only API keys were affected, and now says all three. Use
-  `RAYSPEC_API_KEY_PEPPER_PREVIOUS` to rotate without that effect.
-
-- **Bounded execution: what changes without the managed posture.** Nothing is bounded that was
-  not before, with two exceptions that are unsafe for everyone: a codex child that ignores `SIGTERM`
-  is killed after `RAYSPEC_AGENT_KILL_GRACE_MS` (default 5000), and the durable worker no longer
-  holds a database transaction for the length of a run. `RAYSPEC_AGENT_RUN_MAX_MS`, when set, now
-  aborts the run's call and records a terminal outcome. An unusable value of a variable the
-  execution policy adds refuses the boot. Under `RAYSPEC_HOSTING_POSTURE=managed` the policy's
-  defaults apply and a deployment using the anthropic, codex or pi backend, or a fake speech
-  provider, no longer boots — boot it without the posture, or move the agents to `openai`.
-- **The platform chain gains `0015_tenant_row_security`.** It only creates policies and functions
-  and enables nothing, so a deployment that does not set `RAYSPEC_MIGRATION_DATABASE_URL` runs
-  exactly as before. To turn role separation on for an existing deployment, run the setup SQL on
-  its databases, set the two URLs and restart; see
-  [Database roles and row-level security](./docs/database-isolation.md). The quiesce barrier
-  `database-write-role` needs the runtime-control adapter's connection to be the migration role's.
+- **Changing the API-key pepper also invalidates refresh sessions, invites and owner-recovery
+  tokens,** as it always did for the first two; the architecture guide said only API keys were
+  affected. Use `RAYSPEC_API_KEY_PEPPER_PREVIOUS` to rotate without that effect.
 - **Nothing about the hardened posture changes unless it is turned on.** Without
   `RAYSPEC_SINGLE_TENANT` the number of organizations is not limited and registration stays open;
   without `RAYSPEC_MIGRATION_DATABASE_URL` one role migrates and serves. With neither set, every
@@ -1367,15 +1401,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   streamed error frames and the invalid agent-spec answer carry fixed messages; and a stream handler
   no longer sees the credential headers or the playback `?token=` — a handler that read the caller
   from them reads `init.principal` instead. See [Hosting in the hardened posture](./docs/hardened-posture.md).
+- **Turning role separation on for an existing deployment** means running the setup SQL on its
+  databases, setting the two URLs and restarting; see
+  [Database roles and row-level security](./docs/database-isolation.md). The quiesce barrier
+  `database-write-role` needs the runtime-control adapter's connection to be the migration role's.
+- **With role separation, `rayspec deploy` and `rayspec-serve` run as two processes.** The process
+  you start supervises and holds the migration role; the application runs in a child under it. A
+  process manager still starts, signals and watches the one process it started. Pass the migration
+  and snapshot connections in the environment, not as `_FILE` or in a `.env` file.
+- **Under `RAYSPEC_HOSTING_POSTURE=managed`** every handler declares `uses` (an empty list for a
+  handler that uses no optional capability); a deployment using the anthropic, codex or pi backend,
+  or a fake speech provider, does not boot (boot it without the posture, or move the agents to
+  `openai`); the execution policy's defaults apply; and on Linux the boot refuses a host where the
+  child could read the supervisor's memory or make it write a core file: set
+  `kernel.yama.ptrace_scope` to 1 or more (Docker Desktop's VM kernel has no Yama at all, and
+  RHEL/Fedora-style kernels default to 0), and keep `/bin/sh` in the image or start with a hard
+  core-file limit of 0 (`docker run --ulimit core=0`). Every other posture boots and warns instead.
+  See [Hosting in the hardened posture → Turning it on](./docs/hardened-posture.md#turning-it-on).
 - **`rayspec deploy` of a `.ray` file is a new path.** It used to read the file as YAML. Now a
   `.ray` name, in any case, or a file that starts with a ZIP signature is deployed as a bundle, reads
   no `.env` file, and needs `DATABASE_URL`, `RAYSPEC_API_KEY_PEPPER` and, for a schema change,
   `SHADOW_DATABASE_URL` in the process environment. A YAML spec deploys exactly as before.
-- **The platform chain gains `0017_runtime_control_blob_backend`**, one nullable column on the
-  runtime-control state row. Every bundle deploy fills it for the application it activates; until
-  the first one with this release it is empty, and `rayspec export` of an application that loads
-  extensions is refused (`unsupported-blob-adapter`) until the deployment has been deployed once with
-  this release.
+- **A bundle deploy hands bindings over differently.** The bindings file may supply only names the
+  bundle declares (plus the selected speech provider's key); any other name is refused with
+  `RAY_USAGE`. A provider key it supplies is no longer written into the process environment: it goes
+  to its adapter alone. The application's own names are still written there, and are also available
+  to handlers as `init.bindings.get(name)`.
 - **A bundle pins its runtime.** After upgrading the CLI, repack the application with the new
   release before deploying it; a bundle packed for another runtime version is refused with
   `RAY_RUNTIME_UNSUPPORTED`.
@@ -1384,19 +1435,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existed, a bundle that only matches them, or only adds whole stores, deploys; a bundle that
   carries a product delta is refused until one change through `rayspec deploy <spec.yaml>` has
   started the ledger.
+- **`rayspec export` of an application that loads extensions** is refused
+  (`unsupported-blob-adapter`) until the deployment has had one bundle deploy with this release,
+  which records the blob backend in the column `0017` adds.
 - **Version directories are read-only.** Remove one that is no longer active with
   `chmod -R u+w <dir> && rm -rf <dir>`.
-- **With role separation, `rayspec deploy` and `rayspec-serve` run as two processes.** The process
-  you start supervises and holds the migration role; the application runs in a child under it. A
-  process manager still starts, signals and watches the one process it started. Under
-  `RAYSPEC_HOSTING_POSTURE=managed` on Linux the boot now also refuses a host where the child could
-  read the supervisor's memory or make it write a core file, which booted with 1.8.0: set
-  `kernel.yama.ptrace_scope` to 1 or more (Docker Desktop's VM kernel has no Yama at all, and
-  RHEL/Fedora-style kernels default to 0), and keep `/bin/sh` in the image or start with a hard
-  core-file limit of 0 (`docker run --ulimit core=0`; a distroless image has no `/bin/sh`). Pass the
-  migration and snapshot connections in the environment, not as `_FILE` or in a `.env` file. Every
-  other posture boots and warns instead. See
-  [Hosting in the hardened posture → Turning it on](./docs/hardened-posture.md#turning-it-on).
+- **For maintainers: the release script `release:pack` is now `release:tarballs`.**
 
 ## [1.8.0] - 2026-08-15
 
@@ -5836,6 +5880,7 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.9.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.9.0
 [1.8.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.8.0
 [1.7.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.7.0
 [1.6.2]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.6.2

@@ -256,6 +256,8 @@ treats model and tool output as data, never as instructions. See
   taxonomy, data flow, and the security model.
 - **[Spec reference](./docs/spec-reference.md)** — every section of the two
   document profiles (backend and product), field by field.
+- **[Upgrading to 1.9](./docs/upgrading-to-1.9.md)** — from 1.8.x: what changes
+  without opting in, the hardened posture, the new commands and the migrations.
 - **[The v1 posture](./docs/v1-posture.md)** — the closed capability / operation /
   trigger sets a product document may declare, and the shape guarantees the
   runtime enforces.
