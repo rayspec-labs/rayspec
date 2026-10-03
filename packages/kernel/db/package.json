@@ -8,6 +8,11 @@
     "sql"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/kernel/db"
+  },
   "type": "module",
   "exports": {
     ".": {

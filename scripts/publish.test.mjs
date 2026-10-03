@@ -31,6 +31,11 @@
  *   (D) A TARGET THAT DECLARES A DIFFERENT REQUIREMENT IS NOT PACKABLE — the requirement string has
  *       ONE source, the repo-root `engines.node`. A target that disagrees tells consumers a Node
  *       floor other than the one the workspace is built and tested against.
+ *   (S) A TARGET THAT DOES NOT DECLARE ITS SOURCE REPOSITORY IS NOT PACKABLE — npm refuses a
+ *       provenance publish whose `repository.url` does not name the repository the workflow ran in,
+ *       and it refuses at publish time, after the targets before it are public. Every target declares
+ *       the repo-root `repository.url` and its own `directory`; `--from` holds the packed manifests to
+ *       the same rule.
  *   (A) `--version` IS AN ASSERTION, NEVER AN OVERRIDE — a value that disagrees with the derived
  *       version refuses instead of stamping. There must be no input that packs a version the tree
  *       does not carry.
@@ -81,6 +86,9 @@ const VERSION = '1.6.2';
 // The Node requirement. The fixture's root manifest is its ONE source, exactly as the repo-root
 // manifest is in the real repo; every publish target has to declare the same string.
 const NODE_ENGINE = '>=22';
+// The source repository: the root manifest's `repository.url` is its one source.
+const REPOSITORY_URL = 'git+https://github.com/fixture/rayspec.git';
+const repositoryOf = (m) => ({ type: 'git', url: REPOSITORY_URL, directory: m.dir });
 
 // ── the `pnpm` test double ──────────────────────────────────────────────────────────────────────
 // Logs one JSON line per invocation (argv + cwd, i.e. which package was packed) and succeeds. Its
@@ -150,7 +158,13 @@ function gitIn(root, ...args) {
  * requested tags. A tag with `at: 'previous'` is created on the first commit and a second commit
  * then moves HEAD past it.
  */
-function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = [] } = {}) {
+function fixture({
+  rootVersion = VERSION,
+  versions = {},
+  engines = {},
+  repositories = {},
+  tags = [],
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'rayspec-release-guard-'));
   workspaces.push(root);
 
@@ -163,6 +177,7 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
     name: 'rayspec',
     version: rootVersion,
     private: true,
+    repository: { type: 'git', url: REPOSITORY_URL },
     engines: { node: NODE_ENGINE },
   });
 
@@ -172,10 +187,13 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
     // Publish targets declare the requirement; the members that never ship deliberately do not —
     // the same shape the real repo has, so every case also exercises the guard's scope.
     const engine = m.name in engines ? engines[m.name] : m.target ? NODE_ENGINE : null;
+    const repository =
+      m.name in repositories ? repositories[m.name] : m.target ? repositoryOf(m) : null;
     manifest(join(m.dir, 'package.json'), {
       name: m.name,
       version: versions[m.name] ?? m.pinned ?? rootVersion,
       private: true,
+      ...(repository === null ? {} : { repository }),
       ...(engine === null ? {} : { engines: { node: engine } }),
       dependencies: Object.fromEntries(m.deps.map((d) => [d, 'workspace:*'])),
     });
@@ -328,6 +346,34 @@ try {
     assert.match(r.err, />=20/, `(D) the divergent value must be shown: ${r.err}`);
     assert.match(r.err, />=22/, `(D) the required value must be named: ${r.err}`);
     console.log('ok (D) — a publish target that declares another Node engine cannot be packed');
+  }
+
+  // ── (S) a publish target without its source repository, or with another one → refusal ─────────
+  {
+    const fx = fixture({
+      repositories: {
+        '@rayspec/core': null,
+        '@rayspec/cli': { type: 'git', url: REPOSITORY_URL, directory: 'packages/app' },
+        '@rayspec/server': { type: 'git', url: 'https://github.com/elsewhere/rayspec' },
+      },
+    });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
+    assertRefused(r, '(S)', fx);
+    for (const path of ['kernel/core', 'app/cli', 'app/server']) {
+      assert.match(
+        r.err,
+        new RegExp(`packages/${path}/package\\.json`),
+        `(S) every offending target must be named by path: ${r.err}`,
+      );
+    }
+    assert.match(r.err, /declares \(none\)/, `(S) a missing field must be named: ${r.err}`);
+    assert.match(r.err, /elsewhere/, `(S) the divergent value must be shown: ${r.err}`);
+    assert.match(
+      r.err,
+      /"directory": "packages\/app\/cli"/,
+      `(S) the required directory must be named: ${r.err}`,
+    );
+    console.log('ok (S) — a publish target that does not declare its repository cannot be packed');
   }
 
   // ── (A) --version disagreeing with the derived version → refusal, never an override ────────────
@@ -561,8 +607,11 @@ try {
 
   // ── (F) --from publishes the packed tarballs themselves, and refuses anything else ─────────────
   {
-    /** One tarball per entry `[name, version]`, packed the way pnpm names them. */
-    const packDir = (fx, entries, dirName) => {
+    /**
+     * One tarball per entry `[name, version]`, packed the way pnpm names them, each declaring its
+     * repository unless `bare` names it.
+     */
+    const packDir = (fx, entries, dirName, bare = []) => {
       const dir = join(fx.root, dirName);
       mkdirSync(dir);
       for (const [name, version] of entries) {
@@ -571,7 +620,15 @@ try {
         mkdirSync(join(src, 'package'));
         writeFileSync(
           join(src, 'package', 'package.json'),
-          `${JSON.stringify({ name, version })}\n`,
+          `${JSON.stringify({
+            name,
+            version,
+            ...(bare.includes(name)
+              ? {}
+              : {
+                  repository: repositoryOf(MEMBERS.find((m) => m.name === name) ?? { dir: name }),
+                }),
+          })}\n`,
         );
         const file = `${name.replace('@', '').replace('/', '-')}-${version}.tgz`;
         const tar = spawnSync('tar', ['-czf', join(dir, file), '-C', src, 'package']);
@@ -622,8 +679,15 @@ try {
       [...TARGETS.map((n) => [n, VERSION]), ['@rayspec/parity', VERSION]],
       'foreign',
     );
+    const unsourced = packDir(
+      fx,
+      TARGETS.map((n) => [n, VERSION]),
+      'unsourced',
+      ['@rayspec/server'],
+    );
     for (const [dir, pattern] of [
       [missing, new RegExp(`no tarball of ${TARGETS[0].replace('/', '\\/')}`)],
+      [unsourced, /rayspec-server-1\.6\.2\.tgz declares \(none\)/],
       [drift, /@rayspec\/core@1\.6\.1, the release is 1\.6\.2/],
       [foreign, /is not a publish target/],
     ]) {

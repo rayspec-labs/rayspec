@@ -8,6 +8,11 @@
     "rayspec-release-identity.json"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/app/rayspec"
+  },
   "type": "module",
   "description": "The unscoped `rayspec` launcher — a thin bin that hands control to the RaySpec CLI (`@rayspec/cli`). Installing `rayspec` (or `npx rayspec`) puts the `rayspec` command on PATH: `rayspec init` scaffolds a starter project, `rayspec doctor`/`plan` validate and preview a deploy, `rayspec deploy` serves it. All behavior lives in `@rayspec/cli`; this package only re-exposes its bin under the bare `rayspec` name.",
   "bin": {

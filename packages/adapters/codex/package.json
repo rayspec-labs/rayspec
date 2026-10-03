@@ -3,6 +3,11 @@
   "version": "1.8.0",
   "private": true,
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/adapters/codex"
+  },
   "type": "module",
   "exports": {
     ".": {

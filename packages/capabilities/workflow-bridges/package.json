@@ -6,6 +6,11 @@
     "dist"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/capabilities/workflow-bridges"
+  },
   "type": "module",
   "description": "The durable-workflow ↔ capability composition seams for the four ingress capabilities (audio · conversation · file · record), merged into one package. Each capability's canonical event → WorkflowInputEvent adapter + the fail-closed *Sink a deployment injects to enqueue a durable workflow run on ingress. Homed here so neither the neutral Tier A engine nor the Tier B capabilities depend on the other.",
   "exports": {

@@ -3,6 +3,10 @@
   "version": "1.8.0",
   "private": true,
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git"
+  },
   "description": "RaySpec — file-deployable AI infrastructure platform",
   "packageManager": "pnpm@10.12.4",
   "engines": {

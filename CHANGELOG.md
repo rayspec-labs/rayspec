@@ -950,6 +950,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   themselves, in dependency order, stamping nothing, so the registry receives the bytes the
   candidate tested and the release manifest's integrities match it. It refuses a directory that is
   not exactly one tarball per publish target at the release version.
+- **Every published package names its source repository.** The release workflow publishes with
+  npm provenance, and the registry refuses a provenance statement for a package whose
+  `repository.url` does not name the repository the workflow ran in; no package declared one, so the
+  first publish would have stopped at the first package. Each package of the publish set now declares
+  `repository` with the repository's URL and its own `directory`, and `scripts/publish.mjs` refuses to
+  pack or publish a target, or a `--from` tarball, that omits it or names another, before anything is
+  packed or published.
 
 - **The skill-drift gate holds the CLI help, the CLI reference and the authoring skill to the same
   commands.** Every command `rayspec --help` prints needs a section in `docs/cli-reference.md`, and

@@ -6,6 +6,11 @@
     "dist"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/capabilities/record-runtime"
+  },
   "type": "module",
   "description": "The generic Tier-B submit-ingress capability (record_input) — authenticated JSON records in, a durable workflow trigger out. Product-neutral; mirrors @rayspec/audio-runtime's manifest/mount/event pattern.",
   "exports": {
