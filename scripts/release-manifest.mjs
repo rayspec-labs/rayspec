@@ -294,6 +294,7 @@ export function readOciImage(path) {
     );
     return {
       digest: images[0].digest,
+      configDigest: manifest.config.digest,
       platform: `${config.os}/${config.architecture}`,
       nodeVersion: env.get('NODE_VERSION') ?? null,
       user: config.config?.User ?? '',

@@ -4,6 +4,11 @@
  * `<id>.ray.sig` per signature case.
  *
  * Usage: tsx scripts/gen-corpus.ts
+ *        tsx scripts/gen-corpus.ts --uncommitted <dir>
+ *
+ * `--uncommitted` writes only the cases that are not committed (generated at test time, such as the
+ * 10,005-entry archive) into `<dir>`, under the file names the committed cases use, for a run of
+ * the corpus against an installed CLI. `corpus/` is left as it is.
  *
  * Refuses to write when a built case differs from the size and SHA-256 its expectation records,
  * so the corpus on disk always matches the contract. `corpus.test.ts` rebuilds the same bytes and
@@ -47,6 +52,24 @@ if (mismatches.length > 0) {
   console.error('gen:corpus: refusing to write; built bytes differ from EXPECTATIONS.json:');
   for (const m of mismatches) console.error(`  ${m}`);
   process.exit(1);
+}
+
+const flag = process.argv.indexOf('--uncommitted');
+if (flag >= 0) {
+  const dir = process.argv[flag + 1];
+  if (dir === undefined || dir.startsWith('--')) {
+    console.error('gen:corpus: --uncommitted needs a directory');
+    process.exit(2);
+  }
+  mkdirSync(dir, { recursive: true });
+  let written = 0;
+  for (const c of expectations.cases) {
+    if (c.bytes.committed) continue;
+    writeFileSync(join(dir, caseFileName(c)), buildCase(expectations, c.construction).bytes);
+    written++;
+  }
+  console.log(`gen:corpus: wrote ${written} uncommitted case(s) to ${dir}`);
+  process.exit(0);
 }
 
 const out = join(packageRoot, 'corpus');
