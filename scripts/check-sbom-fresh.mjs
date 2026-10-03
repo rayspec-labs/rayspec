@@ -20,25 +20,31 @@
  * re-derivable (proven: the committed SBOM is byte-identical to a fresh `gen-dependency-sbom.mjs`
  * run) plus lane 1's own `pnpm install`, not on this gate.
  *
- * Host-independent and deterministic: it reads two files and hashes one. No install, no build, no
- * network, no Postgres. There is NO flag or environment variable that relaxes it — a gate with an
- * escape hatch is a suggestion.
+ * It then holds the CycloneDX SBOM of the published closure (`docs/closure-sbom.cdx.json`, written
+ * by `scripts/gen-closure-sbom.mjs`) to a fresh derivation from the same lockfile, that inventory and
+ * the tracked member manifests, member for member.
+ *
+ * Host-independent and deterministic: it reads files and `git ls-files`, nothing else. No install,
+ * no build, no network, no Postgres. There is NO flag or environment variable that relaxes it — a
+ * gate with an escape hatch is a suggestion.
  *
  *   node scripts/check-sbom-fresh.mjs   # exit 1 when the SBOM does not describe the current lockfile
  *
- * On failure: `pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs`, then review
- * the SBOM diff — a new licence family or a new copyleft flag is a change to the legal surface and
+ * On failure: `pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs` and
+ * `node scripts/gen-closure-sbom.mjs`, then review the SBOM diff — a new licence family or a new copyleft flag is a change to the legal surface and
  * belongs in THIRD-PARTY-NOTICES.md too.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { OUTPUT as CLOSURE_SBOM, closureSbomOf } from './gen-closure-sbom.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LOCKFILE = 'pnpm-lock.yaml';
 const SBOM = 'docs/dependency-sbom.json';
 const REGENERATE = `pnpm install --frozen-lockfile && node scripts/gen-dependency-sbom.mjs`;
+const REGENERATE_CLOSURE = 'node scripts/gen-closure-sbom.mjs';
 
 /** Print the failure and exit non-zero. Every message names the fix. */
 function fail(lines) {
@@ -111,8 +117,39 @@ if (actual !== sbom.lockfile_sha256) {
   ]);
 }
 
+// The CycloneDX SBOM of the published closure is derived from the lockfile, the inventory above
+// and the member manifests, and nothing else, so it is compared with a fresh derivation as a whole:
+// a moved pin, a regenerated inventory, a member that joined or left the closure, or a version
+// change all show up as a difference.
+let closure;
+try {
+  closure = JSON.parse(readFileSync(join(repoRoot, CLOSURE_SBOM), 'utf8'));
+} catch (err) {
+  fail([
+    `cannot read/parse ${CLOSURE_SBOM} (${err?.message ?? err}).`,
+    `Regenerate it: ${REGENERATE_CLOSURE}`,
+  ]);
+}
+let fresh;
+try {
+  fresh = closureSbomOf(repoRoot);
+} catch (err) {
+  fail([
+    `the closure SBOM cannot be derived from this checkout: ${err?.message ?? err}`,
+    `Fix the cause, then regenerate it: ${REGENERATE_CLOSURE}`,
+  ]);
+}
+if (JSON.stringify(closure) !== JSON.stringify(fresh)) {
+  fail([
+    `${CLOSURE_SBOM} does not describe this checkout: a fresh derivation from ${LOCKFILE}, ${SBOM}`,
+    `and the member manifests differs from the committed document.`,
+    `Regenerate it: ${REGENERATE_CLOSURE}`,
+  ]);
+}
+
 console.log(
   `SBOM-freshness gate PASSED: ${SBOM} describes the current ${LOCKFILE} ` +
     `(sha256 ${actual.slice(0, 12)}…, ${sbom.packages.length} distinct packages, ` +
-    `${sbom.flags?.strong_copyleft?.length ?? '?'} strong-copyleft).`,
+    `${sbom.flags?.strong_copyleft?.length ?? '?'} strong-copyleft), and ${CLOSURE_SBOM} matches ` +
+    `a fresh derivation (${fresh.components.length + 1} components).`,
 );
