@@ -12,12 +12,16 @@
  *                                 to a THROWAWAY DB (never the real target). Mutates NOTHING on it.
  *   rayspec gen-handler …        Render ONE bounded-template handler (.ts or .js) from a holes contract.
  *
- * PASSIVE BUNDLE COMMANDS (the `bundle` group — read a `.ray` archive; never run it, write nothing):
+ * BUNDLE COMMANDS (the `bundle` group — read a `.ray` archive; never run it):
  *   rayspec bundle inspect <file.ray>   The structural checks and what the bundle declares.
  *   rayspec bundle verify <file.ray>    The same, then runtime, target, capability, spec, secret
  *                                        and signature checks against the running CLI.
- *   Both always write ONE result envelope to stdout (see envelope.ts) and exit with the class of
- *   their first error (0 ok, 1 negative verdict, 2 invalid input, 3 incompatible, 4 policy refusal,
+ *   rayspec bundle sign <file.ray> --key-file <pem>
+ *                                        The structural checks, then write and verify the detached
+ *                                        Ed25519 signature file (see bundle-sign.ts). The one bundle
+ *                                        command that writes: the signature file, nothing else.
+ *   Each always writes ONE result envelope to stdout (see envelope.ts) and exits with the class of
+ *   its first error (0 ok, 1 negative verdict, 2 invalid input, 3 incompatible, 4 policy refusal,
  *   6 interrupted, 7 internal).
  *
  * PACKAGING (writes one file; never builds, imports or runs application code):
@@ -81,7 +85,7 @@
  * without it the output is what it has always been. An unexpected internal failure exits 7.
  *
  * Every command module is imported on its own path only, so a command loads nothing another command
- * needs: `bundle inspect`/`verify` and `pack` in particular never load the server, the database
+ * needs: `bundle inspect`/`verify`/`sign` and `pack` in particular never load the server, the database
  * layer or a handler loader (`pack --against` alone loads the product schema planner).
  */
 import { readFileSync, realpathSync } from 'node:fs';
@@ -175,7 +179,7 @@ const HELP_SECTIONS: readonly HelpSection[] = [
   },
   {
     heading:
-      'PASSIVE bundle commands (the `bundle` group — read a .ray archive; never run it, write nothing):',
+      'BUNDLE commands (the `bundle` group — read a .ray archive; never run it; only sign writes, and only the signature file):',
     commands: [
       {
         name: 'bundle inspect',
@@ -209,6 +213,27 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 (verdict deployable / not-deployable). Exit 0 deployable / 1 spec
                                 invalid / 2 invalid input / 3 incompatible runtime, target or
                                 capability / 4 reserved binding, secret or signature refusal /
+                                7 internal error.`,
+      },
+      {
+        name: 'bundle sign',
+        block: `  rayspec bundle sign <file.ray> --key-file <ed25519-private-key.pem> [--output <file.ray.sig>]
+                      [--force] [--json]
+                                Sign the bundle with an Ed25519 private key: run the structural checks
+                                inspect runs, then write the detached signature file over the
+                                archive's SHA-256 to <file.ray>.sig (the file verify and deploy read)
+                                or to --output, and verify it against the key's public half before
+                                reporting success. The key file must be a regular file, not a link,
+                                owned by you and unreadable by group and others (chmod 600), holding
+                                one unencrypted Ed25519 private key in PEM form (openssl genpkey
+                                -algorithm ed25519); a public key or another algorithm is refused.
+                                The file is written beside its destination and moved into place in
+                                one step; an existing file is refused unless --force. Nothing in the
+                                archive is extracted or run. Writes ONE result envelope (the archive
+                                SHA-256, the signature path and the public key's SHA-256, never key
+                                material). A signature says who signed the archive; it does not vouch
+                                for the code inside. Exit 0 signed / 2 usage, refused archive or an
+                                existing signature file / 4 an unprotected key file / 6 interrupted /
                                 7 internal error.`,
       },
     ],
@@ -797,11 +822,13 @@ async function printAnswer(answered: Answer): Promise<number> {
 }
 
 /**
- * `rayspec bundle inspect|verify`. The verbs are new, so they write one envelope on stdout whether
- * or not `--json` was given, and the operation id on stderr; without `--json` a short description of
- * the result follows it there. They read no environment, so the `.env` auto-load below is skipped.
+ * `rayspec bundle inspect|verify|sign`. The verbs are new, so they write one envelope on stdout
+ * whether or not `--json` was given, and the operation id on stderr; without `--json` a short
+ * description of the result follows it there. They read no environment, so the `.env` auto-load
+ * below is skipped.
  */
 async function runBundleVerb(rest: readonly string[], json: boolean): Promise<number> {
+  if (rest[0] === 'sign') return runBundleSignVerb(rest.slice(1), json);
   const operation: ResultOperation = rest[0] === 'verify' ? 'bundle.verify' : 'bundle.inspect';
   const operationId = newOperationId();
   await writeDrained(process.stderr, `operationId: ${operationId}\n`);
@@ -840,6 +867,40 @@ async function runBundleVerb(rest: readonly string[], json: boolean): Promise<nu
     const failed = internalEnvelope(operation, operationId);
     await writeEnvelope(process.stdout, failed);
     return envelopeExitCode(failed);
+  }
+}
+
+/**
+ * `rayspec bundle sign`. It writes a file, so it is not abandoned on a signal like the passive
+ * verbs: SIGINT and SIGTERM are answered before the signature file is placed, where the verb removes
+ * its temporary file and reports `RAY_INTERRUPTED`.
+ */
+async function runBundleSignVerb(rest: readonly string[], json: boolean): Promise<number> {
+  const operationId = newOperationId();
+  await writeDrained(process.stderr, `operationId: ${operationId}\n`);
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    const { runSign } = await import('./bundle-sign.js');
+    const outcome = await runSign(rest, { operationId, json, signal: controller.signal });
+    if (!outcome.json && outcome.summary.length > 0) {
+      await writeDrained(process.stderr, `${outcome.summary.join('\n')}\n`);
+    }
+    await writeEnvelope(process.stdout, outcome.envelope);
+    return envelopeExitCode(outcome.envelope);
+  } catch (err) {
+    await writeDrained(
+      process.stderr,
+      `${JSON.stringify({ ok: false, cliError: errMessage(err) })}\n`,
+    );
+    const failed = internalEnvelope('bundle.sign', operationId);
+    await writeEnvelope(process.stdout, failed);
+    return envelopeExitCode(failed);
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
 }
 
