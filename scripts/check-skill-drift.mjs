@@ -175,11 +175,9 @@ function main() {
 
   // (d) + (e) — the commands of the built CLI's help text, the reference and the skill.
   const cliEntry = join(repoRoot, 'packages/app/cli/dist/index.js');
-  const helpRun = existsSync(cliEntry)
-    ? spawnSync(process.execPath, [cliEntry, '--help'], { encoding: 'utf8' })
-    : null;
+  const helpRun = spawnSync(process.execPath, [cliEntry, '--help'], { encoding: 'utf8' });
   let commandCount = 0;
-  if (helpRun === null || helpRun.status !== 0) {
+  if (helpRun.status !== 0) {
     problems.push(
       'the CLI help text cannot be read: run `pnpm build` so packages/app/cli/dist/index.js exists',
     );

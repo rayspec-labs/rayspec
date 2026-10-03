@@ -44,8 +44,8 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  constants,
   copyFileSync,
-  existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -53,7 +53,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { publishSet, workspaceMembers } from './lib/release-closure.mjs';
@@ -309,13 +309,22 @@ export async function main(argv = process.argv.slice(2)) {
         'the tracked tree has changes: a candidate is built from a commit',
       );
     }
-    if (existsSync(join(REPO, IDENTITY_IN_LAUNCHER))) {
+    if (
+      readdirSync(join(REPO, dirname(IDENTITY_IN_LAUNCHER))).includes(
+        basename(IDENTITY_IN_LAUNCHER),
+      )
+    ) {
       throw new CandidateRefused(
         `${IDENTITY_IN_LAUNCHER} is left from an earlier run: remove it first`,
       );
     }
-    if (existsSync(out) && readdirSync(out).length > 0)
-      throw new CandidateRefused(`${out} is not empty`);
+    let present = [];
+    try {
+      present = readdirSync(out);
+    } catch {
+      present = [];
+    }
+    if (present.length > 0) throw new CandidateRefused(`${out} is not empty`);
     mkdirSync(join(out, 'logs'), { recursive: true });
     prepared = true;
     summary.sourceCommit = git(['rev-parse', 'HEAD']).trim();
@@ -354,7 +363,8 @@ export async function main(argv = process.argv.slice(2)) {
       const repack = join(out, 'logs', 'repack');
       const shipped = join(REPO, IDENTITY_IN_LAUNCHER);
       try {
-        copyFileSync(identity, shipped);
+        // Exclusive: a manifest that appeared since the preflight is never overwritten.
+        copyFileSync(identity, shipped, constants.COPYFILE_EXCL);
         step(
           'the launcher packed with its identity manifest',
           runScript('publish.mjs', ['--pack', '--out', repack], launcherLog) === 0,

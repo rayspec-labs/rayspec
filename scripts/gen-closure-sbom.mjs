@@ -35,7 +35,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -413,14 +413,18 @@ export function closureSbomOf(repo = REPO, { tarballs } = {}) {
 export function generate(repo = REPO, options = {}) {
   const sbom = closureSbomOf(repo, options);
   const biome = join(repo, 'node_modules/.bin/biome');
-  if (!existsSync(biome)) {
-    throw new SbomRefused(`${biome} is missing: run pnpm install --frozen-lockfile first`);
+  try {
+    return execFileSync(biome, ['format', `--stdin-file-path=${OUTPUT}`], {
+      cwd: repo,
+      input: `${JSON.stringify(sbom, null, 2)}\n`,
+      encoding: 'utf8',
+    });
+  } catch (err) {
+    if (err?.code === 'ENOENT') {
+      throw new SbomRefused(`${biome} is missing: run pnpm install --frozen-lockfile first`);
+    }
+    throw err;
   }
-  return execFileSync(biome, ['format', `--stdin-file-path=${OUTPUT}`], {
-    cwd: repo,
-    input: `${JSON.stringify(sbom, null, 2)}\n`,
-    encoding: 'utf8',
-  });
 }
 
 function main(argv) {

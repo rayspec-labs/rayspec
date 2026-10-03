@@ -27,7 +27,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -170,11 +170,16 @@ export async function runCorpus({
       : generated === undefined
         ? null
         : join(generated, name);
-    if (file === null || !existsSync(file)) {
+    let bytes = null;
+    try {
+      bytes = file === null ? null : readFileSync(file);
+    } catch {
+      bytes = null;
+    }
+    if (bytes === null) {
       report.failed.push({ id: c.id, why: `the case file ${name} is missing` });
       continue;
     }
-    const bytes = readFileSync(file);
     if (bytes.length !== c.bytes.size || sha256(bytes) !== c.bytes.sha256) {
       report.failed.push({ id: c.id, why: `${name} is not the bytes the expectation records` });
       continue;

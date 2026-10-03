@@ -215,14 +215,15 @@ const { values: flags } = parseArgs({
  */
 const candidate = flags.candidate === undefined ? null : resolve(flags.candidate);
 function candidateCli(dir) {
-  const launcher = join(dir, 'node_modules', 'rayspec', 'package.json');
-  if (!existsSync(launcher)) fail(`--candidate ${dir} holds no installed rayspec`);
-  return join(
-    dir,
-    'node_modules',
-    'rayspec',
-    JSON.parse(readFileSync(launcher, 'utf8')).bin.rayspec,
-  );
+  let launcher;
+  try {
+    launcher = JSON.parse(
+      readFileSync(join(dir, 'node_modules', 'rayspec', 'package.json'), 'utf8'),
+    );
+  } catch {
+    return fail(`--candidate ${dir} holds no installed rayspec`);
+  }
+  return join(dir, 'node_modules', 'rayspec', launcher.bin.rayspec);
 }
 const CLI = candidate === null ? WORKING_TREE_CLI : candidateCli(candidate);
 if (!existsSync(CLI)) {
