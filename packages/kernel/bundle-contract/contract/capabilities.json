@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Capability id vocabulary. An id never changes meaning; a changed meaning gets a new id. The vocabulary version increments when ids are added.",
-  "contractVersion": "1.0.0-rc.1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Capability id vocabulary. An id never changes meaning; a changed meaning gets a new id. The vocabulary version increments when ids are added.",
+  "contractVersion": "1.0.0-rc.2",
   "vocabularyVersion": 1,
   "idPattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$",
   "statusValues": {

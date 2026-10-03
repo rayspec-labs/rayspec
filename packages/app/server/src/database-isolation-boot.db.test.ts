@@ -140,7 +140,7 @@ const ENV_KEYS = [
 
 function base() {
   return {
-    contractVersion: '1.0.0-rc.1' as const,
+    contractVersion: '1.0.0-rc.2' as const,
     operationId: randomUUID(),
     actor: 'operator:isolation-suite',
   };

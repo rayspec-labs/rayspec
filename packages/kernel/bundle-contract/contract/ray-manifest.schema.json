@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rayspec:bundle:v1",
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Validates ray.json, the root manifest of a .ray bundle (formatVersion 1). Structural only: the semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced.",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Validates ray.json, the root manifest of a .ray bundle (formatVersion 1). Structural only: the semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

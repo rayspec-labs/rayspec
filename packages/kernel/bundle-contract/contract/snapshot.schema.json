@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rayspec:snapshot:v1",
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Validates snapshot.json, the root of the inner encrypted snapshot archive (snapshotFormatVersion 1). The object index inside the snapshot (payload/object-index.json) validates against #/$defs/objectIndex; payload/objects.bin is the concatenation of the stored blob files in object-index order, one stored range per object, consecutive from offset 0 with no gaps or overlaps. The semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced. snapshot.json is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason snapshot-size before it is parsed. Every snapshot.json this schema admits, including 10,000 tableCounts entries, stays under that limit.",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Validates snapshot.json, the root of the inner encrypted snapshot archive (snapshotFormatVersion 1). The object index inside the snapshot (payload/object-index.json) validates against #/$defs/objectIndex; payload/objects.bin is the concatenation of the stored blob files in object-index order, one stored range per object, consecutive from offset 0 with no gaps or overlaps. The semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced. snapshot.json is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason snapshot-size before it is parsed. Every snapshot.json this schema admits, including 10,000 tableCounts entries, stays under that limit.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

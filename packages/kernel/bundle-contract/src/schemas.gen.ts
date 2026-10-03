@@ -5,7 +5,7 @@
 export const RAY_MANIFEST_SCHEMA: Readonly<Record<string, unknown>> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rayspec:bundle:v1",
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Validates ray.json, the root manifest of a .ray bundle (formatVersion 1). Structural only: the semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced.",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Validates ray.json, the root manifest of a .ray bundle (formatVersion 1). Structural only: the semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -337,7 +337,7 @@ export const RAY_MANIFEST_SCHEMA: Readonly<Record<string, unknown>> = {
 export const SNAPSHOT_SCHEMA: Readonly<Record<string, unknown>> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rayspec:snapshot:v1",
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Validates snapshot.json, the root of the inner encrypted snapshot archive (snapshotFormatVersion 1). The object index inside the snapshot (payload/object-index.json) validates against #/$defs/objectIndex; payload/objects.bin is the concatenation of the stored blob files in object-index order, one stored range per object, consecutive from offset 0 with no gaps or overlaps. The semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced. snapshot.json is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason snapshot-size before it is parsed. Every snapshot.json this schema admits, including 10,000 tableCounts entries, stays under that limit.",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Validates snapshot.json, the root of the inner encrypted snapshot archive (snapshotFormatVersion 1). The object index inside the snapshot (payload/object-index.json) validates against #/$defs/objectIndex; payload/objects.bin is the concatenation of the stored blob files in object-index order, one stored range per object, consecutive from offset 0 with no gaps or overlaps. The semantic rules in 06-SEMANTIC-DETAILS.md are normative and must also be enforced. snapshot.json is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason snapshot-size before it is parsed. Every snapshot.json this schema admits, including 10,000 tableCounts entries, stays under that limit.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -844,7 +844,7 @@ export const SNAPSHOT_SCHEMA: Readonly<Record<string, unknown>> = {
 export const MANAGED_RECEIPT_SCHEMA: Readonly<Record<string, unknown>> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rayspec:managed-receipt:v1",
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. A release capability receipt names exactly which public-hosting protections were tested for one runtime release. It is not a compliance certificate. Every const below is a protection the release must have tested; a release that cannot attest one of them has no managed receipt. supportedBackends and capabilities list only what the managed posture allows: capabilities.json ids whose managedPosture is self-host-only or test-only are refused here, and Cloud also cross-checks every listed id against capabilities.json managedPosture allowed. A receipt is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason receipt-size before it is parsed. The array bounds keep every receipt this schema admits under that limit.",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. A release capability receipt names exactly which public-hosting protections were tested for one runtime release. It is not a compliance certificate. Every const below is a protection the release must have tested; a release that cannot attest one of them has no managed receipt. supportedBackends and capabilities list only what the managed posture allows: capabilities.json ids whose managedPosture is self-host-only or test-only are refused here, and Cloud also cross-checks every listed id against capabilities.json managedPosture allowed. A receipt is at most 4 MiB (4,194,304 bytes); a larger one is refused with RAY_LIMIT_EXCEEDED reason receipt-size before it is parsed. The array bounds keep every receipt this schema admits under that limit.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -852,7 +852,7 @@ export const MANAGED_RECEIPT_SCHEMA: Readonly<Record<string, unknown>> = {
       "const": 1
     },
     "contractVersion": {
-      "const": "1.0.0-rc.1"
+      "const": "1.0.0-rc.2"
     },
     "runtimeVersion": {
       "$ref": "#/$defs/exactVersion"
@@ -1071,7 +1071,7 @@ export const MANAGED_RECEIPT_SCHEMA: Readonly<Record<string, unknown>> = {
 export const RELEASE_MANIFEST_SCHEMA: Readonly<Record<string, unknown>> = {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:rayspec:release-manifest:v1",
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Validates the signed release manifest, the release catalog of one RaySpec release. The file is canonical JSON (01-RAY-BUNDLE.md) followed by one LF; releaseManifestSha256 is the SHA-256 of exactly those file bytes. Its detached signature file validates against #/$defs/signatureFile. The semantic rules in 06-SEMANTIC-DETAILS.md \"Release and bindings\" are normative and must also be enforced.",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Validates the signed release manifest, the release catalog of one RaySpec release. The file is canonical JSON (01-RAY-BUNDLE.md) followed by one LF; releaseManifestSha256 is the SHA-256 of exactly those file bytes. Its detached signature file validates against #/$defs/signatureFile. The semantic rules in 06-SEMANTIC-DETAILS.md \"Release and bindings\" are normative and must also be enforced.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -1282,7 +1282,7 @@ export const RESULT_ENVELOPE_SCHEMA: Readonly<Record<string, unknown>> = {
   "additionalProperties": false,
   "properties": {
     "contractVersion": {
-      "const": "1.0.0-rc.1"
+      "const": "1.0.0-rc.2"
     },
     "ok": {
       "type": "boolean"
@@ -1292,6 +1292,7 @@ export const RESULT_ENVELOPE_SCHEMA: Readonly<Record<string, unknown>> = {
         "pack",
         "bundle.inspect",
         "bundle.verify",
+        "bundle.sign",
         "deploy.dry-run",
         "deploy",
         "export",
@@ -1839,6 +1840,55 @@ export const RESULT_ENVELOPE_SCHEMA: Readonly<Record<string, unknown>> = {
                   "checkedAgainstRuntime",
                   "signature",
                   "verdict"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "const": "bundle.sign"
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "data": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "bundleSha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "signaturePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "publicKeySha256": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "bundleSha256",
+                  "signaturePath",
+                  "publicKeySha256"
                 ]
               },
               {
@@ -2402,7 +2452,7 @@ export const RESULT_ENVELOPE_SCHEMA: Readonly<Record<string, unknown>> = {
                     "pattern": "^[0-9]+[.][0-9]+[.][0-9]+$"
                   },
                   "contractVersion": {
-                    "const": "1.0.0-rc.1"
+                    "const": "1.0.0-rc.2"
                   },
                   "capabilityVocabularyVersion": {
                     "const": 1

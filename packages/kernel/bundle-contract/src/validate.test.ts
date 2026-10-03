@@ -23,7 +23,12 @@ import {
   validateReceipt,
   validateSnapshot,
 } from './validate.js';
-import { CAPABILITIES, DEFAULT_READER_LIMITS, type ReaderLimits } from './vocabulary.js';
+import {
+  CAPABILITIES,
+  CONTRACT_VERSION,
+  DEFAULT_READER_LIMITS,
+  type ReaderLimits,
+} from './vocabulary.js';
 
 const expectations = loadExpectations();
 
@@ -696,5 +701,40 @@ describe('object index semantics', () => {
     expect(outcome(validateObjectIndex(doc, { objectsSize: -1 }))).toMatchObject({
       code: 'RAY_USAGE',
     });
+  });
+});
+
+describe('the bundle.sign envelope', () => {
+  const validate = schemaValidator('resultEnvelope');
+  const HEX = 'a'.repeat(64);
+  const signed = (data: unknown) => ({
+    contractVersion: CONTRACT_VERSION,
+    ok: true,
+    operation: 'bundle.sign',
+    operationId: '00000000-0000-4000-8000-000000000000',
+    data,
+    errors: [],
+    warnings: [],
+  });
+
+  it('carries the archive digest, the signature path and the public key digest, or null', () => {
+    const data = { bundleSha256: HEX, signaturePath: 'app.ray.sig', publicKeySha256: HEX };
+    expect(validate(signed(data))).toBe(true);
+    expect(
+      validate({
+        ...signed(null),
+        ok: false,
+        errors: [{ code: 'RAY_USAGE', message: 'x', retryable: false }],
+      }),
+    ).toBe(true);
+  });
+
+  it('refuses a member it does not define, a missing one, and key material in its place', () => {
+    const data = { bundleSha256: HEX, signaturePath: 'app.ray.sig', publicKeySha256: HEX };
+    expect(validate(signed({ ...data, privateKey: 'x' }))).toBe(false);
+    const { signaturePath: _, ...missing } = data;
+    expect(validate(signed(missing))).toBe(false);
+    expect(validate(signed({ ...data, publicKeySha256: 'not-a-digest' }))).toBe(false);
+    expect(validate(signed({ ...data, signaturePath: 'x'.repeat(4097) }))).toBe(false);
   });
 });

@@ -142,7 +142,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
 
   function base() {
     return {
-      contractVersion: '1.0.0-rc.1' as const,
+      contractVersion: '1.0.0-rc.2' as const,
       operationId: randomUUID(),
       actor: 'supervisor:test',
     };
@@ -260,7 +260,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     expect(data.fence).toEqual({ state: 'open', fenceEpoch: 0 });
     expect(data.environmentRevision).toBe(1);
     expect(data.runtimeVersion).toBe(runtimeVersion());
-    expect(data.contractVersion).toBe('1.0.0-rc.1');
+    expect(data.contractVersion).toBe('1.0.0-rc.2');
     expect(data.target).toEqual({
       os: process.platform,
       arch: process.arch,
