@@ -15,8 +15,9 @@
  *                          SHA-256: the contract version and digest, every package with its SHA-256,
  *                          the image with its registry reference, the schemas, the fixture corpus
  *                          digest, the previous supported version and the upgrade results from it,
- *                          the capabilities, the managed-posture receipt, the SBOM and an index of
- *                          every evidence file.
+ *                          the capabilities, the managed-posture receipt, the SBOM of the closure,
+ *                          the SBOM of the image's installed tree and an index of every evidence
+ *                          file.
  *
  * NOTHING IS TAKEN ON TRUST AND NOTHING IS LEFT BLANK. Every value is read from the artifact it
  * describes — the packed tarballs, the identity manifest, the image's OCI archive, the receipt, the
@@ -33,8 +34,8 @@
  *        [--trusted-key <pem>]... [--tarballs <dir>] [--image-oci <tar>]
  *   node scripts/release-manifest.mjs evidence --manifest <file> (--signature <file.sig> |
  *        --unsigned-candidate) --tarballs <dir> --identity <file> --image-oci <tar> --sbom <file>
- *        --receipt <file> --previous <version> --upgrade-report <file>... [--evidence <role>=<file>]...
- *        --out <release-evidence.json>
+ *        --image-sbom <file> --receipt <file> --previous <version> --upgrade-report <file>...
+ *        [--evidence <role>=<file>]... --out <release-evidence.json>
  *
  * `sign` reads the key through one descriptor and refuses a key file other users can read; it
  * writes `<manifest>.sig` and verifies it before it exits. `--unsigned-candidate` is accepted only
@@ -55,6 +56,7 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isEntryPoint } from './lib/entry.mjs';
 import { publishSet, workspaceMembers } from './lib/release-closure.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -176,17 +178,21 @@ export function readTarballs(dir) {
 // ─── OCI image archive ─────────────────────────────────────────────────────────────────────────
 
 /**
- * The entries of an uncompressed tar file, as `Map<path, { offset, size }>`, read through one
- * descriptor. A pax header's `path` and `size` apply to the entry after it; any other entry type
- * than a regular file, a directory or a pax header is refused.
+ * The entries of an uncompressed tar stream of `total` bytes, as `Map<path, { offset, size }>`,
+ * read through `readAt(buffer, position)`. A pax header's `path` and `size` apply to the entry
+ * after it, and so does a GNU long name. An OCI layout (`layer: false`) holds only regular files,
+ * directories and pax headers, and anything else is refused; an image layer (`layer: true`) may
+ * also hold links and devices, which are skipped.
  */
-function tarIndex(fd, total) {
+function tarIndex(readAt, total, { layer = false } = {}) {
+  const what = layer ? 'an image layer' : 'the image archive';
   const entries = new Map();
   const header = Buffer.alloc(512);
   let offset = 0;
   let pax = {};
+  let longName = null;
   while (offset + 512 <= total) {
-    readSync(fd, header, 0, 512, offset);
+    readAt(header, offset);
     if (header.every((b) => b === 0)) break;
     const field = (start, length) =>
       header
@@ -194,31 +200,35 @@ function tarIndex(fd, total) {
         .toString('latin1')
         .split('\0')[0];
     const size = pax.size ?? Number.parseInt(field(124, 12).trim() || '0', 8);
-    if (!Number.isSafeInteger(size) || size < 0)
-      refuse('the image archive has an unreadable entry size');
+    if (!Number.isSafeInteger(size) || size < 0) refuse(`${what} has an unreadable entry size`);
     const prefix = field(345, 155);
-    const name = pax.path ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100));
+    const name = pax.path ?? longName ?? (prefix ? `${prefix}/${field(0, 100)}` : field(0, 100));
     const type = field(156, 1);
     const body = offset + 512;
-    if (type === 'x') {
+    if (body + size > total) refuse(`${what} ends inside an entry`);
+    if (type === 'x' || type === 'L') {
       const text = Buffer.alloc(size);
-      readSync(fd, text, 0, size, body);
-      pax = {};
-      for (const record of text.toString('utf8').split('\n')) {
-        const m = /^\d+ ([^=]+)=(.*)$/.exec(record);
-        if (m?.[1] === 'path') pax.path = m[2];
-        if (m?.[1] === 'size') pax.size = Number.parseInt(m[2], 10);
+      readAt(text, body);
+      if (type === 'L') longName = text.toString('utf8').split('\0')[0];
+      else {
+        pax = {};
+        for (const record of text.toString('utf8').split('\n')) {
+          const m = /^\d+ ([^=]+)=(.*)$/.exec(record);
+          if (m?.[1] === 'path') pax.path = m[2];
+          if (m?.[1] === 'size') pax.size = Number.parseInt(m[2], 10);
+        }
       }
     } else {
-      if (!['0', '', '5', 'g'].includes(type)) {
+      if (!layer && !['0', '', '5', 'g'].includes(type)) {
         refuse(`the image archive holds an entry of type '${type}', which an OCI layout never has`);
       }
       if (type === '0' || type === '') {
         const path = name.replace(/^\.\//, '');
-        if (entries.has(path)) refuse(`the image archive holds ${path} twice`);
+        if (entries.has(path)) refuse(`${what} holds ${path} twice`);
         entries.set(path, { offset: body, size });
       }
       pax = {};
+      longName = null;
     }
     offset = body + Math.ceil(size / 512) * 512;
   }
@@ -226,13 +236,16 @@ function tarIndex(fd, total) {
 }
 
 const MAX_OCI_JSON_BYTES = 4 * 1024 * 1024;
+const HASH_CHUNK = 4 * 1024 * 1024;
+const DIGEST = /^sha256:[a-f0-9]{64}$/;
 
 /**
- * The image an OCI archive (`docker buildx build --output type=oci`) holds for linux/amd64: the
- * digest of its image manifest, which is the digest a registry serves it under when the archive is
- * pushed without conversion, and its configuration. Every blob read is checked against its digest.
+ * Open an OCI archive and find its one linux/amd64 image: the index, the image manifest and the
+ * configuration, each checked against its digest, and every layer the manifest names present in
+ * the archive at the size the manifest gives and with the SHA-256 of its digest. Calls `use` with
+ * the image and a reader of whole blobs; the descriptor is closed when it returns.
  */
-export function readOciImage(path) {
+function withOciImage(path, use) {
   let fd;
   try {
     fd = openSync(path, 'r');
@@ -241,11 +254,14 @@ export function readOciImage(path) {
   }
   try {
     const total = fstatSync(fd).size;
-    const entries = tarIndex(fd, total);
-    const read = (name, digest) => {
+    const entries = tarIndex(
+      (buffer, position) => readSync(fd, buffer, 0, buffer.length, position),
+      total,
+    );
+    const read = (name, digest, limit = MAX_OCI_JSON_BYTES) => {
       const entry = entries.get(name);
       if (entry === undefined) refuse(`the image archive has no ${name}`);
-      if (entry.size > MAX_OCI_JSON_BYTES) refuse(`${name} in the image archive is too large`);
+      if (entry.size > limit) refuse(`${name} in the image archive is too large`);
       const bytes = Buffer.alloc(entry.size);
       readSync(fd, bytes, 0, entry.size, entry.offset);
       if (digest !== undefined && `sha256:${sha256(bytes)}` !== digest) {
@@ -253,11 +269,11 @@ export function readOciImage(path) {
       }
       return bytes;
     };
-    const blob = (digest) => {
-      if (!/^sha256:[a-f0-9]{64}$/.test(digest ?? ''))
-        refuse('the image archive names a malformed digest');
-      return read(`blobs/sha256/${digest.slice('sha256:'.length)}`, digest);
+    const blobName = (digest) => {
+      if (!DIGEST.test(digest ?? '')) refuse('the image archive names a malformed digest');
+      return `blobs/sha256/${digest.slice('sha256:'.length)}`;
     };
+    const blob = (digest, limit) => read(blobName(digest), digest, limit);
     const layout = parseJson(read('oci-layout'), 'oci-layout');
     if (layout.imageLayoutVersion !== '1.0.0')
       refuse('the archive is not an OCI image layout 1.0.0');
@@ -280,30 +296,121 @@ export function readOciImage(path) {
         `the image archive holds ${images.length} image manifests; build exactly one platform`,
       );
     }
-    const manifestBytes = blob(images[0].digest);
-    const manifest = parseJson(manifestBytes, 'the image manifest');
+    const manifest = parseJson(blob(images[0].digest), 'the image manifest');
     const config = parseJson(blob(manifest.config?.digest), 'the image configuration');
     if (config.os !== IMAGE_PLATFORM.os || config.architecture !== IMAGE_PLATFORM.architecture) {
       refuse(`the image is ${config.os}/${config.architecture}, not linux/amd64`);
     }
-    const env = new Map(
-      (config.config?.Env ?? []).map((e) => [
-        e.slice(0, e.indexOf('=')),
-        e.slice(e.indexOf('=') + 1),
-      ]),
-    );
-    return {
-      digest: images[0].digest,
-      configDigest: manifest.config.digest,
-      platform: `${config.os}/${config.architecture}`,
-      nodeVersion: env.get('NODE_VERSION') ?? null,
-      user: config.config?.User ?? '',
-      labels: config.config?.Labels ?? {},
-      healthcheck: config.config?.Healthcheck?.Test ?? null,
-    };
+    // Every layer is in the archive with its own bytes: an archive that lost one would load
+    // nowhere, and a registry push of it would fail only after the packages were published.
+    const layers = Array.isArray(manifest.layers) ? manifest.layers : [];
+    for (const layer of layers) {
+      const name = blobName(layer?.digest);
+      const entry = entries.get(name);
+      if (entry === undefined) refuse(`the image archive has no layer ${layer.digest}`);
+      if (entry.size !== layer.size) {
+        refuse(`layer ${layer.digest} in the image archive is not the size the image names`);
+      }
+      const hash = createHash('sha256');
+      const chunk = Buffer.alloc(Math.min(HASH_CHUNK, Math.max(entry.size, 1)));
+      for (let done = 0; done < entry.size; ) {
+        const length = Math.min(chunk.length, entry.size - done);
+        readSync(fd, chunk, 0, length, entry.offset + done);
+        hash.update(chunk.subarray(0, length));
+        done += length;
+      }
+      if (`sha256:${hash.digest('hex')}` !== layer.digest) {
+        refuse(`layer ${layer.digest} in the image archive does not match its digest`);
+      }
+    }
+    return use({ digest: images[0].digest, manifest, config, layers, blob });
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * The image an OCI archive (`docker buildx build --output type=oci`) holds for linux/amd64: the
+ * digest of its image manifest, which is the digest a registry serves it under when the archive is
+ * pushed without conversion, and its configuration. Every blob is checked against its digest.
+ */
+export function readOciImage(path) {
+  return withOciImage(path, imageFacts);
+}
+
+/** The facts of an image the release relies on, from its manifest and configuration. */
+function imageFacts({ digest, manifest, config, layers }) {
+  const env = new Map(
+    (config.config?.Env ?? []).map((e) => [
+      e.slice(0, e.indexOf('=')),
+      e.slice(e.indexOf('=') + 1),
+    ]),
+  );
+  return {
+    digest,
+    configDigest: manifest.config.digest,
+    platform: `${config.os}/${config.architecture}`,
+    nodeVersion: env.get('NODE_VERSION') ?? null,
+    user: config.config?.User ?? '',
+    labels: config.config?.Labels ?? {},
+    healthcheck: config.config?.Healthcheck?.Test ?? null,
+    layers: layers.length,
+  };
+}
+
+/** The largest compressed image layer `readImageFile` reads. */
+const MAX_LAYER_BYTES = 2 * 1024 * 1024 * 1024 - 1;
+
+/**
+ * The bytes of one regular file of the image's filesystem (`filePath`, without a leading slash),
+ * as the topmost layer that holds it has it, or null when no layer does or a later layer deletes
+ * it. Each layer is read through the archive's one descriptor, checked against its digest, and
+ * handed to tar on its standard input; layers are tar, gzip-compressed or not.
+ */
+export function readImageFile(path, filePath) {
+  return readImageWithFile(path, filePath).file;
+}
+
+/**
+ * The facts of the image (`readOciImage`) and one file of its filesystem (`readImageFile`), read
+ * through one open of the archive, so both describe the same bytes.
+ */
+export function readImageWithFile(path, filePath) {
+  const wanted = filePath.replace(/^\/+/, '');
+  const slash = wanted.lastIndexOf('/');
+  const whiteout = `${wanted.slice(0, slash + 1)}.wh.${wanted.slice(slash + 1)}`;
+  return withOciImage(path, (opened) => ({
+    image: imageFacts(opened),
+    file: fileOfLayers(opened, wanted, whiteout),
+  }));
+}
+
+/** The file `wanted` as the topmost layer that holds it has it, or null. */
+function fileOfLayers({ layers, blob }, wanted, whiteout) {
+  for (const layer of [...layers].reverse()) {
+    const mediaType = layer.mediaType ?? '';
+    let flag;
+    if (/\.tar\+gzip$|\.tar\.gzip$/.test(mediaType)) flag = 'z';
+    else if (/\.tar$/.test(mediaType)) flag = '';
+    else return refuse(`layer ${layer.digest} has the media type ${mediaType}`);
+    const packed = blob(layer.digest, MAX_LAYER_BYTES);
+    const tar = (mode, ...names) =>
+      spawnSync('tar', [`-${mode}${flag}f`, '-', ...names], {
+        input: packed,
+        maxBuffer: 256 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'ignore'],
+      });
+    const extracted = tar('xO', wanted);
+    if (extracted.status === 0) return extracted.stdout;
+    const listed = tar('t');
+    if (listed.status !== 0) refuse(`layer ${layer.digest} is not a readable tar stream`);
+    const names = listed.stdout
+      .toString('utf8')
+      .split('\n')
+      .map((n) => n.replace(/^\.\//, ''));
+    if (names.includes(whiteout)) return null;
+  }
+  return null;
 }
 
 /** The image facts the release relies on, checked against the release they belong to. */
@@ -644,17 +751,30 @@ export function versionBelow(a, b) {
   return false;
 }
 
-/** One upgrade-with-data summary, judged: it passed, from a version below the release. */
+/**
+ * One upgrade-with-data summary, judged: it passed, from a version below the release, onto the
+ * release installed from its tarballs. The harness records the CLI it ran and the version that CLI
+ * reported (`target`); an upgrade onto anything but the candidate install is not the release's.
+ */
 export function judgeUpgrade(report, version, file) {
   if (report === null || typeof report !== 'object') refuse(`${file} is not an upgrade summary`);
   if (report.ok !== true)
     refuse(`the upgrade in ${file} did not pass${report.error ? `: ${report.error}` : ''}`);
+  const target = report.target ?? {};
+  if (target.install !== 'candidate') {
+    refuse(
+      `${file} upgraded onto ${target.install ?? 'an unnamed runtime'}, not the candidate install`,
+    );
+  }
+  if (target.cliVersion !== version) {
+    refuse(`${file} ran a CLI that reported ${target.cliVersion ?? 'no version'}, not ${version}`);
+  }
   if (typeof report.from !== 'string' || !EXACT_VERSION.test(report.from))
     refuse(`${file} names no version it upgraded from`);
   if (!versionBelow(report.from, version))
     refuse(`${file} upgraded from ${report.from}, which is not below ${version}`);
-  if (typeof report.to !== 'string' || !report.to.startsWith(`${version} `)) {
-    refuse(`${file} upgraded to ${report.to}, not to ${version}`);
+  if (report.to !== `${version} (candidate install)`) {
+    refuse(`${file} upgraded to ${report.to}, not to ${version} (candidate install)`);
   }
   const checks = Array.isArray(report.checks) ? report.checks : [];
   if (checks.length === 0 || checks.some((c) => c.ok !== true))
@@ -691,6 +811,7 @@ export function buildEvidence(inputs) {
     identityBytes,
     image,
     sbom,
+    imageSbom,
     receipt,
     previous,
     upgrades,
@@ -729,6 +850,30 @@ export function buildEvidence(inputs) {
     const hex = c?.hashes?.find((h) => h.alg === 'SHA-512')?.content;
     if (hex !== Buffer.from(p.integrity.slice('sha512-'.length), 'base64').toString('hex')) {
       refuse(`the SBOM does not carry the SHA-512 of the ${p.name} tarball`);
+    }
+  }
+
+  const imageDoc = parseJson(imageSbom.bytes, 'the image SBOM');
+  if (imageDoc.bomFormat !== 'CycloneDX' || imageDoc.specVersion !== '1.5')
+    refuse('the image SBOM is not CycloneDX 1.5');
+  const imageComponent = imageDoc.metadata?.component ?? {};
+  const imageHash = imageComponent.hashes?.find((h) => h.alg === 'SHA-256')?.content;
+  if (imageComponent.type !== 'container' || `sha256:${imageHash}` !== manifest.images[0].digest)
+    refuse('the image SBOM describes another image than the manifest names');
+  if (imageComponent.version !== version)
+    refuse(`the image SBOM describes ${imageComponent.version}, not ${version}`);
+  // The image's installed tree holds each release tarball itself: npm checked it against the
+  // SHA-512 the image SBOM carries, which must be the tarball's integrity in the manifest.
+  for (const p of manifest.packages) {
+    const installed = (imageDoc.components ?? []).filter(
+      (x) => x.name === p.name && x.version === version,
+    );
+    const hex = Buffer.from(p.integrity.slice('sha512-'.length), 'base64').toString('hex');
+    if (
+      installed.length !== 1 ||
+      installed[0].hashes?.find((h) => h.alg === 'SHA-512')?.content !== hex
+    ) {
+      refuse(`the image SBOM does not show the ${p.name} tarball installed in the image`);
     }
   }
 
@@ -772,6 +917,7 @@ export function buildEvidence(inputs) {
       : [file('release-manifest-signature', signature.path, signature.bytes)]),
     file('release-identity', 'rayspec-release-identity.json', identityBytes),
     file('sbom', sbom.path, sbom.bytes),
+    file('image-sbom', imageSbom.path, imageSbom.bytes),
     file('managed-receipt', receipt.path, receipt.bytes),
     ...upgrades.map((u) => ({ role: 'upgrade-report', file: basename(u.file), sha256: u.sha256 })),
     ...extra.map((e) => file(e.role, e.path, e.bytes)),
@@ -838,6 +984,13 @@ export function buildEvidence(inputs) {
       supportedBackends: r.supportedBackends,
     },
     sbom: { file: basename(sbom.path), format: 'CycloneDX 1.5', sha256: sha256(sbom.bytes) },
+    imageSbom: {
+      file: basename(imageSbom.path),
+      format: 'CycloneDX 1.5',
+      sha256: sha256(imageSbom.bytes),
+      image: manifest.images[0].digest,
+      packages: (imageDoc.components ?? []).length,
+    },
     evidenceIndex: index,
   };
   refusePlaceholders(evidence, 'the evidence document');
@@ -852,6 +1005,7 @@ async function evidenceCommand(args) {
     'identity',
     'image-oci',
     'sbom',
+    'image-sbom',
     'receipt',
     'previous',
     'out',
@@ -900,6 +1054,10 @@ async function evidenceCommand(args) {
     identityBytes: readInput(args.identity, 'the identity manifest'),
     image: readOciImage(resolve(args['image-oci'])),
     sbom: { path: resolve(args.sbom), bytes: readInput(args.sbom, 'the SBOM') },
+    imageSbom: {
+      path: resolve(args['image-sbom']),
+      bytes: readInput(args['image-sbom'], 'the image SBOM'),
+    },
     receipt: { path: resolve(args.receipt), bytes: readInput(args.receipt, 'the managed receipt') },
     previous: args.previous,
     upgrades,
@@ -944,6 +1102,7 @@ export async function main(argv = process.argv.slice(2)) {
         'key-file': { type: 'string' },
         'trusted-key': { type: 'string', multiple: true },
         sbom: { type: 'string' },
+        'image-sbom': { type: 'string' },
         receipt: { type: 'string' },
         previous: { type: 'string' },
         'upgrade-report': { type: 'string', multiple: true },
@@ -967,6 +1126,6 @@ export async function main(argv = process.argv.slice(2)) {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exitCode = await main();
 }

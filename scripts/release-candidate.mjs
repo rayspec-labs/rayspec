@@ -18,7 +18,11 @@
  *      to go on unless the tracked tree is exactly what it was before;
  *   4. builds the runtime image for linux/amd64 from the tarballs into an OCI archive
  *      (`deployments/runtime-image/Dockerfile`, `--skip-image` leaves it out and then no release
- *      manifest can be written);
+ *      manifest can be written): first the image's dependency tree is resolved once into
+ *      `image/lock/package-lock.json` (the Dockerfile's `lock` stage), then the image installs
+ *      exactly that tree with `npm ci`, its timestamps set to the commit's time; the run checks that
+ *      the image holds that lockfile and writes the CycloneDX SBOM of the image's installed tree
+ *      (`scripts/gen-image-sbom.mjs`, `image/image-sbom.cdx.json`);
  *   5. writes the release manifest (`scripts/release-manifest.mjs generate`) and, with
  *      `--key-file`, signs and verifies it;
  *   6. writes `candidate.json`: the version, the commit, every artifact with its SHA-256 and the
@@ -54,9 +58,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { isEntryPoint } from './lib/entry.mjs';
 import { publishSet, workspaceMembers } from './lib/release-closure.mjs';
+import { ManifestRefused, readImageFile } from './release-manifest.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const IDENTITY_IN_LAUNCHER = 'packages/app/rayspec/rayspec-release-identity.json';
@@ -145,15 +151,40 @@ export function stampVersionLine(text, from, to) {
   return stamped;
 }
 
-function git(args) {
-  const res = spawnSync('git', args, { cwd: REPO, encoding: 'utf8' });
+function git(args, repo = REPO) {
+  const res = spawnSync('git', args, { cwd: repo, encoding: 'utf8' });
   if (res.status !== 0)
     throw new CandidateRefused(`git ${args.join(' ')} failed: ${res.stderr.trim()}`);
   return res.stdout;
 }
 
 /** Tracked changes only: the run's own output and build products are untracked by design. */
-const trackedChanges = () => git(['status', '--porcelain', '--untracked-files=no']);
+const trackedChanges = (repo = REPO) =>
+  git(['status', '--porcelain', '--untracked-files=no'], repo);
+
+/**
+ * The checks before anything is written: the tracked tree of `repo` is clean, no identity manifest
+ * is left in its launcher directory, and `out` is empty or absent.
+ */
+export function preflight(repo, out) {
+  if (trackedChanges(repo) !== '') {
+    throw new CandidateRefused('the tracked tree has changes: a candidate is built from a commit');
+  }
+  if (
+    readdirSync(join(repo, dirname(IDENTITY_IN_LAUNCHER))).includes(basename(IDENTITY_IN_LAUNCHER))
+  ) {
+    throw new CandidateRefused(
+      `${IDENTITY_IN_LAUNCHER} is left from an earlier run: remove it first`,
+    );
+  }
+  let present = [];
+  try {
+    present = readdirSync(out);
+  } catch {
+    present = [];
+  }
+  if (present.length > 0) throw new CandidateRefused(`${out} is not empty`);
+}
 
 /**
  * Stamp `version` into the root and every member manifest, run `work`, and restore every manifest
@@ -210,8 +241,14 @@ function runScript(script, args, logFile, extraEnv = {}) {
   return res.status ?? 1;
 }
 
-function buildImage({ tarballs, version, commit, out, logFile, builder }) {
-  const args = [
+/**
+ * The `docker buildx build` arguments of the two image builds. `lock` resolves the dependency tree
+ * of the tarballs into `lockDir` (the Dockerfile's `lock` stage); the image build then takes that
+ * directory as the `lock` stage, so the image installs exactly the resolved tree. Every timestamp
+ * of the image is the commit's (`epoch`).
+ */
+export function imageBuildArgs({ step, tarballs, lockDir, version, commit, epoch, out, builder }) {
+  const common = [
     'buildx',
     'build',
     ...(builder === undefined ? [] : ['--builder', builder]),
@@ -221,16 +258,36 @@ function buildImage({ tarballs, version, commit, out, logFile, builder }) {
     '--sbom=false',
     '--build-context',
     `tarballs=${tarballs}`,
+  ];
+  if (step === 'lock') {
+    return [
+      ...common,
+      '--target',
+      'lock',
+      '--output',
+      `type=local,dest=${lockDir}`,
+      join(REPO, DOCKERFILE_DIR),
+    ];
+  }
+  return [
+    ...common,
+    '--build-context',
+    `lock=${lockDir}`,
     '--build-arg',
     `RAYSPEC_VERSION=${version}`,
     '--build-arg',
     `SOURCE_COMMIT=${commit}`,
+    '--build-arg',
+    `SOURCE_DATE_EPOCH=${epoch}`,
     '--output',
     // The docker exporter with OCI media types writes an OCI image layout that `docker load`
     // also reads, so the archive the manifest names is the image the conformance runs.
-    `type=docker,oci-mediatypes=true,dest=${out},name=rayspec-candidate:${version}`,
+    `type=docker,oci-mediatypes=true,rewrite-timestamp=true,dest=${out},name=rayspec-candidate:${version}`,
     join(REPO, DOCKERFILE_DIR),
   ];
+}
+
+function buildx(args, logFile) {
   const res = spawnSync('docker', args, {
     cwd: REPO,
     encoding: 'utf8',
@@ -304,27 +361,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (release) checkReleaseVersion(values.version, committed, annotatedTagOnHead(values.version));
     else checkCandidateVersion(values.version, committed);
     summary.mode = release ? 'release' : 'candidate';
-    if (trackedChanges() !== '') {
-      throw new CandidateRefused(
-        'the tracked tree has changes: a candidate is built from a commit',
-      );
-    }
-    if (
-      readdirSync(join(REPO, dirname(IDENTITY_IN_LAUNCHER))).includes(
-        basename(IDENTITY_IN_LAUNCHER),
-      )
-    ) {
-      throw new CandidateRefused(
-        `${IDENTITY_IN_LAUNCHER} is left from an earlier run: remove it first`,
-      );
-    }
-    let present = [];
-    try {
-      present = readdirSync(out);
-    } catch {
-      present = [];
-    }
-    if (present.length > 0) throw new CandidateRefused(`${out} is not empty`);
+    preflight(REPO, out);
     mkdirSync(join(out, 'logs'), { recursive: true });
     prepared = true;
     summary.sourceCommit = git(['rev-parse', 'HEAD']).trim();
@@ -408,18 +445,53 @@ export async function main(argv = process.argv.slice(2)) {
     } else {
       mkdirSync(join(out, 'image'), { recursive: true });
       const image = join(out, 'image', 'rayspec-runtime.oci.tar');
+      const lockDir = join(out, 'image', 'lock');
+      const build = {
+        tarballs,
+        lockDir,
+        version: values.version,
+        commit: summary.sourceCommit,
+        epoch: git(['log', '-1', '--format=%ct', 'HEAD']).trim(),
+        out: image,
+        builder: values.builder,
+      };
+      const lockLog = join(out, 'logs', 'image-lock.log');
+      step(
+        "the image's dependency tree, resolved once",
+        buildx(imageBuildArgs({ ...build, step: 'lock' }), lockLog) === 0,
+        { log: lockLog },
+      );
+      let lockfile;
+      try {
+        lockfile = readFileSync(join(lockDir, 'package-lock.json'));
+      } catch {
+        throw new CandidateRefused(`the lock stage wrote no package-lock.json into ${lockDir}`);
+      }
       const imageLog = join(out, 'logs', 'image-build.log');
       step(
         'runtime image (linux/amd64)',
-        buildImage({
-          tarballs,
-          version: values.version,
-          commit: summary.sourceCommit,
-          out: image,
-          logFile: imageLog,
-          builder: values.builder,
-        }) === 0,
+        buildx(imageBuildArgs({ ...build, step: 'image' }), imageLog) === 0,
         { log: imageLog },
+      );
+      let installed;
+      try {
+        installed = readImageFile(image, 'opt/rayspec/package-lock.json');
+      } catch (err) {
+        if (!(err instanceof ManifestRefused)) throw err;
+        throw new CandidateRefused(`the image archive cannot be read: ${err.message}`);
+      }
+      step('the image is installed from that lockfile', installed?.equals(lockfile) === true, {
+        lockfileSha256: sha256(lockfile),
+      });
+      const imageSbomLog = join(out, 'logs', 'image-sbom.log');
+      step(
+        "CycloneDX SBOM of the image's installed tree",
+        runScript(
+          'gen-image-sbom.mjs',
+          ['--image-oci', image, '--out', join(out, 'image', 'image-sbom.cdx.json')],
+          imageSbomLog,
+        ) === 0,
+        { log: imageSbomLog },
       );
       const manifest = join(out, 'release-manifest.json');
       const manifestLog = join(out, 'logs', 'release-manifest.log');
@@ -476,6 +548,6 @@ export async function main(argv = process.argv.slice(2)) {
   return summary.ok ? 0 : 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exitCode = await main();
 }

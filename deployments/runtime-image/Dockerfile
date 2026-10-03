@@ -1,14 +1,24 @@
 # The RaySpec runtime image: linux/amd64, Node at the pinned 22 patch, the published closure installed
-# from the packed release tarballs (never from workspace links), run as a non-root user that cannot
-# write the installation.
+# from the packed release tarballs (never from workspace links) and a lockfile, run as a non-root
+# user that cannot write the installation.
 #
-# Built by scripts/release-candidate.mjs (see docs/releasing.md), with the tarballs as a named build
-# context:
+# Built by scripts/release-candidate.mjs (see docs/releasing.md) in two steps, with the tarballs as a
+# named build context. First the dependency tree is resolved once and written out:
+#
+#   docker buildx build --platform linux/amd64 --build-context tarballs=<dir of the packed .tgz files> \
+#     --target lock --output type=local,dest=<lock dir> deployments/runtime-image
+#
+# then the image is built from that lockfile, which replaces the `lock` stage below:
 #
 #   docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
-#     --build-context tarballs=<dir of the packed .tgz files> \
+#     --build-context tarballs=<dir of the packed .tgz files> --build-context lock=<lock dir> \
 #     --build-arg RAYSPEC_VERSION=<version> --build-arg SOURCE_COMMIT=<40-hex commit> \
-#     --output type=docker,oci-mediatypes=true,dest=<image.oci.tar> deployments/runtime-image
+#     --build-arg SOURCE_DATE_EPOCH=<commit time> \
+#     --output type=docker,oci-mediatypes=true,rewrite-timestamp=true,dest=<image.oci.tar> \
+#     deployments/runtime-image
+#
+# The lockfile is kept with the release (image/lock/package-lock.json) and inside the image
+# (/opt/rayspec/package-lock.json); scripts/gen-image-sbom.mjs lists what the image installed.
 #
 # What the image keeps, and why: /bin/sh, because the supervisor of a role-separated deploy
 # re-executes itself through it to set a zero hard core-file limit; pg_dump and pg_restore of
@@ -32,17 +42,30 @@ RUN set -eu; \
       | awk '$2 == "=>" && $3 ~ /^\// { print $3 }' | sort -u \
       | while read -r lib; do cp -L "$lib" /out/lib/; done
 
-# The published closure, installed from the tarballs the way a consumer installs them: every
-# @rayspec package from its tarball, everything else from the registry, no install scripts.
+# The dependency tree of the published closure, resolved once the way a consumer's npm resolves it:
+# every @rayspec package from its tarball, everything else from the registry. Only the manifest and
+# the lockfile leave this stage.
+FROM ${NODE_IMAGE} AS resolve
+COPY --from=tarballs . /build/tarballs/
+WORKDIR /opt/rayspec
+RUN set -eu; \
+    printf '{"name":"rayspec-runtime","private":true}\n' > package.json; \
+    npm install --package-lock-only --ignore-scripts --no-audit --no-fund /build/tarballs/*.tgz
+
+FROM scratch AS lock
+COPY --from=resolve /opt/rayspec/package.json /opt/rayspec/package-lock.json /
+
+# The published closure, installed with `npm ci` from that lockfile and nothing else: the versions
+# and integrities it records, the tarballs at theirs, no install scripts.
 FROM ${NODE_IMAGE} AS install
 ARG RAYSPEC_VERSION
 ARG SOURCE_COMMIT
 RUN test -n "${RAYSPEC_VERSION}" && test -n "${SOURCE_COMMIT}"
 COPY --from=tarballs . /build/tarballs/
+COPY --from=lock /package.json /package-lock.json /opt/rayspec/
 WORKDIR /opt/rayspec
 RUN set -eu; \
-    printf '{"name":"rayspec-runtime","private":true}\n' > package.json; \
-    npm install --omit=dev --ignore-scripts --no-audit --no-fund /build/tarballs/*.tgz; \
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
     node -e 'const v = require("/opt/rayspec/node_modules/rayspec/package.json").version; if (v !== process.argv[1]) { console.error(`installed rayspec ${v}, expected ${process.argv[1]}`); process.exit(1); }' "${RAYSPEC_VERSION}"
 COPY healthcheck.mjs /opt/rayspec/healthcheck.mjs
 

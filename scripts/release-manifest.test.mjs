@@ -10,14 +10,22 @@
  *    at another version, an identity manifest that does not record a package, an image that runs as
  *    root, is labelled with another version or commit, has no health check or no Node version, and
  *    any placeholder value;
- *  - the OCI archive: a blob that does not match its digest, two image manifests, and another
- *    platform are refused; an attestation manifest is ignored and a nested index is followed;
+ *  - generate through the command line refuses an identity manifest of another commit;
+ *  - the OCI archive: a blob that does not match its digest, two image manifests, another
+ *    platform, a layer missing from the archive, a layer of another size and a layer with other
+ *    bytes are refused; an attestation manifest is ignored and a nested index is followed; a file
+ *    is read from the topmost layer that holds it, and a later layer's whiteout hides it;
+ *  - the image SBOM (`gen-image-sbom.mjs`) lists the image's installed tree with each tarball's
+ *    SHA-512 and names the image by digest, and refuses an image without the tree;
  *  - sign and verify through the command line: a key file other users can read and a key that is
  *    not Ed25519 are refused; a signature verifies with the release key and not with another; a
- *    manifest changed after signing does not verify; tarballs and image are checked against it;
- *  - evidence: binds every input by digest and refuses a receipt for another manifest, a failed or
- *    missing upgrade from the previous version, an unsigned release version, an SBOM without the
- *    tarball digests, and placeholders.
+ *    manifest changed after signing does not verify; tarballs and image are checked against it: a
+ *    tarball with other bytes, an extra tarball and an image archive missing a layer fail verify;
+ *  - evidence: binds every input by digest and refuses a receipt for another manifest, runtime
+ *    version or commit, a failed or missing upgrade from the previous version (a summary that says
+ *    it failed even when its checks passed), an upgrade onto anything but the candidate install or
+ *    by a CLI of another version, an unsigned release version, an SBOM without the tarball digests,
+ *    an image SBOM of another image or without a tarball installed, and placeholders.
  *
  * Needs `pnpm build` (the built contract, bundle and server). Standalone: `node <thisfile>`; exit 0
  * = pass.
@@ -25,11 +33,23 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import { CHECKS } from './certification.mjs';
+import { INSTALLED_TREE, imageSbom, main as imageSbomMain } from './gen-image-sbom.mjs';
 import { receiptOf } from './managed-receipt.mjs';
 import {
   buildEvidence,
@@ -39,6 +59,7 @@ import {
   ManifestRefused,
   main,
   placeholders,
+  readImageFile,
   readOciImage,
   readTarballs,
   versionBelow,
@@ -75,6 +96,21 @@ async function check(label, fn) {
 /** A refusal whose message matches `pattern`. */
 function refused(fn, pattern) {
   assert.throws(fn, (err) => err instanceof ManifestRefused && pattern.test(err.message));
+}
+
+/** Run the command line and return its exit code with what it wrote to stderr. */
+async function run(argv, entry = main) {
+  const write = process.stderr.write;
+  let stderr = '';
+  process.stderr.write = (chunk) => {
+    stderr += String(chunk);
+    return true;
+  };
+  try {
+    return { code: await entry(argv), stderr };
+  } finally {
+    process.stderr.write = write;
+  }
 }
 
 // ─── fixtures ──────────────────────────────────────────────────────────────────────────────────
@@ -121,18 +157,58 @@ function tarEntry(name, body) {
   return Buffer.concat([header, body, pad]);
 }
 
+/** A gzip-compressed layer holding `files` (path to bytes). */
+function layerOf(files) {
+  return gzipSync(
+    Buffer.concat([
+      ...Object.entries(files).map(([name, body]) => tarEntry(name, Buffer.from(body))),
+      Buffer.alloc(1024),
+    ]),
+  );
+}
+
 /**
  * An OCI image archive. `config` overrides the image configuration; `extraManifests` adds index
  * entries; `tamper` changes the config blob after its digest was taken; `nest` wraps the index.
+ * `layers` are the files of each layer, bottom first; `dropLayer` leaves the blob of that layer out
+ * of the archive, `tamperLayer` writes other bytes for it, and `layerSize` adds to the size the
+ * manifest names for the first layer.
  */
-function ociArchive(path, { config = {}, extraManifests = [], tamper = false, nest = false } = {}) {
+function ociArchive(
+  path,
+  {
+    config = {},
+    extraManifests = [],
+    tamper = false,
+    nest = false,
+    layers = [{ 'etc/hostname': 'image\n' }],
+    dropLayer = null,
+    tamperLayer = null,
+    layerSize = 0,
+  } = {},
+) {
   const blobs = [];
   const blob = (value) => {
-    const bytes = Buffer.from(JSON.stringify(value));
+    const bytes = Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value));
     const digest = `sha256:${sha256(bytes)}`;
     blobs.push([digest, bytes]);
     return { digest, size: bytes.length };
   };
+  const layerRefs = layers.map((files, i) => {
+    const ref = blob(layerOf(files));
+    if (i === dropLayer) blobs.pop();
+    if (i === tamperLayer) {
+      // The same size, one byte different.
+      const other = Buffer.from(blobs[blobs.length - 1][1]);
+      other[other.length - 1] ^= 0x01;
+      blobs[blobs.length - 1] = [ref.digest, other];
+    }
+    return {
+      mediaType: 'application/vnd.oci.image.layer.v1.tar+gzip',
+      ...ref,
+      size: ref.size + (i === 0 ? layerSize : 0),
+    };
+  });
   const cfg = {
     os: 'linux',
     architecture: 'amd64',
@@ -152,7 +228,7 @@ function ociArchive(path, { config = {}, extraManifests = [], tamper = false, ne
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     config: { mediaType: 'application/vnd.oci.image.config.v1+json', ...configRef },
-    layers: [],
+    layers: layerRefs,
   });
   const manifests = [
     { mediaType: 'application/vnd.oci.image.manifest.v1+json', ...manifest },
@@ -187,7 +263,34 @@ function ociArchive(path, { config = {}, extraManifests = [], tamper = false, ne
 }
 
 const tarballDir = packTarballs(join(work, 'tarballs'));
-const archive = ociArchive(join(work, 'image.tar'));
+
+/** The installed tree npm records in the image: each tarball at its integrity, and a dependency. */
+function installedTree(dir = tarballDir) {
+  const packages = { '': { name: 'rayspec-runtime' } };
+  for (const t of readTarballs(dir).values()) {
+    packages[`node_modules/${t.name}`] = {
+      version: t.version,
+      resolved: `file:../../build/tarballs/${t.file}`,
+      integrity: `sha512-${createHash('sha512').update(t.bytes).digest('base64')}`,
+      license: 'FSL-1.1-ALv2',
+    };
+  }
+  packages['node_modules/hono'] = {
+    version: '4.13.12',
+    integrity: `sha512-${createHash('sha512').update('hono').digest('base64')}`,
+    license: 'MIT',
+  };
+  packages['node_modules/@rayspec/cli/node_modules/hono'] = {
+    version: '4.13.12',
+    integrity: `sha512-${createHash('sha512').update('hono').digest('base64')}`,
+    license: 'MIT',
+  };
+  return Buffer.from(JSON.stringify({ name: 'rayspec-runtime', lockfileVersion: 3, packages }));
+}
+
+const archive = ociArchive(join(work, 'image.tar'), {
+  layers: [{ 'etc/hostname': 'image\n' }, { [INSTALLED_TREE]: installedTree() }],
+});
 const identity = identityFor();
 const identityBytes = Buffer.from(`${JSON.stringify(identity, null, 2)}\n`);
 
@@ -319,6 +422,28 @@ await check('refuses a placeholder anywhere in the manifest', () => {
   assert.deepEqual(placeholders({ a: [1, 'TBD'], b: { c: 'ok' } }), ['/a/1']);
 });
 
+await check('generate refuses an identity manifest of another commit', async () => {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO, encoding: 'utf8' }).trim();
+  assert.notEqual(COMMIT, head, 'the fixture commit must not be this checkout');
+  const file = join(work, 'identity-other-commit.json');
+  writeFileSync(file, identityBytes);
+  const out = join(work, 'generated-other-commit.json');
+  const { code, stderr } = await run([
+    'generate',
+    '--tarballs',
+    tarballDir,
+    '--identity',
+    file,
+    '--image-oci',
+    archive.path,
+    '--out',
+    out,
+  ]);
+  assert.equal(code, 1);
+  assert.match(stderr, new RegExp(`names ${COMMIT}, this checkout is at ${head}`));
+  assert.equal(existsSync(out), false);
+});
+
 // ─── the OCI archive ───────────────────────────────────────────────────────────────────────────
 
 await check('the archive: a blob that does not match its digest is refused', () => {
@@ -335,6 +460,33 @@ await check('the archive: two images or another platform are refused', () => {
   refused(() => readOciImage(arm.path), /linux\/arm64, not linux\/amd64/);
 });
 
+await check('the archive: a layer missing, of another size or with other bytes is refused', () => {
+  const layers = [{ 'etc/hostname': 'a\n' }, { 'opt/x': 'b\n' }];
+  assert.equal(readOciImage(ociArchive(join(work, 'layers.tar'), { layers }).path).layers, 2);
+  const missing = ociArchive(join(work, 'missing-layer.tar'), { layers, dropLayer: 1 });
+  refused(() => readOciImage(missing.path), /has no layer sha256:/);
+  const sized = ociArchive(join(work, 'sized-layer.tar'), { layers, layerSize: 1 });
+  refused(() => readOciImage(sized.path), /is not the size the image names/);
+  const other = ociArchive(join(work, 'other-layer.tar'), { layers, tamperLayer: 0 });
+  refused(
+    () => readOciImage(other.path),
+    /layer sha256:[a-f0-9]+ in the image archive does not match/,
+  );
+});
+
+await check('the archive: a file is read from the topmost layer that holds it', () => {
+  const layered = ociArchive(join(work, 'files.tar'), {
+    layers: [
+      { 'etc/a': 'first\n', 'etc/b': 'kept\n', 'etc/c': 'deleted\n' },
+      { 'etc/a': 'second\n', 'etc/.wh.c': '' },
+    ],
+  });
+  assert.equal(readImageFile(layered.path, '/etc/a')?.toString(), 'second\n');
+  assert.equal(readImageFile(layered.path, 'etc/b')?.toString(), 'kept\n');
+  assert.equal(readImageFile(layered.path, 'etc/c'), null);
+  assert.equal(readImageFile(layered.path, 'etc/none'), null);
+});
+
 await check('the archive: an attestation is ignored and a nested index is followed', () => {
   const attested = ociArchive(join(work, 'attested.tar'), {
     extraManifests: [
@@ -348,6 +500,49 @@ await check('the archive: an attestation is ignored and a nested index is follow
   const nested = ociArchive(join(work, 'nested.tar'), { nest: true });
   assert.equal(readOciImage(nested.path).digest, nested.digest);
 });
+
+// ─── the image SBOM ────────────────────────────────────────────────────────────────────────────
+
+const imageSbomPath = join(work, 'image-sbom.cdx.json');
+
+await check('the image SBOM lists the installed tree and names the image by digest', async () => {
+  const { code } = await run(['--image-oci', archive.path, '--out', imageSbomPath], imageSbomMain);
+  assert.equal(code, 0);
+  const doc = JSON.parse(readFileSync(imageSbomPath, 'utf8'));
+  assert.equal(doc.bomFormat, 'CycloneDX');
+  assert.equal(doc.metadata.component.type, 'container');
+  assert.equal(`sha256:${doc.metadata.component.hashes[0].content}`, archive.digest);
+  assert.equal(doc.metadata.component.version, VERSION);
+  // hono is installed twice at one version: one component, both places named.
+  const hono = doc.components.filter((c) => c.name === 'hono');
+  assert.equal(hono.length, 1);
+  assert.equal(hono[0].properties.length, 2);
+  const cli = doc.components.find((c) => c.name === '@rayspec/cli');
+  const bytes = readFileSync(join(tarballDir, `rayspec-cli-${VERSION}.tgz`));
+  assert.equal(cli.hashes[0].content, createHash('sha512').update(bytes).digest('hex'));
+  assert.equal(
+    imageSbom(readOciImage(archive.path), installedTree()),
+    readFileSync(imageSbomPath, 'utf8'),
+  );
+});
+
+await check(
+  'the image SBOM refuses an image without the installed tree or the launcher',
+  async () => {
+    const bare = ociArchive(join(work, 'bare.tar'));
+    const out = join(work, 'bare-sbom.json');
+    const { code, stderr } = await run(['--image-oci', bare.path, '--out', out], imageSbomMain);
+    assert.equal(code, 1);
+    assert.match(stderr, /holds no \/opt\/rayspec\/node_modules\/\.package-lock\.json/);
+    assert.equal(existsSync(out), false);
+    const tree = JSON.parse(installedTree().toString());
+    delete tree.packages['node_modules/rayspec'];
+    assert.throws(
+      () => imageSbom(readOciImage(archive.path), Buffer.from(JSON.stringify(tree))),
+      /no rayspec 1\.9\.0-rc\.0 launcher/,
+    );
+  },
+);
 
 // ─── sign and verify ───────────────────────────────────────────────────────────────────────────
 
@@ -495,6 +690,57 @@ await check(
   },
 );
 
+await check(
+  'verify refuses a tarball with other bytes and a tarball the manifest does not list',
+  async () => {
+    const verify = (dir) =>
+      run(['verify', '--manifest', manifestPath, '--tarballs', dir, '--image-oci', archive.path]);
+    assert.equal((await verify(tarballDir)).code, 0);
+    // The same package at the same version, packed with other bytes.
+    const changed = join(work, 'verify-changed');
+    cpSync(tarballDir, changed, { recursive: true });
+    const src = join(work, 'src-changed', 'package');
+    mkdirSync(src, { recursive: true });
+    writeFileSync(
+      join(src, 'package.json'),
+      `${JSON.stringify({ name: '@rayspec/core', version: VERSION, description: 'other' })}\n`,
+    );
+    const coreFile = join(changed, `rayspec-core-${VERSION}.tgz`);
+    const before = readFileSync(coreFile);
+    execFileSync('tar', ['-czf', coreFile, '-C', dirname(src), 'package']);
+    assert.notDeepEqual(readFileSync(coreFile), before, 'the tarball must really change');
+    assert.equal(readTarballs(changed).get('@rayspec/core').version, VERSION);
+    const integrity = await verify(changed);
+    assert.equal(integrity.code, 1);
+    assert.match(integrity.stderr, /@rayspec\/core: the tarball's integrity is not the manifest's/);
+    // Every listed tarball as packed, and one more.
+    const extra = join(work, 'verify-extra');
+    cpSync(tarballDir, extra, { recursive: true });
+    packTarballs(extra, ['@rayspec/server']);
+    assert.equal(readdirSync(extra).length, readdirSync(tarballDir).length + 1);
+    const more = await verify(extra);
+    assert.equal(more.code, 1);
+    assert.match(more.stderr, /holds a package the manifest does not list/);
+  },
+);
+
+await check('verify refuses an image archive that lost a layer', async () => {
+  const lost = ociArchive(join(work, 'lost-layer.tar'), {
+    layers: [{ 'etc/hostname': 'image\n' }, { [INSTALLED_TREE]: installedTree() }],
+    dropLayer: 1,
+  });
+  assert.equal(lost.digest, archive.digest, 'the archive names the same image');
+  const { code, stderr } = await run([
+    'verify',
+    '--manifest',
+    manifestPath,
+    '--image-oci',
+    lost.path,
+  ]);
+  assert.equal(code, 1);
+  assert.match(stderr, /has no layer sha256:/);
+});
+
 // ─── evidence ──────────────────────────────────────────────────────────────────────────────────
 
 const manifestBytes = readFileSync(manifestPath);
@@ -548,14 +794,20 @@ function sbomFor(tarballs) {
   );
 }
 
-const upgradeReport = (from, ok = true) => ({
+const upgradeReport = (from, ok = true, overrides = {}) => ({
   app: 'notes-ui',
   roles: false,
   from,
-  to: `${VERSION} (working tree)`,
+  to: `${VERSION} (candidate install)`,
+  target: {
+    install: 'candidate',
+    cli: '/consumer/node_modules/rayspec/dist/bin.js',
+    cliVersion: VERSION,
+  },
   ok,
   checks: [{ name: 'every stored row is unchanged', ok }],
   platformMigrations: { before: 12, after: 18 },
+  ...overrides,
 });
 
 function evidence(overrides = {}) {
@@ -569,6 +821,7 @@ function evidence(overrides = {}) {
     identityBytes,
     image: readOciImage(archive.path),
     sbom: { path: join(work, 'closure-sbom.cdx.json'), bytes: sbomFor(tarballs) },
+    imageSbom: { path: imageSbomPath, bytes: readFileSync(imageSbomPath) },
     receipt: { path: join(work, 'managed-receipt.json'), bytes: receiptFor(releaseManifestSha256) },
     previous: '1.8.0',
     upgrades: [
@@ -610,6 +863,9 @@ await check('the evidence binds every input and is reproducible', () => {
   assert.ok(doc.schemas.length >= 7);
   assert.ok(doc.fixtureCorpusDigest.files > 100);
   assert.ok(doc.evidenceIndex.some((e) => e.role === 'managed-receipt'));
+  assert.ok(doc.evidenceIndex.some((e) => e.role === 'image-sbom'));
+  assert.equal(doc.imageSbom.image, archive.digest);
+  assert.equal(doc.imageSbom.sha256, sha256(readFileSync(imageSbomPath)));
   assert.ok(doc.capabilities.length > 0);
 });
 
@@ -624,6 +880,45 @@ await check('the evidence refuses a receipt for another release manifest', () =>
   refused(
     () => evidence({ receipt: { path: join(work, 'r.json'), bytes: Buffer.from('{}') } }),
     /receipt does not validate/,
+  );
+});
+
+await check('the evidence refuses a receipt for another runtime version or commit', () => {
+  for (const lane of [
+    { runtimeVersion: '1.9.0-rc.1' },
+    { sourceCommit: hexOf('another commit').slice(0, 40) },
+  ]) {
+    const bytes = receiptFor(releaseManifestSha256, lane);
+    const parsed = JSON.parse(bytes.toString('utf8'));
+    assert.equal(parsed.releaseManifestSha256, releaseManifestSha256);
+    assert.ok(
+      parsed.runtimeVersion !== VERSION || parsed.sourceCommit !== COMMIT,
+      'the receipt must really name another runtime or commit',
+    );
+    refused(
+      () => evidence({ receipt: { path: join(work, 'r.json'), bytes } }),
+      /receipt is for another runtime or commit/,
+    );
+  }
+});
+
+await check('the evidence refuses an image SBOM of another image or without a tarball', () => {
+  const doc = JSON.parse(readFileSync(imageSbomPath, 'utf8'));
+  const as = (d) => ({ path: imageSbomPath, bytes: Buffer.from(JSON.stringify(d)) });
+  const other = structuredClone(doc);
+  other.metadata.component.hashes[0].content = hexOf('another image');
+  refused(() => evidence({ imageSbom: as(other) }), /describes another image/);
+  const lacking = structuredClone(doc);
+  lacking.components = lacking.components.filter((c) => c.name !== '@rayspec/core');
+  refused(
+    () => evidence({ imageSbom: as(lacking) }),
+    /does not show the @rayspec\/core tarball installed/,
+  );
+  const rehashed = structuredClone(doc);
+  rehashed.components.find((c) => c.name === 'rayspec').hashes[0].content = hexOf('x').repeat(2);
+  refused(
+    () => evidence({ imageSbom: as(rehashed) }),
+    /does not show the rayspec tarball installed/,
   );
 });
 
@@ -664,6 +959,54 @@ await check(
     refused(() => evidence({ previous: '2.0.0' }), /not a version below/);
   },
 );
+
+await check(
+  'the evidence refuses a summary that says it failed, even with every check passing',
+  () => {
+    const report = upgradeReport('1.8.0', true, { ok: false, error: 'the boot timed out' });
+    assert.ok(
+      report.checks.every((c) => c.ok === true),
+      'every recorded check passed',
+    );
+    refused(
+      () =>
+        evidence({
+          upgrades: [{ file: join(work, 'u.json'), report, sha256: hexOf('u') }],
+        }),
+      /did not pass: the boot timed out/,
+    );
+  },
+);
+
+await check('the evidence refuses an upgrade onto anything but the candidate install', () => {
+  const onto = (overrides) =>
+    evidence({
+      upgrades: [
+        {
+          file: join(work, 'u.json'),
+          report: upgradeReport('1.8.0', true, overrides),
+          sha256: hexOf('u'),
+        },
+      ],
+    });
+  refused(
+    () =>
+      onto({
+        to: `${VERSION} (working tree)`,
+        target: { install: 'working tree', cliVersion: VERSION },
+      }),
+    /onto working tree, not the candidate install/,
+  );
+  refused(() => onto({ target: undefined }), /onto an unnamed runtime/);
+  refused(
+    () => onto({ target: { install: 'candidate', cliVersion: '1.8.0' } }),
+    /ran a CLI that reported 1\.8\.0, not 1\.9\.0-rc\.0/,
+  );
+  refused(
+    () => onto({ to: `${VERSION} (working tree)` }),
+    /not to 1\.9\.0-rc\.0 \(candidate install\)/,
+  );
+});
 
 await check('the evidence of a release version needs the signature', () => {
   const m = JSON.parse(manifestBytes.toString('utf8'));
@@ -706,6 +1049,7 @@ await check('the command line refuses an unknown command and missing inputs', as
   assert.equal(await main(['publish']), 2);
   assert.equal(await main(['generate', '--tarballs', tarballDir]), 2);
   assert.equal(await main(['evidence', '--manifest', manifestPath]), 2);
+  assert.equal((await run(['--out', join(work, 'x.json')], imageSbomMain)).code, 2);
 });
 
 rmSync(work, { recursive: true, force: true });
