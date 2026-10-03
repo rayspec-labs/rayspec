@@ -255,7 +255,7 @@ describes, and checks that the new release serves under its supervisor with only
 connected).
 A bundle pins its runtime, so after upgrading the CLI, repack the application for the new release
 (the same source, the new `rayspec pack`) and deploy that bundle. An older runtime refuses a
-database a newer one has migrated.
+database a newer one has migrated. [Upgrading to 1.9](./upgrading-to-1.9.md) lists what changes from 1.8.x.
 
 ## Recovery
 
