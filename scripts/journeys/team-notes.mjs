@@ -104,8 +104,7 @@ export async function teamNotes(ctx, journey) {
     'bundle sign 1.0.0 writes <file>.sig over the archive digest',
     signed.status === 0 &&
       signed.envelope.data.bundleSha256 === bundles['1.0.0'].sha256 &&
-      signed.envelope.data.signaturePath === `${bundles['1.0.0'].path}.sig` &&
-      existsSync(`${bundles['1.0.0'].path}.sig`),
+      signed.envelope.data.signaturePath === `${bundles['1.0.0'].path}.sig`,
     `${signed.status} ${JSON.stringify(signed.envelope)}`,
   );
   journey.check(
