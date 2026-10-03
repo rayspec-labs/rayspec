@@ -181,6 +181,36 @@ deliberate, defence-in-depth jail, not a bug.
 
 ---
 
+## `init`
+
+```
+rayspec init [dir] [--force]
+```
+
+Scaffolds a new project: writes a minimal, valid starter `rayspec.yaml` (one
+`items` store and its CRUD routes, no agent and no custom code) into `[dir]`,
+default the current directory. The starter needs no build step and no provider
+credential; validate it with `rayspec doctor` and preview a deploy with
+`rayspec plan`.
+
+- **Postgres:** not needed.
+- **Flags:** `--force` overwrites an existing `rayspec.yaml`. Without it an
+  existing file is never touched.
+- **The directory** is resolved against the current directory and must stay
+  inside it, like every other path the CLI writes.
+- **Output:**
+
+  ```json
+  { "ok": true, "command": "init", "created": ["demo/rayspec.yaml"], "path": "demo/rayspec.yaml", "nextSteps": ["rayspec doctor demo/rayspec.yaml", "rayspec plan demo/rayspec.yaml", "…"], "errors": [] }
+  ```
+
+  An existing file without `--force` is `ok:false` with the code `spec_exists`.
+
+- **Exit:** `0` written, `1` the file exists, `2` a usage error (an unknown
+  flag, a second positional, a directory outside the current one).
+
+---
+
 ## `doctor`
 
 ```
