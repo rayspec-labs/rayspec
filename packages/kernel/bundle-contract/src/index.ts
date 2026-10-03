@@ -6,7 +6,7 @@
  * JSON form, and validators that parse and check each document in the reader pipeline's order.
  * It also carries the pure rules of the runtime-control operations: request checks, the plan
  * digest and its expiry, the product schema digest, the shared schema lock key and the platform
- * tables with their snapshot categories.
+ * tables with their snapshot categories, and the semantic rules of the release manifest.
  *
  * No I/O: it reads no file, opens no connection and knows no cloud provider. The committed
  * contract files ship beside the build under `contract/`, with `CONTRACT-LOCK.json` recording the
@@ -51,6 +51,13 @@ export {
   PUBLIC_PLATFORM_TABLE_NAMES,
   RUNTIME_CONTROL_TABLES,
 } from './platform-tables.js';
+export {
+  RELEASE_MANIFEST_MAX_BYTES,
+  RELEASE_SIGNATURE_DOMAIN,
+  releaseManifestFile,
+  releaseManifestViolations,
+  validateReleaseManifest,
+} from './release-manifest.js';
 export {
   BINDING_REVISION_KEY_BYTES,
   bindingRevisionId,
