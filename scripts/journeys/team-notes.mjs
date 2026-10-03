@@ -2,8 +2,9 @@
  * The team-notes journey: a CRUD application with a static UI, in three releases, from source to a
  * second imported environment, driven only through the installed release.
  *
- *   build the three releases → pack 1.0.0 → inspect, verify → deploy on fresh databases (role
- *   separation) → two members and a key-only owner; create, read, update, soft-delete; the 100-note
+ *   build the three releases → pack 1.0.0 → inspect, verify → sign 1.0.0 with an Ed25519 key, verify
+ *   it with --require-signature against that key's public half (another key refused) → deploy the
+ *   signed bundle on fresh databases (role separation, --require-signature) → two members and a key-only owner; create, read, update, soft-delete; the 100-note
  *   seed, loaded twice → 1.1.0 (additive, packed against 1.0.0) keeps every row; the largest safe
  *   integers and a decimal past float precision written and read back exactly → 2.0.0 (drops a
  *   column) refused at pack and at deploy → export while serving (the source is fenced: writes 503,
@@ -19,7 +20,8 @@
  * and left unfenced.
  */
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   call,
@@ -94,6 +96,54 @@ export async function teamNotes(ctx, journey) {
     JSON.stringify(inspected.envelope.data),
   );
 
+  // ── Sign 1.0.0, and verify the signature as a deployer would ──────────────────────────────────
+  journey.step('signing 1.0.0 and verifying the signature');
+  const signer = signingKeys(ctx, 'publisher');
+  const signed = rayspec(ctx, ['bundle', 'sign', bundles['1.0.0'].path, '--key-file', signer.key]);
+  journey.check(
+    'bundle sign 1.0.0 writes <file>.sig over the archive digest',
+    signed.status === 0 &&
+      signed.envelope.data.bundleSha256 === bundles['1.0.0'].sha256 &&
+      signed.envelope.data.signaturePath === `${bundles['1.0.0'].path}.sig` &&
+      existsSync(`${bundles['1.0.0'].path}.sig`),
+    `${signed.status} ${JSON.stringify(signed.envelope)}`,
+  );
+  journey.check(
+    'the sign output carries no key material',
+    !leaks(signed.stdout + signed.stderr, signer.secrets),
+  );
+  const signedVerify = rayspec(ctx, [
+    'bundle',
+    'verify',
+    bundles['1.0.0'].path,
+    '--trusted-key',
+    signer.publicKey,
+    '--require-signature',
+  ]);
+  journey.check(
+    'bundle verify --require-signature accepts it with the publisher key, by the same fingerprint',
+    signedVerify.status === 0 &&
+      signedVerify.envelope.data.signature.verified === true &&
+      signedVerify.envelope.data.signature.publicKeySha256 === signed.envelope.data.publicKeySha256,
+    JSON.stringify(signedVerify.envelope),
+  );
+  const otherSigner = signingKeys(ctx, 'other-publisher');
+  const otherVerify = rayspec(ctx, [
+    'bundle',
+    'verify',
+    bundles['1.0.0'].path,
+    '--trusted-key',
+    otherSigner.publicKey,
+    '--require-signature',
+  ]);
+  journey.check(
+    'bundle verify refuses it with another trusted key',
+    otherVerify.status === 4 &&
+      otherVerify.envelope.errors?.[0]?.code === 'RAY_SIGNATURE_INVALID' &&
+      otherVerify.envelope.errors[0].reason === 'untrusted-key',
+    JSON.stringify(otherVerify.envelope),
+  );
+
   // ── A source with two organizations is refused on export ──────────────────────────────────────
   journey.step('a source with two organizations');
   await multiTenantRefusal(ctx, journey, bundles['1.0.0'].path);
@@ -104,7 +154,11 @@ export async function teamNotes(ctx, journey) {
   source.mintSecrets();
   const v1Bundle = join(source.dir, 'team-notes-1.0.0.ray');
   copyFileSync(bundles['1.0.0'].path, v1Bundle);
-  let { plan, served } = await deployServing(ctx, journey, source, v1Bundle);
+  copyFileSync(`${bundles['1.0.0'].path}.sig`, `${v1Bundle}.sig`);
+  let { plan, served } = await deployServing(ctx, journey, source, v1Bundle, {
+    extra: ['--trusted-key', signer.publicKey, '--require-signature'],
+    what: 'the signed 1.0.0 with --require-signature',
+  });
   journey.check('the first plan needs no binding', plan.plan.requiredBindings.length === 0);
   const base = source.base;
   const version = await call(`${base}/app-version.json`);
@@ -784,4 +838,23 @@ async function multiTenantRefusal(ctx, journey, bundle) {
     JSON.stringify(fence),
   );
   await env.drop();
+}
+
+/**
+ * An Ed25519 key pair for signing bundles: the private key in a file of mode 0600, the public key
+ * beside it, readable by others, as a publisher hands it out. `secrets` are the encodings of the
+ * private key that no output may carry.
+ */
+function signingKeys(ctx, name) {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const pem = privateKey.export({ format: 'pem', type: 'pkcs8' });
+  const key = privateFile(join(ctx.work, `${name}-signing-key.pem`), pem);
+  const pub = join(ctx.work, `${name}-signing-key.pub.pem`);
+  writeFileSync(pub, publicKey.export({ format: 'pem', type: 'spki' }), { mode: 0o644 });
+  const der = privateKey.export({ format: 'der', type: 'pkcs8' });
+  return {
+    key,
+    publicKey: pub,
+    secrets: [pem.split('\n')[1], der.subarray(der.length - 32).toString('hex')],
+  };
 }

@@ -55,6 +55,15 @@ The build needs Node only. It copies the release spec and the UI and writes
 `metadata.id` or `metadata.version` disagrees with that table, so the version the UI shows is the
 version the bundle carries. See [Packing an application](../../docs/packing.md).
 
+To sign it, with an Ed25519 key only you can read (see
+[Signing a bundle](../../docs/packing.md#signing-a-bundle)), and check the signature as a deployer
+would, with the public key:
+
+```bash
+rayspec bundle sign   team-notes-1.0.0.ray --key-file publisher.pem
+rayspec bundle verify team-notes-1.0.0.ray --trusted-key publisher.pub.pem --require-signature
+```
+
 ## Deploy
 
 On the server, with the [environment a bundle deploy reads](../../docs/self-hosted-deployment.md#what-you-need)
@@ -65,6 +74,9 @@ On the server, with the [environment a bundle deploy reads](../../docs/self-host
 rayspec deploy team-notes-1.0.0.ray --dry-run          # prints the plan and its planDigest
 rayspec deploy team-notes-1.0.0.ray --plan-digest <planDigest from the dry-run>
 ```
+
+With the signature beside the bundle, `--trusted-key publisher.pub.pem --require-signature` on both
+commands deploys only the bundle that key signed.
 
 The plan needs no binding. The deployment serves on port `8080` of the loopback interface unless
 `--port` and `--host` say otherwise.
@@ -150,7 +162,9 @@ export (`RAY_MULTI_TENANT_UNSUPPORTED`).
   alone, the two users, the refusals, the seed and its inventory, the update to `1.1.0` and the
   refused `2.0.0`, with the real built CLI and a database.
 - `scripts/journeys/team-notes.mjs` — the whole life of the application with the CLI installed from
-  the packed release, never the workspace: the three releases, the two users, the seed, the
+  the packed release, never the workspace: the three releases, `1.0.0` signed, verified with the
+  publisher key and refused with another, and deployed with `--require-signature`, the two users,
+  the seed, the
   key-only owner, export while serving, two imports, the identity reset, owner recovery and
   `rayspec resume`; and the refused export of a source with two organizations. Run with
   `pnpm test:journeys --app team-notes` (see [Reference journeys](../../CONTRIBUTING.md#reference-journeys)).
