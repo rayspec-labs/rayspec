@@ -6,6 +6,11 @@
     "dist"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/compose/product-yaml"
+  },
   "type": "module",
   "description": "The Product-YAML deploy COMPOSITION. Turns a validated ProductSpec + a deployer-supplied rollout (STT adapter, agent handlers, workflow enqueuer, store bindings) into the deployable engine fragments: audio capability mount + bridge-compiled durable workflows + trigger wiring + declarative views + the tenant-bound node registry. Product-free: every product concept comes from the YAML declarations; unsupported sections fail closed.",
   "exports": {

@@ -6,6 +6,11 @@
     "dist"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/capabilities/conversation-runtime"
+  },
   "type": "module",
   "description": "The generic Tier-B conversational-ingress capability (conversation_input) — an idempotent client-keyed conversation create plus a bounded JSON turn submit that persists the user turn in a capability-owned ledger and emits a durable workflow trigger. Product-neutral; a record×file hybrid (record_input donates the JSON-payload discipline, file_input donates the manifest/handler/mount template).",
   "exports": {

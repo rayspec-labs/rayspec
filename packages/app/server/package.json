@@ -6,6 +6,11 @@
     "dist"
   ],
   "license": "FSL-1.1-ALv2",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rayspec-labs/rayspec.git",
+    "directory": "packages/app/server"
+  },
   "type": "module",
   "description": "LOCAL/single-node production-style boot entrypoint + AppDeps composition root. Pre-external-hardening (no KMS/per-tenant isolate/DPoP; database roles and row-level security opt-in) — NOT internet-facing. Assembles the platform from env, applies the committed migration chain via the real programmatic migrator, fails closed on missing secrets, and serves the Hono app.",
   "exports": {

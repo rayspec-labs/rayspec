@@ -50,7 +50,7 @@ import {
   writeTree,
 } from '../../../kernel/bundle-closure/src/test-support/app.js';
 import { runPack } from './pack.js';
-import { CLI_DIST, type ParsedJson } from './test-support/bundles.js';
+import { CLI_DIST, CLI_VERSION, type ParsedJson } from './test-support/bundles.js';
 import { freePort } from './test-support/processes.js';
 
 const baseUrl = process.env.DATABASE_URL;
@@ -129,7 +129,11 @@ describe.skipIf(!baseUrl)('rayspec deploy <file.ray> — the life of one deploym
         output,
         ...(against === undefined ? [] : ['--against', join(source, 'previous.yaml')]),
       ],
-      { operationId: randomUUID(), cliVersion: '1.8.0', env: { SHADOW_DATABASE_URL: shadowUrl } },
+      {
+        operationId: randomUUID(),
+        cliVersion: CLI_VERSION,
+        env: { SHADOW_DATABASE_URL: shadowUrl },
+      },
     );
     expect(packed.envelope.ok, JSON.stringify(packed.envelope.errors)).toBe(true);
     const target = join(deployDir, `${name}.ray`);

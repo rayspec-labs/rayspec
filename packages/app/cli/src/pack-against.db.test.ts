@@ -42,6 +42,7 @@ import {
   writeTree,
 } from '../../../kernel/bundle-closure/src/test-support/app.js';
 import { runPack } from './pack.js';
+import { CLI_VERSION } from './test-support/bundles.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const dbRequired = Boolean(process.env.CI) || process.env.RAYSPEC_REQUIRE_DB_TESTS === 'true';
@@ -92,7 +93,11 @@ describe.skipIf(!baseUrl)('pack --against, prepared by the target', () => {
         join(root, 'previous.yaml'),
         ...(allowlist === undefined ? [] : ['--allowlist', join(root, 'allow.json')]),
       ],
-      { operationId: randomUUID(), cliVersion: '1.8.0', env: { SHADOW_DATABASE_URL: shadowUrl } },
+      {
+        operationId: randomUUID(),
+        cliVersion: CLI_VERSION,
+        env: { SHADOW_DATABASE_URL: shadowUrl },
+      },
     );
     expect(outcome.envelope.ok, JSON.stringify(outcome.envelope.errors)).toBe(true);
     const data = outcome.envelope.data as { sha256: string };

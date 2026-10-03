@@ -45,6 +45,16 @@
  * which is exactly what the guard exists to prevent. Members outside the publish set are not checked —
  * they are never installed by anyone.
  *
+ * THE SOURCE REPOSITORY
+ * ---------------------
+ * The release workflow publishes with npm provenance, and the registry accepts a provenance statement
+ * only when the package's `repository.url` names the repository the workflow ran in; a package
+ * without one is refused at publish time, after the packages before it in the order are already
+ * public. So every publish target declares `repository` in its COMMITTED manifest: the repo-root
+ * `repository.url` (the one source of the string) and `directory`, its own path in the repository.
+ * The preflight refuses a target that omits either or disagrees, and `--from` refuses a tarball whose
+ * packed manifest does, before the first call. Like the Node requirement, nothing injects it.
+ *
  * WORKSPACE VERSION COUPLING
  * --------------------------
  * Internal deps are declared `@rayspec/x: "workspace:*"`. Because ALL targets are stamped to the SAME
@@ -74,6 +84,17 @@
  * directory holds exactly one tarball per publish target, each declaring that target's name and the
  * release version. The release manifest's integrities then match the registry's.
  *
+ * CONTINUING A PUBLISH THAT STOPPED PART WAY
+ * ------------------------------------------
+ * A version on npm can never be published again, so a `--publish --from` run first asks the
+ * registry for each target's `dist.integrity` at the release version. A target the registry already
+ * serves with the integrity of its tarball here is skipped; one it serves with any other integrity
+ * refuses the whole run before the first call (those bytes are public, and the release must move to
+ * a new version); a lookup that fails for any reason other than "not found" refuses too. Running the
+ * same publish again over the same tarballs therefore publishes exactly the targets that are
+ * missing, from the release workflow, with provenance. The `rayspec` launcher always goes last, so
+ * the launcher being on npm means the whole closure is: the release workflow's guard reads that.
+ *
  * Other flags: --version <v> (asserts the derived version) · --out <dir> (pack destination; a
  * relative path is resolved against the current working directory once, before anything is packed,
  * so every target lands in that ONE directory and the run prints the absolute path) ·
@@ -86,6 +107,7 @@
  * fixture repo with the package manager stubbed (`scripts/publish.test.mjs`).
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -222,6 +244,10 @@ function topoOrder(names, pkgs) {
     ordered.push(n);
   };
   for (const n of names) visit(n);
+  // The launcher last: nothing depends on it, and the release workflow's guard reads "the launcher
+  // is on npm" as "the whole closure is", which holds only if it is the final publish.
+  const launcher = ordered.indexOf('rayspec');
+  if (launcher !== -1) ordered.push(...ordered.splice(launcher, 1));
   return ordered;
 }
 
@@ -286,6 +312,50 @@ function engineMismatches(engine, names, pkgs) {
   return offenders.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/** The repo-root `repository.url`, which every publish target must declare. */
+function deriveRepositoryUrl() {
+  const json = JSON.parse(readFileSync(join(REPO_ROOT, VERSION_SOURCE), 'utf8'));
+  const url = json.repository?.url;
+  if (typeof url !== 'string' || url === '') {
+    console.error(
+      `${VERSION_SOURCE} carries no "repository.url" — every publish target is checked against it.`,
+    );
+    process.exit(2);
+  }
+  return url;
+}
+
+/** The repository path of a package directory, with forward slashes. */
+const repositoryDirectory = (path) => relative(REPO_ROOT, dirname(path)).split(/[\\/]/).join('/');
+
+/** What is wrong with a manifest's `repository` for the target at `path`, or null. */
+function repositoryProblem(repository, url, path) {
+  const directory = repositoryDirectory(path);
+  if (repository?.url !== url || repository?.directory !== directory) {
+    return (
+      `declares ${repository === undefined ? '(none)' : JSON.stringify(repository)}, ` +
+      `needs { "url": "${url}", "directory": "${directory}" }`
+    );
+  }
+  return null;
+}
+
+/**
+ * Every publish target that does not declare the repository it is published from, or declares
+ * another one. Returns EVERY offender, so one run names the whole gap.
+ */
+function repositoryMismatches(url, names, pkgs) {
+  const offenders = [];
+  for (const name of names) {
+    const entry = pkgs.get(name);
+    const problem = entry ? repositoryProblem(entry.json.repository, url, entry.path) : 'not found';
+    if (problem !== null) {
+      offenders.push({ name, path: entry ? relative(REPO_ROOT, entry.path) : name, problem });
+    }
+  }
+  return offenders.sort((a, b) => a.path.localeCompare(b.path));
+}
+
 /**
  * Every manifest that must already carry the release version: the `@rayspec/*` members plus the
  * unscoped launcher — including the ones that are never published (the workspace releases in
@@ -333,7 +403,7 @@ function tagIdentity(version) {
  * manifest is stamped and BEFORE the first `pnpm` child process, so a refusal leaves the working tree
  * and the registry untouched. Returns the tag identity for the summary.
  */
-function preflight(flags, version, engine, pkgs, publishSet) {
+function preflight(flags, version, engine, repositoryUrl, pkgs, publishSet) {
   if (flags.version !== null && flags.version !== version) {
     console.error(
       `--version ${flags.version} does not match the release version ${version} (from ` +
@@ -364,6 +434,17 @@ function preflight(flags, version, engine, pkgs, publishSet) {
       'nothing was packed. A target that does not declare the requirement ships without an engine ' +
         'check for its consumers.',
     );
+    process.exit(2);
+  }
+
+  const repositoryOffenders = repositoryMismatches(repositoryUrl, publishSet, pkgs);
+  if (repositoryOffenders.length) {
+    console.error(
+      `repository mismatch: every publish target must declare the repository it is published from ` +
+        `(npm provenance refuses a package without it), but ${repositoryOffenders.length} target(s) do not:`,
+    );
+    for (const o of repositoryOffenders) console.error(`  ${o.path} — ${o.name} ${o.problem}`);
+    console.error('nothing was packed.');
     process.exit(2);
   }
 
@@ -410,7 +491,7 @@ function preflight(flags, version, engine, pkgs, publishSet) {
  * The packed tarball of every publish target in `dir`, keyed by name, read before anything is
  * published: exactly one per target, each declaring its target's name and the release version.
  */
-function tarballsFrom(dir, version, publishSet) {
+function tarballsFrom(dir, version, publishSet, repositoryUrl, pkgs) {
   let files;
   try {
     files = readdirSync(dir).filter((f) => f.endsWith('.tgz'));
@@ -437,6 +518,13 @@ function tarballsFrom(dir, version, publishSet) {
     else if (!publishSet.includes(manifest.name)) problems.push(`${file} is not a publish target`);
     else if (manifest.version !== version) {
       problems.push(`${file} is ${manifest.name}@${manifest.version}, the release is ${version}`);
+    } else {
+      const problem = repositoryProblem(
+        manifest.repository,
+        repositoryUrl,
+        pkgs.get(manifest.name).path,
+      );
+      if (problem !== null) problems.push(`${file} ${problem}`);
     }
     byName.set(manifest.name, join(dir, file));
   }
@@ -448,6 +536,49 @@ function tarballsFrom(dir, version, publishSet) {
     process.exit(2);
   }
   return byName;
+}
+
+/** The npm integrity (`sha512-<base64>`) of a tarball's exact bytes, as `dist.integrity` records it. */
+function integrityOf(file) {
+  return `sha512-${createHash('sha512').update(readFileSync(file)).digest('base64')}`;
+}
+
+/**
+ * What the registry already serves of this release, read before anything is published: the set of
+ * targets it serves with exactly their tarball's integrity (skipped by the publish). Refuses, before
+ * the first call, when it serves a target with other bytes or a lookup fails other than "not found".
+ */
+function alreadyPublished(order, packed, version) {
+  const skip = new Set();
+  const problems = [];
+  for (const name of order) {
+    const spec = `${name}@${version}`;
+    let served;
+    try {
+      served = execFileSync('npm', ['view', spec, 'dist.integrity', '--prefer-online'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
+    } catch (err) {
+      const said = `${err.stderr ?? ''}${err.stdout ?? ''}`;
+      if (/\bE404\b/.test(said)) continue; // no such package yet
+      problems.push(
+        `${spec}: the registry cannot be asked (${said.trim().split('\n')[0] || err.message})`,
+      );
+      continue;
+    }
+    if (served === '') continue; // the package exists, this version does not
+    const local = integrityOf(packed.get(name));
+    if (served === local) skip.add(name);
+    else problems.push(`${spec} is already on npm as ${served}, and its tarball here is ${local}`);
+  }
+  if (problems.length) {
+    console.error('refusing to publish: the registry does not allow continuing this release:');
+    for (const p of problems) console.error(`  ${p}`);
+    console.error('nothing was published by this run.');
+    process.exit(2);
+  }
+  return skip;
 }
 
 function main() {
@@ -473,11 +604,18 @@ function main() {
   const pkgs = loadRayspecPackages();
   const version = deriveVersion();
   const nodeEngine = deriveNodeEngine();
+  const repositoryUrl = deriveRepositoryUrl();
   const publishSet = computePublishSet(pkgs);
-  const tag = preflight(flags, version, nodeEngine, pkgs, publishSet);
+  const tag = preflight(flags, version, nodeEngine, repositoryUrl, pkgs, publishSet);
   const order = topoOrder(publishSet, pkgs);
   const packed =
-    flags.from === undefined ? null : tarballsFrom(resolve(flags.from), version, publishSet);
+    flags.from === undefined
+      ? null
+      : tarballsFrom(resolve(flags.from), version, publishSet, repositoryUrl, pkgs);
+  const published =
+    flags.mode === 'publish' && packed !== null
+      ? alreadyPublished(order, packed, version)
+      : new Set();
   // Resolved ONCE, here, so every target is handed the same absolute destination: each `pnpm pack`
   // child runs with its cwd set to the package directory, so a relative destination passed on
   // unresolved would resolve once PER TARGET and scatter the closure one tarball per package while
@@ -502,6 +640,11 @@ function main() {
 
     // Phase 2 — run the requested command per target, in dependency order.
     for (const name of order) {
+      if (published.has(name)) {
+        results.push({ name, version, ok: true, skipped: true, stdout: '' });
+        if (!flags.json) console.log(`[${flags.mode}] ${name}@${version} already on npm, skipped`);
+        continue;
+      }
       const pkgDir = dirname(pkgs.get(name).path);
       let stdout = '';
       if (flags.mode === 'pack') {
@@ -544,7 +687,12 @@ function main() {
     order,
     outDir: outDir ?? null,
     from: packed === null ? null : resolve(flags.from),
-    results: results.map(({ name, version: v, ok }) => ({ name, version: v, ok })),
+    results: results.map(({ name, version: v, ok, skipped }) => ({
+      name,
+      version: v,
+      ok,
+      ...(skipped ? { skipped: true } : {}),
+    })),
   };
   if (flags.json) console.log(JSON.stringify(summary, null, 2));
   else {

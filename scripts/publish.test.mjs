@@ -31,6 +31,11 @@
  *   (D) A TARGET THAT DECLARES A DIFFERENT REQUIREMENT IS NOT PACKABLE — the requirement string has
  *       ONE source, the repo-root `engines.node`. A target that disagrees tells consumers a Node
  *       floor other than the one the workspace is built and tested against.
+ *   (S) A TARGET THAT DOES NOT DECLARE ITS SOURCE REPOSITORY IS NOT PACKABLE — npm refuses a
+ *       provenance publish whose `repository.url` does not name the repository the workflow ran in,
+ *       and it refuses at publish time, after the targets before it are public. Every target declares
+ *       the repo-root `repository.url` and its own `directory`; `--from` holds the packed manifests to
+ *       the same rule.
  *   (A) `--version` IS AN ASSERTION, NEVER AN OVERRIDE — a value that disagrees with the derived
  *       version refuses instead of stamping. There must be no input that packs a version the tree
  *       does not carry.
@@ -53,6 +58,10 @@
  *       it is, in dependency order, stamping nothing; a directory that is not exactly one tarball per
  *       publish target at the release version refuses before the first call, naming every problem,
  *       and `--from` is refused with `--pack` and without a value.
+ *   (N) A PUBLISH THAT STOPPED PART WAY CAN BE CONTINUED — npm never takes the same version twice, so
+ *       a `--publish --from` run skips a target the registry already serves with its tarball's exact
+ *       integrity and publishes the rest; a target served with other bytes, or a registry that cannot
+ *       be asked, refuses before the first call. The launcher is always published last.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -61,6 +70,7 @@
  */
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
@@ -81,6 +91,9 @@ const VERSION = '1.6.2';
 // The Node requirement. The fixture's root manifest is its ONE source, exactly as the repo-root
 // manifest is in the real repo; every publish target has to declare the same string.
 const NODE_ENGINE = '>=22';
+// The source repository: the root manifest's `repository.url` is its one source.
+const REPOSITORY_URL = 'git+https://github.com/fixture/rayspec.git';
+const repositoryOf = (m) => ({ type: 'git', url: REPOSITORY_URL, directory: m.dir });
 
 // ── the `pnpm` test double ──────────────────────────────────────────────────────────────────────
 // Logs one JSON line per invocation (argv + cwd, i.e. which package was packed) and succeeds. Its
@@ -103,6 +116,23 @@ if (argv[0] === 'pack' && destIdx !== -1) {
   writeFileSync(join(dest, pkg.name.replace('@', '').replace('/', '-') + '-' + pkg.version + '.tgz'), '');
 }
 process.stdout.write('fake pnpm: ' + argv.join(' ') + '\\n');
+`;
+
+// ── the `npm` test double ───────────────────────────────────────────────────────────────────────
+// Answers `npm view <name>@<version> dist.integrity` from FAKE_NPM_REGISTRY (a JSON map of spec to
+// integrity, or to "!down" for a registry that cannot be reached), and like the real one exits 1
+// with `E404` for a spec it does not hold. Every call is logged, so a case can show which targets
+// were looked up.
+const FAKE_NPM = `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const argv = process.argv.slice(2);
+appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ argv }) + '\\n');
+const registry = JSON.parse(process.env.FAKE_NPM_REGISTRY || '{}');
+if (argv[0] !== 'view') { process.stderr.write('fake npm: only view\\n'); process.exit(1); }
+const served = registry[argv[1]];
+if (served === '!down') { process.stderr.write('npm error code ECONNREFUSED\\n'); process.exit(1); }
+if (served === undefined) { process.stderr.write('npm error code E404\\nnpm error 404 Not Found\\n'); process.exit(1); }
+process.stdout.write(served + '\\n');
 `;
 
 /**
@@ -150,7 +180,13 @@ function gitIn(root, ...args) {
  * requested tags. A tag with `at: 'previous'` is created on the first commit and a second commit
  * then moves HEAD past it.
  */
-function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = [] } = {}) {
+function fixture({
+  rootVersion = VERSION,
+  versions = {},
+  engines = {},
+  repositories = {},
+  tags = [],
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), 'rayspec-release-guard-'));
   workspaces.push(root);
 
@@ -163,6 +199,7 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
     name: 'rayspec',
     version: rootVersion,
     private: true,
+    repository: { type: 'git', url: REPOSITORY_URL },
     engines: { node: NODE_ENGINE },
   });
 
@@ -172,10 +209,13 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
     // Publish targets declare the requirement; the members that never ship deliberately do not —
     // the same shape the real repo has, so every case also exercises the guard's scope.
     const engine = m.name in engines ? engines[m.name] : m.target ? NODE_ENGINE : null;
+    const repository =
+      m.name in repositories ? repositories[m.name] : m.target ? repositoryOf(m) : null;
     manifest(join(m.dir, 'package.json'), {
       name: m.name,
       version: versions[m.name] ?? m.pinned ?? rootVersion,
       private: true,
+      ...(repository === null ? {} : { repository }),
       ...(engine === null ? {} : { engines: { node: engine } }),
       dependencies: Object.fromEntries(m.deps.map((d) => [d, 'workspace:*'])),
     });
@@ -199,6 +239,8 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
   mkdirSync(stubs);
   writeFileSync(join(stubs, 'pnpm'), FAKE_PNPM);
   chmodSync(join(stubs, 'pnpm'), 0o755);
+  writeFileSync(join(stubs, 'npm'), FAKE_NPM);
+  chmodSync(join(stubs, 'npm'), 0o755);
   return { root, stubs };
 }
 
@@ -207,9 +249,11 @@ function fixture({ rootVersion = VERSION, versions = {}, engines = {}, tags = []
  * publish gate for the cases that must reach the tag check; the unroutable registry is the second
  * belt behind the stub — nothing here can reach a real one.
  */
-function run(fx, args, { allowPublish = false } = {}) {
+function run(fx, args, { allowPublish = false, registry = {} } = {}) {
   const log = join(fx.root, 'pnpm-calls.log');
   writeFileSync(log, '');
+  const npmLog = join(fx.root, 'npm-calls.log');
+  writeFileSync(npmLog, '');
   const res = spawnSync('node', [join(fx.root, 'scripts', 'publish.mjs'), ...args], {
     cwd: fx.root,
     encoding: 'utf8',
@@ -217,12 +261,15 @@ function run(fx, args, { allowPublish = false } = {}) {
       ...process.env,
       PATH: `${fx.stubs}:${process.env.PATH}`,
       FAKE_PNPM_LOG: log,
+      FAKE_NPM_LOG: npmLog,
+      FAKE_NPM_REGISTRY: JSON.stringify(registry),
       npm_config_registry: 'http://127.0.0.1:1/',
       ...(allowPublish ? { RAYSPEC_ALLOW_PUBLISH: '1' } : {}),
     },
   });
   const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
-  return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls };
+  const lookups = readFileSync(npmLog, 'utf8').split('\n').filter(Boolean).map(JSON.parse);
+  return { code: res.status, out: res.stdout ?? '', err: res.stderr ?? '', calls, lookups };
 }
 
 /** A refusal: nonzero exit, an explanation on stderr, and NOT ONE package manager invocation. */
@@ -328,6 +375,34 @@ try {
     assert.match(r.err, />=20/, `(D) the divergent value must be shown: ${r.err}`);
     assert.match(r.err, />=22/, `(D) the required value must be named: ${r.err}`);
     console.log('ok (D) — a publish target that declares another Node engine cannot be packed');
+  }
+
+  // ── (S) a publish target without its source repository, or with another one → refusal ─────────
+  {
+    const fx = fixture({
+      repositories: {
+        '@rayspec/core': null,
+        '@rayspec/cli': { type: 'git', url: REPOSITORY_URL, directory: 'packages/app' },
+        '@rayspec/server': { type: 'git', url: 'https://github.com/elsewhere/rayspec' },
+      },
+    });
+    const r = run(fx, ['--pack', '--out', join(fx.root, 'out')]);
+    assertRefused(r, '(S)', fx);
+    for (const path of ['kernel/core', 'app/cli', 'app/server']) {
+      assert.match(
+        r.err,
+        new RegExp(`packages/${path}/package\\.json`),
+        `(S) every offending target must be named by path: ${r.err}`,
+      );
+    }
+    assert.match(r.err, /declares \(none\)/, `(S) a missing field must be named: ${r.err}`);
+    assert.match(r.err, /elsewhere/, `(S) the divergent value must be shown: ${r.err}`);
+    assert.match(
+      r.err,
+      /"directory": "packages\/app\/cli"/,
+      `(S) the required directory must be named: ${r.err}`,
+    );
+    console.log('ok (S) — a publish target that does not declare its repository cannot be packed');
   }
 
   // ── (A) --version disagreeing with the derived version → refusal, never an override ────────────
@@ -561,8 +636,11 @@ try {
 
   // ── (F) --from publishes the packed tarballs themselves, and refuses anything else ─────────────
   {
-    /** One tarball per entry `[name, version]`, packed the way pnpm names them. */
-    const packDir = (fx, entries, dirName) => {
+    /**
+     * One tarball per entry `[name, version]`, packed the way pnpm names them, each declaring its
+     * repository unless `bare` names it.
+     */
+    const packDir = (fx, entries, dirName, bare = []) => {
       const dir = join(fx.root, dirName);
       mkdirSync(dir);
       for (const [name, version] of entries) {
@@ -571,7 +649,15 @@ try {
         mkdirSync(join(src, 'package'));
         writeFileSync(
           join(src, 'package', 'package.json'),
-          `${JSON.stringify({ name, version })}\n`,
+          `${JSON.stringify({
+            name,
+            version,
+            ...(bare.includes(name)
+              ? {}
+              : {
+                  repository: repositoryOf(MEMBERS.find((m) => m.name === name) ?? { dir: name }),
+                }),
+          })}\n`,
         );
         const file = `${name.replace('@', '').replace('/', '-')}-${version}.tgz`;
         const tar = spawnSync('tar', ['-czf', join(dir, file), '-C', src, 'package']);
@@ -606,6 +692,57 @@ try {
       assert.equal(c.private, true, '(F) nothing is stamped when the tarballs carry the version');
     }
     assert.equal(JSON.parse(r.out).from, good, '(F) the summary names the directory');
+    assert.equal(order.at(-1), 'rayspec', `(F) the launcher is published last: ${order}`);
+    assert.equal(r.lookups.length, TARGETS.length, '(F) the registry is asked once per target');
+
+    // (N) a publish that stopped after @rayspec/core: the next run skips it and publishes the rest.
+    const integrity = (name) =>
+      `sha512-${createHash('sha512')
+        .update(
+          readFileSync(join(good, `${name.replace('@', '').replace('/', '-')}-${VERSION}.tgz`)),
+        )
+        .digest('base64')}`;
+    const core = `@rayspec/core@${VERSION}`;
+    const resumed = run(fx, ['--publish', '--yes-really-publish', '--from', good, '--json'], {
+      allowPublish: true,
+      registry: { [core]: integrity('@rayspec/core') },
+    });
+    assert.equal(
+      resumed.code,
+      0,
+      `(N) a stopped publish continues; got ${resumed.code}: ${resumed.err}`,
+    );
+    const resumedOrder = packedOrder(resumed.calls, fx.root);
+    assert.deepEqual(
+      [...resumedOrder].sort(),
+      TARGETS.filter((n) => n !== '@rayspec/core').sort(),
+      `(N) only the missing targets are published: ${resumedOrder}`,
+    );
+    assert.equal(resumedOrder.at(-1), 'rayspec', '(N) the launcher still goes last');
+    assert.deepEqual(
+      JSON.parse(resumed.out).results.find((x) => x.name === '@rayspec/core'),
+      { name: '@rayspec/core', version: VERSION, ok: true, skipped: true },
+      '(N) the summary says the published target was skipped',
+    );
+    for (const [registry, pattern] of [
+      [{ [core]: 'sha512-other' }, /@rayspec\/core@1\.6\.2 is already on npm as sha512-other/],
+      [
+        { [`@rayspec/server@${VERSION}`]: '!down' },
+        /@rayspec\/server@1\.6\.2: the registry cannot be asked/,
+      ],
+    ]) {
+      const refused = run(fx, ['--publish', '--yes-really-publish', '--from', good], {
+        allowPublish: true,
+        registry,
+      });
+      assertRefused(refused, '(N)', fx);
+      assert.match(refused.err, pattern, `(N) the problem must be named: ${refused.err}`);
+    }
+    // Only a real publish asks the registry: a dry run over the same tarballs stays offline.
+    const dry = run(fx, ['--dry-run', '--from', good], { registry: { [core]: 'sha512-other' } });
+    assert.equal(dry.code, 0, `(N) a dry run does not ask the registry: ${dry.err}`);
+    assert.equal(dry.lookups.length, 0, '(N) no lookup in a dry run');
+    console.log('ok (N) — a stopped publish continues with the missing targets only');
 
     const missing = packDir(
       fx,
@@ -622,8 +759,15 @@ try {
       [...TARGETS.map((n) => [n, VERSION]), ['@rayspec/parity', VERSION]],
       'foreign',
     );
+    const unsourced = packDir(
+      fx,
+      TARGETS.map((n) => [n, VERSION]),
+      'unsourced',
+      ['@rayspec/server'],
+    );
     for (const [dir, pattern] of [
       [missing, new RegExp(`no tarball of ${TARGETS[0].replace('/', '\\/')}`)],
+      [unsourced, /rayspec-server-1\.6\.2\.tgz declares \(none\)/],
       [drift, /@rayspec\/core@1\.6\.1, the release is 1\.6\.2/],
       [foreign, /is not a publish target/],
     ]) {

@@ -32,7 +32,7 @@ import {
   writeTree,
 } from '../../../../kernel/bundle-closure/src/test-support/app.js';
 import { runPack } from '../pack.js';
-import { CLI_DIST, type ParsedJson } from './bundles.js';
+import { CLI_DIST, CLI_VERSION, type ParsedJson } from './bundles.js';
 import { pgToolPath } from './pg-tools.js';
 
 /** The organization of the source: its one application tenant. */
@@ -243,7 +243,7 @@ export async function buildMigrationSource(
     });
     const packed = await runPack(
       ['--spec', join(source, 'rayspec.yaml'), '--output', join(source, 'app.ray')],
-      { operationId: randomUUID(), cliVersion: '1.8.0' },
+      { operationId: randomUUID(), cliVersion: CLI_VERSION },
     );
     if (!packed.envelope.ok) throw new Error(JSON.stringify(packed.envelope.errors));
     const appBundle = join(deployDir, 'app.ray');
