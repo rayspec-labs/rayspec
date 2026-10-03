@@ -1020,14 +1020,20 @@ function verify(flags) {
 
   // The source side is comparable only against the checkout the manifest names — a verifier run
   // from another commit reports that instead of failing on a difference it cannot interpret.
+  // A manifest generated from a working tree with changes recorded those changed bytes, which no
+  // checkout holds any more — a release candidate stamped with its version transiently is the
+  // everyday case — so its source side is reported as not comparable rather than failed.
   const head = git('rev-parse', 'HEAD');
   const tree = worktreeState();
-  const comparable = head === manifest.source.commit && tree.clean === true;
+  const generatedClean = manifest.source.worktree_clean === true;
+  const comparable = head === manifest.source.commit && tree.clean === true && generatedClean;
   const sourceEntries = [...(manifest.schemas ?? []), manifest.lockfile, manifest.dependency_sbom];
   let sourceNote =
     tree.clean === null
       ? `not compared: the working tree state is unknown (${tree.error})`
-      : `not compared: this checkout is ${head ?? 'unknown'}${tree.clean ? '' : ' (dirty)'}, the manifest records ${manifest.source.commit}`;
+      : !generatedClean
+        ? `not compared: the manifest was generated from a working tree with changes (${(manifest.source.dirty_paths ?? []).join(', ')})`
+        : `not compared: this checkout is ${head ?? 'unknown'}${tree.clean ? '' : ' (dirty)'}, the manifest records ${manifest.source.commit}`;
   if (comparable) {
     for (const artifact of sourceEntries) {
       if (!artifact) continue;

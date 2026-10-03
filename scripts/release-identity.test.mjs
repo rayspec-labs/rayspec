@@ -1185,6 +1185,10 @@ try {
   {
     const fx = fixture();
     assert.equal(generate(fx).manifest.source.worktree_clean, true, '(W) a clean tree must say so');
+    writeFileSync(
+      join(fx.root, 'pnpm-lock.yaml.orig'),
+      readFileSync(join(fx.root, 'pnpm-lock.yaml')),
+    );
     writeFileSync(join(fx.root, 'pnpm-lock.yaml'), 'edited after the tag\n');
     const dirty = generate(fx).manifest;
     assert.equal(
@@ -1196,6 +1200,24 @@ try {
       dirty.source.dirty_paths,
       ['pnpm-lock.yaml'],
       `(W) the modified path must be named: ${JSON.stringify(dirty.source.dirty_paths)}`,
+    );
+    // A manifest generated while the tree had changes is not compared against the clean checkout
+    // it names afterwards: the bytes it recorded are gone, so the source side says so instead of
+    // failing on them. The tarball side is still checked.
+    writeFileSync(
+      join(fx.root, 'pnpm-lock.yaml'),
+      readFileSync(join(fx.root, 'pnpm-lock.yaml.orig')),
+    );
+    const restored = verify(fx);
+    assert.equal(
+      restored.code,
+      0,
+      `(W) a dirty-generated manifest must verify its tarballs: ${restored.err}`,
+    );
+    assert.match(
+      restored.out,
+      /not compared: the manifest was generated from a working tree with changes \(pnpm-lock\.yaml\)/,
+      `(W) the source side must say why it was not compared: ${restored.out}`,
     );
     console.log('ok (W) — a dirty working tree is recorded, not smoothed over');
   }
