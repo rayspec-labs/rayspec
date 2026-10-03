@@ -3,8 +3,8 @@
 This is the maintainer runbook for a RaySpec release: how a release candidate is built and tested,
 how a candidate or a release is verified, and how the owner publishes. Nothing in this repository
 publishes on its own. Every registry write happens in the release workflow
-(`.github/workflows/release.yml`), which a maintainer dispatches by hand from the release tag and a
-reviewer approves.
+(`.github/workflows/release.yml`), which a maintainer dispatches by hand from the release tag, the
+approver signs for on their own machine, and a reviewer approves.
 
 ## What a release ships
 
@@ -12,11 +12,13 @@ reviewer approves.
 |---|---|---|
 | The npm packages of the publish set (the `rayspec` launcher, `@rayspec/cli`, `@rayspec/server` and every `@rayspec` package they depend on), with npm provenance | npm | `scripts/publish.mjs --publish --from <tarballs>` |
 | The linux/amd64 runtime image ([The runtime image](./runtime-image.md)) | `ghcr.io/rayspec-labs/rayspec`, by digest | `deployments/runtime-image/Dockerfile` |
-| `release-manifest.json` and `release-manifest.json.sig`: the release catalog of the shared contract, signed with the Ed25519 release key | GitHub release | `scripts/release-manifest.mjs generate`, `sign` |
+| `release-manifest.json` and `release-manifest.json.sig`: the release catalog of the shared contract, signed by the approver with the Ed25519 release key | GitHub release | `scripts/release-manifest.mjs generate`, `sign` (on the approver's machine) |
 | `release-evidence.json`: everything else, each bound by SHA-256 to the manifest | GitHub release | `scripts/release-manifest.mjs evidence` |
 | `managed-receipt.json`: the managed-posture receipt | GitHub release | `scripts/managed-receipt.mjs` |
 | `rayspec-release-identity.json`: the closure mapped back to its commit (also inside the launcher package) | GitHub release, npm | `scripts/release-identity.mjs` |
-| `closure-sbom.cdx.json`: the CycloneDX 1.5 SBOM of the published closure, with each tarball's SHA-512 | GitHub release | `scripts/gen-closure-sbom.mjs --tarballs` |
+| `closure-sbom.cdx.json`: the CycloneDX 1.5 SBOM of the published closure as the workspace lockfile resolves it, with each tarball's SHA-512 | GitHub release | `scripts/gen-closure-sbom.mjs --tarballs` |
+| `image-sbom.cdx.json`: the CycloneDX 1.5 SBOM of the npm packages installed in the image, naming the image by digest | GitHub release | `scripts/gen-image-sbom.mjs` |
+| `package-lock.json` of the image: the tree the image was installed from with `npm ci` | GitHub release, and `/opt/rayspec/package-lock.json` in the image | the Dockerfile's `lock` stage |
 | The packed tarballs | GitHub release | `scripts/publish.mjs --pack` |
 
 The release manifest is exactly the contract's `release-manifest.schema.json`, a closed schema: the
@@ -26,8 +28,11 @@ names the manifest's SHA-256, so the receipt and everything else a release hands
 `release-evidence.json` beside it: the contract version and digest, every package with its SHA-256,
 the image's registry reference, the schemas with their SHA-256, the fixture corpus digest, the
 previous supported version and the upgrade results from it, the platform schema head, the
-capabilities, the receipt, the SBOM and an index of every evidence file. Neither document is written
-with a value that was not read from its artifact: a missing input, or a value that looks like a
+capabilities, the receipt, both SBOMs and an index of every evidence file. The evidence accepts an
+image SBOM only when it names the manifest's image and shows each release tarball installed in the
+image at the tarball's integrity, and an upgrade report only when the harness ran the CLI of the
+candidate install and that CLI reported the release version. Neither document is written with a
+value that was not read from its artifact: a missing input, or a value that looks like a
 placeholder, refuses the run.
 
 ## Versions
@@ -54,8 +59,18 @@ pnpm release:candidate --version 1.9.0-rc.0 --out ./candidate --builder rayspec-
 ```
 
 `./candidate` then holds `tarballs/`, `rayspec-release-identity.json`, `closure-sbom.cdx.json`,
-`image/rayspec-runtime.oci.tar`, `release-manifest.json`, `candidate.json` (every artifact with its
+`image/rayspec-runtime.oci.tar`, `image/lock/package-lock.json` (the tree the image installed),
+`image/image-sbom.cdx.json`, `release-manifest.json`, `candidate.json` (every artifact with its
 SHA-256 and the outcome of each step) and `logs/`. Check that `git status` shows nothing.
+
+The image is built in two steps. The Dockerfile's `lock` stage resolves the dependency tree of the
+tarballs once, the way a consumer's npm resolves it: every `@rayspec` package from its tarball,
+every third-party package from the registry at that moment. The image then installs exactly that
+lockfile with `npm ci`, and the builder checks that the image holds it. So the third-party versions
+in the image are the ones the registry served when the candidate was built, which can be newer than
+the ones the workspace lockfile pins and `closure-sbom.cdx.json` lists; `image-sbom.cdx.json` lists
+what the image holds, and the candidate workflow scans the lockfile with osv-scanner as ci.yml scans
+a consumer install.
 
 Then test exactly those artifacts. DATABASE_URL names a PostgreSQL 16 server where databases and
 roles may be created (see `.env.example`).
@@ -105,7 +120,7 @@ repository's tools:
 
 ```bash
 # The manifest: canonical, its schema, the contract's rules, the signature by the release key, and
-# the tarballs and image it names.
+# the tarballs and image it names (every layer of the image archive with its own bytes).
 node scripts/release-manifest.mjs verify --manifest release-manifest.json \
   --signature release-manifest.json.sig --trusted-key release-key.pub.pem \
   --tarballs ./tarballs --image-oci rayspec-runtime.oci.tar
@@ -122,17 +137,30 @@ The signature is the contract's detached signature file: Ed25519 over
 `rayspec-release-manifest-v1\nsha256:<SHA-256 of the manifest file>\n`, naming the SHA-256 of the
 release public key. A `.ray` signature uses another domain string, so neither verifies as the other.
 
+### What a rebuild reproduces
+
+A release is checked against its own published artifacts, not against a rebuild. A rebuild of the
+same commit is not byte for byte the same: pnpm writes the dependencies of a packed manifest in its
+own order, `tsc` can emit the members of a union type in another order in a declaration file (so
+the file-list digest of `@rayspec/server` in the identity manifest can differ), and the image's
+third-party packages are resolved from the registry when its lockfile is written. The image's
+timestamps are the commit's time (`SOURCE_DATE_EPOCH`), so they do not differ between builds.
+Verify a release with `release-identity.mjs --verify` and `release-manifest.mjs verify` against the
+tarballs and the image archive the release ships.
+
 ## Publishing
 
-The owner publishes. Before the first release, once:
+The owner publishes. The release key is held by the approver: it never leaves their machine and is
+never given to a workflow. Before the first release, once:
 
-1. Generate the Ed25519 release key on the approver's machine and keep the private key there:
-   `openssl genpkey -algorithm ed25519 -out release-key.pem` and
+1. The approver generates the Ed25519 release key on their machine and keeps the private key there,
+   readable by them only:
+   `openssl genpkey -algorithm ed25519 -out release-key.pem && chmod 600 release-key.pem` and
    `openssl pkey -in release-key.pem -pubout -out release-key.pub.pem`.
 2. Create the GitHub environment `release` with at least one required reviewer, and give it the
-   secrets `RAYSPEC_RELEASE_SIGNING_KEY` (the private key PEM) and `NPM_TOKEN` (an npm automation
-   token for the `rayspec` packages), and the variable `RAYSPEC_RELEASE_PUBLIC_KEY` (the public key
-   PEM). Publish the public key where integrators read it.
+   secret `NPM_TOKEN` (an npm automation token for the `rayspec` packages) and the variable
+   `RAYSPEC_RELEASE_PUBLIC_KEY` (the approver's public key PEM). Publish the public key where
+   integrators read it. The workflow refuses to run while the environment has no required reviewer.
 3. Allow the workflow to write the `ghcr.io/rayspec-labs/rayspec` package.
 
 For each release:
@@ -144,15 +172,37 @@ For each release:
    are green.
 3. Tag the merge commit: `git tag -a v1.9.0 -m "RaySpec 1.9.0"` and push the tag.
 4. Dispatch **Release** from the tag `v1.9.0` with `version` `1.9.0` and `confirm`
-   `publish rayspec 1.9.0`. The workflow refuses anything else, and refuses a version npm already has.
-5. The workflow builds the release's own artifacts from the tag (`release-candidate.mjs --release`,
-   nothing stamped), runs the whole conformance and the upgrade matrix on them, and runs the
-   certification lane at the tag. Then, in the `release` environment, after a reviewer approves:
-   it makes the managed receipt, signs the release manifest and verifies the signature against the
-   approver's public key, writes the evidence, publishes the tested tarballs themselves with npm
-   provenance, copies the archived image to GHCR without conversion and checks the registry serves
-   its digest, checks npm serves every integrity the manifest lists, and creates the GitHub release
-   with every artifact attached.
+   `publish rayspec 1.9.0`, and nothing else. The workflow refuses anything else, and refuses a
+   version npm already has. It builds the release's own artifacts from the tag
+   (`release-candidate.mjs --release`, nothing stamped), runs the whole conformance and the upgrade
+   matrix on them, runs the certification lane at the tag, and verifies the release manifest. It
+   signs and publishes nothing.
+5. The approver downloads the `release-candidate` artifact of that run, checks it and signs the
+   manifest on their machine, from a checkout of the tag with `pnpm build` run:
+
+   ```bash
+   node scripts/release-manifest.mjs verify --manifest release-candidate/release-manifest.json \
+     --tarballs release-candidate/tarballs --image-oci release-candidate/image/rayspec-runtime.oci.tar
+   node scripts/release-manifest.mjs sign --manifest release-candidate/release-manifest.json \
+     --key-file release-key.pem --trusted-key release-key.pub.pem
+   ```
+
+6. Dispatch **Release** again from the tag, with the same `version` and `confirm`, `build_run` the
+   id of the run of step 4, and `signature` the signature file in base64:
+
+   ```bash
+   gh workflow run release.yml --ref v1.9.0 -f version=1.9.0 -f confirm='publish rayspec 1.9.0' \
+     -f build_run=<run id> -f signature="$(base64 < release-candidate/release-manifest.json.sig | tr -d '\n')"
+   ```
+
+   The workflow checks that the run is a successful release build of the same commit and, in the
+   `release` environment after a reviewer approves, verifies the signature against
+   `RAYSPEC_RELEASE_PUBLIC_KEY`, makes the managed receipt from that run's certification lane,
+   writes the evidence, publishes that run's tarballs themselves with npm provenance, copies its
+   archived image to GHCR without conversion and checks the registry serves its digest, checks npm
+   serves every integrity the manifest lists, and creates the GitHub release with every artifact
+   attached. The artifacts of step 4 are kept for 30 days: sign and publish within that time, or
+   build again.
 
 ### When a release fails
 
@@ -177,5 +227,8 @@ For each release:
   the image check (`image-conformance.mjs`) serves one reference application through a container
   network instead.
 - The closure SBOM describes the closure as the workspace lockfile resolves it. A consumer's npm
-  resolves afresh; `scripts/check-consumer-install.mjs` scans that tree separately.
+  resolves afresh; `scripts/check-consumer-install.mjs` scans that tree separately. The image holds
+  the tree its own lockfile records, resolved when the image was built: `image-sbom.cdx.json`
+  describes it, and its third-party versions can differ from the closure SBOM's.
+- A rebuild of a commit is not byte-reproducible (see What a rebuild reproduces).
 - The release workflow's publish steps have not run yet: the first release is their first run.

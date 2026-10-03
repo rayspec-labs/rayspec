@@ -21,7 +21,8 @@ docker pull ghcr.io/rayspec-labs/rayspec@sha256:<digest from the signed release 
 | Platform | `linux/amd64` only. Other platforms are not built and not supported. |
 | Base | `node:<pinned 22 patch>-trixie-slim`, pinned by digest in `deployments/runtime-image/Dockerfile` |
 | User | `rayspec` (uid and gid 10001). The image never runs as root. |
-| Installation | `/opt/rayspec`, owned by root and not writable by any other user, installed from the release tarballs with install scripts disabled |
+| Installation | `/opt/rayspec`, owned by root and not writable by any other user, installed from the release tarballs with `npm ci` from the lockfile the release ships (`/opt/rayspec/package-lock.json`), install scripts disabled |
+| SBOM | `image-sbom.cdx.json` of the release lists every npm package installed in the image, with the image's digest |
 | Working directory | `/var/lib/rayspec`, owned by `rayspec`, mode 0700: put the state directory and the blob root here, on a volume |
 | Listening | port 8080 (`PORT`), on every address of the container (`RAYSPEC_HOST=0.0.0.0`); `docker run -p` decides what the host exposes |
 | Health check | `node /opt/rayspec/healthcheck.mjs`: `/livez` must answer 200 |
@@ -29,8 +30,13 @@ docker pull ghcr.io/rayspec-labs/rayspec@sha256:<digest from the signed release 
 | Kept | `/bin/sh`, which the supervisor of a role-separated deploy needs; `pg_dump` and `pg_restore` of PostgreSQL 16 |
 | Removed | npm, npx, corepack and yarn. The Debian base userland otherwise stays as the base image ships it. |
 
-The candidate and release workflows check every row of this table on the archived image before it
-is published (`scripts/image-conformance.mjs`).
+The candidate and release workflows check this table on the archived image before it is published
+(`scripts/image-conformance.mjs`): the platform, the Node patch the Dockerfile pins, the user, the
+installation's owner and that no file of it is writable by the user, the working directory's owner
+and mode, the port and address, the health check, the labels, `/bin/sh`, the client tools and the
+removed package managers. The base image's digest is pinned in the Dockerfile and not checked again;
+that the image holds the lockfile it was built from is checked by `scripts/release-candidate.mjs`,
+and the image SBOM by `scripts/release-manifest.mjs evidence`.
 
 ## Running it
 
@@ -77,9 +83,13 @@ Some prerequisites of the managed posture belong to the host, not to the image
 ## Building it
 
 `scripts/release-candidate.mjs` builds the image from the packed release tarballs, never from the
-workspace (see [Releasing](./releasing.md)). It needs a buildx builder of the `docker-container`
-driver, because it writes the image as an OCI image layout archive; `docker load -i` reads the same
-archive, so the image you test is the image the release manifest names:
+workspace (see [Releasing](./releasing.md)). It first resolves the dependency tree once into a
+lockfile (the Dockerfile's `lock` stage), then builds the image from that lockfile with `npm ci`, its
+timestamps set to the commit's time. The third-party versions are therefore the ones the registry
+served when the lockfile was written, which can be newer than the workspace lockfile's; the image
+SBOM lists them. It needs a buildx builder of the `docker-container` driver, because it writes the
+image as an OCI image layout archive; `docker load -i` reads the same archive, so the image you test
+is the image the release manifest names:
 
 ```bash
 docker buildx create --name rayspec-release --driver docker-container
