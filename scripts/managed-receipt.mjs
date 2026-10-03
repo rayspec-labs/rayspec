@@ -48,6 +48,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { CHECKS, judgeReport, laneFacts, SUMMARY_FILE } from './certification.mjs';
+import { isEntryPoint } from './lib/entry.mjs';
 import { RESIDUAL_RISKS } from './lib/residual-risks.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -485,6 +486,6 @@ export async function main(argv = process.argv.slice(2), options = {}) {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+if (isEntryPoint(import.meta.url)) {
   process.exitCode = await main();
 }

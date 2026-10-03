@@ -155,17 +155,8 @@ describe('the verbs against their contract definitions', () => {
     ).toEqual(contract.sort());
   });
 
-  it('export reports every code the contract lists, and the preflight codes it adds', () => {
-    for (const code of exportVerb.errors)
-      expect(EXPORT_ERROR_CODES.has(code as never), code).toBe(true);
-    const added = [...EXPORT_ERROR_CODES].filter((c) => !exportVerb.errors.includes(c)).sort();
-    expect(added).toEqual([
-      'RAY_DIGEST_MISMATCH',
-      'RAY_FENCE_MISMATCH',
-      'RAY_POLICY_DENIED',
-      'RAY_RUNTIME_UNSUPPORTED',
-      'RAY_TARGET_UNSUPPORTED',
-    ]);
+  it('export reports exactly the codes the contract lists', () => {
+    expect([...EXPORT_ERROR_CODES].sort()).toEqual([...exportVerb.errors].sort());
   });
 
   it('resume reports exactly the codes the contract lists', () => {

@@ -119,7 +119,7 @@ export class Journey {
  * database server, the client tools and the age library of the installed tree.
  */
 export class Context {
-  constructor({ repo, consumer, tarballs, work, adminUrl, shadowUrl, logDir, log }) {
+  constructor({ repo, consumer, tarballs, work, adminUrl, shadowUrl, logDir, log, image }) {
     this.repo = repo;
     this.consumer = consumer;
     this.tarballs = tarballs;
@@ -133,6 +133,24 @@ export class Context {
     );
     this.cli = join(consumer, 'node_modules', 'rayspec', launcher.bin.rayspec);
     this.version = launcher.version;
+    // With a runtime image, every `rayspec` command of the journey runs in a container of that
+    // image instead (see imageCliSource); the installed tree still supplies the helpers above.
+    this.image = image ?? null;
+    if (this.image !== null) {
+      this.cli = join(work, 'rayspec-in-image.cjs');
+      writeFileSync(
+        this.cli,
+        imageCliSource({
+          image: this.image.ref,
+          network: this.image.network,
+          label: this.image.label,
+          namePrefix: this.image.namePrefix,
+          mounts: [...new Set([work, consumer, repo])],
+          user: `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+          home: work,
+        }),
+      );
+    }
     this.rolesSql = readFileSync(
       join(consumer, 'node_modules', '@rayspec', 'db', 'sql', 'database-roles.sql'),
       'utf8',
@@ -173,12 +191,129 @@ export class Context {
     writeFileSync(join(this.logDir, `${label}.log`), text);
   }
 
+  /**
+   * With an image, SIGKILL the container a stand-in child started: a SIGKILL ends the stand-in
+   * without a chance to pass it on, and the container would keep running. The container is named
+   * after the stand-in's process id (imageCliSource).
+   */
+  killContainer(child) {
+    if (this.image === null || child.pid === undefined) return;
+    spawnSync('docker', ['kill', '--signal', 'KILL', `${this.image.namePrefix}-${child.pid}`], {
+      stdio: 'ignore',
+    });
+  }
+
   /** Stop every child still running and drop every environment's databases and roles. */
   async dispose() {
     for (const served of [...this.serving]) await served.kill();
-    for (const child of this.children) if (child.exitCode === null) child.kill('SIGKILL');
+    for (const child of this.children) {
+      if (child.exitCode !== null) continue;
+      this.killContainer(child);
+      child.kill('SIGKILL');
+    }
+    // A killed wrapper cannot stop its container; every container of this run carries the label.
+    if (this.image !== null) removeLabelledContainers(this.image.label);
     for (const env of this.environments.splice(0).reverse()) await env.drop().catch(() => {});
   }
+}
+
+/**
+ * A pre-release runtime is outside every caret range of its release line under npm's rules
+ * (`^1.8.0` excludes `1.9.0-rc.0`), and pack refuses an extension whose `@rayspec` range excludes
+ * the runtime the bundle pins. For a release candidate, the built extension's `@rayspec` ranges are
+ * therefore set to `^<version>` of the candidate, and the change is returned so the run records it.
+ * A release version changes nothing.
+ */
+export function platformRangesForRuntime(packageJsonPath, version) {
+  if (!version.includes('-')) return [];
+  const manifest = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  const changed = [];
+  for (const [name, range] of Object.entries(manifest.dependencies ?? {})) {
+    if (!name.startsWith('@rayspec/')) continue;
+    manifest.dependencies[name] = `^${version}`;
+    changed.push({ name, from: range, to: `^${version}` });
+  }
+  writeFileSync(packageJsonPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return changed;
+}
+
+/** Environment variables a container of the image never takes from the journey. */
+export const IMAGE_ENV_DROPPED = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'RAYSPEC_PG_DUMP',
+  'RAYSPEC_PG_RESTORE',
+];
+
+/**
+ * The source of a Node script that runs `rayspec <args>` in a container of `image`, standing in
+ * for the installed CLI: the same arguments, working directory, environment and exit code.
+ *
+ *   - `mounts` are bind-mounted at their own real paths, so every path a journey passes means the
+ *     same file inside the container; the working directory is the real path too, so a directory
+ *     reached through a symbolic link (macOS keeps its temporary directories under /var, a link to
+ *     /private/var) is still inside a mount;
+ *   - the container runs as `user` (the journey's own, never root), so it reads the journey's
+ *     private files and the installation stays read-only to it; `home` is its HOME;
+ *   - every variable of the environment it is given is passed by name (`-e NAME`), so no value
+ *     appears on a command line, except those in IMAGE_ENV_DROPPED: the image has its own PATH and
+ *     its own pg_dump and pg_restore;
+ *   - `network` is the container's network (`host` on Linux, where the journey's servers, proxies
+ *     and database are on 127.0.0.1);
+ *   - SIGTERM and SIGINT are passed to the container with `docker kill --signal`; every container
+ *     carries `label`, so one left by a SIGKILL is removed by the run.
+ */
+export function imageCliSource({
+  image,
+  network,
+  label,
+  namePrefix = 'rayspec-journey',
+  mounts,
+  user,
+  home,
+}) {
+  const config = {
+    image,
+    network,
+    label,
+    namePrefix,
+    mounts,
+    user,
+    home,
+    dropped: IMAGE_ENV_DROPPED,
+  };
+  return [
+    `#!/usr/bin/env node`,
+    "'use strict';",
+    "const { spawn, spawnSync } = require('node:child_process');",
+    "const { realpathSync } = require('node:fs');",
+    `const config = ${JSON.stringify(config)};`,
+    "const name = config.namePrefix + '-' + process.pid;",
+    'const env = { ...process.env };',
+    'const names = Object.keys(env).filter((k) => !config.dropped.includes(k) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));',
+    "const args = ['run', '--rm', '--name', name, '--label', config.label, '--network', config.network,",
+    "  '--ulimit', 'core=0', '--user', config.user, '-w', process.cwd(), '-e', 'HOME=' + config.home,",
+    "  ...config.mounts.map((m) => realpathSync(m)).flatMap((m) => ['-v', m + ':' + m]),",
+    "  ...names.flatMap((k) => ['-e', k]),",
+    '  config.image, ...process.argv.slice(2)];',
+    "const child = spawn('docker', args, { env, stdio: ['ignore', 'inherit', 'inherit'] });",
+    "for (const signal of ['SIGTERM', 'SIGINT']) {",
+    "  process.on(signal, () => spawnSync('docker', ['kill', '--signal', signal.slice(3), name], { stdio: 'ignore' }));",
+    '}',
+    "child.on('exit', (code) => process.exit(code ?? 1));",
+    '',
+  ].join('\n');
+}
+
+/** Remove every container carrying `label`, running or not. */
+export function removeLabelledContainers(label) {
+  const listed = spawnSync('docker', ['ps', '-aq', '--filter', `label=${label}`], {
+    encoding: 'utf8',
+  });
+  const ids = (listed.stdout ?? '').split('\n').filter(Boolean);
+  if (ids.length > 0) spawnSync('docker', ['rm', '-f', ...ids], { stdio: 'ignore' });
+  return ids.length;
 }
 
 function hostTool(name) {
@@ -430,7 +565,10 @@ export function rayspecAsync(ctx, args, { env, cwd, timeout = 300_000 } = {}) {
   child.stderr.on('data', (d) => {
     stderr += String(d);
   });
-  const timer = setTimeout(() => child.kill('SIGKILL'), timeout);
+  const timer = setTimeout(() => {
+    ctx.killContainer(child);
+    child.kill('SIGKILL');
+  }, timeout);
   return new Promise((resolve) => {
     child.on('close', (status) => {
       clearTimeout(timer);
@@ -496,6 +634,7 @@ export async function serve(ctx, environment, bundle, planDigest, { env, label, 
       // not listening yet
     }
     if (Date.now() > deadline) {
+      ctx.killContainer(child);
       child.kill('SIGKILL');
       ctx.saveLog(name, output);
       throw new JourneyFailure(`the deploy of ${environment.label} did not serve within 180 s`);
@@ -520,6 +659,7 @@ export async function serve(ctx, environment, bundle, planDigest, { env, label, 
       return { code, envelope };
     },
     async kill() {
+      ctx.killContainer(child);
       child.kill('SIGKILL');
       const result = await exited;
       ctx.children.delete(child);

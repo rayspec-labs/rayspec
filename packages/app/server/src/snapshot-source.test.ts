@@ -4,11 +4,7 @@
  * unknown and blocks the export; the always-excluded categories and run history under its policy
  * never have their rows exported, and the identity policy is the contract's object.
  */
-import {
-  CONTRACT_PLATFORM_TABLES,
-  PLATFORM_TABLES,
-  schemaValidator,
-} from '@rayspec/bundle-contract';
+import { PLATFORM_TABLES, schemaValidator } from '@rayspec/bundle-contract';
 import { describe, expect, it } from 'vitest';
 import {
   classifyApplicationTables,
@@ -88,7 +84,7 @@ describe('classifyApplicationTables', () => {
   });
 
   it('keeps run history rows only under the included policy', () => {
-    const runHistory = CONTRACT_PLATFORM_TABLES.filter((p) => p.category === 'run-history');
+    const runHistory = PLATFORM_TABLES.filter((p) => p.category === 'run-history');
     expect(runHistory.length).toBeGreaterThan(0);
     for (const policy of ['included', 'excluded'] as const) {
       const { tables } = classifyApplicationTables(all, new Set(), policy);

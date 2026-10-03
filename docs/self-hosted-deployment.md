@@ -20,7 +20,9 @@ environment is in [Runtime operations](./runtime-operations.md).
 
 - **The RaySpec CLI of the release the bundle pins.** A bundle names one exact runtime version
   (`runtime.version` in its manifest); a different CLI refuses it with `RAY_RUNTIME_UNSUPPORTED`.
-  Install that release (`npm install -g rayspec@<version>`), or run it with `npx rayspec@<version>`.
+  Install that release (`npm install -g rayspec@<version>`), run it with `npx rayspec@<version>`, or
+  run the release's linux/amd64 [runtime image](./runtime-image.md) by the digest its signed release
+  manifest names.
   You do not need the application's source tree: the bundle carries everything the application
   runs, and the runtime provides the `@rayspec/*` packages.
 - **A PostgreSQL database** for the deployment, and a server where a throwaway database may be

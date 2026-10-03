@@ -280,6 +280,7 @@ export const CAPABILITY_MODULES: Readonly<Record<string, string>> = {
   'tts-openai': '@rayspec/adapter-openai-tts',
   'tts-fake': '@rayspec/tts-port',
   'blob-store-fs': '@rayspec/platform',
+  'extraction-deterministic': '@rayspec/agent-runtime',
 };
 
 const requireHere = createRequire(import.meta.url);

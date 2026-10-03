@@ -1,22 +1,22 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. CLI verb map, result envelope and exit codes. Codes and their exit classes are in error-codes.json.",
-  "contractVersion": "1.0.0-draft.2",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. CLI verb map, result envelope and exit codes. Codes and their exit classes are in error-codes.json.",
+  "contractVersion": "1.0.0-rc.1",
   "output": {
-    "rule": "A new verb writes exactly one final JSON envelope to stdout, with or without --json; progress and logs go to stderr. An existing verb without --json keeps its current output byte for byte. An existing verb with --json writes the envelope with its legacy result object unchanged in data and adds the warning RAY_W_LEGACY_OUTPUT; its legacy string errors become errors with code RAY_CHECK_FAILED and the string as message, and its spec errors become SPEC_ codes.",
+    "rule": "A new verb writes exactly one final JSON envelope to stdout, with or without --json. While it runs, stdout carries nothing else: progress, library and runtime output go to stderr, and so does the short human-readable description of the result, which is written only without --json. An existing verb without --json keeps its current output byte for byte. An existing verb with --json writes the envelope with its legacy result object unchanged in data and adds the warning RAY_W_LEGACY_OUTPUT; its legacy string errors become errors with code RAY_CHECK_FAILED and the string as message, and its spec errors become SPEC_ codes.",
     "secrets": "No output, log, error message or envelope field ever carries a secret value, a bindings-file value, an identity or key file content, or a path component known to be secret.",
-    "operationId": "A CLI verb generates a fresh random UUID v4 operationId per invocation, prints it on stderr and records it in any receipt. A runtime.<name> result echoes the operationId of its request, which the caller chose and reuses on retry (runtime-control.md \"Common shapes\").",
-    "interrupt": "On SIGINT or SIGTERM a verb stops at a safe point, leaves any fence it took in place, writes an envelope with RAY_INTERRUPTED and a recovery instruction, and exits 6."
+    "operationId": "A new verb generates a fresh random UUID v4 operationId per invocation and always prints it on stderr as \"operationId: <id>\", with or without --json. An existing verb generates and prints one only with --json, so its plain output stays byte for byte as before. A verb records its operationId in any receipt it writes. A runtime.<name> result echoes the operationId of its request, which the caller chose and reuses on retry (runtime-control.md \"Common shapes\").",
+    "interrupt": "On SIGINT or SIGTERM a verb stops at a safe point, leaves any fence it took in place, writes an envelope with RAY_INTERRUPTED and exits 6. The message carries the recovery instruction: a verb that took a fence names rayspec resume with the deployment and the fence epoch; a passive verb (bundle inspect, bundle verify) or a verb that changed nothing says so and that the command can be run again, and names no rayspec resume because nothing was fenced."
   },
   "exitCodes": {
     "reference": "error-codes.json exitCodes, exitPrecedence and exitRule",
-    "existingVerbs": "Existing verbs keep 0, 1 and 2 for every outcome they have today. An unexpected internal error, which exits 2 today (packages/app/cli/src/index.ts:597-611), exits 7 from this release. Codes 3 to 6 appear on an existing verb only for an outcome that verb does not have today, such as RAY_LOCK_TIMEOUT when the boot waits on the shared advisory lock."
+    "existingVerbs": "Existing verbs keep 0, 1 and 2 for every outcome they had in the previous release. An unexpected internal error exits 7 (it exited 2 before this release). Codes 3 to 6 appear on an existing verb only for an outcome that verb did not have before, such as RAY_LOCK_TIMEOUT when the boot waits on the shared advisory lock."
   },
   "globalFlags": [
     {
       "flag": "--json",
       "value": null,
       "required": false,
-      "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+      "description": "Accepted on every verb except tenant recover-owner, which writes its own JSON object once and refuses --json with exit 2. New verbs always write the envelope; the flag is accepted for symmetry."
     },
     {
       "flag": "--help",
@@ -27,7 +27,7 @@
   ],
   "deployDispatch": {
     "rule": "rayspec deploy <path> selects the bundle path when the file starts with the ZIP signature 50 4B 03 04 or 50 4B 05 06, or when the path ends in .ray (ASCII case-insensitive). The check reads at most the first 4 bytes and runs before any configuration is loaded or any database connection is opened. A .ray path whose bytes are not a ZIP is refused with RAY_INVALID_ARCHIVE reason not-a-zip. Every other file takes the legacy YAML path.",
-    "legacyOrder": "The legacy YAML path validates the spec and signer key before applying the platform migration chain. This is a fix of today's order (the chain is applied at packages/app/server/src/composition-root.ts:1925 before the spec is parsed at :2041); a spec that fails validation now leaves the database untouched, and the exit code stays 1."
+    "legacyOrder": "The legacy YAML path validates the spec and signer key before applying the platform migration chain; a spec that fails validation leaves the database untouched, and the exit code stays 1."
   },
   "readerPipeline": {
     "governedBy": "01-RAY-BUNDLE.md \"Reader pipeline\" fixes the order of its numbered items 1 to 17 and the reason of each failure; this table repeats them as reader steps with the codes each can emit. Where a verb pipeline lists reader steps it runs them in this order, and on any disagreement 01-RAY-BUNDLE.md governs.",
@@ -210,13 +210,13 @@
           "flag": "--against",
           "value": "<old-spec>",
           "required": false,
-          "description": "Generate the product delta against this previous spec, as rayspec plan does, and carry it with the allowlist."
+          "description": "The spec the target environment runs. pack carries the product delta from its stores to the stores of --spec, generated as the target regenerates it, and the product schema digests the delta migrates between, computed on a throwaway database that pack creates and drops on the server SHADOW_DATABASE_URL names (read from the process environment only). Without SHADOW_DATABASE_URL, with a server that cannot be used, with a previous spec of the other profile, or with a destructive delta that --allowlist does not clear, pack refuses with RAY_USAGE."
         },
         {
           "flag": "--allowlist",
           "value": "<file.json>",
           "required": false,
-          "description": "Reviewed destructive-statement allowlist carried with the delta."
+          "description": "Reviewed destructive-statement allowlist carried with the delta. Only with --against; refused with RAY_USAGE when the stores did not change, so there is no delta for it to cover."
         },
         {
           "flag": "--source-maps",
@@ -254,6 +254,13 @@
           "step": "arguments",
           "codes": [
             "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "product delta against --against (only with --against): previous spec, allowlist, shadow digests",
+          "codes": [
+            "RAY_USAGE",
+            "RAY_SPEC_INVALID"
           ]
         },
         {
@@ -405,7 +412,7 @@
         "RAY_DIGEST_MISMATCH",
         "RAY_INTERNAL"
       ],
-      "verdictRule": "ok true with verdict structurally-valid when the container, manifest and inventory checks pass; runtime, target and capability checks are not run. A structural failure is ok false with verdict invalid."
+      "verdictRule": "ok true with data.verdict structurally-valid when the container, manifest and inventory checks pass; runtime, target and capability checks are not run. A structural failure is ok false with data null: the data object describes a validated manifest, which such a bundle does not have. The failure is the verdict invalid of the expectation corpus, and errors[0] names the failing check."
     },
     {
       "verb": "rayspec bundle verify <file.ray>",
@@ -573,49 +580,6 @@
         "RAY_BINDING_RESERVED",
         "RAY_SECRET_DETECTED",
         "RAY_SIGNATURE_INVALID",
-        "RAY_INTERNAL"
-      ]
-    },
-    {
-      "verb": "rayspec bundle sign <file.ray>",
-      "operation": "bundle.sign",
-      "status": "new",
-      "summary": "Write a detached Ed25519 provenance signature over \"rayspec-ray-v1\\nsha256:<archive hex>\\n\". Establishes origin only.",
-      "positionals": [
-        "<file.ray>"
-      ],
-      "flags": [
-        {
-          "flag": "--key-file",
-          "value": "<ed25519-private-key.pem>",
-          "required": true,
-          "description": "PKCS#8 PEM private key; must pass the protected-file checks."
-        },
-        {
-          "flag": "--output",
-          "value": "<file.ray.sig>",
-          "required": false,
-          "description": "Signature output path.",
-          "default": "<file.ray>.sig"
-        },
-        {
-          "flag": "--force",
-          "value": null,
-          "required": false,
-          "description": "Overwrite an existing signature file."
-        },
-        {
-          "flag": "--json",
-          "value": null,
-          "required": false,
-          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
-        }
-      ],
-      "errors": [
-        "RAY_USAGE",
-        "RAY_INVALID_ARCHIVE",
-        "RAY_BINDINGS_FILE_INSECURE",
-        "RAY_OUTPUT_EXISTS",
         "RAY_INTERNAL"
       ]
     },
@@ -796,7 +760,7 @@
           ]
         },
         {
-          "step": "prepare: live schema head, regenerated product delta and plan; findings are plan blockers",
+          "step": "prepare: live schema head, product migration ledger, regenerated product delta and plan; findings are plan blockers. On an environment without runtime-control state the binding revision ids are computed under a key derived from RAYSPEC_API_KEY_PEPPER, which the dry run then needs (RAY_USAGE without it)",
           "codes": [
             "RAY_SCHEMA_DRIFT",
             "RAY_MIGRATION_REQUIRED",
@@ -1022,7 +986,7 @@
           ]
         },
         {
-          "step": "prepare: live schema head, regenerated product delta and plan; findings are plan blockers",
+          "step": "prepare: live schema head, product migration ledger, regenerated product delta and plan; findings are plan blockers. On an environment without runtime-control state the binding revision ids are computed under a key derived from RAYSPEC_API_KEY_PEPPER, which the dry run then needs (RAY_USAGE without it)",
           "codes": [
             "RAY_SCHEMA_DRIFT",
             "RAY_MIGRATION_REQUIRED",
@@ -1043,13 +1007,20 @@
           ]
         },
         {
-          "step": "apply() in the order of runtime-control.md: idempotency, freshness and revision, blockers, fence, shared advisory lock, steps with receipts",
+          "step": "apply() in the order of runtime-control.md: idempotency (the key is the plan digest), freshness and revision, blockers, fence, the operation lease (RAY_LOCK_TIMEOUT while another operation holds it, RAY_FENCE_MISMATCH when this one lost it), shared advisory lock, steps with receipts",
           "codes": [
             "RAY_PLAN_STALE",
             "RAY_POLICY_DENIED",
             "RAY_LOCK_TIMEOUT",
             "RAY_RECONCILIATION_REQUIRED",
-            "RAY_INFRA_UNAVAILABLE"
+            "RAY_INFRA_UNAVAILABLE",
+            "RAY_FENCE_MISMATCH"
+          ]
+        },
+        {
+          "step": "boot of the applied version; a refusal is RAY_CHECK_FAILED with the boot reason as message (exit 1), and the envelope carries data with status refused",
+          "codes": [
+            "RAY_CHECK_FAILED"
           ]
         },
         {
@@ -1083,6 +1054,8 @@
         "RAY_INFRA_UNAVAILABLE",
         "RAY_RECONCILIATION_REQUIRED",
         "RAY_INTERRUPTED",
+        "RAY_CHECK_FAILED",
+        "RAY_FENCE_MISMATCH",
         "RAY_INTERNAL"
       ]
     },
@@ -1090,7 +1063,7 @@
       "verb": "rayspec export",
       "operation": "export",
       "status": "new",
-      "summary": "Preflight, quiesce under operator confirmation, and write an encrypted complete snapshot as a migration .ray. Never writes plaintext output. Leaves the source fenced.",
+      "summary": "Precheck, quiesce under operator confirmation, and write an encrypted complete snapshot as a migration .ray. Never writes plaintext output. Leaves the source fenced, except after a refusal at the precheck, which runs before the fence.",
       "positionals": [],
       "flags": [
         {
@@ -1163,8 +1136,22 @@
         "RAY_LOCK_TIMEOUT",
         "RAY_INFRA_UNAVAILABLE",
         "RAY_INTERRUPTED",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_SPEC_INVALID",
+        "RAY_RUNTIME_UNSUPPORTED",
+        "RAY_TARGET_UNSUPPORTED",
+        "RAY_CAPABILITY_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_SECRET_DETECTED",
+        "RAY_POLICY_DENIED",
+        "RAY_FENCE_MISMATCH",
         "RAY_INTERNAL"
-      ]
+      ],
+      "precheckRule": "The precheck runs before the fence and changes nothing. It rebuilds the active application bundle from its version directory and reads it again through the deploy pipeline of this runtime, reader steps 1 to 16 (no signature file lies beside the rebuilt archive), so every code of those steps can refuse an export; a rebuilt archive whose SHA-256 differs from the deployed one is RAY_DIGEST_MISMATCH reason bundle-sha256. It also refuses a source with no organization (RAY_USAGE), more than one (RAY_MULTI_TENANT_UNSUPPORTED), no active member holding a password (RAY_OWNER_RECOVERY_REQUIRED), a database extension other than those the workflow engine creates in its own database (RAY_POLICY_DENIED reason unsupported-extension), a database server major it cannot state (RAY_TARGET_UNSUPPORTED), more than 500,000 objects (RAY_LIMIT_EXCEEDED reason object-index-size), and, when database role separation is not enabled and --source-stopped is not given, the missing database barrier (RAY_EXTERNAL_STATE_UNSUPPORTED reason database-barrier-unavailable). A refusal at the precheck leaves the source unfenced.",
+      "environment": "DATABASE_URL (the runtime role), RAYSPEC_MIGRATION_DATABASE_URL (role separation), RAYSPEC_SNAPSHOT_DATABASE_URL (the read-only snapshot role), DBOS_SYSTEM_DATABASE_URL, RAYSPEC_BLOB_ROOT and RAYSPEC_PG_DUMP (absolute path of pg_dump; default pg_dump on PATH, of the server's major), from the process environment only, never a .env file.",
+      "leaseRule": "The fence is taken and released under the operation lease (runtime-control.md \"Operation lease\"): RAY_LOCK_TIMEOUT while another operation holds it, RAY_FENCE_MISMATCH when the export's lease expired or was taken over before it finished."
     },
     {
       "verb": "rayspec import <migration.ray> --dry-run",
@@ -1213,11 +1200,17 @@
         "RAY_TARGET_NOT_EMPTY",
         "RAY_MULTI_TENANT_UNSUPPORTED",
         "RAY_INFRA_UNAVAILABLE",
+        "RAY_CAPABILITY_UNSUPPORTED",
+        "RAY_BINDING_RESERVED",
+        "RAY_SPEC_INVALID",
+        "RAY_SECRET_DETECTED",
+        "RAY_POLICY_DENIED",
         "RAY_INTERNAL"
-      ]
+      ],
+      "flagRule": "--bindings-file and --secrets-out belong to the import, not to its dry run; with --dry-run they are refused with RAY_USAGE."
     },
     {
-      "verb": "rayspec import <migration.ray>",
+      "verb": "rayspec import <migration.ray> --secrets-out <new-dir>",
       "operation": "import",
       "status": "new",
       "summary": "Explicit restore into an isolated empty target with the exact source runtime, verification and credential reset. No in-place merge. Ends in ready-for-cutover; the target does not accept traffic until cutover.",
@@ -1238,10 +1231,34 @@
           "description": "age X25519 identity file."
         },
         {
+          "flag": "--secrets-out",
+          "value": "<new-dir>",
+          "required": true,
+          "description": "A new directory (created mode 0700, files 0600) into which the import mints the target's own JWT signing key, API-key pepper and media signing key. Never printed; the source secrets are never carried."
+        },
+        {
           "flag": "--bindings-file",
           "value": "<protected-file>",
           "required": false,
           "description": "Target application bindings."
+        },
+        {
+          "flag": "--discard-failed",
+          "value": null,
+          "required": false,
+          "description": "With --target alone: remove what a failed import restored into that target (both databases and the blob root are emptied, the deployment state removed; the receipts stay). Refused for a target that holds a deployment, an import ready for its cutover, or one that was cut over."
+        },
+        {
+          "flag": "--cutover-token",
+          "value": "<token>",
+          "required": false,
+          "description": "With --target alone: check and consume the cutover token the import printed against what it binds (bundle, target, both fence epochs, environment revision, the target's catalogs), then release the target's fence and grant the runtime role its writes."
+        },
+        {
+          "flag": "--renew-cutover-token",
+          "value": null,
+          "required": false,
+          "description": "With --target alone: replace an expired or spent cutover token with a new one; the earlier token stops working."
         },
         {
           "flag": "--json",
@@ -1269,14 +1286,38 @@
         "RAY_INFRA_UNAVAILABLE",
         "RAY_RECONCILIATION_REQUIRED",
         "RAY_INTERRUPTED",
+        "RAY_CAPABILITY_UNSUPPORTED",
+        "RAY_SPEC_INVALID",
+        "RAY_SECRET_DETECTED",
+        "RAY_FENCE_MISMATCH",
         "RAY_INTERNAL"
-      ]
+      ],
+      "modes": [
+        {
+          "form": "rayspec import <migration.ray> --target <state-dir> --identity-file <file> --secrets-out <new-dir> [--bindings-file <file>]",
+          "result": "the restore; data as below, status ready-for-cutover"
+        },
+        {
+          "form": "rayspec import --target <state-dir> --discard-failed",
+          "result": "operation import, ok true, data null"
+        },
+        {
+          "form": "rayspec import --target <state-dir> --cutover-token <token>",
+          "result": "operation import, ok true, data null; the fence is released"
+        },
+        {
+          "form": "rayspec import --target <state-dir> --renew-cutover-token",
+          "result": "operation import, ok true, data null; the new token is printed on stderr"
+        }
+      ],
+      "modeRule": "--discard-failed, --cutover-token and --renew-cutover-token are three separate steps; each takes --target alone (any other flag or a positional is RAY_USAGE), and two of them together are RAY_USAGE. The import prints the cutover token once, on stderr, with the instruction to cut over; the envelope never carries it (its data is closed), and the receipts record only its SHA-256. The token works once, for 15 minutes.",
+      "environment": "DATABASE_URL (the runtime role), RAYSPEC_MIGRATION_DATABASE_URL (required), DBOS_SYSTEM_DATABASE_URL, RAYSPEC_BLOB_ROOT and RAYSPEC_PG_RESTORE (absolute path of pg_restore; default pg_restore on PATH, of the server's major), from the process environment only, never a .env file."
     },
     {
       "verb": "rayspec resume",
       "operation": "resume",
       "status": "new",
-      "summary": "Release the source fence taken by export, only for the matching epoch. The recovery instruction printed by an interrupted or failed export names this command.",
+      "summary": "Release the source fence taken by export, only for the matching epoch, and give the runtime role back the writes the barrier revoked. A fence an import holds on its target is never released here (RAY_USAGE): the import's --cutover-token releases it. The recovery instruction printed by an interrupted or failed export names this command.",
       "positionals": [],
       "flags": [
         {
@@ -1310,8 +1351,10 @@
         "RAY_BINDINGS_FILE_INSECURE",
         "RAY_FENCE_MISMATCH",
         "RAY_INFRA_UNAVAILABLE",
+        "RAY_LOCK_TIMEOUT",
         "RAY_INTERNAL"
-      ]
+      ],
+      "leaseRule": "RAY_LOCK_TIMEOUT while another operation holds the operation lease of the environment (runtime-control.md \"Operation lease\")."
     }
   ],
   "existingVerbs": [
@@ -1417,6 +1460,14 @@
       "status": "existing",
       "json": "not applicable; no change",
       "exitToday": "unchanged"
+    },
+    {
+      "verb": "rayspec tenant recover-owner --email <address> [--org-id <uuid>] [--ttl-seconds <n>]",
+      "operation": null,
+      "status": "new",
+      "json": "refused: with --json it writes {\"ok\":false,\"cliError\":...} to stderr and exits 2, because its one JSON object on stdout carries the one-time token and the envelope has no operation for it",
+      "exitToday": "0 token issued; 1 ok false (refused); 2 usage",
+      "source": "packages/app/cli/src/index.ts:753-759; packages/app/cli/src/tenant/recover-owner.ts"
     }
   ],
   "envelopeSchema": {
@@ -1426,7 +1477,7 @@
     "additionalProperties": false,
     "properties": {
       "contractVersion": {
-        "const": "1.0.0-draft.2"
+        "const": "1.0.0-rc.1"
       },
       "ok": {
         "type": "boolean"
@@ -1436,7 +1487,6 @@
           "pack",
           "bundle.inspect",
           "bundle.verify",
-          "bundle.sign",
           "deploy.dry-run",
           "deploy",
           "export",
@@ -1446,7 +1496,6 @@
           "runtime.inspect",
           "runtime.prepare",
           "runtime.quiesce",
-          "runtime.snapshot",
           "runtime.apply",
           "runtime.health",
           "runtime.resume",
@@ -1985,55 +2034,6 @@
                     "checkedAgainstRuntime",
                     "signature",
                     "verdict"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "if": {
-          "type": "object",
-          "properties": {
-            "operation": {
-              "const": "bundle.sign"
-            }
-          },
-          "required": [
-            "operation"
-          ]
-        },
-        "then": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "bundleSha256": {
-                      "type": "string",
-                      "pattern": "^[a-f0-9]{64}$"
-                    },
-                    "signaturePath": {
-                      "type": "string",
-                      "minLength": 1,
-                      "maxLength": 4096
-                    },
-                    "publicKeySha256": {
-                      "type": "string",
-                      "pattern": "^[a-f0-9]{64}$"
-                    }
-                  },
-                  "required": [
-                    "bundleSha256",
-                    "signaturePath",
-                    "publicKeySha256"
                   ]
                 },
                 {
@@ -2597,7 +2597,7 @@
                       "pattern": "^[0-9]+[.][0-9]+[.][0-9]+$"
                     },
                     "contractVersion": {
-                      "const": "1.0.0-draft.2"
+                      "const": "1.0.0-rc.1"
                     },
                     "capabilityVocabularyVersion": {
                       "const": 1
@@ -2923,145 +2923,6 @@
                     "producers",
                     "barriers",
                     "unfencedExternal"
-                  ]
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "if": {
-          "type": "object",
-          "properties": {
-            "operation": {
-              "const": "runtime.snapshot"
-            }
-          },
-          "required": [
-            "operation"
-          ]
-        },
-        "then": {
-          "type": "object",
-          "properties": {
-            "data": {
-              "oneOf": [
-                {
-                  "type": "object",
-                  "additionalProperties": false,
-                  "properties": {
-                    "migrationBundleSha256": {
-                      "type": "string",
-                      "pattern": "^[a-f0-9]{64}$"
-                    },
-                    "ciphertextSha256": {
-                      "type": "string",
-                      "pattern": "^[a-f0-9]{64}$"
-                    },
-                    "ciphertextSize": {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    "sourceLedger": {
-                      "type": "object",
-                      "additionalProperties": false,
-                      "properties": {
-                        "fenceEpoch": {
-                          "type": "integer",
-                          "minimum": 0,
-                          "maximum": 9007199254740991
-                        },
-                        "schemaHead": {
-                          "type": "object",
-                          "additionalProperties": false,
-                          "properties": {
-                            "platform": {
-                              "type": "string",
-                              "pattern": "^[0-9]{4}_[a-z0-9_]{1,120}$"
-                            },
-                            "product": {
-                              "type": "string",
-                              "pattern": "^[a-f0-9]{64}$"
-                            }
-                          },
-                          "required": [
-                            "platform",
-                            "product"
-                          ]
-                        },
-                        "applicationDigest": {
-                          "type": "string",
-                          "pattern": "^[a-f0-9]{64}$"
-                        },
-                        "tableCounts": {
-                          "type": "array",
-                          "items": {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "properties": {
-                              "database": {
-                                "enum": [
-                                  "application",
-                                  "workflow-system"
-                                ]
-                              },
-                              "schema": {
-                                "type": "string",
-                                "pattern": "^[a-z_][a-z0-9_]{0,62}$"
-                              },
-                              "table": {
-                                "type": "string",
-                                "pattern": "^[a-z_][a-z0-9_]{0,62}$"
-                              },
-                              "rows": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 9007199254740991
-                              }
-                            },
-                            "required": [
-                              "database",
-                              "schema",
-                              "table",
-                              "rows"
-                            ]
-                          },
-                          "maxItems": 10000
-                        },
-                        "objectCount": {
-                          "type": "integer",
-                          "minimum": 0,
-                          "maximum": 9007199254740991
-                        },
-                        "excludedDataCategories": {
-                          "type": "array",
-                          "items": {
-                            "type": "string",
-                            "maxLength": 64
-                          },
-                          "uniqueItems": true
-                        }
-                      },
-                      "required": [
-                        "fenceEpoch",
-                        "schemaHead",
-                        "applicationDigest",
-                        "tableCounts",
-                        "objectCount",
-                        "excludedDataCategories"
-                      ]
-                    }
-                  },
-                  "required": [
-                    "migrationBundleSha256",
-                    "ciphertextSha256",
-                    "ciphertextSize",
-                    "sourceLedger"
                   ]
                 },
                 {
@@ -3679,5 +3540,12 @@
       "publicKeySha256",
       "signature"
     ]
-  }
+  },
+  "verbsNotProvided": [
+    {
+      "verb": "rayspec bundle sign <file.ray>",
+      "operation": "bundle.sign",
+      "reason": "Not a verb of this release: the CLI answers rayspec bundle sign as an unknown bundle subcommand (exit 2). The detached signature format (signatureFileSchema) and its verification by bundle verify and deploy are unchanged; a signature file is written by the release tooling that holds the Ed25519 release key, never by the runtime CLI."
+    }
+  ]
 }

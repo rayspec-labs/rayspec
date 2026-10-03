@@ -33,6 +33,11 @@ name: CI
 #                          against real providers with RAYSPEC_REQUIRE_LIVE_TESTS=true so a live
 #                          suite can never silently self-skip either.
 #
+# Two more workflows build and test what a release ships: candidate.yml (on every push to main and
+# by hand: the tarballs, the runtime image, the SBOM and the release manifest of a release candidate,
+# the consumer and image conformance and the upgrade matrix) and release.yml (by hand only, behind
+# the protected `release` environment and a typed confirmation: the one workflow that publishes).
+#
 # The test split is by TURBO --filter, not self-skip: GitHub sets CI=true, which arms the
 # un-skippable DB ran-guards (they hard-FAIL, they do not skip, when DATABASE_URL is absent). So the
 # 9 Postgres-backed packages MUST be excluded from lane 1 at the filter level — they run only in
@@ -238,6 +243,27 @@ jobs:
       # DB-free / secret-free / network-free → lane 1.
       - name: Release-identity manifest regression
         run: pnpm test:release-identity
+
+      # The release candidate and its release manifest are built only by the candidate and release
+      # workflows (candidate.yml, release.yml), so their logic is held here on every pull request:
+      # the CycloneDX SBOM of the closure (derivation, refusals, freshness check), the release
+      # manifest and evidence (contract rules, OCI archive, placeholders, signing with the release
+      # key, refusals), the candidate builder (pre-release versions only, the tree restored after
+      # stamping), the contract corpus through a built CLI, the judgements of the runtime-image
+      # check, the command half of the skill-drift gate, the runtime the upgrade harness upgrades a
+      # candidate to, and the shape of the release workflow (dispatch only, the reviewer check before
+      # any secret, no signing key in CI). Built dist and the installed tsx are the only inputs.
+      # DB-free / secret-free / network-free → lane 1.
+      - name: Release candidate tooling regression
+        run: |
+          pnpm test:closure-sbom
+          pnpm test:release-manifest
+          pnpm test:release-candidate
+          pnpm test:corpus-conformance
+          pnpm test:image-conformance-logic
+          pnpm test:skill-drift
+          pnpm test:upgrade-target
+          pnpm test:release-workflow
 
       # The neutral reference product (examples/acme-notes/**) must carry ZERO product-domain meaning —
       # a forcing function on the fixtures the platform gates/goldens/e2e are pinned against.

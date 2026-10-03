@@ -142,7 +142,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
 
   function base() {
     return {
-      contractVersion: '1.0.0-draft.2' as const,
+      contractVersion: '1.0.0-rc.1' as const,
       operationId: randomUUID(),
       actor: 'supervisor:test',
     };
@@ -260,7 +260,7 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     expect(data.fence).toEqual({ state: 'open', fenceEpoch: 0 });
     expect(data.environmentRevision).toBe(1);
     expect(data.runtimeVersion).toBe(runtimeVersion());
-    expect(data.contractVersion).toBe('1.0.0-draft.2');
+    expect(data.contractVersion).toBe('1.0.0-rc.1');
     expect(data.target).toEqual({
       os: process.platform,
       arch: process.arch,
@@ -270,10 +270,11 @@ describe.skipIf(!baseUrl)('the runtime-control adapter', () => {
     expect(data.applicationId).toBeNull();
     expect(data.releaseManifestSha256).toBeNull();
     expect(data.managedPosture).toEqual({ supported: false, receiptSha256: null });
-    // Every available id resolves in this process; a planned one is never reported.
+    // Every available id resolves in this process, runtime-provided ones included: the deterministic
+    // extraction provider ships with the runtime, so its test-only id is listed.
     const available = CAPABILITIES.filter((c) => c.status === 'available').map((c) => c.id);
     expect(data.capabilities).toEqual(available);
-    expect(data.capabilities).not.toContain('extraction-deterministic');
+    expect(data.capabilities).toContain('extraction-deterministic');
     // No secret and no topology: nothing of the connection string, and no path.
     const text = JSON.stringify(result);
     const url = new URL(dbUrl);

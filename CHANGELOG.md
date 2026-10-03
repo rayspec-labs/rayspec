@@ -9,6 +9,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Release candidates, built and tested as a release.** `pnpm release:candidate --version
+  <x.y.z-pre> --out <dir>` (`scripts/release-candidate.mjs`) stamps a pre-release version into every
+  RaySpec manifest for the run only, packs the publish set, writes the release identity manifest,
+  packs the launcher again with that manifest inside, writes the CycloneDX SBOM of the closure,
+  restores every manifest to its committed bytes (and refuses to go on otherwise), resolves the
+  image's dependency tree once into a lockfile, builds the linux/amd64 runtime image from the
+  tarballs and that lockfile, checks the image holds it, writes the CycloneDX SBOM of the image's
+  installed tree and writes the release manifest. It refuses a release version, a tree with changes,
+  an identity manifest left from an earlier run and a non-empty output directory. `--release` builds the committed
+  version from its annotated tag, unstamped. The new workflow `candidate.yml` runs it on every push
+  to `main` and by hand, then installs the tarballs as a consumer and runs the contract corpus and
+  the reference journeys through that install and through the image, and the upgrade with data from
+  1.7.0 and 1.8.0 onto the candidate, and scans the image's lockfile for known advisories;
+  everything is kept as workflow artifacts and nothing is published. See
+  [Releasing](./docs/releasing.md).
+
+- **A runtime image.** `deployments/runtime-image/Dockerfile` builds the linux/amd64 image of the
+  runtime: Node at the pinned 22 patch on a digest-pinned Debian base, the published closure
+  installed with `npm ci` from a lockfile resolved once from the release tarballs, install scripts
+  disabled, every timestamp at the commit's time, the user `rayspec` (uid 10001)
+  that cannot write the installation, `/bin/sh` for the supervisor, `pg_dump` and `pg_restore` of
+  PostgreSQL 16, no npm, npx, corepack or yarn, a health check on `/livez`, and the version and
+  source-commit labels. It is exported as an OCI image layout archive that `docker load` reads, so
+  the image tested is the image the release manifest names. The lockfile and the CycloneDX SBOM of
+  the installed tree (`scripts/gen-image-sbom.mjs`) ship with the release, because the image's
+  third-party versions are the ones the registry served when the lockfile was written and can be
+  newer than the workspace's. `scripts/image-conformance.mjs` checks the image's configuration,
+  Node patch, user, working directory, port and file ownership on the loaded image, runs the
+  contract corpus through its CLI and serves the
+  team-notes application from it with role separation. See [The runtime image](./docs/runtime-image.md),
+  which also states the host settings the managed posture needs (`--ulimit core=0`,
+  `kernel.yama.ptrace_scope`).
+
+- **The signed release manifest and the release evidence.** `pnpm release:manifest`
+  (`scripts/release-manifest.mjs`) writes `release-manifest.json` exactly as the contract's
+  `release-manifest.schema.json` states it, from the tarballs, the identity manifest and the image
+  archive (every layer present with its own bytes); signs it with an Ed25519 release key on the
+  approver's machine (a key file other users can read is refused) and verifies the signature against
+  the approver's public key; verifies a manifest, its signature, its tarballs and its image; and
+  writes `release-evidence.json`, which binds the contract version and digest, every package's
+  SHA-256, the image reference, the schemas, the fixture corpus digest, the previous supported
+  version and the upgrade results, the platform schema head, the capabilities, the managed receipt,
+  the closure SBOM and the image SBOM to the manifest's digest. The evidence takes an image SBOM only
+  when it shows every release tarball installed in the image, and an upgrade report only when it
+  ran the candidate install's CLI at the release version. Both refuse a missing input and any
+  placeholder value. `@rayspec/bundle-contract` gains `validateReleaseManifest` and
+  `releaseManifestViolations` (the contract's semantic rules), and `@rayspec/bundle` gains
+  `createReleaseSignatureFile` and `verifyReleaseSignatureFile`.
+
+- **A CycloneDX SBOM of the published closure.** `docs/closure-sbom.cdx.json`
+  (`pnpm gen:closure-sbom`) lists the publish set and every package it reaches in production, with
+  the dependency graph, each third-party SHA-512 from the lockfile and each licence from
+  `docs/dependency-sbom.json`. The SBOM freshness gate holds it to a fresh derivation. A candidate
+  writes it with each tarball's SHA-512.
+
+- **A release workflow, prepared and never run by itself.** `release.yml` runs only on a manual
+  dispatch from the annotated release tag with the typed confirmation `publish rayspec <version>`,
+  refuses a version npm already has and a `release` environment without a required reviewer, and
+  takes two dispatches. The first builds and tests the release's artifacts and runs the
+  certification lane at the tag, and publishes nothing. The approver signs that run's release
+  manifest on their own machine; no signing key is given to the workflow. The second dispatch names
+  that run and carries the signature: in the protected `release` environment, after a reviewer
+  approves, it verifies the signature against the approver's public key, makes the managed receipt,
+  publishes that run's tarballs with npm provenance, copies its archived image to GHCR without
+  conversion and checks both registries serve what the manifest names.
+
+- **Conformance through an installed release.** `scripts/corpus-conformance.mjs` runs every
+  `bundle inspect` and `bundle verify` expectation of the contract corpus through an installed CLI
+  and lists the ones a command line cannot state; `tsx scripts/gen-corpus.ts --uncommitted <dir>`
+  writes the corpus case generated at test time. `scripts/reference-journeys.mjs --image <ref>` runs
+  the three reference applications with every `rayspec` command in a container of a runtime image,
+  and `scripts/upgrade-with-data.mjs --candidate <dir>` upgrades onto a candidate install instead of
+  the working tree; it stops unless every path it uses lies inside that install and its CLI reports
+  the install's version, and records both in its summary.
+
 - **A certification lane for the hardened hosting posture.** `pnpm test:certification`
   (`scripts/certification.mjs`) runs the suites that prove each check a public host must hold, on a
   real database, and prints one JSON verdict per check; a skipped test fails its check, and no
@@ -214,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `closureFiles` the input of the `@rayspec/bundle` writer.
 - **`@rayspec/bundle-contract`: the application bundle contract in code.** A new kernel package
   carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
-  managed hosting receipt, as a proposed contract version `1.0.0-draft.2`. It commits the contract's
+  managed hosting receipt, as contract version `1.0.0-rc.1`. It commits the contract's
   JSON Schemas and vocabularies byte for byte under `contract/`, with `CONTRACT-LOCK.json` recording
   the SHA-256 of every contract file and one digest over them. A test recomputes that digest over
   the recorded file map and the hash of every committed file; the contract's prose documents are
@@ -871,6 +946,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`scripts/publish.mjs --from <dir>`** publishes the packed tarballs of an earlier `--pack`
+  themselves, in dependency order, stamping nothing, so the registry receives the bytes the
+  candidate tested and the release manifest's integrities match it. It refuses a directory that is
+  not exactly one tarball per publish target at the release version.
+
+- **The skill-drift gate holds the CLI help, the CLI reference and the authoring skill to the same
+  commands.** Every command `rayspec --help` prints needs a section in `docs/cli-reference.md`, and
+  every command the authoring skill names in code must be one the help prints. The gate now reads
+  the built CLI, so it needs `pnpm build`.
+
+- **`scripts/release-identity.mjs --verify` does not compare the source side of a manifest
+  generated from a working tree with changes**, such as a candidate's stamped tree: the bytes it
+  recorded are gone, and it says so instead of failing on them. Its notes name the release workflow
+  and the signed release manifest that records its digest.
+
+- **The bundle contract is revision `1.0.0-rc.1`, and it states what this release does.**
+  `@rayspec/bundle-contract` carries the revised contract files and their new lock digest, and every
+  envelope, runtime-control request, snapshot and receipt states `contractVersion` `1.0.0-rc.1`.
+  The verb map lists `pack --against` and `--allowlist` as they work, the `import` flags
+  `--secrets-out`, `--discard-failed`, `--cutover-token` and `--renew-cutover-token`, and
+  `tenant recover-owner`, which writes its own JSON object and refuses `--json`. Each verb's code
+  list is the set its source can report: `deploy` adds `RAY_CHECK_FAILED` (a boot that refuses the
+  version it applied) and `RAY_FENCE_MISMATCH`, `resume` adds `RAY_LOCK_TIMEOUT` (another operation
+  holds the environment's operation lease), and `export` and `import` add the codes of the reader
+  steps their prechecks run again; `EXPORT_ERROR_CODES` and `RESUME_ERROR_CODES` follow. The
+  snapshot categories name the runtime-control tables, the product migration ledger and the owner
+  recovery tokens, and the platform schema head is `0017_runtime_control_blob_backend`;
+  `PLATFORM_TABLES` lists every platform table and `CONTRACT_PLATFORM_TABLES` is gone. The corpus
+  gains three cases: a `ray.json` whose CRC-32 is wrong, a central directory with bytes after its
+  records, and a private-key header whose word holds digits. There is no `bundle sign` verb and no
+  `runtime.snapshot` operation, so neither is a result operation any more, and the
+  `RuntimeControl` type lists the five operations the adapter performs. The deterministic
+  extraction capability, `extraction-deterministic`, is available and provided by the runtime:
+  runtime-control `inspect()` lists it, and a bundle cannot require it.
 - **Every suite that starts a deploy, and `pnpm test:upgrade-with-data`, listen on a port the
   operating system hands out.** They no longer derive a port from the process id, which a server
   left over from an earlier run could still hold; the upgrade script still takes `--port`. Suites
@@ -989,6 +1098,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The release and certification scripts run when started through a linked path.**
+  `scripts/managed-receipt.mjs`, `scripts/certification.mjs` and `scripts/check-consumer-install.mjs`
+  compared their own URL with the path they were started by, so started through a path holding a
+  symbolic link (macOS keeps its temporary directories under `/var`, a link to `/private/var`) they
+  did nothing and exited 0. They, and the new release tooling, now compare real paths.
+
 - **A schedule the scheduler refuses is refused in the operator's terms.** The boot refusal of a cron
   trigger's `schedule` and of `RAYSPEC_CLEANUP_SCHEDULE` quoted the scheduler's own parser text — for
   a shorthand such as `@daily` or a short expression a bare `Cannot read properties of undefined
@@ -1087,6 +1202,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- [Releasing](./docs/releasing.md) is the maintainer runbook: what a release ships, building and
+  testing a candidate, verifying a release, publishing, and what to do when a release fails.
+- [The runtime image](./docs/runtime-image.md) describes the image, running it, and the host
+  settings it needs.
+- `docs/cli-reference.md` documents `rayspec init`, which the CLI help listed and the reference did
+  not.
 - `CONTRIBUTING.md` states what a complete local test run needs: the Node and pnpm versions,
   Docker for the pinned Postgres, the two database URLs and `RAYSPEC_REQUIRE_DB_TESTS` in the
   environment, `ffmpeg` for the media suites, and that no boot secret has to be set.

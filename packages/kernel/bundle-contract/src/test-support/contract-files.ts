@@ -70,6 +70,8 @@ export interface Expectations {
   readerLimitsDefault: Record<string, number>;
   runtimeProfiles: Record<string, { version: string; target: Record<string, unknown> }>;
   testSigners: { seeds: string[] };
+  /** The construction rules; `pinnedDeflateStreams` maps an entry's SHA-256 to its deflate stream. */
+  construction: { pinnedDeflateStreams: Record<string, string> };
   cases: CorpusCase[];
   documentCases: { id: string; schema: string; document: unknown; valid: boolean }[];
   decryptionCases: { id: string; operation: string; expect: { code?: string } }[];

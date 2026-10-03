@@ -36,7 +36,7 @@ const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
 
 const base = {
-  contractVersion: '1.0.0-draft.2',
+  contractVersion: '1.0.0-rc.1',
   operationId: '0b6f7c1e-2f3a-4b5c-8d9e-0f1a2b3c4d5e',
   actor: 'operator@example.test',
 };
@@ -308,7 +308,7 @@ describe('plan digest', () => {
   it('is the SHA-256 of the canonical document the contract lists', () => {
     const expected =
       '{"bindingRevisions":[{"name":"ANTHROPIC_API_KEY","revisionId":"r1"},{"name":"OPENAI_API_KEY","revisionId":"r2"}],' +
-      `"bundleSha256":"${A}","contractVersion":"1.0.0-draft.2","environmentRevision":3,"expiresAt":"2026-09-29T12:30:00Z",` +
+      `"bundleSha256":"${A}","contractVersion":"1.0.0-rc.1","environmentRevision":3,"expiresAt":"2026-09-29T12:30:00Z",` +
       '"grants":{"capabilities":["declarative-api","stream-routes"],"egressHosts":["a.example","b.example"],"execution":"in-process"},' +
       `"planFormatVersion":1,"preparedAt":"2026-09-29T12:00:00Z","productDeltaSha256":null,"runtimeReleaseDigest":"unreleased",` +
       `"schemaHeadFrom":{"platform":"0011_tenant_event_bus","product":"${B}"},"schemaHeadTo":{"platform":"0012_runtime_control","product":"${C}"}}`;

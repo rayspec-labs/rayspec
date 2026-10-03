@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Stable error vocabulary. Codes are append-only; a code never changes meaning, exit code or retryable flag within a contract major.",
-  "contractVersion": "1.0.0-draft.2",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Stable error vocabulary. Codes are append-only; a code never changes meaning, exit code or retryable flag within a contract major.",
+  "contractVersion": "1.0.0-rc.1",
   "exitCodes": [
     {
       "exit": 0,
@@ -51,7 +51,7 @@
       "code": "RAY_USAGE",
       "exit": 2,
       "retryable": false,
-      "meaning": "The command line is invalid: unknown verb or flag, missing or malformed argument, conflicting flags, or a --deployment id that differs from the state directory or the database.",
+      "meaning": "The command line is invalid: unknown verb or flag, missing or malformed argument, conflicting flags, or a --deployment id that differs from the state directory or the database; or the source of an export holds no organization.",
       "action": "Fix the command line; see the verb help."
     },
     {
@@ -65,7 +65,7 @@
       "code": "RAY_CHECK_FAILED",
       "exit": 1,
       "retryable": false,
-      "meaning": "An existing verb completed and its verdict is negative for a reason that has no typed code yet. The legacy message is carried verbatim in message.",
+      "meaning": "An existing verb completed and its verdict is negative for a reason that has no typed code yet; the legacy message is carried verbatim in message. A bundle deploy reports the same code when the boot of the version it applied refuses its configuration, with the boot reason as message.",
       "action": "Read the message; fix the input."
     },
     {
@@ -119,7 +119,7 @@
       "code": "RAY_LIMIT_EXCEEDED",
       "exit": 2,
       "retryable": false,
-      "meaning": "A byte, entry, path, nesting, time or CPU budget was exceeded while reading or writing.",
+      "meaning": "A byte, entry, path, nesting, time or CPU budget was exceeded while reading or writing. object-index-size is an object index larger than the migration extracted limit, or a blob root of more than 500,000 objects (the most an object index holds).",
       "action": "Reduce the input; limits may only be lowered by configuration.",
       "reasons": [
         "archive-size",
@@ -160,7 +160,7 @@
       "code": "RAY_MANIFEST_INVALID",
       "exit": 2,
       "retryable": false,
-      "meaning": "ray.json or snapshot.json is not canonical JSON, fails its JSON Schema, or breaks a semantic rule.",
+      "meaning": "ray.json, snapshot.json, the object index or a managed receipt is not canonical JSON, fails its JSON Schema, or breaks a semantic rule.",
       "action": "Rebuild the bundle; the path field names the offending member.",
       "reasons": [
         "invalid-utf8",
@@ -327,7 +327,7 @@
       "code": "RAY_LOCK_TIMEOUT",
       "exit": 5,
       "retryable": true,
-      "meaning": "The shared schema advisory lock was not acquired within the bounded wait.",
+      "meaning": "The shared schema advisory lock was not acquired within the bounded wait, or another operation holds the environment's operation lease.",
       "action": "Retry later with the same idempotency key."
     },
     {
@@ -355,8 +355,8 @@
       "code": "RAY_FENCE_MISMATCH",
       "exit": 4,
       "retryable": false,
-      "meaning": "The fence epoch in the request does not match the active fence.",
-      "action": "Use the epoch returned by quiesce."
+      "meaning": "The fence epoch in the request does not match the active fence, or the lease the operation held on the environment expired or was taken over, so it may not write.",
+      "action": "Use the epoch returned by quiesce; after a lost lease, run the operation again."
     },
     {
       "code": "RAY_EXTERNAL_STATE_UNSUPPORTED",
@@ -383,8 +383,8 @@
       "code": "RAY_OWNER_RECOVERY_REQUIRED",
       "exit": 4,
       "retryable": false,
-      "meaning": "An organization would lose every credential on import because its only credentials are API keys and no tested owner-recovery path exists.",
-      "action": "Add a password-holding owner before export."
+      "meaning": "An organization would have no way back in after import: no active member of it holds a password, and the import resets every API key, session and invite.",
+      "action": "Add a password-holding owner before export. On the target, an owner without a password is let back in with rayspec tenant recover-owner."
     },
     {
       "code": "RAY_DECRYPTION_FAILED",
@@ -414,7 +414,7 @@
       "exit": 6,
       "retryable": false,
       "meaning": "The operation was interrupted (SIGINT or SIGTERM). Any fence it took stays held.",
-      "action": "Follow the recovery instruction in the message: resume the source or retry."
+      "action": "Follow the recovery instruction in the message: resume the source when a fence was taken, otherwise run the command again."
     },
     {
       "code": "RAY_RECONCILIATION_REQUIRED",

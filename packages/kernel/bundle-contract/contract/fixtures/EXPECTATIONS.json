@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-draft.2. Golden fixture corpus. Every case is built deterministically from the bases below by the construction rules, then read by bundle.inspect and bundle.verify; errors[0] must match code and reason. The corpus is shared: Core and Cloud run the same bytes through the same reader.",
-  "contractVersion": "1.0.0-draft.2",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Golden fixture corpus. Every case is built deterministically from the bases below by the construction rules, then read by bundle.inspect and bundle.verify; errors[0] must match code and reason. The corpus is shared: Core and Cloud run the same bytes through the same reader.",
+  "contractVersion": "1.0.0-rc.1",
   "expectationsFormatVersion": 1,
   "bases": {
     "application": {
@@ -244,12 +244,16 @@
       "append": "write bytes after the end record; secondArchive appends a complete strict archive with the single entry ray.json containing \"{}\" LF",
       "eocd": "override end-record fields (comment, disk)",
       "zip64Record": "write a ZIP64 end record and locator before the end record",
-      "deflate": "store the entry with method 8, raw deflate level 9",
-      "emptyFiles": "add count empty entries payload/f/NNNNN (five digits, from 00000)"
+      "deflate": "store the entry with method 8; the stored bytes are the stream pinnedDeflateStreams records for the SHA-256 of the entry's bytes, because raw deflate output at level 9 differs between zlib builds; an entry without a pinned stream gets raw deflate level 9",
+      "emptyFiles": "add count empty entries payload/f/NNNNN (five digits, from 00000)",
+      "directoryPadding": "write the given bytes after the last central record and count them in the end record's central directory size"
     },
     "readerLimits": "reader limits for this case, configured downward from the defaults; the first reader step (budget) applies the larger of archiveBytes and migrationArchiveBytes for bundle.inspect and bundle.verify, archiveBytes for deploy and prepare, migrationArchiveBytes for import; after the manifest schema step the limit of the kind applies",
     "signature": "a detached signature file: signerSeed names the test signer; over is this-archive or the id of another case whose bytes are signed; flipFirstByte XORs the first signature byte with 0x01",
-    "trustedSignerSeeds": "the test signers whose public keys the verifier trusts"
+    "trustedSignerSeeds": "the test signers whose public keys the verifier trusts",
+    "pinnedDeflateStreams": {
+      "99ec929c3b1dbb37ecd3406caaec2b74c5ecbdf46094847f79887f36252c90b7": "1dca390ec3300c05d15ea7f89d2b7969791b06a200011615905490e37b2967f07e62de86129663dd97d425b870302540b90be133b59c92ebb0ce916bfbc73449d5868668795c868d1937ddee004a33c2bab1bb84bfc7bf4ca87cbaa40b"
+    }
   },
   "cases": [
     {
@@ -3044,6 +3048,42 @@
       ]
     },
     {
+      "id": "secret-private-key-pem-digit-word",
+      "layer": "secret",
+      "description": "A payload file payload/config/key.txt whose content starts with a PEM private-key header line whose word holds digits (X25519) and a body that is not a key.",
+      "construction": {
+        "base": "application",
+        "files": [
+          {
+            "op": "add",
+            "name": "payload/config/key.txt",
+            "utf8": "-----BEGIN X25519 PRIVATE KEY-----\nbm90IGEga2V5\n-----END X25519 PRIVATE KEY-----\n"
+          }
+        ]
+      },
+      "bytes": {
+        "size": 2128,
+        "sha256": "989bbc7a97f52d67e835d022b2575219af66554249236514f48cbbfa7c785084",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": true,
+          "verdict": "structurally-valid",
+          "exit": 0
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_SECRET_DETECTED",
+          "exit": 4
+        }
+      ]
+    },
+    {
       "id": "archive-not-a-zip",
       "layer": "archive",
       "description": "Five bytes \"hello\".",
@@ -4628,6 +4668,44 @@
       ]
     },
     {
+      "id": "archive-directory-trailing-bytes",
+      "layer": "archive",
+      "description": "One byte 00 after the last central record, counted in the end record's central directory size: the directory holds more than the records it announces.",
+      "construction": {
+        "base": "application",
+        "archive": [
+          {
+            "op": "directoryPadding",
+            "hex": "00"
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1808,
+        "sha256": "03c203dc6c6b9d4b53e51389624bde7a4d9157b47fe397c157908cc24c235246",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": false,
+          "verdict": "invalid",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "header-directory-mismatch",
+          "exit": 2
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "header-directory-mismatch",
+          "exit": 2
+        }
+      ]
+    },
+    {
       "id": "archive-trailing-archive",
       "layer": "archive",
       "description": "A second complete archive (one entry ray.json containing \"{}\" LF, written by the same strict writer) appended after the end record. The last end record found is the appended one; its central directory offset plus size does not equal its own position in the file, so the reader reports the mismatch.",
@@ -4721,6 +4799,46 @@
       "bytes": {
         "size": 1807,
         "sha256": "58eeb62c06d5d88d483b15ca86dbd0d321f3872e1eb8e7684ee7eff8fcca8377",
+        "committed": true
+      },
+      "expect": [
+        {
+          "operation": "bundle.inspect",
+          "ok": false,
+          "verdict": "invalid",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "crc-mismatch",
+          "exit": 2
+        },
+        {
+          "operation": "bundle.verify",
+          "runtimeProfile": "fixture",
+          "ok": false,
+          "verdict": "not-deployable",
+          "code": "RAY_INVALID_ARCHIVE",
+          "reason": "crc-mismatch",
+          "exit": 2
+        }
+      ]
+    },
+    {
+      "id": "archive-manifest-crc-mismatch",
+      "layer": "archive",
+      "description": "The CRC-32 of ray.json replaced by 0 in both headers. ray.json is not in the inventory, but its CRC-32 is checked like every entry's.",
+      "construction": {
+        "base": "application",
+        "archive": [
+          {
+            "op": "set",
+            "entry": "ray.json",
+            "field": "crc",
+            "value": 0
+          }
+        ]
+      },
+      "bytes": {
+        "size": 1807,
+        "sha256": "5341a9520dc29430820d0d070aa18b6d2756108fa5b6f22e48e34c1dfa7a3da2",
         "committed": true
       },
       "expect": [
@@ -6432,7 +6550,7 @@
       "description": "A complete managed receipt.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6483,7 +6601,7 @@
       "description": "agentTraceExport \"openai\".",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6534,7 +6652,7 @@
       "description": "executionLevels claims \"sandboxed\", which Core does not provide.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6586,7 +6704,7 @@
       "description": "recoveryScopeEndpoint \"public\".",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6637,7 +6755,7 @@
       "description": "databaseRoleSeparation false.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6688,7 +6806,7 @@
       "description": "supportedBackends [\"openai\", \"codex\"]; codex is self-host-only.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6740,7 +6858,7 @@
       "description": "capabilities lists stt-fake, which is test-only.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6792,7 +6910,7 @@
       "description": "capabilities lists agent-backend-pi, which is self-host-only.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6844,7 +6962,7 @@
       "description": "targets[0].nodeVersion \"22.20.0\", below the 22.21.0 floor.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6895,7 +7013,7 @@
       "description": "targets[0].nodeVersion \"22.100.3\".",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -7291,7 +7409,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "A failed inspection envelope.",
       "document": {
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "ok": false,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7313,7 +7431,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "ok true while errors is non-empty.",
       "document": {
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "ok": true,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7335,7 +7453,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "ok false with an empty errors list.",
       "document": {
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "ok": false,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7350,7 +7468,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "errors as a list of strings (the legacy deploy --dry-run shape).",
       "document": {
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "ok": false,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7367,7 +7485,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "doctor with --json: legacy object in data, SPEC_ code in errors.",
       "document": {
-        "contractVersion": "1.0.0-draft.2",
+        "contractVersion": "1.0.0-rc.1",
         "ok": false,
         "operation": "doctor",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7586,13 +7704,13 @@
     {
       "id": "export-no-database-barrier",
       "operation": "export",
-      "description": "Source without database role separation, exported without --source-stopped: quiesce reports the database barrier unavailable and export refuses before any capture.",
+      "description": "Source without database role separation, exported without --source-stopped: the precheck finds no database barrier and export refuses before the fence, so the source is never fenced.",
       "expect": {
         "ok": false,
         "code": "RAY_EXTERNAL_STATE_UNSUPPORTED",
         "reason": "database-barrier-unavailable",
         "exit": 3,
-        "sourceStaysFenced": true
+        "sourceStaysFenced": false
       }
     },
     {

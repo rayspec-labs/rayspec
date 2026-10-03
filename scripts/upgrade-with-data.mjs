@@ -25,6 +25,13 @@
  *   6. Packs the application with this working tree and deploys it as a bundle onto the upgraded
  *      environment — a dry-run, then the reviewed plan — and checks rows and credentials again.
  *
+ * With `--candidate <dir>` the release upgraded to is the one a consumer installed from release
+ * candidate tarballs into `<dir>` (`scripts/check-consumer-install.mjs`) instead of this working
+ * tree: steps 4 and 6 run its CLI, and its database roles setup and `@rayspec` packages are used.
+ * Before anything else the run checks that every one of those paths lies inside the install and
+ * that the CLI reports the install's version (`scripts/lib/upgrade-target.mjs`), and the summary
+ * records them as `target`.
+ *
  * With `--roles` the upgrade also turns role separation on, as docs/database-isolation.md has an
  * operator do it: after the previous release stopped, the working tree's database roles setup
  * (`packages/kernel/db/sql/database-roles.sql`) prepares the database with roles of its own, and
@@ -61,10 +68,15 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import postgres from 'postgres';
-import { startClassifier, startEgressProxy, testCertificates } from './journeys/lib.mjs';
+import {
+  platformRangesForRuntime,
+  startClassifier,
+  startEgressProxy,
+  testCertificates,
+} from './journeys/lib.mjs';
+import { reportedVersion, targetProblems, upgradeTarget } from './lib/upgrade-target.mjs';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const CLI = join(REPO, 'packages', 'app', 'cli', 'dist', 'index.js');
 
 /**
  * The applications the harness upgrades: where the source is, how it becomes a directory holding
@@ -136,26 +148,30 @@ const APPS = {
       }
       writeFileSync(entry, stripped);
     },
-    release(app) {
+    release(app, toVersion) {
       const fresh = join(work, 'asset-catalog-release');
       buildAssetCatalog(fresh);
       for (const file of ['rayspec.yaml', join('packs', 'catalog-pack', 'index.js')]) {
         cpSync(join(fresh, file), join(app, file));
       }
+      // A candidate runtime is a pre-release, outside the extension's caret range under npm's
+      // rules; the bundle the upgraded runtime packs declares the candidate's own range.
+      const widened = platformRangesForRuntime(
+        join(app, 'packs', 'catalog-pack', 'package.json'),
+        toVersion,
+      );
+      if (widened.length > 0) summary.platformRanges = widened;
     },
     runtime(app, which) {
       const modules = join(app, 'node_modules', '@rayspec');
       rmSync(join(app, 'node_modules'), { recursive: true, force: true });
       if (which === 'none') return;
       mkdirSync(modules, { recursive: true });
-      for (const [name, dir] of [
-        ['platform', join('kernel', 'platform')],
-        ['handler-sdk', join('kernel', 'handler-sdk')],
-      ]) {
+      for (const [name, upgraded] of TARGET.packages) {
         symlinkSync(
           which === 'previous'
             ? join(work, 'previous', 'node_modules', '@rayspec', name)
-            : join(REPO, 'packages', dir),
+            : upgraded,
           join(modules, name),
         );
       }
@@ -180,9 +196,6 @@ function buildAssetCatalog(out) {
 const baseUrl = process.env.DATABASE_URL;
 if (!baseUrl)
   fail('DATABASE_URL is not set: it names the server the throwaway database is created on');
-if (!existsSync(CLI))
-  fail(`the working tree is not built (${CLI} is missing): run pnpm build first`);
-
 const { values: flags } = parseArgs({
   options: {
     from: { type: 'string' },
@@ -190,8 +203,25 @@ const { values: flags } = parseArgs({
     'log-dir': { type: 'string' },
     port: { type: 'string' },
     roles: { type: 'boolean', default: false },
+    candidate: { type: 'string' },
   },
 });
+/**
+ * With `--candidate <dir>`, the side upgraded to is the release a consumer installed from the
+ * candidate tarballs into `<dir>` (`scripts/check-consumer-install.mjs`), never the workspace: its
+ * CLI, its database roles setup and its `@rayspec` packages for an extension.
+ */
+const candidate = flags.candidate === undefined ? null : resolve(flags.candidate);
+let TARGET;
+try {
+  TARGET = upgradeTarget({ repo: REPO, candidate });
+} catch (err) {
+  fail(err instanceof Error ? err.message : String(err));
+}
+const CLI = TARGET.cli;
+if (!existsSync(CLI)) {
+  fail(`the working tree is not built (${CLI} is missing): run pnpm build first`);
+}
 const APP = APPS[flags.app];
 if (APP === undefined) {
   fail(`--app ${flags.app} is not one of: ${Object.keys(APPS).join(', ')}`);
@@ -222,7 +252,14 @@ const work = mkdtempSync(join(tmpdir(), 'rayspec-upgrade-'));
 const children = new Set();
 /** The local services an application calls (its HTTPS host and the egress proxy), closed at the end. */
 const services = [];
-const summary = { app: flags.app, roles: flags.roles, from: null, to: null, checks: [] };
+const summary = {
+  app: flags.app,
+  roles: flags.roles,
+  from: null,
+  to: null,
+  target: { install: TARGET.install, cli: CLI, cliVersion: null, rolesSql: TARGET.rolesSql },
+  checks: [],
+};
 /** With `--roles`: the roles the database is prepared with, named for this run, and their passwords. */
 const roleSuffix = randomBytes(4).toString('hex');
 const roles = {
@@ -296,10 +333,7 @@ function roleUrl(db, role) {
  * release made one) and give each role a password. Returns what the boots add to their environment.
  */
 async function prepareRoles() {
-  const setup = readFileSync(
-    join(REPO, 'packages', 'kernel', 'db', 'sql', 'database-roles.sql'),
-    'utf8',
-  );
+  const setup = readFileSync(summary.target.rolesSql, 'utf8');
   const admin = postgres(withDbName(baseUrl, 'postgres'), { max: 1, onnotice: () => {} });
   const sysDb = `${suiteDb}_dbos_sys`;
   let databases;
@@ -462,11 +496,19 @@ async function storedRows(sql) {
 async function main() {
   const from =
     flags.from ?? execFileSync('npm', ['view', 'rayspec', 'version'], { encoding: 'utf8' }).trim();
-  const to = JSON.parse(
-    readFileSync(join(REPO, 'packages', 'app', 'cli', 'package.json'), 'utf8'),
-  ).version;
+  const to = TARGET.version;
   summary.from = from;
-  summary.to = `${to} (working tree)`;
+  summary.to = `${to} (${TARGET.install === 'candidate' ? 'candidate install' : 'working tree'})`;
+  // The runtime upgraded to is the one named: every path inside the install, and its CLI reports
+  // the install's version. A run that fell back to the working tree would say so here.
+  const problems = targetProblems({ ...TARGET, cli: CLI, rolesSql: summary.target.rolesSql });
+  check('the runtime upgraded to is the one named', problems.length === 0, problems.join('; '));
+  summary.target.cliVersion = reportedVersion(CLI);
+  check(
+    `the CLI upgraded to reports ${to}`,
+    summary.target.cliVersion === to,
+    `it reports ${summary.target.cliVersion}`,
+  );
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(from)) fail('--from is not a version');
 
   // 1. The previous release, from npm, with install scripts disabled.
@@ -592,7 +634,7 @@ async function main() {
     // 6. The same application as a bundle, deployed onto the upgraded environment.
     log('packing the application and deploying it as a bundle');
     APP.runtime?.(app, 'none');
-    APP.release?.(app);
+    APP.release?.(app, to);
     const packed = execFileSync(
       process.execPath,
       [

@@ -7,7 +7,8 @@
  * executes anything from an archive. `inspectBundle` writes nothing; `extractBundle` copies into a
  * fresh private directory and removes it on any failure. The writer produces the same bytes for
  * the same input, reads its output back through the reader and moves it into place atomically.
- * Detached Ed25519 signatures are made and verified with Node's crypto.
+ * Detached Ed25519 signatures of a `.ray` and of a release manifest are made and verified with
+ * Node's crypto.
  *
  * Built on Node's own modules and `@rayspec/bundle-contract`, and nothing else.
  */
@@ -29,9 +30,12 @@ export {
   type SecretRule,
 } from './secrets.js';
 export {
+  createReleaseSignatureFile,
   createSignatureFile,
   publicKeySha256,
+  releaseSignatureMessage,
   signatureMessage,
+  verifyReleaseSignatureFile,
   verifySignatureFile,
 } from './signature.js';
 export {
