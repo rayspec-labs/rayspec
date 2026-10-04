@@ -50,7 +50,7 @@ describe('contract lock', () => {
         .map((k) => [k, lock.files[k]]),
     );
     expect(sha256(JSON.stringify(sorted))).toBe(lock.digest);
-    expect(lock.digest).toBe('6b410aa79a0f43bd66ff5e7f60ebdb985f581708108069970099c827d4c503e8');
+    expect(lock.digest).toBe('e53bed8f30d4991fa99e672fe98ce4ed5a13e003a86d94b85359979c5e638bae');
   });
 
   it('every committed contract file hashes to its lock entry', () => {

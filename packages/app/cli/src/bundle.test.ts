@@ -477,11 +477,12 @@ describe('output', () => {
 });
 
 describe('--help', () => {
-  it('`bundle --help` prints both verbs as plain text, exit 0', async () => {
+  it('`bundle --help` prints the three verbs as plain text, exit 0', async () => {
     expect(await main(['bundle', '--help'])).toBe(0);
     const out = io.out();
     expect(out).toContain('rayspec bundle inspect <file.ray>');
     expect(out).toContain('rayspec bundle verify <file.ray>');
+    expect(out).toContain('rayspec bundle sign <file.ray>');
     expect(io.err()).toBe('');
   });
 
@@ -505,6 +506,15 @@ describe('--help', () => {
     expect(io.out()).not.toMatch(/\bsafe\b/i);
   });
 
+  it('`bundle sign --help` names every flag sign accepts and says what a signature is not', async () => {
+    expect(await main(['bundle', 'sign', '--help'])).toBe(0);
+    const out = io.out();
+    expect(out).toContain('rayspec bundle sign <file.ray>');
+    expect(out).not.toContain('rayspec bundle verify <file.ray>');
+    for (const flag of ['--key-file', '--output', '--force', '--json']) expect(out).toContain(flag);
+    expect(out).toContain('does not vouch');
+  });
+
   it('a token after the help flag is refused as for any command', async () => {
     await expect(main(['bundle', 'inspect', '--help', 'x.ray'])).rejects.toThrow(
       /takes no arguments/,
@@ -513,6 +523,7 @@ describe('--help', () => {
 
   it('the general usage lists the bundle group', async () => {
     expect(await main(['--help'])).toBe(0);
-    expect(io.out()).toContain('PASSIVE bundle commands');
+    expect(io.out()).toContain('BUNDLE commands');
+    expect(io.out()).toContain('only sign writes');
   });
 });

@@ -1,21 +1,32 @@
 /**
- * `rayspec bundle inspect` and `verify` through the REAL built CLI (`node dist/index.js`).
+ * `rayspec bundle inspect`, `verify` and `sign` through the REAL built CLI (`node dist/index.js`).
  *
  * Two properties only a real process can show:
  *
  *  - WHAT IT LOADS. A module-resolution hook, registered with `--import`, records every module the
- *    process resolves. Inspecting and verifying a bundle must resolve nothing of the server, the
- *    database layer, the platform (whose handler loader imports handler modules), the product
- *    composition, the Postgres driver, the durable engine or the HTTP framework. The accept control
- *    runs `rayspec plan` under the same hook and sees the database layer, so an empty list is a
- *    finding and not a blind probe.
+ *    process resolves. Inspecting, verifying and signing a bundle must resolve nothing of the
+ *    server, the database layer, the platform (whose handler loader imports handler modules), the
+ *    product composition, the Postgres driver, the durable engine or the HTTP framework. The accept
+ *    control
+ *    runs `rayspec plan` under the same hook and sees the database layer, so an empty list
+ *    is a finding and not a blind probe.
  *  - THAT NOTHING RUNS. The canary bundle carries a module that, if it were imported, would write a
  *    canary file and open a TCP connection to a listener this test owns, plus a package manifest with
- *    install hooks that would do the same. Inspect and verify leave both untouched; the control
- *    imports the same module in a child process and trips both, which proves the probe would notice.
+ *    install hooks that would do the same. Inspect, verify and sign leave both untouched; the
+ *    control imports the same module in a child process and trips both, which proves the probe
+ *    would notice.
  */
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -186,6 +197,29 @@ maybeDescribe('the canary bundle through the real CLI', () => {
     expect(connections).toBe(0);
   });
 
+  it('sign signs it without running it', async () => {
+    const key = join(work, 'canary-signer.pem');
+    writeFileSync(
+      key,
+      generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }),
+      { mode: 0o600 },
+    );
+    chmodSync(key, 0o600);
+    const r = cli([
+      'bundle',
+      'sign',
+      archive,
+      '--key-file',
+      key,
+      '--output',
+      `${archive}.canary.sig`,
+    ]);
+    expect(r.status, r.stdout).toBe(0);
+    await settle();
+    expect(existsSync(canary)).toBe(false);
+    expect(connections).toBe(0);
+  });
+
   it('the probe detects execution: importing the same module trips both canaries', async () => {
     // Asynchronous, so this process's listener can answer the connection while the child runs.
     const status = await new Promise<number | null>((done) => {
@@ -237,6 +271,29 @@ maybeDescribe('what the bundle verbs load', () => {
       }
     });
   }
+
+  it('sign loads no server, database layer or handler loader, and writes its signature', () => {
+    const signDir = mkdtempSync(join(work, 'sign-'));
+    const target = join(signDir, 'app.ray');
+    copyFileSync(good, target);
+    const key = join(signDir, 'signer.pem');
+    writeFileSync(
+      key,
+      generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }),
+      { mode: 0o600 },
+    );
+    chmodSync(key, 0o600);
+    const r = cli(['bundle', 'sign', target, '--key-file', key]);
+    expect(r.status, r.stdout).toBe(0);
+    expect(existsSync(`${target}.sig`)).toBe(true);
+    expect(r.modules.some((m) => /\/packages\/kernel\/bundle\//.test(m))).toBe(true);
+    for (const [what, pattern] of FORBIDDEN_MODULES) {
+      expect(
+        r.modules.filter((m) => pattern.test(m)),
+        `sign loaded ${what}`,
+      ).toEqual([]);
+    }
+  });
 
   it('the accept control: plan, under the same probe, loads the database layer', () => {
     const specDir = mkdtempSync(join(work, 'plan-'));

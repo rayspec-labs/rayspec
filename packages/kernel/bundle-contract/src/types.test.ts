@@ -49,7 +49,7 @@ function typeErrors(body: string): string[] {
 }
 
 const envelope = (members: string) =>
-  `const e: ResultEnvelope<null> = { contractVersion: '1.0.0-rc.1', operationId: 'x', data: null, warnings: [], ${members} }; void e;`;
+  `const e: ResultEnvelope<null> = { contractVersion: '1.0.0-rc.2', operationId: 'x', data: null, warnings: [], ${members} }; void e;`;
 
 describe('result envelope types', () => {
   it.each([

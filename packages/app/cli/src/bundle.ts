@@ -1,5 +1,6 @@
 /**
- * `rayspec bundle inspect` and `rayspec bundle verify` — the two passive bundle verbs.
+ * `rayspec bundle inspect` and `rayspec bundle verify` — the two passive bundle verbs. The third
+ * verb of the group, `rayspec bundle sign`, writes a signature file and lives in bundle-sign.ts.
  *
  *   rayspec bundle inspect <file.ray> [--json]
  *       The structural half of the reader pipeline: the archive budget, the container, the manifest
@@ -46,7 +47,7 @@ import { type Envelope, envelope, usageEnvelope } from './envelope.js';
 export class BundleCliError extends Error {}
 
 /** The subcommands of the group. */
-export const BUNDLE_SUBCOMMANDS = ['inspect', 'verify'] as const;
+export const BUNDLE_SUBCOMMANDS = ['inspect', 'verify', 'sign'] as const;
 export type BundleSubcommand = (typeof BUNDLE_SUBCOMMANDS)[number];
 
 export interface BundleRunOptions {
@@ -138,19 +139,22 @@ export function cliRuntimeProfile(version: string): RuntimeProfile {
   };
 }
 
-/** Run `rayspec bundle <subcommand> ...`. A problem with the group itself throws BundleCliError. */
+/**
+ * Run `rayspec bundle inspect|verify ...`. A problem with the group itself throws BundleCliError;
+ * `sign` is answered by bundle-sign.ts, which index.ts calls directly.
+ */
 export async function runBundle(
   args: readonly string[],
   options: BundleRunOptions,
 ): Promise<BundleOutcome> {
   const [subcommand, ...rest] = args;
   if (subcommand === undefined) {
-    throw new BundleCliError('missing bundle subcommand (expected `inspect` or `verify`)');
+    throw new BundleCliError('missing bundle subcommand (expected `inspect`, `verify` or `sign`)');
   }
   if (subcommand === 'inspect') return runInspect(rest, options);
   if (subcommand === 'verify') return runVerify(rest, options);
   throw new BundleCliError(
-    `unknown bundle subcommand ${JSON.stringify(subcommand)} (expected \`inspect\` or \`verify\`)`,
+    `unknown bundle subcommand ${JSON.stringify(subcommand)} (expected \`inspect\`, \`verify\` or \`sign\`)`,
   );
 }
 
@@ -466,7 +470,8 @@ async function readTrustedKeys(paths: readonly string[]): Promise<KeyObject[]> {
 
 // ─── shared ────────────────────────────────────────────────────────────────────────────────────
 
-function onePositional(positionals: readonly string[]): string {
+/** The one `<file.ray>` positional of a bundle verb. */
+export function onePositional(positionals: readonly string[]): string {
   if (positionals.length === 0) throw new Error('missing the <file.ray> argument');
   if (positionals.length > 1) {
     throw new Error(`expected exactly one <file.ray>, got ${positionals.length} arguments`);
@@ -495,7 +500,8 @@ function refused(result: Envelope, json: boolean, context: string[] = []): Bundl
   return { envelope: result, summary: [...context, ...errorLines(result)], json };
 }
 
-function errorLines(result: Envelope): string[] {
+/** The refusal lines of the stderr description: the first error, and how many follow. */
+export function errorLines(result: Envelope): string[] {
   const first = result.errors[0];
   if (first === undefined) return [];
   const lines = [

@@ -22,9 +22,9 @@ documented exception, `--help`, which prints plain text there instead (see
 | ---- | ---------------------------------------------------------------------- |
 | `0`  | Success — the spec is valid / the plan passed / the action succeeded.  |
 | `1`  | A not-ok result — an invalid spec, a blocked migration, a failed op. The JSON result explains why (in its `errors` / findings). |
-| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse, and `pack` for an application it cannot package or an output that exists. |
+| `2`  | A usage/CLI error — an empty argument list, an unknown subcommand, or an unknown/invalid flag (including a missing or invalid required flag or path for `gen-handler`, `tenant` and `dev`). A short JSON error is written to **stderr** and the usage text is printed. The bundle verbs also use `2` for an archive, manifest or inventory they refuse, `bundle sign` for a signature file that exists, and `pack` for an application it cannot package or an output that exists. |
 | `3`  | Incompatible — a bundle pins another runtime, a target or a capability this runtime does not provide, or an application declares a `@rayspec/*` range that excludes the runtime it pins; for `export`, state a snapshot cannot carry (a second organization, an unknown table, no database write barrier); for `import`, a snapshot of another runtime or server major, or a dump with a second organization. Bundle verbs, `pack`, `deploy <file.ray>`, `export` and `import` only. |
-| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify, a fence epoch that is not the held one, a dump the import allowlist refuses, an import target that is not empty. Bundle verbs, `pack`, `deploy <file.ray>`, `export`, `import` and `resume` only. |
+| `4`  | Policy refusal — a reserved binding name, a secret in a bundle, a signature that does not verify, a key file other users can read, a fence epoch that is not the held one, a dump the import allowlist refuses, an import target that is not empty. Bundle verbs, `pack`, `deploy <file.ray>`, `export`, `import` and `resume` only. |
 | `5`  | Retryable — a database that cannot be reached, a lock another operation holds, a source that did not drain before the deadline. `deploy <file.ray>`, `export`, `import` and `resume` only. |
 | `6`  | Interrupted by SIGINT or SIGTERM before the command finished, or blocked until reconciled (schema drift, a failed restore). Bundle verbs, `pack`, `deploy <file.ray>`, `export` and `import` only. |
 | `7`  | An unexpected internal failure (a defect, not a verdict). A short JSON error is written to **stderr**. |
@@ -42,9 +42,10 @@ The commands split into these groups:
 
 - A **read-only diagnostic floor** — `doctor`, `plan`, `openapi`, `gen-handler`.
   These never mutate a real/target database and never print secret values.
-- The **passive `bundle` group** — `bundle inspect`, `bundle verify`. They read
-  a `.ray` application bundle and never extract, import or run anything from it,
-  and write nothing. They answer with the result envelope described under
+- The **`bundle` group** — `bundle inspect`, `bundle verify`, `bundle sign`.
+  They read a `.ray` bundle and never extract, import or run anything from it.
+  `inspect` and `verify` write nothing; `sign` writes one detached signature
+  file and nothing else. They answer with the result envelope described under
   [`--json`](#the---json-flag).
 - **`pack`** writes one `.ray` application bundle from an application that is
   already built. It builds, imports and runs nothing, and writes nothing but its
@@ -117,7 +118,7 @@ switches the answer to the **result envelope**, one JSON object on stdout:
 
 ```json
 {
-  "contractVersion": "1.0.0-rc.1",
+  "contractVersion": "1.0.0-rc.2",
   "ok": false,
   "operation": "doctor",
   "operationId": "3f0c2a8e-9b1d-4c47-8e2a-5d7f6b1c9a04",
@@ -546,7 +547,7 @@ It runs these steps in order and stops at the first failure:
 
   ```json
   {
-    "contractVersion": "1.0.0-rc.1",
+    "contractVersion": "1.0.0-rc.2",
     "ok": true,
     "operation": "pack",
     "operationId": "…",
@@ -619,7 +620,7 @@ inventory (size, CRC-32 and SHA-256, under the extracted-byte limit). It does
 
   ```json
   {
-    "contractVersion": "1.0.0-rc.1",
+    "contractVersion": "1.0.0-rc.2",
     "ok": true,
     "operation": "bundle.inspect",
     "operationId": "…",
@@ -716,12 +717,13 @@ encrypted and are not read.
   `--trusted-key <ed25519-public-key.pem>`, repeatable — a PEM public key; a
   private key, an unreadable file, one that is not a regular file, one over
   16 KiB or a non-Ed25519 key is a usage error;
-  `--require-signature`; `--json`.
+  `--require-signature`; `--json`. [`bundle sign`](#bundle-sign) writes the
+  signature file this checks.
 - **Output:** the result envelope (operation `bundle.verify`):
 
   ```json
   {
-    "contractVersion": "1.0.0-rc.1",
+    "contractVersion": "1.0.0-rc.2",
     "ok": true,
     "operation": "bundle.verify",
     "operationId": "…",
@@ -749,6 +751,96 @@ encrypted and are not read.
 - **Exit:** `0` deployable, `1` spec invalid, `2` a refused archive, manifest
   or derived field (or a usage error), `3` runtime, target or capability, `4`
   reserved binding, secret or signature, `6` interrupted, `7` internal error.
+
+---
+
+## `bundle sign`
+
+```
+rayspec bundle sign <file.ray> --key-file <ed25519-private-key.pem>
+                    [--output <file.ray.sig>] [--force] [--json]
+```
+
+Writes the detached Ed25519 signature of a bundle: a canonical JSON file
+naming the archive's SHA-256 and the SHA-256 of the signer's public key (DER
+SubjectPublicKeyInfo), with the signature over
+`rayspec-ray-v1\nsha256:<archive SHA-256>\n`. This is the file `bundle verify`
+and `deploy` check against `--trusted-key`. How to make a key, hand out its
+public half and what a signature proves:
+[Signing a bundle](./packing.md#signing-a-bundle).
+
+In order, stopping at the first failure:
+
+1. **Arguments.** One archive path; `--key-file` is required. The signature
+   path is `--output`, else `<file.ray>.sig`; it may not name the bundle or the
+   key file — through another path either, such as a linked directory or a
+   second hard link, which is checked again just before placement — and is at
+   most 4,096 characters. `RAY_USAGE`.
+2. **Key file.** Opened once, without following a link, and judged through
+   that open file: a symbolic link, a file that is not regular, one not owned
+   by you, or one group or others can read or write (`chmod 600`; `0400` also
+   passes) is `RAY_BINDINGS_FILE_INSECURE`; when such a file holds a public key,
+   the message says so. A FIFO or other special file is refused at once, never
+   waited on. A path with no file is `RAY_USAGE`.
+3. **Key.** At most 16 KiB holding exactly one unencrypted Ed25519 private key
+   in PEM form (`openssl genpkey -algorithm ed25519`). A public key, an RSA, EC
+   or other key, or an encrypted key is `RAY_USAGE`. A message names the flag and
+   the path, never the file's content.
+4. **Bundle.** The structural checks of `bundle inspect` — the archive size,
+   the container, the manifest and every entry against the inventory — and its
+   SHA-256. Nothing in the archive is extracted, imported or run, and a refused
+   archive is refused before anything is written, with the code `inspect`
+   reports (`RAY_INVALID_ARCHIVE`, `RAY_LIMIT_EXCEEDED`, `RAY_MANIFEST_INVALID`,
+   `RAY_DIGEST_MISMATCH`). The runtime, capability, spec, secret-scan and
+   signature checks of `bundle verify` are **not** run: verify the bundle too.
+5. **Signature.** Written to a temporary file in the directory of the signature
+   path, read back and verified against the public half of the key. One that does
+   not verify is never placed (`RAY_INTERNAL`). A missing directory, or one you
+   cannot write, is `RAY_USAGE`.
+6. **Placement.** Moved into place in one step: without `--force` it is refused
+   when anything is at the signature path (`RAY_OUTPUT_EXISTS`; a directory there
+   is named as one, and `--force` does not replace a directory); with `--force` it
+   replaces the file, or a link without writing through it. Placement without
+   `--force` makes a hard link, so on a file system without hard links (FAT,
+   exFAT, some network mounts) it is `RAY_USAGE`: write the signature on another
+   file system, or pass `--force`. A name too long for the file system is
+   `RAY_USAGE`. The temporary file is removed whatever happens.
+
+- **Postgres:** not needed. **Environment:** none read (no `.env` is loaded).
+- **Writes:** the signature file (mode `0644`, whatever the umask) and nothing
+  else.
+- **Flags:** `--key-file <ed25519-private-key.pem>` (required);
+  `--output <file.ray.sig>` (default `<file.ray>.sig`); `--force`; `--json`.
+- **Output:** the result envelope (operation `bundle.sign`):
+
+  ```json
+  {
+    "contractVersion": "1.0.0-rc.2",
+    "ok": true,
+    "operation": "bundle.sign",
+    "operationId": "…",
+    "data": {
+      "bundleSha256": "20331da54f5c5b0911e1d9fe6dc4732b6ebd28448930d845b6a84e0188a9d194",
+      "signaturePath": "app.ray.sig",
+      "publicKeySha256": "03d6111f60bf5fc57c9b17beeb0dc25f4e94b4fa064ffbdef1936aa6739901c2"
+    },
+    "errors": [],
+    "warnings": []
+  }
+  ```
+
+  `publicKeySha256` is the value `bundle verify` reports for a signature it
+  verified with that key. On a refusal `data` is `null`. On stderr: the
+  operation id and, without `--json`, a short description — the bundle, the
+  signature path, the public key's SHA-256 and the `bundle verify` command that
+  checks it, with `--signature` when the signature is not at `<file.ray>.sig`
+  (`deploy` reads only that name). No output carries key material. A signature establishes who signed
+  the archive for whoever trusts that key; it does not vouch for the code the
+  bundle carries.
+- **Exit:** `0` signed and verified, `2` a usage error, a refused archive or an
+  existing signature file, `4` a key file that is a link, not a regular file,
+  not yours or open to others, `6` interrupted before the file was placed
+  (nothing written), `7` internal error.
 
 ---
 
@@ -1525,7 +1617,7 @@ encrypted with age to the X25519 recipient, and leaves the source **fenced**. Th
 
   ```json
   {
-    "contractVersion": "1.0.0-rc.1",
+    "contractVersion": "1.0.0-rc.2",
     "ok": true,
     "operation": "export",
     "operationId": "…",

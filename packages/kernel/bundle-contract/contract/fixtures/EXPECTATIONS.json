@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Golden fixture corpus. Every case is built deterministically from the bases below by the construction rules, then read by bundle.inspect and bundle.verify; errors[0] must match code and reason. The corpus is shared: Core and Cloud run the same bytes through the same reader.",
-  "contractVersion": "1.0.0-rc.1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Golden fixture corpus. Every case is built deterministically from the bases below by the construction rules, then read by bundle.inspect and bundle.verify; errors[0] must match code and reason. The corpus is shared: Core and Cloud run the same bytes through the same reader.",
+  "contractVersion": "1.0.0-rc.2",
   "expectationsFormatVersion": 1,
   "bases": {
     "application": {
@@ -6550,7 +6550,7 @@
       "description": "A complete managed receipt.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6601,7 +6601,7 @@
       "description": "agentTraceExport \"openai\".",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6652,7 +6652,7 @@
       "description": "executionLevels claims \"sandboxed\", which Core does not provide.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6704,7 +6704,7 @@
       "description": "recoveryScopeEndpoint \"public\".",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6755,7 +6755,7 @@
       "description": "databaseRoleSeparation false.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6806,7 +6806,7 @@
       "description": "supportedBackends [\"openai\", \"codex\"]; codex is self-host-only.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6858,7 +6858,7 @@
       "description": "capabilities lists stt-fake, which is test-only.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6910,7 +6910,7 @@
       "description": "capabilities lists agent-backend-pi, which is self-host-only.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -6962,7 +6962,7 @@
       "description": "targets[0].nodeVersion \"22.20.0\", below the 22.21.0 floor.",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -7013,7 +7013,7 @@
       "description": "targets[0].nodeVersion \"22.100.3\".",
       "document": {
         "receiptFormatVersion": 1,
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "runtimeVersion": "0.0.0-contract-fixture",
         "sourceCommit": "0000000000000000000000000000000000000000",
         "releaseManifestSha256": "58466ebdd352f801198118e294e38715f864985fd87977f348bfcd7db62e7c76",
@@ -7409,7 +7409,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "A failed inspection envelope.",
       "document": {
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "ok": false,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7431,7 +7431,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "ok true while errors is non-empty.",
       "document": {
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "ok": true,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7453,7 +7453,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "ok false with an empty errors list.",
       "document": {
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "ok": false,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7468,7 +7468,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "errors as a list of strings (the legacy deploy --dry-run shape).",
       "document": {
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "ok": false,
         "operation": "bundle.inspect",
         "operationId": "00000000-0000-4000-8000-000000000000",
@@ -7485,7 +7485,7 @@
       "schema": "cli-verbs.json#/envelopeSchema",
       "description": "doctor with --json: legacy object in data, SPEC_ code in errors.",
       "document": {
-        "contractVersion": "1.0.0-rc.1",
+        "contractVersion": "1.0.0-rc.2",
         "ok": false,
         "operation": "doctor",
         "operationId": "00000000-0000-4000-8000-000000000000",

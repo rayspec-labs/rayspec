@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. CLI verb map, result envelope and exit codes. Codes and their exit classes are in error-codes.json.",
-  "contractVersion": "1.0.0-rc.1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. CLI verb map, result envelope and exit codes. Codes and their exit classes are in error-codes.json.",
+  "contractVersion": "1.0.0-rc.2",
   "output": {
     "rule": "A new verb writes exactly one final JSON envelope to stdout, with or without --json. While it runs, stdout carries nothing else: progress, library and runtime output go to stderr, and so does the short human-readable description of the result, which is written only without --json. An existing verb without --json keeps its current output byte for byte. An existing verb with --json writes the envelope with its legacy result object unchanged in data and adds the warning RAY_W_LEGACY_OUTPUT; its legacy string errors become errors with code RAY_CHECK_FAILED and the string as message, and its spec errors become SPEC_ codes.",
     "secrets": "No output, log, error message or envelope field ever carries a secret value, a bindings-file value, an identity or key file content, or a path component known to be secret.",
@@ -582,6 +582,151 @@
         "RAY_SIGNATURE_INVALID",
         "RAY_INTERNAL"
       ]
+    },
+    {
+      "verb": "rayspec bundle sign <file.ray>",
+      "operation": "bundle.sign",
+      "status": "new",
+      "summary": "Write a detached Ed25519 provenance signature (signatureFileSchema) over \"rayspec-ray-v1\\nsha256:<archive hex>\\n\" for a bundle that passes the structural reader steps, and verify it against the public half of the signing key before reporting success. Establishes origin only; the bundle is read, never extracted, imported or run.",
+      "positionals": [
+        "<file.ray>"
+      ],
+      "flags": [
+        {
+          "flag": "--key-file",
+          "value": "<ed25519-private-key.pem>",
+          "required": true,
+          "description": "The signing key: one unencrypted Ed25519 private key in PEM form (PKCS#8, as openssl genpkey -algorithm ed25519 writes it). The file follows keyFileRule."
+        },
+        {
+          "flag": "--output",
+          "value": "<file.ray.sig>",
+          "required": false,
+          "description": "Where the signature file is written. The file follows outputRule.",
+          "default": "<file.ray>.sig, the file bundle verify and deploy read when no --signature is given"
+        },
+        {
+          "flag": "--force",
+          "value": null,
+          "required": false,
+          "description": "Replace an existing file at the signature path."
+        },
+        {
+          "flag": "--json",
+          "value": null,
+          "required": false,
+          "description": "Accepted on every verb. New verbs always write the envelope; the flag is accepted for symmetry."
+        }
+      ],
+      "pipeline": [
+        {
+          "step": "arguments: exactly one <file.ray>; --key-file given and not empty; --output, when given, not empty; the signature path at most 4096 characters and neither the bundle nor the key file",
+          "codes": [
+            "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "key file: opened without following a link and judged through that handle (keyFileRule)",
+          "codes": [
+            "RAY_BINDINGS_FILE_INSECURE",
+            "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "key: one Ed25519 private key in PEM form (keyFileRule)",
+          "codes": [
+            "RAY_USAGE"
+          ]
+        },
+        {
+          "step": "reader step 1: budget: transfer size against the operation limit",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 2: end record",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 3: central records",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 4: name set",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 5: layout and local headers",
+          "codes": [
+            "RAY_INVALID_ARCHIVE"
+          ]
+        },
+        {
+          "step": "reader step 6: manifest bytes",
+          "codes": [
+            "RAY_LIMIT_EXCEEDED",
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 7: manifest schema, then the archive limit of the kind",
+          "codes": [
+            "RAY_MANIFEST_INVALID",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "reader step 8: manifest semantics",
+          "codes": [
+            "RAY_MANIFEST_INVALID"
+          ]
+        },
+        {
+          "step": "reader step 9: archive against inventory",
+          "codes": [
+            "RAY_INVALID_ARCHIVE",
+            "RAY_DIGEST_MISMATCH",
+            "RAY_LIMIT_EXCEEDED"
+          ]
+        },
+        {
+          "step": "signature: created over the archive SHA-256 the reader computed, written to a temporary file in the directory of the signature path, read back and verified against the public half of the key; a signature that does not verify is a defect",
+          "codes": [
+            "RAY_USAGE",
+            "RAY_INTERNAL"
+          ]
+        },
+        {
+          "step": "placement (outputRule)",
+          "codes": [
+            "RAY_OUTPUT_EXISTS",
+            "RAY_USAGE"
+          ]
+        }
+      ],
+      "errors": [
+        "RAY_USAGE",
+        "RAY_INVALID_ARCHIVE",
+        "RAY_LIMIT_EXCEEDED",
+        "RAY_MANIFEST_INVALID",
+        "RAY_DIGEST_MISMATCH",
+        "RAY_BINDINGS_FILE_INSECURE",
+        "RAY_OUTPUT_EXISTS",
+        "RAY_INTERNAL"
+      ],
+      "keyFileRule": "The key file is a protected file (02-CLI-AND-RUNTIME.md \"Bindings\"). It is opened once, without following a link and without blocking, and judged through that handle: a link (the open fails with ELOOP), a file that is not regular, a file not owned by the invoking user, or a file that group or others can read or write (any of the mode bits 0077; 0600 and 0400 pass) is RAY_BINDINGS_FILE_INSECURE. A path with no file or a file that cannot be opened or read is RAY_USAGE. The content is read through the same handle: more than 16 KiB, anything but exactly one PEM private key, an encrypted key, a public key, or a key of another algorithm (RSA, EC, Ed448, X25519) is RAY_USAGE. A message names the flag and the path, never the content of the file.",
+      "outputRule": "The signature path is --output, else <file.ray>.sig. The signature file (mode 0644, canonical JSON) is written to a temporary file in the directory of the signature path, synced, read back and verified, then moved into place in one step: without --force it is linked to the signature path, which fails if anything exists there (RAY_OUTPUT_EXISTS); with --force it is renamed over the signature path, replacing a file or a link without writing through it, and a directory there is RAY_USAGE. A missing directory of the signature path, or one that cannot be written, is RAY_USAGE. The temporary file is removed on every outcome; a refusal at any step before placement leaves nothing at the signature path, and a bundle the reader refuses is refused before anything is written. SIGINT or SIGTERM before placement removes the temporary file and reports RAY_INTERRUPTED; nothing was written.",
+      "exitRule": "Exit 0 when the signature file is placed and verified; 2 for RAY_USAGE, RAY_INVALID_ARCHIVE, RAY_LIMIT_EXCEEDED, RAY_MANIFEST_INVALID, RAY_DIGEST_MISMATCH and RAY_OUTPUT_EXISTS; 4 for RAY_BINDINGS_FILE_INSECURE; 6 for RAY_INTERRUPTED; 7 for RAY_INTERNAL (error-codes.json).",
+      "dataRule": "data on success: bundleSha256 (the archive SHA-256 the signature signs), signaturePath (the signature path as given or derived, not resolved) and publicKeySha256 (SHA-256 of the public key in DER SubjectPublicKeyInfo form: the value the signature file names and bundle verify reports). data is null on any failure. No output carries key material."
     },
     {
       "verb": "rayspec deploy <file.ray> --dry-run",
@@ -1477,7 +1622,7 @@
     "additionalProperties": false,
     "properties": {
       "contractVersion": {
-        "const": "1.0.0-rc.1"
+        "const": "1.0.0-rc.2"
       },
       "ok": {
         "type": "boolean"
@@ -1487,6 +1632,7 @@
           "pack",
           "bundle.inspect",
           "bundle.verify",
+          "bundle.sign",
           "deploy.dry-run",
           "deploy",
           "export",
@@ -2034,6 +2180,55 @@
                     "checkedAgainstRuntime",
                     "signature",
                     "verdict"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "type": "object",
+          "properties": {
+            "operation": {
+              "const": "bundle.sign"
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        },
+        "then": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "bundleSha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "signaturePath": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 4096
+                    },
+                    "publicKeySha256": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    }
+                  },
+                  "required": [
+                    "bundleSha256",
+                    "signaturePath",
+                    "publicKeySha256"
                   ]
                 },
                 {
@@ -2597,7 +2792,7 @@
                       "pattern": "^[0-9]+[.][0-9]+[.][0-9]+$"
                     },
                     "contractVersion": {
-                      "const": "1.0.0-rc.1"
+                      "const": "1.0.0-rc.2"
                     },
                     "capabilityVocabularyVersion": {
                       "const": 1
@@ -3541,11 +3736,5 @@
       "signature"
     ]
   },
-  "verbsNotProvided": [
-    {
-      "verb": "rayspec bundle sign <file.ray>",
-      "operation": "bundle.sign",
-      "reason": "Not a verb of this release: the CLI answers rayspec bundle sign as an unknown bundle subcommand (exit 2). The detached signature format (signatureFileSchema) and its verification by bundle verify and deploy are unchanged; a signature file is written by the release tooling that holds the Ed25519 release key, never by the runtime CLI."
-    }
-  ]
+  "verbsNotProvided": []
 }

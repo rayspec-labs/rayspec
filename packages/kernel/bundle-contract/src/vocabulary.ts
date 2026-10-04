@@ -10,7 +10,7 @@
  */
 
 /** The contract version every artifact, envelope and request states. */
-export const CONTRACT_VERSION = '1.0.0-rc.1';
+export const CONTRACT_VERSION = '1.0.0-rc.2';
 
 // ─── capabilities ──────────────────────────────────────────────────────────────────────────────
 
@@ -328,6 +328,7 @@ export const RESULT_OPERATIONS = [
   'pack',
   'bundle.inspect',
   'bundle.verify',
+  'bundle.sign',
   'deploy.dry-run',
   'deploy',
   'export',

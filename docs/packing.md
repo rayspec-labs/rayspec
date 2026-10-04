@@ -245,6 +245,78 @@ an agent backend but declares no egress hosts is packed with the warning
 `RAY_W_EGRESS_UNDECLARED`: a host network policy that enforces the declared
 hosts would deny its calls.
 
+## Signing a bundle
+
+A signature lets whoever deploys a bundle check that it is the file you
+published, byte for byte, and that you published it. It is a small detached
+file next to the bundle: Ed25519 over the bundle's SHA-256, naming the SHA-256
+of your public key. The bundle itself is not changed.
+
+**1. Make a signing key once**, and keep it to yourself:
+
+```sh
+openssl genpkey -algorithm ed25519 -out publisher.pem
+chmod 600 publisher.pem
+openssl pkey -in publisher.pem -pubout -out publisher.pub.pem
+```
+
+`publisher.pem` is the private key. `bundle sign` refuses it unless it is a
+regular file (not a link), owned by you, and readable by nobody else (mode
+`0600` or `0400`), and unless it holds one unencrypted Ed25519 private key in
+PEM form; a public key, an RSA or EC key, or an encrypted key is refused. If
+you pass `publisher.pub.pem` by mistake, the refusal says it holds a public
+key, whatever its mode.
+Store it like any other credential: never in the repository, never in the
+application directory you pack.
+
+**2. Sign each bundle** after you pack it:
+
+```sh
+rayspec pack --spec dist/rayspec.yaml --output notes-1.4.0.ray
+rayspec bundle sign notes-1.4.0.ray --key-file publisher.pem
+```
+
+This writes `notes-1.4.0.ray.sig`, the name `bundle verify` and `deploy` look
+for. Sign runs the same structural checks `bundle inspect` runs, so a damaged
+or hostile archive is refused before anything is written; it does not run the
+runtime, capability or spec checks, so check the bundle with `bundle verify`
+too. It verifies the signature it wrote against the public half of your key
+before it reports success, and prints the bundle's SHA-256, the signature path
+and your public key's SHA-256 — never the key. `--output` writes the
+signature elsewhere; an existing signature file is refused unless you pass
+`--force`. `bundle verify` reads a signature written elsewhere only when you
+give it `--signature <path>`, and `deploy` reads only `<file.ray>.sig`, so a
+signature you hand out with a bundle goes next to it under that name.
+
+**3. Hand out the public key** — `publisher.pub.pem` — through a channel
+the deployer already trusts (your repository's release page, a key published
+on your own domain, or in person), separately from the bundle. A key that
+travels with the bundle proves nothing: whoever could swap the bundle could
+swap the key. Tell the deployer its SHA-256 too
+(`openssl pkey -pubin -in publisher.pub.pem -outform DER | sha256sum`); sign
+and verify both print it.
+
+**4. The deployer verifies** with that public key, and refuses an unsigned
+bundle:
+
+```sh
+rayspec bundle verify notes-1.4.0.ray --trusted-key publisher.pub.pem --require-signature
+rayspec deploy notes-1.4.0.ray --dry-run --trusted-key publisher.pub.pem --require-signature
+```
+
+A bundle changed after signing, a signature made by another key, or a missing
+signature is refused with `RAY_SIGNATURE_INVALID` (exit 4).
+
+**What a signature proves, and what it does not.** A verified signature shows
+that the archive is exactly the one the holder of the private key signed, and
+nothing more. It does not show that the code in the bundle is safe, correct or
+free of secrets, that the signer reviewed it, or that the bundle suits the
+runtime you deploy it on — `bundle verify` checks that last part separately. It
+is only as good as the key: anyone who has `publisher.pem` can sign anything as
+you, and a deployer who trusts the wrong public key trusts its holder. If the
+key leaks, make a new one, re-sign what you still publish, and tell deployers
+to drop the old public key.
+
 ## Not available yet
 
 - **`--build`** is refused: pack does not run builds. Build the application

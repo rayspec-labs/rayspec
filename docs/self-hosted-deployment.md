@@ -58,7 +58,7 @@ Read what the bundle is before you run anything from it:
 
 ```bash
 rayspec bundle inspect app.ray
-rayspec bundle verify app.ray --trusted-key /etc/rayspec/publisher.pem
+rayspec bundle verify app.ray --trusted-key /etc/rayspec/publisher.pub.pem
 ```
 
 `inspect` reports the application id and version, the runtime it pins, the capabilities it requires,
@@ -68,6 +68,19 @@ the archive, the manifest, the runtime, target and capabilities, the reserved bi
 spec, the fields derived from it, the secret scan and the signature — and says whether this runtime
 can deploy it. Neither extracts, imports or runs anything. An unsigned bundle is accepted with the
 warning `RAY_W_UNSIGNED`; `--require-signature` refuses it.
+
+The signature is the `<file>.ray.sig` the publisher wrote with `rayspec bundle sign` (see
+[Signing a bundle](./packing.md#signing-a-bundle)), and `--trusted-key` is the publisher's
+**public** key; the private key never leaves the publisher. Get the public key from the publisher
+through a channel you already trust, not from beside the bundle, and compare its SHA-256 with the
+one the publisher states: `verify` prints it as `signature.publicKeySha256`. To deploy only signed bundles, pass the same two flags to the deploy:
+
+```bash
+rayspec deploy app.ray --dry-run --trusted-key /etc/rayspec/publisher.pub.pem --require-signature
+```
+
+A verified signature shows that the bundle is the file the key's holder signed. It does not show
+that its code is safe; the checks above and your own review of what it declares do that part.
 
 ## Bind
 

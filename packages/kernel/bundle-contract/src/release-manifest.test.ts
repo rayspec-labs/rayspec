@@ -67,7 +67,7 @@ describe('validateReleaseManifest', () => {
   });
 
   it('refuses a member the closed schema does not know, naming it', () => {
-    const extended = { ...manifest(), contractVersion: '1.0.0-rc.1' };
+    const extended = { ...manifest(), contractVersion: '1.0.0-rc.2' };
     expect(first(validateReleaseManifest(bytes(extended)))).toBe(
       'RAY_MANIFEST_INVALID/schema@/contractVersion',
     );

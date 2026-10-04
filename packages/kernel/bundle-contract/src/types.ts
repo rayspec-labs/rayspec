@@ -179,7 +179,7 @@ export interface ObjectIndex {
 /** The protections one runtime release was tested for under the managed hosting posture. */
 export interface ManagedReceipt {
   receiptFormatVersion: 1;
-  contractVersion: '1.0.0-rc.1';
+  contractVersion: '1.0.0-rc.2';
   runtimeVersion: string;
   sourceCommit: string;
   releaseManifestSha256: Sha256;
@@ -235,7 +235,7 @@ export interface ReleaseSignatureFile {
 // ─── result envelope ───────────────────────────────────────────────────────────────────────────
 
 interface ResultEnvelopeBase<T> {
-  contractVersion: '1.0.0-rc.1';
+  contractVersion: '1.0.0-rc.2';
   operation: ResultOperation;
   /** UUID v4: fresh per CLI invocation; echoed from the request by a runtime operation. */
   operationId: string;
@@ -256,7 +256,7 @@ export type ResultEnvelope<T> =
 
 /** Every runtime-control request carries these. */
 export interface RequestBase {
-  contractVersion: '1.0.0-rc.1';
+  contractVersion: '1.0.0-rc.2';
   /** UUID v4 chosen by the caller and reused on retry. */
   operationId: string;
   /** Opaque, at most 256 characters, recorded in receipts; never a credential. */
@@ -275,7 +275,7 @@ export interface InspectData {
   runtimeVersion: string;
   target: Target;
   nodeVersion: string;
-  contractVersion: '1.0.0-rc.1';
+  contractVersion: '1.0.0-rc.2';
   capabilityVocabularyVersion: 1;
   /** Every id this runtime provides. */
   capabilities: string[];

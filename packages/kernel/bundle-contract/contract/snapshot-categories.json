@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Every platform table mapped to a snapshot data category.",
-  "contractVersion": "1.0.0-rc.1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Every platform table mapped to a snapshot data category.",
+  "contractVersion": "1.0.0-rc.2",
   "platformSchemaHead": "0017_runtime_control_blob_backend",
   "categories": [
     {

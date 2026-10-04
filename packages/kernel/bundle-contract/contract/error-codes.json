@@ -1,6 +1,6 @@
 {
-  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.1. Stable error vocabulary. Codes are append-only; a code never changes meaning, exit code or retryable flag within a contract major.",
-  "contractVersion": "1.0.0-rc.1",
+  "$comment": "RAY-CLOUD shared contract 1.0.0-rc.2. Stable error vocabulary. Codes are append-only; a code never changes meaning, exit code or retryable flag within a contract major.",
+  "contractVersion": "1.0.0-rc.2",
   "exitCodes": [
     {
       "exit": 0,

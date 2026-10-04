@@ -343,7 +343,7 @@ pinned `postgres` image `docker-compose.yml` runs, through `docker run`.
 ## Compatibility notes
 
 Where `rayspec export` behaves differently from the earlier draft of the bundle contract, as the
-contract it implements (`1.0.0-rc.1`) now states:
+contract it implements (`1.0.0-rc.2`) now states:
 
 - **A barrier that cannot hold is refused before the fence.** The contract's `quiesce` takes the
   fence and then reports the database barrier `unavailable`, and its `snapshot` refuses with

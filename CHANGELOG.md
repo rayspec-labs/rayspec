@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rayspec bundle sign` writes the detached Ed25519 signature of a bundle.**
+  `rayspec bundle sign <file.ray> --key-file <ed25519-private-key.pem> [--output <file.ray.sig>]
+  [--force] [--json]` reads the bundle through the structural steps of the one bundle reader (never
+  extracting or running it, so a damaged or hostile archive is refused before anything is written),
+  signs its archive SHA-256 with the bundle library's `createSignatureFile`, writes the signature
+  file beside its destination, reads it back and verifies it against the public half of the key,
+  and only then moves it into place: to `<file.ray>.sig`, the file `bundle verify` and `deploy` read,
+  or to `--output`. An existing file is refused with `RAY_OUTPUT_EXISTS` unless `--force`, which
+  replaces a file or a link without writing through it; a signature path that reaches the bundle
+  or the key file through another path (a linked directory, a second hard link) is refused with
+  `RAY_USAGE`, with or without `--force`, and so is a file system without hard links when
+  `--force` is not given. The signature file is mode 0644 whatever the umask. The key file is opened once without
+  following a link and judged through that handle: a link, a file that is not regular, one owned by
+  another user or one group or others can read or write is `RAY_BINDINGS_FILE_INSECURE` (exit 4);
+  a missing file, a public key, an RSA, EC or encrypted key, or more than one key is `RAY_USAGE`.
+  The envelope (`bundle.sign`) carries the archive SHA-256, the signature path and the SHA-256 of
+  the public key, the value `bundle verify` reports; no output carries key material. Like the
+  other bundle verbs it loads no server, database layer or handler loader. The signature shows who
+  signed the archive, not that its code is safe; see
+  [Signing a bundle](./docs/packing.md#signing-a-bundle). The team-notes reference journey signs its
+  first release, verifies it with `--require-signature` against the publisher key and with another
+  key, and deploys it with `--require-signature`.
+
 - **Release candidates, built and tested as a release.** `pnpm release:candidate --version
   <x.y.z-pre> --out <dir>` (`scripts/release-candidate.mjs`) stamps a pre-release version into every
   RaySpec manifest for the run only, packs the publish set, writes the release identity manifest,
@@ -289,7 +312,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `closureFiles` the input of the `@rayspec/bundle` writer.
 - **`@rayspec/bundle-contract`: the application bundle contract in code.** A new kernel package
   carries the format of a `.ray` application bundle, of the encrypted migration snapshot and of the
-  managed hosting receipt, as contract version `1.0.0-rc.1`. It commits the contract's
+  managed hosting receipt, as contract version `1.0.0-rc.2`. It commits the contract's
   JSON Schemas and vocabularies byte for byte under `contract/`, with `CONTRACT-LOCK.json` recording
   the SHA-256 of every contract file and one digest over them. A test recomputes that digest over
   the recorded file map and the hash of every committed file; the contract's prose documents are
@@ -968,9 +991,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded are gone, and it says so instead of failing on them. Its notes name the release workflow
   and the signed release manifest that records its digest.
 
-- **The bundle contract is revision `1.0.0-rc.1`, and it states what this release does.**
+- **The bundle contract is revision `1.0.0-rc.2`, and it states what this release does.**
   `@rayspec/bundle-contract` carries the revised contract files and their new lock digest, and every
-  envelope, runtime-control request, snapshot and receipt states `contractVersion` `1.0.0-rc.1`.
+  envelope, runtime-control request, snapshot and receipt states `contractVersion` `1.0.0-rc.2`.
   The verb map lists `pack --against` and `--allowlist` as they work, the `import` flags
   `--secrets-out`, `--discard-failed`, `--cutover-token` and `--renew-cutover-token`, and
   `tenant recover-owner`, which writes its own JSON object and refuses `--json`. Each verb's code
@@ -982,8 +1005,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recovery tokens, and the platform schema head is `0017_runtime_control_blob_backend`;
   `PLATFORM_TABLES` lists every platform table and `CONTRACT_PLATFORM_TABLES` is gone. The corpus
   gains three cases: a `ray.json` whose CRC-32 is wrong, a central directory with bytes after its
-  records, and a private-key header whose word holds digits. There is no `bundle sign` verb and no
-  `runtime.snapshot` operation, so neither is a result operation any more, and the
+  records, and a private-key header whose word holds digits. The verb map defines `bundle sign` in
+  full (its flags, key file and output rules, codes and data) and `bundle.sign` is a result
+  operation; there is no `runtime.snapshot` operation, so it is not one any more, and the
   `RuntimeControl` type lists the five operations the adapter performs. The deterministic
   extraction capability, `extraction-deterministic`, is available and provided by the runtime:
   runtime-control `inspect()` lists it, and a bundle cannot require it.

@@ -191,7 +191,7 @@ describe.skipIf(!baseUrl)('the legacy deploy through apply', () => {
       );
       expect(await state(dbUrl)).toEqual({ revision: '2', applied: live });
       const inspected = await createRuntimeControl({ db }).inspect({
-        contractVersion: '1.0.0-rc.1',
+        contractVersion: '1.0.0-rc.2',
         operationId: randomUUID(),
         actor: 'operator:deploy-apply',
       });
