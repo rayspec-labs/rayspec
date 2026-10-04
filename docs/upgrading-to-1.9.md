@@ -141,6 +141,7 @@ not protect against. The [threat model](./threat-model.md) lists every accepted 
 | `rayspec pack` | Builds a `.ray` application bundle from an application that is already built ([Packing an application](./packing.md)). |
 | `rayspec bundle inspect <file.ray>` | Checks the archive and reports what the bundle is; runs and writes nothing. |
 | `rayspec bundle verify <file.ray>` | Everything inspect checks, plus the runtime, target, capabilities, spec, secret scan and signature. |
+| `rayspec bundle sign <file.ray> --key-file <pem>` | Writes the detached Ed25519 signature `bundle verify` and `deploy --require-signature` check. See [packing](./packing.md). |
 | `rayspec deploy <file.ray>` | Deploys a bundle: a dry run that prints a plan digest, then the deploy of that digest ([Self-hosted deployment](./self-hosted-deployment.md)). |
 | `rayspec export` | Moves a self-hosted deployment out as one encrypted migration bundle ([Exporting a deployment](./export.md)). |
 | `rayspec import` | Restores a migration bundle into a new, empty target ([Importing a deployment](./import.md)). |
@@ -179,8 +180,8 @@ signature, now takes the bundle path. It used to read such a file as YAML. A bun
   [changelog](../CHANGELOG.md#190---2026-10-03) lists them.
 - `isSensitive` in `@rayspec/auth-core` takes the posture as an optional second argument.
 - The repository script `release:pack` is now `release:tarballs`.
-- The bundle contract this release implements is revision `1.0.0-rc.1`; every envelope, receipt and
-  runtime-control request states `contractVersion` `1.0.0-rc.1`.
+- The bundle contract this release implements is revision `1.0.0-rc.2`; every envelope, receipt and
+  runtime-control request states `contractVersion` `1.0.0-rc.2`.
 
 ## Going back
 
