@@ -201,13 +201,13 @@ describe('stream-backend: an extension shipped with its own manifest', () => {
   it('refuses a runtime the extension declared range excludes', async () => {
     const result = await resolveClosure({
       specPath: join(root, 'rayspec.yaml'),
-      runtimeVersion: '1.9.0',
+      runtimeVersion: '1.10.0',
     });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.errors[0]!.code).toBe('RAY_RUNTIME_UNSUPPORTED');
       expect(result.errors[0]!.message).toContain('@rayspec/platform');
-      expect(result.errors[0]!.message).toContain('1.9.0');
+      expect(result.errors[0]!.message).toContain('1.10.0');
     }
   });
 

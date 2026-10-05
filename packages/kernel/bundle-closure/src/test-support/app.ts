@@ -20,7 +20,7 @@ export const REPO_ROOT = join(
 export const EXAMPLES = join(REPO_ROOT, 'examples');
 
 /** The runtime version the tests pin, which is the repository's own version. */
-export const RUNTIME = '1.8.0';
+export const RUNTIME = '1.9.0';
 
 const created: string[] = [];
 
