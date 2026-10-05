@@ -1,7 +1,7 @@
 # Upgrading to 1.9
 
 This guide takes a deployment from RaySpec 1.8.x to 1.9.0. It lists what changes when you only
-upgrade, every behavior change in the [changelog](../CHANGELOG.md#190---2026-10-03) with what you do
+upgrade, every behavior change in the [changelog](../CHANGELOG.md#190---2026-10-05) with what you do
 about it, how to turn on the hardened posture this release adds, the new commands, the Node floor
 and the migrations that run on the first boot.
 
@@ -177,7 +177,7 @@ signature, now takes the bundle path. It used to read such a file as YAML. A bun
 ## For embedders and maintainers
 
 - `@rayspec/server` exports the bundle deploy's, apply's, export's and import's building blocks; the
-  [changelog](../CHANGELOG.md#190---2026-10-03) lists them.
+  [changelog](../CHANGELOG.md#190---2026-10-05) lists them.
 - `isSensitive` in `@rayspec/auth-core` takes the posture as an optional second argument.
 - The repository script `release:pack` is now `release:tarballs`.
 - The bundle contract this release implements is revision `1.0.0-rc.2`; every envelope, receipt and
