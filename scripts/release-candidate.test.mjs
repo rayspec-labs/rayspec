@@ -20,7 +20,7 @@
  * Standalone: `node scripts/release-candidate.test.mjs`; exit 0 = pass.
  */
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -228,8 +228,16 @@ await check('the command line refuses before it writes anything', async () => {
     readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'),
   ).version;
   assert.equal(await main(['--release', '--version', '9.9.9', '--out', out]), 2);
-  // This checkout's HEAD is a development commit: it carries no release tag of its own version.
-  assert.equal(await main(['--release', '--version', committed, '--out', out]), 2);
+  // A development commit carries no release tag of its own version, so a release build of it is
+  // refused. The commit a release is tagged on does carry it, and there the build is admitted, so the
+  // refusal is only asserted where it applies.
+  const tags = execFileSync('git', ['tag', '--points-at', 'HEAD'], {
+    cwd: join(import.meta.dirname, '..'),
+    encoding: 'utf8',
+  }).split('\n');
+  if (!tags.includes(`v${committed}`)) {
+    assert.equal(await main(['--release', '--version', committed, '--out', out]), 2);
+  }
   assert.equal(await main(['--version', '1.9.0-rc.0', '--out', out, '--key-file', 'k.pem']), 2);
   assert.equal(existsSync(out), false);
 });
