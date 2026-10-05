@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The lead-qualifier live test reads a run's usage once the run has ended.** A durable agent run
+  holds no transaction across the model call, so a tool's write is served while the run is still
+  executing. The test took the lead reading `qualified` as the end of the run and summed
+  `journal_steps` at that moment: the tool's own step, which carries no tokens, was the only one
+  there, because the OpenAI adapter journals its model calls when the provider call returns. It
+  failed on `total_tokens` 0 for a run that went on to journal its usage. It now waits for the run
+  header to be terminal and reads that run's steps. No runtime behavior changes: a run's usage and
+  cost are journaled as before, when its last model response is in. A database test drives the
+  same example with a backend that reports usage per model response around a tool call, and holds
+  the tool step, each model step's tokens and registry cost, the billed cost and the header's
+  roll-up; the in-request cost test now holds the token columns too.
+
 ## [1.9.0] - 2026-10-05
 
 ### Added

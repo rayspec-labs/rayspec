@@ -26,6 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { agentBackendsFactoryFromEnv } from './agent-backends-from-env.js';
 import { assembleServer, type BootedServer, loadServerConfig } from './composition-root.js';
 import { logRedactedRunFailure } from './live-smoke-diagnostics.js';
+import { type AgentRunUsage, readEndedAgentRunUsage } from './live-smoke-run-usage.js';
 
 const baseUrl = process.env.DATABASE_URL;
 const hasKey = Boolean(process.env.OPENAI_API_KEY);
@@ -227,24 +228,37 @@ describe.skipIf(!canRun)('lead-qualifier LIVE smoke — a real agent qualifies a
       expect(typeof row?.qualified_at).toBe('string');
 
       // The REAL provider call journaled NONZERO token usage under the tenant (the metering signal).
+      // The lead reads `qualified` as soon as the tool has written it, which is BEFORE the run ends:
+      // the model's closing turn is still out, and the adapter journals its model calls when the
+      // provider call returns. So wait for the run itself to end, then read ITS steps.
+      const runId = String(created.run_id);
       const client = postgres(appDbUrl, { max: 1 });
-      let usage: { n: number; max_tokens: string } | undefined;
+      let usage: AgentRunUsage;
       try {
-        const steps = (await client.unsafe(
-          'SELECT count(*)::int AS n, coalesce(max(total_tokens),0)::numeric AS max_tokens FROM journal_steps',
-        )) as unknown as Array<{ n: number; max_tokens: string }>;
-        usage = steps[0];
+        usage = await readEndedAgentRunUsage(client, runId, { timeoutMs: 150_000 });
+        if (usage.status !== 'completed') await logRedactedRunFailure(client, runId);
       } finally {
         await client.end();
       }
       // eslint-disable-next-line no-console
       console.log(
-        '[lead-live] journal_steps:',
-        usage?.n,
-        'max_tokens:',
-        Number(usage?.max_tokens ?? 0),
+        '[lead-live] run:',
+        usage.status,
+        'journal_steps:',
+        usage.steps,
+        'llm_steps:',
+        usage.llmSteps,
+        'total_tokens:',
+        usage.totalTokens,
+        'cost_usd:',
+        usage.costUsd,
       );
-      expect(Number(usage?.max_tokens ?? 0)).toBeGreaterThan(0);
+      expect(usage.status).toBe('completed');
+      // One tool step, and a model response on either side of it.
+      expect(usage.llmSteps).toBeGreaterThanOrEqual(1);
+      expect(usage.steps).toBeGreaterThan(usage.llmSteps);
+      expect(usage.totalTokens).toBeGreaterThan(0);
+      expect(usage.costUsd).toBeGreaterThan(0);
     },
     240_000,
   );

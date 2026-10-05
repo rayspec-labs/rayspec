@@ -129,6 +129,10 @@ describe('per-step cost is RE-COMPUTED from the registry at record() time', () =
     // computeCost('gpt-4.1-mini', {1000,500}) = (1000*0.4 + 500*1.6)/1e6 = (400+800)/1e6 = 0.0012.
     const expected = computeCost('gpt-4.1-mini', { inputTokens: 1000, outputTokens: 500 }).costUsd;
     expect(Number(step?.costUsd)).toBeCloseTo(expected, 12);
+    // The usage the backend reported is the step's own, column by column.
+    expect(Number(step?.inputTokens)).toBe(1000);
+    expect(Number(step?.outputTokens)).toBe(500);
+    expect(Number(step?.totalTokens)).toBe(1500);
     // The adapter LIED with 999 — it must NOT be in the ledger.
     expect(Number(step?.costUsd)).not.toBe(999);
     // Provenance: produced_by is the SDK+adapter tag; pricing_version is the pricing entry.
