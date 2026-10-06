@@ -1210,6 +1210,10 @@ Notes that matter:
 - Serving is fail-closed: path traversal (incl. URL-encoded forms), dotfiles/hidden paths, and symlinks
   that escape `dir` are refused; directories are never listed — the `cleanUrls` `<path>.html` candidate
   runs the same guard.
+- One dot path is served: `<dir>/.well-known/` of a `route: /` mount, for `/.well-known/security.txt`,
+  `assetlinks.json`, `apple-app-site-association` and the like. Only the exact first segment
+  `.well-known`, no dot segment below it, not under any other route; a miss there is a `404` even with
+  `spa: true` (never the `index.html` fallback).
 - `cleanUrls` is for a MULTI-PAGE site built by a static site generator; `spa` is for a single-page app.
   Do not reach for `spa: true` to fix broken extensionless links — it answers EVERY unmatched path with
   the root document, so a genuinely broken link comes back `200`. `cleanUrls` keeps `404` terminal (for

@@ -151,9 +151,9 @@ A backend-profile document can serve a built web UI itself, in one of two forms.
   the same server that answers your API also serves the built static assets at that
   route. Static mounts are the last fallback, so every platform and API route
   (`/health`, `/v1/*`, `/oidc/*`, and any declared `api` path) always wins over
-  them, and serving is fail-closed (no traversal, no dotfiles, no directory
-  listing). This is the [`frontend` section](./spec-reference.md#frontend) of the
-  backend profile.
+  them, and serving is fail-closed (no traversal, no dotfiles apart from a root
+  mount's `/.well-known/`, no directory listing). This is the
+  [`frontend` section](./spec-reference.md#frontend) of the backend profile.
 - **Frontend-only — a static profile.** A document that declares **only** a
   `frontend` — with no stores, api, agents, tooling, triggers, handlers, or
   extensions, no durable worker and no enabled event bus — boots as a **static

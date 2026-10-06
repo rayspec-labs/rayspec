@@ -217,6 +217,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GitHub release. It says what that path does not produce (npm provenance, a signed manifest, an
   image in a registry, the evidence document and the managed receipt), and how the approver adds
   the signature and pushes the tested image archive afterwards.
+- **A static mount at `route: /` serves its `/.well-known/` directory.** The static handler refused
+  every request path with a segment that begins with a dot, so `/.well-known/security.txt`
+  (RFC 9116), `assetlinks.json`, `apple-app-site-association` and every other well-known file
+  answered `404` although the file was in the mounted directory. A mount at the root now serves
+  the top-level `.well-known` directory of its `dir`. Everything else stays hidden: only the exact,
+  case-sensitive first segment `.well-known` is let through, no segment below it may begin with a
+  dot, and a mount at any other route serves no dot path, so `/.env`, `/.git/config`,
+  `/.well-known/.secret` and `/a/.well-known/x` answer `404` as before. The traversal and
+  symlink-escape checks are unchanged and apply to these paths, and the directory is not listed.
+  Files are typed by extension (`security.txt` as `text/plain`, a `.json` file as
+  `application/json`), and `apple-app-site-association`, which has none, is served as
+  `application/json`. `cleanUrls` and the root `404.html` apply as to any other path; a path under
+  `/.well-known/` that names no file is a `404` on an `spa: true` mount too and never the
+  `index.html` fallback. The boot's inline-asset scan reads the HTML files of that directory, since
+  they are now served. `rayspec pack` already carried the directory in a bundle; a test now holds
+  that. **What changes for an existing deployment:** files a build already placed in
+  `<dir>/.well-known/` of a root mount become reachable; look at what is in that directory before
+  upgrading.
 
 ### Security
 

@@ -323,6 +323,37 @@ describe("the walk's skips are the mount's refusals", () => {
     expect((await server.app.request('/escape.html')).status).toBe(404);
   });
 
+  it("a ROOT mount's /.well-known page is SERVED — and named; under an /app mount it is neither", async () => {
+    writeAsset('index.html', CLEAN);
+    writeAsset('.well-known/change-password.html', ALL_FOUR);
+    writeAsset('.well-known/.draft.html', ALL_FOUR);
+    writeAsset('docs/.well-known/page.html', ALL_FOUR);
+
+    const warnings: string[] = [];
+    const server = assembleStaticServer(
+      loadStaticServerConfig({}),
+      { specPath: specPath(), frontend: [SPA_MOUNT] },
+      { bootWarn: (message) => warnings.push(message) },
+    );
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('1 served HTML file carries');
+    expect(warnings[0]).toContain('web/dist/.well-known/change-password.html');
+    expect((await server.app.request('/.well-known/change-password.html')).status).toBe(200);
+    // The dot entry below it and the one that is not at the top are refused, and not named.
+    expect((await server.app.request('/.well-known/.draft.html')).status).toBe(404);
+    expect((await server.app.request('/docs/.well-known/page.html')).status).toBe(404);
+
+    const appMount: FrontendSpec = { route: '/app', dir: 'web/dist', spa: false, cleanUrls: false };
+    const appWarnings: string[] = [];
+    const appServer = assembleStaticServer(
+      loadStaticServerConfig({}),
+      { specPath: specPath(), frontend: [appMount] },
+      { bootWarn: (message) => appWarnings.push(message) },
+    );
+    expect(appWarnings).toEqual([]);
+    expect((await appServer.app.request('/app/.well-known/change-password.html')).status).toBe(404);
+  });
+
   it("a ROOT mount's /v1, /health and /oidc pages are 404 from the mount — and are not named", async () => {
     // `mountFrontend` declines a reserved-namespace request BEFORE the file server, so under a
     // `route: '/'` mount none of these three pages has a servable path — naming one would send an
