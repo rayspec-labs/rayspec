@@ -261,7 +261,8 @@ treats model and tool output as data, never as instructions. See
 - **[Spec reference](./docs/spec-reference.md)** — every section of the two
   document profiles (backend and product), field by field.
 - **[Upgrading to 1.9](./docs/upgrading-to-1.9.md)** — from 1.8.x: what changes
-  without opting in, the hardened posture, the new commands and the migrations.
+  without opting in, the hardened posture, the new commands and the migrations;
+  and from 1.9.0 to 1.9.1.
 - **[The v1 posture](./docs/v1-posture.md)** — the closed capability / operation /
   trigger sets a product document may declare, and the shape guarantees the
   runtime enforces.

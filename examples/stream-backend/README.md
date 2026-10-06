@@ -84,15 +84,15 @@ over `package.json` after copying the extension out:
   "type": "module",
   "main": "./dist/index.js",
   "dependencies": {
-    "@rayspec/handler-sdk": "1.9.0",
-    "@rayspec/platform": "1.9.0"
+    "@rayspec/handler-sdk": "1.9.1",
+    "@rayspec/platform": "1.9.1"
   }
 }
 ```
 
 The pinned version **must equal the platform version the deployment runs** — the entry imports
 `defineExtension` from that exact build, and the `@rayspec` closure (`core`, `db`, `handler-sdk`,
-`platform`, `spec`) is released in lockstep under one version. `1.9.0` is the current release and what
+`platform`, `spec`) is released in lockstep under one version. `1.9.1` is the current release and what
 the pins above name; the recipe itself was last verified end to end against `1.6.2`, so the pins are
 carried forward rather than re-measured. Check the registry for the current version.
 

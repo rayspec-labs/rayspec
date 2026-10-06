@@ -3,21 +3,23 @@
 This guide takes a deployment from RaySpec 1.8.x to 1.9.0. It lists what changes when you only
 upgrade, every behavior change in the [changelog](../CHANGELOG.md#190---2026-10-05) with what you do
 about it, how to turn on the hardened posture this release adds, the new commands, the Node floor
-and the migrations that run on the first boot.
+and the migrations that run on the first boot. [From 1.9.0 to 1.9.1](#from-190-to-191) is the
+section for a deployment that already runs 1.9.0, and for what 1.9.1 adds on the way from 1.8.x.
 
 ## The short version
 
 An existing deployment needs nothing new. Upgrade Node if it is older than 22.21.0, take a backup,
-install 1.9.0 and start the deployment the way you started it before. Role separation, row-level
-security, single-tenant mode, the managed posture and the execution bounds stay off until you set
-them; a YAML deploy boots and prints as before; every existing command keeps exit codes 0, 1 and 2
-for the outcomes it had.
+install 1.9.1 and start the deployment the way you started it before
+([From 1.9.0 to 1.9.1](#from-190-to-191) lists what the patch release asks for). Role separation,
+row-level security, single-tenant mode, the managed posture and the execution bounds stay off until
+you set them; a YAML deploy boots and prints as before; every existing command keeps exit codes 0,
+1 and 2 for the outcomes it had.
 
 The upgrade is checked with data before every release: deployments of three example applications
-(one of them with a compiled extension) are created with 1.7.0 and with 1.8.0, written to and
-upgraded, and afterwards every row is compared, the passwords and API keys made before the upgrade
-still work, and a bundle deploys onto the upgraded environment; one more variant turns role
-separation on during the upgrade.
+(one of them with a compiled extension) are created with 1.7.0 and with 1.8.0 (and, from 1.9.1 on,
+with 1.9.0), written to and upgraded, and afterwards every row is compared, the passwords and API
+keys made before the upgrade still work, and a bundle deploys onto the upgraded environment; one
+more variant turns role separation on during the upgrade.
 
 ## Before you upgrade
 
@@ -183,6 +185,68 @@ signature, now takes the bundle path. It used to read such a file as YAML. A bun
 - The bundle contract this release implements is revision `1.0.0-rc.2`; every envelope, receipt and
   runtime-control request states `contractVersion` `1.0.0-rc.2`.
 
+## From 1.9.0 to 1.9.1
+
+1.9.1 is a patch release: fixes, two opt-in additions and dependency updates, listed in the
+[changelog](../CHANGELOG.md#191---2026-10-07). From 1.8.x, go straight to 1.9.1: everything above
+applies, and so does this section.
+
+**The short version.** Install 1.9.1 and start the deployment the way you started it before. No
+platform migration runs: the chain ends at `0017`, as in 1.9.0, and no product table changes. If
+you set `RAYSPEC_TRUSTED_PROXIES`, check the list first (below). If you serve a static mount at the
+root, look at its `.well-known` directory first (below). If you deploy bundles, repack them with
+1.9.1: one packed for 1.9.0 is refused with `RAY_RUNTIME_UNSUPPORTED`. An extension whose
+`package.json` pins a `@rayspec/*` package to exactly `1.9.0` moves the pin to `1.9.1`, or to a
+range that includes it, before repacking. A snapshot pins its runtime as a bundle does: an export
+taken on 1.9.0 is [imported](./import.md) with 1.9.0, and the upgrade follows the import.
+
+| What changes | What you do |
+| --- | --- |
+| An entry of `RAYSPEC_TRUSTED_PROXIES` that names no range refuses the boot, and the message names it: an address that does not parse, or a missing or malformed prefix length (`10.0.0.0/`, `10.0.0.0/8.0`, `10.0.0.0/33`). 1.9.0 read an empty prefix as `/0`, read `/8.0` as `/8`, and accepted an entry that matched nothing. | Correct or remove such an entry **before** upgrading. |
+| An entry inside the IPv4-mapped block `::ffff:0:0/96` with a prefix of `/96` to `/128` matches the IPv4 range it carries, where it matched no dotted peer; `::ffff:0:0/96` itself is every IPv4 address. Every spelling of an IPv4-mapped address (`::ffff:a01:203`) is the IPv4 address it carries, in the rate-limit bucket, the address stored with a session and the audit log's address hash. | Review a list that carries such an entry. |
+| An audio session reads `completed` once all its tracks are sealed, and `recording` again while a track that started later is uploading. 1.9.0 wrote `recording` and never changed it. | A client that treated `recording` as the only session status accepts `completed`. |
+| Chunk 1 of a new track, sent while chunk 0 is still being stored, is answered `409` with `"error": "gap"` and `next_expected_index: 0`; 1.9.0 waited and answered `200`. A rejected chunk no longer creates a session or a track row. | A client that uploads a track's chunks in parallel resumes from the index the answer names. |
+| A recording with a chunk that is not Ogg, or that ffmpeg cannot read, fails. 1.9.0 stitched it up to that chunk and treated the shortened result as the whole recording. | Nothing for recordings of intact Ogg-Opus chunks. |
+| A static mount at `route: /` serves the `.well-known` directory of its `dir`. | Look at what a build already placed in that directory before upgrading. |
+| `rayspec bundle verify` and the dry-run of a bundle deploy write `warning: media tools missing` to stderr when the bundle requires `audio_input` or `media_playback` and the host has no `ffmpeg` or `ffprobe`. The envelope and the exit code are unchanged. | Install both tools, or name them with `RAYSPEC_FFMPEG_BIN` and `RAYSPEC_FFPROBE_BIN`. |
+| The [runtime image](./runtime-image.md#ffmpeg-and-ffprobe) carries ffmpeg and ffprobe and is larger: 1.75 GB unpacked where it was 1.30 GB, 572 MB as an archive where it was 402 MB. Its build also needs snapshot.debian.org. | Rebuild the image from the 1.9.1 tarballs and the Dockerfile at the `v1.9.1` tag ([Getting the image](./runtime-image.md#getting-the-image)); drop a layer of your own that added ffmpeg on 1.9.0. |
+| `@rayspec/adapter-codex` pins `@modelcontextprotocol/sdk` `1.31.0`, the first version outside GHSA-6qxp-vccf-f47h. The pin is exact, so an install of 1.9.0 resolves `1.29.0`. | Upgrade; nothing else moves that copy. |
+
+### Settling audio sessions and rows 1.9.0 left
+
+Nothing here is needed for the runtime to work. It makes a session list right for a product that
+declares `audio_input` and recorded on 1.9.0, where a finalized session kept `recording` and a
+rejected chunk left an empty session and track behind. Run the three statements once, in this
+order, on the application database, after the upgrade and at a moment when no recording is being
+uploaded. With role separation, run them as the migration role, which sees every tenant's rows.
+
+```sql
+-- Track rows a rejected chunk left: a track at `recording` with no chunk never held one.
+DELETE FROM audio_tracks WHERE status = 'recording' AND persisted_chunk_count = 0;
+
+-- Sessions left with no track.
+DELETE FROM audio_sessions s
+ WHERE NOT EXISTS (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id);
+
+-- Sessions whose tracks are all sealed.
+UPDATE audio_sessions s SET status = 'completed'
+ WHERE status = 'recording'
+   AND NOT EXISTS (SELECT 1 FROM audio_tracks t
+                    WHERE t.session_pk = s.id AND t.status <> 'completed')
+   AND EXISTS (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id);
+```
+
+The order matters: an empty track left in place keeps its session at `recording`. Without the
+statements, a session settles the next time one of its tracks is finalized again; a finalize with
+the same `total_chunks` is idempotent.
+
+### What you can turn on
+
+| Setting | What it does |
+| --- | --- |
+| `span_granularity: sentence` on the `stt` capability of a product document | One transcript span per sentence instead of one per paragraph ([spec reference](./spec-reference.md#span_granularity-on-stt)). **Span ids change with it:** `<track>:s<index>` counts sentences, so evidence stored under one value does not match transcripts produced under the other, and nothing is migrated. Choose the value before a product stores evidence. Nothing caps the number of spans. |
+| `RAYSPEC_STT_FAKE_FIXTURES`, `RAYSPEC_STT_FAKE_FALLBACK=fixed`, `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true` | A deployed product runs from upload to extracted rows with no provider key, for development and tests ([getting started](./getting-started.md)). `RAYSPEC_HOSTING_POSTURE=managed` refuses each of them at boot. |
+
 ## Going back
 
 Downgrading a migrated database is not supported. A 1.8.x runtime does **not** detect a database
@@ -190,3 +254,8 @@ that 1.9.0 has migrated: it boots and serves on it without a warning, so nothing
 skips the backup. Only 1.9.0 and later refuse a database that a newer runtime migrated. To go back,
 restore the backup you took before the upgrade, together with the boot secrets it was taken under,
 and start 1.8.x on it.
+
+Going from 1.9.1 back to 1.9.0 needs no restore: both run on the same platform schema. Take
+`span_granularity` out of a product document that declares it, which 1.9.0 does not know, and
+deploy the bundle packed for 1.9.0 again. Audio sessions 1.9.1 marked `completed` keep that status.
+The upgrade check runs forward only, so this direction is not exercised before a release.
