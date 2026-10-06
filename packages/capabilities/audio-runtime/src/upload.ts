@@ -36,13 +36,20 @@ function isUniqueViolation(errValue: unknown): boolean {
 }
 
 /**
- * Read (or lazily CREATE) the per-(session, track) watermark row within THIS tenant. On a brand-new
- * (session, track) the parent session row is upserted first (so the track FK resolves), then the track
- * row is inserted at watermark 0. EACH contending INSERT runs inside a NESTED `db.transaction()`
- * SAVEPOINT so a concurrent first-chunk race that collides on the tenant-namespaced UNIQUE rolls back
- * ONLY that savepoint (not the outer route tx): the session-row collision is re-read HERE; the
- * track-row collision (23505) is thrown OUT for the caller to catch + re-read — never a 500 on a
- * poisoned outer tx.
+ * CREATE the per-(session, track) watermark row for a track the caller read as absent, within THIS
+ * tenant, and return it (or the row a concurrent first chunk created). The parent session row is
+ * upserted first (so the track FK resolves), then the track row is inserted at watermark 0. EACH
+ * contending INSERT runs inside a NESTED `db.transaction()` SAVEPOINT so a concurrent first-chunk
+ * race that collides on the tenant-namespaced UNIQUE rolls back ONLY that savepoint (not the outer
+ * route tx): the session-row collision is re-read HERE; the track-row collision (23505) is thrown OUT
+ * for the caller to catch + re-read — never a 500 on a poisoned outer tx.
+ *
+ * The session row is LOCKED (a no-op UPDATE, the one row lock `HandlerDb` offers) before the track
+ * row is inserted, and `completeSessionIfAllTracksSealed` takes the same lock before it reads the
+ * tracks. A new track and a finalize of the same session therefore run one after the other: either
+ * the finalize sees this track and leaves the session `recording`, or this call sees the session the
+ * finalize completed and reopens it. Lock order is session → track here and track → session on
+ * finalize; neither path waits for a track row the other holds, so the two cannot deadlock.
  */
 async function ensureTrackRow(
   db: HandlerDb,
@@ -51,18 +58,14 @@ async function ensureTrackRow(
   track: string,
   protocolVersion: number,
 ): Promise<StoreRow> {
-  const existing = await db.select(AUDIO_TRACKS_STORE, { session_id: sessionId, track });
-  if (existing[0]) return existing[0];
-
   const sessions = await db.select(AUDIO_SESSIONS_STORE, { session_id: sessionId });
-  let sessionRow = sessions[0];
-  if (!sessionRow) {
+  if (!sessions[0]) {
     // The session INSERT runs inside a NESTED savepoint — a concurrent first-chunk for the SAME session
     // (different track / same track) collides on `session_ref`; the savepoint scopes that 23505 so the
-    // loser re-reads the winner's now-visible row on the still-clean outer tx.
+    // loser carries on with the winner's now-visible row on the still-clean outer tx.
     try {
       await db.transaction(async (tx) => {
-        sessionRow = await tx.insert(AUDIO_SESSIONS_STORE, {
+        await tx.insert(AUDIO_SESSIONS_STORE, {
           session_id: sessionId,
           session_ref: sessionRef(tenantId, sessionId),
           status: 'recording',
@@ -71,11 +74,14 @@ async function ensureTrackRow(
       });
     } catch (errValue) {
       if (!isUniqueViolation(errValue)) throw errValue;
-      const reread = await db.select(AUDIO_SESSIONS_STORE, { session_id: sessionId });
-      if (!reread[0]) throw errValue;
-      sessionRow = reread[0];
     }
   }
+  // Lock the session row and read it as it stands once any finalize holding it has committed.
+  const [sessionRow] = await db.update(
+    AUDIO_SESSIONS_STORE,
+    { session_id: sessionId },
+    { session_id: sessionId },
+  );
   if (!sessionRow) {
     throw new Error('audio-runtime ingest: session row unresolved after upsert (fail-closed).');
   }
@@ -84,8 +90,12 @@ async function ensureTrackRow(
     throw new Error('audio-runtime ingest: session row missing its uuid id (fail-closed).');
   }
 
-  // The track INSERT likewise runs inside a NESTED savepoint — the concurrent first-chunk race for the
-  // SAME (session, track) collides on `track_ref`; the caller catches the surfaced 23505 + re-reads.
+  // A concurrent first chunk of the same track that held the lock first has committed its row by now.
+  const raced = await db.select(AUDIO_TRACKS_STORE, { session_id: sessionId, track });
+  if (raced[0]) return raced[0];
+
+  // The track INSERT likewise runs inside a NESTED savepoint — a collision on `track_ref` surfaces as a
+  // 23505 the caller catches + re-reads.
   let trackRow: StoreRow | undefined;
   await db.transaction(async (tx) => {
     trackRow = await tx.insert(AUDIO_TRACKS_STORE, {
@@ -103,7 +113,9 @@ async function ensureTrackRow(
     throw new Error('audio-runtime ingest: track row unresolved after insert (fail-closed).');
   }
   // A track that starts on a session whose earlier tracks were all sealed puts the session back in
-  // flight; that track's own finalize completes it again.
+  // flight; that track's own finalize completes it again. Decided on the status read under the lock,
+  // and only after this call's own insert succeeded: a first-chunk retry that finds the track already
+  // there must not reopen a session that track's finalize completed.
   if (sessionRow.status === 'completed') {
     await db.update(AUDIO_SESSIONS_STORE, { session_id: sessionId }, { status: 'recording' });
   }
@@ -115,6 +127,10 @@ async function ensureTrackRow(
  * raw Response: 200 ack (advance), 200 no-op (duplicate / sealed), or 409 gap. `contentType` is the
  * request's content type (advisory metadata on the stored blob). `chunkIndexRaw` is the server-parsed
  * path param (validated to a non-negative integer here).
+ *
+ * A REJECTED chunk writes nothing. Every rejection (400, 409 gap, 413) is decided from a plain read of
+ * the track row; a track with no row has watermark 0 and no committed bytes, so only an accepted
+ * index 0 creates the session row and the track row, and only after its bytes are stored.
  */
 export async function ingestChunk(
   ctx: AudioBlobContext,
@@ -138,27 +154,17 @@ export async function ingestChunk(
     ctx.config.defaultProtocolVersion,
   );
 
-  // Resolve the current watermark (create the row lazily; a concurrent first-chunk race is re-read).
-  let trackRow: StoreRow;
-  try {
-    trackRow = await ensureTrackRow(ctx.db, ctx.tenantId, sessionId, track, protocolVersion);
-  } catch (errValue) {
-    if (isUniqueViolation(errValue)) {
-      const reread = await ctx.db.select(AUDIO_TRACKS_STORE, { session_id: sessionId, track });
-      if (!reread[0]) throw errValue;
-      trackRow = reread[0];
-    } else {
-      throw errValue;
-    }
-  }
+  // Resolve the current watermark WITHOUT creating anything: an absent track is at watermark 0.
+  const found = await ctx.db.select(AUDIO_TRACKS_STORE, { session_id: sessionId, track });
+  const existing = found[0];
 
   // A SEALED (finalized) track no-ops a late chunk retry (the upload is done — not an error).
-  if (trackRow.status === 'completed') {
-    const sealedWatermark = Number(trackRow.persisted_chunk_count) || 0;
+  if (existing?.status === 'completed') {
+    const sealedWatermark = Number(existing.persisted_chunk_count) || 0;
     return ok({ next_expected_index: sealedWatermark });
   }
 
-  const watermark = Number(trackRow.persisted_chunk_count);
+  const watermark = existing ? Number(existing.persisted_chunk_count) : 0;
   const nextExpected = Number.isInteger(watermark) && watermark >= 0 ? watermark : 0;
 
   // index < next_expected → idempotent re-POST (no-op 200, do NOT re-advance).
@@ -175,7 +181,7 @@ export async function ingestChunk(
   // authenticated caller cannot accrue unbounded storage/memory across many individually-in-cap chunks.
   // A duplicate re-POST (index < next_expected, handled above) never reaches here, so a retry of an
   // already-counted chunk is never double-charged against the cap.
-  const committedSoFar = Number(trackRow.committed_byte_len) || 0;
+  const committedSoFar = existing ? Number(existing.committed_byte_len) || 0 : 0;
   if (committedSoFar + bytes.length > ctx.config.maxTrackBytes) {
     return err(
       413,
@@ -187,9 +193,30 @@ export async function ingestChunk(
 
   // index == next_expected → store the chunk. Put-by-index FIRST (idempotent — a crash before the
   // watermark advance is safe: a retry re-puts the same key), then advance the watermark transactionally
-  // with a re-read guard against a concurrent same-index race.
+  // with a re-read guard against a concurrent same-index race. The put also precedes the creation of
+  // a new track's rows, so a failed put leaves no row behind and the session row is not held locked
+  // across the blob write.
+  //
+  // No row lock is held across the put, at any index. Two requests for the SAME index that both read
+  // the same watermark both put; the first to commit counts its own length and the other no-ops at
+  // that watermark, but its put may land last. With different bodies the later body is then stored
+  // against the earlier length, so `committed_byte_len` (and with it the per-track cap) can
+  // under-count by at most one chunk cap per such race. Only a client racing its own upload of one
+  // index with different bytes reaches this.
   const key = chunkKey(sessionId, track, chunkIndex);
   await ctx.blob.put(key, bytes, contentType ? { contentType } : undefined);
+
+  // The accepted first chunk of a new track creates its rows (a concurrent first-chunk race is
+  // re-read; the advance below then settles on whatever watermark the winner reached).
+  if (!existing) {
+    try {
+      await ensureTrackRow(ctx.db, ctx.tenantId, sessionId, track, protocolVersion);
+    } catch (errValue) {
+      if (!isUniqueViolation(errValue)) throw errValue;
+      const reread = await ctx.db.select(AUDIO_TRACKS_STORE, { session_id: sessionId, track });
+      if (!reread[0]) throw errValue;
+    }
+  }
 
   let advancedTo = chunkIndex + 1;
   await ctx.db.transaction(async (tx) => {
@@ -221,7 +248,9 @@ export async function ingestChunk(
         advancedTo = chunkIndex + 1;
       }
     } else if (currentWatermark > chunkIndex) {
-      // A concurrent POST already advanced past us — idempotent no-op (same key the winner wrote).
+      // A concurrent POST already advanced past us (for index 0: the first chunk whose track row
+      // this request found or collided with) — idempotent no-op. Both wrote the same blob key; the
+      // winner's length is the one counted (see the note above the put).
       advancedTo = currentWatermark;
     } else {
       throw new Error(
@@ -286,13 +315,25 @@ async function finalizedTrackSummaries(
 /**
  * Mark the session `completed` once every track it holds is sealed. Called on BOTH finalize paths, so
  * a re-finalize also settles a session that an earlier release left at `recording`. A session with a
- * track still in flight stays `recording`. A track whose first chunk races this read is not seen
- * here; `ensureTrackRow` reopens the session for it, or its own finalize settles the session again.
+ * track still in flight stays `recording`.
+ *
+ * The session row is LOCKED (a no-op UPDATE) before the tracks are read. Two tracks finalized at the
+ * same time each seal their own track first; without the lock each would read the other as still
+ * `recording` and neither would complete the session. With it the second finalize waits for the first
+ * to commit and its read then sees every track sealed. `ensureTrackRow` takes the same lock before it
+ * inserts a new track, so a track that starts during a finalize is either seen here or reopens the
+ * session itself.
  */
 async function completeSessionIfAllTracksSealed(
   ctx: AudioCoreContext,
   sessionId: string,
 ): Promise<void> {
+  const [sessionRow] = await ctx.db.update(
+    AUDIO_SESSIONS_STORE,
+    { session_id: sessionId },
+    { session_id: sessionId },
+  );
+  if (!sessionRow) return;
   const tracks = await ctx.db.select(AUDIO_TRACKS_STORE, { session_id: sessionId });
   if (tracks.length === 0 || tracks.some((t) => t.status !== 'completed')) return;
   await ctx.db.update(

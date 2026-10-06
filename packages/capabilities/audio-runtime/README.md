@@ -19,6 +19,17 @@ of the `audio_input` + `media_playback` capability contracts.
 ## Behavior (declared 1.0 semantics)
 
 - Upload watermark: `200` advance / `200` idempotent no-op / `409 gap`; sealed track late retry → `200`.
+- A rejected chunk writes nothing. A track with no row is at watermark 0, so any index other than 0 for
+  a session or track that does not exist yet is a `409 gap` with `next_expected_index: 0`, and neither
+  that nor a `400` or a `413` creates a session row or a track row. Only an accepted index 0 creates
+  them, after its bytes are stored.
+- Chunks of a track are acknowledged one at a time. A chunk sent before the previous chunk of the same
+  track is acknowledged can be answered `409 gap`, including index 1 sent alongside index 0 of a new
+  track; the client resumes from `next_expected_index`.
+- Session status: `recording` from the first accepted chunk; `completed` once every track of the session
+  is sealed, also when the tracks are finalized at the same time. A track that starts on a `completed`
+  session moves it back to `recording` until that track is finalized. `finalizing` and `failed` are
+  reserved values that nothing writes.
 - Finalize: `409 chunk_count_mismatch`, idempotent terminal; a **dual-track finalize converges on exactly
   one** `session_finalized` event (session-scoped `${tenantId}:${sessionId}` idempotency key).
 - Playback token: `409 not_ready` until a playable artifact exists; TTL `max(900, ceil(duration)+60)`

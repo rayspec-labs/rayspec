@@ -14,6 +14,11 @@
  *  5. TENANT ISOLATION on every route: ingest, upload-status, finalize, play-token, and the playback
  *     media-JWT boundary (a tenant-A token against tenant-B's resource → 404 via the DB ownership re-check).
  *  6. Playback read contract: 200 / Range 206 / 304 / 416 + the resource-binding 403 + a forged-token 401.
+ *  7. A rejected chunk commits no row: a gap or a refused track on a session or track that does not
+ *     exist leaves `audio_sessions` and `audio_tracks` as they were.
+ *  8. The session status under real transactions: two tracks finalized at the same time complete the
+ *     session, a track that starts while the other is being finalized keeps it `recording`, and a
+ *     finalize whose sink throws rolls the track seal and the session status back together.
  *
  * Skips when DATABASE_URL is absent — but HARD-FAILS if the DB is required (CI / RAYSPEC_REQUIRE_DB_TESTS)
  * yet absent, so this security-load-bearing suite can never silently self-skip to a false green.
@@ -25,6 +30,7 @@ import {
   type AudioBlobContext,
   createFakeMediaAdapter,
   createInMemorySessionFinalizedSink,
+  type FinalizedSessionEvent,
   finalizedEventId,
   type InMemorySessionFinalizedSink,
   mediaArtifactKey,
@@ -64,11 +70,22 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   let blobFactory: BlobStoreFactory;
   let media: MediaTokenService;
   let sink: InMemorySessionFinalizedSink;
+  /**
+   * Runs inside a finalize's transaction, just before the event is delivered: after the track seal
+   * and the session-status step, before the commit. A test sets it to hold a finalize open at that
+   * point, or to make the sink throw. Cleared before every test.
+   */
+  let beforeEmit: ((event: FinalizedSessionEvent) => Promise<void>) | undefined;
 
   beforeAll(async () => {
     sink = createInMemorySessionFinalizedSink();
     const mounted = mountAudioCapability({
-      sessionFinalizedSink: sink,
+      sessionFinalizedSink: {
+        emit: async (event) => {
+          await beforeEmit?.(event);
+          await sink.emit(event);
+        },
+      },
       capability: { allowedTracks: ['mic', 'system'] },
     });
     // The neutral test product spec (stores + routes come from the neutral capability).
@@ -88,6 +105,7 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   beforeEach(async () => {
     await h.reset();
     sink.clear();
+    beforeEmit = undefined;
   });
   afterAll(async () => {
     await h.close();
@@ -282,6 +300,208 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
   });
 
   // ──────────────────────────────────────────────────────────────────────────────────────────────
+  // A rejected chunk commits nothing.
+  // ──────────────────────────────────────────────────────────────────────────────────────────────
+
+  /** Every session and track row of one tenant, as `session:status` / `session/track:status:chunks`. */
+  async function rowsHeld(orgId: string): Promise<{ sessions: string[]; tracks: string[] }> {
+    const sessions = (await h.db.$client.unsafe(
+      'select session_id, status from audio_sessions where tenant_id = $1 order by session_id',
+      [orgId],
+    )) as unknown as Array<{ session_id: string; status: string }>;
+    const tracks = (await h.db.$client.unsafe(
+      'select session_id, track, status, persisted_chunk_count as n from audio_tracks ' +
+        'where tenant_id = $1 order by session_id, track',
+      [orgId],
+    )) as unknown as Array<{ session_id: string; track: string; status: string; n: number }>;
+    return {
+      sessions: sessions.map((r) => `${r.session_id}:${r.status}`),
+      tracks: tracks.map((r) => `${r.session_id}/${r.track}:${r.status}:${r.n}`),
+    };
+  }
+
+  it('a gap on a session that does not exist → 409 at index 0 and no row is committed', async () => {
+    const a = await principal('gapnew@example.com', 'GapNew');
+    const gap = await postChunk('ghost', 'mic', 3, a.token, new Uint8Array([9]));
+    expect(gap.status).toBe(409);
+    expect(await gap.json()).toEqual({
+      error: 'gap',
+      detail: expect.any(String),
+      next_expected_index: 0,
+    });
+    expect(await rowsHeld(a.orgId)).toEqual({ sessions: [], tracks: [] });
+    // The track still reads as never started, and its first chunk is accepted afterwards.
+    const status = await authGet('/sessions/ghost/mic/upload-status', a.token);
+    expect((await status.json()).status).toBe('absent');
+    expect((await postChunk('ghost', 'mic', 0, a.token, new Uint8Array([1]))).status).toBe(200);
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['ghost:recording'],
+      tracks: ['ghost/mic:recording:1'],
+    });
+  });
+
+  it('a gap on a new track of a completed session leaves the session completed and adds no track', async () => {
+    const a = await principal('gaptrack@example.com', 'GapTrack');
+    await postChunk('s12', 'mic', 0, a.token, new Uint8Array([1]));
+    expect((await finalize('s12', 'mic', a.token, 1)).status).toBe(200);
+    const gap = await postChunk('s12', 'system', 2, a.token, new Uint8Array([9]));
+    expect(gap.status).toBe(409);
+    expect((await gap.json()).next_expected_index).toBe(0);
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['s12:completed'],
+      tracks: ['s12/mic:completed:1'],
+    });
+  });
+
+  it('a chunk for a track the product does not allow, or a malformed index → 400 and no row', async () => {
+    const a = await principal('badreq@example.com', 'BadReq');
+    expect((await postChunk('s13', 'other', 0, a.token, new Uint8Array([1]))).status).toBe(400);
+    expect((await postChunk('s13', 'mic', -1, a.token, new Uint8Array([1]))).status).toBe(400);
+    expect(await rowsHeld(a.orgId)).toEqual({ sessions: [], tracks: [] });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────────────────────────
+  // The session status under real transactions (row locks + read committed).
+  // ──────────────────────────────────────────────────────────────────────────────────────────────
+
+  /** A gate a finalize waits at inside its transaction until the test opens it. */
+  function gate(): { reached: Promise<void>; wait: () => Promise<void>; open: () => void } {
+    let markReached: () => void = () => {};
+    let open: () => void = () => {};
+    const reached = new Promise<void>((resolve) => {
+      markReached = resolve;
+    });
+    const opened = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return {
+      reached,
+      wait: async () => {
+        markReached();
+        await opened;
+      },
+      open,
+    };
+  }
+
+  /** Resolve true if `p` settles within `ms`, false if it is still pending (it keeps running). */
+  async function settlesWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    });
+    const settled = await Promise.race([p.then(() => true as const), timedOut]);
+    clearTimeout(timer);
+    return settled;
+  }
+
+  it('two tracks finalized at the same time complete the session', async () => {
+    const a = await principal('dualconc@example.com', 'DualConc');
+    await postChunk('s14', 'mic', 0, a.token, new Uint8Array([1]));
+    await postChunk('s14', 'system', 0, a.token, new Uint8Array([2]));
+
+    // Hold the `mic` finalize open after it has sealed `mic` and read the tracks, before it commits.
+    const g = gate();
+    let held = false;
+    beforeEmit = async () => {
+      if (held) return;
+      held = true;
+      await g.wait();
+    };
+    const mic = finalize('s14', 'mic', a.token, 1);
+    await g.reached;
+    // The `system` finalize seals its own track and must then WAIT for the `mic` finalize: reading
+    // the tracks now would still show `mic` as recording, and neither would complete the session.
+    const system = finalize('s14', 'system', a.token, 1);
+    const systemRanAhead = await settlesWithin(system, 500);
+    g.open();
+    expect((await mic).status).toBe(200);
+    expect((await system).status).toBe(200);
+    expect(systemRanAhead).toBe(false);
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['s14:completed'],
+      tracks: ['s14/mic:completed:1', 's14/system:completed:1'],
+    });
+  });
+
+  it('a track that starts while the other track is being finalized keeps the session recording', async () => {
+    const a = await principal('late@example.com', 'Late');
+    await postChunk('s15', 'mic', 0, a.token, new Uint8Array([1]));
+
+    // Hold the `mic` finalize open after it has set the session `completed`, before it commits.
+    const g = gate();
+    beforeEmit = () => g.wait();
+    const mic = finalize('s15', 'mic', a.token, 1);
+    await g.reached;
+    // The first chunk of `system` must WAIT for that finalize: it still reads the session as
+    // `recording`, and would otherwise commit a recording track under a session about to be completed.
+    const system = postChunk('s15', 'system', 0, a.token, new Uint8Array([2]));
+    const systemRanAhead = await settlesWithin(system, 500);
+    g.open();
+    expect((await mic).status).toBe(200);
+    expect((await system).status).toBe(200);
+    expect(systemRanAhead).toBe(false);
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['s15:recording'],
+      tracks: ['s15/mic:completed:1', 's15/system:recording:1'],
+    });
+    // Its own finalize completes the session again.
+    beforeEmit = undefined;
+    expect((await finalize('s15', 'system', a.token, 1)).status).toBe(200);
+    expect((await rowsHeld(a.orgId)).sessions).toEqual(['s15:completed']);
+  });
+
+  it('unsynchronised finalizes and first chunks never leave a session status that disagrees with its tracks', async () => {
+    const a = await principal('storm@example.com', 'Storm');
+    const dual = Array.from({ length: 6 }, (_, i) => `dual-${i}`);
+    const late = Array.from({ length: 6 }, (_, i) => `late-${i}`);
+    for (const s of dual) {
+      await postChunk(s, 'mic', 0, a.token, new Uint8Array([1]));
+      await postChunk(s, 'system', 0, a.token, new Uint8Array([2]));
+    }
+    for (const s of late) await postChunk(s, 'mic', 0, a.token, new Uint8Array([1]));
+
+    const responses = await Promise.all([
+      ...dual.flatMap((s) => [finalize(s, 'mic', a.token, 1), finalize(s, 'system', a.token, 1)]),
+      ...late.flatMap((s) => [
+        finalize(s, 'mic', a.token, 1),
+        postChunk(s, 'system', 0, a.token, new Uint8Array([2])),
+      ]),
+    ]);
+    for (const r of responses) expect(r.status).toBe(200);
+
+    const held = await rowsHeld(a.orgId);
+    expect(held.sessions).toEqual([
+      ...dual.map((s) => `${s}:completed`),
+      ...late.map((s) => `${s}:recording`),
+    ]);
+    expect(held.tracks).toEqual([
+      ...dual.flatMap((s) => [`${s}/mic:completed:1`, `${s}/system:completed:1`]),
+      ...late.flatMap((s) => [`${s}/mic:completed:1`, `${s}/system:recording:1`]),
+    ]);
+  });
+
+  it('a finalize whose sink throws rolls the track seal and the session status back together', async () => {
+    const a = await principal('sinkfail@example.com', 'SinkFail');
+    await postChunk('s16', 'mic', 0, a.token, new Uint8Array([1]));
+    beforeEmit = async () => {
+      throw new Error('event sink unavailable');
+    };
+    expect((await finalize('s16', 'mic', a.token, 1)).status).toBe(500);
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['s16:recording'],
+      tracks: ['s16/mic:recording:1'],
+    });
+    // The retry, with the sink back, seals the track and completes the session.
+    beforeEmit = undefined;
+    expect((await finalize('s16', 'mic', a.token, 1)).status).toBe(200);
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['s16:completed'],
+      tracks: ['s16/mic:completed:1'],
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────────────────────────────
   // Tenant isolation on EVERY route.
   // ──────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -290,6 +510,23 @@ describe.skipIf(!hasDb)('Tier B Audio/Media capability end-to-end', () => {
     const b = await principal('tenB@example.com', 'TenB');
     await postChunk('shared', 'mic', 0, a.token, new Uint8Array([1]));
     await postChunk('shared', 'mic', 1, a.token, new Uint8Array([2]));
+
+    // B has no track under this session id: an index at or below A's watermark is a gap at B's own
+    // index 0 (NOT an ack or a no-op against A's watermark 2), and it commits no row for B.
+    for (const index of [2, 1]) {
+      const bGap = await postChunk('shared', 'mic', index, b.token, new Uint8Array([9]));
+      expect(bGap.status).toBe(409);
+      expect(await bGap.json()).toEqual({
+        error: 'gap',
+        detail: expect.any(String),
+        next_expected_index: 0,
+      });
+    }
+    expect(await rowsHeld(b.orgId)).toEqual({ sessions: [], tracks: [] });
+    expect(await rowsHeld(a.orgId)).toEqual({
+      sessions: ['shared:recording'],
+      tracks: ['shared/mic:recording:2'],
+    });
 
     // B posts the SAME session/index 0 → a fresh index-0 ack (NOT a 409/no-op against A's watermark).
     const bRes = await postChunk('shared', 'mic', 0, b.token, new Uint8Array([9]));

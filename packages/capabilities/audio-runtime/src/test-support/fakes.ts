@@ -45,8 +45,11 @@ export interface FakeHandlerDbOptions {
    * Test-only interleave seam: fires at the START of every `update()` (before the write lands). Lets a
    * deterministic test force a concurrent state change (e.g. a finalize sealing a track) BETWEEN a
    * transaction's re-read and its guarded write — the interleave the atomic status-guard defends.
+   * `beforeInsert` is the same seam for `insert()`: it lets a test land a concurrent winner's row
+   * BETWEEN a first chunk's read and its own insert, so the insert collides on the UNIQUE column.
    */
   readonly hooks?: {
+    readonly beforeInsert?: (store: string, values: StoreRow) => void | Promise<void>;
     readonly beforeUpdate?: (
       store: string,
       filter: StoreFilter,
@@ -88,6 +91,7 @@ export class FakeHandlerDb implements HandlerDb {
   }
 
   async insert(store: string, values: StoreRow): Promise<StoreRow> {
+    await this.hooks?.beforeInsert?.(store, values);
     const uniques = this.uniqueColumns[store] ?? [];
     for (const col of uniques) {
       if (values[col] !== undefined && this.rows(store).some((r) => r[col] === values[col])) {
