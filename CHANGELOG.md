@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An audio session is marked `completed` once all its tracks are sealed.** The audio capability
+  created the `audio_sessions` row with `status: recording` and never changed it: finalizing a
+  track sealed the track row only, so a session list kept reporting a finished recording as
+  `recording`. Finalizing the last open track of a session now sets the session to `completed`. A
+  session with a track still uploading stays `recording`, and a track that starts on a completed
+  session puts it back to `recording` until that track is finalized. Sessions finalized before
+  this release keep `recording` until a track of theirs is finalized again (a re-finalize with the
+  same `total_chunks` is idempotent and settles the session), or until they are updated directly:
+  `UPDATE audio_sessions s SET status = 'completed' WHERE status = 'recording' AND NOT EXISTS
+  (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id AND t.status <> 'completed') AND EXISTS
+  (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id)`. A client that treated `recording` as
+  the only session status should accept `completed`.
 - **The lead-qualifier live test reads a run's usage once the run has ended.** A durable agent run
   holds no transaction across the model call, so a tool's write is served while the run is still
   executing. The test took the lead reading `qualified` as the end of the run and summed

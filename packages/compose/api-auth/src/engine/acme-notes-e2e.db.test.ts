@@ -591,7 +591,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
     expect(sessions).toHaveLength(1);
     const s = sessions[0] as Record<string, unknown>;
     expect(s.id).toBe(SESSION);
-    expect(s.status).toBe('recording');
+    expect(s.status).toBe('completed');
     expect(s.protocol_version).toBe(2);
     expect(typeof s.started_at).toBe('string');
     expect(s.ended_at).toBeNull();

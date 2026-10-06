@@ -27,6 +27,11 @@ async function ingest(
   return ingestChunk(c, { session_id: session, track, chunk_index: String(index) }, bytes);
 }
 
+async function sessionStatus(c: AudioBlobContext, session: string): Promise<unknown> {
+  const rows = await c.db.select('audio_sessions', { session_id: session });
+  return rows[0]?.status;
+}
+
 describe('ingestChunk — the idempotent watermark contract', () => {
   it('advances the watermark on an in-order chunk (200 ack next+1)', async () => {
     const c = ctx();
@@ -191,6 +196,53 @@ describe('finalizeTrack — count gate + idempotency + single-flight event', () 
     expect(sink.emitCount()).toBe(2);
     expect(sink.deliveredCount()).toBe(1);
     expect(sink.delivered()[0]?.event_id).toBe(finalizedEventId(TENANT, 's1'));
+  });
+
+  it('sealing the only track marks the session completed', async () => {
+    const c = ctx();
+    await ingest(c, 's1', 'mic', 0, new Uint8Array([1]));
+    expect(await sessionStatus(c, 's1')).toBe('recording');
+    await finalizeTrack(
+      c,
+      { session_id: 's1', track: 'mic' },
+      1,
+      createInMemorySessionFinalizedSink(),
+    );
+    expect(await sessionStatus(c, 's1')).toBe('completed');
+  });
+
+  it('a dual-track session stays recording until its LAST track is sealed', async () => {
+    const c = ctx();
+    await ingest(c, 's1', 'mic', 0, new Uint8Array([1]));
+    await ingest(c, 's1', 'system', 0, new Uint8Array([2]));
+    const sink = createInMemorySessionFinalizedSink();
+    await finalizeTrack(c, { session_id: 's1', track: 'mic' }, 1, sink);
+    expect(await sessionStatus(c, 's1')).toBe('recording');
+    await finalizeTrack(c, { session_id: 's1', track: 'system' }, 1, sink);
+    expect(await sessionStatus(c, 's1')).toBe('completed');
+  });
+
+  it('re-finalizing settles a session an earlier release left at recording', async () => {
+    const c = ctx();
+    await ingest(c, 's1', 'mic', 0, new Uint8Array([1]));
+    const sink = createInMemorySessionFinalizedSink();
+    await finalizeTrack(c, { session_id: 's1', track: 'mic' }, 1, sink);
+    // The pre-fix state: the track sealed, the session row never moved.
+    await c.db.update('audio_sessions', { session_id: 's1' }, { status: 'recording' });
+    await finalizeTrack(c, { session_id: 's1', track: 'mic' }, 1, sink);
+    expect(await sessionStatus(c, 's1')).toBe('completed');
+  });
+
+  it('a track that starts on a completed session reopens it until that track is sealed', async () => {
+    const c = ctx();
+    await ingest(c, 's1', 'mic', 0, new Uint8Array([1]));
+    const sink = createInMemorySessionFinalizedSink();
+    await finalizeTrack(c, { session_id: 's1', track: 'mic' }, 1, sink);
+    expect(await sessionStatus(c, 's1')).toBe('completed');
+    await ingest(c, 's1', 'system', 0, new Uint8Array([2]));
+    expect(await sessionStatus(c, 's1')).toBe('recording');
+    await finalizeTrack(c, { session_id: 's1', track: 'system' }, 1, sink);
+    expect(await sessionStatus(c, 's1')).toBe('completed');
   });
 
   it('a sealed track no-ops a late chunk retry (200, no advance)', async () => {

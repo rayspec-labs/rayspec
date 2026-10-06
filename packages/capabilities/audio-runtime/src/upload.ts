@@ -102,6 +102,11 @@ async function ensureTrackRow(
   if (!trackRow) {
     throw new Error('audio-runtime ingest: track row unresolved after insert (fail-closed).');
   }
+  // A track that starts on a session whose earlier tracks were all sealed puts the session back in
+  // flight; that track's own finalize completes it again.
+  if (sessionRow.status === 'completed') {
+    await db.update(AUDIO_SESSIONS_STORE, { session_id: sessionId }, { status: 'recording' });
+  }
   return trackRow;
 }
 
@@ -279,6 +284,25 @@ async function finalizedTrackSummaries(
 }
 
 /**
+ * Mark the session `completed` once every track it holds is sealed. Called on BOTH finalize paths, so
+ * a re-finalize also settles a session that an earlier release left at `recording`. A session with a
+ * track still in flight stays `recording`. A track whose first chunk races this read is not seen
+ * here; `ensureTrackRow` reopens the session for it, or its own finalize settles the session again.
+ */
+async function completeSessionIfAllTracksSealed(
+  ctx: AudioCoreContext,
+  sessionId: string,
+): Promise<void> {
+  const tracks = await ctx.db.select(AUDIO_TRACKS_STORE, { session_id: sessionId });
+  if (tracks.length === 0 || tracks.some((t) => t.status !== 'completed')) return;
+  await ctx.db.update(
+    AUDIO_SESSIONS_STORE,
+    { session_id: sessionId, status: 'recording' },
+    { status: 'completed' },
+  );
+}
+
+/**
  * Emit the session-scoped `session_finalized` event through the injected sink. Called on BOTH the
  * first-seal path AND the idempotent already-completed path (so a crash between seal and emit is
  * recovered by a retried finalize) — the sink dedupes by the session-scoped `event_id`, so a dual-track
@@ -306,8 +330,9 @@ async function emitFinalizedSession(
  * Seal a track's upload (idempotent terminal). The client asserts how many chunks it sent
  * (`totalChunks`); a mismatch against the durable watermark is a 409 (resume from the watermark). On a
  * terminal completed seal the capability EMITS `session_finalized` through the injected sink (NOT a
- * durable agent run — that is Tier A's job). Idempotent: re-finalizing a completed track with the same
- * total re-emits the (deduped) event and returns 200.
+ * durable agent run — that is Tier A's job). Sealing the last open track of a session also marks the
+ * session row `completed`. Idempotent: re-finalizing a completed track with the same total re-emits
+ * the (deduped) event and returns 200.
  */
 export async function finalizeTrack(
   ctx: AudioCoreContext,
@@ -351,6 +376,7 @@ export async function finalizeTrack(
 
   // Idempotent terminal: an already-completed track (matching total) re-emits the deduped event + 200.
   if (status === 'completed') {
+    await completeSessionIfAllTracksSealed(ctx, sessionId);
     const eventId = await emitFinalizedSession(ctx, sessionId, sink);
     return ok({
       session_id: sessionId,
@@ -368,6 +394,7 @@ export async function finalizeTrack(
     { session_id: sessionId, track },
     { status: 'completed' },
   );
+  await completeSessionIfAllTracksSealed(ctx, sessionId);
 
   // Emit the session-scoped finalized event (dual-track finalize converges on ONE via the event_id).
   const eventId = await emitFinalizedSession(ctx, sessionId, sink);
