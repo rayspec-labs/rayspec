@@ -1797,9 +1797,13 @@ node packages/app/cli/dist/index.js deploy <product>.product.yaml
   `span_granularity: sentence` writes one segment per sentence (the fake adapter emits segments as written).
 - `RAYSPEC_STT_FAKE_FALLBACK=fixed` gives a recording no fixture matches a fixed two-sentence transcript.
   It has no labelled line, so it reaches a readable transcript, not persisted artifacts.
+- Fixture rules the boot enforces: `session_id` and `track` carry no surrounding whitespace, span ids
+  (written or the `<track>:s<index>` default) are unique across ALL tracks of a file, a file is at most
+  1 MiB, and a symbolic link is followed only to a file inside the directory (a mounted ConfigMap works).
 - The three variables are a dev/CI posture: the boot banner names each one, a fake-adapter setting
   beside `STT_PROVIDER=deepgram` and the stand-in under `RAYSPEC_EXTRACTION_MODE=live` refuse the boot,
-  and `RAYSPEC_HOSTING_POSTURE=managed` refuses all three. A fixture directory is not part of a bundle;
+  a stand-in config must still name a `backend`, and `RAYSPEC_HOSTING_POSTURE=managed` refuses all three
+  for a product document. A fixture directory is not part of a bundle;
   a bundle whose config names a real backend still needs a placeholder value for that backend's key
   binding. Reference: `examples/acme-notes/stt-fixtures/default.json`,
   docs/spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter, and the merge-gated proof
@@ -1985,8 +1989,10 @@ sessions (`POST /v1/sessions/{id}/reprocess`); human-edited and dismissed rows (
 kind without `reconcile_stale_rows`) keep citations of the earlier value. A sentence-granular transcript
 row carries `payload.span_granularity: sentence` (a paragraph-granular one has no such key) — project it
 with `{ kind: json, column: payload, path: [span_granularity], type: string, default: paragraph }` when
-a reader needs to know. Rules: any other value is a `schema_violation`; on a capability other than `stt`
-the mount refuses it; inside `provider_policy`, a workflow step or an extractor it is an `unknown_field`.
+a reader needs to know (a row from the fake adapter, a supplied adapter or a provider response without
+paragraphs carries no key, so that default reports `paragraph` for it). Rules: any other value is a
+`schema_violation`; so is the key on a capability other than `stt` (validation refuses it, before pack
+or deploy); inside `provider_policy`, a workflow step or an extractor it is an `unknown_field`.
 It is honoured by the Deepgram adapter (`STT_PROVIDER=deepgram`); the fake adapter emits its fixtures'
 segments as written (`RAYSPEC_STT_FAKE_FIXTURES`, see "A keyless end-to-end run of an AUDIO product"), so a fixture for
 a sentence-granular product holds one segment per sentence. A

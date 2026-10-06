@@ -2780,6 +2780,16 @@ function productExtractionMode(
   );
 }
 
+/** Whether `value` can name a backend: a non-blank string with no control character (one line). */
+function isBackendName(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim() === '') return false;
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
 /** The keys an extraction config that selects the deterministic provider may carry. */
 const DETERMINISTIC_EXTRACTOR_CONFIG_KEYS = new Set(['agent_id', 'backend', 'schema_file']);
 
@@ -2895,6 +2905,14 @@ export function deterministicExtraction(
           'for a development or test run. Fail-closed.',
       );
     }
+    // A stand-in answers for a backend the config names, and the boot banner prints that name.
+    if (standIn && !isBackendName(cfg.backend)) {
+      throw new ProductBootError(
+        `extractor '${extractor.id}': the extraction config at ${configPath} names no backend ` +
+          '(a non-empty single-line string) for the deterministic provider to stand in for. ' +
+          'Fail-closed.',
+      );
+    }
     // A config that selects the provider describes nothing else; a stand-in's other keys describe
     // the real call, which is not made, and are left unread.
     const unknown = standIn
@@ -2959,13 +2977,37 @@ export function assertManagedPostureKeyless(env: NodeJS.ProcessEnv): void {
       );
     }
   }
-  if (settingOf(env, EXTRACTION_DETERMINISTIC_STAND_IN) === 'true') {
+  // Any value but `false`: one that is not `true` would be refused later, but only for a document
+  // that declares extractors.
+  const standIn = settingOf(env, EXTRACTION_DETERMINISTIC_STAND_IN);
+  if (standIn !== undefined && standIn !== 'false') {
     throw new ProductBootError(
       `RAYSPEC_HOSTING_POSTURE=managed does not support ${EXTRACTION_DETERMINISTIC_STAND_IN.name}: ` +
         'it selects the deterministic extraction provider, whose capability ' +
         "'extraction-deterministic' is test-only. Unset it. Fail-closed.",
     );
   }
+}
+
+/**
+ * What a product boot under the managed posture checks before it builds any provider: the speech
+ * providers against the supported-backend matrix, then the settings of a run without provider keys.
+ * A no-op outside the posture.
+ */
+export function assertManagedProductPosture(
+  config: {
+    readonly hostingPosture?: string | undefined;
+    readonly ttsProvider?: string | undefined;
+  },
+  env: NodeJS.ProcessEnv,
+): void {
+  if (config.hostingPosture !== 'managed') return;
+  assertManagedPostureBackends({
+    posture: 'managed',
+    sttProvider: env.STT_PROVIDER?.trim(),
+    ttsProvider: config.ttsProvider,
+  });
+  assertManagedPostureKeyless(env);
 }
 
 /**
@@ -3152,14 +3194,7 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
   // Under the managed posture every product model call is checked against the supported-backend
   // matrix as it is built, and every speech provider before anything is built — a backend outside the
   // matrix refuses the boot (supported-backends.ts). Outside the posture nothing is wrapped.
-  if (config.hostingPosture === 'managed') {
-    assertManagedPostureBackends({
-      posture: 'managed',
-      sttProvider: env.STT_PROVIDER?.trim(),
-      ttsProvider: config.ttsProvider,
-    });
-    assertManagedPostureKeyless(env);
-  }
+  assertManagedProductPosture(config, env);
   const productBackends =
     config.hostingPosture === 'managed'
       ? managedProductBackends(boundBackends ?? envProductBackends(env))

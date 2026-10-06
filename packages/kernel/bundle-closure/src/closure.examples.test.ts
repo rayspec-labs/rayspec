@@ -172,13 +172,13 @@ describe('acme-notes-backend: compiled handlers, stores, an agent and a cron tri
 describe('acme-notes: a product document that sizes its transcript spans', () => {
   const STT_CONTRACT = '      - stt.transcript_span\n';
 
-  /** The example copied aside, its `stt` capability declaring `span_granularity`. */
-  function withGranularity(value: string): string {
+  /** The example copied aside, its `stt` capability (or the one `after` ends) declaring `span_granularity`. */
+  function withGranularity(value: string, after = STT_CONTRACT): string {
     const root = temporaryDirectory('example-');
     cpSync(join(EXAMPLES, 'acme-notes'), root, { recursive: true });
     const path = join(root, 'acme-notes.product.yaml');
     const text = readFileSync(path, 'utf8');
-    const declared = text.replace(STT_CONTRACT, `${STT_CONTRACT}    span_granularity: ${value}\n`);
+    const declared = text.replace(after, `${after}    span_granularity: ${value}\n`);
     expect(declared).not.toBe(text);
     writeFileSync(path, declared);
     return path;
@@ -227,6 +227,21 @@ describe('acme-notes: a product document that sizes its transcript spans', () =>
         'SPEC_SCHEMA_VIOLATION',
       ]);
       expect(result.errors[1]?.path).toBe('capabilities[2].span_granularity');
+    }
+  });
+
+  it('refuses the key on a capability other than stt, so such a document is never packed', async () => {
+    const result = await resolveClosure({
+      specPath: withGranularity('sentence', '      - media_playback.stream\n'),
+      runtimeVersion: RUNTIME,
+      ...identity,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.map((e) => [e.code, e.path])).toEqual([
+        ['RAY_SPEC_INVALID', undefined],
+        ['SPEC_SCHEMA_VIOLATION', 'capabilities[1].span_granularity'],
+      ]);
     }
   });
 });

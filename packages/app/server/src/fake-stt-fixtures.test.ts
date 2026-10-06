@@ -16,7 +16,11 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FakeSttAdapter } from '@rayspec/stt-port';
 import { afterAll, describe, expect, it } from 'vitest';
-import { FakeSttFixturesError, loadFakeSttFixtures } from './fake-stt-fixtures.js';
+import {
+  FAKE_STT_FIXTURE_MAX_BYTES,
+  FakeSttFixturesError,
+  loadFakeSttFixtures,
+} from './fake-stt-fixtures.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '../../../..');
@@ -90,16 +94,46 @@ describe('loadFakeSttFixtures — which files of the directory are fixtures', ()
     const dir = dirWith({ 'inside.json': fixture('inside') });
     symlinkSync(join(outside, 'secret.json'), join(dir, 'link.json'));
     symlinkSync(outside, join(dir, 'linked-dir.json'));
+    symlinkSync(join(dir, 'absent.json'), join(dir, 'dangling.json'));
 
     const loaded = loadFakeSttFixtures(dir);
     expect(loaded.files).toEqual(['inside.json']);
     expect(loaded.fixtures.map((f) => f.session_id)).toEqual(['inside']);
-    // A directory whose only .json entry is a link holds no fixture.
+    // A directory whose only .json entries are such links holds no fixture, and the refusal says
+    // that links were passed over.
     const onlyLink = dirWith();
     symlinkSync(join(outside, 'secret.json'), join(onlyLink, 'link.json'));
     expect(refusal(() => loadFakeSttFixtures(onlyLink))).toBe(
-      `RAYSPEC_STT_FAKE_FIXTURES '${onlyLink}' holds no .json fixture file. Fail-closed.`,
+      `RAYSPEC_STT_FAKE_FIXTURES '${onlyLink}' holds no .json fixture file (1 symbolic link ` +
+        'that does not lead to a file inside the directory was skipped). Fail-closed.',
     );
+    symlinkSync(outside, join(onlyLink, 'linked-dir.json'));
+    expect(refusal(() => loadFakeSttFixtures(onlyLink))).toBe(
+      `RAYSPEC_STT_FAKE_FIXTURES '${onlyLink}' holds no .json fixture file (2 symbolic links ` +
+        'that do not lead to a file inside the directory were skipped). Fail-closed.',
+    );
+  });
+
+  it('follows a symbolic link to a file inside the directory, as a mounted volume lays them out', () => {
+    // The layout of a projected volume: each visible name links through a linked data directory.
+    const dir = dirWith();
+    mkdirSync(join(dir, '..2026_01_01'));
+    writeFileSync(join(dir, '..2026_01_01', 'default.json'), JSON.stringify(fixture('*')));
+    writeFileSync(join(dir, '..2026_01_01', 'named.json'), JSON.stringify(fixture('named')));
+    symlinkSync('..2026_01_01', join(dir, '..data'));
+    symlinkSync(join('..data', 'default.json'), join(dir, 'default.json'));
+    symlinkSync(join('..data', 'named.json'), join(dir, 'named.json'));
+
+    const loaded = loadFakeSttFixtures(dir);
+    expect(loaded.files).toEqual(['default.json', 'named.json']);
+    expect(loaded.fixtures.map((f) => [f.fixture_id, f.session_id])).toEqual([
+      ['default', '*'],
+      ['named', 'named'],
+    ]);
+    // The directory itself may be reached through a link.
+    const alias = join(dirWith(), 'alias');
+    symlinkSync(dir, alias);
+    expect(loadFakeSttFixtures(alias).files).toEqual(['default.json', 'named.json']);
   });
 
   it('a recording id shaped like a path reads nothing: only declared ids are compared', async () => {
@@ -184,6 +218,21 @@ describe('loadFakeSttFixtures — a directory it refuses', () => {
     chmodSync(join(dir, 'locked.json'), 0o000);
     expect(refusal(() => loadFakeSttFixtures(dir))).toMatch(
       /^fake STT fixture locked\.json: it could not be read \(.*\)\. Fail-closed\.$/,
+    );
+  });
+
+  it('a file larger than the size a fixture may have', () => {
+    const atLimit = fixture('s');
+    atLimit.tracks[0]!.segments[0]!.text = 'x'.repeat(
+      FAKE_STT_FIXTURE_MAX_BYTES - JSON.stringify(fixture('s', 'mic', '')).length,
+    );
+    expect(JSON.stringify(atLimit)).toHaveLength(FAKE_STT_FIXTURE_MAX_BYTES);
+    expect(loadFakeSttFixtures(dirWith({ 'limit.json': atLimit })).files).toEqual(['limit.json']);
+
+    expect(FAKE_STT_FIXTURE_MAX_BYTES).toBe(1024 * 1024);
+    const dir = dirWith({ 'big.json': `${JSON.stringify(atLimit)} ` });
+    expect(refusal(() => loadFakeSttFixtures(dir))).toBe(
+      'fake STT fixture big.json: it is larger than 1048576 bytes. Fail-closed.',
     );
   });
 

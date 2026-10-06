@@ -309,12 +309,12 @@ maybeDescribe('pack of every example, then inspect and verify of the bundle', ()
 maybeDescribe('a product document that declares span_granularity', () => {
   const STT_CONTRACT = '      - stt.transcript_span\n';
 
-  /** The acme-notes example copied aside, its `stt` capability declaring the key. */
-  function withGranularity(value: string): string {
+  /** The acme-notes example copied aside, its `stt` capability (or the one `after` ends) declaring the key. */
+  function withGranularity(value: string, after = STT_CONTRACT): string {
     const root = copyExample('acme-notes');
     const path = join(root, 'acme-notes.product.yaml');
     const text = readFileSync(path, 'utf8');
-    const declared = text.replace(STT_CONTRACT, `${STT_CONTRACT}    span_granularity: ${value}\n`);
+    const declared = text.replace(after, `${after}    span_granularity: ${value}\n`);
     expect(declared).not.toBe(text);
     writeFileSync(path, declared);
     return path;
@@ -356,6 +356,21 @@ maybeDescribe('a product document that declares span_granularity', () => {
     expect(
       r.envelope.errors.slice(1).map((e: { code: string; path?: string }) => [e.code, e.path]),
     ).toEqual([['SPEC_SCHEMA_VIOLATION', 'capabilities[2].span_granularity']]);
+  });
+
+  it('refuses to pack the key on a capability other than stt, which a deployment would refuse', () => {
+    const r = refusedPack(
+      [
+        '--spec',
+        withGranularity('sentence', '      - media_playback.stream\n'),
+        ...identity.slice(0, 4),
+      ],
+      1,
+      'RAY_SPEC_INVALID',
+    );
+    expect(
+      r.envelope.errors.slice(1).map((e: { code: string; path?: string }) => [e.code, e.path]),
+    ).toEqual([['SPEC_SCHEMA_VIOLATION', 'capabilities[1].span_granularity']]);
   });
 });
 

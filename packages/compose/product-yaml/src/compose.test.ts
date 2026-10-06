@@ -550,16 +550,27 @@ describe('composeProductDeploy — span_granularity is an stt setting', () => {
     }
   });
 
+  /** The fixture with the key set on `capabilityId` after the parse, as code that builds a spec can. */
+  function declaredOn(capabilityId: string, value: 'sentence' | 'paragraph'): ProductSpec {
+    const spec = parseFixture();
+    const capability = spec.capabilities.find((c) => c.id === capabilityId);
+    if (!capability) throw new Error(`the fixture declares no '${capabilityId}' capability`);
+    capability.span_granularity = value;
+    return spec;
+  }
+
   it('rejects it on any other capability, naming the capability and the key', () => {
+    // The parser refuses such a document first; the composition refuses the spec itself.
     const GROUNDING_CAPABILITY = '  - id: grounding\n    tier: B\n    status: available\n';
     const yaml = NOTETOOL_YAML.replace(
       GROUNDING_CAPABILITY,
       `${GROUNDING_CAPABILITY}    span_granularity: sentence\n`,
     );
     expect(yaml).not.toBe(NOTETOOL_YAML);
+    expect(() => parseFixture(yaml)).toThrow(/capability 'grounding' declares 'span_granularity'/);
     let thrown: unknown;
     try {
-      composeProductDeploy(parseFixture(yaml), rollout());
+      composeProductDeploy(declaredOn('grounding', 'sentence'), rollout());
     } catch (e) {
       thrown = e;
     }
@@ -572,16 +583,15 @@ describe('composeProductDeploy — span_granularity is an stt setting', () => {
   });
 
   it('rejects the default value on another capability too (a declaration is never ignored)', () => {
-    const AUDIO_CONTRACTS = '    contracts: [audio_input.finalized_session]\n';
-    const yaml = NOTETOOL_YAML.replace(
-      AUDIO_CONTRACTS,
-      `${AUDIO_CONTRACTS}    span_granularity: paragraph\n`,
-    );
-    expect(yaml).not.toBe(NOTETOOL_YAML);
-    expectReject(
-      yaml,
-      rollout(),
-      'unsupported_spec',
+    let thrown: unknown;
+    try {
+      composeProductDeploy(declaredOn('audio_input', 'paragraph'), rollout());
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ProductComposeError);
+    expect((thrown as ProductComposeError).step).toBe('unsupported_spec');
+    expect((thrown as ProductComposeError).message).toMatch(
       /capability 'audio_input' declares 'span_granularity'/,
     );
   });

@@ -285,6 +285,25 @@ describe('capabilities[].span_granularity (closed value set, capability-level on
     expect(res.errors[0]?.message).toMatch(/sentence/);
   });
 
+  it('rejects either value on a capability other than stt (EXACTLY one schema_violation at the key)', () => {
+    for (const value of ['sentence', 'paragraph']) {
+      expectExact(withGranularity(value), [
+        ['schema_violation', 'capabilities[0].span_granularity'],
+      ]);
+    }
+    const res = parseProductSpec(withGranularity('sentence'));
+    if (res.ok) throw new Error('the key on another capability must be rejected');
+    expect(res.errors[0]?.message).toBe(
+      "capability 'cap_a' declares 'span_granularity', but it sizes transcript spans and is " +
+        "honoured on the 'stt' capability only — remove it (or declare it on stt)",
+    );
+    // The same document with the capability named stt parses.
+    const onStt = withGranularity('sentence').replaceAll('cap_a', 'stt');
+    const ok = parseProductSpec(onStt);
+    if (!ok.ok) throw new Error(`must parse:\n${JSON.stringify(ok.errors, null, 2)}`);
+    expect(ok.value.capabilities[0]?.span_granularity).toBe('sentence');
+  });
+
   it('rejects the key on a workflow step (it is not a graph key)', () => {
     expectExact(
       BASE.replace(

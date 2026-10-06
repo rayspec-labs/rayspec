@@ -2276,9 +2276,10 @@ capabilities:
   backs it.
 
 Any other value is a `schema_violation` at validation. The key belongs to the
-`stt` capability: on another capability it is refused when the document is
-mounted, and inside `provider_policy`, a workflow step or an extractor it is an
-`unknown_field`. It is part of the document, not of the environment, so the
+`stt` capability: on another capability either value is a `schema_violation` at
+validation too, so `rayspec doctor`, `plan` and `pack` refuse the document
+before a deployment would, and inside `provider_policy`, a workflow step or an
+extractor it is an `unknown_field`. It is part of the document, not of the environment, so the
 span size is the same wherever the document is deployed and travels with it in
 a bundle. It derives no manifest field: `rayspec pack` and `rayspec bundle
 verify` report the same `requires`, `permissions` and `bindings` with and
@@ -2302,8 +2303,15 @@ same under both values.
 **When the provider returns no paragraphs.** Sentences are read from the
 paragraphs of the provider's response. A response without paragraphs has no
 sentences either, and its transcript is cut at pauses longer than one second
-under both values. A paragraph that lists no sentence stays one span, and a
-sentence without text is skipped.
+under both values. A paragraph that lists no sentence stays one span. A
+sentence without text is skipped, and the time it covers goes to the sentence
+before it in its paragraph (to the one after it when it comes first), so its
+words stay in a span of their own paragraph.
+
+**How many spans.** Nothing caps the number of spans of a track: it is the
+number of sentences (or paragraphs) the provider's response carries. `sentence`
+typically yields several times as many spans as `paragraph` for the same
+recording.
 
 **Which adapter honours it.** The Deepgram adapter the deployment constructs
 (`STT_PROVIDER=deepgram`). The fake adapter (`STT_PROVIDER=fake`) emits the
@@ -2339,6 +2347,11 @@ default filling in for rows without the key:
 ```yaml
 span_granularity: { kind: json, column: payload, path: [span_granularity], type: string, default: paragraph }
 ```
+
+The key is written only where sentences were read. A transcript from the fake
+adapter, from an adapter the embedding application supplies, or from a provider
+response without paragraphs carries no key whatever the document declares, so
+that view field reports `paragraph` for it.
 
 ### `input_normalize` on `record_input`
 
@@ -2661,9 +2674,11 @@ document that declares extractors. With `true`, under
 
 `true` under `RAYSPEC_EXTRACTION_MODE=live` refuses the boot: a live run calls
 the configured backends, so the two settings contradict each other.
-`RAYSPEC_HOSTING_POSTURE=managed` refuses `true` as well. An executor injected
-by a test or an embedder still replaces the provider, and the variable is then
-not read.
+`RAYSPEC_HOSTING_POSTURE=managed` refuses `true` as well. A stand-in answers for
+a backend the config names: a config whose `backend` is absent, blank, not a
+string or not a single line refuses the boot (`… names no backend …`). An
+executor injected by a test or an embedder still replaces the provider, and the
+variable is then not read.
 
 **A stand-in also reads transcript spans.** Besides text inputs it reads an input
 artifact that is a span set — a non-empty array of objects that each have a
@@ -2705,8 +2720,11 @@ at boot, only under `STT_PROVIDER=fake` and only for a document that declares an
 
 **`RAYSPEC_STT_FAKE_FIXTURES`** names a directory (resolved against the working
 directory; blank counts as unset). Every regular file directly in it whose name
-ends in `.json` is one fixture. Other files, subdirectories and symbolic links
-are ignored, and files load in the order of their names. A fixture is the
+ends in `.json` is one fixture, and so is a symbolic link of such a name that
+leads to a regular file inside the directory — which is how a mounted volume
+(a Kubernetes ConfigMap, for one) lays its files out. Other files,
+subdirectories and links that lead anywhere else are ignored, and files load in
+the order of their names. A fixture file is at most 1 MiB. A fixture is the
 transcript of the tracks of one session:
 
 ```json
@@ -2727,13 +2745,13 @@ transcript of the tracks of one session:
 
 | Key | Rule |
 | --- | --- |
-| `session_id` | Required, a non-empty string. `"*"` answers **any** session; `*` cannot be a real session id. |
+| `session_id` | Required, a non-empty string without leading or trailing whitespace. `"*"` answers **any** session; `*` cannot be a real session id. |
 | `fixture_id` | Optional non-empty string; the file name without `.json` when absent. |
-| `tracks` | Required, a non-empty array. `track` is a non-empty string, unique within the file. |
+| `tracks` | Required, a non-empty array. `track` is a non-empty string without leading or trailing whitespace, unique within the file. |
 | `tracks[].status` | Optional; when present it must be `completed`. |
 | `tracks[].segments` | Required, a non-empty array. Each segment becomes one span. |
 | `segments[].text` | Required, a non-empty string. |
-| `segments[].span_id` | Optional non-empty string, unique within the track; `<track>:s<index>` when absent. |
+| `segments[].span_id` | Optional non-empty string; `<track>:s<index>` when absent. The ids a file emits, written or default, are unique over all its tracks: a session's spans are cited from one set. |
 | `segments[].start`, `.end` | Optional numbers from 0, with `end` at or after `start`; `index × 5` and `(index + 1) × 5` seconds when absent. |
 | any other key | Ignored. |
 
@@ -2765,11 +2783,11 @@ The boot refuses, before it changes anything:
 | Case | Refusal |
 | --- | --- |
 | the directory is missing, is a file, or cannot be listed | `RAYSPEC_STT_FAKE_FIXTURES '<path>' is not a readable directory.` |
-| it holds no `.json` file | `RAYSPEC_STT_FAKE_FIXTURES '<path>' holds no .json fixture file.` |
-| a file is unreadable, is not JSON, or breaks a rule of the table | `fake STT fixture <file>: <why>.` |
+| it holds no `.json` file | `RAYSPEC_STT_FAKE_FIXTURES '<path>' holds no .json fixture file.`, followed by the number of skipped symbolic links when there were any |
+| a file is unreadable, is larger than 1 MiB, is not JSON, or breaks a rule of the table | `fake STT fixture <file>: <why>.` |
 | two files hold the same session and track | `fake STT fixtures <a> and <b> both answer <session_id>/<track>.` |
 | `RAYSPEC_STT_FAKE_FALLBACK` is not `fixed` | `RAYSPEC_STT_FAKE_FALLBACK '<value>' is not supported …` |
-| either variable is set while `STT_PROVIDER` is not `fake` | `<VARIABLE> is set, but STT_PROVIDER is '<provider>': it configures the fake adapter only.` |
+| either variable is set while `STT_PROVIDER` is not `fake`, for a document that transcribes | `<VARIABLE> is set, but STT_PROVIDER is '<provider>': it configures the fake adapter only.` |
 | either variable is set under `RAYSPEC_HOSTING_POSTURE=managed` | `RAYSPEC_HOSTING_POSTURE=managed does not support <VARIABLE> …` |
 
 The boot banner says how many fixture files answer and whether the fallback is

@@ -18,11 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   end. The setting is part of the document, so it is the same on every deployment of it and
   travels in the bundle; `rayspec pack` and `rayspec bundle verify` accept it and derive the same
   `requires`, `permissions` and `bindings` as without it. Values are `paragraph` and `sentence`;
-  another value is a `schema_violation`, and the key on a capability other than `stt` is refused
-  when the document is mounted. **The default does not change:** a document without the key, or
+  another value is a `schema_violation`, and so is the key on a capability other than `stt`, at
+  validation (`rayspec doctor`, `plan` and `pack` refuse it; the deploy composition refuses it
+  again). **The default does not change:** a document without the key, or
   with `span_granularity: paragraph`, gets the spans, the span ids and the transcript rows it got
   before, and the request sent to the provider is the same under both values. A response without
-  paragraphs carries no sentences and is cut at pauses under both values. The fake adapter
+  paragraphs carries no sentences and is cut at pauses under both values. A sentence without text
+  is skipped and its time goes to the neighbouring sentence of its paragraph. The fake adapter
   (`STT_PROVIDER=fake`) emits its fixtures' segments as written and ignores the key.
   **Span ids differ between the two granularities.** An id keeps the form `<track>:s<index>`, and
   the index counts paragraphs under `paragraph` and sentences under `sentence`, so `mic:s1` names
@@ -34,7 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `preserve_human_edits`, dismissed rows, surplus rows of a kind without `reconcile_stale_rows`)
   keep the citations of the earlier value and are not marked as such. A transcript row cut per
   sentence carries `payload.span_granularity: sentence`, which a view can project; a
-  paragraph-granular row is unchanged and carries no such key. See
+  paragraph-granular row is unchanged and carries no such key, and neither does a row from the
+  fake adapter, from a supplied adapter or from a response without paragraphs. See
   [`span_granularity` on `stt`](docs/spec-reference.md#span_granularity-on-stt).
 - **A deployed product runs end to end with no provider key.** A product that transcribes could
   validate, plan, dry-run and pack without a key, but a real deployment of it could not get a
@@ -47,7 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     directory that cannot be read, holds no fixture, holds a malformed one or holds two for the
     same session and track refuses the boot instead of failing the first recording. A recording's
     session and track ids are only compared with the ids the fixtures declare: no path is built
-    from them, and symbolic links in the directory are not followed.
+    from them. A symbolic link is followed only to a regular file inside the directory (the
+    layout of a mounted volume); a fixture file is at most 1 MiB, and the span ids of a file are
+    unique over all its tracks.
   - `RAYSPEC_STT_FAKE_FALLBACK=fixed` answers a recording no fixture matches with a fixed
     two-sentence transcript, with or without a fixture directory. It carries no labelled line, so
     it takes a recording to a readable transcript, not to extracted artifacts.
@@ -63,9 +68,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **All three stay a development and test posture.** The non-real-provider boot banner names each
   one in effect: how many fixture files answer, whether the fallback is on, and every extractor
   the deterministic provider stands in for with the backend its config names.
-  `RAYSPEC_HOSTING_POSTURE=managed` refuses each of them at boot, by name, whatever the document
-  declares. A fake-adapter setting beside another `STT_PROVIDER`, an unsupported value, and the
-  stand-in under `RAYSPEC_EXTRACTION_MODE=live` refuse the boot too. `rayspec deploy --check-env`
+  For a product document, `RAYSPEC_HOSTING_POSTURE=managed` refuses each of them at boot, by
+  name, whether or not the document transcribes or extracts. For a product document that
+  transcribes, a fake-adapter setting beside another `STT_PROVIDER` and an unsupported value
+  refuse the boot; so do, for one that extracts, the stand-in under
+  `RAYSPEC_EXTRACTION_MODE=live` and a stand-in config that names no backend. `rayspec deploy --check-env`
   lists the three as optional for a product document that reads them. **Nothing changes for a
   deployment that sets none of them:** the fake adapter has no fixtures and gives the same error,
   a real-backend config under deterministic mode is refused with the same message, an extractor

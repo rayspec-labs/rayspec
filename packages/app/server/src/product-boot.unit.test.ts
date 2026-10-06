@@ -21,6 +21,7 @@ import {
   anthropicReuseLoginShadowWarning,
   assembleExtractionInstructions,
   assertManagedPostureKeyless,
+  assertManagedProductPosture,
   buildLiveAgent,
   buildProductSttAdapter,
   buildSttAdapter,
@@ -434,6 +435,13 @@ describe('assertManagedPostureKeyless — the managed posture refuses each keyle
       `${ABORT}RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: it selects the deterministic extraction ` +
         "provider, whose capability 'extraction-deterministic' is test-only. Unset it. Fail-closed.",
     );
+    // A value the boot would not accept as true is refused here too, not left for a later check
+    // that only a document with extractors reaches.
+    for (const value of ['TRUE', '1', 'yes']) {
+      expect(refusal({ RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: value })).toContain(
+        `${ABORT}RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN:`,
+      );
+    }
   });
 
   it('checks the fixtures first, then the fallback, then the stand-in', () => {
@@ -457,6 +465,47 @@ describe('assertManagedPostureKeyless — the managed posture refuses each keyle
       { RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: '' },
     ]) {
       expect(() => assertManagedPostureKeyless(env)).not.toThrow();
+    }
+  });
+});
+
+describe('assertManagedProductPosture — what a product boot checks before it builds a provider', () => {
+  const KEYLESS: Array<[string, string]> = [
+    ['RAYSPEC_STT_FAKE_FIXTURES', 'd'],
+    ['RAYSPEC_STT_FAKE_FALLBACK', 'fixed'],
+    ['RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN', 'true'],
+  ];
+
+  it('under managed, refuses each keyless setting beside a supported provider', () => {
+    for (const [name, value] of KEYLESS) {
+      expect(() =>
+        assertManagedProductPosture(
+          { hostingPosture: 'managed' },
+          { STT_PROVIDER: 'deepgram', [name]: value },
+        ),
+      ).toThrow(`RAYSPEC_HOSTING_POSTURE=managed does not support ${name}:`);
+    }
+  });
+
+  it('under managed, refuses a speech provider outside the supported set first', () => {
+    expect(() =>
+      assertManagedProductPosture(
+        { hostingPosture: 'managed' },
+        { STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FALLBACK: 'fixed' },
+      ),
+    ).toThrow(/STT_PROVIDER/);
+    expect(() =>
+      assertManagedProductPosture({ hostingPosture: 'managed' }, { STT_PROVIDER: 'deepgram' }),
+    ).not.toThrow();
+  });
+
+  it('outside managed it refuses nothing', () => {
+    for (const hostingPosture of [undefined, 'local'] as const) {
+      for (const [name, value] of KEYLESS) {
+        expect(() =>
+          assertManagedProductPosture({ hostingPosture }, { STT_PROVIDER: 'fake', [name]: value }),
+        ).not.toThrow();
+      }
     }
   });
 });

@@ -213,6 +213,14 @@ describe('FakeSttAdapter — which fixture answers a recording', () => {
         `No fake STT fixture for ${session}/${track}.`,
       );
     }
+    // The any-session marker is not a session: a request that carries it matches no fixture, the
+    // any-session one included.
+    await expect(
+      new FakeSttAdapter({ fixtures: [ANY] }).transcribeTrack({
+        session_id: FAKE_STT_ANY_SESSION,
+        track: 'mic',
+      }),
+    ).rejects.toThrow('No fake STT fixture for */mic.');
   });
 
   it('uses the start and end a segment gives, and five-second slots where it gives none', async () => {
@@ -368,6 +376,38 @@ describe('parseFakeSttFixture — the format of one fixture file', () => {
         ],
       },
       "span id 'mic:s1' appears twice in track 'mic'",
+    ],
+    [
+      'a span id written on two tracks',
+      {
+        session_id: 's',
+        tracks: [
+          { track: 'mic', segments: [{ text: 'One.', span_id: 'same' }] },
+          { track: 'system', segments: [{ text: 'Two.', span_id: 'same' }] },
+        ],
+      },
+      "span id 'same' appears in tracks 'mic' and 'system'",
+    ],
+    [
+      "a span id that collides with another track's default one",
+      {
+        session_id: 's',
+        tracks: [
+          { track: 'mic', segments: [{ text: 'One.', span_id: 'system:s0' }] },
+          { track: 'system', segments: [{ text: 'Two.' }] },
+        ],
+      },
+      "span id 'system:s0' appears in tracks 'mic' and 'system'",
+    ],
+    [
+      'a session_id with surrounding whitespace',
+      { session_id: ' * ', tracks: [track] },
+      'session_id has leading or trailing whitespace',
+    ],
+    [
+      'a track with surrounding whitespace',
+      { session_id: 's', tracks: [{ track: ' mic', segments: [segment] }] },
+      'tracks[0].track has leading or trailing whitespace',
     ],
     ...(
       [

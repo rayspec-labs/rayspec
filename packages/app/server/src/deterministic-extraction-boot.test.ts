@@ -363,6 +363,21 @@ describe('the deterministic provider as a stand-in for a configured backend', ()
         buildDeterministicExtraction({ ...STAND_IN }, missing.specPath, missing.spec, undefined),
       ),
     ).toContain('could not read it');
+
+    // A stand-in answers for a config that names a backend; one that names none is not one.
+    const unnamed: unknown[] = [undefined, null, '', '  ', 7, { name: 'openai' }, 'open\nai'];
+    for (const backend of unnamed) {
+      const { specPath, spec, root } = acme(({ backend: _omitted, ...rest }) =>
+        backend === undefined ? rest : { ...rest, backend },
+      );
+      expect(
+        refusal(() => buildDeterministicExtraction({ ...STAND_IN }, specPath, spec, undefined)),
+      ).toBe(
+        "Boot aborted (Product-YAML) — extractor 'note_extractor': the extraction config at " +
+          `${join(root, ACME_CONFIG)} names no backend (a non-empty single-line string) for the ` +
+          'deterministic provider to stand in for. Fail-closed.',
+      );
+    }
   });
 
   it('leaves a config that selects the provider itself exactly as it was: no stand-in, three keys', async () => {

@@ -367,25 +367,148 @@ describe('mapDeepgramResponse — sentence granularity', () => {
     }
   });
 
-  it('skips a sentence without text and leaves the others their own bounds', () => {
+  it('skips a sentence without text and gives its time to the sentence before it', () => {
     for (const text of ['', '   ', undefined, 42]) {
       const payload = edited((alternative) => {
         alternative.paragraphs.paragraphs[0].sentences[1].text = text;
       });
       const mapped = mapDeepgramResponse(payload, sentenceCtx);
       expect(mapped.spans.map((span) => [span.id, span.start, span.end, span.text])).toEqual([
-        ['mic:s0', 0.2, 2.1, 'We agreed on the rollout order.'],
+        ['mic:s0', 0.2, 4.3, 'We agreed on the rollout order.'],
         ['mic:s1', 4.6, 6.9, 'Billing follows a week later.'],
         ['mic:s2', 8.5, 10.0, 'Who owns the migration?'],
         ['mic:s3', 10.4, 11.6, 'I will take it.'],
       ]);
-      // No word is lost: the five words of the skipped sentence take the first-segment fallback
-      // the normalizer applies to any word outside every segment.
+      // No word is lost: the five words of the skipped sentence stay with the sentence that now
+      // covers their time, and its confidence is the mean over all eleven.
       expect(mapped.words).toHaveLength(24);
-      expect(mapped.words.every((word) => word.segment_id !== null)).toBe(true);
+      expect(mapped.words.slice(6, 11).map((word) => word.segment_id)).toEqual(
+        Array(5).fill('stt.segment.dg-sess.mic.0000'),
+      );
       expect(mapped.segments[0]?.word_ids).toHaveLength(11);
       expect(mapped.segments[1]?.word_ids).toHaveLength(5);
+      expect(mapped.segments[0]?.confidence).toBeCloseTo(
+        (0.99 + 0.98 + 0.97 + 0.99 + 0.96 + 0.95 + 0.99 + 0.94 + 0.93 + 0.92 + 0.97) / 11,
+        10,
+      );
     }
+  });
+
+  it("keeps a skipped sentence's words in their own paragraph, not in the track's first span", () => {
+    // Blank first sentence of the second paragraph: the next sentence starts where it started.
+    const first = mapDeepgramResponse(
+      edited((alternative) => {
+        alternative.paragraphs.paragraphs[1].sentences[0].text = '';
+      }),
+      sentenceCtx,
+    );
+    expect(first.spans.map((span) => [span.id, span.start, span.end, span.text])).toEqual([
+      ['mic:s0', 0.2, 2.1, 'We agreed on the rollout order.'],
+      ['mic:s1', 2.4, 4.3, 'The upload service goes first.'],
+      ['mic:s2', 4.6, 6.9, 'Billing follows a week later.'],
+      ['mic:s3', 8.5, 11.6, 'I will take it.'],
+    ]);
+    expect(first.spans.map((span) => span.word_ids.length)).toEqual([6, 5, 5, 8]);
+    expect(first.segments[3]?.confidence).toBeCloseTo(
+      (0.99 + 0.98 + 0.99 + 0.9 + 0.97 + 0.96 + 0.95 + 0.94) / 8,
+      10,
+    );
+    expect(first.segments[0]?.confidence).toBeCloseTo(
+      (0.99 + 0.98 + 0.97 + 0.99 + 0.96 + 0.95) / 6,
+      10,
+    );
+
+    // Blank last sentence of the second paragraph: the sentence before it ends where it ended.
+    const last = mapDeepgramResponse(
+      edited((alternative) => {
+        alternative.paragraphs.paragraphs[1].sentences[1].text = '';
+      }),
+      sentenceCtx,
+    );
+    expect(last.spans.map((span) => [span.id, span.start, span.end])).toEqual([
+      ['mic:s0', 0.2, 2.1],
+      ['mic:s1', 2.4, 4.3],
+      ['mic:s2', 4.6, 6.9],
+      ['mic:s3', 8.5, 11.6],
+    ]);
+    expect(last.spans.map((span) => span.word_ids.length)).toEqual([6, 5, 5, 8]);
+
+    // A skipped sentence that carries no bounds of its own extends nothing.
+    const unbounded = mapDeepgramResponse(
+      edited((alternative) => {
+        alternative.paragraphs.paragraphs[1].sentences[1] = { text: '' };
+      }),
+      sentenceCtx,
+    );
+    expect(unbounded.spans[3]).toMatchObject({ start: 8.5, end: 10.0 });
+  });
+
+  it("takes a sentence's confidence from the words inside its bounds, whatever the order", () => {
+    const payload = {
+      metadata: { duration: 4 },
+      results: {
+        channels: [
+          {
+            alternatives: [
+              {
+                transcript: 'one two three four',
+                confidence: 0.5,
+                words: [
+                  { word: 'one', start: 0, end: 1, confidence: 0.1 },
+                  { word: 'two', start: 1, end: 2, confidence: 0.2 },
+                  { word: 'three', start: 2.5, end: 3, confidence: 0.3 },
+                  { word: 'four', start: 3, end: 4, confidence: 0.4 },
+                ],
+                paragraphs: {
+                  paragraphs: [
+                    {
+                      start: 0,
+                      end: 4,
+                      sentences: [
+                        { text: 'three four', start: 2.5, end: 4 },
+                        { text: 'one two', start: 0, end: 2 },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+    const mapped = mapDeepgramResponse(payload, sentenceCtx);
+    const textOf = new Map(mapped.words.map((word) => [word.id, word.text]));
+    expect(
+      mapped.segments.map((segment) => segment.word_ids.map((id) => textOf.get(id)).join(' ')),
+    ).toEqual(['three four', 'one two']);
+    expect(mapped.segments[0]?.confidence).toBeCloseTo(0.35, 10);
+    expect(mapped.segments[1]?.confidence).toBeCloseTo(0.15, 10);
+
+    // Overlapping sentences: a word inside both belongs to the first, for word_ids and confidence.
+    payload.results.channels[0]!.alternatives[0]!.paragraphs.paragraphs[0]!.sentences = [
+      { text: 'one two three', start: 0, end: 3 },
+      { text: 'three four', start: 2.5, end: 4 },
+    ];
+    const overlapping = mapDeepgramResponse(payload, sentenceCtx);
+    expect(overlapping.segments.map((segment) => segment.word_ids.length)).toEqual([3, 1]);
+    expect(overlapping.segments[0]?.confidence).toBeCloseTo(0.2, 10);
+    expect(overlapping.segments[1]?.confidence).toBeCloseTo(0.4, 10);
+  });
+
+  it('reads a sentence bound the way a paragraph or word bound is read', () => {
+    const payload = edited((alternative) => {
+      const sentences = alternative.paragraphs.paragraphs[0].sentences;
+      sentences[1].start = '2.4';
+      sentences[1].end = '4.3';
+    });
+    const mapped = mapDeepgramResponse(payload, sentenceCtx);
+    expect(mapped.spans.map((span) => [span.start, span.end])).toEqual(
+      transcript.spans.map((span) => [span.start, span.end]),
+    );
+    expect(mapped.spans.map((span) => span.word_ids)).toEqual(
+      transcript.spans.map((span) => span.word_ids),
+    );
   });
 
   it('keeps a paragraph whose sentences all lack text as the paragraph segment', () => {

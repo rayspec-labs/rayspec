@@ -929,6 +929,9 @@ function findDuplicates<T>(
   return errors;
 }
 
+/** The one capability id on which `span_granularity` is honoured (the speech-to-text capability). */
+const SPAN_GRANULARITY_CAPABILITY_ID = 'stt';
+
 /**
  * The full semantic pass over an already-shape-valid `ProductSpec`. Resolves every cross-reference,
  * rejects duplicates, enforces the capability-status discipline, and vets the contract vocabulary.
@@ -1080,6 +1083,24 @@ export function lintProductSpec(spec: ProductSpec): SpecError[] {
       checkRef(
         cap.input_normalize.output_contract,
         `capabilities[${i}].input_normalize.output_contract`,
+      );
+    }
+  });
+
+  // ---- capabilities[].span_granularity → the stt capability only ----------------------
+  // The key sizes TRANSCRIPT spans, so only the speech capability reads it. The deploy composition
+  // refuses it anywhere else; refusing it here too means a document that validates, plans and packs
+  // is not one that then fails to deploy. Either value is refused: a declaration is never ignored.
+  spec.capabilities.forEach((cap, i) => {
+    if (cap.span_granularity !== undefined && cap.id !== SPAN_GRANULARITY_CAPABILITY_ID) {
+      errors.push(
+        specError(
+          'schema_violation',
+          `capability '${cap.id}' declares 'span_granularity', but it sizes transcript spans and ` +
+            `is honoured on the '${SPAN_GRANULARITY_CAPABILITY_ID}' capability only — remove it ` +
+            `(or declare it on ${SPAN_GRANULARITY_CAPABILITY_ID})`,
+          `capabilities[${i}].span_granularity`,
+        ),
       );
     }
   });

@@ -143,19 +143,29 @@ function segmentsFromParagraphs(
   return segments;
 }
 
-/** The number when the provider sent a finite one, otherwise `fallback` (`null` is not a zero). */
-function finiteOr(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+/**
+ * A sentence bound, read as `num` reads a paragraph or word bound (a numeric string counts), except
+ * that an absent, `null` or non-numeric one is `undefined` rather than a zero.
+ */
+function optionalBound(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 /**
  * Segments from the sentences of Deepgram paragraphs: one segment per sentence, in order across
  * paragraphs, with the sentence's own text and bounds (the paragraph's bound where the sentence
- * carries no finite one). A sentence without text is skipped — a span with nothing in it can back
- * no claim. A paragraph left with no sentence at all contributes the one segment
- * `segmentsFromParagraphs` builds for it, so no stretch of the recording loses its segment.
- * Confidence comes from the same running word index as the paragraph mapping, bounded by each
- * segment's end (the final segment absorbs the remainder).
+ * carries no usable one). A sentence without text is skipped — a span with nothing in it can back
+ * no claim — and the time it carries goes to the sentence before it in the paragraph, or to the
+ * one after it when it comes first, so its words stay in their own paragraph. A paragraph left
+ * with no sentence at all contributes the one segment `segmentsFromParagraphs` builds for it, so
+ * no stretch of the recording loses its segment.
+ *
+ * A segment's confidence is the mean over the words the shared normalizer will list as its
+ * `word_ids`: a word belongs to the first segment whose bounds contain it, and to the first
+ * segment of the track when none does. Sentences that arrive out of order or overlap therefore get
+ * the confidence of exactly their own words.
  */
 function segmentsFromSentences(
   paragraphs: Array<Record<string, unknown>>,
@@ -166,34 +176,48 @@ function segmentsFromSentences(
     const start = num(paragraph.start);
     const end = num(paragraph.end);
     const sentences = asArray(paragraph.sentences).map(asRecord);
-    const spoken = sentences.filter((sentence) => str(sentence.text).trim().length > 0);
-    if (spoken.length === 0) {
+    if (!sentences.some((sentence) => str(sentence.text).trim().length > 0)) {
       pieces.push({ text: sentences.map((sentence) => str(sentence.text)).join(' '), start, end });
       continue;
     }
-    for (const sentence of spoken) {
-      pieces.push({
+    let previous: { text: string; start: number; end: number } | undefined;
+    // The earliest start of the skipped sentences that precede the paragraph's first kept one.
+    let leading: number | undefined;
+    for (const sentence of sentences) {
+      const sentenceStart = optionalBound(sentence.start);
+      const sentenceEnd = optionalBound(sentence.end);
+      if (str(sentence.text).trim().length === 0) {
+        if (previous) {
+          if (sentenceEnd !== undefined) previous.end = Math.max(previous.end, sentenceEnd);
+        } else if (sentenceStart !== undefined) {
+          leading = Math.min(leading ?? sentenceStart, sentenceStart);
+        }
+        continue;
+      }
+      const piece = {
         text: str(sentence.text),
-        start: finiteOr(sentence.start, start),
-        end: finiteOr(sentence.end, end),
-      });
+        start: sentenceStart ?? start,
+        end: sentenceEnd ?? end,
+      };
+      if (leading !== undefined) {
+        piece.start = Math.min(piece.start, leading);
+        leading = undefined;
+      }
+      pieces.push(piece);
+      previous = piece;
     }
   }
-  const segments: NeutralSegment[] = [];
-  let index = 0;
-  const last = pieces.length - 1;
-  pieces.forEach((piece, position) => {
-    const run: Array<Record<string, unknown>> = [];
-    while (
-      index < rawWords.length &&
-      (position === last || num(rawWords[index]?.start) < piece.end)
-    ) {
-      run.push(asRecord(rawWords[index]));
-      index += 1;
-    }
-    segments.push({ ...piece, confidence: meanConfidence(run) });
-  });
-  return segments;
+  const runs: Array<Array<Record<string, unknown>>> = pieces.map(() => []);
+  for (const word of rawWords) {
+    const wordStart = num(word.start);
+    const wordEnd = num(word.end);
+    const position = pieces.findIndex((piece) => wordStart >= piece.start && wordEnd <= piece.end);
+    runs[position === -1 ? 0 : position]?.push(word);
+  }
+  return pieces.map((piece, position) => ({
+    ...piece,
+    confidence: meanConfidence(runs[position] ?? []),
+  }));
 }
 
 /**

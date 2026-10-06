@@ -323,17 +323,19 @@ The [deterministic extraction provider](./spec-reference.md#the-deterministic-ex
 this matrix, and a boot under the posture that would run it is refused, naming its capability
 `extraction-deterministic`.
 
-The settings of a run without provider keys are refused under the posture as well, each by name
-and before anything is written, whatever the document declares and whatever provider is selected —
-a test setting left over in a managed environment is refused even where it would do nothing:
+The settings of a run without provider keys are refused under the posture as well, for a product
+document: each by name and before anything is written, whether or not the document transcribes or
+extracts and whatever provider is selected — a test setting left over in a managed environment is
+refused even where it would do nothing. A backend-profile document reads none of them, under any
+posture, and its boot does not check them.
 
 - `RAYSPEC_STT_FAKE_FIXTURES` and `RAYSPEC_STT_FAKE_FALLBACK`, when set and not blank: each
   configures the fake speech-to-text adapter, whose capability `stt-fake` is test-only.
-- `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true`: it selects the deterministic extraction
-  provider, whose capability `extraction-deterministic` is test-only.
+- `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN`, when set to anything but `false`: it selects the
+  deterministic extraction provider, whose capability `extraction-deterministic` is test-only.
 
 `STT_PROVIDER=fake` is refused first, by the matrix above, and
-`RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=false` is not refused. What the settings do outside the
+`RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=false` (or blank) is not refused. What the settings do outside the
 posture is in the spec reference:
 [fixtures for the fake speech-to-text adapter](./spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter)
 and [standing in for a configured backend](./spec-reference.md#standing-in-for-a-configured-backend).

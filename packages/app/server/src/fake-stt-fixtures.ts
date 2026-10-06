@@ -1,16 +1,17 @@
 /**
  * The fixture directory of the fake speech-to-text adapter (`RAYSPEC_STT_FAKE_FIXTURES`), read once
- * at boot. Every regular file directly in the directory whose name ends in `.json` is one session
- * fixture (`parseFakeSttFixture` in `@rayspec/stt-port` states the format); other files,
- * subdirectories and symbolic links are ignored. Files load in the order of their names.
+ * at boot. Every entry directly in the directory whose name ends in `.json` and that is a regular
+ * file, or a symbolic link to a regular file inside the directory, is one session fixture
+ * (`parseFakeSttFixture` in `@rayspec/stt-port` states the format). Other files, subdirectories
+ * and links that lead anywhere else are ignored. Files load in the order of their names.
  *
  * Nothing here runs at request time and no path is ever built from a session or track id: the
  * adapter compares a recording's ids with the ids the loaded fixtures declare. A directory that
  * cannot be read, holds no fixture, holds a malformed one, or holds two that answer the same
  * session and track is refused here, at boot, rather than at the first recording.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { join, resolve as resolvePath, sep } from 'node:path';
 import {
   FakeSttFixtureError,
   parseFakeSttFixture,
@@ -19,6 +20,9 @@ import {
 
 /** The environment variable that names the directory. */
 const VARIABLE = 'RAYSPEC_STT_FAKE_FIXTURES';
+
+/** The largest fixture file that loads, in bytes. A transcript fixture is a few kilobytes. */
+export const FAKE_STT_FIXTURE_MAX_BYTES = 1024 * 1024;
 
 /** Why a fixture directory is refused. The boot reports `message` as its own refusal. */
 export class FakeSttFixturesError extends Error {
@@ -40,23 +44,37 @@ export interface LoadedFakeSttFixtures {
  */
 export function loadFakeSttFixtures(dir: string): LoadedFakeSttFixtures {
   const root = resolvePath(dir);
-  let files: string[];
+  const files: string[] = [];
+  let skippedLinks = 0;
   try {
     if (!statSync(root).isDirectory()) throw new Error('not a directory');
-    // `isFile()` on a directory entry is false for a symbolic link, so a link is never followed
-    // out of the directory.
-    files = readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
-      .map((entry) => entry.name)
-      .sort();
+    const realRoot = realpathSync(root);
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.name.endsWith('.json')) continue;
+      if (entry.isFile()) {
+        files.push(entry.name);
+      } else if (entry.isSymbolicLink()) {
+        // A mounted volume lays its files out as links into a data directory beside them, so a
+        // link is followed — but only to a regular file whose real path is inside the directory.
+        if (linksToFileInside(realRoot, join(root, entry.name))) files.push(entry.name);
+        else skippedLinks += 1;
+      }
+    }
+    files.sort();
   } catch {
     throw new FakeSttFixturesError(
       `${VARIABLE} '${dir}' is not a readable directory. Fail-closed.`,
     );
   }
   if (files.length === 0) {
+    const links =
+      skippedLinks === 0
+        ? ''
+        : skippedLinks === 1
+          ? ' (1 symbolic link that does not lead to a file inside the directory was skipped)'
+          : ` (${skippedLinks} symbolic links that do not lead to a file inside the directory were skipped)`;
     throw new FakeSttFixturesError(
-      `${VARIABLE} '${dir}' holds no .json fixture file. Fail-closed.`,
+      `${VARIABLE} '${dir}' holds no .json fixture file${links}. Fail-closed.`,
     );
   }
 
@@ -80,12 +98,30 @@ export function loadFakeSttFixtures(dir: string): LoadedFakeSttFixtures {
   return { fixtures, files };
 }
 
+/** Whether the symbolic link at `path` leads to a regular file inside `realRoot`. */
+function linksToFileInside(realRoot: string, path: string): boolean {
+  try {
+    const real = realpathSync(path);
+    return real.startsWith(realRoot + sep) && statSync(real).isFile();
+  } catch {
+    // A link that leads nowhere.
+    return false;
+  }
+}
+
 /** One fixture file, parsed and checked. */
 function readFixture(root: string, file: string): SttDualTrackFixture {
   let text: string;
   try {
+    if (statSync(join(root, file)).size > FAKE_STT_FIXTURE_MAX_BYTES) {
+      throw new FakeSttFixturesError(
+        `fake STT fixture ${file}: it is larger than ${FAKE_STT_FIXTURE_MAX_BYTES} bytes. ` +
+          'Fail-closed.',
+      );
+    }
     text = readFileSync(join(root, file), 'utf8');
   } catch (e) {
+    if (e instanceof FakeSttFixturesError) throw e;
     throw new FakeSttFixturesError(
       `fake STT fixture ${file}: it could not be read (${
         e instanceof Error ? e.message : String(e)

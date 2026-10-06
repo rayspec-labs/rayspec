@@ -257,6 +257,7 @@ function fixtureMatches(
     );
   }
   return (
+    fixture.session_id !== FAKE_STT_ANY_SESSION &&
     fixture.session_id === request.session_id &&
     fixture.tracks.some((track) => track.track === request.track)
   );
@@ -312,8 +313,11 @@ function isSecond(value: unknown): value is number {
  * and return it with only the keys the adapter reads. `session_id`, `tracks`, each track's `track`
  * and `segments` and each segment's `text` are required; `fixture_id` defaults to the file name
  * without `.json`; a track's `status`, when present, must be `completed`; a segment's `span_id`,
- * `start` and `end` are optional. Any other key is ignored. Fail-closed: the first rule a file
- * breaks is thrown as a `FakeSttFixtureError`. The port reads no file; the caller does.
+ * `start` and `end` are optional. A `session_id` or `track` is compared as written, so one with
+ * leading or trailing whitespace could match no recording and is refused. A span id is unique over
+ * all tracks of the file: a session's spans are cited from one set. Any other key is ignored.
+ * Fail-closed: the first rule a file breaks is thrown as a `FakeSttFixtureError`. The port reads
+ * no file; the caller does.
  */
 export function parseFakeSttFixture(value: unknown, fileName: string): SttDualTrackFixture {
   const refuse = (why: string): never => {
@@ -321,6 +325,9 @@ export function parseFakeSttFixture(value: unknown, fileName: string): SttDualTr
   };
   if (!isRecord(value)) return refuse('it is not a JSON object');
   if (!isNonEmptyString(value.session_id)) return refuse('session_id is not a non-empty string');
+  if (value.session_id !== value.session_id.trim()) {
+    return refuse('session_id has leading or trailing whitespace');
+  }
   if (value.fixture_id !== undefined && !isNonEmptyString(value.fixture_id)) {
     return refuse('fixture_id is not a non-empty string');
   }
@@ -330,12 +337,17 @@ export function parseFakeSttFixture(value: unknown, fileName: string): SttDualTr
 
   const tracks: SttDualTrackFixture['tracks'] = [];
   const trackNames = new Set<string>();
+  /** Emitted span id → the track that emits it, over the whole file. */
+  const spanTracks = new Map<string, string>();
   const rawTracks: unknown[] = value.tracks;
   for (const [i, rawTrack] of rawTracks.entries()) {
     if (!isRecord(rawTrack) || !isNonEmptyString(rawTrack.track)) {
       return refuse(`tracks[${i}].track is not a non-empty string`);
     }
     const name = rawTrack.track;
+    if (name !== name.trim()) {
+      return refuse(`tracks[${i}].track has leading or trailing whitespace`);
+    }
     if (trackNames.has(name)) return refuse(`track '${name}' appears twice`);
     trackNames.add(name);
     if (rawTrack.status !== undefined && rawTrack.status !== 'completed') {
@@ -372,12 +384,16 @@ export function parseFakeSttFixture(value: unknown, fileName: string): SttDualTr
     }
 
     // Uniqueness is over the ids the adapter will emit, so a written id that equals another
-    // segment's default id is caught too.
-    const spanIds = new Set<string>();
+    // segment's default id is caught too — in this track or, since the tracks of a session share
+    // one span set, in any other track of the file.
     for (const [j, segment] of segments.entries()) {
       const id = segment.span_id ?? `${name}:s${j}`;
-      if (spanIds.has(id)) return refuse(`span id '${id}' appears twice in track '${name}'`);
-      spanIds.add(id);
+      const owner = spanTracks.get(id);
+      if (owner === name) return refuse(`span id '${id}' appears twice in track '${name}'`);
+      if (owner !== undefined) {
+        return refuse(`span id '${id}' appears in tracks '${owner}' and '${name}'`);
+      }
+      spanTracks.set(id, name);
     }
 
     tracks.push({

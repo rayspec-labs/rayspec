@@ -150,7 +150,7 @@ export type CapabilityInputNormalize = z.infer<typeof CapabilityInputNormalize>;
  * sentence, so two claims drawn from one paragraph cite different spans. Span ids keep the form
  * `<track>:s<index>` under both, so an id written under one value does not name the same text under
  * the other. Honoured on the `stt` capability only; a declaration on any other capability is
- * refused at the deploy composition.
+ * refused by the lint pass (and again at the deploy composition).
  */
 export const SpanGranularity = z.enum(['paragraph', 'sentence']);
 export type SpanGranularity = z.infer<typeof SpanGranularity>;
