@@ -93,7 +93,7 @@ Locally, from a clean checkout of the commit:
 ```bash
 pnpm install --frozen-lockfile && pnpm build
 docker buildx create --name rayspec-release --driver docker-container
-pnpm release:candidate --version 1.9.1-rc.0 --out ./candidate --builder rayspec-release
+pnpm release:candidate --version 1.9.2-rc.0 --out ./candidate --builder rayspec-release
 ```
 
 `./candidate` then holds `tarballs/`, `rayspec-release-identity.json`, `closure-sbom.cdx.json`,
@@ -141,21 +141,21 @@ node scripts/reference-journeys.mjs --consumer ./consumer --tarballs ./candidate
 # The image: loaded from the archive, checked, the corpus through its CLI, team-notes served.
 docker load -i ./candidate/image/rayspec-runtime.oci.tar
 node scripts/image-conformance.mjs --oci ./candidate/image/rayspec-runtime.oci.tar \
-  --image rayspec-candidate:1.9.1-rc.0 --consumer ./consumer --generated ./generated
+  --image rayspec-candidate:1.9.2-rc.0 --consumer ./consumer --generated ./generated
 
 # The three reference applications with every rayspec command in a container of the image.
 # Linux only: the containers share the host network with the journey's servers and database.
-node scripts/reference-journeys.mjs --consumer ./consumer --image rayspec-candidate:1.9.1-rc.0
+node scripts/reference-journeys.mjs --consumer ./consumer --image rayspec-candidate:1.9.2-rc.0
 
 # The upgrade with data from each supported previous release onto the candidate install.
-for from in 1.7.0 1.8.0; do
+for from in 1.7.0 1.8.0 1.9.0; do
   node scripts/upgrade-with-data.mjs --from "$from" --candidate ./consumer
   node scripts/upgrade-with-data.mjs --from "$from" --candidate ./consumer --roles
 done
 ```
 
 `scripts/upgrade-with-data.mjs` also takes `--app team-notes` and `--app asset-catalog`; the candidate
-workflow runs every application from both versions.
+workflow runs every application from each of the three versions.
 
 A candidate carries no managed receipt. The receipt binds the certification lane's commit and the
 runtime version that commit carries, and a candidate's version exists only while its artifacts are

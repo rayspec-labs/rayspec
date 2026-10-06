@@ -17,7 +17,7 @@ name: Release candidate
 #                ffprobe through the audio capability it installed), the corpus run through its
 #                CLI, a reference application served from it, and the three journeys again with
 #                every rayspec command in a container of it.
-#   upgrade      the upgrade-with-data harness from 1.7.0 and from 1.8.0 onto the candidate install.
+#   upgrade      the upgrade-with-data harness from 1.7.0, 1.8.0 and 1.9.0 onto the candidate install.
 #
 # On a push to main the version is the next minor of the committed one with `-main.<run number>`;
 # a manual dispatch names it. The release workflow (release.yml) calls this one with `release: true`
@@ -31,7 +31,7 @@ on:
     inputs:
       version:
         description: >-
-          The pre-release version to stamp, such as 1.9.0-rc.0. Never a release version: the
+          The pre-release version to stamp, such as 1.9.2-rc.0. Never a release version: the
           candidate builder refuses one.
         type: string
         required: true
@@ -246,7 +246,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        from: ['1.7.0', '1.8.0']
+        from: ['1.7.0', '1.8.0', '1.9.0']
         variant: [notes-ui, team-notes, asset-catalog, roles]
     services:
       postgres:

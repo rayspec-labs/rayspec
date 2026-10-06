@@ -227,6 +227,6 @@ image the candidate's release manifest names:
 
 ```bash
 docker buildx create --name rayspec-release --driver docker-container
-pnpm release:candidate --version 1.9.1-rc.0 --out ./candidate --builder rayspec-release
+pnpm release:candidate --version 1.9.2-rc.0 --out ./candidate --builder rayspec-release
 docker load -i ./candidate/image/rayspec-runtime.oci.tar
 ```

@@ -5,7 +5,7 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.9.1] - 2026-10-07
 
 ### Added
 
@@ -95,6 +95,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract, which has no code for a host tool, so this is a line on stderr and not an entry of
   `warnings`. A deploy without `--dry-run` behaves as before: it serves, and stitching a recording
   fails closed. A bundle that requires neither capability never gets the line.
+- **The upgrade with data also starts from 1.9.0.** The candidate workflow, and the release build
+  through it, ran `scripts/upgrade-with-data.mjs` from 1.7.0 and 1.8.0 onto the candidate install.
+  It now runs the same four variants from 1.9.0 too: the three applications, and the one that turns
+  role separation on with the upgrade. From 1.9.0 the platform chain does not move, and the check
+  holds that every stored row, password and API key is unchanged and that a bundle deploys onto
+  the upgraded environment.
 
 ### Fixed
 
@@ -181,22 +187,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record, and one whose record names no installed `ffmpeg`. A Debian package carries no digest and
   no licence in the SBOM, since dpkg records neither; Node and the PostgreSQL client tools are still
   not listed. No step scans the Debian packages for advisories.
-- **The documentation no longer describes a runtime image on GHCR listed in a signed release
-  manifest.** 1.9.0 was published from a maintainer's machine with npm, not by the release workflow:
-  its npm packages carry no provenance attestation, the release manifest attached to its GitHub
-  release is unsigned, and its runtime image was built and tested by the release build and pushed
-  nowhere. `docs/runtime-image.md` and `docs/self-hosted-deployment.md` told operators to pull
-  `ghcr.io/rayspec-labs/rayspec` by the digest of a signed manifest, which does not exist. They now
-  say how to get the image (build it from the tarballs the release attaches, with the two
-  `docker buildx build` commands given there), what the unsigned manifest shows and does not show,
-  why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
-  why. Both pages date ffmpeg, the build's checks of it, the Debian entries of the image SBOM and
-  the `media tools missing` warning from 1.9.1, and `docs/runtime-image.md` says what a 1.9.0
-  deployer with an audio product does instead: move to 1.9.1, or install ffmpeg in an image built
-  on their own 1.9.0 image. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
-  carries, and its "Verifying a release" leads with the commands that fit such a release (the
-  manifest against the tarballs, the identity manifest, `npm view`), from a built checkout of the
-  tag; the signature and the image archive follow as what a workflow-published release adds.
 - **`scripts/publish.mjs` can publish from a terminal with a browser-based second factor.** The
   script ran the publish with piped input and output. An npm account whose two-factor
   authentication is a passkey or a security key gets an authentication URL from npm, which then
@@ -222,14 +212,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the first publish. The two opt-ins of a real publish (`--yes-really-publish` and
   `RAYSPEC_ALLOW_PUBLISH=1`), the tag check and every other refusal are unchanged, and the release
   workflow's publish step runs the same command as before.
-- **`docs/releasing.md` describes publishing from the owner's machine as a supported path.** It was
-  a note that 1.9.0 had been published that way. The runbook now gives the path step by step
-  beside the workflow path: the build pass of the release workflow, downloading its artifacts,
-  verifying them against the release manifest and the identity manifest, publishing the tarballs
-  with `scripts/publish.mjs --publish --from`, checking npm against the manifest, and creating the
-  GitHub release. It says what that path does not produce (npm provenance, a signed manifest, an
-  image in a registry, the evidence document and the managed receipt), and how the approver adds
-  the signature and pushes the tested image archive afterwards.
 - **A static mount at `route: /` serves its `/.well-known/` directory.** The static handler refused
   every request path with a segment that begins with a dot, so `/.well-known/security.txt`
   (RFC 9116), `assetlinks.json`, `apple-app-site-association` and every other well-known file
@@ -250,6 +232,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that. **What changes for an existing deployment:** files a build already placed in
   `<dir>/.well-known/` of a root mount become reachable; look at what is in that directory before
   upgrading.
+
+### Documentation
+
+- **The documentation no longer describes a runtime image on GHCR listed in a signed release
+  manifest.** 1.9.0 was published from a maintainer's machine with npm, not by the release workflow:
+  its npm packages carry no provenance attestation, the release manifest attached to its GitHub
+  release is unsigned, and its runtime image was built and tested by the release build and pushed
+  nowhere. `docs/runtime-image.md` and `docs/self-hosted-deployment.md` told operators to pull
+  `ghcr.io/rayspec-labs/rayspec` by the digest of a signed manifest, which does not exist. They now
+  say how to get the image (build it from the tarballs the release attaches, with the two
+  `docker buildx build` commands given there), what the unsigned manifest shows and does not show,
+  why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
+  why. Both pages date ffmpeg, the build's checks of it, the Debian entries of the image SBOM and
+  the `media tools missing` warning from 1.9.1, and `docs/runtime-image.md` says what a 1.9.0
+  deployer with an audio product does instead: move to 1.9.1, or install ffmpeg in an image built
+  on their own 1.9.0 image. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
+  carries, and its "Verifying a release" leads with the commands that fit such a release (the
+  manifest against the tarballs, the identity manifest, `npm view`), from a built checkout of the
+  tag; the signature and the image archive follow as what a workflow-published release adds.
+- **`docs/releasing.md` describes publishing from the owner's machine as a supported path.** It was
+  a note that 1.9.0 had been published that way. The runbook now gives the path step by step
+  beside the workflow path: the build pass of the release workflow, downloading its artifacts,
+  verifying them against the release manifest and the identity manifest, publishing the tarballs
+  with `scripts/publish.mjs --publish --from`, checking npm against the manifest, and creating the
+  GitHub release. It says what that path does not produce (npm provenance, a signed manifest, an
+  image in a registry, the evidence document and the managed receipt), and how the approver adds
+  the signature and pushes the tested image archive afterwards.
 
 ### Security
 
@@ -338,6 +347,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   untrusted and every client behind it in one rate-limit bucket. An IPv6 address with a dotted
   tail outside the mapped block (`64:ff9b::10.1.2.3`) is parsed and matches IPv6 entries, where it
   matched none. No other IPv6 address is rewritten.
+
+### Upgrade notes
+
+Everything below is documented in place above; this is the checklist, and
+[Upgrading to 1.9 → From 1.9.0 to 1.9.1](./docs/upgrading-to-1.9.md#from-190-to-191) walks through
+it. A deployment that upgrades and sets nothing new keeps working as it did, unless its
+`RAYSPEC_TRUSTED_PROXIES` carries an entry that names no range (the third item): install 1.9.1 and
+start the deployment the way you started it before. The first two items apply to every
+deployment; the rest only to a deployment that sets `RAYSPEC_TRUSTED_PROXIES`, records audio,
+serves a static mount at the root, deploys bundles, runs the runtime image or installs the Codex
+adapter.
+
+- **No platform migration runs.** The platform chain ends at `0017`, as in 1.9.0, and no product
+  table changes: the first boot of 1.9.1 migrates nothing. From 1.8.x or older, the notes of
+  1.9.0 below apply first.
+- **Going back to 1.9.0 needs no restore.** Both releases run on the same platform schema, so
+  1.9.0 boots on a database 1.9.1 has served. What 1.9.1 wrote stays: audio sessions at
+  `completed`, which 1.9.0 never writes and reads like any other session. Before going back, take
+  `span_granularity` out of a product document that declares it (1.9.0 does not know the key), and
+  deploy the bundle packed for 1.9.0 again (a bundle pins its runtime). The upgrade check runs
+  forward only, so this direction is not exercised before a release; going back to 1.8.x or older
+  still starts from the backup taken before that upgrade.
+- **A trusted-proxy entry that names no range now refuses the boot.** Check
+  `RAYSPEC_TRUSTED_PROXIES` before upgrading: an address that does not parse, or a missing or
+  malformed prefix length (`10.0.0.0/`, `10.0.0.0/8.0`, `10.0.0.0/33`), stops the boot with a
+  message that names the entry. 1.9.0 read an empty prefix as `/0`, which trusted every address of
+  the family, read `/8.0` as `/8`, and accepted an entry that matched nothing. Correct or remove
+  such an entry first. A list without one boots as before.
+- **A trusted-proxy entry inside `::ffff:0:0/96` with a prefix of `/96` to `/128` now matches the
+  IPv4 range it carries**, where it matched no dotted peer before; `::ffff:0:0/96` itself is every
+  IPv4 address. Review a list that carries one. The client address the runtime derives for the hex
+  spelling of an IPv4-mapped address (`::ffff:a01:203`) is now the IPv4 address, so its rate-limit
+  bucket, the address stored with a session and the address hash in the audit log are those of
+  `10.1.2.3`.
+- **A client may now read `completed` as the status of an audio session.** 1.9.0 wrote `recording`
+  and never changed it. A session is `completed` once all its tracks are sealed and goes back to
+  `recording` while a track that started later is uploading. A client that treated `recording` as
+  the only status should accept `completed`.
+- **Sessions finalized by 1.9.0 keep `recording`, and rows left by rejected chunks are not
+  removed.** Nothing has to be done for the runtime to work; to make a session list right, run the
+  three statements below once, in this order, on the application database of a product that
+  declares `audio_input`. With role separation run them as the migration role, which sees every
+  tenant's rows. The two `DELETE`s remove the empty track rows a rejected chunk left (a track at
+  `recording` with no chunk never held one, because a track's row and its first chunk have always
+  been committed together) and the sessions left with no track; the `UPDATE` then settles every
+  session whose tracks are all sealed. An empty track left in place keeps its session at
+  `recording`, which is why the `DELETE`s come first.
+
+  ```sql
+  DELETE FROM audio_tracks WHERE status = 'recording' AND persisted_chunk_count = 0;
+
+  DELETE FROM audio_sessions s
+   WHERE NOT EXISTS (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id);
+
+  UPDATE audio_sessions s SET status = 'completed'
+   WHERE status = 'recording'
+     AND NOT EXISTS (SELECT 1 FROM audio_tracks t
+                      WHERE t.session_pk = s.id AND t.status <> 'completed')
+     AND EXISTS (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id);
+  ```
+
+  Run them after the upgrade, at a moment when no recording is being uploaded.
+- **Chunk 1 of a new track sent while chunk 0 is still being stored is answered `409`** with
+  `"error": "gap"` and `next_expected_index: 0`, where 1.9.0 waited for chunk 0 and answered `200`.
+  A client that uploads the chunks of a track one after the other is not affected; one that sends
+  them in parallel resumes from the index the answer names.
+- **A recording with a chunk that is not Ogg, or that ffmpeg cannot read, now fails.** 1.9.0
+  stitched the recording up to that chunk and transcribed and played the shortened result as the
+  whole recording. Recordings of intact Ogg-Opus chunks are stitched as before.
+- **A static mount at `route: /` now serves the `.well-known` directory of its `dir`.** Files a
+  build already placed there become reachable; look at what is in that directory before upgrading.
+- **Span ids change when a product opts into `span_granularity: sentence`.** Nothing changes for a
+  document without the key. With it, `<track>:s<index>` counts sentences instead of paragraphs, so
+  evidence stored before the change does not match transcripts produced after it, and nothing is
+  migrated. Choose the value before a product stores evidence.
+- **A bundle pins its runtime.** Repack each application with 1.9.1 before deploying it; a bundle
+  packed for 1.9.0 is refused with `RAY_RUNTIME_UNSUPPORTED`.
+- **The runtime image now carries ffmpeg and ffprobe, and is larger.** Debian's full ffmpeg build
+  brings 206 packages: an image built from the 1.9.0 tarballs grew from 1.30 GB to 1.75 GB unpacked
+  and from 402 MB to 572 MB as an archive, and the build needs snapshot.debian.org besides the npm
+  registry and Docker Hub. A deployment that added ffmpeg in an image of its own on 1.9.0 can drop
+  that layer. On any other host, `rayspec bundle verify` and the dry-run of a bundle deploy now
+  write `warning: media tools missing` to stderr when the bundle records audio and the host has no
+  ffmpeg or ffprobe; the envelope and the exit code are unchanged.
+- **The Codex adapter's `@modelcontextprotocol/sdk` is fixed only by upgrading.**
+  `@rayspec/adapter-codex` pins the SDK exactly, so an install of 1.9.0 resolves `1.29.0`, inside
+  GHSA-6qxp-vccf-f47h, and no newer SDK release changes that; 1.9.1 pins `1.31.0`.
+- **Still open for consumers: the 22 advisories inside the Pi SDK's shrinkwrap.** The adapter stays
+  at `@earendil-works/pi-coding-agent` `0.79.9`; the scanner exceptions now expire on 2026-12-06.
+- **For maintainers: `scripts/publish.mjs --publish` must run from a terminal, with its output not
+  piped,** and takes `--otp <code>` for an account with an authenticator app. 1.9.1 is published
+  from the owner's machine like 1.9.0: no npm provenance, an unsigned release manifest, no image in
+  a registry ([Releasing](./docs/releasing.md#how-190-and-191-are-published)).
 
 ## [1.9.0] - 2026-10-05
 
@@ -6238,6 +6340,7 @@ stands up the running backend from that single file.
   untrusted, multi-tenant, public-internet hosting is a separate layer and is
   deliberately not part of the core — see [`SECURITY.md`](./SECURITY.md).
 
+[1.9.1]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.9.1
 [1.9.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.9.0
 [1.8.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.8.0
 [1.7.0]: https://github.com/rayspec-labs/rayspec/releases/tag/v1.7.0
