@@ -158,6 +158,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same example with a backend that reports usage per model response around a tool call, and holds
   the tool step, each model step's tokens and registry cost, the billed cost and the header's
   roll-up; the in-request cost test now holds the token columns too.
+- **The release-candidate test passes on the commit a release is tagged on.**
+  `scripts/release-candidate.test.mjs` asserted that a release build of the committed version is
+  refused, which holds on a development commit and not on the one that carries the tag
+  `v<version>`, where the build is admitted. It asserts the refusal only where no such tag points
+  at the checkout.
 
 - **The runtime image can run a product that records audio: it carries ffmpeg and ffprobe.** The
   image installed Node, the published packages and the PostgreSQL client tools, and no ffmpeg. The
@@ -352,12 +357,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Everything below is documented in place above; this is the checklist, and
 [Upgrading to 1.9 → From 1.9.0 to 1.9.1](./docs/upgrading-to-1.9.md#from-190-to-191) walks through
-it. A deployment that upgrades and sets nothing new keeps working as it did, unless its
-`RAYSPEC_TRUSTED_PROXIES` carries an entry that names no range (the third item): install 1.9.1 and
-start the deployment the way you started it before. The first two items apply to every
-deployment; the rest only to a deployment that sets `RAYSPEC_TRUSTED_PROXIES`, records audio,
-serves a static mount at the root, deploys bundles, runs the runtime image or installs the Codex
-adapter.
+it. A deployment that upgrades and sets nothing new keeps working as it did, with three things to
+do first: correct a `RAYSPEC_TRUSTED_PROXIES` entry that names no range (the boot refuses it),
+repack a bundle with 1.9.1 (one packed for 1.9.0 is refused), and look at the `.well-known`
+directory of a static mount at the root (it is now served). Then install 1.9.1 and start the
+deployment the way you started it before. The first two items apply to every deployment; the rest
+only to a deployment that sets `RAYSPEC_TRUSTED_PROXIES`, records audio, serves a static mount at
+the root, deploys bundles, runs the runtime image or installs the Codex adapter.
 
 - **No platform migration runs.** The platform chain ends at `0017`, as in 1.9.0, and no product
   table changes: the first boot of 1.9.1 migrates nothing. From 1.8.x or older, the notes of
@@ -423,8 +429,14 @@ adapter.
   evidence stored before the change does not match transcripts produced after it, and nothing is
   migrated. Choose the value before a product stores evidence.
 - **A bundle pins its runtime.** Repack each application with 1.9.1 before deploying it; a bundle
-  packed for 1.9.0 is refused with `RAY_RUNTIME_UNSUPPORTED`.
-- **The runtime image now carries ffmpeg and ffprobe, and is larger.** Debian's full ffmpeg build
+  packed for 1.9.0 is refused with `RAY_RUNTIME_UNSUPPORTED`. An extension whose `package.json`
+  pins a `@rayspec/*` package to exactly `1.9.0` moves the pin to `1.9.1`, or to a range that
+  includes it, before repacking: `rayspec pack` refuses a range the runtime is outside of, with the
+  same code. A snapshot pins its runtime too: an export taken on 1.9.0 is imported with 1.9.0, and
+  the upgrade follows the import.
+- **The runtime image now carries ffmpeg and ffprobe, and is larger.** Rebuild it from the 1.9.1
+  tarballs and the Dockerfile at the `v1.9.1` tag; ffmpeg comes from the Dockerfile, so the
+  tarballs alone do not bring it. Debian's full ffmpeg build
   brings 206 packages: an image built from the 1.9.0 tarballs grew from 1.30 GB to 1.75 GB unpacked
   and from 402 MB to 572 MB as an archive, and the build needs snapshot.debian.org besides the npm
   registry and Docker Hub. A deployment that added ffmpeg in an image of its own on 1.9.0 can drop
@@ -436,8 +448,9 @@ adapter.
   GHSA-6qxp-vccf-f47h, and no newer SDK release changes that; 1.9.1 pins `1.31.0`.
 - **Still open for consumers: the 22 advisories inside the Pi SDK's shrinkwrap.** The adapter stays
   at `@earendil-works/pi-coding-agent` `0.79.9`; the scanner exceptions now expire on 2026-12-06.
-- **For maintainers: `scripts/publish.mjs --publish` must run from a terminal, with its output not
-  piped,** and takes `--otp <code>` for an account with an authenticator app. 1.9.1 is published
+- **For maintainers: `scripts/publish.mjs --publish` now runs attached to the terminal.** For an
+  account with a browser-approved second factor, run it from a terminal with its output not piped;
+  for one with an authenticator app, pass `--otp <code>`. 1.9.1 is published
   from the owner's machine like 1.9.0: no npm provenance, an unsigned release manifest, no image in
   a registry ([Releasing](./docs/releasing.md#how-190-and-191-are-published)).
 

@@ -247,9 +247,9 @@ For each release:
    member manifest (`scripts/publish.mjs` refuses any that disagree), and the CHANGELOG's
    Unreleased heading renamed to the version and date. Merge it when CI and the candidate workflow
    are green.
-3. Tag the merge commit: `git tag -a v1.9.0 -m "RaySpec 1.9.0"` and push the tag.
-4. Dispatch **Release** from the tag `v1.9.0` with `version` `1.9.0` and `confirm`
-   `publish rayspec 1.9.0`, and nothing else. The workflow refuses anything else, and refuses a
+3. Tag the merge commit: `git tag -a v1.9.1 -m "RaySpec 1.9.1"` and push the tag.
+4. Dispatch **Release** from the tag `v1.9.1` with `version` `1.9.1` and `confirm`
+   `publish rayspec 1.9.1`, and nothing else. The workflow refuses anything else, and refuses a
    version npm already has. It builds the release's own artifacts from the tag
    (`release-candidate.mjs --release`, nothing stamped), runs the whole conformance and the upgrade
    matrix on them, runs the certification lane at the tag, and verifies the release manifest. It
@@ -268,7 +268,7 @@ For each release:
    id of the run of step 4, and `signature` the signature file in base64:
 
    ```bash
-   gh workflow run release.yml --ref v1.9.0 -f version=1.9.0 -f confirm='publish rayspec 1.9.0' \
+   gh workflow run release.yml --ref v1.9.1 -f version=1.9.1 -f confirm='publish rayspec 1.9.1' \
      -f build_run=<run id> -f signature="$(base64 < release-candidate/release-manifest.json.sig | tr -d '\n')"
    ```
 
@@ -454,7 +454,7 @@ release with `gh release upload`.
   ([Publishing from the owner's machine](#publishing-from-the-owners-machine), step 3).
 - **During the image push or the release creation:** the npm packages are public. The image archive
   and the signed documents are the workflow's artifacts: push the archive with
-  `skopeo copy --preserve-digests oci-archive:rayspec-runtime.oci.tar docker://ghcr.io/rayspec-labs/rayspec:1.9.0`
+  `skopeo copy --preserve-digests oci-archive:rayspec-runtime.oci.tar docker://ghcr.io/rayspec-labs/rayspec:1.9.1`
   and check the digest, then create the GitHub release by hand with the same files.
 - **A defect found after the release:** stop recommending the version, say which versions are
   affected and why, and release a fix. Never downgrade a database: a runtime from 1.9.0 on refuses a

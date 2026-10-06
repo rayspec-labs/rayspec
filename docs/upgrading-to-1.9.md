@@ -9,10 +9,11 @@ section for a deployment that already runs 1.9.0, and for what 1.9.1 adds on the
 ## The short version
 
 An existing deployment needs nothing new. Upgrade Node if it is older than 22.21.0, take a backup,
-install 1.9.0 and start the deployment the way you started it before. Role separation, row-level
-security, single-tenant mode, the managed posture and the execution bounds stay off until you set
-them; a YAML deploy boots and prints as before; every existing command keeps exit codes 0, 1 and 2
-for the outcomes it had.
+install 1.9.1 and start the deployment the way you started it before
+([From 1.9.0 to 1.9.1](#from-190-to-191) lists what the patch release asks for). Role separation,
+row-level security, single-tenant mode, the managed posture and the execution bounds stay off until
+you set them; a YAML deploy boots and prints as before; every existing command keeps exit codes 0,
+1 and 2 for the outcomes it had.
 
 The upgrade is checked with data before every release: deployments of three example applications
 (one of them with a compiled extension) are created with 1.7.0 and with 1.8.0 (and, from 1.9.1 on,
@@ -192,8 +193,12 @@ applies, and so does this section.
 
 **The short version.** Install 1.9.1 and start the deployment the way you started it before. No
 platform migration runs: the chain ends at `0017`, as in 1.9.0, and no product table changes. If
-you set `RAYSPEC_TRUSTED_PROXIES`, check the list first (below). If you deploy bundles, repack them
-with 1.9.1.
+you set `RAYSPEC_TRUSTED_PROXIES`, check the list first (below). If you serve a static mount at the
+root, look at its `.well-known` directory first (below). If you deploy bundles, repack them with
+1.9.1: one packed for 1.9.0 is refused with `RAY_RUNTIME_UNSUPPORTED`. An extension whose
+`package.json` pins a `@rayspec/*` package to exactly `1.9.0` moves the pin to `1.9.1`, or to a
+range that includes it, before repacking. A snapshot pins its runtime as a bundle does: an export
+taken on 1.9.0 is [imported](./import.md) with 1.9.0, and the upgrade follows the import.
 
 | What changes | What you do |
 | --- | --- |
@@ -204,7 +209,7 @@ with 1.9.1.
 | A recording with a chunk that is not Ogg, or that ffmpeg cannot read, fails. 1.9.0 stitched it up to that chunk and treated the shortened result as the whole recording. | Nothing for recordings of intact Ogg-Opus chunks. |
 | A static mount at `route: /` serves the `.well-known` directory of its `dir`. | Look at what a build already placed in that directory before upgrading. |
 | `rayspec bundle verify` and the dry-run of a bundle deploy write `warning: media tools missing` to stderr when the bundle requires `audio_input` or `media_playback` and the host has no `ffmpeg` or `ffprobe`. The envelope and the exit code are unchanged. | Install both tools, or name them with `RAYSPEC_FFMPEG_BIN` and `RAYSPEC_FFPROBE_BIN`. |
-| The [runtime image](./runtime-image.md#ffmpeg-and-ffprobe) carries ffmpeg and ffprobe and is larger: 1.75 GB unpacked where it was 1.30 GB, 572 MB as an archive where it was 402 MB. Its build also needs snapshot.debian.org. | Rebuild the image from the 1.9.1 tarballs; drop a layer of your own that added ffmpeg on 1.9.0. |
+| The [runtime image](./runtime-image.md#ffmpeg-and-ffprobe) carries ffmpeg and ffprobe and is larger: 1.75 GB unpacked where it was 1.30 GB, 572 MB as an archive where it was 402 MB. Its build also needs snapshot.debian.org. | Rebuild the image from the 1.9.1 tarballs and the Dockerfile at the `v1.9.1` tag ([Getting the image](./runtime-image.md#getting-the-image)); drop a layer of your own that added ffmpeg on 1.9.0. |
 | `@rayspec/adapter-codex` pins `@modelcontextprotocol/sdk` `1.31.0`, the first version outside GHSA-6qxp-vccf-f47h. The pin is exact, so an install of 1.9.0 resolves `1.29.0`. | Upgrade; nothing else moves that copy. |
 
 ### Settling audio sessions and rows 1.9.0 left
