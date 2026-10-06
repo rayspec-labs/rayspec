@@ -11,7 +11,9 @@ publishes on its own. There are two supported ways to publish a release that the
 - **From the owner's machine**
   ([Publishing from the owner's machine](#publishing-from-the-owners-machine)): the owner downloads
   the artifacts the workflow built, verifies them, and publishes those tarballs with
-  `scripts/publish.mjs`. This is how 1.9.0 was published.
+  `scripts/publish.mjs`. This is the path 1.9.1 takes. 1.9.0 was published from the owner's machine
+  too, by hand with `npm publish <tarball> --access public`, because the script could not yet wait
+  for a browser approval.
 
 Both publish the same tested bytes. They differ in what the release carries besides the packages.
 
@@ -162,29 +164,43 @@ the release workflow runs at the release tag.
 
 ## Verifying a release
 
-Anyone with the approver's public key verifies a release, or a candidate's manifest, with the
-repository's tools:
+A release, or a candidate's manifest, is verified with the repository's tools. They run from a
+checkout of the release tag that has been installed and built
+(`git clone --depth 1 --branch v1.9.1 …`, then `pnpm install --frozen-lockfile && pnpm build`);
+without the build, `release-manifest.mjs verify` refuses and names the missing package. The files
+to check are the ones attached to the GitHub release (`gh release download v1.9.1`, with the
+`.tgz` files moved into `./tarballs`).
+
+For a release published from the owner's machine, which 1.9.0 and 1.9.1 are:
 
 ```bash
-# The manifest: canonical, its schema, the contract's rules, the signature by the release key, and
-# the tarballs and image it names (every layer of the image archive with its own bytes).
-node scripts/release-manifest.mjs verify --manifest release-manifest.json \
-  --signature release-manifest.json.sig --trusted-key release-key.pub.pem \
-  --tarballs ./tarballs --image-oci rayspec-runtime.oci.tar
+# The manifest: canonical, its schema, the contract's rules, and the tarballs it names.
+node scripts/release-manifest.mjs verify --manifest release-manifest.json --tarballs ./tarballs
 
 # The identity manifest against the tarballs (and against the checkout at its commit).
 node scripts/release-identity.mjs --verify --tarballs ./tarballs --manifest rayspec-release-identity.json
 
-# What the registries serve.
-npm view rayspec@1.9.0 dist.integrity   # the integrity the manifest lists for rayspec
-docker buildx imagetools inspect ghcr.io/rayspec-labs/rayspec@<digest from the manifest>
+# What npm serves.
+npm view rayspec@1.9.1 dist.integrity   # the integrity the manifest lists for rayspec
 ```
 
-For a release published from the owner's machine (1.9.0, 1.9.1) leave out `--signature`,
-`--trusted-key` and `--image-oci`: there is no signature file and no image archive to check, and
-the `imagetools` line finds nothing, because the image was not pushed. Without a signature the
+Such a release has no signature file and no image archive, and its image is in no registry. The
 verify shows that the manifest is well formed and that the tarballs are the bytes it lists, and
 `npm view` that npm serves those bytes; it does not show who wrote the manifest.
+
+A release published by the workflow adds a signature by the release key, the image archive and
+the image in the registry. Anyone with the approver's public key then checks those too:
+
+```bash
+# As above, plus the signature by the release key and the image (every layer of the image archive
+# with its own bytes).
+node scripts/release-manifest.mjs verify --manifest release-manifest.json \
+  --signature release-manifest.json.sig --trusted-key release-key.pub.pem \
+  --tarballs ./tarballs --image-oci rayspec-runtime.oci.tar
+
+# What the container registry serves.
+docker buildx imagetools inspect ghcr.io/rayspec-labs/rayspec@<digest from the manifest>
+```
 
 The signature is the contract's detached signature file: Ed25519 over
 `rayspec-release-manifest-v1\nsha256:<SHA-256 of the manifest file>\n`, naming the SHA-256 of the
@@ -199,7 +215,7 @@ the file-list digest of `@rayspec/server` in the identity manifest can differ), 
 third-party packages are resolved from the registry when its lockfile is written. The image's
 timestamps are the commit's time (`SOURCE_DATE_EPOCH`), so they do not differ between builds.
 Verify a release with `release-identity.mjs --verify` and `release-manifest.mjs verify` against the
-tarballs and the image archive the release ships.
+tarballs, and the image archive when the release has one.
 
 ## Publishing
 
@@ -298,8 +314,10 @@ it reads neither `NPM_TOKEN` nor the release key. Then, on the owner's machine:
 
    Both must report no failure. Publish nothing otherwise.
 
-3. **Publish the tarballs** with the script, from a terminal (not through a pipe, a script runner
-   or a CI job), signed in to npm as the publishing account (`npm whoami`):
+3. **Publish the tarballs** with the script, from a terminal (not through a script runner or a CI
+   job) and do not pipe its output (no `| tee publish.log`): npm waits for a browser approval only
+   while both its input and its output are the terminal. Be signed in to npm as the publishing
+   account (`npm whoami`):
 
    ```bash
    RAYSPEC_ALLOW_PUBLISH=1 node scripts/publish.mjs --publish --yes-really-publish \
@@ -336,7 +354,10 @@ it reads neither `NPM_TOKEN` nor the release key. Then, on the owner's machine:
      const m = JSON.parse(readFileSync('release-candidate/release-manifest.json', 'utf8'));
      let bad = 0;
      for (const p of m.packages) {
-       const served = execFileSync('npm', ['view', p.name + '@' + p.version, 'dist.integrity', '--prefer-online'], { encoding: 'utf8' }).trim();
+       let served = '';
+       try {
+         served = execFileSync('npm', ['view', p.name + '@' + p.version, 'dist.integrity', '--prefer-online'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+       } catch {}
        if (served !== p.integrity) { console.error(p.name + ': the registry serves ' + (served || 'nothing')); bad++; }
      }
      if (bad > 0) process.exit(1);
@@ -344,7 +365,8 @@ it reads neither `NPM_TOKEN` nor the release key. Then, on the owner's machine:
    "
    ```
 
-   The registry can take a minute to serve a version it has just accepted; a package it does not
+   Every package npm does not serve, or serves with other bytes, is listed before the check exits
+   1. The registry can take a minute to serve a version it has just accepted; a package it does not
    serve yet fails the check, so run it again before concluding anything.
 
 5. **Create the GitHub release** from the tag, with the tested artifacts attached:

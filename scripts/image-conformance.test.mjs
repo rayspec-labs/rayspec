@@ -15,7 +15,8 @@
  *     archive of the pinned moment, without recommended packages, and checks it during the build;
  *   - the media facts pass for the pinned ffmpeg and a stitched recording of the chunks' length,
  *     and fail, check by check, for a missing or other ffmpeg or ffprobe, a refused remux, a chunk
- *     that was never encoded, and a recording that is empty or of another length;
+ *     that was never encoded, a recording that is empty or of another length, and a chunk that is
+ *     not Ogg or not readable and was stitched around instead of refused;
  *   - the probe script is the one the check runs, and walks both installation roots; the media
  *     probe calls the audio capability the image installed;
  *   - the corpus run in the image mounts every module the runner imports.
@@ -242,7 +243,10 @@ check('the pinned ffmpeg is read from the Dockerfile, which installs and checks 
   assert.match(dockerfile, /rm -rf \/var\/lib\/apt\/lists\/\*/);
   assert.match(dockerfile, /^ {4}ffmpeg -version; \\$/m);
   assert.match(dockerfile, /^ {4}ffprobe -version; \\$/m);
-  assert.match(dockerfile, /-f concat -safe 0 -i "\$work\/list\.txt" -c copy/);
+  assert.match(
+    dockerfile,
+    /-xerror -format_whitelist concat,ogg -protocol_whitelist file \\\n +-f concat -safe 0 -i "\$work\/list\.txt" -c copy/,
+  );
   assert.match(dockerfile, /-c:a libopus/);
 });
 
@@ -252,6 +256,10 @@ const media = {
   ffprobe: 'ffprobe version 7.1.5-0+deb13u1 Copyright (c) 2007-2026 the FFmpeg developers',
   chunks: 2,
   remux: { bytes: 21000, durationS: 2.0135 },
+  refused: {
+    notOgg: 'remux: chunk 1 of 2 is not an Ogg stream',
+    unreadable: 'remux: ffmpeg exited 234',
+  },
   error: null,
 };
 
@@ -265,6 +273,7 @@ check('every media defect is its own failed check', () => {
   const ffprobe = `ffprobe is ${version}, the version the Dockerfile pins`;
   const stitch =
     'the audio capability stitches two Ogg-Opus chunks into one stream of their length';
+  const refuse = 'the audio capability refuses a chunk that is not Ogg and one ffmpeg cannot read';
   const cases = [
     [{ ffmpeg: null }, ffmpeg],
     [{ ffmpeg: 'ffmpeg version 7.1.4-0+deb13u1 Copyright' }, ffmpeg],
@@ -277,6 +286,10 @@ check('every media defect is its own failed check', () => {
     [{ remux: { bytes: 0, durationS: 2 } }, stitch],
     [{ remux: { bytes: 21000, durationS: 1.0 } }, stitch],
     [{ remux: { bytes: 21000, durationS: 4.0 } }, stitch],
+    [{ refused: undefined }, refuse],
+    [{ refused: { notOgg: null, unreadable: media.refused.unreadable } }, refuse],
+    [{ refused: { notOgg: media.refused.notOgg, unreadable: null } }, refuse],
+    [{ refused: { notOgg: 'TypeError: x is not a function', unreadable: 'remux: y' } }, refuse],
   ];
   for (const [change, name] of cases) {
     assert.deepEqual(failing(judgeMedia({ ...media, ...change }, PINNED)), [name]);
@@ -288,6 +301,7 @@ check('the media probe calls the audio capability the image installed', () => {
   assert.equal(AUDIO_RUNTIME, '/opt/rayspec/node_modules/@rayspec/audio-runtime/dist/index.js');
   assert.ok(MEDIA_PROBE.includes(`await import('${AUDIO_RUNTIME}')`));
   assert.match(MEDIA_PROBE, /remuxChunks\(chunks\)/);
+  assert.match(MEDIA_PROBE, /remuxChunks\(\[chunks\[0\], bad\]\)/);
   assert.match(MEDIA_PROBE, /console\.log\(JSON\.stringify\(facts\)\)/);
   const syntax = spawnSync(process.execPath, ['--check', '-'], {
     input: MEDIA_PROBE,

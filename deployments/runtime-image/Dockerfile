@@ -82,7 +82,8 @@ ARG FFMPEG_VERSION
 # ffmpeg and ffprobe, without the packages Debian only recommends. The package lists, the logs and
 # the caches the install leaves behind are removed, and the base image's own package sources are put
 # back. The build then stitches two generated Ogg-Opus chunks the way the audio capability does
-# (concat demuxer, stream copy) and probes the result, so an ffmpeg that cannot do that fails here.
+# (concat demuxer, stream copy, Ogg input through the file protocol only, the first error ends the
+# run) and probes the result, so an ffmpeg that cannot do that fails here.
 RUN set -eu; \
     sources=/etc/apt/sources.list.d; \
     mv "$sources/debian.sources" /tmp/debian.sources; \
@@ -109,8 +110,8 @@ RUN set -eu; \
         -c:a libopus "$work/chunk_$i.opus"; \
       printf "file 'chunk_%s.opus'\n" "$i" >> "$work/list.txt"; \
     done; \
-    ffmpeg -nostdin -hide_banner -loglevel error -f concat -safe 0 -i "$work/list.txt" -c copy \
-      "$work/out.opus"; \
+    ffmpeg -nostdin -hide_banner -loglevel error -xerror -format_whitelist concat,ogg -protocol_whitelist file \
+      -f concat -safe 0 -i "$work/list.txt" -c copy "$work/out.opus"; \
     test "$(ffprobe -v error -select_streams a -show_entries stream=codec_name \
       -of default=noprint_wrappers=1:nokey=1 "$work/out.opus")" = opus; \
     ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \

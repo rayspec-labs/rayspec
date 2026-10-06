@@ -8,7 +8,7 @@
  * IPv4-mapped / bracketed / ported / zoned forms collapse to one key.
  */
 import { describe, expect, it } from 'vitest';
-import { ipInCidr, normalizeIp, resolveClientIp } from './client-ip.js';
+import { ipInCidr, isTrustedProxyRange, normalizeIp, resolveClientIp } from './client-ip.js';
 
 describe('normalizeIp', () => {
   it('unwraps an IPv4-mapped IPv6 address to plain IPv4', () => {
@@ -146,6 +146,30 @@ describe('ipInCidr', () => {
     expect(ipInCidr('2001:db8::1', '::ffff:0:0/96')).toBe(false);
   });
 
+  it('a dotted mapped network with an IPv4-length prefix is the IPv4 range behind the prefix', () => {
+    // The prefix counts IPv4 bits, as in the address it is written behind: never the IPv6 `::/8`.
+    for (const spelling of MAPPED_SPELLINGS) {
+      expect(ipInCidr(spelling, '::ffff:10.0.0.0/8'), spelling).toBe(true);
+      expect(ipInCidr(spelling, '::ffff:10.1.2.3/32'), spelling).toBe(true);
+      expect(ipInCidr(spelling, '::ffff:0.0.0.0/0'), spelling).toBe(true);
+      expect(ipInCidr(spelling, '::ffff:11.0.0.0/8'), spelling).toBe(false);
+      expect(ipInCidr(spelling, '::ffff:10.1.2.4/32'), spelling).toBe(false);
+    }
+    expect(ipInCidr('192.168.1.1', '::ffff:10.0.0.0/8')).toBe(false);
+    expect(ipInCidr('192.168.1.1', '::ffff:0.0.0.0/0')).toBe(true);
+    for (const range of ['::ffff:10.0.0.0/8', '::ffff:10.1.2.3/32', '::ffff:0.0.0.0/0']) {
+      for (const v6 of ['::1', '::', '::10.1.2.3', '2001:db8::1']) {
+        expect(ipInCidr(v6, range), `${v6} in ${range}`).toBe(false);
+      }
+    }
+    // Between the two notations (33 to 95) a dotted network names no range at all.
+    for (const range of ['::ffff:10.0.0.0/33', '::ffff:10.0.0.0/64', '::ffff:10.0.0.0/95']) {
+      expect(ipInCidr('10.1.2.3', range), range).toBe(false);
+      expect(ipInCidr('::1', range), range).toBe(false);
+      expect(ipInCidr('::ffff:1:1', range), range).toBe(false);
+    }
+  });
+
   it('matches an IPv6 address against an IPv6 range whatever the spelling of either', () => {
     expect(ipInCidr('2001:0DB8:0000:0000:0000:0000:0000:0001', '2001:db8::/32')).toBe(true);
     expect(ipInCidr('2001:db8::1', '2001:0DB8:0:0:0:0:0:0/32')).toBe(true);
@@ -173,6 +197,47 @@ describe('ipInCidr', () => {
     // The control: a zero prefix that is written out still matches its whole family.
     expect(ipInCidr('10.1.2.3', '0.0.0.0/0')).toBe(true);
     expect(ipInCidr('::1', '::/0')).toBe(true);
+  });
+});
+
+describe('isTrustedProxyRange', () => {
+  it('accepts every entry that names a range', () => {
+    for (const entry of [
+      '10.0.0.0/8',
+      '10.1.2.3',
+      '0.0.0.0/0',
+      '::1',
+      '::1/128',
+      '::/0',
+      '2001:db8::/32',
+      '[::1]',
+      '::ffff:10.0.0.0/104',
+      '::ffff:10.0.0.0/8',
+      '::ffff:0:0/96',
+      '::ffff:0:0/95',
+      '64:ff9b::10.0.0.0/104',
+    ]) {
+      expect(isTrustedProxyRange(entry), entry).toBe(true);
+    }
+  });
+
+  it('refuses an entry no peer can be inside', () => {
+    for (const entry of [
+      '10.0.0.0/',
+      '10.0.0.0/33',
+      '10.0.0.0/8.0',
+      '10.0.0.0/0x8',
+      '10.0.0.0/+8',
+      '10.0.0.0/1e1',
+      '10.0.0/8',
+      '::/',
+      '::/129',
+      '::ffff:10.0.0.0/64',
+      'proxy.internal',
+      'localhost/8',
+    ]) {
+      expect(isTrustedProxyRange(entry), entry).toBe(false);
+    }
   });
 });
 
@@ -284,6 +349,32 @@ describe('resolveClientIp', () => {
           `${peer} behind ${range}`,
         ).toBe('8.8.8.8');
       }
+    }
+  });
+
+  it('a dotted mapped range with an IPv4-length prefix trusts its IPv4 proxies, not IPv6 peers', () => {
+    for (const range of ['::ffff:10.0.0.0/8', '::ffff:10.0.0.5/32', '::ffff:0.0.0.0/0']) {
+      for (const peer of ['::ffff:10.0.0.5', '10.0.0.5', '::ffff:a00:5']) {
+        expect(
+          resolveClientIp({
+            peer,
+            forwardedFor: '203.0.113.9',
+            realIp: null,
+            trustedProxies: [range],
+          }),
+          `${peer} behind ${range}`,
+        ).toBe('203.0.113.9');
+      }
+      // An IPv6 peer is not inside an IPv4 range: its forwarding header is ignored.
+      expect(
+        resolveClientIp({
+          peer: '::1',
+          forwardedFor: '203.0.113.9',
+          realIp: null,
+          trustedProxies: [range],
+        }),
+        `::1 behind ${range}`,
+      ).toBe('::1');
     }
   });
 

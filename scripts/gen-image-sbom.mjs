@@ -97,7 +97,7 @@ export function debianPackages(statusBytes, osReleaseBytes) {
     const arch = entry.get('Architecture');
     if (!version || !arch) refuse(`${name} in the image's dpkg record has no version`);
     packages.push({
-      ref: `pkg:deb/${id}/${name}@${encodeURIComponent(version)}?arch=${arch}&distro=${id}-${release}`,
+      ref: `pkg:deb/${id}/${encodeURIComponent(name)}@${encodeURIComponent(version)}?arch=${arch}&distro=${id}-${release}`,
       name,
       version,
     });

@@ -69,7 +69,7 @@ under `images[0]` the platform, the Node version and the digest of the image the
 | Platform | `linux/amd64` only. Other platforms are not built and not supported. |
 | Base | `node:<pinned 22 patch>-trixie-slim`, pinned by digest in `deployments/runtime-image/Dockerfile` |
 | User | `rayspec` (uid and gid 10001). The image never runs as root. |
-| Installation | `/opt/rayspec`, owned by root and not writable by any other user, installed from the release tarballs with `npm ci` from the lockfile the release ships (`/opt/rayspec/package-lock.json`), install scripts disabled |
+| Installation | `/opt/rayspec`, owned by root and not writable by any other user, installed from the release tarballs with `npm ci` from the lockfile the build's first step wrote, kept in the image as `/opt/rayspec/package-lock.json`, install scripts disabled |
 | SBOM | `scripts/gen-image-sbom.mjs` writes `image-sbom.cdx.json` from the image archive: every npm package installed under `/opt/rayspec` and every Debian package of the image's dpkg record (the base userland, ffmpeg and what ffmpeg depends on), with the image's digest |
 | Working directory | `/var/lib/rayspec`, owned by `rayspec`, mode 0700: put the state directory and the blob root here, on a volume |
 | Listening | port 8080 (`PORT`), on every address of the container (`RAYSPEC_HOST=0.0.0.0`); `docker run -p` decides what the host exposes |
@@ -98,6 +98,27 @@ played. An image without the tools could therefore not run such a product, which
 image carries them; there is no second image without them, and a product without audio never
 starts them.
 
+**What ffmpeg is given, and what holds it.** The chunks are bytes a signed-in caller uploaded
+through the product's audio route, each at most 8 MiB and a track at most 512 MiB by default.
+ffmpeg and ffprobe run as children of the serving process, as the same user (`rayspec`, uid 10001
+in the image, never root), with the files that user can read and the network the container has.
+
+- The capability refuses a chunk that does not begin as an Ogg stream before ffmpeg sees it, so a
+  text file, a concat script or another container is not handed over.
+- The command line names what ffmpeg may use: the concat and Ogg demuxers
+  (`-format_whitelist concat,ogg`) and the file protocol (`-protocol_whitelist file`). The audio
+  is copied, not decoded. Of Debian's full build, with every demuxer and decoder it carries, this
+  path reaches the Ogg demuxer and its codec header parsers.
+- An error ends the run (`-xerror`), and a run in which ffmpeg could not open a chunk is refused
+  even when ffmpeg exits 0, so a recording is never stitched around a chunk.
+- Each child is killed after `RAYSPEC_FFMPEG_TIMEOUT_MS` (120 seconds by default).
+- **Not provided:** the runtime sets no memory or CPU limit on these children, does not limit how
+  many run at once, and does not sandbox them. A flaw in ffmpeg's Ogg parsing would run with the
+  rights of the runtime user. Give the container memory and CPU limits, and keep it the boundary
+  the [Threat model](./threat-model.md#what-the-host-must-enforce) asks for.
+- A security fix of ffmpeg reaches the image only when the pin below is moved and the image is
+  built again; a built image does not update itself.
+
 - **Pinned.** `FFMPEG_VERSION` names Debian's package version and `DEBIAN_SNAPSHOT` the moment of
   the archive it and its dependencies are installed from, so a later build installs the same
   packages. Debian's package is the only source: nothing is downloaded from elsewhere or compiled.
@@ -105,11 +126,12 @@ starts them.
   together, since the version must be the one that snapshot offers.
 - **Checked when the image is built.** The build runs `ffmpeg -version` and `ffprobe -version`,
   requires the concat demuxer and the Ogg-Opus muxer, encodes two one-second Opus chunks, stitches
-  them the way the capability does and requires one Opus stream of their combined length. A build
+  them with the capability's command line and requires one Opus stream of their combined length. A build
   without a working ffmpeg fails.
 - **Checked on the built image.** `scripts/image-conformance.mjs` requires both tools at the pinned
   version and runs the audio capability installed in the image (`remuxChunks` of
-  `@rayspec/audio-runtime`) on two chunks, as the image's own user. `scripts/gen-image-sbom.mjs`
+  `@rayspec/audio-runtime`) on two chunks, as the image's own user, and requires it to refuse a
+  chunk that is not Ogg and one the image's ffmpeg cannot read. `scripts/gen-image-sbom.mjs`
   refuses an image whose dpkg record names no installed ffmpeg.
 - **Its cost.** Debian's ffmpeg is the full build, and it brings 206 packages with it (codec,
   filter and display libraries). Measured on an image built from the 1.9.0 tarballs, the unpacked

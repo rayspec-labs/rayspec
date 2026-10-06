@@ -73,6 +73,9 @@
  *       npm refuses, names it and what was published before it, restores every manifest and exits 1;
  *       the same command again publishes exactly the targets the registry does not have yet. A run
  *       that packed its own bytes says that it cannot be continued, and restores the tree too.
+ *       A run whose stdin or whose publish output is not a terminal says that npm cannot wait there
+ *       for a browser approval; one attached on both does not. The reason of a failure never
+ *       repeats the publish command line, which carries the one-time code.
  *   (P) THE POSITIVE CONTROL — a coherent checkout packs: the derived version is the reported one,
  *       every target is packed exactly once in dependency order, and the tree is byte-identical
  *       afterwards.
@@ -138,7 +141,8 @@ if (argv[0] === 'publish' && process.env.FAKE_PNPM_FAIL_AT === own.name) {
 // "!down" for a registry that cannot be reached. `npm view <name>@<version> dist.integrity` answers
 // from it and, like the real one, exits 1 with `E404` for a spec it does not hold. `npm publish
 // <tarball>` writes the tarball's spec and integrity into it, refuses a spec it already holds (npm
-// never takes a version twice), and fails with `EOTP` for the package FAKE_NPM_FAIL_AT names.
+// never takes a version twice), fails with `EOTP` for the package FAKE_NPM_FAIL_AT names and is
+// killed by a signal for the one FAKE_NPM_KILL_AT names.
 // Every call is logged: a publish with the package it read from the tarball, what it could read
 // from stdin, and whether a tracked file of the repository was modified while it ran.
 const FAKE_NPM = `#!/usr/bin/env node
@@ -163,6 +167,7 @@ if (argv[0] === 'view') {
   log({ name: manifest.name, stdin, dirty });
   process.stdout.write('fake npm: authenticate ' + manifest.name + ' in the browser\\n');
   if (process.env.FAKE_NPM_FAIL_AT === manifest.name) fail('npm error code EOTP');
+  if (process.env.FAKE_NPM_KILL_AT === manifest.name) process.kill(process.pid, 'SIGKILL');
   if (argv.includes('--dry-run')) process.exit(0);
   if (registry[spec] !== undefined) fail('npm error code E403\\nnpm error You cannot publish over the previously published versions');
   registry[spec] = 'sha512-' + createHash('sha512').update(readFileSync(argv[1])).digest('base64');
@@ -284,20 +289,32 @@ function fixture({
  * supplies the publish gate for the cases that must reach the tag check; the unroutable registry is
  * the second belt behind the stubs — nothing here can reach a real one. `registry` is what the fake
  * registry holds when the run starts and `registryAfter` what it holds afterwards; `failAt` makes
- * the publish of that package fail (`pnpmFailAt` for a target this run packs itself); `input` is
- * the run's own stdin, which the first publish call reads when it inherited it.
+ * the publish of that package fail (`pnpmFailAt` for a target this run packs itself) and `killAt`
+ * ends it by a signal; `input` is the run's own stdin, which the first publish call reads when it
+ * inherited it. `terminal` runs the script with a
+ * terminal on stdin and stderr (see `inTerminal`): `'attached'` with one on stdout too, `'piped'`
+ * with stdout going into a pipe. What the script writes to the terminal is then in `out`.
  */
-function run(fx, args, { allowPublish = false, registry = {}, failAt, pnpmFailAt, input } = {}) {
+function run(
+  fx,
+  args,
+  { allowPublish = false, registry = {}, failAt, killAt, pnpmFailAt, input, terminal } = {},
+) {
   const log = join(fx.root, 'pnpm-calls.log');
   writeFileSync(log, '');
   const npmLog = join(fx.root, 'npm-calls.log');
   writeFileSync(npmLog, '');
   const registryFile = join(fx.root, 'npm-registry.json');
   writeFileSync(registryFile, JSON.stringify(registry));
-  const res = spawnSync('node', [join(fx.root, 'scripts', 'publish.mjs'), ...args], {
+  const script = [process.execPath, join(fx.root, 'scripts', 'publish.mjs'), ...args];
+  const [command, ...commandArgs] =
+    terminal === undefined ? script : inTerminal(script, terminal === 'piped');
+  const res = spawnSync(command, commandArgs, {
     cwd: fx.root,
     encoding: 'utf8',
     ...(input === undefined ? {} : { input }),
+    // script(1) on macOS refuses a stdin that is a pipe; it takes /dev/null.
+    ...(terminal === undefined ? {} : { stdio: ['ignore', 'pipe', 'pipe'] }),
     env: {
       ...process.env,
       PATH: `${fx.stubs}:${process.env.PATH}`,
@@ -306,6 +323,7 @@ function run(fx, args, { allowPublish = false, registry = {}, failAt, pnpmFailAt
       FAKE_NPM_REGISTRY_FILE: registryFile,
       npm_config_registry: 'http://127.0.0.1:1/',
       ...(failAt === undefined ? {} : { FAKE_NPM_FAIL_AT: failAt }),
+      ...(killAt === undefined ? {} : { FAKE_NPM_KILL_AT: killAt }),
       ...(pnpmFailAt === undefined ? {} : { FAKE_PNPM_FAIL_AT: pnpmFailAt }),
       ...(input === undefined ? {} : { FAKE_NPM_READ_STDIN: '1' }),
       ...(allowPublish ? { RAYSPEC_ALLOW_PUBLISH: '1' } : {}),
@@ -322,6 +340,20 @@ function run(fx, args, { allowPublish = false, registry = {}, failAt, pnpmFailAt
     publishes: npmCalls.filter((c) => c.argv[0] === 'publish'),
     registryAfter: JSON.parse(readFileSync(registryFile, 'utf8')),
   };
+}
+
+/**
+ * The command that runs `argv` with a pseudo-terminal on stdin, stdout and stderr, through
+ * script(1), which every supported platform ships with another command line. With `pipeStdout` the
+ * command's stdout goes into a pipe instead, as under `| tee publish.log`; stdin and stderr stay on
+ * the terminal. Everything written to the terminal comes back on script's own stdout.
+ */
+function inTerminal(argv, pipeStdout) {
+  const quoted = argv.map((a) => `'${a.replaceAll("'", "'\\''")}'`).join(' ');
+  const line = pipeStdout ? `${quoted} | cat` : quoted;
+  return process.platform === 'darwin'
+    ? ['script', '-q', '/dev/null', 'sh', '-c', line]
+    : ['script', '-qec', line, '/dev/null'];
 }
 
 /** A refusal: exit 2, an explanation on stderr, and NOT ONE pack or publish invocation. */
@@ -925,6 +957,86 @@ try {
         `(X) a run without a terminal says why a browser approval cannot work: ${stopped.err}`,
       );
       assert.equal(tracked(), '', '(X) a failed publish leaves every tracked byte alone');
+
+      // npm gives up on a browser approval when stdin OR its own stdout is not a terminal. The
+      // wrapper first: it must really give the script a terminal, or the cases below prove nothing.
+      const HINT = /not attached to a terminal/;
+      const streams = spawnSync(
+        ...((line) => [line[0], line.slice(1)])(
+          inTerminal(
+            [
+              process.execPath,
+              '-e',
+              'console.error([0, 1, 2].map((fd) => require("tty").isatty(fd)).join())',
+            ],
+            true,
+          ),
+        ),
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      assert.match(
+        streams.stdout,
+        /true,false,true/,
+        `(X) script(1) gives a terminal on stdin and stderr with stdout piped: ${streams.stdout}${streams.stderr}`,
+      );
+      const attachedFail = run(fx, publishArgs, {
+        allowPublish: true,
+        failAt: order[0],
+        terminal: 'attached',
+      });
+      assert.match(attachedFail.out, /publish of .* failed \(exit 1\)/, `(X) ${attachedFail.out}`);
+      assert.doesNotMatch(
+        attachedFail.out,
+        HINT,
+        `(X) a run attached to a terminal is not told that it is not: ${attachedFail.out}`,
+      );
+      const pipedFail = run(fx, publishArgs, {
+        allowPublish: true,
+        failAt: order[0],
+        terminal: 'piped',
+      });
+      assert.match(pipedFail.out, /publish of .* failed \(exit 1\)/, `(X) ${pipedFail.out}`);
+      assert.match(
+        pipedFail.out,
+        /not attached to a terminal.*do not pipe its output.*--otp <code>/s,
+        `(X) a run with its output piped says why a browser approval cannot work: ${pipedFail.out}`,
+      );
+      // Under --json npm writes to this script's stderr, so a piped stdout takes nothing from it.
+      const jsonPiped = run(fx, [...publishArgs, '--json'], {
+        allowPublish: true,
+        failAt: order[0],
+        terminal: 'piped',
+      });
+      assert.match(jsonPiped.out, /publish of .* failed \(exit 1\)/, `(X) ${jsonPiped.out}`);
+      assert.doesNotMatch(
+        jsonPiped.out,
+        HINT,
+        `(X) --json with stdout piped leaves npm on the terminal: ${jsonPiped.out}`,
+      );
+      // With a one-time code npm asks for no approval, wherever its output goes.
+      const codedPiped = run(fx, [...publishArgs, '--otp', '123456'], {
+        allowPublish: true,
+        failAt: order[0],
+        terminal: 'piped',
+      });
+      assert.doesNotMatch(codedPiped.out, HINT, `(X) ${codedPiped.out}`);
+
+      // A publish child that ends without an exit status: the reason names the signal and never
+      // the command line, which carries the one-time code.
+      const killed = run(fx, [...publishArgs, '--otp', '123456'], {
+        allowPublish: true,
+        killAt: order[1],
+      });
+      assert.equal(killed.code, 1, `(X) a killed publish exits 1; got ${killed.code}`);
+      assert.ok(
+        killed.err.includes(`publish of ${order[1]}@${VERSION} failed (npm was killed by SIGKILL)`),
+        `(X) the signal is the reason: ${killed.err}`,
+      );
+      assert.ok(
+        !`${killed.err}${killed.out}`.includes('123456'),
+        `(X) the one-time code is not printed: ${killed.err}`,
+      );
+      assert.match(killed.err, /published by this run before it \(1\)/, `(X) ${killed.err}`);
 
       const first = run(fx, [...publishArgs, '--json'], { allowPublish: true, failAt: order[0] });
       assert.equal(first.code, 1, '(X) a failure of the first target exits 1');

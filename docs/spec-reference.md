@@ -2095,7 +2095,11 @@ file in `<dir>/.well-known/`. The first path segment must be exactly `.well-know
 (case-sensitive) and no segment below it may begin with a dot, so `/.env`, `/.git/config`,
 `/.well-known/.secret` and `/a/.well-known/x` stay `404`; a mount at any other route
 serves no dot path at all, since a well-known URI exists only at the root of the origin.
-Traversal and symlink checks apply unchanged, and the directory is not listed. Files are
+Traversal and symlink checks apply unchanged, and the directory is not listed. The symlink
+check, here as on every other path of a mount, asks only whether a link ends inside `dir`:
+a link in `.well-known` (or anywhere else in `dir`) whose target is a hidden file of the
+same `dir`, such as `alias.txt -> ../.env`, serves that file under the link's name. Keep
+files that must not be served out of `dir` rather than behind a dot name. Files are
 typed by their extension (`security.txt` is `text/plain`, a `.json` file
 `application/json`); `apple-app-site-association`, which has none, is served as
 `application/json`, and any other file without an extension as

@@ -2,7 +2,8 @@
  * `remuxChunks` — REAL ffmpeg proofs (the concat-demuxer stitch + the structural ffprobe sanity).
  * Generates a few self-contained Ogg-Opus chunks with ffmpeg (each its own OpusHead — the real
  * per-chunk shape), stitches them, and asserts ONE stream + a finite non-zero duration. Fail-closed
- * proofs: an empty list and a garbage chunk both throw RemuxError.
+ * proofs: an empty list, a garbage chunk, a chunk that is not Ogg (text, a concat script, another
+ * container) and a chunk ffmpeg cannot open all throw RemuxError.
  *
  * Skips when ffmpeg/ffprobe (with libopus) is unavailable, but HARD-FAILS a required run
  * (RAYSPEC_REQUIRE_MEDIA_TESTS) that lost ffmpeg — the un-skippable ran-guard.
@@ -14,9 +15,14 @@ import { join } from 'node:path';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { RemuxError, remuxChunks, remuxTimeoutMs } from './remux.js';
 
-/** Generate ONE self-contained Ogg-Opus chunk (a short sine tone) via ffmpeg; null if it cannot. */
-function makeOpusChunk(dir: string, i: number): Uint8Array | null {
-  const out = join(dir, `gen_${i}.opus`);
+/** Generate a short sine tone into `dir/name` with the given codec and container arguments; null if ffmpeg cannot. */
+function makeChunk(
+  dir: string,
+  name: string,
+  encode: readonly string[],
+  frequency = 330,
+): Uint8Array | null {
+  const out = join(dir, name);
   const res = spawnSync(
     process.env.RAYSPEC_FFMPEG_BIN?.trim() || 'ffmpeg',
     [
@@ -27,11 +33,8 @@ function makeOpusChunk(dir: string, i: number): Uint8Array | null {
       '-f',
       'lavfi',
       '-i',
-      `sine=frequency=${330 + i * 110}:duration=0.3`,
-      '-c:a',
-      'libopus',
-      '-f',
-      'ogg',
+      `sine=frequency=${frequency}:duration=0.3`,
+      ...encode,
       '-y',
       out,
     ],
@@ -44,6 +47,14 @@ function makeOpusChunk(dir: string, i: number): Uint8Array | null {
     return null;
   }
 }
+
+/** Generate ONE self-contained Ogg-Opus chunk (a short sine tone) via ffmpeg; null if it cannot. */
+function makeOpusChunk(dir: string, i: number): Uint8Array | null {
+  return makeChunk(dir, `gen_${i}.opus`, ['-c:a', 'libopus', '-f', 'ogg'], 330 + i * 110);
+}
+
+/** Bytes that pass for an Ogg chunk up to the point ffmpeg reads them, for the stubbed-ffmpeg tests. */
+const OGG_BYTES = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 0, 2, 0, 0]);
 
 const genDir = mkdtempSync(join(tmpdir(), 'remux-gen-'));
 const chunks: Uint8Array[] = [];
@@ -83,6 +94,111 @@ describe.skipIf(!hasFfmpeg)('remuxChunks (real ffmpeg)', () => {
     const garbage = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     await expect(remuxChunks([garbage])).rejects.toBeInstanceOf(RemuxError);
   });
+
+  // ffmpeg's concat demuxer logs "Impossible to open" for a file it cannot read, ends the input
+  // there and exits 0. Each case below was a stitched file that passed both structural checks.
+  it('refuses a chunk of plain text behind a good one instead of returning the first chunk alone', async () => {
+    const text = new TextEncoder().encode('this chunk is a text file, not a recording\n'.repeat(8));
+    const refused = remuxChunks([chunks[0] as Uint8Array, text]);
+    await expect(refused).rejects.toBeInstanceOf(RemuxError);
+    await expect(refused).rejects.toThrow(/chunk 1 .*not an Ogg stream/);
+  });
+
+  it('refuses a chunk that is a concat script, which ffmpeg would follow', async () => {
+    // Three lines naming chunk 0 again: followed, the result is four chunks long from two uploads.
+    const script = new TextEncoder().encode(
+      "ffconcat version 1.0\nfile 'chunk_0.opus'\nfile 'chunk_0.opus'\nfile 'chunk_0.opus'\n",
+    );
+    const refused = remuxChunks([chunks[0] as Uint8Array, script]);
+    await expect(refused).rejects.toBeInstanceOf(RemuxError);
+    await expect(refused).rejects.toThrow(/chunk 1 .*not an Ogg stream/);
+  });
+
+  it('refuses a chunk in another container (Matroska)', async () => {
+    const matroska = makeChunk(genDir, 'other.mkv', ['-c:a', 'libopus', '-f', 'matroska']);
+    expect(matroska).not.toBeNull();
+    await expect(remuxChunks([chunks[0] as Uint8Array, matroska as Uint8Array])).rejects.toThrow(
+      /chunk 1 .*not an Ogg stream/,
+    );
+  });
+
+  it('refuses a chunk shorter than the Ogg capture pattern, an empty one included', async () => {
+    for (const short of [new Uint8Array(0), new Uint8Array([0x4f, 0x67, 0x67])]) {
+      await expect(remuxChunks([chunks[0] as Uint8Array, short])).rejects.toThrow(
+        /chunk 1 .*not an Ogg stream/,
+      );
+    }
+  });
+
+  it('refuses a chunk that starts like Ogg but is no stream ffmpeg can open', async () => {
+    // The capture pattern and then bytes that are no Ogg page: only ffmpeg can tell.
+    const junk = new Uint8Array(4000).fill(0x5a);
+    junk.set([0x4f, 0x67, 0x67, 0x53]);
+    const refused = remuxChunks([chunks[0] as Uint8Array, junk, chunks[1] as Uint8Array]);
+    await expect(refused).rejects.toBeInstanceOf(RemuxError);
+    await expect(refused).rejects.toThrow(/ffmpeg/);
+  });
+
+  it('refuses a chunk cut off inside its headers, which ffmpeg skips with exit 0', async () => {
+    // The first Ogg page alone (the OpusHead page, 47 bytes): a stream with no comment header.
+    const first = chunks[1] as Uint8Array;
+    const headOnly = first.slice(0, 47);
+    const refused = remuxChunks([chunks[0] as Uint8Array, headOnly, chunks[2] as Uint8Array]);
+    await expect(refused).rejects.toBeInstanceOf(RemuxError);
+  });
+});
+
+/**
+ * The command line the stitch runs, read back from a stub that records its arguments. The input is
+ * probed from uploaded bytes, so the demuxers and protocols ffmpeg may use are named on it, and an
+ * error ends the run instead of being logged and skipped. Needs no real ffmpeg.
+ */
+describe('remuxChunks — the ffmpeg command line', () => {
+  const savedBin = process.env.RAYSPEC_FFMPEG_BIN;
+  const stubDir = mkdtempSync(join(tmpdir(), 'remux-args-'));
+
+  afterEach(() => {
+    if (savedBin === undefined) delete process.env.RAYSPEC_FFMPEG_BIN;
+    else process.env.RAYSPEC_FFMPEG_BIN = savedBin;
+  });
+  afterAll(() => rmSync(stubDir, { recursive: true, force: true }));
+
+  it('restricts the input formats and protocols and stops on the first error', async () => {
+    const stub = join(stubDir, 'ffmpeg-args.sh');
+    const record = join(stubDir, 'args.txt');
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$@" > '${record}'\nexit 1\n`);
+    chmodSync(stub, 0o755);
+    process.env.RAYSPEC_FFMPEG_BIN = stub;
+
+    await expect(remuxChunks([OGG_BYTES])).rejects.toThrow(/ffmpeg exited 1/);
+    const args = readFileSync(record, 'utf8').trimEnd().split('\n');
+    const input = args.indexOf('-i');
+    expect(input).toBeGreaterThan(0);
+    // Input options only take effect in front of the input they belong to.
+    const before = args.slice(0, input);
+    expect(before).toContain('-xerror');
+    expect(before[before.indexOf('-format_whitelist') + 1]).toBe('concat,ogg');
+    expect(before[before.indexOf('-protocol_whitelist') + 1]).toBe('file');
+    expect(before[before.indexOf('-f') + 1]).toBe('concat');
+    expect(args.slice(input + 2, input + 4)).toEqual(['-c', 'copy']);
+  });
+
+  it('refuses a run in which ffmpeg could not open a chunk, even when it exits 0', async () => {
+    const stub = join(stubDir, 'ffmpeg-skip.sh');
+    // What ffmpeg does for a chunk that ends inside its headers: one line on stderr, exit 0, and
+    // an output file holding the chunks before it.
+    writeFileSync(
+      stub,
+      `#!/bin/sh\nfor last; do :; done\nprintf 'OggS-partial' > "$last"\n` +
+        `echo "[in#0/concat @ 0x1] Impossible to open 'chunk_1.opus'" >&2\nexit 0\n`,
+    );
+    chmodSync(stub, 0o755);
+    process.env.RAYSPEC_FFMPEG_BIN = stub;
+
+    const refused = remuxChunks([OGG_BYTES, OGG_BYTES]);
+    await expect(refused).rejects.toBeInstanceOf(RemuxError);
+    await expect(refused).rejects.toThrow(/could not open a chunk/);
+  });
 });
 
 /**
@@ -115,7 +231,7 @@ describe('remuxChunks — ffmpeg hang timeout (MP-3)', () => {
     process.env.RAYSPEC_FFMPEG_TIMEOUT_MS = '400';
 
     const start = Date.now();
-    await expect(remuxChunks([new Uint8Array([1, 2, 3])])).rejects.toBeInstanceOf(RemuxError);
+    await expect(remuxChunks([OGG_BYTES])).rejects.toBeInstanceOf(RemuxError);
     // The reject must arrive shortly after the 400ms timeout — proving the guard fired, not the 30s sleep.
     expect(Date.now() - start).toBeLessThan(5_000);
   }, 10_000);
@@ -214,7 +330,7 @@ describe('remuxChunks — an out-of-range RAYSPEC_FFMPEG_TIMEOUT_MS does not inv
       const start = Date.now();
       let message = '(resolved — the stub was supposed to fail)';
       try {
-        await remuxChunks([new Uint8Array([1, 2, 3])]);
+        await remuxChunks([OGG_BYTES]);
       } catch (err) {
         message = (err as Error).message;
       }

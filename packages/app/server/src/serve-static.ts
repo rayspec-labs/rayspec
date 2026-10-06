@@ -25,7 +25,10 @@
  *   (b) TRAVERSAL — the resolved candidate path must stay inside the served directory after
  *       `path.resolve` (covers `..` and URL-encoded `..%2f`); a candidate that climbs out is refused.
  *   (c) SYMLINK-ESCAPE — if the target exists, its `fs.realpathSync` must stay inside the served
- *       directory's real path; a symlink pointing outside is refused.
+ *       directory's real path; a symlink pointing outside is refused. The check is CONTAINMENT ONLY:
+ *       a link that ends inside the directory is followed whatever its target is called, so
+ *       `alias.txt -> .env` serves the bytes of `.env` under the name `alias.txt`. Rule (a) is about
+ *       the REQUEST path; a link is the site naming one of its own files a second time.
  *
  * A refused request passes through to `next()` → the platform's uniform 404 (never the SPA shell, even
  * for an `spa:true` mount — a traversal/dotfile attempt must not be answered with `index.html`). A
@@ -39,7 +42,9 @@
  * may begin with `.` — `/.well-known/.secret`, `/a/.well-known/x` and every other dot path stay
  * refused. A mount at any other route keeps rule (a) without the exception: a well-known URI has no
  * meaning below the origin root, so there is nothing to serve there. Checks (b) and (c) apply to these
- * paths unchanged, and so do the range guard, the method guard, `cleanUrls` and the root `404.html`.
+ * paths unchanged — (c) with its containment-only reading, so a link inside `.well-known` that ends
+ * at a hidden file of the mount serves it, as a link anywhere else in the mount does — and so do
+ * the range guard, the method guard, `cleanUrls` and the root `404.html`.
  * ONE thing differs: a miss under `/.well-known/` never reaches the SPA fallback. The clients of these
  * paths read a 200 as "the document exists", so answering a missing `security.txt` with the SPA shell
  * would hand them an HTML page as the policy; the miss ends at the root `404.html` (status 404) or the
@@ -1189,10 +1194,10 @@ export function mountFrontend<E extends Env>(
         }
       }
       // A miss under `/.well-known/` ends in a 404 and never in the SPA shell: the clients of these
-      // paths take a 200 for the document itself. Both decodings are asked, so a path the file
-      // server would resolve under that directory is covered whichever way it is spelled.
-      const spaFallback =
-        spa && !(allowWellKnown && (isWellKnownPath(subPath) || isWellKnownPath(servedSubPath)));
+      // paths take a 200 for the document itself. The router hands over the path with the directory
+      // name already decoded (`/%2ewell-known/x` arrives as `/.well-known/x`), so the name the file
+      // server reads has `.well-known` as its first segment exactly when `subPath` has.
+      const spaFallback = spa && !(allowWellKnown && isWellKnownPath(subPath));
       // RFC-7233: an UNSATISFIABLE Range (start at/after EOF, or reversed) gets a proper 416 rather than
       // serveStatic's malformed 0-byte 206 (closed beyond EOF) or ERR_OUT_OF_RANGE → 500 (open beyond
       // EOF). Runs AFTER the fail-closed guard (a refused path already 404'd) and ONLY when a Range

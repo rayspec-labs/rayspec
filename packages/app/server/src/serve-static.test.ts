@@ -1568,6 +1568,9 @@ describe('mountFrontend — /.well-known/ on a root mount (RFC 8615)', () => {
       '/.well-known',
       '/.well-known/',
       '/%2ewell-known/missing.txt',
+      // A malformed escape behind the encoded name: the router has decoded the name by the time
+      // the mount reads the path, so this is the same miss.
+      '/%2ewell-known/missing%',
     ]) {
       const res = await app.request(path);
       expect(res.status, path).toBe(404);
@@ -1623,6 +1626,29 @@ describe('mountFrontend — /.well-known/ on a root mount (RFC 8615)', () => {
       }
     } finally {
       rmSync(withPage, { recursive: true, force: true });
+    }
+  });
+
+  it('a link that stays inside the mount is followed to its target, a hidden one included, as on any other path', async () => {
+    // The symlink rule is containment only: it asks where a link ends, not what the target is
+    // called. `/.env` itself stays a 404; a link the site put beside its files names it anew.
+    const linked = mkdtempSync(join(tmpdir(), 'rayspec-well-known-inlink-'));
+    try {
+      const dir = join(linked, 'web', 'dist');
+      mkdirSync(join(dir, '.well-known'), { recursive: true });
+      writeFileSync(join(dir, 'index.html'), SHELL, 'utf8');
+      writeFileSync(join(dir, '.env'), HIDDEN, 'utf8');
+      symlinkSync(join(dir, '.env'), join(dir, 'alias.txt'));
+      symlinkSync(join(dir, '.env'), join(dir, '.well-known', 'alias.txt'));
+      const app = buildApp([plain], linked);
+      expect((await app.request('/.env')).status).toBe(404);
+      for (const path of ['/alias.txt', '/.well-known/alias.txt']) {
+        const res = await app.request(path);
+        expect(res.status, path).toBe(200);
+        expect(await res.text(), path).toBe(HIDDEN);
+      }
+    } finally {
+      rmSync(linked, { recursive: true, force: true });
     }
   });
 

@@ -7,12 +7,23 @@
  * OpusHead per chunk — the Tauri-client / fresh-encoder-per-chunk shape) are concatenated with
  * ffmpeg's concat DEMUXER under `-c copy` (NO re-encode/decode; packet count preserved):
  *
- *   ffmpeg -nostdin -f concat -safe 0 -i list.txt -c copy out.opus
+ *   ffmpeg -nostdin -xerror -format_whitelist concat,ogg -protocol_whitelist file \
+ *     -f concat -safe 0 -i list.txt -c copy out.opus
  *
  * The concat DEMUXER produces ONE OpusHead + ONE stream + the WHOLE timeline — UNLIKE the concat
  * PROTOCOL / a naive byte-append, which carry every chunk's OpusHead and yield a multi-OpusHead
  * container Deepgram/players choke on. The list MUST be in EXACT index order — a gap/reorder corrupts
  * the granulepos timeline.
+ *
+ * THE CHUNKS ARE UPLOADED BYTES, so what ffmpeg may make of them is narrowed before and on the
+ * command line. A chunk that does not begin with the Ogg capture pattern (`OggS`) is refused before
+ * it is written: ffmpeg picks a demuxer from the bytes, so a text file would otherwise be skipped
+ * with exit 0 (a recording that silently ends early), a concat script would be FOLLOWED, and any
+ * other container would be handed to its demuxer. `-format_whitelist concat,ogg` and
+ * `-protocol_whitelist file` hold ffmpeg to the two demuxers and the one protocol the stitch needs,
+ * whatever a chunk that passes the first check contains. `-xerror` makes an error end the run, and
+ * a run in which the concat demuxer reports a chunk it could not open is refused whatever its exit
+ * code — ffmpeg ends the input at such a chunk and can still exit 0.
  *
  * FAIL-CLOSED LOUDLY on a non-zero ffmpeg exit (a missing/failed ffmpeg must NEVER produce a
  * truncated/partial stream downstream would mistake for a complete recording). After the remux a
@@ -83,6 +94,20 @@ export function remuxTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   return n;
 }
 
+/** The capture pattern every Ogg page, and so every Ogg file, begins with. */
+const OGG_CAPTURE_PATTERN = [0x4f, 0x67, 0x67, 0x53] as const; // "OggS"
+
+/** True if `bytes` begins with the Ogg capture pattern. */
+function startsWithOggPage(bytes: Uint8Array): boolean {
+  return OGG_CAPTURE_PATTERN.every((byte, i) => bytes[i] === byte);
+}
+
+/**
+ * What the concat demuxer logs for a listed file it cannot open. It then ends the input at that
+ * file, and when the failure is an early end of file ffmpeg exits 0 even under `-xerror`.
+ */
+const CONCAT_OPEN_FAILURE = 'Impossible to open';
+
 /** A remux failure (ffmpeg missing, a non-zero exit, no chunks) — fail-closed, never a partial result. */
 export class RemuxError extends Error {
   constructor(message: string) {
@@ -107,11 +132,21 @@ export interface RemuxResult {
  * Remux an ORDERED list of Ogg-Opus chunk byte arrays (index 0..N-1) into ONE continuous Opus file via
  * the concat DEMUXER + `-c copy`. `chunks[i]` MUST be chunk i's bytes (the caller fetches them in exact
  * index order). Returns the stitched bytes + the temp out-path + the probed duration + a cleanup.
- * FAIL-CLOSED: an empty chunk list, a missing ffmpeg/ffprobe, or a non-zero ffmpeg exit throws `RemuxError`.
+ * FAIL-CLOSED: an empty chunk list, a chunk that is not an Ogg stream, a missing ffmpeg/ffprobe, a
+ * non-zero ffmpeg exit or a chunk ffmpeg could not open throws `RemuxError`.
  */
 export async function remuxChunks(chunks: readonly Uint8Array[]): Promise<RemuxResult> {
   if (chunks.length === 0) {
     throw new RemuxError('remux: no chunks to stitch (fail-closed).');
+  }
+  // Before anything is written or run: every chunk must at least begin as an Ogg stream.
+  for (let i = 0; i < chunks.length; i++) {
+    if (!startsWithOggPage(chunks[i] as Uint8Array)) {
+      throw new RemuxError(
+        `remux: chunk ${i} of ${chunks.length} is not an Ogg stream (it does not begin with 'OggS') ` +
+          '— refusing to hand it to ffmpeg (fail-closed).',
+      );
+    }
   }
 
   const workDir = await mkdtemp(join(tmpdir(), 'remux-'));
@@ -139,6 +174,14 @@ export async function remuxChunks(chunks: readonly Uint8Array[]): Promise<RemuxR
       '-hide_banner',
       '-loglevel',
       'error',
+      // An error ends the run instead of being logged and skipped.
+      '-xerror',
+      // Input options, so in front of `-i`: the list is read by `concat` and each chunk by `ogg`,
+      // through the `file` protocol and nothing else.
+      '-format_whitelist',
+      'concat,ogg',
+      '-protocol_whitelist',
+      'file',
       '-f',
       'concat',
       '-safe',
@@ -180,7 +223,7 @@ export async function remuxChunks(chunks: readonly Uint8Array[]): Promise<RemuxR
 }
 
 /** Spawn ffmpeg with `args`, resolving on exit 0, rejecting `RemuxError` on a non-zero exit / spawn error
- * / TIMEOUT. The timeout is an EXPLICIT timer (not spawn's `timeout` option, which waits on the stdio
+ * / TIMEOUT / a chunk the concat demuxer could not open (which can end in exit 0). The timeout is an EXPLICIT timer (not spawn's `timeout` option, which waits on the stdio
  * streams to close — an orphaned child holding an inherited pipe can defeat it): on expiry we SIGKILL and
  * reject IMMEDIATELY, so a hung ffmpeg can never stall the durable run (MP-3). A `settled` guard prevents
  * a double-settle from a late close after the timeout fired. */
@@ -202,8 +245,15 @@ function runFfmpeg(args: readonly string[]): Promise<void> {
         ),
       );
     }, timeoutMs);
+    // Looked for in ALL of stderr, not in the capped copy kept for the message: the last bytes of
+    // the previous piece are carried over so a line split across two pieces is still found.
+    let openFailed = false;
+    let carry = '';
     child.stderr?.on('data', (d: Buffer) => {
-      if (stderr.length < 4000) stderr += d.toString('utf8');
+      const piece = d.toString('utf8');
+      if (stderr.length < 4000) stderr += piece;
+      if ((carry + piece).includes(CONCAT_OPEN_FAILURE)) openFailed = true;
+      carry = piece.slice(-CONCAT_OPEN_FAILURE.length);
     });
     child.on('error', (err) => {
       if (settled) return;
@@ -220,8 +270,17 @@ function runFfmpeg(args: readonly string[]): Promise<void> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (code === 0) {
+      if (code === 0 && !openFailed) {
         resolveP();
+        return;
+      }
+      if (code === 0) {
+        rejectP(
+          new RemuxError(
+            `remux: ffmpeg could not open a chunk and ended the stream there, with exit 0. stderr: ${stderr.trim().slice(0, 500)} ` +
+              '(fail-closed — refusing a truncated/partial stream).',
+          ),
+        );
         return;
       }
       rejectP(

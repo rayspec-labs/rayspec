@@ -166,15 +166,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs both tools, requires the concat demuxer and the Ogg-Opus muxer, and stitches two generated
   chunks the way the capability does, so a build without a working ffmpeg fails;
   `scripts/image-conformance.mjs` requires both tools at the pinned version and runs the image's own
-  `@rayspec/audio-runtime` on two chunks as the image's user. **The image is larger:** ffmpeg
+  `@rayspec/audio-runtime` on two chunks as the image's user, and requires it to refuse a chunk
+  that is not Ogg and one ffmpeg cannot read. **The image is larger:** ffmpeg
   brings 206 Debian packages with it, and an image built from the 1.9.0 tarballs grew from 1.30 GB
   to 1.75 GB unpacked and from 402 MB to 572 MB as an archive. The build now also needs
   snapshot.debian.org.
 - **The image SBOM lists the image's Debian packages.** `image-sbom.cdx.json` listed the npm
   packages under `/opt/rayspec` and left out the Debian userland. `scripts/gen-image-sbom.mjs` now
   also reads the image's dpkg record (`/var/lib/dpkg/status`) and lists every installed Debian
-  package as `pkg:deb/debian/<name>@<version>?arch=<arch>&distro=debian-<release>`: the base
-  image's userland, ffmpeg and everything ffmpeg depends on. It refuses an image without a dpkg
+  package as `pkg:deb/debian/<name>@<version>?arch=<arch>&distro=debian-<release>`, name and
+  version percent-encoded as a package URL writes them (`libstdc%2B%2B6`); the component's `name`
+  is the one dpkg records. Listed are the base image's userland, ffmpeg and everything ffmpeg
+  depends on. It refuses an image without a dpkg
   record, and one whose record names no installed `ffmpeg`. A Debian package carries no digest and
   no licence in the SBOM, since dpkg records neither; Node and the PostgreSQL client tools are still
   not listed. No step scans the Debian packages for advisories.
@@ -188,7 +191,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker buildx build` commands given there), what the unsigned manifest shows and does not show,
   why the digest it names cannot be pulled or reproduced, and that the image carries ffmpeg and
   why. `docs/releasing.md` states how 1.9.0 and 1.9.1 are published and what such a release
-  carries.
+  carries, and its "Verifying a release" leads with the commands that fit such a release (the
+  manifest against the tarballs, the identity manifest, `npm view`), from a built checkout of the
+  tag; the signature and the image archive follow as what a workflow-published release adds.
 - **`scripts/publish.mjs` can publish from a terminal with a browser-based second factor.** The
   script ran the publish with piped input and output. An npm account whose two-factor
   authentication is a passkey or a security key gets an authentication URL from npm, which then
@@ -196,14 +201,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `EOTP` and nothing was published. 1.9.0 was therefore published by hand, one tarball after
   the other. A `--publish` now runs every publish call attached to the terminal the script was
   started from, and `--otp <code>` hands a one-time code to every call for an account with an
-  authenticator app (refused outside `--publish`). With `--from <dir>` each tarball goes to
+  authenticator app (refused outside `--publish`). npm waits for a browser approval only while
+  both its input and its output are a terminal, so the script's output must not be piped either
+  (`| tee publish.log` is enough to fail with `EOTP`); a failed publish that ran without a
+  terminal on either side says so. With `--from <dir>` each tarball goes to
   `npm publish <tarball>` as it is (before: `pnpm publish <tarball>`, which runs the same npm
   command), and every publish and dry run carries `--access public`, so a scoped package that is
   new in a release is created public instead of being refused as a restricted one. A publish call
   that fails no longer ends in a stack trace: the run restores the manifests, names the package
   and the packages it published before it, says that the same command continues (after a `--from`
   run) or that the run cannot be continued (when it packed its own bytes), and exits 1; the
-  `--json` summary carries `failed`, the name of that package or `null`. A failed dry run names
+  `--json` summary carries `failed`, the name of that package or `null`. The reason it prints is
+  npm's exit code, or the signal that ended npm; it never repeats the publish command line, which
+  carries the one-time code. A failed dry run names
   its package the same way. Continuing is unchanged: a package npm already serves with the
   integrity of its tarball is skipped, and one it serves with other bytes stops the run before
   the first publish. The two opt-ins of a real publish (`--yes-really-publish` and
@@ -226,7 +236,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dot, and a mount at any other route serves no dot path, so `/.env`, `/.git/config`,
   `/.well-known/.secret` and `/a/.well-known/x` answer `404` as before. The traversal and
   symlink-escape checks are unchanged and apply to these paths, and the directory is not listed.
-  Files are typed by extension (`security.txt` as `text/plain`, a `.json` file as
+  The symlink check is containment only, here as on every other path: a link inside `dir` whose
+  target is a hidden file of the same `dir` serves that file under the link's name, so a link in
+  `.well-known` can name one too. Files are typed by extension (`security.txt` as `text/plain`, a `.json` file as
   `application/json`), and `apple-app-site-association`, which has none, is served as
   `application/json`. `cleanUrls` and the root `404.html` apply as to any other path; a path under
   `/.well-known/` that names no file is a `404` on an `spa: true` mount too and never the
@@ -272,6 +284,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test tooling (`vitest`, `vite`, `postcss`) and is not part of what a consumer installs. A
   fresh consumer install of the published packages already resolves `proxy-addr` `2.0.8`, because
   `express` declares `^2.0.7`; the consumer scan reports nothing new.
+- **The audio capability hands ffmpeg only Ogg chunks, and refuses a recording ffmpeg stitched
+  around a chunk.** `remuxChunks` of `@rayspec/audio-runtime` wrote every uploaded chunk to a file
+  and ran ffmpeg's concat demuxer over them with no check of what a chunk was, so ffmpeg chose a
+  demuxer from the bytes. A chunk of plain text behind a good one made ffmpeg log `Impossible to
+  open`, end the stream there and exit 0, and the result, the recording up to that chunk, passed
+  both structural checks and was transcribed and played as the whole recording. A chunk that was
+  an `ffconcat` script was followed (four chunks' length from two uploads), and a chunk in another
+  container was handed to that container's demuxer. Now a chunk that does not begin with the Ogg
+  capture pattern (`OggS`) is refused before anything is written or run; ffmpeg runs with
+  `-format_whitelist concat,ogg -protocol_whitelist file`, so it uses those two demuxers and the
+  file protocol only, and with `-xerror`, so an error ends the run; and a run in which the concat
+  demuxer reports a chunk it could not open is refused whatever ffmpeg's exit code (a chunk cut
+  off inside its headers is skipped with exit 0 even under `-xerror`). Each refusal is a
+  `RemuxError`, which the transcription and playback steps already treat as a failed recording.
+  **What changes:** a recording with a chunk that is not Ogg, or that ffmpeg cannot read, now
+  fails where it was silently shortened; a recording of intact Ogg-Opus chunks is stitched as
+  before. The image build's stitch check uses the same command line.
+  [The runtime image](./docs/runtime-image.md#ffmpeg-and-ffprobe) and the
+  [threat model](./docs/threat-model.md) now state what ffmpeg is given, as which user, under
+  which limits (a time limit; no memory, CPU or concurrency limit and no sandbox), and that an
+  ffmpeg security fix reaches an image only when its pinned version is moved.
 - **A trusted-proxy range gives one answer for one address, however the address is spelled.** An
   IPv4-mapped IPv6 address was replaced by its IPv4 address only in the dotted spelling
   (`::ffff:10.1.2.3`). The hex spelling of the same address (`::ffff:a01:203`, also in uppercase,
@@ -281,17 +314,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `::ffff:0:0/96` is now recognised by value: every spelling becomes the IPv4 address it carries
   before anything is matched, on the peer, on each `X-Forwarded-For` hop and on `X-Real-IP`. On the
   list side, an entry written inside the mapped block is the IPv4 range it carries
-  (`::ffff:10.0.0.0/104` is `10.0.0.0/8`, `::ffff:0:0/96` is every IPv4 address), and an IPv6 entry
+  (`::ffff:10.0.0.0/104` and `::ffff:10.0.0.0/8` are `10.0.0.0/8`, `::ffff:0:0/96` is every IPv4
+  address), and an IPv6 entry
   wider than the block (`::/8`, `::/0`) covers IPv6 peers only, as it always did for the dotted
   spelling. A Node socket reports a mapped peer in the dotted spelling, so the peer check of a
   running deployment was already the IPv4 one; the hex spelling reaches the runtime in a
   forwarding header. **What changes:** the client address the runtime derives is the IPv4 address
   for every spelling, so the rate-limit bucket, the address stored with a session and the address
   hash in the audit log are the same for `::ffff:a01:203` as for `10.1.2.3`, where the hex spelling
-  had its own before. An entry inside the mapped block matched no dotted peer before and matches
-  its IPv4 range now; review a list that carries one, `::ffff:0:0/96` in particular. An entry with
-  a missing or malformed prefix length (`10.0.0.0/`, `10.0.0.0/8.0`) matches nothing; an empty
-  prefix was read as `/0` and trusted every address of the family. An IPv6 address with a dotted
+  had its own before. An entry inside the mapped block with an IPv6-length prefix (`/96` to `/128`)
+  matched no dotted peer before and matches its IPv4 range now; review a list that carries one,
+  `::ffff:0:0/96` in particular. An entry written as a dotted mapped address with an IPv4-length
+  prefix (`::ffff:10.0.0.0/8`, `::ffff:10.1.2.3/32`) keeps the meaning it had: the IPv4 range
+  behind the mapped prefix, here `10.0.0.0/8` and `10.1.2.3/32`. A dotted mapped address with a
+  prefix between the two notations (`/33` to `/95`) names no range, as before. An entry that names
+  no range now refuses the boot and the message names it: an address that does not parse, or a
+  missing or malformed prefix length (`10.0.0.0/`, `10.0.0.0/8.0`, `10.0.0.0/33`). Before, an
+  empty prefix was read as `/0` and trusted every address of the family, `/8.0` was read as `/8`,
+  and an entry that could match nothing was accepted without a word, which left the proxy
+  untrusted and every client behind it in one rate-limit bucket. An IPv6 address with a dotted
   tail outside the mapped block (`64:ff9b::10.1.2.3`) is parsed and matches IPv6 entries, where it
   matched none. No other IPv6 address is rewritten.
 

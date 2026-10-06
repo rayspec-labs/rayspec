@@ -130,7 +130,10 @@ export const AUDIO_RUNTIME = '/opt/rayspec/node_modules/@rayspec/audio-runtime/d
  * The script run inside the image for its media tools; it prints one JSON object. Two one-second
  * Ogg-Opus chunks are encoded with the image's ffmpeg, each a stream of its own as a recording
  * client uploads them, and handed to the capability's own `remuxChunks`, which runs ffmpeg's concat
- * demuxer and probes the result with ffprobe.
+ * demuxer and probes the result with ffprobe. The capability is then handed a second chunk that is
+ * not Ogg, and one that begins like Ogg and is no stream, and the refusal of each is recorded: the
+ * first is the capability's own check, the second is the image's ffmpeg under the command line the
+ * capability gives it.
  */
 export const MEDIA_PROBE = `
 const fs = require('node:fs');
@@ -142,7 +145,7 @@ const banner = (name) => {
   return res.status === 0 ? res.stdout.split('\\n')[0] : null;
 };
 (async () => {
-  const facts = { ffmpeg: banner('ffmpeg'), ffprobe: banner('ffprobe'), chunks: 0, remux: null, error: null };
+  const facts = { ffmpeg: banner('ffmpeg'), ffprobe: banner('ffprobe'), chunks: 0, remux: null, refused: {}, error: null };
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'media-probe-'));
   try {
     const chunks = [];
@@ -158,6 +161,17 @@ const banner = (name) => {
     const stitched = await remuxChunks(chunks);
     facts.remux = { bytes: stitched.bytes.length, durationS: stitched.durationS };
     await stitched.cleanup();
+    const unreadable = Buffer.alloc(4000, 0x5a);
+    unreadable.write('OggS', 'latin1');
+    for (const [name, bad] of [['notOgg', Buffer.from('not a recording\\n'.repeat(8))], ['unreadable', unreadable]]) {
+      try {
+        const around = await remuxChunks([chunks[0], bad]);
+        await around.cleanup();
+        facts.refused[name] = null;
+      } catch (err) {
+        facts.refused[name] = String((err && err.message) || err).slice(0, 200);
+      }
+    }
   } catch (err) {
     facts.error = String((err && err.message) || err);
   } finally {
@@ -188,6 +202,13 @@ export function judgeMedia(facts, pinned) {
         facts.remux.bytes > 0 &&
         facts.remux.durationS > 1.5 &&
         facts.remux.durationS < 2.5,
+    ],
+    [
+      'the audio capability refuses a chunk that is not Ogg and one ffmpeg cannot read',
+      ['notOgg', 'unreadable'].every(
+        (name) =>
+          typeof facts.refused?.[name] === 'string' && facts.refused[name].startsWith('remux: '),
+      ),
     ],
   ];
 }

@@ -52,6 +52,7 @@ import {
   IdempotencyStore,
   IdentityStore,
   InviteStore,
+  isTrustedProxyRange,
   type ManualTriggerFirer,
   makeRunAuthorizer,
   makeTenantEventBus,
@@ -1535,11 +1536,8 @@ export function loadServerConfig(
   // ⇒ [] (no forwarding header is ever trusted — the socket peer is the rate-limit / audit identity).
   // A deployment behind a reverse proxy (nginx / ingress / LB) opts in by naming its proxy-hop CIDRs,
   // so the real client's X-Forwarded-For becomes the per-source throttle identity instead of collapsing
-  // every request onto the single proxy peer. Mirrors ALLOWED_REQUEST_HEADERS parsing.
-  const trustedProxies = (env.RAYSPEC_TRUSTED_PROXIES ?? '')
-    .split(',')
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
+  // every request onto the single proxy peer. An entry that names no range refuses the boot.
+  const trustedProxies = parseTrustedProxies(env);
 
   // The DBOS SYSTEM database url (separate DB; used only for a durableWorker spec). Set
   // explicitly via DBOS_SYSTEM_DATABASE_URL, else derive from DATABASE_URL by swapping the db name to
@@ -1977,6 +1975,30 @@ export function parseHostingPosture(env: NodeJS.ProcessEnv): HostingPosture {
     `Boot aborted — RAYSPEC_HOSTING_POSTURE='${raw}' is not 'local' or 'managed'. Under 'managed' ` +
       'the public live-executor probe (/recovery-scope) is disabled. Fail-closed.',
   );
+}
+
+/**
+ * Parse RAYSPEC_TRUSTED_PROXIES — the comma-separated addresses and CIDR ranges whose forwarding
+ * headers are believed. Blank entries are dropped; unset/blank ⇒ `[]`. An entry that names no range
+ * (an address that does not parse, a missing or malformed prefix length) ABORTS the boot: it could
+ * match no peer, so the proxy it was written for would silently stay untrusted and every client
+ * behind it would share the proxy's rate-limit bucket and audit address.
+ */
+export function parseTrustedProxies(env: NodeJS.ProcessEnv): string[] {
+  const entries = (env.RAYSPEC_TRUSTED_PROXIES ?? '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  const unusable = entries.filter((entry) => !isTrustedProxyRange(entry));
+  if (unusable.length > 0) {
+    throw new BootConfigError(
+      `Boot aborted — RAYSPEC_TRUSTED_PROXIES names ${unusable.map((e) => `'${e}'`).join(', ')}, ` +
+        'which is not an address or a CIDR range (an IPv4 or IPv6 address, optionally followed by ' +
+        "'/' and a decimal prefix length within the address's width). Such an entry matches no " +
+        'peer, so the proxy it stands for would not be trusted. Fail-closed.',
+    );
+  }
+  return entries;
 }
 
 /**

@@ -91,11 +91,13 @@
  * -----------------
  * A real publish runs attached to the terminal this script was started from: its child inherits
  * stdin, stdout and stderr. An account whose two-factor authentication is a browser passkey gets an
- * authentication URL from npm, which then waits on that terminal for the approval; with piped stdio
- * npm cannot wait and the first target fails with EOTP. `--otp <code>` hands a one-time code of an
- * authenticator app to every publish call instead (a code is short-lived: when it expires part way,
- * the run stops and the next run continues with a new code). The release workflow needs neither: its
- * token bypasses the second factor. With `--json` the child's stdout goes to this script's stderr,
+ * authentication URL from npm, which then waits on that terminal for the approval. npm waits only
+ * when both its stdin and its stdout are a terminal: with either one piped (`| tee publish.log`
+ * is enough) it cannot wait and the first target fails with EOTP, so do not pipe this script's
+ * output. `--otp <code>` hands a one-time code of an authenticator app to every publish call
+ * instead (a code is short-lived: when it expires part way, the run stops and the next run
+ * continues with a new code). The release workflow needs neither: its token bypasses the second
+ * factor. With `--json` the child's stdout goes to this script's stderr,
  * so stdout stays the one JSON document.
  *
  * CONTINUING A PUBLISH THAT STOPPED PART WAY
@@ -709,7 +711,16 @@ function main() {
                 })
               : execFileSync('npm', ['publish', packed.get(name), ...args], io);
         } catch (err) {
-          failed = { name, reason: err.status == null ? err.message : `exit ${err.status}` };
+          // Never `err.message`: for a child that ended without an exit status it is the whole
+          // command line, one-time code included.
+          const tool = packed === null ? 'pnpm' : 'npm';
+          const reason =
+            err.status != null
+              ? `exit ${err.status}`
+              : err.signal
+                ? `${tool} was killed by ${err.signal}`
+                : `${tool} did not run: ${err.code ?? 'unknown error'}`;
+          failed = { name, reason };
           results.push({ name, version, ok: false, stdout: '' });
           break;
         }
@@ -749,10 +760,14 @@ function main() {
           ? `published by this run before it (${done.length}): ${done.join(', ')}.`
           : 'nothing was published by this run.',
       );
-      if (!process.stdin.isTTY && flags.otp === undefined) {
+      // npm waits for a browser approval only when its stdin AND its stdout are a terminal. Its
+      // stdout is this script's stdout, or this script's stderr under --json.
+      const npmOut = flags.json ? process.stderr : process.stdout;
+      if ((!process.stdin.isTTY || !npmOut.isTTY) && flags.otp === undefined) {
         console.error(
           'this run was not attached to a terminal: npm cannot wait there for a browser approval ' +
-            'of the second factor. Run it from a terminal, or pass --otp <code>.',
+            'of the second factor. Run it from a terminal and do not pipe its output, or pass ' +
+            '--otp <code>.',
         );
       }
       console.error(

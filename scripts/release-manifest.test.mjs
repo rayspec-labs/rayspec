@@ -312,6 +312,8 @@ const DPKG_STATUS_TEXT = dpkgStatus([
   ['base-files', '13.8+deb13u1'],
   ['ffmpeg', '7:7.1.5-0+deb13u1'],
   ['libavcodec61', '7:7.1.5-0+deb13u1'],
+  // A name with a character a package URL writes percent-encoded.
+  ['libstdc++6', '14.2.0-19'],
   // dpkg remembers the configuration of a removed package: it is not installed.
   ['curl', '8.14.1-2', 'deinstall ok config-files'],
 ]);
@@ -571,9 +573,11 @@ await check('the image SBOM lists the Debian packages dpkg records as installed'
       'pkg:deb/debian/base-files@13.8%2Bdeb13u1?arch=amd64&distro=debian-13',
       'pkg:deb/debian/ffmpeg@7%3A7.1.5-0%2Bdeb13u1?arch=amd64&distro=debian-13',
       'pkg:deb/debian/libavcodec61@7%3A7.1.5-0%2Bdeb13u1?arch=amd64&distro=debian-13',
+      'pkg:deb/debian/libstdc%2B%2B6@14.2.0-19?arch=amd64&distro=debian-13',
     ],
   );
   assert.equal(deb[1].version, '7:7.1.5-0+deb13u1');
+  assert.equal(deb[3].name, 'libstdc++6', 'the component keeps the name dpkg records');
   const refs = doc.components.map((c) => c['bom-ref']);
   assert.deepEqual(refs, [...refs].sort(), 'the components are in one order');
   assert.equal(new Set(refs).size, refs.length);
