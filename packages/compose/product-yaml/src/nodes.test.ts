@@ -23,7 +23,7 @@ import type {
 } from '@rayspec/foundation';
 import { InMemoryArtifactStore } from '@rayspec/grounding-runtime';
 import type { ProductSpec } from '@rayspec/spec';
-import { FakeSttAdapter, type SttDualTrackFixture } from '@rayspec/stt-port';
+import { FakeSttAdapter, type SttAdapter, type SttDualTrackFixture } from '@rayspec/stt-port';
 import { describe, expect, it } from 'vitest';
 import {
   makeArtifactPersistNode,
@@ -258,6 +258,67 @@ describe('stt.transcribe_session node', () => {
       words: Array<{ word: string }>;
     };
     expect(payload.words.map((w) => w.word)).toEqual(['Ship', 'the', 'baseline.']);
+  });
+
+  it('writes the transcript row with exactly the payload keys of a paragraph-granular transcript', async () => {
+    const db = new FakeHandlerDb();
+    sealTracks(db);
+    const result = await sttNode(spec, db)(ctx(STT_STEP));
+    expect(result.status).toBe('completed');
+    for (const row of db.rows('track_transcripts')) {
+      expect(Object.keys(row.payload as Record<string, unknown>)).toEqual([
+        'confidence',
+        'duration',
+        'words',
+        'segments',
+      ]);
+    }
+  });
+
+  it('records sentence granularity on the transcript row when the adapter reports it', async () => {
+    // An adapter that cut its spans per sentence says so on the transcript; the row keeps that, so
+    // a reader of `segments[]` knows which granularity the ids `<track>:s<N>` were written under.
+    const inner = new FakeSttAdapter({ fixtures: [dualTrackFixture()] });
+    const sentenceAdapter: SttAdapter = {
+      id: inner.id,
+      kind: inner.kind,
+      transcribeTrack: (request) => inner.transcribeTrack(request),
+      async transcribeSession(request) {
+        const results = await inner.transcribeSession(request);
+        return results.map((result) =>
+          result.status === 'completed' && result.transcript.track === 'mic'
+            ? {
+                ...result,
+                transcript: { ...result.transcript, span_granularity: 'sentence' as const },
+              }
+            : result,
+        );
+      },
+    };
+    const db = new FakeHandlerDb();
+    sealTracks(db);
+    const node = makeSttTranscribeSessionNode({
+      spec,
+      adapter: sentenceAdapter,
+      db,
+      tenantId: TENANT,
+      transcriptStore: 'track_transcripts',
+    });
+    const result = await node(ctx(STT_STEP));
+    expect(result.status).toBe('completed');
+    const payloads = new Map(
+      db.rows('track_transcripts').map((r) => [r.track, r.payload as Record<string, unknown>]),
+    );
+    expect(payloads.get('mic')?.span_granularity).toBe('sentence');
+    expect(Object.keys(payloads.get('mic') ?? {})).toEqual([
+      'confidence',
+      'duration',
+      'words',
+      'segments',
+      'span_granularity',
+    ]);
+    // Per track: the one that did not report it keeps the payload without the key.
+    expect('span_granularity' in (payloads.get('system') ?? {})).toBe(false);
   });
 
   it('the DECLARED attribution policy overrides the adapter default', async () => {

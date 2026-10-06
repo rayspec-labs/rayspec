@@ -144,6 +144,17 @@ export const CapabilityInputNormalize = z
   .strict();
 export type CapabilityInputNormalize = z.infer<typeof CapabilityInputNormalize>;
 
+/**
+ * How large one transcript span is — the unit a grounded claim cites. `paragraph` (the default when
+ * the key is absent): one span per paragraph of a track's transcript. `sentence`: one span per
+ * sentence, so two claims drawn from one paragraph cite different spans. Span ids keep the form
+ * `<track>:s<index>` under both, so an id written under one value does not name the same text under
+ * the other. Honoured on the `stt` capability only; a declaration on any other capability is
+ * refused at the deploy composition.
+ */
+export const SpanGranularity = z.enum(['paragraph', 'sentence']);
+export type SpanGranularity = z.infer<typeof SpanGranularity>;
+
 export const CapabilitySpec = z
   .object({
     id: z.string().min(1),
@@ -152,6 +163,8 @@ export const CapabilitySpec = z
     /** Named input/output contracts the capability provides (contract ids). */
     contracts: z.array(z.string().min(1)).default([]),
     provider_policy: ProviderPolicy.optional(),
+    /** OPTIONAL transcript span size (absent ⇒ `paragraph` — see SpanGranularity). */
+    span_granularity: SpanGranularity.optional(),
     /** Non-normative explanation (may mention providers — this is NOT the executable graph). */
     runtime_notes: z.string().optional(),
     /** OPTIONAL declarative input-normalize step (default OFF — see CapabilityInputNormalize). */

@@ -6,6 +6,7 @@ import {
   type SttMediaResolver,
   type SttMediaSource,
   type SttModelPolicy,
+  type SttSpanGranularity,
   type SttTranscribeSessionRequest,
   type SttTranscribeTrackRequest,
   type SttTranscriptionResult,
@@ -56,7 +57,16 @@ export interface DeepgramSttAdapterOptions {
    * (`RAYSPEC_AGENT_REQUEST_TIMEOUT_MS`). Absent ⇒ no bound beyond the transport's own.
    */
   timeoutMs?: number;
+  /**
+   * How large one transcript span is: `paragraph` (the default) — one per paragraph of the
+   * response — or `sentence` — one per sentence. The request is the same for both; only the mapping
+   * of the response differs. Span ids keep the form `<track>:s<index>`, so an id produced under one
+   * value does not name the same text under the other.
+   */
+  spanGranularity?: SttSpanGranularity;
 }
+
+const SPAN_GRANULARITIES: readonly SttSpanGranularity[] = ['paragraph', 'sentence'];
 
 export class DeepgramSttAdapter implements SttAdapter {
   readonly id = DEEPGRAM_STT_ADAPTER_ID;
@@ -70,6 +80,7 @@ export class DeepgramSttAdapter implements SttAdapter {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => string;
   private readonly timeoutMs: number | undefined;
+  private readonly spanGranularity: SttSpanGranularity;
 
   constructor(options: DeepgramSttAdapterOptions) {
     this.resolver = options.resolver;
@@ -80,6 +91,16 @@ export class DeepgramSttAdapter implements SttAdapter {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.now = options.now ?? (() => new Date().toISOString());
     this.timeoutMs = options.timeoutMs;
+    const spanGranularity = options.spanGranularity === undefined ? 'paragraph' : options.spanGranularity;
+    // A caller outside the type system can hand over anything: an unknown value is refused here
+    // rather than silently mapped as the default.
+    if (!SPAN_GRANULARITIES.includes(spanGranularity)) {
+      throw new Error(
+        `DeepgramSttAdapter: spanGranularity '${String(spanGranularity)}' is not supported ` +
+          `(${SPAN_GRANULARITIES.join(' | ')}).`,
+      );
+    }
+    this.spanGranularity = spanGranularity;
   }
 
   /**
@@ -192,6 +213,7 @@ export class DeepgramSttAdapter implements SttAdapter {
         session_id: request.session_id,
         track: request.track,
         model: this.resolveModel(request.model_policy),
+        ...(this.spanGranularity === 'sentence' ? { span_granularity: this.spanGranularity } : {}),
         now: this.now(),
       });
       // An empty/silent recording is a VALID completed transcript, not an error.

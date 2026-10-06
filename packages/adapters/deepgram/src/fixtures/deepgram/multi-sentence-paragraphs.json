@@ -1,0 +1,237 @@
+{
+  "metadata": {
+    "request_id": "00000000-0000-4000-8000-000000000007",
+    "duration": 12.4,
+    "channels": 1,
+    "models": [
+      "nova-2"
+    ]
+  },
+  "results": {
+    "channels": [
+      {
+        "detected_language": "en",
+        "alternatives": [
+          {
+            "transcript": "We agreed on the rollout order. The upload service goes first. Billing follows a week later. Who owns the migration? I will take it.",
+            "confidence": 0.962,
+            "words": [
+              {
+                "word": "we",
+                "start": 0.2,
+                "end": 0.517,
+                "confidence": 0.99,
+                "punctuated_word": "We"
+              },
+              {
+                "word": "agreed",
+                "start": 0.517,
+                "end": 0.833,
+                "confidence": 0.98,
+                "punctuated_word": "agreed"
+              },
+              {
+                "word": "on",
+                "start": 0.833,
+                "end": 1.15,
+                "confidence": 0.97,
+                "punctuated_word": "on"
+              },
+              {
+                "word": "the",
+                "start": 1.15,
+                "end": 1.467,
+                "confidence": 0.99,
+                "punctuated_word": "the"
+              },
+              {
+                "word": "rollout",
+                "start": 1.467,
+                "end": 1.783,
+                "confidence": 0.96,
+                "punctuated_word": "rollout"
+              },
+              {
+                "word": "order",
+                "start": 1.783,
+                "end": 2.1,
+                "confidence": 0.95,
+                "punctuated_word": "order."
+              },
+              {
+                "word": "the",
+                "start": 2.4,
+                "end": 2.78,
+                "confidence": 0.99,
+                "punctuated_word": "The"
+              },
+              {
+                "word": "upload",
+                "start": 2.78,
+                "end": 3.16,
+                "confidence": 0.94,
+                "punctuated_word": "upload"
+              },
+              {
+                "word": "service",
+                "start": 3.16,
+                "end": 3.54,
+                "confidence": 0.93,
+                "punctuated_word": "service"
+              },
+              {
+                "word": "goes",
+                "start": 3.54,
+                "end": 3.92,
+                "confidence": 0.92,
+                "punctuated_word": "goes"
+              },
+              {
+                "word": "first",
+                "start": 3.92,
+                "end": 4.3,
+                "confidence": 0.97,
+                "punctuated_word": "first."
+              },
+              {
+                "word": "billing",
+                "start": 4.6,
+                "end": 5.06,
+                "confidence": 0.91,
+                "punctuated_word": "Billing"
+              },
+              {
+                "word": "follows",
+                "start": 5.06,
+                "end": 5.52,
+                "confidence": 0.9,
+                "punctuated_word": "follows"
+              },
+              {
+                "word": "a",
+                "start": 5.52,
+                "end": 5.98,
+                "confidence": 0.99,
+                "punctuated_word": "a"
+              },
+              {
+                "word": "week",
+                "start": 5.98,
+                "end": 6.44,
+                "confidence": 0.98,
+                "punctuated_word": "week"
+              },
+              {
+                "word": "later",
+                "start": 6.44,
+                "end": 6.9,
+                "confidence": 0.97,
+                "punctuated_word": "later."
+              },
+              {
+                "word": "who",
+                "start": 8.5,
+                "end": 8.875,
+                "confidence": 0.99,
+                "punctuated_word": "Who"
+              },
+              {
+                "word": "owns",
+                "start": 8.875,
+                "end": 9.25,
+                "confidence": 0.98,
+                "punctuated_word": "owns"
+              },
+              {
+                "word": "the",
+                "start": 9.25,
+                "end": 9.625,
+                "confidence": 0.99,
+                "punctuated_word": "the"
+              },
+              {
+                "word": "migration",
+                "start": 9.625,
+                "end": 10.0,
+                "confidence": 0.9,
+                "punctuated_word": "migration?"
+              },
+              {
+                "word": "i",
+                "start": 10.4,
+                "end": 10.7,
+                "confidence": 0.97,
+                "punctuated_word": "I"
+              },
+              {
+                "word": "will",
+                "start": 10.7,
+                "end": 11.0,
+                "confidence": 0.96,
+                "punctuated_word": "will"
+              },
+              {
+                "word": "take",
+                "start": 11.0,
+                "end": 11.3,
+                "confidence": 0.95,
+                "punctuated_word": "take"
+              },
+              {
+                "word": "it",
+                "start": 11.3,
+                "end": 11.6,
+                "confidence": 0.94,
+                "punctuated_word": "it."
+              }
+            ],
+            "paragraphs": {
+              "transcript": "We agreed on the rollout order. The upload service goes first. Billing follows a week later.\n\nWho owns the migration? I will take it.",
+              "paragraphs": [
+                {
+                  "start": 0.2,
+                  "end": 6.9,
+                  "num_words": 16,
+                  "sentences": [
+                    {
+                      "text": "We agreed on the rollout order.",
+                      "start": 0.2,
+                      "end": 2.1
+                    },
+                    {
+                      "text": "The upload service goes first.",
+                      "start": 2.4,
+                      "end": 4.3
+                    },
+                    {
+                      "text": "Billing follows a week later.",
+                      "start": 4.6,
+                      "end": 6.9
+                    }
+                  ]
+                },
+                {
+                  "start": 8.5,
+                  "end": 11.6,
+                  "num_words": 8,
+                  "sentences": [
+                    {
+                      "text": "Who owns the migration?",
+                      "start": 8.5,
+                      "end": 10.0
+                    },
+                    {
+                      "text": "I will take it.",
+                      "start": 10.4,
+                      "end": 11.6
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

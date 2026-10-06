@@ -1,6 +1,7 @@
 import {
   type NormalizeTranscriptInput,
   normalizeTranscriptArtifact,
+  type SttSpanGranularity,
   type SttTrack,
   type SttTranscript,
 } from '@rayspec/stt-port';
@@ -19,6 +20,9 @@ import {
  *   words[].{ word, punctuated_word, start, end, confidence, speaker? }
  *   paragraphs.paragraphs[].{ start, end, num_words, speaker?, sentences[].{ text, start, end } }
  *
+ * A segment is one paragraph by default and one sentence when the caller asks for sentence
+ * granularity (`DeepgramMapContext.span_granularity`); both are read from the same response.
+ *
  * Parsing is defensive (untrusted provider JSON): missing fields degrade honestly rather than invent
  * precision — an absent confidence maps to `null` (per the neutral contract's nullable confidence),
  * not a fabricated `0`. Provider-native field names never leak into the public transcript artifact.
@@ -33,6 +37,12 @@ export interface DeepgramMapContext {
   track: SttTrack;
   /** Neutral model label recorded as provenance (the resolved model the adapter used, e.g. `nova-2`). */
   model: string;
+  /**
+   * How large one segment (and so one span) is. Absent or `paragraph` ⇒ one per paragraph. `sentence`
+   * ⇒ one per sentence of each paragraph; a response without paragraphs has no sentences to read
+   * and keeps its pause-based segments under either value.
+   */
+  span_granularity?: SttSpanGranularity;
   /** Optional deterministic clock for tests; defaults to the normalizer's fixed timestamp. */
   now?: string;
 }
@@ -133,6 +143,59 @@ function segmentsFromParagraphs(
   return segments;
 }
 
+/** The number when the provider sent a finite one, otherwise `fallback` (`null` is not a zero). */
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/**
+ * Segments from the sentences of Deepgram paragraphs: one segment per sentence, in order across
+ * paragraphs, with the sentence's own text and bounds (the paragraph's bound where the sentence
+ * carries no finite one). A sentence without text is skipped — a span with nothing in it can back
+ * no claim. A paragraph left with no sentence at all contributes the one segment
+ * `segmentsFromParagraphs` builds for it, so no stretch of the recording loses its segment.
+ * Confidence comes from the same running word index as the paragraph mapping, bounded by each
+ * segment's end (the final segment absorbs the remainder).
+ */
+function segmentsFromSentences(
+  paragraphs: Array<Record<string, unknown>>,
+  rawWords: Array<Record<string, unknown>>,
+): NeutralSegment[] {
+  const pieces: Array<{ text: string; start: number; end: number }> = [];
+  for (const paragraph of paragraphs) {
+    const start = num(paragraph.start);
+    const end = num(paragraph.end);
+    const sentences = asArray(paragraph.sentences).map(asRecord);
+    const spoken = sentences.filter((sentence) => str(sentence.text).trim().length > 0);
+    if (spoken.length === 0) {
+      pieces.push({ text: sentences.map((sentence) => str(sentence.text)).join(' '), start, end });
+      continue;
+    }
+    for (const sentence of spoken) {
+      pieces.push({
+        text: str(sentence.text),
+        start: finiteOr(sentence.start, start),
+        end: finiteOr(sentence.end, end),
+      });
+    }
+  }
+  const segments: NeutralSegment[] = [];
+  let index = 0;
+  const last = pieces.length - 1;
+  pieces.forEach((piece, position) => {
+    const run: Array<Record<string, unknown>> = [];
+    while (
+      index < rawWords.length &&
+      (position === last || num(rawWords[index]?.start) < piece.end)
+    ) {
+      run.push(asRecord(rawWords[index]));
+      index += 1;
+    }
+    segments.push({ ...piece, confidence: meanConfidence(run) });
+  });
+  return segments;
+}
+
 /**
  * Segments from raw words when Deepgram returns no paragraphs: a new
  * segment starts whenever the gap between consecutive words exceeds `SEGMENT_GAP_SECONDS`.
@@ -216,8 +279,12 @@ export function mapDeepgramResponseToNeutralInput(
   }));
 
   const paragraphs = asArray(asRecord(alt.paragraphs).paragraphs).map(asRecord);
-  const segments =
-    paragraphs.length > 0
+  // Sentences exist only inside paragraphs, so the sentence mapping applies only when the response
+  // carries some; that is also the only case in which the transcript records the granularity.
+  const bySentence = ctx.span_granularity === 'sentence' && paragraphs.length > 0;
+  const segments = bySentence
+    ? segmentsFromSentences(paragraphs, rawWords)
+    : paragraphs.length > 0
       ? segmentsFromParagraphs(paragraphs, rawWords)
       : segmentsFromWords(rawWords);
 
@@ -235,6 +302,7 @@ export function mapDeepgramResponseToNeutralInput(
     provider_run_id: requestId,
     words,
     segments,
+    ...(bySentence ? { span_granularity: 'sentence' as const } : {}),
     now: ctx.now,
   };
 }

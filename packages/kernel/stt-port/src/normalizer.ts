@@ -1,4 +1,11 @@
-import type { SttSegment, SttTrack, SttTranscript, SttTranscriptSpan, SttWord } from './types.js';
+import type {
+  SttSegment,
+  SttSpanGranularity,
+  SttTrack,
+  SttTranscript,
+  SttTranscriptSpan,
+  SttWord,
+} from './types.js';
 
 export interface NormalizeTranscriptInput {
   session_id: string;
@@ -27,6 +34,11 @@ export interface NormalizeTranscriptInput {
     confidence?: number | null;
     speaker?: string | null;
   }>;
+  /**
+   * The granularity the caller cut `segments` at, when it is not the default. Carried to the
+   * transcript as given; absent here ⇒ absent there.
+   */
+  span_granularity?: SttSpanGranularity;
   now?: string;
 }
 
@@ -143,6 +155,7 @@ export function normalizeTranscriptArtifact(input: NormalizeTranscriptInput): St
     segments,
     words: wordsWithSegments,
     spans,
+    ...(input.span_granularity === undefined ? {} : { span_granularity: input.span_granularity }),
     created_at: now,
     updated_at: now,
   };

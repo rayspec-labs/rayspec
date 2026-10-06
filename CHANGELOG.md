@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sentence-sized transcript spans (`span_granularity` on the `stt` capability).** The Deepgram
+  adapter cut a transcript into one span per paragraph, so the sentences of a paragraph shared one
+  span id and several claims extracted from it cited the same id: a reader could not tell which
+  sentence backed which claim. A product document can now declare
+  `span_granularity: sentence` on its `stt` capability, beside `provider_policy`, and the adapter
+  emits one span per sentence of the provider's response, with the sentence's own text, start and
+  end. The setting is part of the document, so it is the same on every deployment of it and
+  travels in the bundle; `rayspec pack` and `rayspec bundle verify` accept it and derive the same
+  `requires`, `permissions` and `bindings` as without it. Values are `paragraph` and `sentence`;
+  another value is a `schema_violation`, and the key on a capability other than `stt` is refused
+  when the document is mounted. **The default does not change:** a document without the key, or
+  with `span_granularity: paragraph`, gets the spans, the span ids and the transcript rows it got
+  before, and the request sent to the provider is the same under both values. A response without
+  paragraphs carries no sentences and is cut at pauses under both values. The fake adapter
+  (`STT_PROVIDER=fake`) emits its fixtures' segments as written and ignores the key.
+  **Span ids differ between the two granularities.** An id keeps the form `<track>:s<index>`, and
+  the index counts paragraphs under `paragraph` and sentences under `sentence`, so `mic:s1` names
+  different text under each and evidence stored under one value does not match transcripts
+  produced under the other. Choose the value before a product stores evidence. Nothing is
+  migrated on a change: sessions that are not processed again stay consistent with themselves;
+  `POST /v1/sessions/{id}/reprocess` rewrites a session's transcript and artifact rows at the
+  current value; the rows a reprocess preserves (human-edited rows of a kind with
+  `preserve_human_edits`, dismissed rows, surplus rows of a kind without `reconcile_stale_rows`)
+  keep the citations of the earlier value and are not marked as such. A transcript row cut per
+  sentence carries `payload.span_granularity: sentence`, which a view can project; a
+  paragraph-granular row is unchanged and carries no such key. See
+  [`span_granularity` on `stt`](docs/spec-reference.md#span_granularity-on-stt).
+
 ### Fixed
 
 - **An audio session is marked `completed` once all its tracks are sealed.** The audio capability

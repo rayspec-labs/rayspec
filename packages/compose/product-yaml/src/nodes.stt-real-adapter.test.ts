@@ -18,14 +18,18 @@
  * reproduces the prod `stt_not_ready` failure; after the fix it completes. No live Deepgram key.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { DeepgramSttAdapter } from '@rayspec/adapter-deepgram';
 import { chunkKey } from '@rayspec/audio-runtime';
 import type {
+  ArtifactRef,
   CapabilityInvocationContext,
   WorkflowInputEvent,
   WorkflowSpec,
   WorkflowStepSpec,
 } from '@rayspec/foundation';
+import { InMemoryArtifactStore } from '@rayspec/grounding-runtime';
 import type { ProductSpec } from '@rayspec/spec';
 import {
   type SttFinalizedTrackRef,
@@ -34,9 +38,14 @@ import {
   type SttMediaSource,
 } from '@rayspec/stt-port';
 import { describe, expect, it, vi } from 'vitest';
-import { makeSttTranscribeSessionNode } from './nodes.js';
+import { sttSpanGranularity } from './capability-stores.js';
+import {
+  makeArtifactPersistNode,
+  makeGroundingPolicyNode,
+  makeSttTranscribeSessionNode,
+} from './nodes.js';
 import { FakeHandlerDb } from './test-support/fake-handler-db.js';
-import { parseFixture } from './test-support/fixture.js';
+import { NOTETOOL_YAML, parseFixture } from './test-support/fixture.js';
 
 const TENANT = 'tenant-a';
 const SESSION = 's1';
@@ -153,11 +162,14 @@ function event(): WorkflowInputEvent {
   };
 }
 
-function ctx(): CapabilityInvocationContext {
+function ctx(
+  step: WorkflowStepSpec = STT_STEP,
+  artifacts: ArtifactRef[] = [],
+): CapabilityInvocationContext {
   const ev = event();
   return {
     workflow: WORKFLOW,
-    step: STT_STEP,
+    step,
     input_event: ev,
     input: ev.payload,
     journal: {
@@ -172,7 +184,7 @@ function ctx(): CapabilityInvocationContext {
       created_at: '2026-07-02T00:00:00.000Z',
       updated_at: '2026-07-02T00:00:00.000Z',
     },
-    artifacts: [],
+    artifacts,
   };
 }
 
@@ -278,5 +290,191 @@ describe('STT node ↔ REAL DeepgramSttAdapter (chunk resolver, stubbed transpor
     expect(result.error?.code).toBe('stt_not_ready');
     expect(fetchImpl).not.toHaveBeenCalled(); // never reached the provider
     expect(db.rows('track_transcripts')).toHaveLength(0); // nothing persisted
+  });
+});
+
+// ── span granularity, from the document to the stored evidence ───────────────────────────────────
+
+/**
+ * A recorded-shape response with two paragraphs of three and two sentences (the provider adapter's
+ * own fixture, read as a file — this suite never imports the adapter's source).
+ */
+const MULTI_SENTENCE_JSON = readFileSync(
+  fileURLToPath(
+    new URL(
+      '../../../adapters/deepgram/src/fixtures/deepgram/multi-sentence-paragraphs.json',
+      import.meta.url,
+    ),
+  ),
+  'utf8',
+);
+
+const STT_CONTRACTS =
+  '    contracts: [stt.transcribe_session, stt.transcript, stt.transcript_span]\n';
+const SENTENCE_YAML = NOTETOOL_YAML.replace(
+  STT_CONTRACTS,
+  `${STT_CONTRACTS}    span_granularity: sentence\n`,
+);
+
+const GROUND_STEP: WorkflowStepSpec = {
+  id: 'ground',
+  capability: 'grounding',
+  operation: 'check',
+  depends_on: ['extract'],
+  input: { notes: 'notetool.notes', spans: 'stt.transcript_span' },
+  output_artifact_refs: ['grounding.result', 'notetool.notes'],
+};
+
+const PERSIST_STEP: WorkflowStepSpec = {
+  id: 'persist',
+  capability: 'artifact',
+  operation: 'persist',
+  depends_on: ['validate'],
+  input: { grounded_notes: 'notetool.notes' },
+  output_artifact_refs: ['artifact.handle'],
+};
+
+/** What an extractor returns when it draws two claims from two sentences of one paragraph. */
+function candidate(): ArtifactRef {
+  return {
+    id: 'agent_artifact:process_recording:extract:notetool.notes',
+    kind: 'notetool.notes',
+    source_node_id: 'extract',
+    value: {
+      ref: 'notetool.notes',
+      kind: 'notes_candidate',
+      schema_ref: 'notetool.notes',
+      materialization_target: 'typed_artifact_ref',
+      content: {
+        headline: 'Rollout',
+        body: 'The rollout order.',
+        findings: [
+          { text: 'The upload service goes first.', evidence: ['mic:s1'] },
+          { text: 'Billing follows a week later.', evidence: ['mic:s2'] },
+        ],
+      },
+    },
+  };
+}
+
+/**
+ * Transcribe (real adapter built from the document's setting, stubbed transport) → ground the
+ * candidate against the spans the node emitted → persist. Returns what a reader ends up with.
+ */
+async function runChain(yaml: string) {
+  const spec: ProductSpec = parseFixture(yaml);
+  const db = new FakeHandlerDb();
+  sealTrack(db, 'mic');
+  const blob = new Map<string, Uint8Array>([
+    [chunkKey(SESSION, 'mic', 0), new Uint8Array([0x4f, 0x67, 0x67, 0x53])],
+  ]);
+  const fetchImpl = vi.fn(async () => new Response(MULTI_SENTENCE_JSON, { status: 200 }));
+  const granularity = sttSpanGranularity(spec);
+  const adapter = new DeepgramSttAdapter({
+    resolver: new InMemoryChunkResolver(blob),
+    apiKey: 'test-key-not-a-real-secret',
+    env: {},
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    now: () => '2026-07-02T00:00:00.000Z',
+    ...(granularity === 'sentence' ? { spanGranularity: granularity } : {}),
+  });
+
+  const transcribed = await makeSttTranscribeSessionNode({
+    spec,
+    adapter,
+    db,
+    tenantId: TENANT,
+    transcriptStore: 'track_transcripts',
+  })(ctx());
+  if (transcribed.status !== 'completed') {
+    throw new Error(`STT node did not complete: ${transcribed.error?.message}`);
+  }
+  const sttArtifacts = transcribed.artifact_refs ?? [];
+  const spans = sttArtifacts.find((a) => a.kind === 'stt.transcript_span')?.value as Array<{
+    id: string;
+    text: string;
+  }>;
+
+  const grounded = await makeGroundingPolicyNode(spec)(
+    ctx(GROUND_STEP, [...sttArtifacts, candidate()]),
+  );
+  if (grounded.status !== 'completed') {
+    throw new Error(`grounding did not complete: ${grounded.error?.message}`);
+  }
+  const groundedDoc = grounded.artifact_refs?.find((a) => a.kind === 'notetool.notes');
+  if (!groundedDoc) throw new Error('grounding emitted no grounded document');
+
+  const persisted = await makeArtifactPersistNode({
+    spec,
+    db,
+    tenantId: TENANT,
+    collectionStores: new Map([['note_artifacts', { store: 'note_artifacts' }]]),
+    artifactStore: new InMemoryArtifactStore(),
+  })(ctx(PERSIST_STEP, [groundedDoc]));
+  if (persisted.status !== 'completed') {
+    throw new Error(`persist did not complete: ${persisted.error?.message}`);
+  }
+
+  const transcriptPayload = db.rows('track_transcripts')[0]?.payload as {
+    segments: Array<{ start: number; end: number; text: string }>;
+    span_granularity?: string;
+  };
+  const findings = db
+    .rows('note_artifacts')
+    .filter((r) => String(r.artifact_ref).includes(':finding:'))
+    .map((r) => r.payload as { text: string; evidence_span_ids: string[] });
+  return {
+    spans,
+    transcriptPayload,
+    findings,
+    summary: grounded.output as { pruned_citations: number; dropped_members: number },
+  };
+}
+
+describe('span granularity, from the document to the stored evidence', () => {
+  it('sentence: two claims from one paragraph keep two different citations', async () => {
+    const { spans, transcriptPayload, findings, summary } = await runChain(SENTENCE_YAML);
+
+    expect(spans.map((s) => s.id)).toEqual(['mic:s0', 'mic:s1', 'mic:s2', 'mic:s3', 'mic:s4']);
+    expect(summary).toMatchObject({ pruned_citations: 0, dropped_members: 0 });
+    expect(findings.map((f) => [f.text, f.evidence_span_ids])).toEqual([
+      ['The upload service goes first.', ['mic:s1']],
+      ['Billing follows a week later.', ['mic:s2']],
+    ]);
+
+    // The transcript row a reader resolves a citation against: `mic:s<N>` is `segments[N]`.
+    expect(transcriptPayload.segments).toEqual([
+      { start: 0.2, end: 2.1, text: 'We agreed on the rollout order.' },
+      { start: 2.4, end: 4.3, text: 'The upload service goes first.' },
+      { start: 4.6, end: 6.9, text: 'Billing follows a week later.' },
+      { start: 8.5, end: 10.0, text: 'Who owns the migration?' },
+      { start: 10.4, end: 11.6, text: 'I will take it.' },
+    ]);
+    for (const finding of findings) {
+      const index = Number(finding.evidence_span_ids[0]?.split(':s')[1]);
+      expect(transcriptPayload.segments[index]?.text).toBe(finding.text);
+      expect(spans[index]?.text).toBe(finding.text);
+    }
+    expect(transcriptPayload.span_granularity).toBe('sentence');
+  });
+
+  it('default: the same response has one span per paragraph, so the second citation is not in the set', async () => {
+    const { spans, transcriptPayload, findings, summary } = await runChain(NOTETOOL_YAML);
+
+    expect(spans.map((s) => s.id)).toEqual(['mic:s0', 'mic:s1']);
+    // `mic:s1` now names the whole second paragraph and `mic:s2` names nothing.
+    expect(summary).toMatchObject({ pruned_citations: 1, dropped_members: 1 });
+    expect(findings.map((f) => [f.text, f.evidence_span_ids])).toEqual([
+      ['The upload service goes first.', ['mic:s1']],
+    ]);
+    expect(transcriptPayload.segments).toEqual([
+      {
+        start: 0.2,
+        end: 6.9,
+        text: 'We agreed on the rollout order. The upload service goes first. Billing follows a week later.',
+      },
+      { start: 8.5, end: 11.6, text: 'Who owns the migration? I will take it.' },
+    ]);
+    expect(Object.keys(transcriptPayload)).toEqual(['confidence', 'duration', 'words', 'segments']);
   });
 });

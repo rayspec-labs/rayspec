@@ -264,6 +264,55 @@ describe('capabilities[].input_normalize.output_contract → resolve (dangling_r
   });
 });
 
+describe('capabilities[].span_granularity (closed value set, capability-level only)', () => {
+  const RUNTIME_NOTES =
+    '    runtime_notes: cap_a is a future Tier B capability (deepgram is a candidate adapter).\n';
+  const withGranularity = (value: string): string =>
+    BASE.replace(RUNTIME_NOTES, `${RUNTIME_NOTES}    span_granularity: ${value}\n`);
+
+  it('rejects a value outside paragraph | sentence (EXACTLY one schema_violation at the key)', () => {
+    for (const value of ['word', 'Sentence', 'sentences', '""', '1', 'true', '[sentence]']) {
+      expectExact(withGranularity(value), [
+        ['schema_violation', 'capabilities[0].span_granularity'],
+      ]);
+    }
+  });
+
+  it('names the two supported values in the refusal', () => {
+    const res = parseProductSpec(withGranularity('word'));
+    if (res.ok) throw new Error('an unknown granularity must be rejected');
+    expect(res.errors[0]?.message).toMatch(/paragraph/);
+    expect(res.errors[0]?.message).toMatch(/sentence/);
+  });
+
+  it('rejects the key on a workflow step (it is not a graph key)', () => {
+    expectExact(
+      BASE.replace(
+        '        use: cap_a.thing_ready\n',
+        (m) => `${m}        span_granularity: sentence\n`,
+      ),
+      [['unknown_field', 'workflows[0].steps[0].span_granularity']],
+    );
+  });
+
+  it('rejects the key inside provider_policy and on an extractor', () => {
+    expectExact(
+      BASE.replace(
+        '      adapter_visibility: internal\n',
+        (m) => `${m}      span_granularity: sentence\n`,
+      ),
+      [['unknown_field', 'capabilities[0].provider_policy.span_granularity']],
+    );
+    expectExact(
+      BASE.replace(
+        '    purpose: Extract demo intelligence from thing spans.\n',
+        (m) => `${m}    span_granularity: sentence\n`,
+      ),
+      [['unknown_field', 'extractors[0].span_granularity']],
+    );
+  });
+});
+
 describe('yaml_parse_error', () => {
   it('rejects non-YAML text', () => {
     expectExact('version: "1.0"\nproduct: { id: ', [['yaml_parse_error', undefined]]);

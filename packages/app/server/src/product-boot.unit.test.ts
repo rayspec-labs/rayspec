@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { OpenAIAdapter } from '@rayspec/adapter-openai';
 import type { PlannedMigration } from '@rayspec/api-auth';
+import { chunkKey } from '@rayspec/audio-runtime';
 import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -20,6 +21,7 @@ import {
   anthropicReuseLoginShadowWarning,
   assembleExtractionInstructions,
   buildLiveAgent,
+  buildProductSttAdapter,
   buildSttAdapter,
   type DestructiveTargetProbe,
   extractDestructiveTarget,
@@ -58,6 +60,26 @@ vi.mock('@openai/agents', async (importOriginal) => {
     setDefaultOpenAIKey: (...args: unknown[]) => openaiRegistration.setDefaultOpenAIKey(...args),
     setDefaultOpenAIClient: (...args: unknown[]) =>
       openaiRegistration.setDefaultOpenAIClient(...args),
+  };
+});
+
+/**
+ * The chunk remux the speech adapter's media resolver runs (ffmpeg), replaceable while a test sets
+ * `remux.override` — undefined ⇒ the real function, so nothing else in this file is affected. It lets
+ * the adapter built at boot be driven to a transcript without a media toolchain.
+ */
+const remux = vi.hoisted(() => ({
+  override: undefined as
+    | undefined
+    | ((chunks: Uint8Array[]) => Promise<{ bytes: Uint8Array; cleanup: () => Promise<void> }>),
+}));
+
+vi.mock('@rayspec/audio-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@rayspec/audio-runtime')>();
+  return {
+    ...actual,
+    remuxChunks: (...args: Parameters<typeof actual.remuxChunks>) =>
+      remux.override ? remux.override(args[0] as Uint8Array[]) : actual.remuxChunks(...args),
   };
 });
 
@@ -101,6 +123,132 @@ describe('buildSttAdapter (fail-closed)', () => {
   });
   it('builds the fake adapter for STT_PROVIDER=fake', () => {
     expect(buildSttAdapter({ STT_PROVIDER: 'fake' }, fakeBlob, undefined).kind).toBe('fake');
+  });
+});
+
+describe('the span granularity a product document declares reaches the speech adapter', () => {
+  const MULTI_SENTENCE = readFileSync(
+    resolve(
+      here,
+      '../../../adapters/deepgram/src/fixtures/deepgram/multi-sentence-paragraphs.json',
+    ),
+    'utf8',
+  );
+  const STT_CONTRACT = '      - stt.transcript_span\n';
+  const DEEPGRAM_ENV = { STT_PROVIDER: 'deepgram', DEEPGRAM_API_KEY: 'test-key-not-a-real-secret' };
+
+  /** A blob store holding one chunk of one track — enough for the resolver to produce bytes. */
+  const oneChunkBlob = {
+    get: async (key: string) =>
+      key === chunkKey('s1', 'mic', 0)
+        ? { body: new Uint8Array([0x4f, 0x67, 0x67, 0x53]) }
+        : { notFound: true },
+  } as never;
+
+  function specWith(granularity?: string): ProductSpec {
+    const text = readFileSync(ACME_YAML, 'utf8');
+    if (granularity === undefined) return acmeSpec();
+    const declared = text.replace(
+      STT_CONTRACT,
+      `${STT_CONTRACT}    span_granularity: ${granularity}\n`,
+    );
+    expect(declared).not.toBe(text);
+    const parsed = parseProductSpec(declared);
+    if (!parsed.ok) throw new Error(`must parse: ${JSON.stringify(parsed.errors)}`);
+    return parsed.value;
+  }
+
+  /** Transcribe one track through `adapter` against a provider stub; returns spans + request URLs. */
+  async function transcribe(build: () => ReturnType<typeof buildSttAdapter>) {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return new Response(MULTI_SENTENCE, { status: 200 });
+      }),
+    );
+    remux.override = async (chunks) => ({
+      bytes: chunks[0] as Uint8Array,
+      cleanup: async () => {},
+    });
+    try {
+      // The adapter binds `fetch` when it is constructed, so it is built under the stub.
+      const [result] = await build().transcribeSession({
+        session_id: 's1',
+        tracks: [{ session_id: 's1', track: 'mic' }],
+      });
+      if (result?.status !== 'completed') {
+        throw new Error(`expected a completed transcript: ${JSON.stringify(result?.error)}`);
+      }
+      return { transcript: result.transcript, urls };
+    } finally {
+      remux.override = undefined;
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it('buildSttAdapter: sentence ⇒ one span per sentence; paragraph or nothing ⇒ one per paragraph', async () => {
+    const sentence = await transcribe(() =>
+      buildSttAdapter(DEEPGRAM_ENV, oneChunkBlob, undefined, 'sentence'),
+    );
+    expect(sentence.transcript.spans.map((s) => [s.id, s.text])).toEqual([
+      ['mic:s0', 'We agreed on the rollout order.'],
+      ['mic:s1', 'The upload service goes first.'],
+      ['mic:s2', 'Billing follows a week later.'],
+      ['mic:s3', 'Who owns the migration?'],
+      ['mic:s4', 'I will take it.'],
+    ]);
+    expect(sentence.transcript.span_granularity).toBe('sentence');
+
+    const paragraph = await transcribe(() =>
+      buildSttAdapter(DEEPGRAM_ENV, oneChunkBlob, undefined, 'paragraph'),
+    );
+    const unset = await transcribe(() => buildSttAdapter(DEEPGRAM_ENV, oneChunkBlob, undefined));
+    for (const run of [paragraph, unset]) {
+      expect(run.transcript.spans.map((s) => s.id)).toEqual(['mic:s0', 'mic:s1']);
+      expect('span_granularity' in run.transcript).toBe(false);
+      // The request does not depend on the granularity.
+      expect(run.urls).toEqual(sentence.urls);
+    }
+  });
+
+  it('buildProductSttAdapter reads the granularity from the stt capability of the document', async () => {
+    const declared = await transcribe(() =>
+      buildProductSttAdapter(DEEPGRAM_ENV, oneChunkBlob, specWith('sentence')),
+    );
+    expect(declared.transcript.spans.map((s) => s.id)).toEqual([
+      'mic:s0',
+      'mic:s1',
+      'mic:s2',
+      'mic:s3',
+      'mic:s4',
+    ]);
+
+    for (const spec of [specWith(), specWith('paragraph')]) {
+      const run = await transcribe(() => buildProductSttAdapter(DEEPGRAM_ENV, oneChunkBlob, spec));
+      expect(run.transcript.spans.map((s) => s.id)).toEqual(['mic:s0', 'mic:s1']);
+    }
+  });
+
+  it('buildProductSttAdapter still takes the model from deployment_overrides', async () => {
+    // acme-notes pins deepgram's default_model; the granularity rides beside it, not instead of it.
+    const run = await transcribe(() =>
+      buildProductSttAdapter(DEEPGRAM_ENV, oneChunkBlob, specWith('sentence')),
+    );
+    const model = acmeSpec().deployment_overrides?.providers?.deepgram?.default_model;
+    expect(typeof model).toBe('string');
+    expect(new URL(run.urls[0] as string).searchParams.get('model')).toBe(model);
+    expect(run.transcript.model).toBe(model);
+  });
+
+  it('sentence granularity does not stop a keyless boot: the fake adapter is built as before', () => {
+    const adapter = buildProductSttAdapter(
+      { STT_PROVIDER: 'fake' },
+      fakeBlob,
+      specWith('sentence'),
+    );
+    expect(adapter.kind).toBe('fake');
   });
 });
 

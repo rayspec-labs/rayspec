@@ -2250,7 +2250,95 @@ The wired capability ids are `audio_input`, `media_playback`, `record_input`,
     default `[]`.
   - `provider_policy` — optional declarative provider/model selection
     (`default_provider`, `default_model`, `adapter_visibility`).
+  - `span_granularity` — optional, `paragraph` or `sentence`, on the `stt`
+    capability only: how large one transcript span is. See
+    [`span_granularity` on `stt`](#span_granularity-on-stt).
   - `runtime_notes` — optional non-normative string.
+
+### `span_granularity` on `stt`
+
+A transcript is cut into **spans**, and a grounded claim cites spans by id. The
+`stt` capability decides how large a span is:
+
+```yaml
+capabilities:
+  - id: stt
+    tier: B
+    status: available
+    contracts: [stt.transcribe_session, stt.transcript, stt.transcript_span]
+    span_granularity: sentence      # paragraph (default) | sentence
+```
+
+- `paragraph` — the default, and what a document without the key gets: one span
+  per paragraph of a track's transcript. Several sentences share one span, so
+  two claims drawn from the same paragraph cite the same id.
+- `sentence` — one span per sentence. Each claim can cite the sentence that
+  backs it.
+
+Any other value is a `schema_violation` at validation. The key belongs to the
+`stt` capability: on another capability it is refused when the document is
+mounted, and inside `provider_policy`, a workflow step or an extractor it is an
+`unknown_field`. It is part of the document, not of the environment, so the
+span size is the same wherever the document is deployed and travels with it in
+a bundle. It derives no manifest field: `rayspec pack` and `rayspec bundle
+verify` report the same `requires`, `permissions` and `bindings` with and
+without it.
+
+**What a span id names.** A span id has the form `<track>:s<index>` under both
+values, and `<track>:s<N>` is entry `N` of that track's `segments[]` in the
+transcript row. Under `paragraph` the index counts paragraphs; under `sentence`
+it counts sentences. **The same id therefore names different text under the two
+values**: `mic:s1` is the second paragraph of the microphone track under one and
+its second sentence under the other. Ids written under one value do not match
+transcripts produced under the other.
+
+**What `sentence` changes.** The transcript row's `segments[]` holds one entry
+per sentence (more, shorter entries), the span set an extractor reads and the
+grounding gate checks holds one span per sentence, and `evidence_span_ids` on
+the persisted rows are sentence ids. The transcript text, the words, the
+language, the confidence and the request sent to the speech provider are the
+same under both values.
+
+**When the provider returns no paragraphs.** Sentences are read from the
+paragraphs of the provider's response. A response without paragraphs has no
+sentences either, and its transcript is cut at pauses longer than one second
+under both values. A paragraph that lists no sentence stays one span, and a
+sentence without text is skipped.
+
+**Which adapter honours it.** The Deepgram adapter the deployment constructs
+(`STT_PROVIDER=deepgram`). The fake adapter (`STT_PROVIDER=fake`) emits the
+segments of its fixtures as they are written, one span each, whatever the key
+says. An adapter the embedding application supplies owns its own segmentation.
+
+**Choose the value before the product stores evidence.** Nothing is migrated
+when the value changes:
+
+- A session processed entirely under one value is consistent: one workflow run
+  writes the transcript row and the artifact rows together. Sessions that are
+  not processed again keep their old transcript and their old citations, which
+  still agree with each other.
+- `POST /v1/sessions/{id}/reprocess` brings a session to the current value: the
+  transcript row is rewritten with the new segments and the artifact rows with
+  ids of the new granularity.
+- **The rows a reprocess preserves keep their old citations.** A human-edited
+  row of a kind with `preserve_human_edits`, a dismissed row, and a surplus row
+  of a kind without `reconcile_stale_rows` are not rewritten. Their
+  `evidence_span_ids` were written under the earlier value while `segments[]`
+  now holds the new one, so such an id points at different text, or at no
+  segment. Artifact rows carry no record of the granularity their citations
+  were written under, so a reader cannot detect this from the row; review those
+  rows after a change.
+- An export carries transcript rows and artifact rows as they are, so an
+  imported environment is as consistent as its source.
+
+**Telling the two apart in a transcript row.** A transcript cut per sentence
+records it: its row carries `payload.span_granularity: sentence`. A
+paragraph-granular row carries no such key. A view can serve it, with the
+default filling in for rows without the key:
+
+```yaml
+span_granularity: { kind: json, column: payload, path: [span_granularity], type: string, default: paragraph }
+```
 
 ### `input_normalize` on `record_input`
 

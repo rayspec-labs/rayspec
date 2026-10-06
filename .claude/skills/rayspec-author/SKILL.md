@@ -1910,6 +1910,7 @@ offending key/value is a `no_code_in_yaml` / `provider_native_leak` / `invalid_c
   status: available | reserved | not_yet_runtime   # doctor/plan accept all three; a MOUNT needs `available` + runtime-backed.
   contracts: [<contract id>, ...]                   # named I/O contracts the capability provides.
   provider_policy: { default_provider?, default_model?, adapter_visibility? }   # OPTIONAL — the ONE legal policy slot besides deployment_overrides.
+  span_granularity: paragraph | sentence   # OPTIONAL, `stt` ONLY — the size of one transcript span (absent ⇒ paragraph).
   runtime_notes: <string>   # OPTIONAL non-normative note (may mention providers — it is NOT the executable graph).
 ```
 **Runtime-backed capability ids (mount when declared `status: available`):** `record_input` (the generic
@@ -1933,6 +1934,24 @@ client), and is **idempotent** on the canonical payload hash (a retry converges;
 re-normalizes). It requires a wired `record/<agent>.normalizer.json` config (path-jailed + validated) —
 declaring `input_normalize` without it fails closed at deploy. A `record_input` without it is byte-identical.
 
+**Optional `span_granularity` on `stt`** — how large one transcript span is, i.e. what a citation names.
+`paragraph` (the default; absent ⇒ paragraph) gives one span per paragraph of a track, so several claims
+drawn from one paragraph cite the SAME id. `sentence` gives one span per sentence — choose it when the
+product shows a reader which sentence backs which claim, or when its recordings are short turns that
+would otherwise collapse into a few paragraph spans. Span ids are `<track>:s<index>` under both, and
+`<track>:s<N>` is `segments[N]` of that track's transcript row; the index counts paragraphs under one
+value and sentences under the other, so **ids written under one value do not match transcripts produced
+under the other**. **Choose before the product stores evidence.** After a change, reprocess stored
+sessions (`POST /v1/sessions/{id}/reprocess`); human-edited and dismissed rows (and surplus rows of a
+kind without `reconcile_stale_rows`) keep citations of the earlier value. A sentence-granular transcript
+row carries `payload.span_granularity: sentence` (a paragraph-granular one has no such key) — project it
+with `{ kind: json, column: payload, path: [span_granularity], type: string, default: paragraph }` when
+a reader needs to know. Rules: any other value is a `schema_violation`; on a capability other than `stt`
+the mount refuses it; inside `provider_policy`, a workflow step or an extractor it is an `unknown_field`.
+It is honoured by the Deepgram adapter (`STT_PROVIDER=deepgram`); the fake adapter emits its fixtures'
+segments as written, so a fixture for a sentence-granular product holds one segment per sentence. A
+provider response without paragraphs is cut at pauses under both values.
+
 ### `artifacts[]` — product-owned meaning + output contract
 
 ```yaml
@@ -1941,7 +1960,9 @@ declaring `input_normalize` without it fails closed at deploy. A `record_input` 
   contract: <contract id>   # REQUIRED — the payload contract (resolved against `contracts`).
   scope: <string>           # OPTIONAL — object scope (e.g. `session`).
   collection: <string>      # OPTIONAL — the collection store the kind materializes into.
-  provenance: { source?, evidence_field?, required? }        # OPTIONAL — evidence/span provenance.
+  provenance: { source?, evidence_field?, required? }        # OPTIONAL — evidence/span provenance. The ids in
+                                                              #   `evidence_field` are span ids; their size is
+                                                              #   `capabilities[stt].span_granularity`.
   lifecycle: { persist?, preserve_human_edits?, reconcile_stale_rows? }   # OPTIONAL — persistence policy.
 ```
 > Every persisted artifact kind (`lifecycle.persist` not false) must share ONE `scope` — a multi-scope

@@ -121,6 +121,7 @@ export interface ProductYamlBridgeInput {
     status?: string;
     contracts?: string[];
     provider_policy?: unknown;
+    span_granularity?: unknown;
   }>;
   // The product profile's `extractors` section (renamed from `agents`). Each declaration compiles to a
   // runtime `agent.<id>` operation — the element type stays `ProductYamlAgentDeclaration` (it IS the

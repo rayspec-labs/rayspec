@@ -123,6 +123,7 @@ import {
   makeLiveTurnResponder,
   type ProductYamlRollout,
   recordInputNormalize,
+  sttSpanGranularity,
 } from '@rayspec/product-yaml';
 import {
   assertProductScope,
@@ -142,6 +143,7 @@ import {
   SttMediaResolutionError,
   type SttMediaResolver,
   type SttMediaSource,
+  type SttSpanGranularity,
 } from '@rayspec/stt-port';
 import type { PgTable } from 'drizzle-orm/pg-core';
 // The environment demands this boot raises, from the one module that states them — each `requireEnv`
@@ -806,8 +808,11 @@ export function buildSttAdapter(
   env: NodeJS.ProcessEnv,
   blob: ReturnType<BlobStoreFactory>,
   defaultModel: string | undefined,
+  spanGranularity: SttSpanGranularity = 'paragraph',
 ): SttAdapter {
   const selected = selectSttProvider(env);
+  // The fake adapter emits a fixture's segments as written, one span each: the granularity of a
+  // keyless run is whatever its fixtures hold, so the setting has nothing to configure here.
   if (selected.provider === 'fake') return new FakeSttAdapter({ fixtures: [] });
   // The execution policy's provider-call timeout bounds every transcription request.
   const timeoutMs = resolveAgentRequestTimeoutMs(env);
@@ -815,8 +820,30 @@ export function buildSttAdapter(
     apiKey: selected.apiKey,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
     ...(defaultModel ? { model: defaultModel } : {}),
+    // Passed only when the document asks for sentences: a document that does not declare the
+    // setting constructs the adapter with exactly the options it always got.
+    ...(spanGranularity === 'sentence' ? { spanGranularity } : {}),
     resolver: new BlobRemuxSttMediaResolver(blob),
   });
+}
+
+/**
+ * The speech adapter for one product document: the provider and its credential come from the
+ * environment, the default model from `deployment_overrides`, and the size of a transcript span
+ * from the `stt` capability's `span_granularity` — the document decides what a citation names, so
+ * it is the same wherever the document is deployed.
+ */
+export function buildProductSttAdapter(
+  env: NodeJS.ProcessEnv,
+  blob: ReturnType<BlobStoreFactory>,
+  spec: ProductSpec,
+): SttAdapter {
+  return buildSttAdapter(
+    env,
+    blob,
+    providerDefaultModel(spec, 'deepgram'),
+    sttSpanGranularity(spec),
+  );
 }
 
 // ── the LIVE extraction executor (env `live`) ──────────────────────────────────────────────────
@@ -2939,7 +2966,7 @@ async function buildProductYamlParts(db: Db, config: ServerConfig, opts: DeployP
     if (opts.sttAdapter) {
       stt = opts.sttAdapter;
     } else if (blobFactory) {
-      stt = buildSttAdapter(env, blobFactory(tenantId), providerDefaultModel(spec, 'deepgram'));
+      stt = buildProductSttAdapter(env, blobFactory(tenantId), spec);
     }
   }
 

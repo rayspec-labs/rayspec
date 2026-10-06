@@ -534,6 +534,59 @@ describe('composeProductDeploy — partial-unlock honesty (fail-closed, section 
   });
 });
 
+describe('composeProductDeploy — span_granularity is an stt setting', () => {
+  const STT_CONTRACTS =
+    '    contracts: [stt.transcribe_session, stt.transcript, stt.transcript_span]\n';
+
+  it('composes a document that declares it on the stt capability, for either value', () => {
+    for (const value of ['sentence', 'paragraph']) {
+      const yaml = NOTETOOL_YAML.replace(
+        STT_CONTRACTS,
+        `${STT_CONTRACTS}    span_granularity: ${value}\n`,
+      );
+      expect(yaml).not.toBe(NOTETOOL_YAML);
+      const composed = composeProductDeploy(parseFixture(yaml), rollout());
+      expect([...composed.workflows.keys()]).toEqual(['process_recording']);
+    }
+  });
+
+  it('rejects it on any other capability, naming the capability and the key', () => {
+    const GROUNDING_CAPABILITY = '  - id: grounding\n    tier: B\n    status: available\n';
+    const yaml = NOTETOOL_YAML.replace(
+      GROUNDING_CAPABILITY,
+      `${GROUNDING_CAPABILITY}    span_granularity: sentence\n`,
+    );
+    expect(yaml).not.toBe(NOTETOOL_YAML);
+    let thrown: unknown;
+    try {
+      composeProductDeploy(parseFixture(yaml), rollout());
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(ProductComposeError);
+    expect((thrown as ProductComposeError).step).toBe('unsupported_spec');
+    expect((thrown as ProductComposeError).message).toBe(
+      "capability 'grounding' declares 'span_granularity', but transcript span granularity is " +
+        "only wired for the 'stt' capability in this composition — remove it (or declare it on stt).",
+    );
+  });
+
+  it('rejects the default value on another capability too (a declaration is never ignored)', () => {
+    const AUDIO_CONTRACTS = '    contracts: [audio_input.finalized_session]\n';
+    const yaml = NOTETOOL_YAML.replace(
+      AUDIO_CONTRACTS,
+      `${AUDIO_CONTRACTS}    span_granularity: paragraph\n`,
+    );
+    expect(yaml).not.toBe(NOTETOOL_YAML);
+    expectReject(
+      yaml,
+      rollout(),
+      'unsupported_spec',
+      /capability 'audio_input' declares 'span_granularity'/,
+    );
+  });
+});
+
 describe('composeProductDeploy — the trigger-event vocabulary', () => {
   it('builds the capability inventory events from the MOUNTED descriptors (no hardcode)', () => {
     const composed = composeProductDeploy(parseFixture(), rollout());

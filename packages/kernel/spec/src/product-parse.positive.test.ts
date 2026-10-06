@@ -110,6 +110,39 @@ deployment_overrides:
     expect(res.value.capabilities[0]?.provider_policy?.default_provider).toBe('deepgram');
   });
 
+  it('accepts span_granularity on a capability, beside provider_policy', () => {
+    const doc = (line: string) => `
+version: "1.0"
+product:
+  id: p
+  name: P
+capabilities:
+  - id: stt
+    tier: B
+    status: reserved
+    contracts: [stt.transcribe]
+    provider_policy:
+      default_provider: deepgram
+${line}`;
+    for (const value of ['sentence', 'paragraph'] as const) {
+      const res = parseProductSpec(doc(`    span_granularity: ${value}\n`));
+      if (!res.ok)
+        throw new Error(`span_granularity must parse:\n${JSON.stringify(res.errors, null, 2)}`);
+      expect(res.value.capabilities[0]?.span_granularity).toBe(value);
+    }
+    // No default is filled in: a document that does not use the key parses to a capability without it.
+    const absent = parseProductSpec(doc(''));
+    if (!absent.ok) throw new Error('the document without the key must parse');
+    expect('span_granularity' in (absent.value.capabilities[0] ?? {})).toBe(false);
+    expect(Object.keys(absent.value.capabilities[0] ?? {})).toEqual([
+      'id',
+      'tier',
+      'status',
+      'contracts',
+      'provider_policy',
+    ]);
+  });
+
   it('accepts a contract PROPERTY legitimately named `code` (contracts are excluded from the code-key ban)', () => {
     const yaml = `
 version: "1.0"

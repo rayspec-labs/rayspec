@@ -10,6 +10,7 @@ export {
   declaresFileInput,
   declaresRecordInput,
   recordInputNormalize,
+  sttSpanGranularity,
 } from './capability-stores.js';
 export {
   type ComposedProductDeploy,
