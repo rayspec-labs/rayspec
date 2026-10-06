@@ -361,7 +361,9 @@ finalized event would deduplicate to the original run and do nothing). A
 user-dismissed collection row is preserved across the rebuild — a reprocess never
 resurrects a dismissed artifact (human-edited rows are likewise spared). A
 foreign or absent session id returns `404`; a deployment with no reprocessor wired
-returns `501`.
+returns `501`. A reprocess also re-cuts the transcript at the document's current
+[`span_granularity`](./spec-reference.md#span_granularity-on-stt); the rows it
+preserves keep the citations they had.
 
 ---
 

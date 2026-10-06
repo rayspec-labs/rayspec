@@ -1,0 +1,359 @@
+{
+  "transcript_id": "stt.transcript.dg-sess.mic",
+  "session_id": "dg-sess",
+  "track": "mic",
+  "status": "completed",
+  "full_text": "We agreed on the rollout order. The upload service goes first. Billing follows a week later. Who owns the migration? I will take it.",
+  "language": "en",
+  "confidence": 0.962,
+  "duration_seconds": 12.4,
+  "model": "nova-2",
+  "provider": "deepgram",
+  "provider_run_id": "00000000-0000-4000-8000-000000000007",
+  "segments": [
+    {
+      "id": "stt.segment.dg-sess.mic.0000",
+      "start": 0.2,
+      "end": 6.9,
+      "text": "We agreed on the rollout order. The upload service goes first. Billing follows a week later.",
+      "confidence": 0.9587500000000001,
+      "speaker": null,
+      "word_ids": [
+        "stt.word.dg-sess.mic.0000",
+        "stt.word.dg-sess.mic.0001",
+        "stt.word.dg-sess.mic.0002",
+        "stt.word.dg-sess.mic.0003",
+        "stt.word.dg-sess.mic.0004",
+        "stt.word.dg-sess.mic.0005",
+        "stt.word.dg-sess.mic.0006",
+        "stt.word.dg-sess.mic.0007",
+        "stt.word.dg-sess.mic.0008",
+        "stt.word.dg-sess.mic.0009",
+        "stt.word.dg-sess.mic.0010",
+        "stt.word.dg-sess.mic.0011",
+        "stt.word.dg-sess.mic.0012",
+        "stt.word.dg-sess.mic.0013",
+        "stt.word.dg-sess.mic.0014",
+        "stt.word.dg-sess.mic.0015"
+      ]
+    },
+    {
+      "id": "stt.segment.dg-sess.mic.0001",
+      "start": 8.5,
+      "end": 11.6,
+      "text": "Who owns the migration? I will take it.",
+      "confidence": 0.96,
+      "speaker": null,
+      "word_ids": [
+        "stt.word.dg-sess.mic.0016",
+        "stt.word.dg-sess.mic.0017",
+        "stt.word.dg-sess.mic.0018",
+        "stt.word.dg-sess.mic.0019",
+        "stt.word.dg-sess.mic.0020",
+        "stt.word.dg-sess.mic.0021",
+        "stt.word.dg-sess.mic.0022",
+        "stt.word.dg-sess.mic.0023"
+      ]
+    }
+  ],
+  "words": [
+    {
+      "id": "stt.word.dg-sess.mic.0000",
+      "text": "we",
+      "punctuated_text": "We",
+      "start": 0.2,
+      "end": 0.517,
+      "confidence": 0.99,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0001",
+      "text": "agreed",
+      "punctuated_text": "agreed",
+      "start": 0.517,
+      "end": 0.833,
+      "confidence": 0.98,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0002",
+      "text": "on",
+      "punctuated_text": "on",
+      "start": 0.833,
+      "end": 1.15,
+      "confidence": 0.97,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0003",
+      "text": "the",
+      "punctuated_text": "the",
+      "start": 1.15,
+      "end": 1.467,
+      "confidence": 0.99,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0004",
+      "text": "rollout",
+      "punctuated_text": "rollout",
+      "start": 1.467,
+      "end": 1.783,
+      "confidence": 0.96,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0005",
+      "text": "order",
+      "punctuated_text": "order.",
+      "start": 1.783,
+      "end": 2.1,
+      "confidence": 0.95,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0006",
+      "text": "the",
+      "punctuated_text": "The",
+      "start": 2.4,
+      "end": 2.78,
+      "confidence": 0.99,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0007",
+      "text": "upload",
+      "punctuated_text": "upload",
+      "start": 2.78,
+      "end": 3.16,
+      "confidence": 0.94,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0008",
+      "text": "service",
+      "punctuated_text": "service",
+      "start": 3.16,
+      "end": 3.54,
+      "confidence": 0.93,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0009",
+      "text": "goes",
+      "punctuated_text": "goes",
+      "start": 3.54,
+      "end": 3.92,
+      "confidence": 0.92,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0010",
+      "text": "first",
+      "punctuated_text": "first.",
+      "start": 3.92,
+      "end": 4.3,
+      "confidence": 0.97,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0011",
+      "text": "billing",
+      "punctuated_text": "Billing",
+      "start": 4.6,
+      "end": 5.06,
+      "confidence": 0.91,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0012",
+      "text": "follows",
+      "punctuated_text": "follows",
+      "start": 5.06,
+      "end": 5.52,
+      "confidence": 0.9,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0013",
+      "text": "a",
+      "punctuated_text": "a",
+      "start": 5.52,
+      "end": 5.98,
+      "confidence": 0.99,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0014",
+      "text": "week",
+      "punctuated_text": "week",
+      "start": 5.98,
+      "end": 6.44,
+      "confidence": 0.98,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0015",
+      "text": "later",
+      "punctuated_text": "later.",
+      "start": 6.44,
+      "end": 6.9,
+      "confidence": 0.97,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0000"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0016",
+      "text": "who",
+      "punctuated_text": "Who",
+      "start": 8.5,
+      "end": 8.875,
+      "confidence": 0.99,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0017",
+      "text": "owns",
+      "punctuated_text": "owns",
+      "start": 8.875,
+      "end": 9.25,
+      "confidence": 0.98,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0018",
+      "text": "the",
+      "punctuated_text": "the",
+      "start": 9.25,
+      "end": 9.625,
+      "confidence": 0.99,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0019",
+      "text": "migration",
+      "punctuated_text": "migration?",
+      "start": 9.625,
+      "end": 10,
+      "confidence": 0.9,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0020",
+      "text": "i",
+      "punctuated_text": "I",
+      "start": 10.4,
+      "end": 10.7,
+      "confidence": 0.97,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0021",
+      "text": "will",
+      "punctuated_text": "will",
+      "start": 10.7,
+      "end": 11,
+      "confidence": 0.96,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0022",
+      "text": "take",
+      "punctuated_text": "take",
+      "start": 11,
+      "end": 11.3,
+      "confidence": 0.95,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    },
+    {
+      "id": "stt.word.dg-sess.mic.0023",
+      "text": "it",
+      "punctuated_text": "it.",
+      "start": 11.3,
+      "end": 11.6,
+      "confidence": 0.94,
+      "speaker": null,
+      "segment_id": "stt.segment.dg-sess.mic.0001"
+    }
+  ],
+  "spans": [
+    {
+      "id": "mic:s0",
+      "transcript_id": "stt.transcript.dg-sess.mic",
+      "session_id": "dg-sess",
+      "track": "mic",
+      "speaker_role": "local",
+      "start": 0.2,
+      "end": 6.9,
+      "text": "We agreed on the rollout order. The upload service goes first. Billing follows a week later.",
+      "segment_ids": [
+        "stt.segment.dg-sess.mic.0000"
+      ],
+      "word_ids": [
+        "stt.word.dg-sess.mic.0000",
+        "stt.word.dg-sess.mic.0001",
+        "stt.word.dg-sess.mic.0002",
+        "stt.word.dg-sess.mic.0003",
+        "stt.word.dg-sess.mic.0004",
+        "stt.word.dg-sess.mic.0005",
+        "stt.word.dg-sess.mic.0006",
+        "stt.word.dg-sess.mic.0007",
+        "stt.word.dg-sess.mic.0008",
+        "stt.word.dg-sess.mic.0009",
+        "stt.word.dg-sess.mic.0010",
+        "stt.word.dg-sess.mic.0011",
+        "stt.word.dg-sess.mic.0012",
+        "stt.word.dg-sess.mic.0013",
+        "stt.word.dg-sess.mic.0014",
+        "stt.word.dg-sess.mic.0015"
+      ]
+    },
+    {
+      "id": "mic:s1",
+      "transcript_id": "stt.transcript.dg-sess.mic",
+      "session_id": "dg-sess",
+      "track": "mic",
+      "speaker_role": "local",
+      "start": 8.5,
+      "end": 11.6,
+      "text": "Who owns the migration? I will take it.",
+      "segment_ids": [
+        "stt.segment.dg-sess.mic.0001"
+      ],
+      "word_ids": [
+        "stt.word.dg-sess.mic.0016",
+        "stt.word.dg-sess.mic.0017",
+        "stt.word.dg-sess.mic.0018",
+        "stt.word.dg-sess.mic.0019",
+        "stt.word.dg-sess.mic.0020",
+        "stt.word.dg-sess.mic.0021",
+        "stt.word.dg-sess.mic.0022",
+        "stt.word.dg-sess.mic.0023"
+      ]
+    }
+  ],
+  "created_at": "2026-07-02T00:00:00.000Z",
+  "updated_at": "2026-07-02T00:00:00.000Z"
+}

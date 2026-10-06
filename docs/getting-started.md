@@ -507,6 +507,41 @@ OPENAI_API_KEY=sk-placeholder \
 $RAYSPEC deploy examples/acme-notes/acme-notes.product.yaml --port 8080
 ```
 
+That boot serves the product, and a recording uploaded to it starts its workflow, which
+then stops at transcription (see [below](#where-the-recipe-above-stops)). To run a
+recording **all the way through with no provider key** — transcribe, extract, ground,
+persist and read back — boot the keyless variant instead:
+
+```bash
+RAYSPEC_PRODUCT_TENANT_ID=<ORG_ID> \
+RAYSPEC_BLOB_ROOT=/tmp/rayspec-blobs \
+STT_PROVIDER=fake \
+RAYSPEC_STT_FAKE_FIXTURES=examples/acme-notes/stt-fixtures \
+RAYSPEC_EXTRACTION_MODE=deterministic \
+RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true \
+$RAYSPEC deploy examples/acme-notes/acme-notes.product.yaml --port 8080
+```
+
+Three settings make it keyless, and no file of the example changes:
+
+- `RAYSPEC_STT_FAKE_FIXTURES` is a directory of transcript fixtures the fake adapter
+  answers recordings from. The example ships one, `stt-fixtures/default.json`, whose
+  `"session_id": "*"` answers a recording under any session id.
+- `RAYSPEC_EXTRACTION_MODE=deterministic` runs the deterministic extraction provider,
+  which reads labelled lines (`items: …`) instead of calling a model.
+- `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true` lets that provider answer for the
+  example's committed extraction config, which names `openai` and `gpt-5`. The config is
+  read for its output schema and otherwise left alone; without this setting the boot
+  refuses, because the deterministic provider never silently replaces a backend the
+  application chose.
+
+This is a development and test posture. The boot says so in its banner, naming each
+provider that is not real and what answers in its place, and the managed hosting
+posture (`RAYSPEC_HOSTING_POSTURE=managed`) refuses every one of these settings. The
+[spec reference](./spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter) has
+the fixture format and the provider's rules. The rest of this page works with either
+boot; where the two differ, it says so.
+
 `RAYSPEC_PRODUCT_TENANT_ID` is the **one org this deployment binds to** — pass the
 `<ORG_ID>` step 4 printed, not a freshly generated uuid. The workflow dispatcher binds
 to that id at boot, so it is the tenant every started workflow run belongs to. Give it
@@ -522,7 +557,17 @@ tenant you provisioned in step 4 persists in the database, so its token still wo
 
 The boot first warns that a non-real provider is selected (`STT_PROVIDER=fake`), then
 prints the same not-yet-hardened banner as step 4 and lists the declared routes it
-mounted. In a second terminal:
+mounted. The keyless variant's warning has one line per provider:
+
+```text
+⚠️  RAYSPEC PRODUCT BOOT — NON-REAL PROVIDER(S) SELECTED ⚠️
+    STT_PROVIDER=fake (no real transcription — RAYSPEC_STT_FAKE_FIXTURES answers from 1 fixture file(s); a recording none of them matches will not transcribe)
+    RAYSPEC_EXTRACTION_MODE=deterministic (no real extraction model — the deterministic provider reads labelled lines and is not for production extraction)
+    RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true (the deterministic provider answers for note_extractor (config backend 'openai'); no configured backend is called)
+    This is a DEV/CI posture — NOT a production configuration. If this is prod, fix the env.
+```
+
+In a second terminal:
 
 ```bash
 curl -s http://localhost:8080/health
@@ -613,26 +658,72 @@ cross:
 An id that names no org at all cannot get you here: that deployment refuses to boot, as
 above.
 
-> **Where the offline recipe stops.** The run starts, but it cannot get past its first
-> step here. `STT_PROVIDER=fake` selects the fixture-driven adapter, and this boot wires
-> it with **no fixtures** — which is what the boot warning means by *no real
-> transcription — recordings will not transcribe*. So `transcribe` fails terminally
-> (`stt_adapter_error: No fake STT fixture for demo-session/mic.`), and the steps that
-> depend on it are skipped. The session itself was recorded — the seal above returned `200`
-> — so it is the DERIVED views, transcript and notes, that stay empty:
->
-> ```bash
-> curl -s http://localhost:8080/sessions/demo-session/mic/transcript \
->   -H 'authorization: Bearer <ORG_TOKEN>'
-> # → {"session_id":"demo-session","track":"mic","status":"absent","model":null, …}
-> ```
->
-> Getting further is not a configuration trick: transcription needs
-> `STT_PROVIDER=deepgram` plus a `DEEPGRAM_API_KEY`, and the extraction step needs a
-> real `OPENAI_API_KEY` — both are calls to a third party, which is why the no-network
-> recipe ends at the enqueue. The full pipeline through to persisted, grounded
-> artifacts is exercised without either key in
-> `packages/compose/api-auth/src/engine/acme-notes-e2e.db.test.ts`.
+#### Read the transcript and the notes back (keyless variant)
+
+Under the keyless variant that run goes through every step. The fixture's `mic` track
+is the transcript of the track you sealed, one span per segment (`mic:s0`, `mic:s1`, …):
+
+```bash
+curl -s http://localhost:8080/sessions/demo-session/mic/transcript \
+  -H 'authorization: Bearer <ORG_TOKEN>'
+# → {"session_id":"demo-session","track":"mic","status":"completed","model":"fake-model",
+#    "detected_language":null,
+#    "full_text":"headline: The upload API stays stable. detail: Both tracks keep … ",
+#    "confidence":0.99,"word_count":40,"billed_duration_seconds":25,
+#    "words":[{"word":"headline","punctuated_word":"headline","start":0,"end":0.625, …}, …],
+#    "segments":[{"start":0,"end":5,"text":"headline: The upload API stays stable."},
+#                {"start":5,"end":10,"text":"detail: Both tracks keep the current upload API until the client moves."},
+#                {"start":10,"end":15,"text":"output_language: en"},
+#                {"start":15,"end":20,"text":"items: Keep the upload API stable."},
+#                {"start":20,"end":25,"text":"Nothing on this line is labelled, so no note is read from it."}]}
+
+curl -s http://localhost:8080/sessions/demo-session/notes \
+  -H 'authorization: Bearer <ORG_TOKEN>'
+# → {"session_id":"demo-session",
+#    "digest":{"headline":"The upload API stays stable.",
+#              "detail":"Both tracks keep the current upload API until the client moves.",
+#              "output_language":"en"},
+#    "items":[{"text":"Keep the upload API stable.","evidence":["mic:s3"],"evidence_span_ids":["mic:s3"]}],
+#    "pointers":[],"queries":[],"labels":[],
+#    "counts":{"item":1,"pointer":0,"query":0,"label":0,"digest":1,"total":2}}
+```
+
+The item cites `mic:s3` because its line, `items: Keep the upload API stable.`, is the
+fourth segment of the `mic` track: the deterministic provider gives every claim the id
+of the span it was read from, so the citation passes grounding exactly as a model's
+would have to. `pointers` and `labels` are empty because their lines are on the
+fixture's `system` track, which this walkthrough never uploaded. Upload a `system`
+chunk as well before the first seal, then seal both tracks, and they are read too: the
+transcription step waits for a track that is still recording. The workflow runs after
+the seal returns, so give it a moment before the first read.
+
+To use your own transcript, point `RAYSPEC_STT_FAKE_FIXTURES` at a directory of your
+own fixture files. `RAYSPEC_STT_FAKE_FALLBACK=fixed` is the other option: with it, a
+recording no fixture matches gets a fixed two-sentence transcript instead of failing.
+That transcript has no labelled lines, so it takes a recording as far as a readable
+transcript, not to notes.
+
+#### Where the recipe above stops
+
+Under the **first** boot above (`RAYSPEC_EXTRACTION_MODE=live` with a placeholder key
+and no fixture directory) the run starts, but it cannot get past its first step.
+`STT_PROVIDER=fake` selects the fixture-driven adapter, and that boot wires it with
+**no fixtures** — which is what its boot warning means by *no real transcription —
+recordings will not transcribe*. So `transcribe` fails terminally
+(`stt_adapter_error: No fake STT fixture for demo-session/mic.`), and the steps that
+depend on it are skipped. The session itself was recorded — the seal above returned
+`200` — so it is the DERIVED views, transcript and notes, that stay empty:
+
+```bash
+curl -s http://localhost:8080/sessions/demo-session/mic/transcript \
+  -H 'authorization: Bearer <ORG_TOKEN>'
+# → {"session_id":"demo-session","track":"mic","status":"absent","model":null, …}
+```
+
+Neither boot calls a third party. A real transcription needs `STT_PROVIDER=deepgram`
+plus a `DEEPGRAM_API_KEY`, and a real extraction needs `RAYSPEC_EXTRACTION_MODE=live`
+with a real `OPENAI_API_KEY`: the keyless variant proves the pipeline, the declared
+contracts and the read views, not what a model would extract from your audio.
 
 ### The backend profile: direct agent boot
 

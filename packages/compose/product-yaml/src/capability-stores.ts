@@ -35,7 +35,7 @@ import {
   RECORD_STORE_NAMES,
   recordCapabilityStores,
 } from '@rayspec/record-runtime';
-import type { ProductSpec, StoreSpec } from '@rayspec/spec';
+import type { ProductSpec, SpanGranularity, StoreSpec } from '@rayspec/spec';
 
 /**
  * The capability ids the audio runtime owns (`audio_input`, `media_playback`) — sourced from the audio
@@ -67,6 +67,19 @@ export function recordInputNormalize(
   spec: ProductSpec,
 ): ProductSpec['capabilities'][number]['input_normalize'] {
   return spec.capabilities.find((c) => c.id === RECORD_INPUT_CAPABILITY_ID)?.input_normalize;
+}
+
+/** The capability id whose `span_granularity` the composition honours. */
+export const STT_CAPABILITY_ID = 'stt';
+
+/**
+ * The transcript span size the document declares on its `stt` capability: `sentence`, or `paragraph`
+ * when the key (or the capability) is absent. The deployment hands this to the speech adapter it
+ * constructs, so the size of the spans a grounded claim cites is fixed by the document and travels
+ * with it (span_granularity is only ever valid on stt; enforced elsewhere in compose).
+ */
+export function sttSpanGranularity(spec: ProductSpec): SpanGranularity {
+  return spec.capabilities.find((c) => c.id === STT_CAPABILITY_ID)?.span_granularity ?? 'paragraph';
 }
 
 /**

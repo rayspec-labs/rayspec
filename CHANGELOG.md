@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Sentence-sized transcript spans (`span_granularity` on the `stt` capability).** The Deepgram
+  adapter cut a transcript into one span per paragraph, so the sentences of a paragraph shared one
+  span id and several claims extracted from it cited the same id: a reader could not tell which
+  sentence backed which claim. A product document can now declare
+  `span_granularity: sentence` on its `stt` capability, beside `provider_policy`, and the adapter
+  emits one span per sentence of the provider's response, with the sentence's own text, start and
+  end. The setting is part of the document, so it is the same on every deployment of it and
+  travels in the bundle; `rayspec pack` and `rayspec bundle verify` accept it and derive the same
+  `requires`, `permissions` and `bindings` as without it. Values are `paragraph` and `sentence`;
+  another value is a `schema_violation`, and so is the key on a capability other than `stt`, at
+  validation (`rayspec doctor`, `plan` and `pack` refuse it; the deploy composition refuses it
+  again). **The default does not change:** a document without the key, or
+  with `span_granularity: paragraph`, gets the spans, the span ids and the transcript rows it got
+  before, and the request sent to the provider is the same under both values. A response without
+  paragraphs carries no sentences and is cut at pauses under both values. A sentence without text
+  is skipped and its time goes to the neighbouring sentence of its paragraph. The fake adapter
+  (`STT_PROVIDER=fake`) emits its fixtures' segments as written and ignores the key.
+  **Span ids differ between the two granularities.** An id keeps the form `<track>:s<index>`, and
+  the index counts paragraphs under `paragraph` and sentences under `sentence`, so `mic:s1` names
+  different text under each and evidence stored under one value does not match transcripts
+  produced under the other. Choose the value before a product stores evidence. Nothing is
+  migrated on a change: sessions that are not processed again stay consistent with themselves;
+  `POST /v1/sessions/{id}/reprocess` rewrites a session's transcript and artifact rows at the
+  current value; the rows a reprocess preserves (human-edited rows of a kind with
+  `preserve_human_edits`, dismissed rows, surplus rows of a kind without `reconcile_stale_rows`)
+  keep the citations of the earlier value and are not marked as such. A transcript row cut per
+  sentence carries `payload.span_granularity: sentence`, which a view can project; a
+  paragraph-granular row is unchanged and carries no such key, and neither does a row from the
+  fake adapter, from a supplied adapter or from a response without paragraphs. See
+  [`span_granularity` on `stt`](docs/spec-reference.md#span_granularity-on-stt).
+- **A deployed product runs end to end with no provider key.** A product that transcribes could
+  validate, plan, dry-run and pack without a key, but a real deployment of it could not get a
+  recording past transcription: `STT_PROVIDER=fake` built the fake adapter with no fixtures, and
+  the deterministic extraction provider refused the product's committed extraction config because
+  it names a real backend. Three environment variables close that, for development and tests:
+  - `RAYSPEC_STT_FAKE_FIXTURES` names a directory of transcript fixture files (`*.json`) the fake
+    adapter answers recordings from. A fixture for the recording's own session answers first, then
+    a fixture whose `session_id` is `*` (any session). The directory is read once, at boot; a
+    directory that cannot be read, holds no fixture, holds a malformed one or holds two for the
+    same session and track refuses the boot instead of failing the first recording. A recording's
+    session and track ids are only compared with the ids the fixtures declare: no path is built
+    from them. A symbolic link is followed only to a regular file inside the directory (the
+    layout of a mounted volume); a fixture file is at most 1 MiB, and the span ids of a file are
+    unique over all its tracks.
+  - `RAYSPEC_STT_FAKE_FALLBACK=fixed` answers a recording no fixture matches with a fixed
+    two-sentence transcript, with or without a fixture directory. It carries no labelled line, so
+    it takes a recording to a readable transcript, not to extracted artifacts.
+  - `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true` lets the deterministic extraction provider,
+    under `RAYSPEC_EXTRACTION_MODE=deterministic`, answer for an extractor whose config names a
+    real backend. The committed config is read for `agent_id` and `schema_file` only and is not
+    modified; no backend is constructed, no credential is asked for and no prompt is read. A
+    stand-in also reads transcript spans and gives each claim the id of the span its labelled
+    line was read from, so the claim passes grounding and is persisted with a true citation.
+  With the fixture `examples/acme-notes/stt-fixtures/default.json`, the acme-notes example now
+  runs upload, transcribe, extract, ground, persist and read through `rayspec deploy` with none
+  of its files changed; [getting started](docs/getting-started.md) walks through it.
+  **All three stay a development and test posture.** The non-real-provider boot banner names each
+  one in effect: how many fixture files answer, whether the fallback is on, and every extractor
+  the deterministic provider stands in for with the backend its config names.
+  For a product document, `RAYSPEC_HOSTING_POSTURE=managed` refuses each of them at boot, by
+  name, whether or not the document transcribes or extracts. For a product document that
+  transcribes, a fake-adapter setting beside another `STT_PROVIDER` and an unsupported value
+  refuse the boot; so do, for one that extracts, the stand-in under
+  `RAYSPEC_EXTRACTION_MODE=live` and a stand-in config that names no backend. `rayspec deploy --check-env`
+  lists the three as optional for a product document that reads them. **Nothing changes for a
+  deployment that sets none of them:** the fake adapter has no fixtures and gives the same error,
+  a real-backend config under deterministic mode is refused with the same message, an extractor
+  whose own config selects `deterministic` reads what it read before, and the banner text is the
+  same. A bundle packed from a config that names a real backend still declares that backend's key
+  as a required binding, so a keyless deploy of the bundle supplies a placeholder value for it.
+  The fixture directory is deployment configuration and is not carried in a bundle. See
+  [fixtures for the fake speech-to-text adapter](docs/spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter)
+  and [standing in for a configured backend](docs/spec-reference.md#standing-in-for-a-configured-backend).
+
 ### Fixed
 
 - **An audio session is marked `completed` once all its tracks are sealed.** The audio capability

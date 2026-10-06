@@ -125,6 +125,7 @@ import {
   declaresConversationInput,
   declaresFileInput,
   declaresRecordInput,
+  STT_CAPABILITY_ID,
 } from './capability-stores.js';
 import { ProductComposeError } from './errors.js';
 import {
@@ -534,6 +535,17 @@ export function composeProductDeploy(
         `capability '${cap.id}' declares 'input_normalize', but a declared input-normalize step is ` +
           `only wired for the '${RECORD_INPUT_CAPABILITY_ID}' submit-ingress capability in this ` +
           'composition — remove it (or declare it on record_input).',
+      );
+    }
+    // span_granularity sizes TRANSCRIPT spans: only the speech adapter built for the stt capability
+    // reads it. A declaration anywhere else would change nothing — reject it fail-closed (never a
+    // silently-ignored declaration), whichever value it names. The parser's lint pass refuses the
+    // same document; this guards a spec assembled in code rather than parsed.
+    if (cap.span_granularity !== undefined && cap.id !== STT_CAPABILITY_ID) {
+      unsupported(
+        `capability '${cap.id}' declares 'span_granularity', but transcript span granularity is ` +
+          `only wired for the '${STT_CAPABILITY_ID}' capability in this composition — remove it ` +
+          '(or declare it on stt).',
       );
     }
   }

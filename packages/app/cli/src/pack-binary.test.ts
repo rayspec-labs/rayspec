@@ -306,6 +306,74 @@ maybeDescribe('pack of every example, then inspect and verify of the bundle', ()
   }
 });
 
+maybeDescribe('a product document that declares span_granularity', () => {
+  const STT_CONTRACT = '      - stt.transcript_span\n';
+
+  /** The acme-notes example copied aside, its `stt` capability (or the one `after` ends) declaring the key. */
+  function withGranularity(value: string, after = STT_CONTRACT): string {
+    const root = copyExample('acme-notes');
+    const path = join(root, 'acme-notes.product.yaml');
+    const text = readFileSync(path, 'utf8');
+    const declared = text.replace(after, `${after}    span_granularity: ${value}\n`);
+    expect(declared).not.toBe(text);
+    writeFileSync(path, declared);
+    return path;
+  }
+
+  const identity = ['--id', 'acme-notes', '--version', '1.0.0', '--json'];
+
+  it('packs, and the bundle passes inspect and verify with the manifest fields of the document without it', () => {
+    const plain = packed(join(EXAMPLES, 'acme-notes', 'acme-notes.product.yaml'), identity);
+    const pack = packed(withGranularity('sentence'), identity);
+    expect(pack.envelope.data.requires).toEqual(plain.envelope.data.requires);
+    expect(pack.envelope.data.bindings).toEqual(plain.envelope.data.bindings);
+    expect(pack.envelope.data.execution).toEqual(plain.envelope.data.execution);
+    // The document is part of the bundle, so the two archives differ.
+    expect(pack.envelope.data.sha256).not.toBe(plain.envelope.data.sha256);
+
+    const inspect = cli(['bundle', 'inspect', pack.output, '--json']);
+    expect(inspect.status, inspect.stdout).toBe(0);
+    expect(inspect.envelope.data).toMatchObject({
+      verdict: 'structurally-valid',
+      requires: plain.envelope.data.requires,
+      bindings: plain.envelope.data.bindings,
+    });
+
+    const verify = cli(['bundle', 'verify', pack.output, '--json']);
+    expect(verify.status, verify.stdout).toBe(0);
+    expect(verify.envelope.data).toMatchObject({
+      verdict: 'deployable',
+      checkedAgainstRuntime: cliVersion,
+    });
+  });
+
+  it('refuses to pack a value the grammar does not know, naming the key', () => {
+    const r = refusedPack(
+      ['--spec', withGranularity('word'), ...identity.slice(0, 4)],
+      1,
+      'RAY_SPEC_INVALID',
+    );
+    expect(
+      r.envelope.errors.slice(1).map((e: { code: string; path?: string }) => [e.code, e.path]),
+    ).toEqual([['SPEC_SCHEMA_VIOLATION', 'capabilities[2].span_granularity']]);
+  });
+
+  it('refuses to pack the key on a capability other than stt, which a deployment would refuse', () => {
+    const r = refusedPack(
+      [
+        '--spec',
+        withGranularity('sentence', '      - media_playback.stream\n'),
+        ...identity.slice(0, 4),
+      ],
+      1,
+      'RAY_SPEC_INVALID',
+    );
+    expect(
+      r.envelope.errors.slice(1).map((e: { code: string; path?: string }) => [e.code, e.path]),
+    ).toEqual([['SPEC_SCHEMA_VIOLATION', 'capabilities[1].span_granularity']]);
+  });
+});
+
 maybeDescribe('determinism', () => {
   /** A prepared tree with a vendored scoped package, a lock file and a frontend. */
   function vendoredApp(): string {

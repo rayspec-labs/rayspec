@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { OpenAIAdapter } from '@rayspec/adapter-openai';
 import type { PlannedMigration } from '@rayspec/api-auth';
+import { chunkKey } from '@rayspec/audio-runtime';
 import { type ProductSpec, parseProductSpec } from '@rayspec/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
@@ -19,7 +20,10 @@ import {
   anthropicReuseLoginEnabled,
   anthropicReuseLoginShadowWarning,
   assembleExtractionInstructions,
+  assertManagedPostureKeyless,
+  assertManagedProductPosture,
   buildLiveAgent,
+  buildProductSttAdapter,
   buildSttAdapter,
   type DestructiveTargetProbe,
   extractDestructiveTarget,
@@ -58,6 +62,26 @@ vi.mock('@openai/agents', async (importOriginal) => {
     setDefaultOpenAIKey: (...args: unknown[]) => openaiRegistration.setDefaultOpenAIKey(...args),
     setDefaultOpenAIClient: (...args: unknown[]) =>
       openaiRegistration.setDefaultOpenAIClient(...args),
+  };
+});
+
+/**
+ * The chunk remux the speech adapter's media resolver runs (ffmpeg), replaceable while a test sets
+ * `remux.override` — undefined ⇒ the real function, so nothing else in this file is affected. It lets
+ * the adapter built at boot be driven to a transcript without a media toolchain.
+ */
+const remux = vi.hoisted(() => ({
+  override: undefined as
+    | undefined
+    | ((chunks: Uint8Array[]) => Promise<{ bytes: Uint8Array; cleanup: () => Promise<void> }>),
+}));
+
+vi.mock('@rayspec/audio-runtime', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@rayspec/audio-runtime')>();
+  return {
+    ...actual,
+    remuxChunks: (...args: Parameters<typeof actual.remuxChunks>) =>
+      remux.override ? remux.override(args[0] as Uint8Array[]) : actual.remuxChunks(...args),
   };
 });
 
@@ -101,6 +125,388 @@ describe('buildSttAdapter (fail-closed)', () => {
   });
   it('builds the fake adapter for STT_PROVIDER=fake', () => {
     expect(buildSttAdapter({ STT_PROVIDER: 'fake' }, fakeBlob, undefined).kind).toBe('fake');
+  });
+});
+
+describe('the span granularity a product document declares reaches the speech adapter', () => {
+  const MULTI_SENTENCE = readFileSync(
+    resolve(
+      here,
+      '../../../adapters/deepgram/src/fixtures/deepgram/multi-sentence-paragraphs.json',
+    ),
+    'utf8',
+  );
+  const STT_CONTRACT = '      - stt.transcript_span\n';
+  const DEEPGRAM_ENV = { STT_PROVIDER: 'deepgram', DEEPGRAM_API_KEY: 'test-key-not-a-real-secret' };
+
+  /** A blob store holding one chunk of one track — enough for the resolver to produce bytes. */
+  const oneChunkBlob = {
+    get: async (key: string) =>
+      key === chunkKey('s1', 'mic', 0)
+        ? { body: new Uint8Array([0x4f, 0x67, 0x67, 0x53]) }
+        : { notFound: true },
+  } as never;
+
+  function specWith(granularity?: string): ProductSpec {
+    const text = readFileSync(ACME_YAML, 'utf8');
+    if (granularity === undefined) return acmeSpec();
+    const declared = text.replace(
+      STT_CONTRACT,
+      `${STT_CONTRACT}    span_granularity: ${granularity}\n`,
+    );
+    expect(declared).not.toBe(text);
+    const parsed = parseProductSpec(declared);
+    if (!parsed.ok) throw new Error(`must parse: ${JSON.stringify(parsed.errors)}`);
+    return parsed.value;
+  }
+
+  /** Transcribe one track through `adapter` against a provider stub; returns spans + request URLs. */
+  async function transcribe(build: () => ReturnType<typeof buildSttAdapter>) {
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return new Response(MULTI_SENTENCE, { status: 200 });
+      }),
+    );
+    remux.override = async (chunks) => ({
+      bytes: chunks[0] as Uint8Array,
+      cleanup: async () => {},
+    });
+    try {
+      // The adapter binds `fetch` when it is constructed, so it is built under the stub.
+      const [result] = await build().transcribeSession({
+        session_id: 's1',
+        tracks: [{ session_id: 's1', track: 'mic' }],
+      });
+      if (result?.status !== 'completed') {
+        throw new Error(`expected a completed transcript: ${JSON.stringify(result?.error)}`);
+      }
+      return { transcript: result.transcript, urls };
+    } finally {
+      remux.override = undefined;
+      vi.unstubAllGlobals();
+    }
+  }
+
+  it('buildSttAdapter: sentence ⇒ one span per sentence; paragraph or nothing ⇒ one per paragraph', async () => {
+    const sentence = await transcribe(() =>
+      buildSttAdapter(DEEPGRAM_ENV, oneChunkBlob, undefined, 'sentence'),
+    );
+    expect(sentence.transcript.spans.map((s) => [s.id, s.text])).toEqual([
+      ['mic:s0', 'We agreed on the rollout order.'],
+      ['mic:s1', 'The upload service goes first.'],
+      ['mic:s2', 'Billing follows a week later.'],
+      ['mic:s3', 'Who owns the migration?'],
+      ['mic:s4', 'I will take it.'],
+    ]);
+    expect(sentence.transcript.span_granularity).toBe('sentence');
+
+    const paragraph = await transcribe(() =>
+      buildSttAdapter(DEEPGRAM_ENV, oneChunkBlob, undefined, 'paragraph'),
+    );
+    const unset = await transcribe(() => buildSttAdapter(DEEPGRAM_ENV, oneChunkBlob, undefined));
+    for (const run of [paragraph, unset]) {
+      expect(run.transcript.spans.map((s) => s.id)).toEqual(['mic:s0', 'mic:s1']);
+      expect('span_granularity' in run.transcript).toBe(false);
+      // The request does not depend on the granularity.
+      expect(run.urls).toEqual(sentence.urls);
+    }
+  });
+
+  it('buildProductSttAdapter reads the granularity from the stt capability of the document', async () => {
+    const declared = await transcribe(() =>
+      buildProductSttAdapter(DEEPGRAM_ENV, oneChunkBlob, specWith('sentence')),
+    );
+    expect(declared.transcript.spans.map((s) => s.id)).toEqual([
+      'mic:s0',
+      'mic:s1',
+      'mic:s2',
+      'mic:s3',
+      'mic:s4',
+    ]);
+
+    for (const spec of [specWith(), specWith('paragraph')]) {
+      const run = await transcribe(() => buildProductSttAdapter(DEEPGRAM_ENV, oneChunkBlob, spec));
+      expect(run.transcript.spans.map((s) => s.id)).toEqual(['mic:s0', 'mic:s1']);
+    }
+  });
+
+  it('buildProductSttAdapter still takes the model from deployment_overrides', async () => {
+    // acme-notes pins deepgram's default_model; the granularity rides beside it, not instead of it.
+    const run = await transcribe(() =>
+      buildProductSttAdapter(DEEPGRAM_ENV, oneChunkBlob, specWith('sentence')),
+    );
+    const model = acmeSpec().deployment_overrides?.providers?.deepgram?.default_model;
+    expect(typeof model).toBe('string');
+    expect(new URL(run.urls[0] as string).searchParams.get('model')).toBe(model);
+    expect(run.transcript.model).toBe(model);
+  });
+
+  it('sentence granularity does not stop a keyless boot: the fake adapter is built as before', () => {
+    const adapter = buildProductSttAdapter(
+      { STT_PROVIDER: 'fake' },
+      fakeBlob,
+      specWith('sentence'),
+    );
+    expect(adapter.kind).toBe('fake');
+  });
+});
+
+describe('the fake speech adapter answers from fixtures, a fixed transcript, or not at all', () => {
+  const dirs: string[] = [];
+  afterAll(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+  /** A fixture directory holding `files` (name → JSON value, or raw text). */
+  function fixtureDir(files: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'boot-fake-stt-'));
+    dirs.push(dir);
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(
+        join(dir, name),
+        typeof content === 'string' ? content : JSON.stringify(content),
+      );
+    }
+    return dir;
+  }
+  const NAMED = {
+    session_id: 'rec-1',
+    tracks: [{ track: 'mic', segments: [{ text: 'A named recording.' }] }],
+  };
+  const fullText = async (env: NodeJS.ProcessEnv, session_id: string, track = 'mic') => {
+    const result = await buildSttAdapter(env, fakeBlob, undefined).transcribeTrack({
+      session_id,
+      track,
+    });
+    if (result.status !== 'completed') throw new Error(`expected completed: ${result.status}`);
+    return result.transcript.full_text;
+  };
+  const refusal = (env: NodeJS.ProcessEnv): string => {
+    try {
+      buildSttAdapter(env, fakeBlob, undefined);
+    } catch (e) {
+      expect(e).toBeInstanceOf(ProductBootError);
+      return (e as Error).message;
+    }
+    throw new Error('expected a refusal');
+  };
+  const ABORT = 'Boot aborted (Product-YAML) — ';
+
+  it('with neither setting, a recording is refused with the error it always was', async () => {
+    for (const env of [
+      { STT_PROVIDER: 'fake' },
+      { STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FIXTURES: '', RAYSPEC_STT_FAKE_FALLBACK: '  ' },
+    ]) {
+      await expect(
+        buildSttAdapter(env, fakeBlob, undefined).transcribeSession({
+          session_id: 'rec-1',
+          tracks: [{ session_id: 'rec-1', track: 'mic' }],
+        }),
+      ).rejects.toThrow(new Error('No fake STT fixture for rec-1/mic.'));
+    }
+  });
+
+  it('RAYSPEC_STT_FAKE_FIXTURES: a fixture answers its recording, and no other', async () => {
+    const env = {
+      STT_PROVIDER: 'fake',
+      RAYSPEC_STT_FAKE_FIXTURES: ` ${fixtureDir({ 'named.json': NAMED })} `,
+    };
+    expect(await fullText(env, 'rec-1')).toBe('A named recording.');
+    await expect(fullText(env, 'rec-2')).rejects.toThrow('No fake STT fixture for rec-2/mic.');
+    await expect(fullText(env, 'rec-1', 'system')).rejects.toThrow(
+      'No fake STT fixture for rec-1/system.',
+    );
+  });
+
+  it('follows the lookup order: the own session, then any session, then the fixed transcript', async () => {
+    const env = {
+      STT_PROVIDER: 'fake',
+      RAYSPEC_STT_FAKE_FIXTURES: fixtureDir({
+        'any.json': {
+          session_id: '*',
+          tracks: [{ track: 'mic', segments: [{ text: 'Any recording.' }] }],
+        },
+        'named.json': NAMED,
+      }),
+      RAYSPEC_STT_FAKE_FALLBACK: 'fixed',
+    };
+    expect(await fullText(env, 'rec-1')).toBe('A named recording.');
+    expect(await fullText(env, 'rec-2')).toBe('Any recording.');
+    expect(await fullText(env, 'rec-2', 'system')).toBe(
+      'This is the fixed transcript of the fake speech-to-text adapter. ' +
+        'No audio was read and no provider was called.',
+    );
+  });
+
+  it('RAYSPEC_STT_FAKE_FALLBACK=fixed alone answers every recording', async () => {
+    const env = { STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FALLBACK: 'fixed' };
+    expect(await fullText(env, 'anything')).toContain('the fixed transcript');
+    expect(await fullText(env, 'anything-else', 'system')).toContain('the fixed transcript');
+  });
+
+  it('refuses an unsupported fallback at boot', () => {
+    expect(refusal({ STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FALLBACK: 'FIXED' })).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FALLBACK 'FIXED' is not supported (wired: fixed; unset or blank ⇒ ` +
+        'no fallback). Fail-closed.',
+    );
+  });
+
+  it('refuses a fixture directory it cannot use at boot, not at the first recording', () => {
+    const missing = join(fixtureDir({}), 'absent');
+    expect(refusal({ STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FIXTURES: missing })).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FIXTURES '${missing}' is not a readable directory. Fail-closed.`,
+    );
+    const empty = fixtureDir({ 'readme.txt': 'no fixture' });
+    expect(refusal({ STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FIXTURES: empty })).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FIXTURES '${empty}' holds no .json fixture file. Fail-closed.`,
+    );
+    const broken = fixtureDir({ 'named.json': NAMED, 'broken.json': '{ "session_id": ' });
+    expect(refusal({ STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FIXTURES: broken })).toBe(
+      `${ABORT}fake STT fixture broken.json: it is not valid JSON. Fail-closed.`,
+    );
+    const shape = fixtureDir({ 'shape.json': { session_id: 'x', tracks: [{ track: 'mic' }] } });
+    expect(refusal({ STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FIXTURES: shape })).toBe(
+      `${ABORT}fake STT fixture shape.json: tracks[0].segments is not a non-empty array. Fail-closed.`,
+    );
+    const twice = fixtureDir({ 'a.json': NAMED, 'b.json': NAMED });
+    expect(refusal({ STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FIXTURES: twice })).toBe(
+      `${ABORT}fake STT fixtures a.json and b.json both answer rec-1/mic. Fail-closed.`,
+    );
+  });
+
+  it('refuses either setting beside a real provider, where it would be silently inert', () => {
+    const key = ['inert', 'test', 'value'].join('-');
+    const dir = fixtureDir({ 'named.json': NAMED });
+    expect(
+      refusal({ STT_PROVIDER: 'deepgram', DEEPGRAM_API_KEY: key, RAYSPEC_STT_FAKE_FIXTURES: dir }),
+    ).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FIXTURES is set, but STT_PROVIDER is 'deepgram': it configures ` +
+        'the fake adapter only. Unset it, or select STT_PROVIDER=fake. Fail-closed.',
+    );
+    expect(
+      refusal({
+        STT_PROVIDER: 'deepgram',
+        DEEPGRAM_API_KEY: key,
+        RAYSPEC_STT_FAKE_FALLBACK: 'fixed',
+      }),
+    ).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FALLBACK is set, but STT_PROVIDER is 'deepgram': it configures ` +
+        'the fake adapter only. Unset it, or select STT_PROVIDER=fake. Fail-closed.',
+    );
+    // Blank is unset: a real provider boots beside an emptied setting.
+    expect(
+      buildSttAdapter(
+        { STT_PROVIDER: 'deepgram', DEEPGRAM_API_KEY: key, RAYSPEC_STT_FAKE_FIXTURES: ' ' },
+        fakeBlob,
+        undefined,
+      ).kind,
+    ).not.toBe('fake');
+  });
+});
+
+describe('assertManagedPostureKeyless — the managed posture refuses each keyless setting', () => {
+  const refusal = (env: NodeJS.ProcessEnv): string => {
+    try {
+      assertManagedPostureKeyless(env);
+    } catch (e) {
+      expect(e).toBeInstanceOf(ProductBootError);
+      return (e as Error).message;
+    }
+    throw new Error('expected a refusal');
+  };
+  const ABORT = 'Boot aborted (Product-YAML) — RAYSPEC_HOSTING_POSTURE=managed does not support ';
+
+  it('refuses the fixture directory, the fallback and the stand-in, each by name', () => {
+    // Whatever the value and whatever provider is selected: the directory need not even exist.
+    expect(refusal({ STT_PROVIDER: 'deepgram', RAYSPEC_STT_FAKE_FIXTURES: '/no/such/dir' })).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FIXTURES: it configures the fake speech-to-text adapter, whose ` +
+        "capability 'stt-fake' is test-only. Unset it. Fail-closed.",
+    );
+    expect(refusal({ RAYSPEC_STT_FAKE_FALLBACK: 'fixed' })).toBe(
+      `${ABORT}RAYSPEC_STT_FAKE_FALLBACK: it configures the fake speech-to-text adapter, whose ` +
+        "capability 'stt-fake' is test-only. Unset it. Fail-closed.",
+    );
+    expect(refusal({ RAYSPEC_STT_FAKE_FALLBACK: 'anything' })).toContain(
+      'RAYSPEC_STT_FAKE_FALLBACK',
+    );
+    expect(refusal({ RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: ' true ' })).toBe(
+      `${ABORT}RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: it selects the deterministic extraction ` +
+        "provider, whose capability 'extraction-deterministic' is test-only. Unset it. Fail-closed.",
+    );
+    // A value the boot would not accept as true is refused here too, not left for a later check
+    // that only a document with extractors reaches.
+    for (const value of ['TRUE', '1', 'yes']) {
+      expect(refusal({ RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: value })).toContain(
+        `${ABORT}RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN:`,
+      );
+    }
+  });
+
+  it('checks the fixtures first, then the fallback, then the stand-in', () => {
+    const all = {
+      RAYSPEC_STT_FAKE_FIXTURES: 'd',
+      RAYSPEC_STT_FAKE_FALLBACK: 'fixed',
+      RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: 'true',
+    };
+    expect(refusal(all)).toContain('RAYSPEC_STT_FAKE_FIXTURES:');
+    expect(refusal({ ...all, RAYSPEC_STT_FAKE_FIXTURES: '' })).toContain(
+      'RAYSPEC_STT_FAKE_FALLBACK:',
+    );
+  });
+
+  it('refuses nothing when none is set, when they are blank, or when the stand-in is false', () => {
+    for (const env of [
+      {},
+      { STT_PROVIDER: 'deepgram', RAYSPEC_EXTRACTION_MODE: 'live' },
+      { RAYSPEC_STT_FAKE_FIXTURES: '', RAYSPEC_STT_FAKE_FALLBACK: '  ' },
+      { RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: 'false' },
+      { RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN: '' },
+    ]) {
+      expect(() => assertManagedPostureKeyless(env)).not.toThrow();
+    }
+  });
+});
+
+describe('assertManagedProductPosture — what a product boot checks before it builds a provider', () => {
+  const KEYLESS: Array<[string, string]> = [
+    ['RAYSPEC_STT_FAKE_FIXTURES', 'd'],
+    ['RAYSPEC_STT_FAKE_FALLBACK', 'fixed'],
+    ['RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN', 'true'],
+  ];
+
+  it('under managed, refuses each keyless setting beside a supported provider', () => {
+    for (const [name, value] of KEYLESS) {
+      expect(() =>
+        assertManagedProductPosture(
+          { hostingPosture: 'managed' },
+          { STT_PROVIDER: 'deepgram', [name]: value },
+        ),
+      ).toThrow(`RAYSPEC_HOSTING_POSTURE=managed does not support ${name}:`);
+    }
+  });
+
+  it('under managed, refuses a speech provider outside the supported set first', () => {
+    expect(() =>
+      assertManagedProductPosture(
+        { hostingPosture: 'managed' },
+        { STT_PROVIDER: 'fake', RAYSPEC_STT_FAKE_FALLBACK: 'fixed' },
+      ),
+    ).toThrow(/STT_PROVIDER/);
+    expect(() =>
+      assertManagedProductPosture({ hostingPosture: 'managed' }, { STT_PROVIDER: 'deepgram' }),
+    ).not.toThrow();
+  });
+
+  it('outside managed it refuses nothing', () => {
+    for (const hostingPosture of [undefined, 'local'] as const) {
+      for (const [name, value] of KEYLESS) {
+        expect(() =>
+          assertManagedProductPosture({ hostingPosture }, { STT_PROVIDER: 'fake', [name]: value }),
+        ).not.toThrow();
+      }
+    }
   });
 });
 
@@ -191,6 +597,106 @@ describe('nonRealProviderBanner — loud marker for non-real providers', () => {
     expect(
       nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live', 'live', ''),
     ).toBeNull();
+  });
+});
+
+describe('nonRealProviderBanner — names what answers in place of each provider', () => {
+  const HEAD = '\n⚠️  RAYSPEC PRODUCT BOOT — NON-REAL PROVIDER(S) SELECTED ⚠️\n';
+  const FOOT =
+    '    This is a DEV/CI posture — NOT a production configuration. If this is prod, fix the env.\n';
+  const STT_PLAIN = 'STT_PROVIDER=fake (no real transcription — recordings will not transcribe)';
+  const EXTRACTION =
+    'RAYSPEC_EXTRACTION_MODE=deterministic (no real extraction model — the deterministic ' +
+    'provider reads labelled lines and is not for production extraction)';
+  const lines = (banner: string | null): string[] => {
+    expect(banner?.startsWith(HEAD)).toBe(true);
+    expect(banner?.endsWith(FOOT)).toBe(true);
+    return (banner as string)
+      .slice(HEAD.length, -FOOT.length)
+      .split('\n')
+      .filter((line) => line !== '')
+      .map((line) => line.slice(4));
+  };
+  const fake = { STT_PROVIDER: 'fake' };
+
+  it('without keyless settings every line is the text it always was', () => {
+    const expected = `${HEAD}    ${STT_PLAIN}\n    ${EXTRACTION}\n${FOOT}`;
+    expect(nonRealProviderBanner(fake, false, 'deterministic')).toBe(expected);
+    expect(nonRealProviderBanner(fake, false, 'deterministic', '', '', {})).toBe(expected);
+    expect(
+      nonRealProviderBanner(fake, false, 'deterministic', '', '', {
+        sttFallback: false,
+        standIns: [],
+      }),
+    ).toBe(expected);
+    expect(
+      nonRealProviderBanner({ STT_PROVIDER: 'deepgram' }, false, 'live', '', '', {}),
+    ).toBeNull();
+  });
+
+  it('says how many fixture files answer, and that an unmatched recording will not transcribe', () => {
+    expect(
+      lines(nonRealProviderBanner(fake, false, 'live', '', '', { sttFixtureFiles: 3 })),
+    ).toEqual([
+      'STT_PROVIDER=fake (no real transcription — RAYSPEC_STT_FAKE_FIXTURES answers from 3 ' +
+        'fixture file(s); a recording none of them matches will not transcribe)',
+    ]);
+  });
+
+  it('says that every other recording gets the fixed transcript when the fallback is on too', () => {
+    expect(
+      lines(
+        nonRealProviderBanner(fake, false, 'live', '', '', {
+          sttFixtureFiles: 1,
+          sttFallback: true,
+        }),
+      ),
+    ).toEqual([
+      'STT_PROVIDER=fake (no real transcription — RAYSPEC_STT_FAKE_FIXTURES answers from 1 ' +
+        'fixture file(s); every other recording gets the fixed transcript, ' +
+        'RAYSPEC_STT_FAKE_FALLBACK=fixed)',
+    ]);
+  });
+
+  it('says that every recording gets the fixed transcript when only the fallback is on', () => {
+    expect(
+      lines(nonRealProviderBanner(fake, false, 'live', '', '', { sttFallback: true })),
+    ).toEqual([
+      'STT_PROVIDER=fake (no real transcription — every recording gets the fixed transcript, ' +
+        'RAYSPEC_STT_FAKE_FALLBACK=fixed)',
+    ]);
+  });
+
+  it('names each extractor the deterministic provider stands in for, after the mode line', () => {
+    expect(
+      lines(
+        nonRealProviderBanner(fake, false, 'deterministic', '', '', {
+          sttFixtureFiles: 1,
+          standIns: [
+            { id: 'note_extractor', backend: 'openai' },
+            { id: 'tagger', backend: 'anthropic' },
+          ],
+        }),
+      ),
+    ).toEqual([
+      'STT_PROVIDER=fake (no real transcription — RAYSPEC_STT_FAKE_FIXTURES answers from 1 ' +
+        'fixture file(s); a recording none of them matches will not transcribe)',
+      EXTRACTION,
+      'RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true (the deterministic provider answers for ' +
+        "note_extractor (config backend 'openai'), tagger (config backend 'anthropic'); no " +
+        'configured backend is called)',
+    ]);
+  });
+
+  it('adds no stand-in line under a live run, and no speech line for an injected adapter', () => {
+    const keyless = {
+      sttFixtureFiles: 2,
+      standIns: [{ id: 'note_extractor', backend: 'openai' }],
+    };
+    expect(nonRealProviderBanner(fake, true, 'live', '', '', keyless)).toBeNull();
+    expect(lines(nonRealProviderBanner(fake, true, 'deterministic', '', '', keyless))).toHaveLength(
+      2,
+    );
   });
 });
 

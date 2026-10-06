@@ -15,3 +15,8 @@ segment derivation, but contain **no real API keys, request ids, customer audio,
 | `missing-confidence-words.json` | Absent confidence/language → honest `null` degradation (no fabricated `0`). |
 | `mixed-confidence-words.json` | A run with SOME words missing confidence → present-only mean (flagged divergence: neutral averages the present confidences, denominator = present count, vs a naive `run.length`). |
 | `multichannel.json` | Two channels → only `channels[0]` is mapped (reference behavior). |
+| `multi-sentence-paragraphs.json` | Two paragraphs of three and two sentences, each word inside its sentence's bounds → one segment per paragraph by default, one per sentence under sentence granularity (`segmentsFromSentences`). |
+
+`default-transcripts/<fixture>` is the transcript each fixture maps to when no span granularity is
+given. The mapping test compares against it key for key, so the default mapping cannot change
+unnoticed.

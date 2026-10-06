@@ -54,7 +54,9 @@ import {
  * `RAYSPEC_BLOB_ROOT`, `RAYSPEC_MEDIA_SIGNING_KEY`, `RAYSPEC_CRON_TENANT_ID` and the anthropic
  * `anyOf` PRIMARY reach it. `ANTHROPIC_API_KEY`, `RAYSPEC_ANTHROPIC_REUSE_LOGIN`, `TTS_PROVIDER` and
  * `RAYSPEC_FS_SOURCE_ROOT` appear only as an `optional` row or an `anyOf` sibling, and neither reads
- * `what`. A variable that is
+ * `what`. The three settings of a run without provider keys (`RAYSPEC_STT_FAKE_FIXTURES`,
+ * `RAYSPEC_STT_FAKE_FALLBACK`, `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN`) are optional rows too; the
+ * product boot composes its refusals about them from each record's `name`. A variable that is
  * demanded from two different places with two different reasons gets two records (`OPENAI_API_KEY` has
  * three: the `openai` extraction backend, the `pi` backend, and `TTS_PROVIDER=openai`), because the
  * reason is what an operator needs and it genuinely differs.
@@ -199,6 +201,19 @@ export const EXTRACTION_MODE: BootEnvVar = {
     'provider, dev/CI only)',
 };
 
+/**
+ * `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN` — OPTIONAL, read only for a product document that
+ * declares extractors. `true` lets the deterministic provider answer, under
+ * `RAYSPEC_EXTRACTION_MODE=deterministic`, for an extractor whose config names a real backend.
+ */
+export const EXTRACTION_DETERMINISTIC_STAND_IN: BootEnvVar = {
+  name: 'RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN',
+  fileVariant: null,
+  what:
+    'whether the deterministic provider answers for an extraction config that names a real backend: ' +
+    "'true' | 'false' (dev/CI only)",
+};
+
 /** `RAYSPEC_RESPONDER_MODE` — demanded iff a product document declares the conversation input. */
 export const RESPONDER_MODE: BootEnvVar = {
   name: 'RAYSPEC_RESPONDER_MODE',
@@ -339,6 +354,28 @@ export const DEEPGRAM_API_KEY: BootEnvVar = {
   name: 'DEEPGRAM_API_KEY',
   fileVariant: 'DEEPGRAM_API_KEY_FILE',
   what: 'the Deepgram API key (STT_PROVIDER=deepgram)',
+};
+
+/**
+ * `RAYSPEC_STT_FAKE_FIXTURES` — OPTIONAL, read only under `STT_PROVIDER=fake` for a product document
+ * that transcribes: a directory of fixture files the fake adapter answers recordings from.
+ */
+export const STT_FAKE_FIXTURES: BootEnvVar = {
+  name: 'RAYSPEC_STT_FAKE_FIXTURES',
+  fileVariant: null,
+  what: 'a directory of transcript fixture files for the fake STT adapter (STT_PROVIDER=fake)',
+};
+
+/**
+ * `RAYSPEC_STT_FAKE_FALLBACK` — OPTIONAL, read only under `STT_PROVIDER=fake` for a product document
+ * that transcribes: `fixed` answers a recording no fixture matches with the fixed transcript.
+ */
+export const STT_FAKE_FALLBACK: BootEnvVar = {
+  name: 'RAYSPEC_STT_FAKE_FALLBACK',
+  fileVariant: null,
+  what:
+    "what the fake STT adapter answers a recording no fixture matches with: 'fixed' " +
+    '(STT_PROVIDER=fake)',
 };
 
 /**
@@ -981,6 +1018,40 @@ async function productReport(
         'value naming a nonexistent directory refuses the boot',
     }),
   ];
+  // The settings of a run without provider keys, reported where the boot reads them: the two fake
+  // speech settings for a document that transcribes, the stand-in for one that declares extractors.
+  // Presence only — a value the boot refuses (a directory that is not one, an unsupported word, a
+  // setting whose provider or mode is not selected) is not judged here.
+  if (declaresSttStep(spec) && withAudio) {
+    optional.push(
+      optionalRow(env, STT_FAKE_FIXTURES, {
+        note:
+          'OPTIONAL, for a run without a speech provider key. Under STT_PROVIDER=fake the fake ' +
+          'adapter answers recordings from the fixture files in this directory; unset ⇒ it has no ' +
+          'fixtures. Set with another STT_PROVIDER, a directory the boot cannot read or a ' +
+          'malformed fixture file refuses the boot, as does the managed hosting posture',
+      }),
+      optionalRow(env, STT_FAKE_FALLBACK, {
+        note:
+          "OPTIONAL, for a run without a speech provider key. 'fixed' under STT_PROVIDER=fake " +
+          'answers a recording no fixture matches with the fixed transcript; unset ⇒ such a ' +
+          'recording does not transcribe. Any other value, or set with another STT_PROVIDER, ' +
+          'refuses the boot, as does the managed hosting posture',
+      }),
+    );
+  }
+  if (spec.extractors.length > 0) {
+    optional.push(
+      optionalRow(env, EXTRACTION_DETERMINISTIC_STAND_IN, {
+        note:
+          "OPTIONAL, for a run without a model provider key. 'true' under " +
+          'RAYSPEC_EXTRACTION_MODE=deterministic lets the deterministic provider answer for an ' +
+          'extraction config that names a real backend, reading only its agent_id and ' +
+          "schema_file; unset or 'false' ⇒ such a config is refused under that mode. 'true' under " +
+          'RAYSPEC_EXTRACTION_MODE=live, or under the managed hosting posture, refuses the boot',
+      }),
+    );
+  }
 
   return assemble(
     base,

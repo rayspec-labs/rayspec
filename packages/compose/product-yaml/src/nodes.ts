@@ -323,6 +323,10 @@ export function makeSttTranscribeSessionNode(cfg: SttSessionNodeConfig): Capabil
             confidence: w.confidence ?? 0,
           })),
           segments: t.segments.map((s) => ({ start: s.start, end: s.end, text: s.text })),
+          // `segments[N]` is what a cited `<track>:s<N>` resolves to. A transcript whose spans are
+          // not paragraph-sized says so here, so a reader can tell which granularity the row holds;
+          // the default writes no key and the row is exactly what it always was.
+          ...(t.span_granularity === undefined ? {} : { span_granularity: t.span_granularity }),
         },
       });
     }

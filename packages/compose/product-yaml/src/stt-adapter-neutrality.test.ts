@@ -136,6 +136,7 @@ const NEUTRAL_SURFACE_FIELD_ALLOWLIST = new Set<string>([
   'segment_ids',
   'segments',
   'session_id',
+  'span_granularity',
   'span_id',
   'spans',
   'speaker',

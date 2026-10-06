@@ -187,6 +187,10 @@ node packages/app/cli/dist/index.js doctor examples/acme-notes/acme-notes.produc
 # first (getting-started) and paste its id — a freshly generated uuid belongs to no
 # org, and the deployment refuses to boot rather than come up bound to a tenant that
 # does not exist.
+# To run a recording all the way through with no provider key (transcribe, extract,
+# ground, persist, read), use the keyless variant in getting-started instead:
+# RAYSPEC_STT_FAKE_FIXTURES=examples/acme-notes/stt-fixtures,
+# RAYSPEC_EXTRACTION_MODE=deterministic, RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true.
 RAYSPEC_PRODUCT_TENANT_ID="<an existing org uuid>" \
 RAYSPEC_BLOB_ROOT=/tmp/rayspec-blobs \
 STT_PROVIDER=fake \

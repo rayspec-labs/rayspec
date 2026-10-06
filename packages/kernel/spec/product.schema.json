@@ -115,6 +115,13 @@
             },
             "additionalProperties": false
           },
+          "span_granularity": {
+            "type": "string",
+            "enum": [
+              "paragraph",
+              "sentence"
+            ]
+          },
           "runtime_notes": {
             "type": "string"
           },

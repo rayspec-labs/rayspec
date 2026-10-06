@@ -221,3 +221,117 @@ describe('the deterministic extraction provider', () => {
     expect(Object.keys(ok.properties)).toEqual(['a']);
   });
 });
+
+/** A transcript-shaped output: scalars at the top, claims that cite the spans they were read from. */
+const NOTES = parseDeterministicExtractionSchema({
+  type: 'object',
+  properties: {
+    headline: { type: 'string' },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          evidence: { type: 'array', items: { type: 'string' } },
+          weight: { type: ['integer', 'null'] },
+        },
+      },
+    },
+    labels: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          evidence_span_ids: { type: 'array', items: { type: 'string' } },
+          text: { type: 'string' },
+        },
+      },
+    },
+  },
+});
+
+const SPANS = [
+  { id: 'mic:s0', track: 'mic', start: 0, end: 5, text: 'Headline: Stable upload.' },
+  { id: 'mic:s1', track: 'mic', start: 5, end: 10, text: 'Items: Keep the API stable. | 3' },
+  {
+    id: 'system:s0',
+    track: 'system',
+    start: 0,
+    end: 5,
+    text: 'Labels: Later.\nItems: Move later.',
+  },
+  { id: 'system:s1', track: 'system', start: 5, end: 10, text: 'A sentence with no label.' },
+];
+
+const SPAN_SETS = { spanSets: { idFields: ['evidence', 'evidence_span_ids'] } };
+
+describe('the deterministic extraction provider reading transcript spans', () => {
+  it('without the option, ignores a span array and drops an item that has an array property', async () => {
+    const handler = deterministicExtractionHandler(NOTES);
+    const out = await handler(
+      input([SPANS, 'Headline: From text.\nItems: A claim | 2\nLabels: A label']),
+      {} as never,
+    );
+    // The span array is not read (the headline comes from the string), and no line fills an item
+    // whose shape carries an array: exactly what the provider did before spans existed for it.
+    expect(out[0]?.value).toEqual({ headline: 'From text.', items: [], labels: [] });
+    expect(await handler(input([SPANS]), {} as never)).toEqual([
+      expect.objectContaining({ value: { items: [], labels: [] } }),
+    ]);
+  });
+
+  it('reads labelled lines from span texts in order, and cites the span each claim came from', async () => {
+    const handler = deterministicExtractionHandler(NOTES, SPAN_SETS);
+    const out = await handler(input([{ session_id: 's', tracks: [] }, SPANS]), {} as never);
+    expect(out[0]?.value).toEqual({
+      headline: 'Stable upload.',
+      items: [
+        // The id field takes no `|` part: `3` is the part of the next property, `weight`.
+        { text: 'Keep the API stable.', evidence: ['mic:s1'], weight: 3 },
+        { text: 'Move later.', evidence: ['system:s0'], weight: null },
+      ],
+      labels: [{ evidence_span_ids: ['system:s0'], text: 'Later.' }],
+    });
+  });
+
+  it('gives a claim read from plain text an empty citation, and still fills scalars first-wins', async () => {
+    const handler = deterministicExtractionHandler(NOTES, SPAN_SETS);
+    const out = await handler(
+      input(['Headline: From text.\nItems: Unbacked claim', SPANS]),
+      {} as never,
+    );
+    expect(out[0]?.value).toEqual({
+      headline: 'From text.',
+      items: [
+        { text: 'Unbacked claim', evidence: [], weight: null },
+        { text: 'Keep the API stable.', evidence: ['mic:s1'], weight: 3 },
+        { text: 'Move later.', evidence: ['system:s0'], weight: null },
+      ],
+      labels: [{ evidence_span_ids: ['system:s0'], text: 'Later.' }],
+    });
+  });
+
+  it('fills only the named id fields: another array property still drops the line', async () => {
+    const handler = deterministicExtractionHandler(NOTES, { spanSets: { idFields: ['evidence'] } });
+    const out = await handler(input([SPANS]), {} as never);
+    expect((out[0]?.value as { labels: unknown[] }).labels).toEqual([]);
+    expect((out[0]?.value as { items: unknown[] }).items).toHaveLength(2);
+  });
+
+  it('ignores an array that is not a span set', async () => {
+    const handler = deterministicExtractionHandler(NOTES, SPAN_SETS);
+    const notSpans: unknown[] = [
+      [],
+      [{ id: 'a:s0' }],
+      [{ text: 'Headline: no id.' }],
+      [{ id: 7, text: 'Headline: numeric id.' }],
+      [SPANS[0], { id: 'x', text: 9 }],
+      [SPANS[0], 'Headline: a string element.'],
+    ];
+    for (const value of notSpans) {
+      const out = await handler(input([value]), {} as never);
+      expect(out[0]?.value, JSON.stringify(value)).toEqual({ items: [], labels: [] });
+    }
+  });
+});

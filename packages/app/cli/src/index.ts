@@ -348,7 +348,11 @@ const HELP_SECTIONS: readonly HelpSection[] = [
                                 predicted, while an UNSET selector is never a boot error on a BACKEND
                                 document (on a product document STT_PROVIDER IS demanded, but only
                                 when the document declares an stt.* step alongside the audio
-                                capability whose chunks it transcribes). Opens no socket, no
+                                capability whose chunks it transcribes). A product document also
+                                lists, as optional, the settings of a run without provider keys:
+                                RAYSPEC_STT_FAKE_FIXTURES and RAYSPEC_STT_FAKE_FALLBACK (with
+                                STT_PROVIDER=fake) and RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN
+                                (with RAYSPEC_EXTRACTION_MODE=deterministic). Opens no socket, no
                                 database and no credential, and loads NO extension — so every demand
                                 an extension changes is invisible: an extension REMOVES one by
                                 supplying a blob backend, and ADDS one by contributing a

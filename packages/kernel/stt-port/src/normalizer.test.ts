@@ -37,3 +37,45 @@ describe('normalizeTranscriptArtifact word_ids consistency', () => {
     expect(transcript.spans[0]?.word_ids).toContain('stt.word.sess-1.mic.0003');
   });
 });
+
+describe('normalizeTranscriptArtifact span_granularity', () => {
+  const base = {
+    session_id: 'sess-1',
+    track: 'mic',
+    provider: 'fake',
+    full_text: 'alpha beta. gamma delta.',
+    segments: [
+      { start: 0, end: 1, text: 'alpha beta.' },
+      { start: 1, end: 2, text: 'gamma delta.' },
+    ],
+  };
+
+  it('carries the granularity the segments were cut at to the transcript', () => {
+    const transcript = normalizeTranscriptArtifact({ ...base, span_granularity: 'sentence' });
+    expect(transcript.span_granularity).toBe('sentence');
+    expect(transcript.spans.map((span) => span.id)).toEqual(['mic:s0', 'mic:s1']);
+  });
+
+  it('leaves the key off the transcript when the input does not carry it', () => {
+    const transcript = normalizeTranscriptArtifact(base);
+    expect('span_granularity' in transcript).toBe(false);
+    expect(Object.keys(transcript)).toEqual([
+      'transcript_id',
+      'session_id',
+      'track',
+      'status',
+      'full_text',
+      'language',
+      'confidence',
+      'duration_seconds',
+      'model',
+      'provider',
+      'provider_run_id',
+      'segments',
+      'words',
+      'spans',
+      'created_at',
+      'updated_at',
+    ]);
+  });
+});

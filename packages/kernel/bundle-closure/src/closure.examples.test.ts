@@ -169,6 +169,83 @@ describe('acme-notes-backend: compiled handlers, stores, an agent and a cron tri
   });
 });
 
+describe('acme-notes: a product document that sizes its transcript spans', () => {
+  const STT_CONTRACT = '      - stt.transcript_span\n';
+
+  /** The example copied aside, its `stt` capability (or the one `after` ends) declaring `span_granularity`. */
+  function withGranularity(value: string, after = STT_CONTRACT): string {
+    const root = temporaryDirectory('example-');
+    cpSync(join(EXAMPLES, 'acme-notes'), root, { recursive: true });
+    const path = join(root, 'acme-notes.product.yaml');
+    const text = readFileSync(path, 'utf8');
+    const declared = text.replace(after, `${after}    span_granularity: ${value}\n`);
+    expect(declared).not.toBe(text);
+    writeFileSync(path, declared);
+    return path;
+  }
+
+  const identity = { id: 'acme-notes', version: '1.0.0' };
+
+  it('resolves to the closure of the document without the key, spec bytes aside', async () => {
+    const plain = await resolved(join(EXAMPLES, 'acme-notes', 'acme-notes.product.yaml'), identity);
+    for (const value of ['sentence', 'paragraph']) {
+      const closure = await resolved(withGranularity(value), identity);
+      // The key derives no manifest field: what the bundle requires, may do and binds is unchanged.
+      expect(closure.requires).toEqual(plain.requires);
+      expect(closure.permissions).toEqual(plain.permissions);
+      expect(closure.bindings).toEqual(plain.bindings);
+      expect(closure.warnings).toEqual(plain.warnings);
+      expect(paths(closure)).toEqual(paths(plain));
+    }
+  });
+
+  it('writes a bundle the reader accepts, whose spec still declares the key', async () => {
+    const closure = await resolved(withGranularity('sentence'), identity);
+    expect(await roundTrip(closure)).toMatch(/^[0-9a-f]{64}$/);
+    const spec = closure.files.find((f) => f.path === 'payload/acme-notes.product.yaml');
+    const parsed = parseBundleSpec(readFileSync(spec!.file!));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.value.kind === 'product') {
+      expect(parsed.value.spec.capabilities.find((c) => c.id === 'stt')?.span_granularity).toBe(
+        'sentence',
+      );
+    } else {
+      throw new Error('the bundled document is not a product document');
+    }
+  });
+
+  it('refuses a value the grammar does not know, with the schema violation at the key', async () => {
+    const result = await resolveClosure({
+      specPath: withGranularity('word'),
+      runtimeVersion: RUNTIME,
+      ...identity,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.map((e) => e.code)).toEqual([
+        'RAY_SPEC_INVALID',
+        'SPEC_SCHEMA_VIOLATION',
+      ]);
+      expect(result.errors[1]?.path).toBe('capabilities[2].span_granularity');
+    }
+  });
+
+  it('refuses the key on a capability other than stt, so such a document is never packed', async () => {
+    const result = await resolveClosure({
+      specPath: withGranularity('sentence', '      - media_playback.stream\n'),
+      runtimeVersion: RUNTIME,
+      ...identity,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors.map((e) => [e.code, e.path])).toEqual([
+        ['RAY_SPEC_INVALID', undefined],
+        ['SPEC_SCHEMA_VIOLATION', 'capabilities[1].span_granularity'],
+      ]);
+    }
+  });
+});
+
 describe('stream-backend: an extension shipped with its own manifest', () => {
   const root = buildStreamBackend();
 

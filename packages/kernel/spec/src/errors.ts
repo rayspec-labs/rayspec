@@ -24,7 +24,10 @@ import { z } from 'zod';
  *                               not a whole positive number (a safe integer greater than zero). Inside
  *                               `parseSpec` the grammar rejects those first, so that restatement is
  *                               defence in depth; it reports when `lintSpec` is run directly over a
- *                               spec value assembled in code rather than parsed.
+ *                               spec value assembled in code rather than parsed. The product lint
+ *                               pass emits it too, for a `span_granularity` declared on a
+ *                               capability other than `stt` — a key that is valid in shape but
+ *                               honoured in that one place only.
  *  - `unknown_field`          — a `.strict()` unknown-key rejection (fail-closed: any extra key).
  *  - `reserved_document_key`  — the raw document carries a mapping key literally named `__proto__`
  *                               (anywhere, on either profile). It is refused by a scan over the

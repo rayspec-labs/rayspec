@@ -516,3 +516,101 @@ describe('DeepgramSttAdapter — session fan-out', () => {
     }
   });
 });
+
+describe('DeepgramSttAdapter — span granularity', () => {
+  function adapterWith(options: Record<string, unknown>, fixture: string) {
+    const { fetchImpl, calls } = fetchReturning(loadFixtureText(fixture));
+    const adapter = new DeepgramSttAdapter({
+      resolver: resolverFor(),
+      apiKey: SECRET_KEY,
+      env: {},
+      fetchImpl,
+      now: () => '2026-07-02T00:00:00.000Z',
+      ...options,
+    });
+    return { adapter, calls };
+  }
+
+  it('returns one span per paragraph when no granularity is configured', async () => {
+    const { adapter } = adapterWith({}, 'multi-sentence-paragraphs.json');
+    const result = await adapter.transcribeTrack(trackRequest());
+    if (result.status !== 'completed') throw new Error('expected completed');
+    expect(result.transcript.spans.map((span) => span.id)).toEqual(['mic:s0', 'mic:s1']);
+    expect('span_granularity' in result.transcript).toBe(false);
+  });
+
+  it('returns one span per sentence under sentence granularity, from the same request', async () => {
+    const byDefault = adapterWith({}, 'multi-sentence-paragraphs.json');
+    const bySentence = adapterWith(
+      { spanGranularity: 'sentence' },
+      'multi-sentence-paragraphs.json',
+    );
+    await byDefault.adapter.transcribeTrack(trackRequest());
+    const result = await bySentence.adapter.transcribeTrack(trackRequest());
+    if (result.status !== 'completed') throw new Error('expected completed');
+    expect(result.transcript.spans.map((span) => [span.id, span.text])).toEqual([
+      ['mic:s0', 'We agreed on the rollout order.'],
+      ['mic:s1', 'The upload service goes first.'],
+      ['mic:s2', 'Billing follows a week later.'],
+      ['mic:s3', 'Who owns the migration?'],
+      ['mic:s4', 'I will take it.'],
+    ]);
+    expect(result.transcript.span_granularity).toBe('sentence');
+    // The sentences are already in the response: the request is the one the default adapter sends.
+    expect(bySentence.calls.map((call) => call.url)).toEqual(
+      byDefault.calls.map((call) => call.url),
+    );
+    expect(bySentence.calls[0]?.init?.headers).toEqual(byDefault.calls[0]?.init?.headers);
+  });
+
+  it('applies the granularity to every track of a session', async () => {
+    const { fetchImpl } = fetchReturning(loadFixtureText('multi-sentence-paragraphs.json'));
+    const adapter = new DeepgramSttAdapter({
+      resolver: new StaticSttMediaResolver()
+        .set('sess', 'mic', { bytes: AUDIO })
+        .set('sess', 'system', { bytes: AUDIO }),
+      apiKey: SECRET_KEY,
+      env: {},
+      fetchImpl,
+      spanGranularity: 'sentence',
+    });
+    const results = await adapter.transcribeSession({
+      session_id: 'sess',
+      tracks: [
+        { session_id: 'sess', track: 'mic' },
+        { session_id: 'sess', track: 'system' },
+      ],
+    });
+    expect(
+      results.map((result) => result.transcript?.spans.map((span) => span.id)),
+    ).toEqual([
+      ['mic:s0', 'mic:s1', 'mic:s2', 'mic:s3', 'mic:s4'],
+      ['system:s0', 'system:s1', 'system:s2', 'system:s3', 'system:s4'],
+    ]);
+  });
+
+  it('behaves as the default adapter when paragraph granularity is named', async () => {
+    const { adapter } = adapterWith(
+      { spanGranularity: 'paragraph' },
+      'multi-sentence-paragraphs.json',
+    );
+    const result = await adapter.transcribeTrack(trackRequest());
+    if (result.status !== 'completed') throw new Error('expected completed');
+    expect(result.transcript.spans.map((span) => span.id)).toEqual(['mic:s0', 'mic:s1']);
+    expect('span_granularity' in result.transcript).toBe(false);
+  });
+
+  it('refuses a granularity it does not implement at construction', () => {
+    for (const value of ['word', 'Sentence', '', null, 1]) {
+      expect(
+        () =>
+          new DeepgramSttAdapter({
+            resolver: resolverFor(),
+            spanGranularity: value as never,
+          }),
+      ).toThrow(
+        `DeepgramSttAdapter: spanGranularity '${value}' is not supported (paragraph | sentence).`,
+      );
+    }
+  });
+});

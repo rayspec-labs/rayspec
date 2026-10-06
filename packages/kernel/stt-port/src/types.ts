@@ -2,6 +2,14 @@ export type SttTrack = 'mic' | 'system' | (string & {});
 
 export type SttTranscriptStatus = 'absent' | 'pending' | 'processing' | 'completed' | 'failed';
 
+/**
+ * How large one transcript span is. `paragraph` — one span per paragraph of the recording, the size
+ * every adapter produces unless told otherwise. `sentence` — one span per sentence, so a citation
+ * names a single sentence. The span id keeps the form `<track>:s<index>` under both; what the index
+ * counts differs, so ids from one granularity do not name the same text under the other.
+ */
+export type SttSpanGranularity = 'paragraph' | 'sentence';
+
 export type SttAdapterScenario = 'completed' | 'pending' | 'failed' | 'malformed_provider_output';
 
 export interface SttLanguagePolicy {
@@ -85,6 +93,11 @@ export interface SttTranscript {
   segments: SttSegment[];
   words: SttWord[];
   spans: SttTranscriptSpan[];
+  /**
+   * Present only when the adapter cut the spans at a granularity other than the default: `sentence`
+   * when each span is one sentence. Absent ⇒ paragraph-sized spans.
+   */
+  span_granularity?: SttSpanGranularity;
   created_at: string;
   updated_at: string;
 }

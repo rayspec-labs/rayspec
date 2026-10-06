@@ -1750,6 +1750,10 @@ provider for every extractor whose config selects it (`"backend": "deterministic
 development and tests only — `RAYSPEC_HOSTING_POSTURE=managed` refuses it, and a config naming a real
 backend is refused in deterministic mode rather than answered by it
 (docs/spec-reference.md#the-deterministic-extraction-provider; `examples/document-intake` runs on it).
+The operator can lift that refusal for one boot with `RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true`:
+the provider then answers for the COMMITTED production config as it is, reading only its `agent_id` and
+`schema_file` (see the keyless run below). Do not write a second, deterministic copy of a production
+config for that purpose.
 An executor injected via `assembleServer(config, { productDeterministicAgents })` (the
 `examples/dev-server` pattern) replaces the provider. The merge-gated acceptance e2e below injects one
 and proves the whole loop end-to-end (boot → submit → `store_read → agent → validation → store_write` → the views):
@@ -1766,6 +1770,45 @@ for a FILE product the merge-gated e2e is `packages/app/server/src/invoice-intak
 (`pnpm --filter @rayspec/server test support-intake-chat-e2e`) — a chat product ALSO injects a
 deterministic REPLY Backend, so the wrapper is
 `assembleServer(config, { productDeterministicResponderBackend, productDeterministicAgents })`.
+
+**A keyless end-to-end run of an AUDIO product (no provider key, through the real `rayspec deploy`).**
+A product that transcribes runs upload → transcribe → extract → ground → persist → read with three
+environment variables and no change to its committed files — for the product repository's CI or a demo:
+```bash
+STT_PROVIDER=fake \
+RAYSPEC_STT_FAKE_FIXTURES=<dir of *.json fixtures> \
+RAYSPEC_EXTRACTION_MODE=deterministic \
+RAYSPEC_EXTRACTION_DETERMINISTIC_STAND_IN=true \
+node packages/app/cli/dist/index.js deploy <product>.product.yaml
+```
+(plus the usual `RAYSPEC_PRODUCT_TENANT_ID`, `RAYSPEC_BLOB_ROOT` and `RAYSPEC_MEDIA_SIGNING_KEY`).
+- **A fixture file** is `{ "session_id": "<id or *>", "tracks": [{ "track": "mic", "segments": [{ "text": "…" }] }] }`.
+  `"session_id": "*"` answers ANY session; a fixture for the recording's own session wins over it. Each
+  segment is one span, `<track>:s<index>` (override with `span_id`; optional `start`/`end` seconds,
+  default five-second slots). One fixture per `.json` file directly in the directory; two files may not
+  hold the same session and track. A broken directory or file refuses the BOOT, not the first recording.
+- **Write the fixture's segments as labelled lines** — `headline: …`, `items: …` — one label per output
+  property. The deterministic stand-in reads each span's lines into the extractor's output schema, and
+  inside an array-of-objects property it fills the evidence field (the kind's
+  `provenance.evidence_field`, an array of strings) with the id of the span the line came from: a
+  segment `items: Keep the API stable.` at index 3 of `mic` becomes
+  `{ "text": "Keep the API stable.", "evidence": ["mic:s3"] }`. Other item properties are `|`-separated
+  parts in declared order; top-level scalars take the first line with their label. A product with
+  `span_granularity: sentence` writes one segment per sentence (the fake adapter emits segments as written).
+- `RAYSPEC_STT_FAKE_FALLBACK=fixed` gives a recording no fixture matches a fixed two-sentence transcript.
+  It has no labelled line, so it reaches a readable transcript, not persisted artifacts.
+- Fixture rules the boot enforces: `session_id` and `track` carry no surrounding whitespace, span ids
+  (written or the `<track>:s<index>` default) are unique across ALL tracks of a file, a file is at most
+  1 MiB, and a symbolic link is followed only to a file inside the directory (a mounted ConfigMap works).
+- The three variables are a dev/CI posture: the boot banner names each one, a fake-adapter setting
+  beside `STT_PROVIDER=deepgram` and the stand-in under `RAYSPEC_EXTRACTION_MODE=live` refuse the boot,
+  a stand-in config must still name a `backend`, and `RAYSPEC_HOSTING_POSTURE=managed` refuses all three
+  for a product document. A fixture directory is not part of a bundle;
+  a bundle whose config names a real backend still needs a placeholder value for that backend's key
+  binding. Reference: `examples/acme-notes/stt-fixtures/default.json`,
+  docs/spec-reference.md#fixtures-for-the-fake-speech-to-text-adapter, and the merge-gated proof
+  `packages/app/server/src/product-keyless-boot.db.test.ts`
+  (`pnpm --filter @rayspec/server test product-keyless`).
 
 **Interactive per-product dev-boot (the play-DB pattern).** The example is
 `examples/support-ticket-triage/dev-boot.mjs` — a thin per-product script that auto-creates a
@@ -1910,6 +1953,7 @@ offending key/value is a `no_code_in_yaml` / `provider_native_leak` / `invalid_c
   status: available | reserved | not_yet_runtime   # doctor/plan accept all three; a MOUNT needs `available` + runtime-backed.
   contracts: [<contract id>, ...]                   # named I/O contracts the capability provides.
   provider_policy: { default_provider?, default_model?, adapter_visibility? }   # OPTIONAL — the ONE legal policy slot besides deployment_overrides.
+  span_granularity: paragraph | sentence   # OPTIONAL, `stt` ONLY — the size of one transcript span (absent ⇒ paragraph).
   runtime_notes: <string>   # OPTIONAL non-normative note (may mention providers — it is NOT the executable graph).
 ```
 **Runtime-backed capability ids (mount when declared `status: available`):** `record_input` (the generic
@@ -1933,6 +1977,27 @@ client), and is **idempotent** on the canonical payload hash (a retry converges;
 re-normalizes). It requires a wired `record/<agent>.normalizer.json` config (path-jailed + validated) —
 declaring `input_normalize` without it fails closed at deploy. A `record_input` without it is byte-identical.
 
+**Optional `span_granularity` on `stt`** — how large one transcript span is, i.e. what a citation names.
+`paragraph` (the default; absent ⇒ paragraph) gives one span per paragraph of a track, so several claims
+drawn from one paragraph cite the SAME id. `sentence` gives one span per sentence — choose it when the
+product shows a reader which sentence backs which claim, or when its recordings are short turns that
+would otherwise collapse into a few paragraph spans. Span ids are `<track>:s<index>` under both, and
+`<track>:s<N>` is `segments[N]` of that track's transcript row; the index counts paragraphs under one
+value and sentences under the other, so **ids written under one value do not match transcripts produced
+under the other**. **Choose before the product stores evidence.** After a change, reprocess stored
+sessions (`POST /v1/sessions/{id}/reprocess`); human-edited and dismissed rows (and surplus rows of a
+kind without `reconcile_stale_rows`) keep citations of the earlier value. A sentence-granular transcript
+row carries `payload.span_granularity: sentence` (a paragraph-granular one has no such key) — project it
+with `{ kind: json, column: payload, path: [span_granularity], type: string, default: paragraph }` when
+a reader needs to know (a row from the fake adapter, a supplied adapter or a provider response without
+paragraphs carries no key, so that default reports `paragraph` for it). Rules: any other value is a
+`schema_violation`; so is the key on a capability other than `stt` (validation refuses it, before pack
+or deploy); inside `provider_policy`, a workflow step or an extractor it is an `unknown_field`.
+It is honoured by the Deepgram adapter (`STT_PROVIDER=deepgram`); the fake adapter emits its fixtures'
+segments as written (`RAYSPEC_STT_FAKE_FIXTURES`, see "A keyless end-to-end run of an AUDIO product"), so a fixture for
+a sentence-granular product holds one segment per sentence. A
+provider response without paragraphs is cut at pauses under both values.
+
 ### `artifacts[]` — product-owned meaning + output contract
 
 ```yaml
@@ -1941,7 +2006,9 @@ declaring `input_normalize` without it fails closed at deploy. A `record_input` 
   contract: <contract id>   # REQUIRED — the payload contract (resolved against `contracts`).
   scope: <string>           # OPTIONAL — object scope (e.g. `session`).
   collection: <string>      # OPTIONAL — the collection store the kind materializes into.
-  provenance: { source?, evidence_field?, required? }        # OPTIONAL — evidence/span provenance.
+  provenance: { source?, evidence_field?, required? }        # OPTIONAL — evidence/span provenance. The ids in
+                                                              #   `evidence_field` are span ids; their size is
+                                                              #   `capabilities[stt].span_granularity`.
   lifecycle: { persist?, preserve_human_edits?, reconcile_stale_rows? }   # OPTIONAL — persistence policy.
 ```
 > Every persisted artifact kind (`lifecycle.persist` not false) must share ONE `scope` — a multi-scope

@@ -1,0 +1,23 @@
+{
+  "description": "A transcript for any session, for a run of acme-notes without provider keys: the fake speech-to-text adapter (STT_PROVIDER=fake, RAYSPEC_STT_FAKE_FIXTURES=examples/acme-notes/stt-fixtures) answers every recording with these segments, and the deterministic extraction provider reads each labelled segment into the note it names, citing that segment's span.",
+  "session_id": "*",
+  "tracks": [
+    {
+      "track": "mic",
+      "segments": [
+        { "text": "headline: The upload API stays stable." },
+        { "text": "detail: Both tracks keep the current upload API until the client moves." },
+        { "text": "output_language: en" },
+        { "text": "items: Keep the upload API stable." },
+        { "text": "Nothing on this line is labelled, so no note is read from it." }
+      ]
+    },
+    {
+      "track": "system",
+      "segments": [
+        { "text": "pointers: Move the client later." },
+        { "text": "labels: The client moves later." }
+      ]
+    }
+  ]
+}

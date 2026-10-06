@@ -1,6 +1,7 @@
 import {
   type NormalizeTranscriptInput,
   normalizeTranscriptArtifact,
+  type SttSpanGranularity,
   type SttTrack,
   type SttTranscript,
 } from '@rayspec/stt-port';
@@ -19,6 +20,9 @@ import {
  *   words[].{ word, punctuated_word, start, end, confidence, speaker? }
  *   paragraphs.paragraphs[].{ start, end, num_words, speaker?, sentences[].{ text, start, end } }
  *
+ * A segment is one paragraph by default and one sentence when the caller asks for sentence
+ * granularity (`DeepgramMapContext.span_granularity`); both are read from the same response.
+ *
  * Parsing is defensive (untrusted provider JSON): missing fields degrade honestly rather than invent
  * precision — an absent confidence maps to `null` (per the neutral contract's nullable confidence),
  * not a fabricated `0`. Provider-native field names never leak into the public transcript artifact.
@@ -33,6 +37,12 @@ export interface DeepgramMapContext {
   track: SttTrack;
   /** Neutral model label recorded as provenance (the resolved model the adapter used, e.g. `nova-2`). */
   model: string;
+  /**
+   * How large one segment (and so one span) is. Absent or `paragraph` ⇒ one per paragraph. `sentence`
+   * ⇒ one per sentence of each paragraph; a response without paragraphs has no sentences to read
+   * and keeps its pause-based segments under either value.
+   */
+  span_granularity?: SttSpanGranularity;
   /** Optional deterministic clock for tests; defaults to the normalizer's fixed timestamp. */
   now?: string;
 }
@@ -134,6 +144,83 @@ function segmentsFromParagraphs(
 }
 
 /**
+ * A sentence bound, read as `num` reads a paragraph or word bound (a numeric string counts), except
+ * that an absent, `null` or non-numeric one is `undefined` rather than a zero.
+ */
+function optionalBound(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Segments from the sentences of Deepgram paragraphs: one segment per sentence, in order across
+ * paragraphs, with the sentence's own text and bounds (the paragraph's bound where the sentence
+ * carries no usable one). A sentence without text is skipped — a span with nothing in it can back
+ * no claim — and the time it carries goes to the sentence before it in the paragraph, or to the
+ * one after it when it comes first, so its words stay in their own paragraph. A paragraph left
+ * with no sentence at all contributes the one segment `segmentsFromParagraphs` builds for it, so
+ * no stretch of the recording loses its segment.
+ *
+ * A segment's confidence is the mean over the words the shared normalizer will list as its
+ * `word_ids`: a word belongs to the first segment whose bounds contain it, and to the first
+ * segment of the track when none does. Sentences that arrive out of order or overlap therefore get
+ * the confidence of exactly their own words.
+ */
+function segmentsFromSentences(
+  paragraphs: Array<Record<string, unknown>>,
+  rawWords: Array<Record<string, unknown>>,
+): NeutralSegment[] {
+  const pieces: Array<{ text: string; start: number; end: number }> = [];
+  for (const paragraph of paragraphs) {
+    const start = num(paragraph.start);
+    const end = num(paragraph.end);
+    const sentences = asArray(paragraph.sentences).map(asRecord);
+    if (!sentences.some((sentence) => str(sentence.text).trim().length > 0)) {
+      pieces.push({ text: sentences.map((sentence) => str(sentence.text)).join(' '), start, end });
+      continue;
+    }
+    let previous: { text: string; start: number; end: number } | undefined;
+    // The earliest start of the skipped sentences that precede the paragraph's first kept one.
+    let leading: number | undefined;
+    for (const sentence of sentences) {
+      const sentenceStart = optionalBound(sentence.start);
+      const sentenceEnd = optionalBound(sentence.end);
+      if (str(sentence.text).trim().length === 0) {
+        if (previous) {
+          if (sentenceEnd !== undefined) previous.end = Math.max(previous.end, sentenceEnd);
+        } else if (sentenceStart !== undefined) {
+          leading = Math.min(leading ?? sentenceStart, sentenceStart);
+        }
+        continue;
+      }
+      const piece = {
+        text: str(sentence.text),
+        start: sentenceStart ?? start,
+        end: sentenceEnd ?? end,
+      };
+      if (leading !== undefined) {
+        piece.start = Math.min(piece.start, leading);
+        leading = undefined;
+      }
+      pieces.push(piece);
+      previous = piece;
+    }
+  }
+  const runs: Array<Array<Record<string, unknown>>> = pieces.map(() => []);
+  for (const word of rawWords) {
+    const wordStart = num(word.start);
+    const wordEnd = num(word.end);
+    const position = pieces.findIndex((piece) => wordStart >= piece.start && wordEnd <= piece.end);
+    runs[position === -1 ? 0 : position]?.push(word);
+  }
+  return pieces.map((piece, position) => ({
+    ...piece,
+    confidence: meanConfidence(runs[position] ?? []),
+  }));
+}
+
+/**
  * Segments from raw words when Deepgram returns no paragraphs: a new
  * segment starts whenever the gap between consecutive words exceeds `SEGMENT_GAP_SECONDS`.
  */
@@ -216,8 +303,12 @@ export function mapDeepgramResponseToNeutralInput(
   }));
 
   const paragraphs = asArray(asRecord(alt.paragraphs).paragraphs).map(asRecord);
-  const segments =
-    paragraphs.length > 0
+  // Sentences exist only inside paragraphs, so the sentence mapping applies only when the response
+  // carries some; that is also the only case in which the transcript records the granularity.
+  const bySentence = ctx.span_granularity === 'sentence' && paragraphs.length > 0;
+  const segments = bySentence
+    ? segmentsFromSentences(paragraphs, rawWords)
+    : paragraphs.length > 0
       ? segmentsFromParagraphs(paragraphs, rawWords)
       : segmentsFromWords(rawWords);
 
@@ -235,6 +326,7 @@ export function mapDeepgramResponseToNeutralInput(
     provider_run_id: requestId,
     words,
     segments,
+    ...(bySentence ? { span_granularity: 'sentence' as const } : {}),
     now: ctx.now,
   };
 }

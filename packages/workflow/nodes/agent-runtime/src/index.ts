@@ -1,8 +1,10 @@
 export { AGENT_EXTRACTION_OPERATION, createAgentRuntimeHandler } from './agent-node.js';
 export {
   DETERMINISTIC_EXTRACTION_BACKEND,
+  type DeterministicExtractionOptions,
   type DeterministicExtractionSchema,
   DeterministicExtractionSchemaError,
+  type DeterministicExtractionSpanSets,
   deterministicExtractionHandler,
   extractLabelledRecord,
   inputText,
