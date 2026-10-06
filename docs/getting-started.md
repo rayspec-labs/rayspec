@@ -588,6 +588,14 @@ curl -s -X POST http://localhost:8080/sessions/demo-session/mic/finalize \
 #   200
 ```
 
+Chunks of a track are sent in order from index `0`. An index ahead of the next one the
+server expects is a `409` whose body carries `"error": "gap"` and `next_expected_index`,
+the index to send next, and a rejected chunk creates nothing: a session appears in
+`GET /sessions` only once the first chunk of one of its tracks has been accepted. There it
+reads `recording` until every track it holds has been sealed, then `completed`. Wait for a
+chunk's `200` before sending the next one: a chunk sent while the previous chunk of the
+same track is still in flight can be answered `409`.
+
 That `200` is the whole point of the walkthrough: the seal was accepted by the
 tenant-bound dispatcher and a run was started under `<ORG_ID>`.
 `finalized_event_id` is that event's idempotency key and it is **session**-scoped

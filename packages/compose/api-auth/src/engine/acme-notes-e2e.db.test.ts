@@ -456,6 +456,27 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
     );
   });
 
+  it('a chunk rejected as a gap on a session that does not exist leaves the session list empty', async () => {
+    testsRan += 1;
+    const gap = await postChunk('never-started', 'mic', 3, tokenA, new Uint8Array([9]));
+    expect(gap.status).toBe(409);
+    expect(await gap.json()).toEqual({
+      error: 'gap',
+      detail: expect.any(String),
+      next_expected_index: 0,
+    });
+    // The rejected request created no session: the list a client reads shows no empty recording.
+    const list = (await (await get('/sessions', tokenA)).json()) as Record<string, unknown>;
+    expect(list.sessions).toEqual([]);
+    expect(list.total).toBe(0);
+    const rows = (await h.db.$client.unsafe(
+      `SELECT (SELECT count(*)::int FROM audio_sessions WHERE tenant_id = $1) AS sessions,
+              (SELECT count(*)::int FROM audio_tracks WHERE tenant_id = $1) AS tracks`,
+      [TENANT_A],
+    )) as unknown as Array<{ sessions: number; tracks: number }>;
+    expect(rows[0]).toEqual({ sessions: 0, tracks: 0 });
+  });
+
   it('upload → dual-track finalize → EXACTLY ONE durable run, executed to completion', async () => {
     testsRan += 1;
     expect((await postChunk(SESSION, 'mic', 0, tokenA, new Uint8Array([1, 2]))).status).toBe(200);
@@ -591,7 +612,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
     expect(sessions).toHaveLength(1);
     const s = sessions[0] as Record<string, unknown>;
     expect(s.id).toBe(SESSION);
-    expect(s.status).toBe('recording');
+    expect(s.status).toBe('completed');
     expect(s.protocol_version).toBe(2);
     expect(typeof s.started_at).toBe('string');
     expect(s.ended_at).toBeNull();
@@ -751,7 +772,7 @@ describe.skipIf(!hasDb)('acme-notes fake-provider e2e through the REAL deploy pa
 describe('acme-notes e2e (DB) — ran-guard', () => {
   it('the acme-notes e2e tests ACTUALLY RAN when the DB is required (CI / opt-in)', () => {
     if (requireDb) {
-      expect(testsRan).toBe(8); // the 8 e2e stages above
+      expect(testsRan).toBe(9); // the 9 e2e stages above
     } else {
       expect(requireDb).toBe(false);
     }

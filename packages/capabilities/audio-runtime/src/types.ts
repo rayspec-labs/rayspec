@@ -6,7 +6,12 @@
  * blob key or a watermark.
  */
 
-/** A session's lifecycle status. `recording` → `finalizing` → `completed` (or `failed`). */
+/**
+ * A session's lifecycle status. The capability writes two of these values: `recording` from the first
+ * accepted chunk of the session's first track, and `completed` once every track the session holds is
+ * sealed. A track that starts on a `completed` session moves it back to `recording` until that track
+ * is sealed too. `finalizing` and `failed` are reserved: no code path writes them today.
+ */
 export type AudioSessionStatus = 'recording' | 'finalizing' | 'completed' | 'failed';
 
 /**

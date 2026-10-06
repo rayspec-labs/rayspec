@@ -24,7 +24,9 @@ export function audioCapabilityStores(): StoreSpec[] {
         { name: 'session_id', type: 'text', nullable: false, unique: false },
         // Tenant-namespaced single-column UNIQUE (= `${tenantId}:${session_id}`). The tenant is server-derived.
         { name: 'session_ref', type: 'text', nullable: false, unique: true },
-        // recording | finalizing | completed | failed.
+        // `recording` while any track is still uploading, `completed` once every track is sealed (a
+        // track that starts later moves it back to `recording`). `finalizing` and `failed` are reserved
+        // values of the status type that nothing writes today.
         { name: 'status', type: 'text', nullable: false, unique: false },
         // The upload protocol version the client declared (readable DATA; behavior never branches on it).
         { name: 'protocol_version', type: 'integer', nullable: false, unique: false },
@@ -40,7 +42,8 @@ export function audioCapabilityStores(): StoreSpec[] {
         { name: 'session_id', type: 'text', nullable: false, unique: false },
         // The track lane id (config-validated; stored as DATA — no fixed two-lane assumption).
         { name: 'track', type: 'text', nullable: false, unique: false },
-        // recording | completed | failed (absent = no row).
+        // `recording` until the track is sealed, then `completed` (absent = no row: the row is created
+        // by the track's first accepted chunk, never by a rejected one). `failed` is reserved.
         { name: 'status', type: 'text', nullable: false, unique: false },
         // The blob-key prefix for this track's raw chunks (`${session_id}/${track}`).
         { name: 'storage_key_prefix', type: 'text', nullable: false, unique: false },

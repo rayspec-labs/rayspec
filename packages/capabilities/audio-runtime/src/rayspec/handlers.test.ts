@@ -23,10 +23,14 @@ function handlerConfig(maxChunkBytes: number) {
 }
 
 /** Build a fake stream init carrying a raw POST body of `bytes` bytes for (s1, mic, index). */
-function chunkInit(bytes: Uint8Array, index = 0): StreamRouteHandlerInit {
+function chunkInit(
+  bytes: Uint8Array,
+  index = 0,
+  db: FakeHandlerDb = new FakeHandlerDb(),
+): StreamRouteHandlerInit {
   return {
     tenantId: TENANT,
-    db: new FakeHandlerDb(),
+    db,
     blob: new FakeBlobStore(),
     params: { session_id: 's1', track: 'mic', chunk_index: String(index) },
     request: new Request('http://audio.local/ingest', {
@@ -42,6 +46,30 @@ describe('makeChunkIngestHandler — per-chunk byte cap', () => {
     const handler = makeChunkIngestHandler(handlerConfig(4));
     const res = await handler(chunkInit(new Uint8Array([1, 2, 3, 4, 5]))); // 5 > 4
     expect(res.status).toBe(413);
+  });
+
+  it('an over-cap first chunk creates no session row and no track row', async () => {
+    const handler = makeChunkIngestHandler(handlerConfig(4));
+    const db = new FakeHandlerDb();
+    const res = await handler(chunkInit(new Uint8Array([1, 2, 3, 4, 5]), 0, db));
+    expect(res.status).toBe(413);
+    expect(((await res.json()) as { error: string }).error).toBe('chunk_too_large');
+    expect(await db.select('audio_sessions')).toEqual([]);
+    expect(await db.select('audio_tracks')).toEqual([]);
+  });
+
+  it('a gap on a session that does not exist answers 409 at index 0 and creates nothing', async () => {
+    const handler = makeChunkIngestHandler(handlerConfig(4));
+    const db = new FakeHandlerDb();
+    const res = await handler(chunkInit(new Uint8Array([1]), 3, db));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: 'gap',
+      detail: expect.any(String),
+      next_expected_index: 0,
+    });
+    expect(await db.select('audio_sessions')).toEqual([]);
+    expect(await db.select('audio_tracks')).toEqual([]);
   });
 
   it('accepts an in-cap chunk (200 ack)', async () => {

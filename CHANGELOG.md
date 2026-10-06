@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An audio session is marked `completed` once all its tracks are sealed.** The audio capability
+  created the `audio_sessions` row with `status: recording` and never changed it: finalizing a
+  track sealed the track row only, so a session list kept reporting a finished recording as
+  `recording`. Finalizing the last open track of a session now sets the session to `completed`. A
+  session with a track still uploading stays `recording`, and a track that starts on a completed
+  session puts it back to `recording` until that track is finalized. This holds when the requests
+  overlap: a finalize and the first chunk of a new track take a lock on the session row before
+  they read its tracks or its status, so two tracks finalized at the same time complete the
+  session, and a track that starts while the session's other track is being finalized leaves it
+  `recording`. The first chunk of a track, and every finalize, therefore wait for another such
+  request on the same session to commit; later chunks of a track take no session lock. Sessions
+  finalized before this release keep `recording` until a track of theirs is finalized again (a
+  re-finalize with the same `total_chunks` is idempotent and settles the session), or until they
+  are updated directly:
+  `UPDATE audio_sessions s SET status = 'completed' WHERE status = 'recording' AND NOT EXISTS
+  (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id AND t.status <> 'completed') AND EXISTS
+  (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id)`. A client that treated `recording` as
+  the only session status should accept `completed`.
+- **A rejected audio chunk no longer leaves an empty recording behind.** `POST
+  /sessions/{session_id}/{track}/chunks/{n}` created the `audio_sessions` row and the
+  `audio_tracks` row before it compared `n` with the track's watermark. A chunk with `n` greater
+  than 0 for a session or track that did not exist yet was answered `409` with `"error": "gap"`
+  and `next_expected_index: 0`, as it should be, but both rows were committed, at
+  `recording` with zero chunks and zero bytes, and a session list showed a recording that never
+  started. A first chunk refused with `413 track_too_large` did the same. Every rejection is now
+  decided from a read of the track row: a track with no row is at watermark 0 with no committed
+  bytes, so the `409` and the `413` are answered without a write, on a new session and on a new
+  track of an existing one. Only an accepted chunk 0 creates the rows, and it creates them after
+  its bytes are stored, so a failed blob write creates none either. The status codes and bodies
+  are unchanged for requests sent one after the other. One overlap is answered differently:
+  chunk 1 of a new track sent while chunk 0 is still being stored waited for chunk 0 and was
+  answered `200`; it is now a `409 gap` with `next_expected_index: 0`, as for any chunk sent
+  ahead of the watermark, and the client resumes from that index. Rows left by earlier releases
+  are not removed. A track row at `recording` with
+  `persisted_chunk_count = 0` is such a row, because a track's row and its first chunk have always
+  been committed together: `DELETE FROM audio_tracks WHERE status = 'recording' AND
+  persisted_chunk_count = 0` removes them, and `DELETE FROM audio_sessions s WHERE NOT EXISTS
+  (SELECT 1 FROM audio_tracks t WHERE t.session_pk = s.id)` then removes the sessions left with no
+  track. Run both before the `UPDATE` of the entry above: a leftover empty track keeps its
+  session at `recording`, for that `UPDATE` and for a re-finalize of the session's other tracks
+  alike, until the track row is deleted or the track is itself finalized with `total_chunks: 0`.
+  That finalize emits the session's finalized event again, under the same session-scoped event id,
+  so a consumer that deduplicates by event id sees nothing new.
 - **The lead-qualifier live test reads a run's usage once the run has ended.** A durable agent run
   holds no transaction across the model call, so a tool's write is served while the run is still
   executing. The test took the lead reading `qualified` as the end of the run and summed
